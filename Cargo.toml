@@ -93,7 +93,7 @@ tree-sitter-javascript = "0.25"
 tree-sitter-md = { version = "0.5", features = ["parser"] }
 tree-sitter-rust = "0.24"
 ureq = "2.12"
-wgpu = { version = "30.0", default-features = false, features = ["parking_lot", "std", "vulkan", "wgsl"] }
+wgpu = { version = "30.0", default-features = false, features = ["noop", "parking_lot", "std", "vulkan", "wgsl"] }
 wtransport = { version = "0.7", features = ["dangerous-configuration"] }
 xml = "1.0"
 zmq = { git = "https://github.com/rdaum/rust-zmq.git", branch = "main" }
