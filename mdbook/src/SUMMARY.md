@@ -15,6 +15,7 @@
 - [Errors and Recovery](./language/errors-and-recovery.md)
 - [Relational Mental Model](./language/relational-mental-model.md)
 - [Relations](./language/relations.md)
+- [Keys and Single-Valued Relations](./language/keyed-relations.md)
 - [Rules](./language/rules.md)
 - [Changing Worlds and Live Updates](./language/differential-updates.md)
 - [Computed Relations](./language/computed-relations.md)

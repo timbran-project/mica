@@ -142,8 +142,8 @@ return one Name(#lamp, ?name)
 ```
 
 The key-position list is zero-based. In `make_functional_relation(:Name, 2, [0])`, position 0 is the
-key. That means the key value `#lamp` determines the remaining position. The relation behaves like a
-map from the key tuple to the non-key values.
+key. For each concrete key, the relation contains at most one matching tuple. The relation as a
+whole may still contain many tuples with different keys.
 
 Functional relation metadata is a real constraint used by replacement and dot sugar. It is not just
 documentation. Code that assigns through a functional relation replaces the tuple for that key
@@ -156,6 +156,9 @@ If the query produces zero results, `one` returns `nothing`, the zero-column emp
 produces more than one result, `one` raises `E_AMBIGUOUS`. If the single result has exactly one free
 variable, `one` returns that variable's value. If the single result has multiple free variables, the
 result shape is a binding map.
+
+See [Keys and Single-Valued Relations](./keyed-relations.md) for a fuller explanation of keys,
+replacement, property-style access, and composite keys.
 
 ## Relation Value Algebra
 
