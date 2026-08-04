@@ -1,0 +1,115 @@
+// A complete approval-workflow example for the Mica guide.
+//
+// Domain eligibility is represented by CanApprove. Runtime authority is a
+// separate concern and is covered by apps/shared/capabilities.mica.
+
+make_identity(:approver)
+make_identity(:senior_approver)
+make_identity(:request)
+
+make_identity(:alice)
+make_identity(:sam)
+make_identity(:office_supplies_request)
+make_identity(:lab_upgrade_request)
+
+make_relation(:Delegates, 3)
+make_relation(:Approver, 1)
+make_relation(:SeniorApprover, 1)
+make_relation(:Request, 1)
+make_functional_relation(:RequestAmount, 2, [0])
+make_functional_relation(:RequestState, 2, [0])
+make_functional_relation(:RequestedBy, 2, [0])
+make_functional_relation(:ApprovedBy, 2, [0])
+make_functional_relation(:DecisionNote, 2, [0])
+
+make_relation(:Pending, 1)
+make_relation(:NeedsSeniorApproval, 1)
+make_relation(:CanApprove, 2)
+make_relation(:Approved, 1)
+
+make_relation(:CanRead, 2)
+make_relation(:CanWrite, 2)
+make_relation(:CanInvoke, 2)
+
+assert Delegates(#senior_approver, #approver, 0)
+assert Delegates(#alice, #approver, 0)
+assert Delegates(#sam, #senior_approver, 0)
+assert Delegates(#office_supplies_request, #request, 0)
+assert Delegates(#lab_upgrade_request, #request, 0)
+
+assert Approver(#alice)
+assert Approver(#sam)
+assert SeniorApprover(#sam)
+assert Request(#office_supplies_request)
+assert Request(#lab_upgrade_request)
+
+#office_supplies_request.requestAmount = 250
+#office_supplies_request.requestState = :pending
+#office_supplies_request.requestedBy = #alice
+
+#lab_upgrade_request.requestAmount = 5000
+#lab_upgrade_request.requestState = :pending
+#lab_upgrade_request.requestedBy = #alice
+
+assert CanRead(#alice, :Pending)
+assert CanRead(#alice, :NeedsSeniorApproval)
+assert CanRead(#alice, :CanApprove)
+assert CanRead(#alice, :Approved)
+assert CanRead(#alice, :RequestState)
+assert CanRead(#alice, :RequestedBy)
+assert CanRead(#alice, :ApprovedBy)
+assert CanRead(#alice, :DecisionNote)
+assert CanRead(#sam, :Pending)
+assert CanRead(#sam, :NeedsSeniorApproval)
+assert CanRead(#sam, :CanApprove)
+assert CanRead(#sam, :Approved)
+assert CanRead(#sam, :RequestState)
+assert CanRead(#sam, :RequestedBy)
+assert CanRead(#sam, :ApprovedBy)
+assert CanRead(#sam, :DecisionNote)
+assert CanWrite(#alice, :RequestState)
+assert CanWrite(#alice, :ApprovedBy)
+assert CanWrite(#alice, :DecisionNote)
+assert CanWrite(#sam, :RequestState)
+assert CanWrite(#sam, :ApprovedBy)
+assert CanWrite(#sam, :DecisionNote)
+assert CanInvoke(#alice, :approve)
+assert CanInvoke(#alice, :withdraw)
+assert CanInvoke(#sam, :approve)
+assert CanInvoke(#sam, :withdraw)
+
+Pending(request) :-
+  RequestState(request, :pending)
+
+NeedsSeniorApproval(request) :-
+  Pending(request),
+  RequestAmount(request, amount),
+  amount > 1000
+
+CanApprove(approver, request) :-
+  Approver(approver),
+  Pending(request),
+  not NeedsSeniorApproval(request)
+
+CanApprove(approver, request) :-
+  SeniorApprover(approver),
+  Pending(request),
+  NeedsSeniorApproval(request)
+
+Approved(request) :-
+  RequestState(request, :approved)
+
+verb approve(actor @ #approver, request @ #request, note)
+  CanApprove(actor, request) || return :not_eligible
+  request.requestState = :approved
+  request.approvedBy = actor
+  request.decisionNote = note
+  return :approved
+end
+
+verb withdraw(actor, request @ #request)
+  RequestedBy(request, actor) || return :not_requester
+  Pending(request) || return :not_pending
+  request.requestState = :withdrawn
+  return :withdrawn
+end

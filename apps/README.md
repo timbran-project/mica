@@ -7,6 +7,8 @@ policy, task effects, and host integration.
 ## Directories
 
 - `shared/`: reusable libraries and host policy used by more than one app.
+- `examples/`: compact, tested guide examples for equipment tracking, approval workflows, and
+  recursive dependency planning.
 - `mud/`: a compact multi-user room/object world. It is the broadest example in this directory:
   world state, command parsing, event delivery, HTTP documents, and browser UI authored mostly in
   Mica with live WebTransport DOM sync.
@@ -15,6 +17,21 @@ policy, task effects, and host integration.
   drive the source-provider computed relations.
 - `chat/`: a smaller WebTransport DOM sync chat example.
 - `web/`: HTTP host handlers and relational route fileins.
+
+## Guide Examples
+
+The examples under `examples/` are self-contained fileins designed for readers learning Mica without
+an application-specific background. The guide provides persistent-store walkthroughs for each one:
+
+- [shared equipment service](../mdbook/src/examples/equipment-service.md);
+- [approval workflow](../mdbook/src/examples/approval-workflow.md);
+- [recursive dependency planner](../mdbook/src/examples/dependency-planner.md).
+
+Their focused runtime tests load the checked-in source directly:
+
+```sh
+cargo test -p mica-runtime guide_example_stays_executable
+```
 
 ## MUD Web App
 

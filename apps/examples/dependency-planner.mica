@@ -1,0 +1,77 @@
+// A complete recursive dependency example for the Mica guide.
+
+make_identity(:operator)
+make_identity(:component)
+
+make_identity(:olivia)
+make_identity(:web_frontend)
+make_identity(:api_service)
+make_identity(:job_worker)
+make_identity(:database)
+
+make_relation(:Delegates, 3)
+make_relation(:Component, 1)
+make_functional_relation(:Label, 2, [0])
+make_relation(:DirectDependency, 2)
+make_relation(:Unavailable, 1)
+
+make_relation(:DependsOn, 2)
+make_relation(:Affected, 1)
+
+make_relation(:CanRead, 2)
+make_relation(:CanWrite, 2)
+make_relation(:CanInvoke, 2)
+
+assert Delegates(#olivia, #operator, 0)
+assert Delegates(#web_frontend, #component, 0)
+assert Delegates(#api_service, #component, 0)
+assert Delegates(#job_worker, #component, 0)
+assert Delegates(#database, #component, 0)
+
+assert Component(#web_frontend)
+assert Component(#api_service)
+assert Component(#job_worker)
+assert Component(#database)
+
+#web_frontend.label = "Web frontend"
+#api_service.label = "API service"
+#job_worker.label = "Job worker"
+#database.label = "Database"
+
+assert DirectDependency(#web_frontend, #api_service)
+assert DirectDependency(#api_service, #database)
+assert DirectDependency(#job_worker, #database)
+
+assert CanRead(#olivia, :Component)
+assert CanRead(#olivia, :Label)
+assert CanRead(#olivia, :DirectDependency)
+assert CanRead(#olivia, :Unavailable)
+assert CanRead(#olivia, :DependsOn)
+assert CanRead(#olivia, :Affected)
+assert CanWrite(#olivia, :Unavailable)
+assert CanInvoke(#olivia, :mark_unavailable)
+assert CanInvoke(#olivia, :restore)
+
+DependsOn(component, dependency) :-
+  DirectDependency(component, dependency)
+
+DependsOn(component, dependency) :-
+  DirectDependency(component, intermediate),
+  DependsOn(intermediate, dependency)
+
+Affected(component) :-
+  Unavailable(component)
+
+Affected(component) :-
+  DependsOn(component, dependency),
+  Unavailable(dependency)
+
+verb mark_unavailable(actor @ #operator, component @ #component)
+  assert Unavailable(component)
+  return :marked_unavailable
+end
+
+verb restore(actor @ #operator, component @ #component)
+  retract Unavailable(component)
+  return :restored
+end

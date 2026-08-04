@@ -30,6 +30,18 @@ fn assert_relation_query_is_true(report: &super::RunReport) {
     );
 }
 
+fn assert_completed_value(report: &super::RunReport, expected: Value) {
+    let TaskOutcome::Complete { value, .. } = &report.outcome else {
+        panic!("expected task to complete");
+    };
+    assert_eq!(
+        *value,
+        expected,
+        "unexpected task result: {}",
+        report.render()
+    );
+}
+
 fn query_relation<const COLUMNS: usize, const ROWS: usize>(
     heading: [&str; COLUMNS],
     rows: [[Value; COLUMNS]; ROWS],
@@ -5145,6 +5157,160 @@ fn runner_installs_rules_with_surface_negation() {
     assert_eq!(
         query.render(),
         "task 11 complete: [:obj] {[#alice]} (retries: 0)"
+    );
+}
+
+#[test]
+fn runner_equipment_guide_example_stays_executable() {
+    let mut runner = SourceRunner::new_empty();
+    runner
+        .run_filein(include_str!(
+            "../../../apps/examples/equipment-service.mica"
+        ))
+        .unwrap();
+
+    assert_completed_value(
+        &runner
+            .run_source("return CanCollect(#bob, #spectrometer_2)")
+            .unwrap(),
+        Value::bool(true),
+    );
+    assert_completed_value(
+        &runner
+            .run_source("return CanCollect(#alice, #sensor_17)")
+            .unwrap(),
+        Value::bool(false),
+    );
+    assert_completed_value(
+        &runner
+            .run_source("return BlockedProject(#air_quality_project, #sensor_17)")
+            .unwrap(),
+        Value::bool(true),
+    );
+
+    assert_completed_value(
+        &runner
+            .run_source("return :record_calibration(actor: #alice, instrument: #sensor_17)")
+            .unwrap(),
+        Value::symbol(Symbol::intern("calibrated")),
+    );
+    assert_completed_value(
+        &runner.run_source("return ReadyForUse(#sensor_17)").unwrap(),
+        Value::bool(true),
+    );
+    assert_completed_value(
+        &runner
+            .run_source(
+                "return :transfer(actor: #alice, instrument: #sensor_17, destination: #north_office)",
+            )
+            .unwrap(),
+        Value::symbol(Symbol::intern("transferred")),
+    );
+    assert_completed_value(
+        &runner
+            .run_source("return CanCollect(#bob, #sensor_17)")
+            .unwrap(),
+        Value::bool(true),
+    );
+}
+
+#[test]
+fn runner_approval_guide_example_stays_executable() {
+    let mut runner = SourceRunner::new_empty();
+    runner
+        .run_filein(include_str!(
+            "../../../apps/examples/approval-workflow.mica"
+        ))
+        .unwrap();
+
+    assert_completed_value(
+        &runner
+            .run_source("return CanApprove(#alice, #office_supplies_request)")
+            .unwrap(),
+        Value::bool(true),
+    );
+    assert_completed_value(
+        &runner
+            .run_source("return CanApprove(#alice, #lab_upgrade_request)")
+            .unwrap(),
+        Value::bool(false),
+    );
+    assert_completed_value(
+        &runner
+            .run_source(
+                "return :approve(actor: #alice, request: #lab_upgrade_request, note: \"approved\")",
+            )
+            .unwrap(),
+        Value::symbol(Symbol::intern("not_eligible")),
+    );
+    assert_completed_value(
+        &runner
+            .run_source("return Pending(#lab_upgrade_request)")
+            .unwrap(),
+        Value::bool(true),
+    );
+
+    assert_completed_value(
+        &runner
+            .run_source(
+                "return :approve(actor: #sam, request: #lab_upgrade_request, note: \"budget confirmed\")",
+            )
+            .unwrap(),
+        Value::symbol(Symbol::intern("approved")),
+    );
+    assert_completed_value(
+        &runner
+            .run_source("return Approved(#lab_upgrade_request)")
+            .unwrap(),
+        Value::bool(true),
+    );
+    assert_completed_value(
+        &runner
+            .run_source("return #lab_upgrade_request.approvedBy")
+            .unwrap(),
+        runner.named_identity(Symbol::intern("sam")).unwrap().into(),
+    );
+}
+
+#[test]
+fn runner_dependency_guide_example_stays_executable() {
+    let mut runner = SourceRunner::new_empty();
+    runner
+        .run_filein(include_str!(
+            "../../../apps/examples/dependency-planner.mica"
+        ))
+        .unwrap();
+
+    assert_completed_value(
+        &runner
+            .run_source("return DependsOn(#web_frontend, #database)")
+            .unwrap(),
+        Value::bool(true),
+    );
+    assert_completed_value(
+        &runner
+            .run_source("return :mark_unavailable(actor: #olivia, component: #database)")
+            .unwrap(),
+        Value::symbol(Symbol::intern("marked_unavailable")),
+    );
+    for component in ["web_frontend", "api_service", "job_worker", "database"] {
+        assert_completed_value(
+            &runner
+                .run_source(&format!("return Affected(#{component})"))
+                .unwrap(),
+            Value::bool(true),
+        );
+    }
+
+    assert_completed_value(
+        &runner
+            .run_source("return :restore(actor: #olivia, component: #database)")
+            .unwrap(),
+        Value::symbol(Symbol::intern("restored")),
+    );
+    assert_completed_value(
+        &runner.run_source("return Affected(#web_frontend)").unwrap(),
+        Value::bool(false),
     );
 }
 

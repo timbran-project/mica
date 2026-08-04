@@ -14,6 +14,13 @@
 - [Authority Is Part of the Model](./tutorial/authority.md)
 - [Designing Your First Mica System](./tutorial/designing-a-system.md)
 
+# Worked Examples
+
+- [Running the Examples](./examples/index.md)
+- [Shared Equipment Service](./examples/equipment-service.md)
+- [Approval Workflow](./examples/approval-workflow.md)
+- [Recursive Dependency Planner](./examples/dependency-planner.md)
+
 # Language Reference
 
 - [Language Overview](./language/index.md)

@@ -1,0 +1,120 @@
+// A complete shared-equipment example for the Mica guide.
+//
+// Load this file into its own store, then query and invoke it with the commands
+// in mdbook/src/examples/equipment-service.md.
+
+make_identity(:staff)
+make_identity(:technician)
+make_identity(:instrument)
+make_identity(:site)
+make_identity(:project)
+
+make_identity(:alice)
+make_identity(:bob)
+make_identity(:sensor_17)
+make_identity(:spectrometer_2)
+make_identity(:calibration_lab)
+make_identity(:north_office)
+make_identity(:air_quality_project)
+
+make_relation(:Delegates, 3)
+make_relation(:Person, 1)
+make_relation(:Instrument, 1)
+make_relation(:Site, 1)
+make_relation(:Project, 1)
+make_functional_relation(:Label, 2, [0])
+make_functional_relation(:LocatedAt, 2, [0])
+make_relation(:WorksAt, 2)
+make_relation(:AssignedTo, 2)
+make_relation(:RequiresCalibration, 1)
+make_functional_relation(:LastTransferredBy, 2, [0])
+make_relation(:CalibratedBy, 2)
+
+// Derived relations are declared like stored relations. Rules below provide
+// their facts.
+make_relation(:ReadyForUse, 1)
+make_relation(:CanCollect, 2)
+make_relation(:BlockedProject, 2)
+
+// Effective authority consumed by `mica --actor ... eval`. The full authority
+// guide shows how to derive these relations from coarser role policy.
+make_relation(:CanRead, 2)
+make_relation(:CanWrite, 2)
+make_relation(:CanInvoke, 2)
+
+assert Delegates(#technician, #staff, 0)
+assert Delegates(#alice, #technician, 0)
+assert Delegates(#bob, #staff, 0)
+assert Delegates(#sensor_17, #instrument, 0)
+assert Delegates(#spectrometer_2, #instrument, 0)
+assert Delegates(#calibration_lab, #site, 0)
+assert Delegates(#north_office, #site, 0)
+assert Delegates(#air_quality_project, #project, 0)
+
+assert Person(#alice)
+assert Person(#bob)
+assert Instrument(#sensor_17)
+assert Instrument(#spectrometer_2)
+assert Site(#calibration_lab)
+assert Site(#north_office)
+assert Project(#air_quality_project)
+
+#alice.label = "Alice"
+#bob.label = "Bob"
+#sensor_17.label = "Temperature sensor 17"
+#spectrometer_2.label = "Spectrometer 2"
+#calibration_lab.label = "Calibration lab"
+#north_office.label = "North office"
+#air_quality_project.label = "Air quality project"
+
+#sensor_17.locatedAt = #calibration_lab
+#spectrometer_2.locatedAt = #north_office
+assert WorksAt(#alice, #calibration_lab)
+assert WorksAt(#bob, #north_office)
+assert AssignedTo(#sensor_17, #air_quality_project)
+assert RequiresCalibration(#sensor_17)
+
+assert CanRead(#alice, :Label)
+assert CanRead(#alice, :LocatedAt)
+assert CanRead(#alice, :ReadyForUse)
+assert CanRead(#alice, :CanCollect)
+assert CanRead(#alice, :BlockedProject)
+assert CanRead(#bob, :Label)
+assert CanRead(#bob, :LocatedAt)
+assert CanRead(#bob, :ReadyForUse)
+assert CanRead(#bob, :CanCollect)
+assert CanRead(#bob, :BlockedProject)
+assert CanWrite(#alice, :RequiresCalibration)
+assert CanWrite(#alice, :CalibratedBy)
+assert CanWrite(#alice, :LocatedAt)
+assert CanWrite(#alice, :LastTransferredBy)
+assert CanWrite(#bob, :LocatedAt)
+assert CanWrite(#bob, :LastTransferredBy)
+assert CanInvoke(#alice, :record_calibration)
+assert CanInvoke(#alice, :transfer)
+assert CanInvoke(#bob, :transfer)
+
+ReadyForUse(instrument) :-
+  Instrument(instrument),
+  not RequiresCalibration(instrument)
+
+CanCollect(person, instrument) :-
+  WorksAt(person, site),
+  LocatedAt(instrument, site),
+  ReadyForUse(instrument)
+
+BlockedProject(project, instrument) :-
+  AssignedTo(instrument, project),
+  RequiresCalibration(instrument)
+
+verb record_calibration(actor @ #technician, instrument @ #instrument)
+  retract RequiresCalibration(instrument)
+  assert CalibratedBy(instrument, actor)
+  return :calibrated
+end
+
+verb transfer(actor @ #staff, instrument @ #instrument, destination @ #site)
+  instrument.locatedAt = destination
+  instrument.lastTransferredBy = actor
+  return :transferred
+end
