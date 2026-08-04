@@ -970,6 +970,48 @@ impl SourceRunner {
         mode: FileinMode,
         include_loader: Option<impl FnMut(&str) -> Result<String, String>>,
     ) -> Result<FileinReport, SourceTaskError> {
+        if mode != FileinMode::Replace {
+            return self.run_filein_with_unit_direct(unit, source, mode, include_loader);
+        }
+
+        let expected_version = self.task_manager.kernel().snapshot().version();
+        let staged_kernel = self.task_manager.kernel().fork_in_memory();
+        let mut staged = Self {
+            context: self.context.clone(),
+            task_manager: self.task_manager.fork_with_kernel(staged_kernel),
+            host_request_functions: self.host_request_functions.clone(),
+            next_method_identity_id: self.next_method_identity_id,
+        };
+        let mut report = staged.run_filein_with_unit_direct(unit, source, mode, include_loader)?;
+        ensure_filein_replacement_completed(&report.reports)?;
+        self.task_manager
+            .kernel()
+            .commit_staged_snapshot(expected_version, staged.task_manager.kernel().snapshot())
+            .map_err(CompileError::from)?;
+
+        self.next_method_identity_id = staged.next_method_identity_id;
+        self.refresh_context_from_catalog();
+        if let Err(error) = self.task_manager.dispatch_subscriptions() {
+            tracing::error!(
+                ?error,
+                "failed to dispatch atomic filein subscription batches"
+            );
+        }
+        for task_report in &mut report.reports {
+            task_report.task_id = self
+                .task_manager
+                .record_completed_outcome(task_report.outcome.clone());
+        }
+        Ok(report)
+    }
+
+    fn run_filein_with_unit_direct(
+        &mut self,
+        unit: Symbol,
+        source: &str,
+        mode: FileinMode,
+        include_loader: Option<impl FnMut(&str) -> Result<String, String>>,
+    ) -> Result<FileinReport, SourceTaskError> {
         if mode == FileinMode::Replace {
             self.retract_source_unit(unit)?;
         }
@@ -2000,6 +2042,30 @@ fn return_compile_errors(errors: Vec<CompileError>) -> Result<(), SourceTaskErro
     }
 }
 
+fn ensure_filein_replacement_completed(reports: &[RunReport]) -> Result<(), SourceTaskError> {
+    for report in reports {
+        match &report.outcome {
+            TaskOutcome::Complete { .. } => {}
+            TaskOutcome::Aborted { error, .. } => {
+                return Err(
+                    TaskManagerError::Task(TaskError::Runtime(RuntimeError::Raised(error.clone())))
+                        .into(),
+                );
+            }
+            TaskOutcome::Suspended { .. } => {
+                return Err(TaskManagerError::Task(TaskError::Runtime(
+                    RuntimeError::InvalidBuiltinCall {
+                        name: Symbol::intern("filein"),
+                        message: "unit replacement cannot suspend".to_owned(),
+                    },
+                ))
+                .into());
+            }
+        }
+    }
+    Ok(())
+}
+
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 enum GrantKind {
     Actor,
@@ -2599,6 +2665,13 @@ fn predeclare_source_names_in_kernel(
 
 fn collect_source_declarations(source: &str) -> Result<SourceDeclarations, SourceTaskError> {
     let source = expand_filein_grant_blocks(source)?;
+    let parsed = parse(&source);
+    if !parsed.errors.is_empty() {
+        return Err(CompileError::ParseErrors {
+            errors: parsed.errors,
+        }
+        .into());
+    }
     let mut declarations = SourceDeclarations::default();
     for chunk in source_chunks(&source) {
         let semantic = parse_semantic(&chunk);
@@ -7160,6 +7233,9 @@ fn render_kernel_error(
             "invalid index on relation {} at position {position} (arity {arity})",
             render_relation(relation)
         ),
+        KernelError::StaleStagedSnapshot { expected, actual } => {
+            format!("staged snapshot version {expected} is stale; current version is {actual}")
+        }
         KernelError::Persistence(message) => format!("persistence error: {message}"),
         KernelError::DifferentialWeightOverflow {
             relation,

@@ -606,6 +606,20 @@ impl TaskManager {
         &self.kernel
     }
 
+    pub(crate) fn fork_with_kernel(&self, kernel: RelationKernel) -> Self {
+        Self::new(kernel)
+            .with_limits(self.limits)
+            .with_resolver(self.resolver.clone())
+            .with_builtins(self.builtins.clone())
+    }
+
+    pub(crate) fn record_completed_outcome(&mut self, outcome: TaskOutcome) -> TaskId {
+        debug_assert!(matches!(outcome, TaskOutcome::Complete { .. }));
+        let task_id = self.allocate_task_id();
+        self.record_outcome(task_id, outcome, None);
+        task_id
+    }
+
     #[cfg(test)]
     pub(crate) fn subscription_count(&self) -> usize {
         self.subscriptions.len()

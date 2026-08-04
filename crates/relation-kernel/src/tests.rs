@@ -117,6 +117,129 @@ fn fact_identity_is_separate_from_set_tuple_identity() {
     assert_eq!(fact.tuple(), &tuple);
 }
 
+#[test]
+fn staged_snapshot_publishes_catalog_and_facts_as_one_commit() {
+    let kernel = RelationKernel::new();
+    kernel
+        .create_relation(RelationMetadata::new(rel(1), Symbol::intern("Reading"), 2))
+        .unwrap();
+    let old = Tuple::from([int(1), int(10)]);
+    let new = Tuple::from([int(1), int(20)]);
+    let detail = Tuple::from([int(1), Value::string("calibrated")]);
+    let mut seed = kernel.begin();
+    seed.assert(rel(1), old.clone()).unwrap();
+    seed.commit().unwrap();
+
+    let base_version = kernel.snapshot().version();
+    let staged = kernel.fork_in_memory();
+    staged
+        .create_relation(RelationMetadata::new(
+            rel(2),
+            Symbol::intern("ReadingDetail"),
+            2,
+        ))
+        .unwrap();
+    let mut staged_tx = staged.begin();
+    staged_tx.retract(rel(1), old.clone()).unwrap();
+    staged_tx.assert(rel(1), new.clone()).unwrap();
+    staged_tx.assert(rel(2), detail.clone()).unwrap();
+    staged_tx.commit().unwrap();
+
+    assert_eq!(
+        kernel.snapshot().scan(rel(1), &[None, None]).unwrap(),
+        vec![old]
+    );
+    assert!(matches!(
+        kernel.snapshot().scan(rel(2), &[None, None]),
+        Err(KernelError::UnknownRelation(relation)) if relation == rel(2)
+    ));
+
+    let result = kernel
+        .commit_staged_snapshot(base_version, staged.snapshot())
+        .unwrap();
+
+    assert_eq!(result.commit().version(), base_version + 1);
+    assert_eq!(result.commit().catalog_changes().len(), 1);
+    assert_eq!(result.commit().changes().len(), 3);
+    assert_eq!(
+        kernel.snapshot().scan(rel(1), &[None, None]).unwrap(),
+        vec![new]
+    );
+    assert_eq!(
+        kernel.snapshot().scan(rel(2), &[None, None]).unwrap(),
+        vec![detail]
+    );
+    assert_eq!(kernel.snapshot().commits_since(base_version).len(), 1);
+}
+
+#[test]
+fn stale_staged_snapshot_is_rejected_without_publishing() {
+    let kernel = kernel_with_located();
+    let base_version = kernel.snapshot().version();
+    let staged = kernel.fork_in_memory();
+    let staged_tuple = Tuple::from([int(1), int(20)]);
+    let mut staged_tx = staged.begin();
+    staged_tx.assert(rel(1), staged_tuple.clone()).unwrap();
+    staged_tx.commit().unwrap();
+
+    let current_tuple = Tuple::from([int(1), int(30)]);
+    let mut current_tx = kernel.begin();
+    current_tx.assert(rel(1), current_tuple.clone()).unwrap();
+    current_tx.commit().unwrap();
+
+    assert_eq!(
+        kernel
+            .commit_staged_snapshot(base_version, staged.snapshot())
+            .unwrap_err(),
+        KernelError::StaleStagedSnapshot {
+            expected: base_version,
+            actual: base_version + 1,
+        }
+    );
+    assert_eq!(
+        kernel.snapshot().scan(rel(1), &[None, None]).unwrap(),
+        vec![current_tuple]
+    );
+    assert!(
+        !kernel
+            .snapshot()
+            .scan(rel(1), &[None, None])
+            .unwrap()
+            .contains(&staged_tuple)
+    );
+}
+
+#[test]
+fn failed_staged_snapshot_persistence_keeps_current_snapshot() {
+    let provider = Arc::new(FailAfterCommitProvider::new(2));
+    let kernel = RelationKernel::with_provider(provider);
+    kernel
+        .create_relation(RelationMetadata::new(rel(1), Symbol::intern("Reading"), 2))
+        .unwrap();
+    let original = Tuple::from([int(1), int(10)]);
+    let replacement = Tuple::from([int(1), int(20)]);
+    let mut seed = kernel.begin();
+    seed.assert(rel(1), original.clone()).unwrap();
+    seed.commit().unwrap();
+
+    let base_version = kernel.snapshot().version();
+    let staged = kernel.fork_in_memory();
+    let mut staged_tx = staged.begin();
+    staged_tx.retract(rel(1), original.clone()).unwrap();
+    staged_tx.assert(rel(1), replacement).unwrap();
+    staged_tx.commit().unwrap();
+
+    assert!(matches!(
+        kernel.commit_staged_snapshot(base_version, staged.snapshot()),
+        Err(KernelError::Persistence(message)) if message == "intentional persistence failure"
+    ));
+    assert_eq!(kernel.snapshot().version(), base_version);
+    assert_eq!(
+        kernel.snapshot().scan(rel(1), &[None, None]).unwrap(),
+        vec![original]
+    );
+}
+
 fn kernel_with_located() -> RelationKernel {
     let kernel = RelationKernel::new();
     kernel

@@ -41,6 +41,10 @@ pub enum KernelError {
         position: u16,
         arity: u16,
     },
+    StaleStagedSnapshot {
+        expected: Version,
+        actual: Version,
+    },
     Persistence(String),
     DifferentialWeightOverflow {
         relation: RelationId,

@@ -18,11 +18,13 @@ use crate::snapshot::{
     empty_method_program_cache, empty_packed_cache,
 };
 use crate::{
-    CatalogChange, Commit, CommitProvider, ComputedRelation, ComputedRelationRegistry,
-    ExecutionContext, FactChangeKind, KernelError, RelationDurability, RelationMetadata, Rule,
-    RuleDefinition, RuleSet, Snapshot, Transaction,
+    CatalogChange, Commit, CommitProvider, CommitResult, ComputedRelation,
+    ComputedRelationRegistry, ExecutionContext, FactChange, FactChangeKind, KernelError,
+    RelationDurability, RelationMetadata, Rule, RuleDefinition, RuleSet, Snapshot, Transaction,
+    Version,
 };
 use arc_swap::ArcSwap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 pub(crate) const GENERATED_RULE_ID_START: u64 = 0x00d0_0000_0000_0000;
@@ -309,6 +311,84 @@ impl RelationKernel {
         self.root.load_full()
     }
 
+    /// Fork the current snapshot into an isolated in-memory kernel.
+    ///
+    /// Commits made to the fork are never persisted or published by this
+    /// kernel. Use [`Self::commit_staged_snapshot`] to publish the fork's final
+    /// snapshot as one commit after all staged work succeeds.
+    pub fn fork_in_memory(&self) -> Self {
+        Self {
+            root: ArcSwap::new(self.snapshot()),
+            provider: Arc::new(crate::InMemoryCommitProvider::new()),
+            commit_lock: Mutex::new(()),
+            execution_context: self.execution_context.clone(),
+        }
+    }
+
+    /// Publish the final state of an isolated fork as one atomic commit.
+    ///
+    /// The caller must pass the version from which the fork was created. If
+    /// this kernel advanced in the meantime, the staged state is rejected
+    /// without publishing any of it.
+    pub fn commit_staged_snapshot(
+        &self,
+        expected_version: Version,
+        staged: Arc<Snapshot>,
+    ) -> Result<CommitResult, KernelError> {
+        let _guard = self.commit_guard();
+        let current = self.snapshot();
+        if current.version() != expected_version {
+            return Err(KernelError::StaleStagedSnapshot {
+                expected: expected_version,
+                actual: current.version(),
+            });
+        }
+
+        validate_staged_snapshot(&current, &staged)?;
+        let staged_commits = staged.commits_since(expected_version);
+        let catalog_changes = staged_catalog_changes(&current, &staged);
+        let changes = staged_fact_changes(&current, &staged, &staged_commits)?;
+
+        let mut next = (*staged).clone();
+        next.version = current.version() + 1;
+        next.derived_cache = empty_derived_cache();
+        next.maintained_cache = empty_maintained_cache();
+        next.packed_cache = empty_packed_cache();
+        next.dispatch_cache = empty_dispatch_cache();
+        next.method_program_cache = empty_method_program_cache();
+        let relation_changes = settled_snapshot_relation_changes(&current, &next)?;
+        let commit = Commit {
+            version: next.version,
+            catalog_changes: catalog_changes.into(),
+            changes: changes.into(),
+            relation_changes: relation_changes.into(),
+            settled_relation_changes_available: true,
+        };
+        next.commits = current.commits.append(commit.clone());
+        let next = Arc::new(next);
+
+        self.persist_commit_against(&next, &commit)?;
+        if !self.try_publish(current.version(), next.clone()) {
+            return Err(KernelError::Persistence(
+                "staged commit publish failed after serialized persistence".to_owned(),
+            ));
+        }
+        for change in commit.catalog_changes() {
+            let operation = match change {
+                CatalogChange::RelationCreated(_) => {
+                    crate::metrics::CatalogOperation::RelationCreated
+                }
+                CatalogChange::RuleInstalled(_) => crate::metrics::CatalogOperation::RuleInstalled,
+                CatalogChange::RuleDisabled(_) => crate::metrics::CatalogOperation::RuleDisabled,
+            };
+            crate::metrics::metrics().catalog_operations.inc(operation);
+        }
+        Ok(CommitResult {
+            snapshot: next,
+            commit,
+        })
+    }
+
     pub fn create_relation(
         &self,
         metadata: RelationMetadata,
@@ -376,7 +456,7 @@ impl RelationKernel {
         next.dispatch_cache = empty_dispatch_cache();
         next.method_program_cache = empty_method_program_cache();
         next.version += 1;
-        let relation_changes = settled_catalog_relation_changes(&current, &next)?;
+        let relation_changes = settled_snapshot_relation_changes(&current, &next)?;
         let commit = Commit {
             version: next.version,
             catalog_changes: Arc::from([CatalogChange::RuleInstalled(definition.clone())]),
@@ -416,7 +496,7 @@ impl RelationKernel {
         next.dispatch_cache = empty_dispatch_cache();
         next.method_program_cache = empty_method_program_cache();
         next.version += 1;
-        let relation_changes = settled_catalog_relation_changes(&current, &next)?;
+        let relation_changes = settled_snapshot_relation_changes(&current, &next)?;
         let commit = Commit {
             version: next.version,
             catalog_changes: Arc::from([CatalogChange::RuleDisabled(rule_id)]),
@@ -468,6 +548,14 @@ impl RelationKernel {
 
     pub(crate) fn persist_commit(&self, commit: &Commit) -> Result<(), KernelError> {
         let snapshot = self.snapshot();
+        self.persist_commit_against(&snapshot, commit)
+    }
+
+    fn persist_commit_against(
+        &self,
+        snapshot: &Snapshot,
+        commit: &Commit,
+    ) -> Result<(), KernelError> {
         let changes = commit
             .changes()
             .iter()
@@ -505,7 +593,7 @@ impl RelationKernel {
     }
 }
 
-fn settled_catalog_relation_changes(
+fn settled_snapshot_relation_changes(
     current: &Snapshot,
     next: &Snapshot,
 ) -> Result<Vec<crate::FactChange>, KernelError> {
@@ -550,6 +638,123 @@ fn settled_catalog_relation_changes(
             .then_with(|| left.tuple.cmp(&right.tuple))
     });
     Ok(changes)
+}
+
+fn validate_staged_snapshot(current: &Snapshot, staged: &Snapshot) -> Result<(), KernelError> {
+    let staged_relations = staged
+        .relation_metadata()
+        .map(|metadata| (metadata.id(), metadata))
+        .collect::<BTreeMap<_, _>>();
+    for metadata in current.relation_metadata() {
+        let Some(staged_metadata) = staged_relations.get(&metadata.id()) else {
+            return Err(KernelError::UnknownRelation(metadata.id()));
+        };
+        if *staged_metadata != metadata {
+            return Err(KernelError::RelationAlreadyExists(metadata.id()));
+        }
+    }
+
+    let staged_rules = staged
+        .rules()
+        .iter()
+        .map(|rule| (rule.id(), rule))
+        .collect::<BTreeMap<_, _>>();
+    for rule in current.rules() {
+        let Some(staged_rule) = staged_rules.get(&rule.id()) else {
+            return Err(KernelError::UnknownRule(rule.id()));
+        };
+        if staged_rule.rule() != rule.rule() || staged_rule.source() != rule.source() {
+            return Err(KernelError::UnknownRule(rule.id()));
+        }
+        if !rule.active() && staged_rule.active() {
+            return Err(KernelError::UnknownRule(rule.id()));
+        }
+    }
+    Ok(())
+}
+
+fn staged_catalog_changes(current: &Snapshot, staged: &Snapshot) -> Vec<CatalogChange> {
+    let current_relations = current
+        .relation_metadata()
+        .map(RelationMetadata::id)
+        .collect::<BTreeSet<_>>();
+    let current_rules = current
+        .rules()
+        .iter()
+        .map(|rule| (rule.id(), rule))
+        .collect::<BTreeMap<_, _>>();
+    let mut changes = staged
+        .relation_metadata()
+        .filter(|metadata| !current_relations.contains(&metadata.id()))
+        .cloned()
+        .map(CatalogChange::RelationCreated)
+        .collect::<Vec<_>>();
+    for rule in staged.rules() {
+        let Some(current_rule) = current_rules.get(&rule.id()) else {
+            changes.push(CatalogChange::RuleInstalled(rule.clone()));
+            continue;
+        };
+        if current_rule.active() && !rule.active() {
+            changes.push(CatalogChange::RuleDisabled(rule.id()));
+        }
+    }
+    changes
+}
+
+fn staged_fact_changes(
+    current: &Snapshot,
+    staged: &Snapshot,
+    staged_commits: &[Commit],
+) -> Result<Vec<FactChange>, KernelError> {
+    let touched = staged_commits
+        .iter()
+        .flat_map(Commit::changes)
+        .map(|change| (change.relation, change.tuple.clone()))
+        .collect::<BTreeSet<_>>();
+    let mut changes = Vec::new();
+    for (relation, tuple) in touched {
+        let before = contains_extensional_fact(current, relation, &tuple)?;
+        let after = contains_extensional_fact(staged, relation, &tuple)?;
+        let kind = match (before, after) {
+            (false, true) => FactChangeKind::Assert,
+            (true, false) => FactChangeKind::Retract,
+            _ => continue,
+        };
+        changes.push(FactChange {
+            relation,
+            tuple,
+            kind,
+        });
+    }
+    changes.sort_by(|left, right| {
+        left.relation
+            .cmp(&right.relation)
+            .then_with(|| left.tuple.cmp(&right.tuple))
+            .then_with(|| {
+                fact_change_kind_order(left.kind).cmp(&fact_change_kind_order(right.kind))
+            })
+    });
+    Ok(changes)
+}
+
+fn contains_extensional_fact(
+    snapshot: &Snapshot,
+    relation: crate::RelationId,
+    tuple: &crate::Tuple,
+) -> Result<bool, KernelError> {
+    let bindings = tuple.values().iter().cloned().map(Some).collect::<Vec<_>>();
+    match snapshot.scan_facts(relation, &bindings) {
+        Ok(rows) => Ok(rows.contains(tuple)),
+        Err(KernelError::UnknownRelation(unknown)) if unknown == relation => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+fn fact_change_kind_order(kind: FactChangeKind) -> u8 {
+    match kind {
+        FactChangeKind::Retract => 0,
+        FactChangeKind::Assert => 1,
+    }
 }
 
 fn validate_rule_definition_against_relations(

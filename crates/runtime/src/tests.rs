@@ -5064,6 +5064,7 @@ fn runner_filein_replace_removes_facts_no_longer_in_source_unit() {
             FileinMode::Add,
         )
         .unwrap();
+    let version_before_replace = runner.task_manager.kernel().snapshot().version();
     runner
         .run_filein_with_unit(
             unit,
@@ -5073,6 +5074,10 @@ fn runner_filein_replace_removes_facts_no_longer_in_source_unit() {
             FileinMode::Replace,
         )
         .unwrap();
+    assert_eq!(
+        runner.task_manager.kernel().snapshot().version(),
+        version_before_replace + 1
+    );
 
     let query = runner.run_source("return Name(#lamp, ?name)").unwrap();
     let source = runner.fileout_unit(unit).unwrap();
@@ -5080,6 +5085,238 @@ fn runner_filein_replace_removes_facts_no_longer_in_source_unit() {
     assert!(query.render().contains("[:name] {[\"golden lamp\"]}"));
     assert!(source.contains("assert Name(#lamp, \"golden lamp\")"));
     assert!(!source.contains("brass lamp"));
+}
+
+#[test]
+fn runner_failed_filein_replacement_preserves_source_unit() {
+    let mut runner = SourceRunner::new_empty();
+    let unit = Symbol::intern("equipment");
+    runner
+        .run_filein_with_unit(
+            unit,
+            "make_identity(:sensor)\n\
+                 make_relation(:Label, 2)\n\
+                 make_relation(:Operational, 1)\n\
+                 assert Label(#sensor, \"original\")\n\
+                 Operational(item) :- Label(item, ?label)\n\
+                 verb equipment_label(item)\n\
+                   return one Label(item, ?label)\n\
+                 end\n",
+            FileinMode::Add,
+        )
+        .unwrap();
+    let source_before = runner.fileout_unit(unit).unwrap();
+    let version_before = runner.task_manager.kernel().snapshot().version();
+
+    let error = runner
+        .run_filein_with_unit(
+            unit,
+            "make_identity(:sensor)\n\
+                 make_relation(:Label, 2)\n\
+                 assert Label(#sensor, \"replacement\")\n\
+                 raise E_INVARG, \"replacement failed\"\n",
+            FileinMode::Replace,
+        )
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        SourceTaskError::TaskManager(TaskManagerError::Task(TaskError::Runtime(
+            RuntimeError::Raised(_)
+        )))
+    ));
+    assert_eq!(
+        runner.task_manager.kernel().snapshot().version(),
+        version_before
+    );
+    assert_eq!(runner.fileout_unit(unit).unwrap(), source_before);
+    let query = runner.run_source("return Label(#sensor, ?label)").unwrap();
+    let derived = runner.run_source("return Operational(#sensor)").unwrap();
+    let invocation = runner
+        .run_source("return :equipment_label(item: #sensor)")
+        .unwrap();
+    assert!(query.render().contains("original"));
+    assert_relation_query_is_true(&derived);
+    assert_completed_value(&invocation, Value::string("original"));
+
+    let parse_error = runner
+        .run_filein_with_unit(unit, "make_identity(:sensor\n", FileinMode::Replace)
+        .unwrap_err();
+    assert!(matches!(
+        parse_error,
+        SourceTaskError::Compile(CompileError::ParseErrors { .. })
+    ));
+    assert_eq!(
+        runner.task_manager.kernel().snapshot().version(),
+        version_before
+    );
+    assert_eq!(runner.fileout_unit(unit).unwrap(), source_before);
+}
+
+#[test]
+fn runner_failed_filein_include_preserves_source_unit() {
+    let mut runner = SourceRunner::new_empty();
+    let unit = Symbol::intern("web_assets");
+    runner
+        .run_filein_with_unit(
+            unit,
+            "verb page_style()\n\
+               return \"original css\"\n\
+             end\n",
+            FileinMode::Add,
+        )
+        .unwrap();
+    let source_before = runner.fileout_unit(unit).unwrap();
+    let version_before = runner.task_manager.kernel().snapshot().version();
+
+    let error = runner
+        .run_filein_with_unit_and_include_loader(
+            unit,
+            "verb page_style()\n\
+               return include_text(\"missing.css\")\n\
+             end\n",
+            FileinMode::Replace,
+            |_| Err("asset unavailable".to_owned()),
+        )
+        .unwrap_err();
+
+    assert!(format!("{error:?}").contains("asset unavailable"));
+    assert_eq!(
+        runner.task_manager.kernel().snapshot().version(),
+        version_before
+    );
+    assert_eq!(runner.fileout_unit(unit).unwrap(), source_before);
+    let invocation = runner.run_source("return :page_style()").unwrap();
+    assert_completed_value(&invocation, Value::string("original css"));
+}
+
+#[test]
+fn runner_fjall_filein_replacement_reopens_atomic_state() {
+    let path = std::env::temp_dir().join(format!(
+        "mica-runtime-fjall-{}-{}",
+        std::process::id(),
+        Symbol::intern("runner_fjall_filein_replacement_reopens_atomic_state").id()
+    ));
+    let _ = std::fs::remove_dir_all(&path);
+    let unit = Symbol::intern("equipment");
+
+    {
+        let mut runner =
+            SourceRunner::open_fjall(&path, mica_relation_kernel::FjallDurabilityMode::Strict)
+                .unwrap();
+        runner
+            .run_filein_with_unit(
+                unit,
+                "make_identity(:sensor)\n\
+                 make_relation(:Label, 2)\n\
+                 make_relation(:Ready, 1)\n\
+                 assert Label(#sensor, \"original\")\n\
+                 Ready(item) :- Label(item, \"original\")\n\
+                 verb equipment_label(item)\n\
+                   return one Label(item, ?label)\n\
+                 end\n",
+                FileinMode::Add,
+            )
+            .unwrap();
+        let version_before = runner.task_manager.kernel().snapshot().version();
+        runner
+            .run_filein_with_unit(
+                unit,
+                "make_identity(:sensor)\n\
+                 make_relation(:Label, 2)\n\
+                 make_relation(:Ready, 1)\n\
+                 make_relation(:CalibrationState, 2)\n\
+                 assert Label(#sensor, \"replacement\")\n\
+                 assert CalibrationState(#sensor, :current)\n\
+                 Ready(item) :- Label(item, \"replacement\")\n\
+                 verb equipment_label(item)\n\
+                   return one Label(item, ?label)\n\
+                 end\n",
+                FileinMode::Replace,
+            )
+            .unwrap();
+        assert_eq!(
+            runner.task_manager.kernel().snapshot().version(),
+            version_before + 1
+        );
+    }
+
+    {
+        let mut runner =
+            SourceRunner::open_fjall(&path, mica_relation_kernel::FjallDurabilityMode::Strict)
+                .unwrap();
+        let label = runner.run_source("return Label(#sensor, ?label)").unwrap();
+        let calibration = runner
+            .run_source("return CalibrationState(#sensor, ?state)")
+            .unwrap();
+        let ready = runner.run_source("return Ready(#sensor)").unwrap();
+        let label_from_verb = runner
+            .run_source("return :equipment_label(item: #sensor)")
+            .unwrap();
+        let source = runner.fileout_unit(unit).unwrap();
+        assert!(label.render().contains("replacement"));
+        assert!(calibration.render().contains(":current"));
+        assert_relation_query_is_true(&ready);
+        assert_completed_value(&label_from_verb, Value::string("replacement"));
+        assert!(source.contains("make_relation(:CalibrationState, 2)"));
+        assert!(!source.contains("original"));
+    }
+
+    let _ = std::fs::remove_dir_all(&path);
+}
+
+#[test]
+fn runner_fjall_failed_filein_replacement_reopens_original_state() {
+    let path = std::env::temp_dir().join(format!(
+        "mica-runtime-fjall-{}-{}",
+        std::process::id(),
+        Symbol::intern("runner_fjall_failed_filein_replacement_reopens_original_state").id()
+    ));
+    let _ = std::fs::remove_dir_all(&path);
+    let unit = Symbol::intern("equipment");
+
+    {
+        let mut runner =
+            SourceRunner::open_fjall(&path, mica_relation_kernel::FjallDurabilityMode::Strict)
+                .unwrap();
+        runner
+            .run_filein_with_unit(
+                unit,
+                "make_identity(:sensor)\n\
+                 make_relation(:Label, 2)\n\
+                 assert Label(#sensor, \"original\")\n",
+                FileinMode::Add,
+            )
+            .unwrap();
+        let version_before = runner.task_manager.kernel().snapshot().version();
+        runner
+            .run_filein_with_unit(
+                unit,
+                "make_identity(:sensor)\n\
+                 make_relation(:Label, 2)\n\
+                 assert Label(#sensor, \"replacement\")\n\
+                 raise E_INVARG, \"replacement failed\"\n",
+                FileinMode::Replace,
+            )
+            .unwrap_err();
+        assert_eq!(
+            runner.task_manager.kernel().snapshot().version(),
+            version_before
+        );
+    }
+
+    {
+        let mut runner =
+            SourceRunner::open_fjall(&path, mica_relation_kernel::FjallDurabilityMode::Strict)
+                .unwrap();
+        let label = runner.run_source("return Label(#sensor, ?label)").unwrap();
+        let source = runner.fileout_unit(unit).unwrap();
+        assert!(label.render().contains("original"));
+        assert!(source.contains("original"));
+        assert!(!source.contains("replacement"));
+    }
+
+    let _ = std::fs::remove_dir_all(&path);
 }
 
 #[test]
