@@ -2,6 +2,18 @@
 
 [Introduction](./introduction.md)
 
+# Tutorial: A Persistent Relational System
+
+- [Start Here](./tutorial/index.md)
+- [A Program That Keeps Its State](./tutorial/persistent-world.md)
+- [Identities, Facts, and Relations](./tutorial/facts-identities-relations.md)
+- [Asking Questions](./tutorial/queries.md)
+- [Changing the World Safely](./tutorial/changing-world.md)
+- [Deriving New Knowledge](./tutorial/rules.md)
+- [Installing Behaviour](./tutorial/behaviour.md)
+- [Authority Is Part of the Model](./tutorial/authority.md)
+- [Designing Your First Mica System](./tutorial/designing-a-system.md)
+
 # Language Reference
 
 - [Language Overview](./language/index.md)

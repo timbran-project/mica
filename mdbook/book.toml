@@ -1,6 +1,6 @@
 [book]
-title = "Mica Reference"
-description = "Language, syntax, and runtime reference for Mica."
+title = "The Mica Guide"
+description = "Learn, build, and operate persistent relational systems with Mica."
 authors = ["Ryan Daum"]
 language = "en"
 multilingual = false
