@@ -10,52 +10,53 @@ is small:
 | relation       | a named collection of same-shaped facts                           |
 | query          | a pattern matched against facts                                   |
 | query variable | a marked hole, such as `?item`, that asks Mica to return bindings |
-| binding map    | one answer to a query, such as `{:item -> #lamp}`                 |
+| binding map    | one answer to a query, such as `{:work -> #inspection}`           |
 | rule           | a named computed query that derives new facts from other facts    |
 | transaction    | a private draft of world changes that commits atomically          |
 
 For example:
 
 ```mica
-LocatedIn(#alice, #room)
-LocatedIn(#lamp, #room)
+AssignedTo(#inspection, #alice)
+AssignedTo(#repair, #alice)
 ```
 
-These are two facts in the `LocatedIn` relation. They have the same shape: something is located in
-some place.
+These are two facts in the `AssignedTo` relation. They have the same shape: work is assigned to a
+person.
 
 A query can ask Mica to fill one position:
 
 ```mica
-LocatedIn(?thing, #room)
+AssignedTo(?work, #alice)
 ```
 
-The result is a list of binding maps:
+The result is a relation value:
 
 ```mica
-[{:thing -> #alice}, {:thing -> #lamp}]
+[:work] { [#inspection], [#repair] }
 ```
 
-`?thing` binds a value and returns it in the answer. `_` is different: it is a wildcard. It matches
-a value but does not bind or return it.
+`?work` binds a value and names the result column. Iterating that relation exposes each row as a
+binding map such as `{:work -> #inspection}`. `_` is different: it is a wildcard. It matches a
+value but does not bind or return it.
 
 ```mica
-LocatedIn(_, #room)
+AssignedTo(_, #alice)
 ```
 
-That asks whether anything is in `#room`, but it does not name the thing.
+That asks whether any work is assigned to `#alice`, but it does not name the work.
 
 Rules use bare variable names instead of `?` variables:
 
 ```mica
-SameRoom(left, right) :-
-  LocatedIn(left, room),
-  LocatedIn(right, room)
+Collaborators(left, right) :-
+  AssignedTo(work, left),
+  AssignedTo(work, right)
 ```
 
-Inside a rule, `left`, `right`, and `room` are logical variables. They are not local variables
+Inside a rule, `left`, `right`, and `work` are logical variables. They are not local variables
 assigned step by step. Mica searches for values that make the body true and then derives matching
-`SameRoom(left, right)` facts.
+`Collaborators(left, right)` facts.
 
 Transactions are the runtime side of this model. A task runs against a private draft of the world.
 `assert` and `retract` change that draft. Commit publishes the draft; abort or retry throws it away.

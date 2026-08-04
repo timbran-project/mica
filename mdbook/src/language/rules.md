@@ -1,127 +1,67 @@
 # Rules
 
-Rules let the world compute facts from other facts.
-
-Stored facts are useful for direct observations:
+Rules derive relation facts from other relation facts:
 
 ```mica
-LocatedIn(#alice, #room)
-LocatedIn(#lamp, #room)
-HiddenFrom(#lamp, #alice)
+ReadyForReview(reviewer, change) :-
+  AssignedReviewer(change, reviewer),
+  Completed(change),
+  not ReviewRecorded(change)
 ```
 
-But many useful facts are derived. If Alice and the lamp are in the same room, and the lamp is not
-hidden from Alice, Alice can see the lamp. That is not a fact you want to update by hand every time
-something moves. It is a rule:
+The head before `:-` describes the facts being derived. Every body item must hold for one set of
+logical variable bindings. Rule variables are conventionally bare names; they are not imperative
+locals assigned in source order.
+
+Task-code queries mark free variables with `?`:
 
 ```mica
-VisibleTo(actor, item) :-
-  LocatedIn(actor, room),
-  LocatedIn(item, room),
-  not HiddenFrom(item, actor)
+return ReadyForReview(#alice, ?change)
 ```
 
-The part before `:-` is the fact being derived. The indented lines after `:-` are the conditions
-that must hold. The variables in the rule are logical variables, not local imperative bindings. Mica
-finds bindings that make the body true and then produces matching `VisibleTo(actor, item)` results.
+The compiler also accepts `?name` in rule atoms, but bare names are the preferred rule style. A
+relation with both asserted facts and rule heads reads as the union of stored and derived facts.
 
-Rule variables are conventionally written as bare names. This is different from ad hoc relation
-queries in task code, where free variables are normally written with `?`:
+## Safety and Negation
+
+Rules must be range-restricted. Every head variable must be bound by a positive body predicate.
+Variables in a negated predicate must also be bound positively:
 
 ```mica
-// task-code query
-VisibleTo(#alice, ?item)
-
-// rule variables
-VisibleTo(actor, item) :-
-  LocatedIn(actor, room),
-  LocatedIn(item, room)
+ReadyForReview(reviewer, change) :-
+  AssignedReviewer(change, reviewer),
+  Completed(change),
+  not ReviewRecorded(change)
 ```
 
-In a rule, a variable is introduced by appearing in the rule body. Mica tries to find values for the
-variables that make every body predicate true.
-
-The current compiler also accepts `?name` terms in rule atoms and treats them as rule variables.
-Prefer bare names in rules; use `?name` in task-code queries where the result comes back as a
-binding map.
-
-Rules are read through the same relation interface as stored facts:
+This is unsafe because neither variable has a finite positive source:
 
 ```mica
-return VisibleTo(#alice, ?item)
+ReadyForReview(reviewer, change) :-
+  not ReviewRecorded(change)
 ```
 
-If a relation has both asserted facts and rules, reads see the union of stored and derived facts.
+`not` means "not derivable in the current snapshot". Negation is stratified: the runtime must be
+able to compute positive dependencies before the relations that negate them. Mutual negative cycles
+are rejected because neither side has a stable evaluation order.
 
-## Rule Safety
+## Recursion
 
-Rules must be range-restricted. Every variable in the head must be bound by the body. Variables used
-inside a negated predicate must already be bound by positive predicates.
-
-This is valid:
+Positive recursion expresses transitive relationships:
 
 ```mica
-VisibleTo(actor, item) :-
-  LocatedIn(actor, room),
-  LocatedIn(item, room),
-  not HiddenFrom(item, actor)
+Requires(item, dependency) :-
+  DependsOn(item, dependency)
+
+Requires(item, dependency) :-
+  DependsOn(item, intermediate),
+  Requires(intermediate, dependency)
 ```
 
-`actor` and `item` appear in positive predicates before they are used in
-`not HiddenFrom(item, actor)`.
+Mica computes the finite, set-based least fixpoint: it starts with direct dependencies, repeatedly
+adds newly implied dependencies, and stops when another pass adds nothing. Cycles do not produce
+duplicate facts.
 
-This shape is not valid:
-
-```mica
-VisibleTo(actor, item) :-
-  not HiddenFrom(item, actor)
-```
-
-There is no positive predicate limiting which actors and items should be considered.
-
-Recursive rules can express transitive relationships:
-
-```mica
-Contains(container, item) :-
-  In(item, container)
-
-Contains(container, item) :-
-  In(inner, container),
-  Contains(inner, item)
-```
-
-This says that a container contains its direct contents, and also contains anything inside those
-contents. The recursive rule gives callers a single relation to ask "what is inside this?" without
-manually walking every nested level.
-
-Positive recursion is evaluated as a set-based least fixpoint: start with the facts known directly,
-repeatedly derive new facts, and stop when another pass would add nothing new. This is the usual
-finite active-domain Datalog model.
-
-Negation is stratified. `not` means "not derivable in the current snapshot", not SQL three-valued
-`NOT` and not absolute truth. A rule may use `not`, but the rule system must be able to evaluate
-negative dependencies after the positive relations they depend on are known.
-
-This kind of mutual negation is not allowed:
-
-```mica
-A(x) :-
-  not B(x)
-
-B(x) :-
-  not A(x)
-```
-
-There is no stable order in which to compute `A` and `B`.
-
-Agent-workspace rules use the same machinery. For example, an observation can be relevant to an
-agent when it is about a task assigned to that agent:
-
-```mica
-RelevantTo(agent, observation) :-
-  AssignedTo(task, agent),
-  AboutTask(observation, task)
-```
-
-Rules are world changes, not offline declarations. They can be installed, inspected, disabled, and
-filed out.
+Rules are installed world state. They can be inspected, disabled, subscribed to through their head
+relations, and filed out. See [Changing Worlds and Differential Updates](./differential-updates.md)
+for how derived results respond to later fact changes.

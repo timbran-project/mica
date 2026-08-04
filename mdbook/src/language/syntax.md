@@ -9,6 +9,19 @@ chapters.
 // line comment
 ```
 
+## Qualified Names
+
+Names may use `/`-separated namespaces:
+
+```mica
+#workflow/reviewer
+:workflow/approve
+workflow/AssignedTo(#change_request, #workflow/reviewer)
+```
+
+The final segment determines whether a call is relation-shaped: `workflow/AssignedTo(...)` is a
+relation query because `AssignedTo` begins with an uppercase letter.
+
 ## Bindings
 
 ```mica
@@ -41,13 +54,16 @@ Annotations check kinds without converting values. See
 ```mica
 [1, 2, 3]
 [@prefix, last]
-{:name -> "lamp", :portable -> true}
+{:name -> "sensor", :calibrated -> true}
 items[2]
 items[2.._]
 ```
 
 `[@prefix, last]` splices the list in `prefix` into a new list before `last`. `2.._` is an
 open-ended range used by index operations.
+
+Operator precedence and call resolution are specified in
+[Operators, Indexing, and Calls](./operators-and-calls.md).
 
 ## DOM Markup
 
@@ -66,17 +82,17 @@ dom <ul>{@items}</ul>
 ## Relations
 
 ```mica
-make_relation(:LocatedIn, 2)
-make_functional_relation(:Name, 2, [0])
+make_relation(:AssignedTo, 2)
+make_functional_relation(:Label, 2, [0])
 
-assert LocatedIn(#coin, #room)
-retract LocatedIn(#coin, _)
+assert AssignedTo(#inspection, #technician)
+retract AssignedTo(#inspection, _)
 
-LocatedIn(#coin, #room)
-LocatedIn(?thing, #room)
-one Name(#lamp, ?name)
+AssignedTo(#inspection, #technician)
+AssignedTo(?work, #technician)
+one Label(#sensor, ?label)
 
-[:thing, :owner] { [#coin, #alice], [#lamp, #bob] }
+[:work, :owner] { [#inspection, #alice], [#repair, #bob] }
 [] {}
 [] {[]}
 ```
@@ -96,13 +112,13 @@ require CanMove(actor, item)
 ## Rules
 
 ```mica
-VisibleTo(actor, item) :-
-  LocatedIn(actor, room),
-  LocatedIn(item, room),
-  not HiddenFrom(item, actor)
+ReadyForReview(reviewer, change) :-
+  AssignedReviewer(change, reviewer),
+  Completed(change),
+  not ReviewRecorded(change)
 ```
 
-Rule variables are conventionally bare names such as `actor`, `item`, and `room`. The current
+Rule variables are conventionally bare names such as `reviewer` and `change`. The current
 compiler also accepts `?name` in rule atoms, but bare names are the preferred rule style.
 
 ## Control
@@ -160,7 +176,7 @@ end
 ## Verbs and Dispatch
 
 ```mica
-verb get(actor @ #player, item @ #thing)
+verb approve(actor @ #reviewer, request @ #change_request)
   return true
 end
 
@@ -168,12 +184,13 @@ verb echo(value @ #string: string) -> string
   return value
 end
 
-:get(actor: #alice, item: #coin)
-#coin:look(actor: #alice)
+:approve(actor: #alice, request: #release_change)
+#release_change:approve(actor: #alice)
 ```
 
-`actor @ #player` is a role restriction. `#coin:look(actor: #alice)` is receiver-call sugar for a
-named-role dispatch with `receiver: #coin`; it is not classic method-table lookup.
+`actor @ #reviewer` is a role restriction. `#release_change:approve(actor: #alice)` is
+receiver-call sugar for a named-role dispatch with `receiver: #release_change`; it is not classic
+method-table lookup.
 
 ## Task Control
 
@@ -192,11 +209,11 @@ mailbox_close(rx)
 ## Filein Definitions
 
 ```mica
-make_identity(:lamp)
+make_identity(:sensor)
 make_relation(:Object, 1)
-assert Object(#lamp)
+assert Object(#sensor)
 
-verb look(actor, item)
-  return item
+verb inspect(actor, subject)
+  return subject
 end
 ```

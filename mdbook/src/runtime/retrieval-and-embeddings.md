@@ -9,8 +9,8 @@ might matter?" It is useful for:
 
 - showing related objects, notes, or events in a live application;
 - helping an agent choose relevant context before acting;
-- finding lore, tickets, incident notes, or design decisions by meaning rather than by exact string
-  match;
+- finding manuals, tickets, incident notes, or design decisions by meaning rather than by exact
+  string match;
 - recording what context was used to produce an answer or recommendation.
 
 Embeddings are one way to implement that bridge. An embedding is a vector representation of some
@@ -53,53 +53,52 @@ The shared vocabulary lives in `apps/shared/retrieval.mica`.
 
 ## Text Units
 
-A text unit is a retrievable piece of text. It might be a paragraph, a room description, a ticket
+A text unit is a retrievable piece of text. It might be a paragraph, a manual section, a ticket
 comment, a chat excerpt, a code-review note, or a summary of a domain object.
 
 ```mica
-TextUnit(#lamp_note)
-TextUnitText(#lamp_note, "A brass lamp sits on the workbench.")
+TextUnit(#sensor_manual)
+TextUnitText(#sensor_manual, "Calibrate the temperature sensor every 90 days.")
 ```
 
 The text unit is the thing retrieval returns. In a document-heavy system, a text unit will usually
-be separate from the domain object it describes. For example, `#lamp` might be the world object and
-`#lamp_note_3` might be a text unit describing it.
+be separate from the domain object it describes. For example, `#sensor` might be the equipment
+identity and `#sensor_manual` might be a text unit describing it.
 
 Small demos can collapse those identities when the object and its description are effectively the
 same retrieval subject:
 
 ```mica
-TextUnit(#coin)
-TextUnitText(#coin, "coin: A tarnished brass coin catches the light.")
+TextUnit(#maintenance_notice)
+TextUnitText(#maintenance_notice, "The north-line sensor is due for calibration.")
 ```
 
-The MUD browser example uses that shortcut so related-context search can return rooms, people, and
-objects directly. Larger applications should keep the described subject and the text span separate
-when they need provenance, multiple descriptions, document revisions, or citation precision.
+Larger applications should keep the described subject and the text span separate when they need
+provenance, multiple descriptions, document revisions, or citation precision.
 
 ## Embeddings And Index Membership
 
 An embedding attaches a vector to a subject:
 
 ```mica
-Embedding(#emb_lamp_note)
-EmbeddingOf(#emb_lamp_note, #lamp_note)
-EmbeddingModel(#emb_lamp_note, "mud-world")
-EmbeddingVector(#emb_lamp_note, [0.12, 0.70, 0.03])
+Embedding(#emb_sensor_manual)
+EmbeddingOf(#emb_sensor_manual, #sensor_manual)
+EmbeddingModel(#emb_sensor_manual, "maintenance-docs")
+EmbeddingVector(#emb_sensor_manual, [0.12, 0.70, 0.03])
 ```
 
 An index decides which embeddings participate in a search surface:
 
 ```mica
-VectorIndex(#world_index)
-VectorIndexMetric(#world_index, "cosine")
-VectorIndexContains(#world_index, #emb_lamp_note)
+VectorIndex(#manual_index)
+VectorIndexMetric(#manual_index, "cosine")
+VectorIndexContains(#manual_index, #emb_sensor_manual)
 ```
 
 The shared filein provides helper verbs for maintaining these facts:
 
 ```mica
-index_text_unit(actor, #world_index, #lamp_note, "mud-world")
+index_text_unit(actor, #manual_index, #sensor_manual, "maintenance-docs")
 ```
 
 That helper reads `TextUnitText`, calls `embed_text(model, text)`, records the embedding facts, and
@@ -110,10 +109,10 @@ marks the index entry ready. It also tracks stale or missing embeddings when the
 To search, embed the question or selected text, then query `NearestEmbedding`:
 
 ```mica
-let query_embedding = embed_text("mud-world", "brass light source")
+let query_embedding = embed_text("maintenance-docs", "sensor calibration interval")
 
 return NearestEmbedding(
-  #world_index,
+  #manual_index,
   query_embedding,
   5,
   ?subject,
@@ -148,11 +147,11 @@ The shared retrieval verb records context only when the actor may retrieve the c
 CanRetrieveSubject(actor, subject)
 ```
 
-Applications define this relation using their own policy. In the MUD browser example:
+Applications define this relation using their own policy. For example:
 
 ```mica
 CanRetrieveSubject(actor, subject) :-
-  CanSee(actor, subject)
+  CanReadDocument(actor, subject)
 ```
 
 This check happens before a `RetrievedContext` fact is recorded. Filtering only at display time
@@ -166,10 +165,10 @@ passed to an answer-generation tool.
 ```mica
 let result = retrieve_context(
   #alice,
-  #world_index,
-  "brass light source",
+  #manual_index,
+  "sensor calibration interval",
   5,
-  "mud-world"
+  "maintenance-docs"
 )
 ```
 
@@ -177,16 +176,16 @@ The verb records a question, a retrieval plan, and one `RetrievedContext` per au
 
 ```mica
 Question(question)
-QuestionText(question, "brass light source")
+QuestionText(question, "sensor calibration interval")
 
 RetrievalPlan(plan)
 PlanForQuestion(plan, question)
 PlanKind(plan, "nearest_embedding")
-PlanModel(plan, "mud-world")
+PlanModel(plan, "maintenance-docs")
 
 RetrievedContext(context)
 ContextForPlan(context, plan)
-ContextSubject(context, #lamp_note)
+ContextSubject(context, #sensor_manual)
 ContextScore(context, 0.92)
 ContextReason(context, "nearest_embedding")
 ContextSnapshotVersion(context, 123)
@@ -208,11 +207,11 @@ the answer text, and citations:
 ```mica
 Answer(answer)
 AnswerForQuestion(answer, question)
-AnswerPromptText(answer, "brass light source")
-AnswerContextText(answer, "\n- A brass lamp sits on the workbench.")
-AnswerText(answer, "Relevant context for: brass light source\n- ...")
-AnswerCitation(answer, #lamp_note)
-AnswerCitationText(answer, #lamp_note, "A brass lamp sits on the workbench.")
+AnswerPromptText(answer, "sensor calibration interval")
+AnswerContextText(answer, "\n- Calibrate the temperature sensor every 90 days.")
+AnswerText(answer, "Relevant context for: sensor calibration interval\n- ...")
+AnswerCitation(answer, #sensor_manual)
+AnswerCitationText(answer, #sensor_manual, "Calibrate the temperature sensor every 90 days.")
 AnswerStatus(answer, "fresh")
 ```
 

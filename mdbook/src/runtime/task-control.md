@@ -73,5 +73,5 @@ while durable progress should still be written as facts such as `ToolResult`, `O
 `Completed`.
 
 Relation subscriptions deliver their settled changes through the same mailbox mechanism. See
-[Differential Datalog and Live Updates](../language/differential-updates.md#listening-for-changes)
-for `subscribe_changes`, bounded delivery, and resynchronization.
+[Subscriptions](./subscriptions.md) for `subscribe_changes`, bounded delivery, and
+resynchronization.

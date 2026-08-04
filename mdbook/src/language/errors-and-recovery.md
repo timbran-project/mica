@@ -12,8 +12,8 @@ Use `raise` to signal an error:
 
 ```mica
 raise E_NOT_FOUND
-raise E_PERMISSION, "You cannot take that."
-raise E_PERMISSION, "You cannot take that.", item
+raise E_PERMISSION, "Approval is not permitted."
+raise E_PERMISSION, "Approval is not permitted.", request
 ```
 
 The optional second value is the message. The optional third value is a payload chosen by the

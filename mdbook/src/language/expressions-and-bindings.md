@@ -6,13 +6,13 @@ exits the current function, verb, or task body.
 Expression-oriented does not mean every form is pure. It means forms compose and produce values. A
 relation query returns a boolean or relation value. `assert` and `retract` change the current
 transaction and return `nothing`, the zero-column empty relation. `emit` records a pending effect
-and returns `nothing`. This keeps the language surface uniform without pretending that all
+and returns the emitted value. This keeps the language surface uniform without pretending that all
 expressions are side-effect free.
 
 Bindings use `let` for local names:
 
 ```mica
-let name = "brass lamp"
+let name = "temperature sensor"
 let count = 1 + 1
 ```
 
@@ -71,7 +71,7 @@ dispatch, receiver positional dispatch, `invoke`, and positional spawn.
 Named-role dispatch uses map splices for dynamic role sets:
 
 ```mica
-let roles = {:item -> #coin}
+let roles = {:request -> #release_change}
 :inspect(actor: #alice, @roles)
 ```
 
@@ -112,8 +112,8 @@ Dot syntax is authoring sugar for declared functional binary relations. It is no
 storage:
 
 ```mica
-#lamp.name = "brass lamp"
-let name = #lamp.name
+#sensor.label = "temperature sensor"
+let label = #sensor.label
 ```
 
 The relation backing a dot name must be declared as functional so the syntax has single-value
@@ -122,8 +122,8 @@ behaviour.
 Query variables use `?name` syntax in task code:
 
 ```mica
-for found in LocatedIn(?thing, room)
-  emit(actor, found[:thing])
+for found in AssignedTo(?work, assignee)
+  emit(actor, found[:work])
 end
 ```
 

@@ -3,7 +3,7 @@
 Frobs are lightweight parameterized values with a delegate identity and a payload:
 
 ```mica
-#take_event<{:actor -> #alice, :item -> #coin}>
+#inspection_event<{:actor -> #alice, :subject -> #sensor, :result -> :passed}>
 ```
 
 They are useful when a value needs behaviour or interpretation without becoming a durable object
@@ -18,8 +18,8 @@ still giving dispatch something meaningful to restrict on.
 
 A frob has two parts:
 
-- the delegate identity, such as `#take_event`;
-- the payload value, such as `{:actor -> #alice, :item -> #coin}`.
+- the delegate identity, such as `#inspection_event`;
+- the payload value, such as `{:actor -> #alice, :subject -> #sensor, :result -> :passed}`.
 
 Access the delegate and payload through builtins:
 
@@ -32,7 +32,7 @@ The payload can be any value appropriate for the domain:
 
 ```mica
 #message<"hello">
-#movement_event<{:actor -> #alice, :from -> #first_room, :to -> #north_room}>
+#status_event<{:work -> #inspection, :from -> :pending, :to -> :complete}>
 #html_node<{:tag -> :a, :attrs -> {:href -> "/docs"}, :children -> ["docs"]}>
 ```
 
@@ -53,9 +53,9 @@ gives libraries a way to define behaviour over families of structured values.
 Restrictions can be more specific when the caller wants a particular delegate:
 
 ```mica
-verb render(event @ #movement_event<_>)
+verb render(event @ #status_event<_>)
   let data = frob_value(event)
-  return [data[:actor], " moved."]
+  return [data[:work], " changed status."]
 end
 ```
 

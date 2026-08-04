@@ -3,9 +3,9 @@
 Conditionals are expressions:
 
 ```mica
-if Portable(item)
+if Calibrated(instrument)
   return true
-elseif Container(item)
+elseif RequiresCalibration(instrument)
   return false
 else
   return nothing
@@ -18,7 +18,7 @@ The value of an `if` expression is the value produced by the branch that runs. W
 This makes guard-oriented code natural:
 
 ```mica
-if Portable(item) == false
+if Calibrated(instrument) == false
   return false
 end
 ```
@@ -26,7 +26,7 @@ end
 or, when the condition is short:
 
 ```mica
-Portable(item) || return false
+Calibrated(instrument) || return false
 ```
 
 Loops include `while`:
@@ -74,20 +74,20 @@ Relation queries are also iterable because they return relation values. Each obs
 as a binding map:
 
 ```mica
-for found in Contents(container, ?item)
-  emit(actor, one Name(found[:item], ?name))
+for found in AssignedTo(?work, actor)
+  emit(actor, one Label(found[:work], ?label))
 end
 ```
 
 Loops are mainly for imperative work inside a task: rendering output, building lists, validating
 input, or coordinating effects. Do not use loops to encode stable derived knowledge when a rule
-would express the relationship directly. For example, recursive containment belongs in a `Contains`
-rule, not in every verb that needs to know whether something is inside a container.
+would express the relationship directly. For example, recursive dependencies belong in a
+`Requires` rule, not in every verb that needs to walk a dependency graph.
 
 Guard-style early returns are idiomatic when they keep control flow direct:
 
 ```mica
-Portable(item) || return false
+Calibrated(instrument) || return false
 ```
 
 Use this style for preconditions that stop the body. Prefer a full `if` when there is meaningful
@@ -109,5 +109,5 @@ items[2..5]
 items[2.._]
 ```
 
-An underscore endpoint means an open-ended range. Index and range behaviour is defined by the
-runtime value operations for lists, maps, strings, and other collection-like values.
+An underscore endpoint means an open-ended range. Range indexing applies to lists; integer indexing
+also applies to lists and relation rows, while maps use value keys.

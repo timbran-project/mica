@@ -6,28 +6,28 @@ class-based languages, but they are not stored "inside" a receiver object.
 A verb declares a selector and a set of named parameters:
 
 ```mica
-verb get(actor @ #player, item @ #thing)
-  Portable(item) || return false
-  assert HeldBy(actor, item)
+verb approve(actor @ #reviewer, request @ #change_request)
+  ReadyForReview(actor, request) || return false
+  assert ApprovedBy(request, actor)
   return true
 end
 ```
 
-The selector is `:get`. The parameter names are `actor` and `item`. The restrictions after `@`
-describe what values may fill those roles for this verb branch to apply.
+The selector is `:approve`. The parameter names are `actor` and `request`. The restrictions after
+`@` describe what values may fill those roles for this verb branch to apply.
 
-The `@ #player` and `@ #thing` parts are role restrictions. They say that this verb applies when the
-`actor` role is matched by `#player` and the `item` role is matched by `#thing`. Matching can use
-prototype delegation, so a concrete identity such as `#alice` can match `#player` if the world says
-Alice delegates to that prototype.
+The `@ #reviewer` and `@ #change_request` parts are role restrictions. They say that this verb
+applies when the supplied values match those prototypes. Matching can use prototype delegation, so
+a concrete identity such as `#alice` can match `#reviewer` if the world says Alice delegates to
+that prototype.
 
 The setup is ordinary relation data:
 
 ```mica
 make_relation(:Delegates, 3)
 
-assert Delegates(#alice, #player, 0)
-assert Delegates(#coin, #thing, 0)
+assert Delegates(#alice, #reviewer, 0)
+assert Delegates(#release_change, #change_request, 0)
 ```
 
 The third position gives delegation order. It allows multiple prototypes to be ordered without
@@ -36,16 +36,16 @@ making parentage a built-in object-table field.
 Dispatch uses named roles:
 
 ```mica
-:get(actor: #alice, item: #coin)
+:approve(actor: #alice, request: #release_change)
 ```
 
 This is different from positional function calls. The call site says which value is the actor and
-which value is the item. That makes dispatch able to consider several domain roles without making
+which value is the request. That makes dispatch able to consider several domain roles without making
 one of them the privileged receiver.
 
-The dispatcher looks for installed verbs whose selector is `:get` and whose role restrictions match
-the supplied role values. There is no privileged `self` argument in the dispatch model. A call can
-dispatch on actor, item, tool, room, target, or any other role the domain cares about.
+The dispatcher looks for installed verbs whose selector is `:approve` and whose role restrictions
+match the supplied role values. There is no privileged `self` argument in the dispatch model. A
+call can dispatch on actor, request, tool, target, or any other role the domain cares about.
 
 The compiler also supports positional dispatch syntax:
 
@@ -94,7 +94,7 @@ end
 :summarize(agent: #planner, artifact: #release_notes)
 ```
 
-Here dispatch is over an agent and an artifact, not over a room object.
+Here dispatch considers both an agent and an artefact.
 
 Receiver-call sugar may be used where it reads naturally:
 
@@ -120,10 +120,10 @@ The author-facing `verb` form generates method identities as needed. Fileout and
 may also use an explicit method form:
 
 ```mica
-method #get_thing :get
-  roles actor @ #player, item @ #thing
+method #approve_change :approve
+  roles actor @ #reviewer, request @ #change_request
 do
-  return item
+  return request
 end
 ```
 

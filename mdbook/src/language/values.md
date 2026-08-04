@@ -10,11 +10,11 @@ Current value families include:
 - integers;
 - floats;
 - strings;
-- symbols such as `:look`;
+- symbols such as `:approve`;
 - error codes such as `E_FAIL`;
 - identity values such as `#alice`;
 - lists such as `[1, 2, 3]`;
-- maps such as `{:name -> "lamp"}`;
+- maps such as `{:name -> "sensor"}`;
 - immutable relation values, including `nothing`;
 - frobs such as `#event<{:actor -> #alice}>`;
 - bytes;
@@ -34,12 +34,12 @@ Primitive values behave like values in most dynamic languages:
 ```mica
 42
 true
-"brass lamp"
-:look
+"temperature sensor"
+:approve
 E_PERMISSION
 [1, 2, 3]
-{:name -> "lamp"}
-[:thing, :owner] { [#coin, #alice], [#lamp, #bob] }
+{:name -> "sensor"}
+[:work, :owner] { [#inspection, #alice], [#repair, #bob] }
 ```
 
 `nothing` is the source alias for the zero-column empty relation. It is not a separate value kind,
@@ -52,8 +52,8 @@ Relation literals have a symbol heading followed by a set of rows:
 
 ```mica
 [:thing, :owner] {
-  [#coin, #alice],
-  [#lamp, #bob],
+  [#inspection, #alice],
+  [#repair, #bob],
 }
 ```
 
@@ -73,7 +73,7 @@ Symbols are interned names used for selectors, relation names, policy surfaces, 
 other program-facing labels:
 
 ```mica
-:look
+:approve
 :tool_call
 :inspection
 ```
@@ -91,13 +91,13 @@ value. Mica does not require a closed universe of built-in error names.
 Lists are ordered sequences:
 
 ```mica
-["coin", "box", "lamp"]
+["inspect", "repair", "calibrate"]
 ```
 
 Maps are associative values:
 
 ```mica
-{:actor -> #alice, :item -> #coin}
+{:actor -> #alice, :request -> #release_change}
 ```
 
 Maps remain useful even in a relation-first language. Relations are for world state and queryable
@@ -111,7 +111,7 @@ hidden Alice structure. It is a stable key-like value that can appear in relatio
 ```mica
 Actor(#alice)
 Name(#alice, "Alice")
-LocatedIn(#alice, #first_room)
+AssignedTo(#inspection, #alice)
 ```
 
 An identity is also not the primary key of one privileged object table. It can appear in many

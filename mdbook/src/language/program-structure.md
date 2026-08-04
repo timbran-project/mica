@@ -13,35 +13,35 @@ identities, relations, dot sugar, and installed methods are resolved before the 
 That means this is normally a two-submission sequence:
 
 ```mica
-make_identity(:lamp)
-make_functional_relation(:Name, 2, [0])
+make_identity(:sensor)
+make_functional_relation(:Label, 2, [0])
 ```
 
 then:
 
 ```mica
-assert Name(#lamp, "brass lamp")
-return one Name(#lamp, ?name)
+assert Label(#sensor, "temperature sensor")
+return one Label(#sensor, ?label)
 ```
 
 The first task creates an identity and a functional relation keyed by position 0. After it commits,
-the runner refreshes its compile context. The second task can then compile references to `Name` and
-`#lamp`, assert a fact, and ask for the single name attached to `#lamp`.
+the runner refreshes its compile context. The second task can then compile references to `Label` and
+`#sensor`, assert a fact, and ask for the single label attached to `#sensor`.
 
 Filein uses the same language, but the runner may split root source into definition and task chunks
 when installation needs to happen before later code can compile. That makes this shape valid in a
 filein:
 
 ```mica
-make_identity(:lamp)
-make_functional_relation(:Name, 2, [0])
-assert Name(#lamp, "brass lamp")
+make_identity(:sensor)
+make_functional_relation(:Label, 2, [0])
+assert Label(#sensor, "temperature sensor")
 ```
 
 The same distinction shows up when authoring larger systems. A line such as:
 
 ```mica
-assert Name(#lamp, "brass lamp")
+assert Label(#sensor, "temperature sensor")
 ```
 
 changes stored world state when the task commits. A verb definition such as:
@@ -100,8 +100,8 @@ A task body is ordinary Mica code. It may compute values, query relations, asser
 call builtins, emit effects, or invoke verbs:
 
 ```mica
-let room = one LocatedIn(actor, ?room)
-emit(actor, one Description(room, ?text))
+let work = one AssignedTo(?work, actor)
+emit(actor, one Description(work, ?text))
 ```
 
 The task body is expression-oriented. Forms such as `assert`, `emit`, and assignment still produce

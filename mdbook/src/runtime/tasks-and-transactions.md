@@ -15,16 +15,16 @@ tasks cannot see them until the commit publishes successfully.
 State changes are buffered in the task transaction:
 
 ```mica
-assert LocatedIn(#coin, #box)
-emit(#alice, "Placed.")
+assert AssignedTo(#inspection, #alice)
+emit(#alice, "Assignment recorded.")
 ```
 
 On commit, relation writes become visible, effects are published, and mailbox sends are delivered.
 On abort or retry, pending writes, effects, and mailbox sends are discarded.
 
-This matters for effects. If a task prints "Placed." and then fails, the host should not tell the
-user that placement happened. Mica therefore treats effects like transactional output: they are
-published only after a successful commit.
+This matters for effects. If a task prints "Assignment recorded." and then fails, the host should
+not report that the assignment happened. Mica therefore treats effects like transactional output:
+they are published only after a successful commit.
 
 Suspension is also a commit boundary. A task that calls `suspend`, `read`, `commit`, `spawn`, or
 `mailbox_recv` commits its current transaction before control returns to the driver. When it

@@ -5,28 +5,28 @@ A relation is how Mica records that something is true in the world.
 If an ordinary object system would write:
 
 ```text
-lamp.location = room
-lamp.name = "brass lamp"
-lamp.portable = true
+sensor.location = lab
+sensor.label = "temperature sensor"
+sensor.calibrated = true
 ```
 
 Mica usually writes facts:
 
 ```mica
-LocatedIn(#lamp, #room)
-Name(#lamp, "brass lamp")
-Portable(#lamp)
+InstalledAt(#sensor, #lab)
+Label(#sensor, "temperature sensor")
+Calibrated(#sensor)
 ```
 
-This is the core shift. State is not packed into one hidden record behind `#lamp`. State is a
+This is the core shift. State is not packed into one hidden record behind `#sensor`. State is a
 collection of named relationships that can be queried, derived, indexed, authorized, filed out, and
 extended independently.
 
-Each relation has a fixed number of positions. `Portable` has one position: the thing that is
-portable. `LocatedIn` has two positions: the thing and the place. `Name` has two positions: the
-thing and the string used as its name. In database language, those fixed-position facts are tuples
-and the number of positions is the relation's arity, but the practical rule is simpler: every fact
-in the same relation has the same shape.
+Each relation has a fixed number of positions. `Calibrated` has one position: the instrument whose
+calibration is current. `InstalledAt` has two positions: the instrument and the site. `Label` has
+two positions: the subject and its label string. In database language, those fixed-position facts
+are tuples and the number of positions is the relation's arity, but the practical rule is simpler:
+every fact in the same relation has the same shape.
 
 ## Relation Semantics
 
@@ -34,8 +34,8 @@ Relations have set semantics. A fact is either present or absent; asserting the 
 not create two logical copies. There is no meaningful tuple order inside the relation. Query results
 preserve these set semantics as immutable relation values.
 
-The positions in a relation are ordinal. `LocatedIn(#coin, #room)` means position 0 is `#coin` and
-position 1 is `#room`. The positions do not have stored column names. Names come from the relation
+The positions in a relation are ordinal. `InstalledAt(#sensor, #lab)` means position 0 is `#sensor`
+and position 1 is `#lab`. The positions do not have stored column names. Names come from the relation
 and from how queries bind variables.
 
 Mica values are ordinary values when stored in relations. `nothing` denotes the zero-column empty
@@ -44,7 +44,7 @@ relation; it is not SQL `NULL`, and Mica does not use SQL's three-valued logic.
 Create a relation with a builtin:
 
 ```mica
-make_relation(:LocatedIn, 2)
+make_relation(:InstalledAt, 2)
 ```
 
 Named relations are durable by default: their facts survive a process restart when the runtime uses
@@ -69,23 +69,22 @@ what recovery does after a restart.
 Assert facts into it:
 
 ```mica
-assert LocatedIn(#coin, #room)
+assert InstalledAt(#sensor, #lab)
 ```
 
-That fact says that `#coin` is located in `#room`. Mica does not care whether `#coin` is a game
-object, an agent task, a document, or an operational entity. The meaning comes from the relation and
-from the rules and verbs that use it.
+That fact says that `#sensor` is installed at `#lab`. The meaning comes from the relation and from
+the rules and verbs that use it.
 
 Query with free variables:
 
 ```mica
-return LocatedIn(?thing, #room)
+return InstalledAt(?instrument, #lab)
 ```
 
-The `?thing` part is a query variable. The result is a relation value whose source form is:
+The `?instrument` part is a query variable. The result is a relation value whose source form is:
 
 ```mica
-[:thing] { [#coin], [#lamp] }
+[:instrument] { [#sensor], [#controller] }
 ```
 
 The heading names the free variables and each row contains their values. Relation values are
@@ -96,31 +95,31 @@ Relation values are iterable. Each observed row is exposed as a binding map, so 
 remains direct without allocating a map for every answer up front:
 
 ```mica
-for row in LocatedIn(?thing, ?place)
-  emit(#observer, row[:thing])
+for row in InstalledAt(?instrument, ?site)
+  emit(#observer, row[:instrument])
 end
 ```
 
 A relation call with no free variables is a predicate test:
 
 ```mica
-if LocatedIn(#coin, #room)
-  return "the coin is here"
+if InstalledAt(#sensor, #lab)
+  return "installed"
 end
 ```
 
 You can also leave multiple positions open:
 
 ```mica
-return LocatedIn(?thing, ?place)
+return InstalledAt(?instrument, ?site)
 ```
 
-That returns a relation value with `:thing` and `:place` columns.
+That returns a relation value with `:instrument` and `:site` columns.
 
 Repeated query variables require equality:
 
 ```mica
-SameRoom(?who, ?who)
+LinkedTo(?subject, ?subject)
 ```
 
 This only matches facts where both positions contain the same value.
@@ -128,7 +127,7 @@ This only matches facts where both positions contain the same value.
 `_` is a wildcard, not a binding:
 
 ```mica
-LocatedIn(_, #room)
+InstalledAt(_, #lab)
 ```
 
 It matches any first-position value but does not include that value in the result.
@@ -136,20 +135,20 @@ It matches any first-position value but does not include that value in the resul
 Functional relations declare key positions and support single-value projection:
 
 ```mica
-make_functional_relation(:Name, 2, [0])
-assert Name(#lamp, "brass lamp")
-return one Name(#lamp, ?name)
+make_functional_relation(:Label, 2, [0])
+assert Label(#sensor, "temperature sensor")
+return one Label(#sensor, ?label)
 ```
 
-The key-position list is zero-based. In `make_functional_relation(:Name, 2, [0])`, position 0 is the
-key. For each concrete key, the relation contains at most one matching tuple. The relation as a
+The key-position list is zero-based. In `make_functional_relation(:Label, 2, [0])`, position 0 is
+the key. For each concrete key, the relation contains at most one matching tuple. The relation as a
 whole may still contain many tuples with different keys.
 
 Functional relation metadata is a real constraint used by replacement and dot sugar. It is not just
 documentation. Code that assigns through a functional relation replaces the tuple for that key
 rather than adding another competing fact.
 
-`one` projects at most one result. It is useful for relations such as `Name`, where the program
+`one` projects at most one result. It is useful for relations such as `Label`, where the program
 expects a single value and should fail loudly if the data is ambiguous.
 
 If the query produces zero results, `one` returns `nothing`, the zero-column empty relation. If it
@@ -194,17 +193,16 @@ values: the former has no rows and is falsey, while the latter has one empty row
 Dot sugar is only valid for declared functional binary relations:
 
 ```mica
-return #lamp.name
-#lamp.name = "golden lamp"
+return #sensor.label
+#sensor.label = "temperature sensor A"
 ```
 
 This is convenient, but it is still relation access. The assignment replaces the
-`Name(#lamp, value)` fact for the key `#lamp`; it does not write a field inside a record.
+`Label(#sensor, value)` fact for the key `#sensor`; it does not write a field inside a record.
 
-The dot name maps to a declared binary relation. A read such as `#lamp.name` is equivalent to a
-single-result projection such as `one Name(#lamp, ?name)`. If there is no matching tuple, the result
-is `nothing`. If more than one tuple matches a non-functional backing relation, the read raises
-`E_AMBIGUOUS`. There is no fallback to hidden object storage.
+The dot name maps to a declared functional binary relation. A read such as `#sensor.label` is
+equivalent to a single-result projection such as `one Label(#sensor, ?label)`. If there is no
+matching tuple, the result is `nothing`. There is no fallback to hidden object storage.
 
 Mica relation calls are closer to Datalog predicates than SQL `SELECT` statements. Named relations
 have no implicit row ids, no stored column names, and no SQL `NULL`. Query variables provide the

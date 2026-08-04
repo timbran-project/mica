@@ -4,7 +4,7 @@ Effects are committed outputs from Mica tasks to the outside world. They are not
 by arbitrary task code.
 
 ```mica
-emit(actor, "You take the coin.")
+emit(actor, "Calibration recorded.")
 ```
 
 `emit` always has a target. The target is an identity chosen by the world or host integration: an

@@ -52,7 +52,8 @@ For example, `apps/shared/retrieval.mica` records retrieved context only after c
 CanRetrieveSubject(actor, subject)
 ```
 
-The MUD example derives that relation from `CanSee(actor, subject)`.
+An application might derive that relation from document ownership, project membership, or an
+explicit access grant.
 
 ## Required Bindings
 

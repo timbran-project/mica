@@ -34,7 +34,7 @@ places where the Mica code is describing nested DOM structure.
 This is useful when the UI is part of the shared system rather than a separate client application.
 The view can stay close to the facts, rules, authority checks, and verbs that decide what a user is
 allowed to see or do, while the source still reads like the DOM tree it produces. That makes it a
-good fit for small tools, inspectors, operational panels, room views, and other Mica-hosted
+good fit for small tools, inspectors, operational panels, live views, and other Mica-hosted
 interfaces where the server owns the browser state.
 
 The markup form makes those trees readable at a glance. It avoids long `dom_element(...)` calls
@@ -138,4 +138,4 @@ invoke the DOM constructors and any helpers used inside `{...}` expressions.
 
 DOM markup defines a tree; it does not decide when the browser should receive a new version. A
 synchronized view declares the relations that can change its tree, as described in
-[Differential Datalog and Live Updates](./differential-updates.md#differential-dom-updates).
+[Subscriptions](../runtime/subscriptions.md#synchronized-dom-views).

@@ -27,3 +27,8 @@ A typical flow looks like this:
 
 The runtime does not require all state to be durable. Endpoint state, capabilities, and mailboxes
 are runtime concerns. Durable state stores the world's facts, rules, definitions, and policy.
+
+[Tasks and Transactions](./tasks-and-transactions.md) and [Task Control](./task-control.md) specify
+execution boundaries. [Subscriptions](./subscriptions.md) covers settled change delivery, while
+[Catalogue and Introspection](./catalogue-and-introspection.md) describes the live schema and
+runtime observation surfaces.
