@@ -61,8 +61,8 @@ as true.
 ## What Mica Means by a World
 
 This guide uses *world* for the complete live environment: its identities, stored facts, derived
-facts, installed rules and verbs, and policy. A world need not be a fictional place. It can model a
-lab, a company, a document collection, a simulation, an agent workspace, or an operational service.
+facts, installed rules and verbs, and policy. A world can model a lab, a company, a document
+collection, a simulation, an agent workspace, or an operational service.
 
 The word is useful because the environment is more than a database. Code can be installed into it,
 people and processes can act on it concurrently, and its definitions can change without rebuilding

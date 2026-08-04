@@ -9,9 +9,9 @@ environment where durable identities, facts, rules, verbs, authority, effects, a
 change while the system is running. Code does not sit outside the data as a separate application
 layer. Behaviour is installed into the world alongside the facts it reads and writes.
 
-You do not need experience with Datalog, logic programming, persistent object systems, or MUDs to
-use this guide. The tutorial begins with ordinary statements about people, equipment, and work. It
-introduces the relational vocabulary only after showing what each idea is for.
+The tutorial assumes no prior knowledge of relational logic or persistent programming. It begins
+with ordinary statements about people, equipment, and work, introducing each piece of relational
+vocabulary in context.
 
 The guide is organized in four parts:
 

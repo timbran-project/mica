@@ -179,8 +179,8 @@ authority limits each task
 fileins evolve the continuing world
 ```
 
-This model is useful for collaborative applications, simulations, knowledge systems, operational
-services, and agent workspaces. None of it depends on a game-world metaphor.
+This model applies across collaborative applications, simulations, knowledge systems, operational
+services, and agent workspaces.
 
 The next part of the guide develops complete runnable systems. The
 [Language Overview](../language/index.md) and [Runtime Overview](../runtime/index.md) provide exact
