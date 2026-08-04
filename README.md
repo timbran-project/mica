@@ -14,6 +14,9 @@
 Mica is a programming language and runtime for building long-lived shared systems around facts,
 rules, objects, and inference.
 
+**Start with [The Mica Guide](mdbook/src/SUMMARY.md).** It includes a tutorial, complete runnable
+examples, and the language and runtime reference.
+
 It is for software whose state is not only stored but reasoned over: live worlds where facts can
 imply other facts, rules define derived relations, and authors can extend the logic while the system
 is running. Collaborative worlds, simulations, knowledge bases, agent workspaces, games, and
@@ -400,11 +403,6 @@ cargo run --bin mica-daemon -- \
 
 HTTP requests run as the `#web` principal by default. The daemon derives request-handler authority
 from Mica policy facts rather than running `:http_request(...)` as root.
-
-## Reference
-
-The checked-in mdBook source lives under [`mdbook/src`](mdbook/src/SUMMARY.md). It is an in-progress
-language and runtime reference; the generated HTML output is not committed yet.
 
 ## Repository Map
 
