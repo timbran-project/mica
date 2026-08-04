@@ -4,7 +4,7 @@ Facts say what the world currently accepts as true. Rules say what follows from 
 system also needs controlled actions: transfer an instrument, assign it to a project, close a work
 order, or approve a repair.
 
-Mica installs these actions as *verbs*.
+Mica installs these actions as _verbs_.
 
 ## A Verb Is Live World Behaviour
 
@@ -44,8 +44,8 @@ But transfer behaviour may depend equally on who is acting, what is moving, and 
 Mica does not force one of those values to own the method. Dispatch considers named roles.
 
 This makes multi-party behaviour direct. A calibration action might select a method based on the
-technician, the instrument family, and the procedure. No artificial receiver has to stand in for
-the whole interaction.
+technician, the instrument family, and the procedure. No artificial receiver has to stand in for the
+whole interaction.
 
 Receiver-call syntax exists where it reads naturally, but it remains sugar for a named role rather
 than a separate object lookup mechanism.
@@ -132,8 +132,8 @@ are unrelated APIs.
 
 ## Functions and Verbs Serve Different Purposes
 
-An ordinary function value is useful for local computation, transformation, and higher-order code.
-A verb is useful when behaviour should be installed, selected through domain roles, invoked through
+An ordinary function value is useful for local computation, transformation, and higher-order code. A
+verb is useful when behaviour should be installed, selected through domain roles, invoked through
 the world, inspected, and governed by invoke authority.
 
 Not every helper needs to become a verb. Prefer a verb for a named domain action and ordinary

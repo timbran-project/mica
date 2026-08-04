@@ -101,8 +101,8 @@ key, the relation behaves like a function from subject to label:
 Not every relation behaves this way. The earlier `Tag` relation associates `#sensor` with several
 tags, so it is not a function from subject to tag.
 
-For relations with more than two positions, database theory calls this guarantee a *functional
-dependency*: the values in the key positions determine the values in the remaining positions. That
+For relations with more than two positions, database theory calls this guarantee a _functional
+dependency_: the values in the key positions determine the values in the remaining positions. That
 is what the word “functional” in `make_functional_relation` is hinting at.
 
 The term is precise, but it can sound more abstract than the everyday feature. In practical terms,
@@ -119,8 +119,8 @@ return one Label(#sensor, ?label)
 ```
 
 This returns `"temperature sensor"` when that is the matching label. It returns `nothing` when there
-is no matching fact. If a query unexpectedly produces more than one result, it raises
-`E_AMBIGUOUS` instead of silently choosing one.
+is no matching fact. If a query unexpectedly produces more than one result, it raises `E_AMBIGUOUS`
+instead of silently choosing one.
 
 Without a declared key, code could still use `one`, but it would only be assuming that nobody had
 added a competing fact. The key makes the assumption an enforced part of the relation.
@@ -163,8 +163,8 @@ fields.
 
 ## Keys Made From More Than One Value
 
-Sometimes one value is not enough to identify an answer. A setting could depend on both a device
-and an operating profile:
+Sometimes one value is not enough to identify an answer. A setting could depend on both a device and
+an operating profile:
 
 ```mica
 make_functional_relation(:ProfileSetting, 3, [0, 1])
@@ -231,5 +231,5 @@ make_functional_relation(:RequestPath, 2, [0], :volatile)
 ```
 
 The declaration uses position numbers because Mica relations currently store an arity, not permanent
-column names. Names such as `?subject` and `?label` belong to the query in which they appear; another
-query can use different names for the same positions.
+column names. Names such as `?subject` and `?label` belong to the query in which they appear;
+another query can use different names for the same positions.

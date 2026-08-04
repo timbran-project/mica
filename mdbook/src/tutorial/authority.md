@@ -22,9 +22,8 @@ RelationInSurface(:equipment, :LocatedAt)
 RelationInSurface(:movement, :LocatedAt)
 ```
 
-Rules derive effective permissions such as `CanRead`, `CanWrite`, `CanInvoke`, and `CanEffect`.
-When a task or session begins, the runtime builds an `AuthorityContext` from the current policy
-snapshot.
+Rules derive effective permissions such as `CanRead`, `CanWrite`, `CanInvoke`, and `CanEffect`. When
+a task or session begins, the runtime builds an `AuthorityContext` from the current policy snapshot.
 
 Operations then check that context cheaply. The hot path does not rerun the complete policy query
 for every tuple read or fact written.
@@ -63,8 +62,9 @@ identity.
 ## Relation Grants Cover Whole Relations
 
 Read and write authority applies to a named relation, not automatically to selected rows. Granting
-read access to `AssignedTo` allows an unbound query to observe every readable tuple in that relation.
-The runtime does not infer row ownership from a position named `actor`, `owner`, or `user`.
+read access to `AssignedTo` allows an unbound query to observe every readable tuple in that
+relation. The runtime does not infer row ownership from a position named `actor`, `owner`, or
+`user`.
 
 If a system needs per-tenant isolation, make the tenant explicit and bind it in the interface:
 
@@ -72,8 +72,8 @@ If a system needs per-tenant isolation, make the tenant explicit and bind it in 
 AssignedToTenant(#acme, #sensor_17, #air_quality_project)
 ```
 
-Then expose verbs or derived relations that constrain access to the authorized tenant. Do not
-assume a broad relation grant becomes row-level security automatically.
+Then expose verbs or derived relations that constrain access to the authorized tenant. Do not assume
+a broad relation grant becomes row-level security automatically.
 
 ## Authority Is Refreshed at Boundaries
 
@@ -105,9 +105,9 @@ External output crosses the Mica world boundary. Console messages, HTTP response
 and other host effects require effect authority. A task that may read or write facts does not
 automatically gain permission to make an external request.
 
-External credentials should enter as session or task authority. Durable policy may say that an
-agent can use a search tool; the live API credential itself should not become a durable fact that
-can be filed out.
+External credentials should enter as session or task authority. Durable policy may say that an agent
+can use a search tool; the live API credential itself should not become a durable fact that can be
+filed out.
 
 ## Bootstrap Conservatively
 

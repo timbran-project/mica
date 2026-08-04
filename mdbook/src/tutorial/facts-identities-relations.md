@@ -29,8 +29,8 @@ make_identity(:calibration_lab)
 The argument is a symbol such as `:alice`. Once installed, source refers to its identity value as
 `#alice`.
 
-This split prevents an accidental spelling from silently creating a new durable object. The
-compiler resolves `#alice` against the current world before a task runs.
+This split prevents an accidental spelling from silently creating a new durable object. The compiler
+resolves `#alice` against the current world before a task runs.
 
 ## A Fact Is One Accepted Statement
 
@@ -54,7 +54,7 @@ create two logical copies.
 ## A Relation Names a Kind of Fact
 
 `Instrument`, `Label`, and `LocatedAt` are relations. Each relation has a fixed number of positions,
-called its *arity*:
+called its _arity_:
 
 ```mica
 make_relation(:Instrument, 1)
@@ -66,10 +66,10 @@ make_functional_relation(:Label, 2, [0])
 the located thing and its location.
 
 The positions have meaning because of the relation's design and use; they are not stored column
-names. The declaration fixes the shape, and documentation and conventions explain what each
-position means.
+names. The declaration fixes the shape, and documentation and conventions explain what each position
+means.
 
-`Label` is a *functional relation*. The list `[0]` declares position zero as its key. Each identity
+`Label` is a _functional relation_. The list `[0]` declares position zero as its key. Each identity
 may have at most one label, although the relation can hold labels for many identities:
 
 ```mica
@@ -96,7 +96,7 @@ These changes become visible to other tasks when the current task commits.
 
 In a record-oriented language, code might expect `sensor.label`, `sensor.location`, and
 `sensor.owner` to live in one structure. Mica does not keep a hidden record behind `#sensor_17`.
-Instead, the useful view of the object is its *fact neighbourhood*: all relevant stored and derived
+Instead, the useful view of the object is its _fact neighbourhood_: all relevant stored and derived
 facts that mention the identity.
 
 For example:
@@ -140,8 +140,8 @@ That convenience discards useful structure. `LocatedAt` and `Label` can have dif
 authority policy, rules, indexes, and meaning. A program can ask for locations without filtering a
 mixed property bag.
 
-Use a specific relation when a relationship has domain meaning. Mica is designed to let a world
-grow new kinds of facts without forcing them through one universal slot mechanism.
+Use a specific relation when a relationship has domain meaning. Mica is designed to let a world grow
+new kinds of facts without forcing them through one universal slot mechanism.
 
 ## Durable and Volatile Facts
 

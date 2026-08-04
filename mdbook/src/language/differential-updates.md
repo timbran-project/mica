@@ -45,10 +45,10 @@ These structures are ephemeral implementation state. Durable facts and rules rem
 and a snapshot still presents an ordinary coherent relation. If maintained state is unavailable or
 unsuitable, Mica can evaluate the complete result and produce the same answers.
 
-Differential maintenance is most useful when relations are large, commits change a small fraction
-of their rows, rules remain stable, and derived results are read repeatedly. A small input change
-can still have a large consequence: removing a central dependency edge may alter much of a graph.
+Differential maintenance is most useful when relations are large, commits change a small fraction of
+their rows, rules remain stable, and derived results are read repeatedly. A small input change can
+still have a large consequence: removing a central dependency edge may alter much of a graph.
 
 To receive settled additions and removals in task code, use the runtime
-[subscription API](../runtime/subscriptions.md). Subscription messages expose asserted and
-retracted rows; programs do not inspect arrangements, traces, or support counts.
+[subscription API](../runtime/subscriptions.md). Subscription messages expose asserted and retracted
+rows; programs do not inspect arrangements, traces, or support counts.

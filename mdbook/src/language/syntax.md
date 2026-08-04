@@ -118,8 +118,8 @@ ReadyForReview(reviewer, change) :-
   not ReviewRecorded(change)
 ```
 
-Rule variables are conventionally bare names such as `reviewer` and `change`. The current
-compiler also accepts `?name` in rule atoms, but bare names are the preferred rule style.
+Rule variables are conventionally bare names such as `reviewer` and `change`. The current compiler
+also accepts `?name` in rule atoms, but bare names are the preferred rule style.
 
 ## Control
 
@@ -188,9 +188,9 @@ end
 #release_change:approve(actor: #alice)
 ```
 
-`actor @ #reviewer` is a role restriction. `#release_change:approve(actor: #alice)` is
-receiver-call sugar for a named-role dispatch with `receiver: #release_change`; it is not classic
-method-table lookup.
+`actor @ #reviewer` is a role restriction. `#release_change:approve(actor: #alice)` is receiver-call
+sugar for a named-role dispatch with `receiver: #release_change`; it is not classic method-table
+lookup.
 
 ## Task Control
 

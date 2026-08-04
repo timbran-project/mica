@@ -35,8 +35,8 @@ not create two logical copies. There is no meaningful tuple order inside the rel
 preserve these set semantics as immutable relation values.
 
 The positions in a relation are ordinal. `InstalledAt(#sensor, #lab)` means position 0 is `#sensor`
-and position 1 is `#lab`. The positions do not have stored column names. Names come from the relation
-and from how queries bind variables.
+and position 1 is `#lab`. The positions do not have stored column names. Names come from the
+relation and from how queries bind variables.
 
 Mica values are ordinary values when stored in relations. `nothing` denotes the zero-column empty
 relation; it is not SQL `NULL`, and Mica does not use SQL's three-valued logic.

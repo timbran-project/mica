@@ -8,7 +8,8 @@ often conflated:
 - approval eligibility is a derived domain conclusion;
 - runtime authority controls which relations and verbs a submitted task may use.
 
-The complete source is [`apps/examples/approval-workflow.mica`](../../../apps/examples/approval-workflow.mica).
+The complete source is
+[`apps/examples/approval-workflow.mica`](../../../apps/examples/approval-workflow.mica).
 
 ## Load the Workflow
 
@@ -23,10 +24,10 @@ cargo run --bin mica -- \
 
 The initial requests are:
 
-| Identity | Amount | State |
-| --- | ---: | --- |
-| `#office_supplies_request` | 250 | `:pending` |
-| `#lab_upgrade_request` | 5000 | `:pending` |
+| Identity                   | Amount | State      |
+| -------------------------- | -----: | ---------- |
+| `#office_supplies_request` |    250 | `:pending` |
+| `#lab_upgrade_request`     |   5000 | `:pending` |
 
 Alice is an approver. Sam is a senior approver and delegates transitively to the ordinary approver
 prototype for verb dispatch.
@@ -92,9 +93,9 @@ The verb returns:
 
 It returns before drafting any state change. The request remains pending.
 
-This distinction is deliberate. Runtime authority answers whether Alice's task may invoke
-`:approve` and write the workflow relations. `CanApprove` answers whether this request is valid for
-Alice under current business rules.
+This distinction is deliberate. Runtime authority answers whether Alice's task may invoke `:approve`
+and write the workflow relations. `CanApprove` answers whether this request is valid for Alice under
+current business rules.
 
 ## Approve with the Senior Role
 
@@ -129,8 +130,8 @@ request.decisionNote = note
 ```
 
 Because `Pending` is derived from `RequestState(request, :pending)`, the pending fact disappears.
-Because `Approved` is derived from `RequestState(request, :approved)`, the approved fact appears.
-No code updates either derived relation directly.
+Because `Approved` is derived from `RequestState(request, :approved)`, the approved fact appears. No
+code updates either derived relation directly.
 
 ## Withdrawal Uses a Different Domain Check
 

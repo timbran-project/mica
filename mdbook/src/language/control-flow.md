@@ -81,8 +81,8 @@ end
 
 Loops are mainly for imperative work inside a task: rendering output, building lists, validating
 input, or coordinating effects. Do not use loops to encode stable derived knowledge when a rule
-would express the relationship directly. For example, recursive dependencies belong in a
-`Requires` rule, not in every verb that needs to walk a dependency graph.
+would express the relationship directly. For example, recursive dependencies belong in a `Requires`
+rule, not in every verb that needs to walk a dependency graph.
 
 Guard-style early returns are idiomatic when they keep control flow direct:
 

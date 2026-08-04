@@ -10,7 +10,8 @@ job worker -----------------> database
 A direct dependency is stored. The complete transitive dependency relation and the components
 affected by an outage are derived with recursive rules.
 
-The complete source is [`apps/examples/dependency-planner.mica`](../../../apps/examples/dependency-planner.mica).
+The complete source is
+[`apps/examples/dependency-planner.mica`](../../../apps/examples/dependency-planner.mica).
 
 ## Load the Planner
 
@@ -128,8 +129,8 @@ fact has been derived, encountering it again does not add another logical copy. 
 when a pass adds nothing new.
 
 A cycle can still produce surprising modelling results, such as a component depending transitively
-on itself. Decide whether cycles are valid in your domain and add validation or a separate diagnostic
-relation when they are not.
+on itself. Decide whether cycles are valid in your domain and add validation or a separate
+diagnostic relation when they are not.
 
 ## What the Example Demonstrates
 
@@ -141,5 +142,5 @@ relation when they are not.
 - named-role operator verbs with explicit invoke and write authority;
 - set semantics providing a finite fixpoint for a finite active domain.
 
-The [Rules](../language/rules.md) reference covers recursion, safety, and stratified negation in more
-detail.
+The [Rules](../language/rules.md) reference covers recursion, safety, and stratified negation in
+more detail.

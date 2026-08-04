@@ -8,9 +8,9 @@ LocatedAt(#sensor_17, #calibration_lab)
 RequiresCalibration(#sensor_17)
 ```
 
-Other facts are conclusions. If Alice works at the site where Sensor 17 is located, Alice can collect
-the sensor. Storing that conclusion separately would create synchronization work: every location or
-staffing change would have to find and update all affected `CanCollect` facts.
+Other facts are conclusions. If Alice works at the site where Sensor 17 is located, Alice can
+collect the sensor. Storing that conclusion separately would create synchronization work: every
+location or staffing change would have to find and update all affected `CanCollect` facts.
 
 A rule records the reason instead:
 
@@ -29,20 +29,20 @@ No prior Datalog knowledge is required. The rule is a maintained definition of a
 
 ## The Head Names the Conclusion
 
-The first line is the rule *head*:
+The first line is the rule _head_:
 
 ```mica
 CanCollect(person, instrument) :-
 ```
 
-It describes the fact to derive. The lines after `:-` form the *body*: the conditions that must all
+It describes the fact to derive. The lines after `:-` form the _body_: the conditions that must all
 be satisfied.
 
 `person`, `instrument`, and `site` are logical variables. Mica searches for values that make the
 body facts true, then emits the corresponding head facts.
 
-They are not mutable local variables and the body is not an imperative sequence of assignments.
-The shared `site` name expresses the join: both body facts must use the same site value.
+They are not mutable local variables and the body is not an imperative sequence of assignments. The
+shared `site` name expresses the join: both body facts must use the same site value.
 
 ## Callers Use Derived Relations Normally
 
@@ -85,8 +85,8 @@ CanCollect(person, instrument) :-
   AssignedTo(instrument, project)
 ```
 
-The derived relation contains facts supported by either rule. Set semantics remove duplicate
-answers when both reasons apply.
+The derived relation contains facts supported by either rule. Set semantics remove duplicate answers
+when both reasons apply.
 
 ## Negation Means “Not Derivable Here”
 
@@ -124,9 +124,9 @@ The first rule handles direct installation. The second says an assembly also con
 inside a directly installed subassembly. Callers can query `Contains` without writing a traversal
 loop.
 
-Positive recursion is evaluated until another pass adds no new facts. In formal terms, Mica
-computes a finite least fixpoint. Practically, it repeatedly follows the stated reasons until the
-answer stops growing.
+Positive recursion is evaluated until another pass adds no new facts. In formal terms, Mica computes
+a finite least fixpoint. Practically, it repeatedly follows the stated reasons until the answer
+stops growing.
 
 ## Store Causes; Derive Consequences
 
@@ -143,13 +143,13 @@ This distinction avoids stale caches while keeping important historical decision
 ## Rules Are Installed World Definitions
 
 A rule is not merely a local function in the file that mentions it. Installing the source changes
-the live world's catalogue. The definition can be inspected, filed out, replaced through filein
-unit ownership, and used by later tasks.
+the live world's catalogue. The definition can be inspected, filed out, replaced through filein unit
+ownership, and used by later tasks.
 
 Because rules are live definitions, changes deserve the same review and migration discipline as
 schema and application code. Replacing a rule can change many visible conclusions at once.
 
 ## Continue
 
-Rules define what follows from the world's facts. [Installing Behaviour](./behaviour.md) explains how
-verbs define actions that people and processes can invoke.
+Rules define what follows from the world's facts. [Installing Behaviour](./behaviour.md) explains
+how verbs define actions that people and processes can invoke.

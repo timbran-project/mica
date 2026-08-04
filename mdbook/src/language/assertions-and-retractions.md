@@ -84,6 +84,6 @@ assert Label(#sensor, "north-line sensor")
 Dot assignment is the concise form for this pattern, but only where the backing relation is declared
 functional.
 
-Prefer named relations such as `Label`, `InstalledAt`, `AssignedTo`, and `ToolResult` for concepts the
-world understands. A generic ad hoc relation should be reserved for state that is truly local or
+Prefer named relations such as `Label`, `InstalledAt`, `AssignedTo`, and `ToolResult` for concepts
+the world understands. A generic ad hoc relation should be reserved for state that is truly local or
 experimental.

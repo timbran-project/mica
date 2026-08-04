@@ -143,8 +143,8 @@ separate unit.
 
 ## 9. Test Meaning, Not Only Parsing
 
-A useful test loads the real fileins and exercises the world through actual queries and
-invocations. For the equipment system, verify at least:
+A useful test loads the real fileins and exercises the world through actual queries and invocations.
+For the equipment system, verify at least:
 
 - initial facts and query shapes;
 - derived facts before and after changing their causes;
@@ -153,8 +153,8 @@ invocations. For the equipment system, verify at least:
 - authority differences between actors;
 - fileout and reload where persistence matters.
 
-Executable examples are especially important in a live language. A code block that merely parses
-can still describe the wrong committed behaviour.
+Executable examples are especially important in a live language. A code block that merely parses can
+still describe the wrong committed behaviour.
 
 ## 10. Keep Proposed Ideas Separate from Current Behaviour
 

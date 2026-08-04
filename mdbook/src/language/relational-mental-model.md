@@ -37,8 +37,8 @@ The result is a relation value:
 ```
 
 `?work` binds a value and names the result column. Iterating that relation exposes each row as a
-binding map such as `{:work -> #inspection}`. `_` is different: it is a wildcard. It matches a
-value but does not bind or return it.
+binding map such as `{:work -> #inspection}`. `_` is different: it is a wildcard. It matches a value
+but does not bind or return it.
 
 ```mica
 AssignedTo(_, #alice)

@@ -22,8 +22,8 @@ end
 ```
 
 The call is not invoking an `Instrument` function. It asks the current snapshot whether the
-`Instrument(#sensor_17)` fact can be read. The answer may come from stored facts, installed rules, or
-both.
+`Instrument(#sensor_17)` fact can be read. The answer may come from stored facts, installed rules,
+or both.
 
 ## A Query Variable Marks an Unknown Position
 

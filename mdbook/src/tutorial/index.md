@@ -10,12 +10,12 @@ and which dashboard rows are visible.
 
 A conventional implementation might divide this system among application objects, database rows,
 authorization middleware, background jobs, and event handlers. Mica offers another shape: put the
-identities, facts, rules, behaviours, and policy into one live relational world, then run each action
-as a transaction over that world.
+identities, facts, rules, behaviours, and policy into one live relational world, then run each
+action as a transaction over that world.
 
 This tutorial explains that sentence piece by piece. It assumes you can read small code examples,
-but it does not assume database theory, logic programming, or experience with persistent
-programming systems.
+but it does not assume database theory, logic programming, or experience with persistent programming
+systems.
 
 ## What You Will Learn
 
@@ -60,7 +60,7 @@ as true.
 
 ## What Mica Means by a World
 
-This guide uses *world* for the complete live environment: its identities, stored facts, derived
+This guide uses _world_ for the complete live environment: its identities, stored facts, derived
 facts, installed rules and verbs, and policy. A world can model a lab, a company, a document
 collection, a simulation, an agent workspace, or an operational service.
 

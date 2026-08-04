@@ -1,7 +1,7 @@
 # Running the Examples
 
-The examples in this part are complete Mica fileins checked into `apps/examples/`. They are tested by
-the runtime test suite and can be exercised through the same runner used for other Mica source.
+The examples in this part are complete Mica fileins checked into `apps/examples/`. They are tested
+by the runtime test suite and can be exercised through the same runner used for other Mica source.
 
 They use three familiar operational domains:
 
@@ -37,9 +37,9 @@ An in-memory filein is enough to check that a file loads:
 cargo run --bin mica -- filein apps/examples/equipment-service.mica
 ```
 
-The process exits after the filein, so a later `eval` command would start a different empty in-memory
-world. A named Fjall store lets the walkthrough load the world in one command and interact with the
-same committed state in later commands.
+The process exits after the filein, so a later `eval` command would start a different empty
+in-memory world. A named Fjall store lets the walkthrough load the world in one command and interact
+with the same committed state in later commands.
 
 That also demonstrates an essential Mica property: the identities, facts, rules, verbs, and policy
 installed by the filein remain available after the original runner process ends.

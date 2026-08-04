@@ -8,21 +8,21 @@ always make the intended grouping explicit.
 The table runs from highest to lowest precedence. Operators on the same row associate to the left,
 except assignment, which associates to the right.
 
-| Form | Meaning |
-| --- | --- |
-| `f(...)`, `value[...]`, `value.field`, `value:selector(...)` | call, index, field, receiver call |
-| `*`, `/`, `%` | multiplication, division, remainder |
-| unary `-`, `!`, `not` | numeric negation and logical negation |
-| `+`, `-` | addition and subtraction |
-| `..` | range |
-| `<`, `<=`, `>`, `>=` | ordering comparison |
-| `==`, `!=` | equality comparison |
-| `&&` | logical and |
-| `||` | logical or |
-| `=` | assignment |
+| Form                                                         | Meaning                               |
+| ------------------------------------------------------------ | ------------------------------------- |
+| `f(...)`, `value[...]`, `value.field`, `value:selector(...)` | call, index, field, receiver call     |
+| `*`, `/`, `%`                                                | multiplication, division, remainder   |
+| unary `-`, `!`, `not`                                        | numeric negation and logical negation |
+| `+`, `-`                                                     | addition and subtraction              |
+| `..`                                                         | range                                 |
+| `<`, `<=`, `>`, `>=`                                         | ordering comparison                   |
+| `==`, `!=`                                                   | equality comparison                   |
+| `&&`                                                         | logical and                           |
+| `                                                            |                                       |
+| `=`                                                          | assignment                            |
 
-Unary negation binds less tightly than multiplication. For example, `-2 * 3` means `-(2 * 3)`.
-Use parentheses when that detail would surprise a reader.
+Unary negation binds less tightly than multiplication. For example, `-2 * 3` means `-(2 * 3)`. Use
+parentheses when that detail would surprise a reader.
 
 `&&` and `||` short-circuit and return booleans. `!` and `not` are equivalent. See
 [Values](./values.md) for truthiness, numeric comparison, and exact integer division.
@@ -38,8 +38,8 @@ items[1..3]
 items[2.._]
 ```
 
-Lists and relations accept integer indexes. A relation row is returned as a map keyed by its
-heading symbols. Maps accept any Mica value as a key. Lists also accept inclusive range indexes; an
+Lists and relations accept integer indexes. A relation row is returned as a map keyed by its heading
+symbols. Maps accept any Mica value as a key. Lists also accept inclusive range indexes; an
 open-ended range extends through the final item. An invalid index raises `E_INDEX`; use
 `index_or(collection, index, default)` for a non-raising lookup on lists, maps, or relations.
 
@@ -55,8 +55,8 @@ This is relation projection and replacement, not record access. See
 
 ## Call Resolution
 
-An uppercase call such as `AssignedTo(?work, actor)` is a relation query. Lowercase positional
-calls such as `process(value)` are resolved in this order:
+An uppercase call such as `AssignedTo(?work, actor)` is a relation query. Lowercase positional calls
+such as `process(value)` are resolved in this order:
 
 1. a lexically visible local function or function value;
 2. a compiler-recognized runtime form such as `commit()`;
@@ -64,8 +64,8 @@ calls such as `process(value)` are resolved in this order:
 4. positional verb dispatch using selector `:process`.
 
 The final segment of a relation name therefore begins with an ASCII uppercase letter, as in
-`AssignedTo` or `workflow/AssignedTo`. Functions, built-ins, and verb selectors conventionally
-begin with a lowercase letter.
+`AssignedTo` or `workflow/AssignedTo`. Functions, built-ins, and verb selectors conventionally begin
+with a lowercase letter.
 
 Ordinary functions and built-ins take positional arguments. `@values` splices a list into a call:
 

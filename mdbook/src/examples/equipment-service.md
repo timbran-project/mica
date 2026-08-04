@@ -4,7 +4,8 @@ This example turns the tutorial's running domain into an executable system. It m
 members, two instruments, two sites, and one project. Rules derive whether an instrument is ready,
 who can collect it, and which project is blocked by calibration work.
 
-The complete source is [`apps/examples/equipment-service.mica`](../../../apps/examples/equipment-service.mica).
+The complete source is
+[`apps/examples/equipment-service.mica`](../../../apps/examples/equipment-service.mica).
 
 ## Load the World
 
@@ -38,8 +39,8 @@ The stable returned value is:
 true
 ```
 
-Sensor 17 is assigned to the air-quality project but requires calibration. Ask which assignments
-are blocked:
+Sensor 17 is assigned to the air-quality project but requires calibration. Ask which assignments are
+blocked:
 
 ```sh
 cargo run --bin mica -- \
@@ -155,8 +156,8 @@ cargo run --bin mica -- \
   eval 'return CanCollect(#bob, #sensor_17)'
 ```
 
-The result is `true`. This conclusion follows from the new location, Bob's work site, and the earlier
-calibration transition.
+The result is `true`. This conclusion follows from the new location, Bob's work site, and the
+earlier calibration transition.
 
 ## What the Example Demonstrates
 

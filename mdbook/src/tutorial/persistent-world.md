@@ -9,8 +9,8 @@ the primary environment. Source can install identities, relation definitions, ru
 that world. With a persistent store, those definitions and the durable facts they govern survive a
 process restart.
 
-This is a *persistent programming model*: the programmer changes a continuing environment instead
-of treating every process start as the birth of a new application.
+This is a _persistent programming model_: the programmer changes a continuing environment instead of
+treating every process start as the birth of a new application.
 
 ## Two Kinds of Source Activity
 
@@ -43,7 +43,7 @@ now.
 
 ## Fileins Bootstrap and Evolve a World
 
-A *filein* loads source into a world. It can create definitions before later statements depend on
+A _filein_ loads source into a world. It can create definitions before later statements depend on
 them, so one file may contain this sequence:
 
 ```mica
@@ -99,14 +99,14 @@ install a rule that derives responsibility from `AssignedTo` and `WorksOn`. Exis
 need to be copied into new Rust records, and callers can continue asking the same relational
 question.
 
-That flexibility has a cost: definitions are live state and must be maintained deliberately.
-Filein units, fileout, tests, review, and backups are part of programming in Mica, not afterthoughts
-for an operations team.
+That flexibility has a cost: definitions are live state and must be maintained deliberately. Filein
+units, fileout, tests, review, and backups are part of programming in Mica, not afterthoughts for an
+operations team.
 
 ## Changes Still Happen in Discrete Steps
 
-A persistent world does not mean every expression becomes visible immediately. Each submitted
-action runs as a task with a transaction. The task reads a consistent snapshot, prepares changes in
+A persistent world does not mean every expression becomes visible immediately. Each submitted action
+runs as a task with a transaction. The task reads a consistent snapshot, prepares changes in
 private, and commits them as one transition. Other tasks observe the world before or after that
 transition, not halfway through it.
 
@@ -115,13 +115,13 @@ visible?” The tutorial treats them separately because both matter.
 
 ## A Useful Comparison
 
-| Conventional service | Mica world |
-| --- | --- |
-| rows persist; application objects are rebuilt | identities, facts, and installed definitions persist |
-| handlers are registered when the process starts | verbs can be installed in the world |
-| authorization rules often live in middleware | policy can be expressed as durable relations |
-| background code updates cached conclusions | rules derive conclusions from their causes |
-| a deployment replaces the running program | fileins can evolve a continuing world |
+| Conventional service                            | Mica world                                           |
+| ----------------------------------------------- | ---------------------------------------------------- |
+| rows persist; application objects are rebuilt   | identities, facts, and installed definitions persist |
+| handlers are registered when the process starts | verbs can be installed in the world                  |
+| authorization rules often live in middleware    | policy can be expressed as durable relations         |
+| background code updates cached conclusions      | rules derive conclusions from their causes           |
+| a deployment replaces the running program       | fileins can evolve a continuing world                |
 
 This is not a claim that every external integration belongs in durable state. Hosts still own
 network protocols and operating-system resources. Mica's model is about keeping domain meaning and

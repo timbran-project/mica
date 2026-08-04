@@ -17,9 +17,9 @@ The selector is `:approve`. The parameter names are `actor` and `request`. The r
 `@` describe what values may fill those roles for this verb branch to apply.
 
 The `@ #reviewer` and `@ #change_request` parts are role restrictions. They say that this verb
-applies when the supplied values match those prototypes. Matching can use prototype delegation, so
-a concrete identity such as `#alice` can match `#reviewer` if the world says Alice delegates to
-that prototype.
+applies when the supplied values match those prototypes. Matching can use prototype delegation, so a
+concrete identity such as `#alice` can match `#reviewer` if the world says Alice delegates to that
+prototype.
 
 The setup is ordinary relation data:
 
@@ -44,8 +44,8 @@ which value is the request. That makes dispatch able to consider several domain 
 one of them the privileged receiver.
 
 The dispatcher looks for installed verbs whose selector is `:approve` and whose role restrictions
-match the supplied role values. There is no privileged `self` argument in the dispatch model. A
-call can dispatch on actor, request, tool, target, or any other role the domain cares about.
+match the supplied role values. There is no privileged `self` argument in the dispatch model. A call
+can dispatch on actor, request, tool, target, or any other role the domain cares about.
 
 The compiler also supports positional dispatch syntax:
 

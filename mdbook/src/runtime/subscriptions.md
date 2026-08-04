@@ -27,22 +27,22 @@ subscribe_changes(sender, subject, relation, bindings, initial[, cursor[, queue_
 
 `subject` is one of:
 
-| Subject | Observed surface |
-| --- | --- |
-| `:facts` | asserted changes in a stored relation only |
-| `:relation` | changes to the complete stored-and-derived relation result |
-| `:catalogue` | relation and rule catalogue changes; root authority only |
+| Subject      | Observed surface                                           |
+| ------------ | ---------------------------------------------------------- |
+| `:facts`     | asserted changes in a stored relation only                 |
+| `:relation`  | changes to the complete stored-and-derived relation result |
+| `:catalogue` | relation and rule catalogue changes; root authority only   |
 
 For `:facts` and `:relation`, `relation` is its identity or name symbol. `bindings` has exactly one
-entry per relation position. A concrete value restricts that position; `nothing` leaves it open.
-The example observes rows of `ReadyForReview` whose first position is `#reviewer`.
+entry per relation position. A concrete value restricts that position; `nothing` leaves it open. The
+example observes rows of `ReadyForReview` whose first position is `#reviewer`.
 
 For `:catalogue`, pass `nothing` as the relation and `[]` as the bindings.
 
 `initial` is `:snapshot` to receive current matching rows followed by changes, or `:changes` to
 receive only changes after registration. A non-negative cursor may resume change delivery from
-retained commit history. Pass `nothing` when no cursor is available. The queue budget defaults to
-64 messages and must be a non-negative integer.
+retained commit history. Pass `nothing` when no cursor is available. The queue budget defaults to 64
+messages and must be a non-negative integer.
 
 Registration becomes active when the surrounding task commits.
 
@@ -61,8 +61,8 @@ A relation snapshot or change message is a map:
 }
 ```
 
-An initial relation snapshot uses `:subject -> :snapshot`; its current rows appear in
-`:assertions`. A stored-fact change uses `:subject -> :facts`.
+An initial relation snapshot uses `:subject -> :snapshot`; its current rows appear in `:assertions`.
+A stored-fact change uses `:subject -> :facts`.
 
 Catalogue snapshots use `:kind -> :snapshot`, `:subject -> :catalogue`, a cursor, and an `:entries`
 list. Later catalogue messages use `:kind -> :changes`, `:subject -> :catalogue`, and the same
