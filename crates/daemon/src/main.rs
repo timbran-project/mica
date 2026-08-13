@@ -445,8 +445,11 @@ async fn run_async(cli: Cli) -> Result<(), String> {
         tracing::info!("stopping DogStatsD exporter");
         let _ = dogstatsd_task.cancel().await;
     }
-    tracing::info!("dropping task driver and relation store");
-    drop(driver);
+    tracing::info!("shutting down task driver and relation store");
+    driver
+        .shutdown()
+        .await
+        .map_err(|error| format!("failed to shut down task driver: {error}"))?;
     tracing::info!("daemon shutdown complete");
     Ok(())
 }

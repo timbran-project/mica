@@ -21,6 +21,7 @@ use mica_runtime::{
 };
 use mica_runtime::{SourceRunner, SuspendKind, TaskOutcome};
 use mica_var::{Identity, Symbol, Value};
+use std::future::pending;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -2061,5 +2062,63 @@ fn explicit_cancellation_stops_timed_resume() {
             DriverEvent::TaskCompleted { task_id, .. } | DriverEvent::TaskFailed { task_id, .. }
                 if *task_id == submitted.task_id
         )));
+    });
+}
+
+#[test]
+fn shutdown_cancels_async_workers_and_joins_dispatcher() {
+    compio::runtime::Runtime::new().unwrap().block_on(async {
+        let handler = Arc::new(|_: mica_runtime::ExternalRequest| {
+            Box::pin(pending()) as crate::types::ExternalRequestFuture
+        });
+        let driver = CompioTaskDriver::spawn_with_workers_and_external_handler(
+            SourceRunner::new_empty(),
+            TEST_WORKERS,
+            Some(handler),
+        )
+        .unwrap();
+        let endpoint = endpoint(42);
+        driver
+            .open_endpoint(endpoint, None, Symbol::intern("shell"))
+            .unwrap();
+        let submitted = driver
+            .submit_source(
+                endpoint,
+                root_source("return external_request(:pending, nothing)"),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(submitted.outcome, TaskOutcome::Suspended { .. }));
+
+        driver.shutdown().await.unwrap();
+
+        assert!(driver.is_shutdown());
+        assert_eq!(driver.inner_runner().suspended_len(), 0);
+        assert!(driver.drain_events().iter().any(|event| matches!(
+            event,
+            DriverEvent::TaskCancelled { task_id, reason }
+                if *task_id == submitted.task_id
+                    && *reason == TaskCancellationReason::DriverShutdown
+        )));
+        assert!(matches!(
+            driver
+                .submit_source(endpoint, root_source("return 1"))
+                .await,
+            Err(DriverError::DriverStopped)
+        ));
+        driver.shutdown().await.unwrap();
+    });
+}
+
+#[test]
+fn driver_can_be_constructed_and_shutdown_repeatedly() {
+    compio::runtime::Runtime::new().unwrap().block_on(async {
+        for _ in 0..8 {
+            let driver =
+                CompioTaskDriver::spawn_with_workers(SourceRunner::new_empty(), TEST_WORKERS)
+                    .unwrap();
+            driver.shutdown().await.unwrap();
+            assert!(driver.is_shutdown());
+        }
     });
 }

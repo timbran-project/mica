@@ -19,6 +19,7 @@ use crate::{
     metrics::{self, AsyncWorkerKind, DispatchOperation, WorkerOutcome},
 };
 use compio::dispatcher::Dispatcher;
+use compio::runtime::JoinHandle;
 use mica_relation_wgpu::{WgpuAccelerator, WgpuAcceleratorOptions};
 use mica_runtime::{
     AuthorityContext, ExecutionContext, MailboxRecvRequest, ReadOnlySourceQueryOptions,
@@ -28,7 +29,7 @@ use mica_runtime::{
     TaskRequest, Tuple,
 };
 use mica_var::{Identity, Symbol, Value};
-use std::collections::{BTreeMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::future::Future;
 use std::num::NonZeroUsize;
 use std::pin::Pin;
@@ -69,23 +70,77 @@ impl CompioTaskDriver {
 
 struct PoolInner {
     runner: Arc<SharedSourceRunner>,
-    dispatcher: Dispatcher,
+    dispatcher: Mutex<Option<Dispatcher>>,
     cpu_admission: Arc<CpuAdmission>,
     external_request_handler: Option<ExternalRequestHandler>,
     external_stream_request_handler: Option<ExternalStreamRequestHandler>,
     state: Mutex<PoolState>,
 }
 
-#[derive(Default)]
 struct PoolState {
+    lifecycle: DriverLifecycle,
+    shutdown_error: Option<String>,
+    in_flight_dispatches: usize,
+    idle_wakers: Vec<Waker>,
+    shutdown_wakers: Vec<Waker>,
     contexts: BTreeMap<TaskId, TaskContext>,
     cancelled_tasks: HashSet<TaskId>,
     closed_endpoints: HashSet<Identity>,
+    open_endpoints: HashSet<Identity>,
     input_waiters: BTreeMap<Identity, Vec<TaskId>>,
     mailbox_waiters: BTreeMap<u64, VecDeque<MailboxWaiter>>,
     external_subscription_mailboxes: HashSet<u64>,
     events: Vec<DriverEvent>,
     event_wakers: Vec<Waker>,
+    next_worker_id: u64,
+    workers: HashMap<u64, AsyncWorker>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DriverLifecycle {
+    Running,
+    ShuttingDown,
+    Stopped,
+}
+
+struct AsyncWorker {
+    task_id: TaskId,
+    handle: JoinHandle<()>,
+}
+
+struct DispatchActivity {
+    inner: Arc<PoolInner>,
+}
+
+struct DriverIdle<'a> {
+    driver: &'a CompioTaskDriver,
+}
+
+struct DriverStopped<'a> {
+    driver: &'a CompioTaskDriver,
+}
+
+impl Default for PoolState {
+    fn default() -> Self {
+        Self {
+            lifecycle: DriverLifecycle::Running,
+            shutdown_error: None,
+            in_flight_dispatches: 0,
+            idle_wakers: Vec::new(),
+            shutdown_wakers: Vec::new(),
+            contexts: BTreeMap::new(),
+            cancelled_tasks: HashSet::new(),
+            closed_endpoints: HashSet::new(),
+            open_endpoints: HashSet::new(),
+            input_waiters: BTreeMap::new(),
+            mailbox_waiters: BTreeMap::new(),
+            external_subscription_mailboxes: HashSet::new(),
+            events: Vec::new(),
+            event_wakers: Vec::new(),
+            next_worker_id: 1,
+            workers: HashMap::new(),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -236,7 +291,7 @@ impl CompioTaskDriver {
         Ok(Self {
             inner: Arc::new(PoolInner {
                 runner: Arc::new(runner.into_shared()),
-                dispatcher,
+                dispatcher: Mutex::new(Some(dispatcher)),
                 cpu_admission,
                 external_request_handler,
                 external_stream_request_handler,
@@ -273,6 +328,7 @@ impl CompioTaskDriver {
                     self.inner.runner.render_identity(*endpoint)
                 )
             }
+            DriverError::DriverStopped => "task driver is stopped".to_owned(),
         }
     }
 
@@ -350,6 +406,7 @@ impl CompioTaskDriver {
         &self,
         source: String,
     ) -> Result<RunReport, DriverError> {
+        self.ensure_running()?;
         let context = TaskContext {
             principal: None,
             actor: None,
@@ -510,16 +567,14 @@ impl CompioTaskDriver {
         actor: Option<Identity>,
         protocol: Symbol,
     ) -> Result<(), DriverError> {
+        self.ensure_running()?;
         self.inner
             .runner
             .open_endpoint(endpoint, actor, protocol)
             .map_err(DriverError::Source)?;
-        self.inner
-            .state
-            .lock()
-            .unwrap()
-            .closed_endpoints
-            .remove(&endpoint);
+        let mut state = self.inner.state.lock().unwrap();
+        state.closed_endpoints.remove(&endpoint);
+        state.open_endpoints.insert(endpoint);
         Ok(())
     }
 
@@ -530,16 +585,14 @@ impl CompioTaskDriver {
         actor: Option<Identity>,
         protocol: Symbol,
     ) -> Result<(), DriverError> {
+        self.ensure_running()?;
         self.inner
             .runner
             .open_endpoint_with_context(endpoint, principal, actor, protocol)
             .map_err(DriverError::Source)?;
-        self.inner
-            .state
-            .lock()
-            .unwrap()
-            .closed_endpoints
-            .remove(&endpoint);
+        let mut state = self.inner.state.lock().unwrap();
+        state.closed_endpoints.remove(&endpoint);
+        state.open_endpoints.insert(endpoint);
         Ok(())
     }
 
@@ -551,6 +604,7 @@ impl CompioTaskDriver {
         protocol: Symbol,
         tuples: Vec<(Symbol, Tuple)>,
     ) -> Result<usize, DriverError> {
+        self.ensure_running()?;
         let changes = self
             .inner
             .runner
@@ -558,12 +612,9 @@ impl CompioTaskDriver {
                 endpoint, principal, actor, protocol, tuples,
             )
             .map_err(DriverError::Source)?;
-        self.inner
-            .state
-            .lock()
-            .unwrap()
-            .closed_endpoints
-            .remove(&endpoint);
+        let mut state = self.inner.state.lock().unwrap();
+        state.closed_endpoints.remove(&endpoint);
+        state.open_endpoints.insert(endpoint);
         Ok(changes)
     }
 
@@ -602,6 +653,7 @@ impl CompioTaskDriver {
         &self,
         tuples: Vec<(Symbol, Tuple)>,
     ) -> Result<usize, DriverError> {
+        self.ensure_running()?;
         self.inner
             .runner
             .assert_volatile_tuples_named(tuples)
@@ -612,6 +664,7 @@ impl CompioTaskDriver {
         &self,
         tuples: Vec<(Symbol, Tuple)>,
     ) -> Result<usize, DriverError> {
+        self.ensure_running()?;
         self.inner
             .runner
             .retract_volatile_tuples_named(tuples)
@@ -619,6 +672,7 @@ impl CompioTaskDriver {
     }
 
     pub fn create_subscription_mailbox(&self) -> Result<DriverSubscriptionMailbox, DriverError> {
+        self.ensure_running()?;
         let (receiver, sender) = self
             .inner
             .runner
@@ -671,6 +725,7 @@ impl CompioTaskDriver {
     }
 
     pub fn cancel_subscription(&self, subscription: Value) -> Result<(), DriverError> {
+        self.ensure_running()?;
         self.inner
             .runner
             .cancel_subscription(subscription)
@@ -681,6 +736,7 @@ impl CompioTaskDriver {
         &self,
         mailbox: &DriverSubscriptionMailbox,
     ) -> Result<Vec<Value>, DriverError> {
+        self.ensure_running()?;
         self.inner
             .runner
             .drain_mailbox(mailbox.receiver.clone())
@@ -689,6 +745,7 @@ impl CompioTaskDriver {
 
     pub fn drain_events(&self) -> Vec<DriverEvent> {
         let mut state = self.inner.state.lock().unwrap();
+        state.reap_finished_workers();
         state.drain_effects_into_events(&self.inner.runner);
         let events = std::mem::take(&mut state.events);
         state.record_metrics();
@@ -699,27 +756,114 @@ impl CompioTaskDriver {
         DriverEvents { driver: self }
     }
 
+    pub async fn shutdown(&self) -> Result<(), DriverError> {
+        enum ShutdownStart {
+            Start(Vec<JoinHandle<()>>),
+            Wait,
+            Complete(Result<(), DriverError>),
+        }
+        let start = {
+            let mut state = self.inner.state.lock().unwrap();
+            match state.lifecycle {
+                DriverLifecycle::Running => {
+                    state.lifecycle = DriverLifecycle::ShuttingDown;
+                    state.reap_finished_workers();
+                    ShutdownStart::Start(
+                        state
+                            .workers
+                            .drain()
+                            .map(|(_, worker)| worker.handle)
+                            .collect(),
+                    )
+                }
+                DriverLifecycle::ShuttingDown => ShutdownStart::Wait,
+                DriverLifecycle::Stopped => ShutdownStart::Complete(shutdown_result(&state)),
+            }
+        };
+        let workers = match start {
+            ShutdownStart::Start(workers) => workers,
+            ShutdownStart::Wait => return self.wait_until_stopped().await,
+            ShutdownStart::Complete(result) => return result,
+        };
+
+        let mut worker_error = None;
+        for worker in workers {
+            if matches!(worker.cancel().await, Some(Err(_))) {
+                worker_error = Some("driver async worker panicked during shutdown".to_owned());
+            }
+        }
+        self.wait_until_idle().await;
+
+        let task_ids = {
+            let state = self.inner.state.lock().unwrap();
+            state.contexts.keys().copied().collect::<Vec<_>>()
+        };
+        for task_id in task_ids {
+            let _ = self.cancel_task_with_reason(task_id, TaskCancellationReason::DriverShutdown);
+        }
+        for (task_id, _) in self.inner.runner.cancel_all_tasks() {
+            self.record_cancelled_task(task_id, TaskCancellationReason::DriverShutdown);
+        }
+
+        let endpoints = {
+            let mut state = self.inner.state.lock().unwrap();
+            state.open_endpoints.drain().collect::<Vec<_>>()
+        };
+        for endpoint in endpoints {
+            self.inner.runner.close_endpoint(endpoint);
+        }
+
+        let dispatcher = self.inner.dispatcher.lock().unwrap().take();
+        let join_error = match dispatcher {
+            Some(dispatcher) => dispatcher
+                .join()
+                .await
+                .err()
+                .map(|error| format!("failed to join dispatcher: {error}")),
+            None => None,
+        };
+        let error = worker_error.or(join_error);
+        let shutdown_wakers = {
+            let mut state = self.inner.state.lock().unwrap();
+            state.shutdown_error = error.clone();
+            state.lifecycle = DriverLifecycle::Stopped;
+            std::mem::take(&mut state.shutdown_wakers)
+        };
+        for waker in shutdown_wakers {
+            waker.wake();
+        }
+        match error {
+            Some(error) => Err(DriverError::Join(error)),
+            None => Ok(()),
+        }
+    }
+
+    pub fn is_shutdown(&self) -> bool {
+        self.inner.state.lock().unwrap().lifecycle == DriverLifecycle::Stopped
+    }
+
+    fn ensure_running(&self) -> Result<(), DriverError> {
+        if self.inner.state.lock().unwrap().lifecycle != DriverLifecycle::Running {
+            return Err(DriverError::DriverStopped);
+        }
+        Ok(())
+    }
+
     fn ensure_endpoint_open(&self, endpoint: Identity) -> Result<(), DriverError> {
-        if self
-            .inner
-            .state
-            .lock()
-            .unwrap()
-            .closed_endpoints
-            .contains(&endpoint)
-        {
+        let state = self.inner.state.lock().unwrap();
+        if state.lifecycle != DriverLifecycle::Running {
+            return Err(DriverError::DriverStopped);
+        }
+        if state.closed_endpoints.contains(&endpoint) {
             return Err(DriverError::EndpointClosed(endpoint));
         }
         Ok(())
     }
 
     fn mark_endpoint_closed(&self, endpoint: Identity) {
-        self.inner
-            .state
-            .lock()
-            .unwrap()
-            .closed_endpoints
-            .insert(endpoint);
+        let mut state = self.inner.state.lock().unwrap();
+        state.open_endpoints.remove(&endpoint);
+        state.closed_endpoints.insert(endpoint);
     }
 
     fn cancel_endpoint_tasks(&self, endpoint: Identity) -> Vec<TaskId> {
@@ -746,7 +890,7 @@ impl CompioTaskDriver {
         task_id: TaskId,
         reason: TaskCancellationReason,
     ) -> Result<SuspendKind, DriverError> {
-        let (kind, event_wakers) = {
+        let (kind, event_wakers, workers) = {
             let mut state = self.inner.state.lock().unwrap();
             let Some(_) = state.contexts.remove(&task_id) else {
                 if state.cancelled_tasks.contains(&task_id) {
@@ -764,13 +908,68 @@ impl CompioTaskDriver {
             state
                 .events
                 .push(DriverEvent::TaskCancelled { task_id, reason });
+            let workers = state.take_task_workers(task_id);
             state.record_metrics();
-            (kind, std::mem::take(&mut state.event_wakers))
+            (kind, std::mem::take(&mut state.event_wakers), workers)
         };
+        drop(workers);
         for waker in event_wakers {
             waker.wake();
         }
         Ok(kind)
+    }
+
+    fn record_cancelled_task(&self, task_id: TaskId, reason: TaskCancellationReason) {
+        let event_wakers = {
+            let mut state = self.inner.state.lock().unwrap();
+            if !state.cancelled_tasks.insert(task_id) {
+                return;
+            }
+            state.remove_task_waiters(task_id);
+            state.contexts.remove(&task_id);
+            state
+                .events
+                .push(DriverEvent::TaskCancelled { task_id, reason });
+            state.record_metrics();
+            std::mem::take(&mut state.event_wakers)
+        };
+        for waker in event_wakers {
+            waker.wake();
+        }
+    }
+
+    fn begin_dispatch(&self) -> Result<DispatchActivity, DriverError> {
+        let mut state = self.inner.state.lock().unwrap();
+        if state.lifecycle != DriverLifecycle::Running {
+            return Err(DriverError::DriverStopped);
+        }
+        state.in_flight_dispatches += 1;
+        Ok(DispatchActivity {
+            inner: Arc::clone(&self.inner),
+        })
+    }
+
+    fn wait_until_idle(&self) -> DriverIdle<'_> {
+        DriverIdle { driver: self }
+    }
+
+    fn wait_until_stopped(&self) -> DriverStopped<'_> {
+        DriverStopped { driver: self }
+    }
+
+    fn track_worker(&self, task_id: TaskId, handle: JoinHandle<()>) {
+        let mut state = self.inner.state.lock().unwrap();
+        state.reap_finished_workers();
+        if state.lifecycle != DriverLifecycle::Running {
+            drop(state);
+            drop(handle);
+            return;
+        }
+        let worker_id = state.next_worker_id;
+        state.next_worker_id = state.next_worker_id.wrapping_add(1).max(1);
+        state
+            .workers
+            .insert(worker_id, AsyncWorker { task_id, handle });
     }
 
     async fn dispatch<F, Fut, T>(
@@ -783,13 +982,21 @@ impl CompioTaskDriver {
         Fut: std::future::Future<Output = Result<T, mica_runtime::SourceTaskError>> + 'static,
         T: Send + 'static,
     {
+        let _activity = self.begin_dispatch()?;
         let start = Instant::now();
         metrics::dispatch_started(operation);
         let dispatch_permit = self.inner.cpu_admission.acquire_dispatch().await;
-        let receiver = match self.inner.dispatcher.dispatch(move || async move {
-            let _dispatch_permit = dispatch_permit;
-            f().await
-        }) {
+        let receiver = match self
+            .inner
+            .dispatcher
+            .lock()
+            .unwrap()
+            .as_ref()
+            .ok_or(DriverError::DriverStopped)?
+            .dispatch(move || async move {
+                let _dispatch_permit = dispatch_permit;
+                f().await
+            }) {
             Ok(receiver) => receiver,
             Err(_) => {
                 let result = Err(DriverError::Join("dispatcher is stopped".to_owned()));
@@ -868,24 +1075,24 @@ impl CompioTaskDriver {
                             .push(DriverEvent::TaskAborted { task_id, error });
                     }
                     TaskOutcome::Suspended { kind, .. } => {
-                        if state.closed_endpoints.contains(&context.endpoint) {
+                        let cancellation = match state.lifecycle {
+                            DriverLifecycle::Running
+                                if state.closed_endpoints.contains(&context.endpoint) =>
+                            {
+                                Some(TaskCancellationReason::EndpointClosed)
+                            }
+                            DriverLifecycle::Running => None,
+                            DriverLifecycle::ShuttingDown | DriverLifecycle::Stopped => {
+                                Some(TaskCancellationReason::DriverShutdown)
+                            }
+                        };
+                        if let Some(reason) = cancellation {
                             drop(state);
                             self.inner
                                 .runner
                                 .cancel_task(task_id)
                                 .map_err(DriverError::Source)?;
-                            let mut state = self.inner.state.lock().unwrap();
-                            state.cancelled_tasks.insert(task_id);
-                            state.events.push(DriverEvent::TaskCancelled {
-                                task_id,
-                                reason: TaskCancellationReason::EndpointClosed,
-                            });
-                            state.record_metrics();
-                            event_wakers = std::mem::take(&mut state.event_wakers);
-                            drop(state);
-                            for waker in event_wakers {
-                                waker.wake();
-                            }
+                            self.record_cancelled_task(task_id, reason);
                             continue;
                         }
                         tracing::debug!(
@@ -1066,7 +1273,7 @@ impl CompioTaskDriver {
 
     fn spawn_mailbox_timeout(&self, task_id: TaskId, duration: Duration) {
         let driver = self.clone();
-        compio::runtime::spawn(async move {
+        let handle = compio::runtime::spawn(async move {
             metrics::async_worker_started(AsyncWorkerKind::MailboxTimeout);
             let start = Instant::now();
             compio::time::sleep(duration).await;
@@ -1094,8 +1301,8 @@ impl CompioTaskDriver {
                 outcome,
                 start.elapsed(),
             );
-        })
-        .detach();
+        });
+        self.track_worker(task_id, handle);
     }
 
     async fn wake_mailbox_waiters(
@@ -1313,7 +1520,7 @@ impl CompioTaskDriver {
 
     fn spawn_timer_resume(&self, task_id: TaskId, duration: Duration) {
         let driver = self.clone();
-        compio::runtime::spawn(async move {
+        let handle = compio::runtime::spawn(async move {
             metrics::async_worker_started(AsyncWorkerKind::TimerResume);
             let start = Instant::now();
             compio::time::sleep(duration).await;
@@ -1322,8 +1529,8 @@ impl CompioTaskDriver {
                 outcome = driver.record_worker_resume_error(task_id, error);
             }
             metrics::async_worker_finished(AsyncWorkerKind::TimerResume, outcome, start.elapsed());
-        })
-        .detach();
+        });
+        self.track_worker(task_id, handle);
     }
 
     fn spawn_external_request_resume(
@@ -1351,7 +1558,7 @@ impl CompioTaskDriver {
             let timeout_driver = self.clone();
             let timeout_completed = Arc::clone(&completed);
             let timeout_service = service;
-            compio::runtime::spawn(async move {
+            let handle = compio::runtime::spawn(async move {
                 metrics::async_worker_started(AsyncWorkerKind::ExternalRequestTimeout);
                 let start = Instant::now();
                 compio::time::sleep(timeout).await;
@@ -1386,10 +1593,10 @@ impl CompioTaskDriver {
                     outcome,
                     start.elapsed(),
                 );
-            })
-            .detach();
+            });
+            self.track_worker(task_id, handle);
         }
-        compio::runtime::spawn(async move {
+        let handle = compio::runtime::spawn(async move {
             metrics::async_worker_started(AsyncWorkerKind::ExternalRequest);
             let start = Instant::now();
             tracing::debug!(
@@ -1482,8 +1689,8 @@ impl CompioTaskDriver {
                 outcome,
                 start.elapsed(),
             );
-        })
-        .detach();
+        });
+        self.track_worker(task_id, handle);
     }
 
     async fn deliver_external_mailbox(
@@ -1571,6 +1778,7 @@ impl Future for DriverEvents<'_> {
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let mut state = self.driver.inner.state.lock().unwrap();
+        state.reap_finished_workers();
         state.drain_effects_into_events(&self.driver.inner.runner);
         if !state.events.is_empty() {
             let events = std::mem::take(&mut state.events);
@@ -1586,7 +1794,82 @@ impl Future for DriverEvents<'_> {
     }
 }
 
+impl Future for DriverIdle<'_> {
+    type Output = ();
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let mut state = self.driver.inner.state.lock().unwrap();
+        if state.in_flight_dispatches == 0 {
+            return Poll::Ready(());
+        }
+        let waker = cx.waker().clone();
+        if !state
+            .idle_wakers
+            .iter()
+            .any(|entry| entry.will_wake(&waker))
+        {
+            state.idle_wakers.push(waker);
+        }
+        Poll::Pending
+    }
+}
+
+impl Future for DriverStopped<'_> {
+    type Output = Result<(), DriverError>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let mut state = self.driver.inner.state.lock().unwrap();
+        if state.lifecycle == DriverLifecycle::Stopped {
+            return Poll::Ready(shutdown_result(&state));
+        }
+        let waker = cx.waker().clone();
+        if !state
+            .shutdown_wakers
+            .iter()
+            .any(|entry| entry.will_wake(&waker))
+        {
+            state.shutdown_wakers.push(waker);
+        }
+        Poll::Pending
+    }
+}
+
+impl Drop for DispatchActivity {
+    fn drop(&mut self) {
+        let idle_wakers = {
+            let mut state = self.inner.state.lock().unwrap();
+            state.in_flight_dispatches = state.in_flight_dispatches.saturating_sub(1);
+            if state.in_flight_dispatches == 0 {
+                std::mem::take(&mut state.idle_wakers)
+            } else {
+                Vec::new()
+            }
+        };
+        for waker in idle_wakers {
+            waker.wake();
+        }
+    }
+}
+
 impl PoolState {
+    fn reap_finished_workers(&mut self) {
+        self.workers
+            .retain(|_, worker| !worker.handle.is_finished());
+    }
+
+    fn take_task_workers(&mut self, task_id: TaskId) -> Vec<JoinHandle<()>> {
+        let worker_ids = self
+            .workers
+            .iter()
+            .filter_map(|(worker_id, worker)| (worker.task_id == task_id).then_some(*worker_id))
+            .collect::<Vec<_>>();
+        worker_ids
+            .into_iter()
+            .filter_map(|worker_id| self.workers.remove(&worker_id))
+            .map(|worker| worker.handle)
+            .collect()
+    }
+
     fn drain_effects_into_events(&mut self, runner: &SharedSourceRunner) {
         self.events.extend(
             runner
@@ -1627,6 +1910,13 @@ impl PoolState {
             .map(VecDeque::len)
             .sum::<usize>();
         metrics::record_waiting_state(input_waiters, mailbox_waiters, self.events.len());
+    }
+}
+
+fn shutdown_result(state: &PoolState) -> Result<(), DriverError> {
+    match &state.shutdown_error {
+        Some(error) => Err(DriverError::Join(error.clone())),
+        None => Ok(()),
     }
 }
 

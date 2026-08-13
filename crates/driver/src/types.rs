@@ -124,6 +124,7 @@ pub enum DriverError {
     MissingTaskContext(TaskId),
     TaskCancelled(TaskId),
     EndpointClosed(Identity),
+    DriverStopped,
 }
 
 impl TaskContext {
@@ -144,7 +145,8 @@ impl DriverError {
             Self::Join(_)
             | Self::MissingTaskContext(_)
             | Self::TaskCancelled(_)
-            | Self::EndpointClosed(_) => None,
+            | Self::EndpointClosed(_)
+            | Self::DriverStopped => None,
         }
     }
 }
@@ -159,6 +161,7 @@ impl Display for DriverError {
             }
             Self::TaskCancelled(task_id) => write!(f, "task {task_id} was cancelled"),
             Self::EndpointClosed(endpoint) => write!(f, "endpoint {endpoint:?} is closed"),
+            Self::DriverStopped => write!(f, "task driver is stopped"),
         }
     }
 }
