@@ -49,7 +49,7 @@ impl Drop for DropFlag {
 
 #[test]
 fn driver_runs_source_on_compio_task() {
-    compio::runtime::Runtime::new().unwrap().block_on(async {
+    crate::test_support::run(async {
         let driver =
             CompioTaskDriver::spawn_with_workers(SourceRunner::new_empty(), TEST_WORKERS).unwrap();
         let submitted = driver
@@ -71,7 +71,7 @@ fn driver_runs_source_on_compio_task() {
 
 #[test]
 fn driver_allocates_one_ephemeral_identity_sequence_for_host_objects() {
-    compio::runtime::Runtime::new().unwrap().block_on(async {
+    crate::test_support::run(async {
         let driver =
             CompioTaskDriver::spawn_with_workers(SourceRunner::new_empty(), TEST_WORKERS).unwrap();
 
@@ -86,7 +86,7 @@ fn driver_allocates_one_ephemeral_identity_sequence_for_host_objects() {
 
 #[test]
 fn driver_events_can_be_awaited() {
-    compio::runtime::Runtime::new().unwrap().block_on(async {
+    crate::test_support::run(async {
         let driver =
             CompioTaskDriver::spawn_with_workers(SourceRunner::new_empty(), TEST_WORKERS).unwrap();
         let submitted = driver
@@ -106,7 +106,7 @@ fn driver_events_can_be_awaited() {
 
 #[test]
 fn timed_suspend_wakes_and_resumes_task() {
-    compio::runtime::Runtime::new().unwrap().block_on(async {
+    crate::test_support::run(async {
         let driver =
             CompioTaskDriver::spawn_with_workers(SourceRunner::new_empty(), TEST_WORKERS).unwrap();
         let submitted = driver
@@ -127,7 +127,7 @@ fn timed_suspend_wakes_and_resumes_task() {
 
 #[test]
 fn external_request_suspends_and_resumes_from_handler() {
-    compio::runtime::Runtime::new().unwrap().block_on(async {
+    crate::test_support::run(async {
         let handler = Arc::new(|_, request: mica_runtime::ExternalRequest| {
             Box::pin(async move {
                 Value::list([
@@ -176,7 +176,7 @@ fn external_request_suspends_and_resumes_from_handler() {
 
 #[test]
 fn external_request_admission_bounds_handler_concurrency() {
-    compio::runtime::Runtime::new().unwrap().block_on(async {
+    crate::test_support::run(async {
         let starts = Arc::new(AtomicUsize::new(0));
         let active = Arc::new(AtomicUsize::new(0));
         let maximum_active = Arc::new(AtomicUsize::new(0));
@@ -246,7 +246,7 @@ fn external_request_admission_bounds_handler_concurrency() {
 
 #[test]
 fn external_request_context_is_cancelled_with_its_task() {
-    compio::runtime::Runtime::new().unwrap().block_on(async {
+    crate::test_support::run(async {
         let observed = Arc::new(Mutex::new(None));
         let handler = {
             let observed = Arc::clone(&observed);
@@ -300,7 +300,7 @@ fn external_request_context_is_cancelled_with_its_task() {
 
 #[test]
 fn external_stream_request_delivers_events_to_mica_mailbox() {
-    compio::runtime::Runtime::new().unwrap().block_on(async {
+    crate::test_support::run(async {
         let stream_handler = Arc::new(
             |_,
              request: mica_runtime::ExternalRequest,
@@ -361,7 +361,7 @@ fn external_stream_request_delivers_events_to_mica_mailbox() {
 
 #[test]
 fn missing_external_stream_handler_delivers_an_error_event() {
-    compio::runtime::Runtime::new().unwrap().block_on(async {
+    crate::test_support::run(async {
         let driver =
             CompioTaskDriver::spawn_with_workers(SourceRunner::new_empty(), TEST_WORKERS).unwrap();
         let submitted = driver
@@ -394,7 +394,7 @@ fn missing_external_stream_handler_delivers_an_error_event() {
 
 #[test]
 fn vllm_embed_text_suspends_as_embedding_external_request() {
-    compio::runtime::Runtime::new().unwrap().block_on(async {
+    crate::test_support::run(async {
         let handler = Arc::new(|_, request: mica_runtime::ExternalRequest| {
             Box::pin(async move {
                 assert_eq!(request.service, Symbol::intern("embedding"));
@@ -457,7 +457,7 @@ fn vllm_embed_text_suspends_as_embedding_external_request() {
 
 #[test]
 fn openai_chat_completion_suspends_as_openai_external_request() {
-    compio::runtime::Runtime::new().unwrap().block_on(async {
+    crate::test_support::run(async {
         let handler = Arc::new(|_, request: mica_runtime::ExternalRequest| {
             Box::pin(async move {
                 assert_eq!(request.service, Symbol::intern("openai"));
@@ -548,7 +548,7 @@ fn load_agent_app(runner: &mut SourceRunner) {
 
 #[test]
 fn agent_command_sync_event_appends_user_message_and_suspends_for_llm() {
-    compio::runtime::Runtime::new().unwrap().block_on(async {
+    crate::test_support::run(async {
         let stream_handler = Arc::new(
             |_, request: mica_runtime::ExternalRequest, emitter: crate::ExternalStreamEmitter| {
                 Box::pin(async move {
@@ -618,10 +618,7 @@ fn agent_command_sync_event_appends_user_message_and_suspends_for_llm() {
                         ]))
                         .await
                         .unwrap();
-                    Value::map([(
-                        Value::symbol(Symbol::intern("started")),
-                        Value::bool(true),
-                    )])
+                    Value::map([(Value::symbol(Symbol::intern("started")), Value::bool(true))])
                 }) as crate::types::ExternalRequestFuture
             },
         );
@@ -643,12 +640,7 @@ fn agent_command_sync_event_appends_user_message_and_suspends_for_llm() {
             .unwrap();
         let ep = endpoint(40);
         runner
-            .open_endpoint_with_context(
-                ep,
-                Some(web),
-                Some(agent),
-                Symbol::intern("web"),
-            )
+            .open_endpoint_with_context(ep, Some(web), Some(agent), Symbol::intern("web"))
             .unwrap();
 
         let driver = CompioTaskDriver::spawn_with_workers_and_external_handlers(
@@ -672,15 +664,14 @@ fn agent_command_sync_event_appends_user_message_and_suspends_for_llm() {
         // The loop calls ui/flush (which calls commit()) before the LLM
         // request, so the first suspend may be a Commit. Wait for the
         // task to complete (the external stream handler sends canned events).
-        assert!(matches!(
-            submitted.outcome,
-            TaskOutcome::Suspended { .. }
-        ));
+        assert!(matches!(submitted.outcome, TaskOutcome::Suspended { .. }));
         let mut completed = None;
         for _ in 0..100 {
             for event in driver.drain_events() {
                 match event {
-                    DriverEvent::TaskCompleted { task_id, value } if task_id == submitted.task_id => {
+                    DriverEvent::TaskCompleted { task_id, value }
+                        if task_id == submitted.task_id =>
+                    {
                         completed = Some(value);
                         break;
                     }
@@ -746,10 +737,7 @@ fn agent_command_sync_event_appends_user_message_and_suspends_for_llm() {
         );
 
         let streaming_query = driver
-            .submit_source(
-                ep,
-                root_source("return endpoint().session/isStreaming"),
-            )
+            .submit_source(ep, root_source("return endpoint().session/isStreaming"))
             .await
             .unwrap();
         assert!(matches!(
@@ -761,12 +749,13 @@ fn agent_command_sync_event_appends_user_message_and_suspends_for_llm() {
 
 #[test]
 fn agent_responses_tool_call_round_trip_resubmits_full_context() {
-    compio::runtime::Runtime::new().unwrap().block_on(async {
+    crate::test_support::run(async {
         let request_count = Arc::new(AtomicUsize::new(0));
         let stream_handler = {
             let request_count = Arc::clone(&request_count);
             Arc::new(
-                move |_, request: mica_runtime::ExternalRequest,
+                move |_,
+                      request: mica_runtime::ExternalRequest,
                       emitter: crate::ExternalStreamEmitter| {
                     let turn = request_count.fetch_add(1, Ordering::SeqCst);
                     Box::pin(async move {
@@ -795,10 +784,7 @@ fn agent_responses_tool_call_round_trip_resubmits_full_context() {
                                         Value::symbol(Symbol::intern("call_id")),
                                         Value::string("call_test"),
                                     ),
-                                    (
-                                        Value::symbol(Symbol::intern("name")),
-                                        Value::string("read"),
-                                    ),
+                                    (Value::symbol(Symbol::intern("name")), Value::string("read")),
                                     (
                                         Value::symbol(Symbol::intern("arguments")),
                                         Value::string("{\"path\":\"missing.txt\"}"),
@@ -836,9 +822,7 @@ fn agent_responses_tool_call_round_trip_resubmits_full_context() {
                                                     ),
                                                     (
                                                         Value::symbol(Symbol::intern("arguments")),
-                                                        Value::string(
-                                                            "{\"path\":\"missing.txt\"}",
-                                                        ),
+                                                        Value::string("{\"path\":\"missing.txt\"}"),
                                                     ),
                                                 ])]),
                                             ),
@@ -883,10 +867,7 @@ fn agent_responses_tool_call_round_trip_resubmits_full_context() {
                                 .await
                                 .unwrap();
                         }
-                        Value::map([(
-                            Value::symbol(Symbol::intern("started")),
-                            Value::bool(true),
-                        )])
+                        Value::map([(Value::symbol(Symbol::intern("started")), Value::bool(true))])
                     }) as crate::types::ExternalRequestFuture
                 },
             )
@@ -973,14 +954,15 @@ fn agent_responses_tool_call_round_trip_resubmits_full_context() {
 
 #[test]
 fn agent_steering_cancels_the_active_stream_and_resubmits_full_context() {
-    compio::runtime::Runtime::new().unwrap().block_on(async {
+    crate::test_support::run(async {
         let request_count = Arc::new(AtomicUsize::new(0));
         let producer_observed_close = Arc::new(AtomicBool::new(false));
         let stream_handler = {
             let request_count = Arc::clone(&request_count);
             let producer_observed_close = Arc::clone(&producer_observed_close);
             Arc::new(
-                move |_, request: mica_runtime::ExternalRequest,
+                move |_,
+                      request: mica_runtime::ExternalRequest,
                       emitter: crate::ExternalStreamEmitter| {
                     let turn = request_count.fetch_add(1, Ordering::SeqCst);
                     let producer_observed_close = Arc::clone(&producer_observed_close);
@@ -1044,10 +1026,7 @@ fn agent_steering_cancels_the_active_stream_and_resubmits_full_context() {
                                 .await
                                 .unwrap();
                         }
-                        Value::map([(
-                            Value::symbol(Symbol::intern("started")),
-                            Value::bool(true),
-                        )])
+                        Value::map([(Value::symbol(Symbol::intern("started")), Value::bool(true))])
                     }) as crate::types::ExternalRequestFuture
                 },
             )
@@ -1149,7 +1128,7 @@ fn agent_steering_cancels_the_active_stream_and_resubmits_full_context() {
 
 #[test]
 fn mica_query_host_request_runs_read_only_query_and_resumes_task() {
-    compio::runtime::Runtime::new().unwrap().block_on(async {
+    crate::test_support::run(async {
         let mut runner = SourceRunner::new_empty();
         runner
             .run_filein(
@@ -1220,7 +1199,7 @@ fn mica_query_host_request_runs_read_only_query_and_resumes_task() {
 
 #[test]
 fn root_startup_source_can_resume_vllm_embed_text() {
-    compio::runtime::Runtime::new().unwrap().block_on(async {
+    crate::test_support::run(async {
         let handler = Arc::new(|_, request: mica_runtime::ExternalRequest| {
             Box::pin(async move {
                 assert_eq!(request.service, Symbol::intern("embedding"));
@@ -1255,7 +1234,7 @@ fn root_startup_source_can_resume_vllm_embed_text() {
 
 #[test]
 fn external_request_requires_effect_authority() {
-    compio::runtime::Runtime::new().unwrap().block_on(async {
+    crate::test_support::run(async {
         let driver =
             CompioTaskDriver::spawn_with_workers(SourceRunner::new_empty(), TEST_WORKERS).unwrap();
         let request = TaskRequest {
@@ -1276,7 +1255,7 @@ fn external_request_requires_effect_authority() {
 
 #[test]
 fn log_requires_effect_authority() {
-    compio::runtime::Runtime::new().unwrap().block_on(async {
+    crate::test_support::run(async {
         let driver =
             CompioTaskDriver::spawn_with_workers(SourceRunner::new_empty(), TEST_WORKERS).unwrap();
         let request = TaskRequest {
@@ -1297,7 +1276,7 @@ fn log_requires_effect_authority() {
 
 #[test]
 fn log_returns_nothing_with_effect_authority() {
-    compio::runtime::Runtime::new().unwrap().block_on(async {
+    crate::test_support::run(async {
         let driver =
             CompioTaskDriver::spawn_with_workers(SourceRunner::new_empty(), TEST_WORKERS).unwrap();
         let submitted = driver
@@ -1314,7 +1293,7 @@ fn log_returns_nothing_with_effect_authority() {
 
 #[test]
 fn external_request_timeout_resumes_with_error_value() {
-    compio::runtime::Runtime::new().unwrap().block_on(async {
+    crate::test_support::run(async {
         let dropped = Arc::new(AtomicBool::new(false));
         let cancellation = Arc::new(Mutex::new(None));
         let handler = {
@@ -1368,7 +1347,7 @@ fn external_request_timeout_resumes_with_error_value() {
 
 #[test]
 fn commit_yields_and_immediately_resumes_task() {
-    compio::runtime::Runtime::new().unwrap().block_on(async {
+    crate::test_support::run(async {
         let driver =
             CompioTaskDriver::spawn_with_workers(SourceRunner::new_empty(), TEST_WORKERS).unwrap();
         let submitted = driver
@@ -1395,7 +1374,7 @@ fn commit_yields_and_immediately_resumes_task() {
 
 #[test]
 fn spawn_commits_parent_and_runs_child_task() {
-    compio::runtime::Runtime::new().unwrap().block_on(async {
+    crate::test_support::run(async {
         let mut runner = SourceRunner::new_empty();
         runner
             .run_filein(
@@ -1453,7 +1432,7 @@ fn spawn_commits_parent_and_runs_child_task() {
 
 #[test]
 fn spawn_runs_receiver_positional_child_task() {
-    compio::runtime::Runtime::new().unwrap().block_on(async {
+    crate::test_support::run(async {
         let mut runner = SourceRunner::new_empty();
         let coin = runner.run_source("return make_identity(:coin)").unwrap();
         let TaskOutcome::Complete { value: coin, .. } = coin.outcome else {
@@ -1501,7 +1480,7 @@ fn spawn_runs_receiver_positional_child_task() {
 
 #[test]
 fn endpoint_input_resumes_reading_task() {
-    compio::runtime::Runtime::new().unwrap().block_on(async {
+    crate::test_support::run(async {
         let driver =
             CompioTaskDriver::spawn_with_workers(SourceRunner::new_empty(), TEST_WORKERS).unwrap();
         let endpoint = endpoint(4);
@@ -1529,7 +1508,7 @@ fn endpoint_input_resumes_reading_task() {
 
 #[test]
 fn mailbox_recv_drains_messages_sent_before_wait() {
-    compio::runtime::Runtime::new().unwrap().block_on(async {
+    crate::test_support::run(async {
         let mut runner = SourceRunner::new_empty();
         runner
             .run_filein(
@@ -1578,7 +1557,7 @@ fn mailbox_recv_drains_messages_sent_before_wait() {
 
 #[test]
 fn mailbox_recv_waits_until_sender_commits() {
-    compio::runtime::Runtime::new().unwrap().block_on(async {
+    crate::test_support::run(async {
         let mut runner = SourceRunner::new_empty();
         runner
             .run_filein(
@@ -1622,7 +1601,7 @@ fn mailbox_recv_waits_until_sender_commits() {
 
 #[test]
 fn relation_subscription_delivery_wakes_mailbox_receiver_after_publication() {
-    compio::runtime::Runtime::new().unwrap().block_on(async {
+    crate::test_support::run(async {
         let mut runner = SourceRunner::new_empty();
         runner.run_source("make_relation(:Observed, 1)").unwrap();
         let driver = CompioTaskDriver::spawn_with_workers(runner, TEST_WORKERS).unwrap();
@@ -1669,7 +1648,7 @@ fn relation_subscription_delivery_wakes_mailbox_receiver_after_publication() {
 
 #[test]
 fn relation_subscription_delivery_notifies_external_driver_mailbox() {
-    compio::runtime::Runtime::new().unwrap().block_on(async {
+    crate::test_support::run(async {
         let mut runner = SourceRunner::new_empty();
         runner
             .run_source(
@@ -1743,7 +1722,7 @@ fn relation_subscription_delivery_notifies_external_driver_mailbox() {
 
 #[test]
 fn mailbox_recv_zero_timeout_returns_empty_list() {
-    compio::runtime::Runtime::new().unwrap().block_on(async {
+    crate::test_support::run(async {
         let driver =
             CompioTaskDriver::spawn_with_workers(SourceRunner::new_empty(), TEST_WORKERS).unwrap();
         let submitted = driver
@@ -1777,7 +1756,7 @@ fn mailbox_recv_zero_timeout_returns_empty_list() {
 
 #[test]
 fn mailbox_recv_reports_which_mailbox_is_ready() {
-    compio::runtime::Runtime::new().unwrap().block_on(async {
+    crate::test_support::run(async {
         let driver =
             CompioTaskDriver::spawn_with_workers(SourceRunner::new_empty(), TEST_WORKERS).unwrap();
         let submitted = driver
@@ -1814,7 +1793,7 @@ fn mailbox_recv_reports_which_mailbox_is_ready() {
 
 #[test]
 fn mailbox_caps_are_directional() {
-    compio::runtime::Runtime::new().unwrap().block_on(async {
+    crate::test_support::run(async {
         let driver =
             CompioTaskDriver::spawn_with_workers(SourceRunner::new_empty(), TEST_WORKERS).unwrap();
         let error = driver
@@ -1842,7 +1821,7 @@ fn mailbox_caps_are_directional() {
 
 #[test]
 fn driver_submit_source_sets_endpoint_context() {
-    compio::runtime::Runtime::new().unwrap().block_on(async {
+    crate::test_support::run(async {
         let driver =
             CompioTaskDriver::spawn_with_workers(SourceRunner::new_empty(), TEST_WORKERS).unwrap();
         let endpoint = endpoint(5);
@@ -1860,7 +1839,7 @@ fn driver_submit_source_sets_endpoint_context() {
 
 #[test]
 fn driver_runs_bounded_read_only_source_query_as_endpoint_actor() {
-    compio::runtime::Runtime::new().unwrap().block_on(async {
+    crate::test_support::run(async {
         let mut runner = SourceRunner::new_empty();
         runner
             .run_filein(
@@ -1905,7 +1884,7 @@ fn driver_runs_bounded_read_only_source_query_as_endpoint_actor() {
 
 #[test]
 fn driver_read_only_source_query_rejects_mutation_and_effects() {
-    compio::runtime::Runtime::new().unwrap().block_on(async {
+    crate::test_support::run(async {
         let mut runner = SourceRunner::new_empty();
         runner
             .run_filein(
@@ -1995,7 +1974,7 @@ fn driver_read_only_source_query_rejects_mutation_and_effects() {
 
 #[test]
 fn driver_read_only_source_query_bounds_rendered_output() {
-    compio::runtime::Runtime::new().unwrap().block_on(async {
+    crate::test_support::run(async {
         let mut runner = SourceRunner::new_empty();
         runner
             .run_filein("make_identity(:web)\nmake_relation(:CanRead, 2)\n")
@@ -2028,7 +2007,7 @@ fn driver_read_only_source_query_bounds_rendered_output() {
 
 #[test]
 fn driver_submit_invocation_overrides_request_endpoint_context() {
-    compio::runtime::Runtime::new().unwrap().block_on(async {
+    crate::test_support::run(async {
         let mut runner = SourceRunner::new_empty();
         runner
             .run_filein(
@@ -2067,7 +2046,7 @@ fn driver_submit_invocation_overrides_request_endpoint_context() {
 
 #[test]
 fn driver_routes_actor_effects_to_open_endpoints() {
-    compio::runtime::Runtime::new().unwrap().block_on(async {
+    crate::test_support::run(async {
         let mut runner = SourceRunner::new_empty();
         runner.run_source("make_identity(:alice)").unwrap();
         let alice = Identity::new(0x00e0_0000_0000_0000).unwrap();
@@ -2095,7 +2074,7 @@ fn driver_routes_actor_effects_to_open_endpoints() {
 
 #[test]
 fn driver_stops_routing_after_endpoint_close() {
-    compio::runtime::Runtime::new().unwrap().block_on(async {
+    crate::test_support::run(async {
         let mut runner = SourceRunner::new_empty();
         runner.run_source("make_identity(:alice)").unwrap();
         let alice = Identity::new(0x00e0_0000_0000_0000).unwrap();
@@ -2118,7 +2097,7 @@ fn driver_stops_routing_after_endpoint_close() {
 
 #[test]
 fn driver_routes_endpoint_input() {
-    compio::runtime::Runtime::new().unwrap().block_on(async {
+    crate::test_support::run(async {
         let driver =
             CompioTaskDriver::spawn_with_workers(SourceRunner::new_empty(), TEST_WORKERS).unwrap();
         let endpoint = endpoint(27);
@@ -2143,7 +2122,7 @@ fn driver_routes_endpoint_input() {
 
 #[test]
 fn driver_routes_actor_effects_to_open_endpoints_after_setup() {
-    compio::runtime::Runtime::new().unwrap().block_on(async {
+    crate::test_support::run(async {
         let mut runner = SourceRunner::new_empty();
         runner.run_source("make_identity(:alice)").unwrap();
         let alice = Identity::new(0x00e0_0000_0000_0000).unwrap();
@@ -2173,7 +2152,7 @@ fn driver_routes_actor_effects_to_open_endpoints_after_setup() {
 
 #[test]
 fn endpoint_close_cancels_suspended_tasks() {
-    compio::runtime::Runtime::new().unwrap().block_on(async {
+    crate::test_support::run(async {
         let driver =
             CompioTaskDriver::spawn_with_workers(SourceRunner::new_empty(), TEST_WORKERS).unwrap();
         let endpoint = endpoint(40);
@@ -2207,7 +2186,7 @@ fn endpoint_close_cancels_suspended_tasks() {
 
 #[test]
 fn explicit_cancellation_stops_timed_resume() {
-    compio::runtime::Runtime::new().unwrap().block_on(async {
+    crate::test_support::run(async {
         let driver =
             CompioTaskDriver::spawn_with_workers(SourceRunner::new_empty(), TEST_WORKERS).unwrap();
         let submitted = driver
@@ -2236,7 +2215,7 @@ fn explicit_cancellation_stops_timed_resume() {
 
 #[test]
 fn event_queue_backpressures_producers_without_losing_terminal_events() {
-    compio::runtime::Runtime::new().unwrap().block_on(async {
+    crate::test_support::run(async {
         let mut resources = DriverResources::new(TEST_WORKERS.unwrap());
         resources.event_queue_capacity = NonZeroUsize::new(1).unwrap();
         let driver =
@@ -2270,7 +2249,7 @@ fn event_queue_backpressures_producers_without_losing_terminal_events() {
 
 #[test]
 fn shutdown_cancels_async_workers_and_joins_dispatcher() {
-    compio::runtime::Runtime::new().unwrap().block_on(async {
+    crate::test_support::run(async {
         let handler = Arc::new(|_, _: mica_runtime::ExternalRequest| {
             Box::pin(pending()) as crate::types::ExternalRequestFuture
         });
@@ -2315,7 +2294,7 @@ fn shutdown_cancels_async_workers_and_joins_dispatcher() {
 
 #[test]
 fn driver_can_be_constructed_and_shutdown_repeatedly() {
-    compio::runtime::Runtime::new().unwrap().block_on(async {
+    crate::test_support::run(async {
         for _ in 0..8 {
             let driver =
                 CompioTaskDriver::spawn_with_workers(SourceRunner::new_empty(), TEST_WORKERS)
@@ -2328,7 +2307,7 @@ fn driver_can_be_constructed_and_shutdown_repeatedly() {
 
 #[test]
 fn driver_checks_installs_replaces_and_files_out_units() {
-    compio::runtime::Runtime::new().unwrap().block_on(async {
+    crate::test_support::run(async {
         let driver =
             CompioTaskDriver::spawn_with_workers(SourceRunner::new_empty(), TEST_WORKERS).unwrap();
         let unit = Symbol::intern("equipment");

@@ -21,9 +21,6 @@ pub mod metrics;
 mod pool;
 mod types;
 
-#[cfg(test)]
-mod tests;
-
 pub use affinity::{
     DispatcherAffinity, DispatcherConfig, DispatcherPlacement, configure_dispatcher,
 };
@@ -48,3 +45,25 @@ pub use types::{
     ExternalRequestFuture, ExternalRequestHandler, ExternalStreamEmitFuture, ExternalStreamEmitter,
     ExternalStreamRequestHandler, FileinIncludeLoader, TaskCancellationReason, TaskContext,
 };
+
+#[cfg(test)]
+mod tests;
+
+#[cfg(test)]
+mod test_support {
+    use std::future::Future;
+    use std::sync::Mutex;
+
+    // Libtest runs unit tests concurrently, while every driver test owns a
+    // dispatcher and a Compio runtime. Acquire this before constructing either.
+    static COMPIO_RUNTIME_LOCK: Mutex<()> = Mutex::new(());
+
+    pub(crate) fn run(future: impl Future<Output = ()>) {
+        let _guard = COMPIO_RUNTIME_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        compio::runtime::Runtime::new()
+            .expect("test Compio runtime should start")
+            .block_on(future);
+    }
+}

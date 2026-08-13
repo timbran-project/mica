@@ -187,7 +187,7 @@ mod tests {
 
     #[test]
     fn builds_driver_with_initial_sources_and_units() {
-        compio::runtime::Runtime::new().unwrap().block_on(async {
+        crate::test_support::run(async {
             let resources = DriverResources::new(NonZeroUsize::new(1).unwrap());
             let include_loader = Arc::new(|path: &str| match path {
                 "label.txt" => Ok("embedded".to_owned()),
@@ -219,7 +219,7 @@ mod tests {
     #[cfg(feature = "fjall")]
     #[test]
     fn shutdown_flushes_relaxed_persistent_storage() {
-        compio::runtime::Runtime::new().unwrap().block_on(async {
+        crate::test_support::run(async {
             let path = std::env::temp_dir().join(format!(
                 "mica-driver-shutdown-flush-{}-{}",
                 std::process::id(),
