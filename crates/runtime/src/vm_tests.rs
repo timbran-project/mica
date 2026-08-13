@@ -2729,18 +2729,22 @@ fn program_artifact_round_trips_dynamic_named_spawn() {
     let restored = Program::from_bytes(&program.to_bytes().unwrap()).unwrap();
     assert_eq!(restored, program);
 
-    assert!(matches!(
-        run_program(&kernel, restored, 100).unwrap(),
-        TaskOutcome::Suspended {
-            kind: SuspendKind::Spawn(request),
-            ..
-        } if request.selector == Symbol::intern("inspect")
-            && request.target == SpawnTarget::NamedRoles(vec![
-                (Symbol::intern("actor"), ident(10)),
-                (Symbol::intern("item"), ident(20)),
-            ])
-            && request.delay_millis == Some(500)
-    ));
+    let TaskOutcome::Suspended {
+        kind: SuspendKind::Spawn(request),
+        ..
+    } = run_program(&kernel, restored, 100).unwrap()
+    else {
+        panic!("dynamic spawn should suspend");
+    };
+    let SpawnTarget::NamedRoles(roles) = request.target else {
+        panic!("dynamic named spawn should retain named roles");
+    };
+
+    assert_eq!(request.selector, Symbol::intern("inspect"));
+    assert_eq!(request.delay_millis, Some(500));
+    assert_eq!(roles.len(), 2);
+    assert!(roles.contains(&(Symbol::intern("actor"), ident(10))));
+    assert!(roles.contains(&(Symbol::intern("item"), ident(20))));
 }
 
 #[test]
