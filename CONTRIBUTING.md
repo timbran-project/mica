@@ -35,9 +35,9 @@ cargo clippy --workspace --all-targets
 cargo nextest run --workspace
 ```
 
-The repository nextest configuration puts crates that construct a Compio driver in a
-single-threaded resource group. The driver crate also serializes its Compio-owning unit tests within
-the ordinary Cargo test harness, so both commands avoid exhausting thread or address-space limits.
+The repository nextest configuration puts crates that construct a Compio driver in a single-threaded
+resource group. The driver crate also serializes its Compio-owning unit tests within the ordinary
+Cargo test harness, so both commands avoid exhausting thread or address-space limits.
 
 For language or runner changes, also consider exercising the current filein example:
 
