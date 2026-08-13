@@ -34,12 +34,13 @@ pub use affinity::{
 pub use builder::{CompioTaskDriverBuilder, DriverDurability, DriverStorage};
 pub use config::{
     DEFAULT_EVENT_QUEUE_CAPACITY, DEFAULT_SUBSCRIPTION_QUEUE_BUDGET, DriverResources,
+    RelationAcceleration,
 };
 pub use mica_runtime::{
     AuthorityContext, EPHEMERAL_HOST_IDENTITY_END, EPHEMERAL_HOST_IDENTITY_START, FileinMode,
     FileinReport, ReadOnlySourceQueryOptions, ReadOnlySourceQueryReport, ReadOnlySourceQueryStatus,
-    RunReport, SubmittedTask, SubscriptionInitialDelivery, SubscriptionSubject, SuspendKind,
-    TaskId, TaskLimits, TaskOutcome, TaskRequest,
+    RelationAccelerator, RunReport, SubmittedTask, SubscriptionInitialDelivery,
+    SubscriptionSubject, SuspendKind, TaskId, TaskLimits, TaskOutcome, TaskRequest,
 };
 pub use mica_var::{Identity, Symbol, Value};
 pub use pool::CompioTaskDriver;

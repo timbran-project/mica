@@ -12,8 +12,10 @@
 // with this program. If not, see <https://www.gnu.org/licenses/>.
 
 use crate::{DispatcherAffinity, DispatcherConfig, DriverError};
-use mica_runtime::TaskLimits;
+use mica_runtime::{RelationAccelerator, TaskLimits};
+use std::fmt;
 use std::num::NonZeroUsize;
+use std::sync::Arc;
 
 pub const DEFAULT_EVENT_QUEUE_CAPACITY: usize = 1024;
 pub const DEFAULT_SUBSCRIPTION_QUEUE_BUDGET: usize = 256;
@@ -23,7 +25,29 @@ pub const DEFAULT_SUBSCRIPTION_QUEUE_BUDGET: usize = 256;
 /// A host must choose the dispatcher worker count. Other limits start from
 /// conservative defaults and remain explicit fields that can be adjusted before
 /// construction.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// Relation execution backend selected when the driver is constructed.
+#[derive(Clone)]
+pub enum RelationAcceleration {
+    /// Use the complete CPU implementation without initializing WGPU.
+    Disabled,
+    /// Lazily create and share Mica's process-wide WGPU accelerator, falling
+    /// back to CPU when no suitable Vulkan device is available.
+    Automatic,
+    /// Use an accelerator constructed and owned by the embedding host.
+    HostProvided(Arc<dyn RelationAccelerator>),
+}
+
+impl fmt::Debug for RelationAcceleration {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Disabled => formatter.write_str("Disabled"),
+            Self::Automatic => formatter.write_str("Automatic"),
+            Self::HostProvided(_) => formatter.write_str("HostProvided"),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
 pub struct DriverResources {
     pub worker_count: NonZeroUsize,
     pub relation_parallelism: NonZeroUsize,
@@ -31,6 +55,7 @@ pub struct DriverResources {
     pub task_limits: TaskLimits,
     pub event_queue_capacity: NonZeroUsize,
     pub subscription_queue_budget: NonZeroUsize,
+    pub relation_acceleration: RelationAcceleration,
 }
 
 impl DriverResources {
@@ -43,10 +68,11 @@ impl DriverResources {
             event_queue_capacity: NonZeroUsize::new(DEFAULT_EVENT_QUEUE_CAPACITY).unwrap(),
             subscription_queue_budget: NonZeroUsize::new(DEFAULT_SUBSCRIPTION_QUEUE_BUDGET)
                 .unwrap(),
+            relation_acceleration: RelationAcceleration::Disabled,
         }
     }
 
-    pub(crate) fn validate(self) -> Result<Self, DriverError> {
+    pub(crate) fn validate(&self) -> Result<(), DriverError> {
         if self.relation_parallelism > self.worker_count {
             return Err(DriverError::Configuration(format!(
                 "relation parallelism {} exceeds dispatcher worker count {}",
@@ -63,10 +89,10 @@ impl DriverResources {
                 "task call-depth limit must be non-zero".to_owned(),
             ));
         }
-        Ok(self)
+        Ok(())
     }
 
-    pub(crate) fn dispatcher_config(self) -> DispatcherConfig {
+    pub(crate) fn dispatcher_config(&self) -> DispatcherConfig {
         DispatcherConfig {
             workers: Some(self.worker_count),
             affinity: self.affinity,
@@ -87,6 +113,16 @@ mod tests {
             resources.validate(),
             Err(DriverError::Configuration(message))
                 if message.contains("relation parallelism 2")
+        ));
+    }
+
+    #[test]
+    fn embedded_resource_policy_does_not_initialize_gpu_by_default() {
+        let resources = DriverResources::new(NonZeroUsize::new(1).unwrap());
+
+        assert!(matches!(
+            resources.relation_acceleration,
+            RelationAcceleration::Disabled
         ));
     }
 }

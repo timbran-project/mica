@@ -476,7 +476,6 @@ impl WgpuAccelerator {
                 adapter_info.name
             )));
         }
-        let shared_mappable = supported.contains(wgpu::Features::MAPPABLE_PRIMARY_BUFFERS);
         let requested_features =
             required | supported.intersection(wgpu::Features::MAPPABLE_PRIMARY_BUFFERS);
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
@@ -491,6 +490,29 @@ impl WgpuAccelerator {
                 adapter_info.name
             ))
         })?;
+        Self::from_device(adapter_info.name, device, queue)
+    }
+
+    /// Creates an accelerator on a device and queue owned by the embedding
+    /// host. The device must have been requested with `SHADER_INT64`.
+    pub fn from_device(
+        adapter_name: impl Into<String>,
+        device: wgpu::Device,
+        queue: wgpu::Queue,
+    ) -> Result<Self, WgpuInitializationError> {
+        if cfg!(target_endian = "big") {
+            return Err(WgpuInitializationError::new(
+                "the wgpu relation accelerator requires a little-endian host",
+            ));
+        }
+        let required = wgpu::Features::SHADER_INT64;
+        let supported = device.features();
+        if !supported.contains(required) {
+            return Err(WgpuInitializationError::new(
+                "the host-provided wgpu device lacks shaderInt64",
+            ));
+        }
+        let shared_mappable = supported.contains(wgpu::Features::MAPPABLE_PRIMARY_BUFFERS);
         let membership_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("mica-relation-membership-shader"),
             source: wgpu::ShaderSource::Wgsl(MEMBERSHIP_SHADER.into()),
@@ -537,7 +559,7 @@ impl WgpuAccelerator {
         let max_dispatch_rows =
             limits.max_compute_workgroups_per_dimension as usize * WORKGROUP_SIZE as usize;
         Ok(Self {
-            adapter_name: adapter_info.name,
+            adapter_name: adapter_name.into(),
             device,
             queue,
             membership_pipeline,

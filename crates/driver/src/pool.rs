@@ -16,8 +16,8 @@ use crate::{
     DEFAULT_EVENT_QUEUE_CAPACITY, DEFAULT_SUBSCRIPTION_QUEUE_BUDGET, DispatcherConfig, DriverError,
     DriverEvent, DriverResources, DriverSubscriptionMailbox, DriverSubscriptionRequest,
     EndpointCloseReport, ExternalRequestHandler, ExternalStreamEmitter,
-    ExternalStreamRequestHandler, FileinIncludeLoader, TaskCancellationReason, TaskContext,
-    configure_dispatcher,
+    ExternalStreamRequestHandler, FileinIncludeLoader, RelationAcceleration,
+    TaskCancellationReason, TaskContext, configure_dispatcher,
     metrics::{self, AsyncWorkerKind, DispatchOperation, WorkerOutcome},
 };
 use compio::dispatcher::Dispatcher;
@@ -41,20 +41,20 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::task::{Context, Poll, Waker};
 use std::time::{Duration, Instant};
 
-static RELATION_ACCELERATOR: OnceLock<RelationAccelerator> = OnceLock::new();
+static RELATION_ACCELERATOR: OnceLock<AutomaticRelationAccelerator> = OnceLock::new();
 
-enum RelationAccelerator {
+enum AutomaticRelationAccelerator {
     Enabled(Arc<WgpuAccelerator>),
     Unavailable(String),
 }
 
-fn relation_accelerator() -> &'static RelationAccelerator {
+fn relation_accelerator() -> &'static AutomaticRelationAccelerator {
     RELATION_ACCELERATOR.get_or_init(|| {
         match WgpuAccelerator::new(WgpuAcceleratorOptions::default()) {
-            Ok(accelerator) => RelationAccelerator::Enabled(Arc::new(accelerator)),
+            Ok(accelerator) => AutomaticRelationAccelerator::Enabled(Arc::new(accelerator)),
             Err(error) => {
                 mica_relation_wgpu::metrics().initialization_failures.inc();
-                RelationAccelerator::Unavailable(error.to_string())
+                AutomaticRelationAccelerator::Unavailable(error.to_string())
             }
         }
     })
@@ -265,6 +265,7 @@ impl CompioTaskDriver {
             TaskLimits::default(),
             NonZeroUsize::new(DEFAULT_EVENT_QUEUE_CAPACITY).unwrap(),
             NonZeroUsize::new(DEFAULT_SUBSCRIPTION_QUEUE_BUDGET).unwrap(),
+            RelationAcceleration::Automatic,
             external_request_handler,
             external_stream_request_handler,
         )
@@ -283,7 +284,7 @@ impl CompioTaskDriver {
         external_request_handler: Option<ExternalRequestHandler>,
         external_stream_request_handler: Option<ExternalStreamRequestHandler>,
     ) -> Result<Self, DriverError> {
-        let resources = resources.validate()?;
+        resources.validate()?;
         Self::spawn_configured(
             runner,
             resources.dispatcher_config(),
@@ -291,6 +292,7 @@ impl CompioTaskDriver {
             resources.task_limits,
             resources.event_queue_capacity,
             resources.subscription_queue_budget,
+            resources.relation_acceleration,
             external_request_handler,
             external_stream_request_handler,
         )
@@ -304,6 +306,7 @@ impl CompioTaskDriver {
         task_limits: TaskLimits,
         event_queue_capacity: NonZeroUsize,
         subscription_queue_budget: NonZeroUsize,
+        relation_acceleration: RelationAcceleration,
         external_request_handler: Option<ExternalRequestHandler>,
         external_stream_request_handler: Option<ExternalStreamRequestHandler>,
     ) -> Result<Self, DriverError> {
@@ -333,30 +336,47 @@ impl CompioTaskDriver {
             "runtime task execution configured"
         );
         let mut execution_context = ExecutionContext::parallel(cpu_admission.clone());
-        match relation_accelerator() {
-            RelationAccelerator::Enabled(accelerator) => {
-                tracing::info!(
-                    enabled = true,
-                    backend = "wgpu",
-                    graphics_api = "Vulkan",
-                    adapter = accelerator.adapter_name(),
-                    buffer_mode = if accelerator.uses_shared_mappable_buffers() {
-                        "shared-mappable"
-                    } else {
-                        "staged-readback"
-                    },
-                    "relation GPU backend configured"
-                );
-                execution_context = execution_context.with_accelerator(accelerator.clone());
-            }
-            RelationAccelerator::Unavailable(reason) => {
+        match relation_acceleration {
+            RelationAcceleration::Disabled => {
                 tracing::info!(
                     enabled = false,
-                    backend = "wgpu",
-                    fallback = "CPU",
-                    reason,
-                    "relation GPU backend configured"
+                    backend = "CPU",
+                    "relation acceleration configured"
                 );
+            }
+            RelationAcceleration::Automatic => match relation_accelerator() {
+                AutomaticRelationAccelerator::Enabled(accelerator) => {
+                    tracing::info!(
+                        enabled = true,
+                        backend = "wgpu",
+                        graphics_api = "Vulkan",
+                        adapter = accelerator.adapter_name(),
+                        buffer_mode = if accelerator.uses_shared_mappable_buffers() {
+                            "shared-mappable"
+                        } else {
+                            "staged-readback"
+                        },
+                        "relation GPU backend configured"
+                    );
+                    execution_context = execution_context.with_accelerator(accelerator.clone());
+                }
+                AutomaticRelationAccelerator::Unavailable(reason) => {
+                    tracing::info!(
+                        enabled = false,
+                        backend = "wgpu",
+                        fallback = "CPU",
+                        reason,
+                        "relation GPU backend configured"
+                    );
+                }
+            },
+            RelationAcceleration::HostProvided(accelerator) => {
+                tracing::info!(
+                    enabled = true,
+                    backend = "host-provided",
+                    "relation acceleration configured"
+                );
+                execution_context = execution_context.with_accelerator(accelerator);
             }
         }
         let runner = runner
