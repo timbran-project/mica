@@ -116,11 +116,14 @@ supplied fresh authority, not stale checkpointed authority.
 
 ```sh
 cargo fmt --all
-cargo test --workspace
+cargo nextest run --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 cargo run --bin mica
 cargo run --bin mica -- filein apps/shared/capabilities.mica
 ```
+
+The full suite requires `cargo-nextest` 0.9.48 or later. If it is unavailable, use
+`cargo test --workspace -- --test-threads=1` to avoid running Compio-backed tests concurrently.
 
 For example fileins that need persistence:
 

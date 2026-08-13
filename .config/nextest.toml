@@ -1,0 +1,8 @@
+nextest-version = "0.9.48"
+
+[test-groups]
+compio-driver = { max-threads = 1 }
+
+[[profile.default.overrides]]
+filter = 'package(mica-auth) | package(mica-daemon) | package(mica-driver) | package(mica-load-tools) | package(mica-runner) | package(mica-telnet-host) | package(mica-web-host) | package(mica-webtransport-host)'
+test-group = 'compio-driver'

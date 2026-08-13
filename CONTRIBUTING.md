@@ -25,8 +25,18 @@ Before submitting non-trivial changes, run the relevant checks where practical:
 
 ```bash
 cargo fmt --all
-cargo test --workspace
+cargo nextest run --workspace
 cargo clippy --workspace --all-targets
+```
+
+The full test suite requires `cargo-nextest` 0.9.48 or later. Tests in crates that construct a
+Compio driver share a single-threaded nextest group so that process-level runtimes do not exhaust
+the machine's thread or address-space limits. Install nextest from an official pre-built binary, or
+with `cargo install cargo-nextest --locked`. If nextest is unavailable, use the slower serialized
+fallback:
+
+```bash
+cargo test --workspace -- --test-threads=1
 ```
 
 For language or runner changes, also consider exercising the current filein example:
