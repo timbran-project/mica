@@ -610,6 +610,12 @@ impl SourceRunner {
         self.task_manager.cancel_subscription(subscription)
     }
 
+    pub fn cancel_task(&mut self, task_id: TaskId) -> Result<SuspendKind, SourceTaskError> {
+        self.task_manager
+            .cancel_task(task_id)
+            .map_err(SourceTaskError::from)
+    }
+
     pub fn open_endpoint(
         &mut self,
         endpoint: Identity,
@@ -1741,6 +1747,12 @@ impl SharedSourceRunner {
         self.task_manager.cancel_subscription(subscription)
     }
 
+    pub fn cancel_task(&self, task_id: TaskId) -> Result<SuspendKind, SourceTaskError> {
+        self.task_manager
+            .cancel_task(task_id)
+            .map_err(SourceTaskError::from)
+    }
+
     pub fn drain_routed_emissions(&self) -> Vec<Effect> {
         self.task_manager.drain_routed_emissions()
     }
@@ -1808,6 +1820,10 @@ impl SharedSourceRunner {
 
     pub fn completed_len(&self) -> usize {
         self.task_manager.completed_len()
+    }
+
+    pub fn cancelled_len(&self) -> usize {
+        self.task_manager.cancelled_len()
     }
 
     pub fn suspended_len(&self) -> usize {
@@ -7057,6 +7073,7 @@ fn render_task_manager_error(
         TaskManagerError::TaskAlreadyCompleted(task_id) => {
             format!("task {task_id} already completed")
         }
+        TaskManagerError::TaskCancelled(task_id) => format!("task {task_id} was cancelled"),
         TaskManagerError::Task(error) => render_task_error(error, identity_names, relation_names),
     }
 }

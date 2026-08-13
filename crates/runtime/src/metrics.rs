@@ -76,6 +76,9 @@ pub struct RuntimeMetrics {
     #[help = "Completed tasks retained by runtime bookkeeping"]
     pub completed_tasks: Gauge,
 
+    #[help = "Cancelled tasks retained by runtime bookkeeping"]
+    pub cancelled_tasks: Gauge,
+
     #[help = "Endpoint operations by operation"]
     pub endpoint_operations: LabeledCounter<EndpointOperation>,
 
@@ -122,6 +125,7 @@ impl RuntimeMetrics {
             ),
             suspended_tasks: Gauge::new(),
             completed_tasks: Gauge::new(),
+            cancelled_tasks: Gauge::new(),
             endpoint_operations: LabeledCounter::new(shard_count),
             active_endpoints: Gauge::new(),
             task_effects: Counter::new(shard_count),

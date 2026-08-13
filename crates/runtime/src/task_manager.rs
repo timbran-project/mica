@@ -36,6 +36,7 @@ use std::time::Instant;
 pub enum TaskManagerError {
     UnknownTask(TaskId),
     TaskAlreadyCompleted(TaskId),
+    TaskCancelled(TaskId),
     Task(TaskError),
 }
 
@@ -539,6 +540,7 @@ pub struct TaskManager {
     next_task_id: TaskId,
     suspended: HashMap<TaskId, SuspendedTask>,
     completed: HashMap<TaskId, TaskOutcome>,
+    cancelled: HashSet<TaskId>,
     effects: EffectLog,
     mailboxes: MailboxRuntimeHandle,
     subscriptions: SubscriptionRuntimeHandle,
@@ -562,6 +564,7 @@ pub struct SharedTaskManager {
 struct SharedTaskState {
     suspended: HashMap<TaskId, SuspendedTask>,
     completed: HashSet<TaskId>,
+    cancelled: HashSet<TaskId>,
     effects: EffectLog,
 }
 
@@ -573,6 +576,7 @@ impl TaskManager {
             next_task_id: 1,
             suspended: HashMap::new(),
             completed: HashMap::new(),
+            cancelled: HashSet::new(),
             effects: EffectLog::default(),
             subscriptions: SubscriptionRuntimeHandle::new(mailboxes.clone()),
             mailboxes,
@@ -834,6 +838,7 @@ impl TaskManager {
             state: Mutex::new(SharedTaskState {
                 suspended: self.suspended,
                 completed: self.completed.into_keys().collect(),
+                cancelled: self.cancelled,
                 effects: self.effects,
             }),
             mailboxes: self.mailboxes,
@@ -949,6 +954,9 @@ impl TaskManager {
         value: Value,
         runtime_context: RuntimeContext,
     ) -> Result<TaskOutcome, TaskManagerError> {
+        if self.cancelled.contains(&task_id) {
+            return Err(TaskManagerError::TaskCancelled(task_id));
+        }
         if self.completed.contains_key(&task_id) {
             return Err(TaskManagerError::TaskAlreadyCompleted(task_id));
         }
@@ -988,6 +996,27 @@ impl TaskManager {
         self.suspended.get(&task_id)
     }
 
+    pub fn cancel_task(&mut self, task_id: TaskId) -> Result<SuspendKind, TaskManagerError> {
+        if self.cancelled.contains(&task_id) {
+            return Err(TaskManagerError::TaskCancelled(task_id));
+        }
+        if self.completed.contains_key(&task_id) {
+            return Err(TaskManagerError::TaskAlreadyCompleted(task_id));
+        }
+        let suspended = self
+            .suspended
+            .remove(&task_id)
+            .ok_or(TaskManagerError::UnknownTask(task_id))?;
+        self.cancelled.insert(task_id);
+        crate::metrics::metrics()
+            .suspended_tasks
+            .set(self.suspended.len() as i64);
+        crate::metrics::metrics()
+            .cancelled_tasks
+            .set(self.cancelled.len() as i64);
+        Ok(suspended.kind)
+    }
+
     pub fn completed(&self, task_id: TaskId) -> Option<&TaskOutcome> {
         self.completed.get(&task_id)
     }
@@ -998,6 +1027,10 @@ impl TaskManager {
 
     pub fn completed_len(&self) -> usize {
         self.completed.len()
+    }
+
+    pub fn cancelled_len(&self) -> usize {
+        self.cancelled.len()
     }
 
     fn allocate_task_id(&mut self) -> TaskId {
@@ -1142,6 +1175,9 @@ impl SharedTaskManager {
     ) -> Result<TaskOutcome, TaskManagerError> {
         let (suspended, task_snapshot) = {
             let mut state = self.state.lock().unwrap();
+            if state.cancelled.contains(&task_id) {
+                return Err(TaskManagerError::TaskCancelled(task_id));
+            }
             if state.completed.contains(&task_id) {
                 return Err(TaskManagerError::TaskAlreadyCompleted(task_id));
             }
@@ -1368,8 +1404,34 @@ impl SharedTaskManager {
         self.state.lock().unwrap().completed.len()
     }
 
+    pub fn cancel_task(&self, task_id: TaskId) -> Result<SuspendKind, TaskManagerError> {
+        let mut state = self.state.lock().unwrap();
+        if state.cancelled.contains(&task_id) {
+            return Err(TaskManagerError::TaskCancelled(task_id));
+        }
+        if state.completed.contains(&task_id) {
+            return Err(TaskManagerError::TaskAlreadyCompleted(task_id));
+        }
+        let suspended = state
+            .suspended
+            .remove(&task_id)
+            .ok_or(TaskManagerError::UnknownTask(task_id))?;
+        state.cancelled.insert(task_id);
+        crate::metrics::metrics()
+            .suspended_tasks
+            .set(state.suspended.len() as i64);
+        crate::metrics::metrics()
+            .cancelled_tasks
+            .set(state.cancelled.len() as i64);
+        Ok(suspended.kind)
+    }
+
     pub fn suspended_len(&self) -> usize {
         self.state.lock().unwrap().suspended.len()
+    }
+
+    pub fn cancelled_len(&self) -> usize {
+        self.state.lock().unwrap().cancelled.len()
     }
 
     fn allocate_task_id(&self) -> TaskId {

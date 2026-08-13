@@ -14,9 +14,9 @@
 use crate::{
     AuthorityContext, BuiltinContext, BuiltinRegistry, BuiltinResultKind, CapabilityGrant,
     CapabilityOp, Effect, ErrorField, Instruction, KindCheckSite, ListItem, MapItem, Operand,
-    Program, ProgramResolver, QueryBinding, Register, RelationArg, RuntimeBinaryOp, RuntimeError,
-    SpawnTarget, SuspendKind, Task, TaskError, TaskLimits, TaskManager, TaskManagerError,
-    TaskOutcome,
+    Program, ProgramResolver, QueryBinding, Register, RelationArg, RuntimeBinaryOp, RuntimeContext,
+    RuntimeError, SpawnTarget, SuspendKind, Task, TaskError, TaskLimits, TaskManager,
+    TaskManagerError, TaskOutcome,
 };
 use mica_compiler::{CompileContext, compile_source};
 use mica_relation_kernel::{
@@ -2174,6 +2174,87 @@ fn task_manager_rejects_unknown_and_completed_resume() {
             .resume_with_authority(task_id, AuthorityContext::root())
             .unwrap_err(),
         TaskManagerError::TaskAlreadyCompleted(task_id)
+    );
+}
+
+#[test]
+fn task_manager_cancels_suspended_task() {
+    let kernel = kernel_with_world_relations();
+    let program = Arc::new(
+        Program::new(
+            0,
+            [
+                Instruction::Suspend {
+                    kind: SuspendKind::Never,
+                },
+                Instruction::Return {
+                    value: v(Value::nothing()),
+                },
+            ],
+        )
+        .unwrap(),
+    );
+    let mut task_manager = TaskManager::new(kernel);
+    let (task_id, outcome) = task_manager.submit(program).unwrap();
+    assert!(matches!(outcome, TaskOutcome::Suspended { .. }));
+
+    assert_eq!(
+        task_manager.cancel_task(task_id).unwrap(),
+        SuspendKind::Never
+    );
+    assert_eq!(task_manager.suspended_len(), 0);
+    assert_eq!(task_manager.cancelled_len(), 1);
+    assert_eq!(
+        task_manager
+            .resume_with_authority(task_id, AuthorityContext::root())
+            .unwrap_err(),
+        TaskManagerError::TaskCancelled(task_id)
+    );
+    assert_eq!(
+        task_manager.cancel_task(task_id).unwrap_err(),
+        TaskManagerError::TaskCancelled(task_id)
+    );
+}
+
+#[test]
+fn shared_task_manager_cancels_suspended_task() {
+    let kernel = kernel_with_world_relations();
+    let program = Arc::new(
+        Program::new(
+            0,
+            [
+                Instruction::Suspend {
+                    kind: SuspendKind::Never,
+                },
+                Instruction::Return {
+                    value: v(Value::nothing()),
+                },
+            ],
+        )
+        .unwrap(),
+    );
+    let task_manager = TaskManager::new(kernel).into_shared();
+    let (task_id, outcome) = task_manager
+        .submit_with_context(program, AuthorityContext::root(), RuntimeContext::default())
+        .unwrap();
+    assert!(matches!(outcome, TaskOutcome::Suspended { .. }));
+
+    assert_eq!(
+        task_manager.cancel_task(task_id).unwrap(),
+        SuspendKind::Never
+    );
+    assert_eq!(task_manager.suspended_len(), 0);
+    assert_eq!(task_manager.cancelled_len(), 1);
+    assert_eq!(
+        task_manager
+            .resume_with_context(
+                task_id,
+                AuthorityContext::root(),
+                Value::nothing(),
+                RuntimeContext::default(),
+            )
+            .unwrap_err(),
+        TaskManagerError::TaskCancelled(task_id)
     );
 }
 
