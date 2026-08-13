@@ -16,3 +16,7 @@ proptest.workspace = true
 [[bench]]
 name = "var_benches"
 harness = false
+
+[[bench]]
+name = "small_relation_representations"
+harness = false

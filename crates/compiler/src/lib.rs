@@ -27,6 +27,8 @@ mod lexer;
 mod lower;
 mod parser;
 mod semantics;
+#[cfg(test)]
+mod structural_syntax_prototype;
 mod syntax;
 
 pub use ast::{
