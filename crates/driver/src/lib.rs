@@ -33,8 +33,8 @@ pub use affinity::{
 };
 pub use builder::{CompioTaskDriverBuilder, DriverDurability, DriverStorage};
 pub use config::{
-    DEFAULT_EVENT_QUEUE_CAPACITY, DEFAULT_SUBSCRIPTION_QUEUE_BUDGET, DriverResources,
-    RelationAcceleration,
+    DEFAULT_EVENT_QUEUE_CAPACITY, DEFAULT_EXTERNAL_REQUEST_CAPACITY,
+    DEFAULT_SUBSCRIPTION_QUEUE_BUDGET, DriverResources, RelationAcceleration,
 };
 pub use mica_runtime::{
     AuthorityContext, EPHEMERAL_HOST_IDENTITY_END, EPHEMERAL_HOST_IDENTITY_START, FileinMode,
@@ -46,6 +46,7 @@ pub use mica_var::{Identity, Symbol, Value};
 pub use pool::CompioTaskDriver;
 pub use types::{
     DriverError, DriverEvent, DriverSubscriptionMailbox, DriverSubscriptionRequest,
-    EndpointCloseReport, ExternalRequestHandler, ExternalStreamEmitter,
-    ExternalStreamRequestHandler, FileinIncludeLoader, TaskCancellationReason, TaskContext,
+    EndpointCloseReport, ExternalRequestCancellation, ExternalRequestContext,
+    ExternalRequestHandler, ExternalStreamEmitter, ExternalStreamRequestHandler,
+    FileinIncludeLoader, TaskCancellationReason, TaskContext,
 };

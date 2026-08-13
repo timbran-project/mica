@@ -25,6 +25,7 @@ use mica_var::{Identity, Symbol, Value};
 use std::future::pending;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
@@ -36,6 +37,14 @@ fn endpoint(offset: u64) -> Identity {
 
 fn root_source(source: &str) -> TaskRequest {
     SourceRunner::root_source_request(source)
+}
+
+struct DropFlag(Arc<AtomicBool>);
+
+impl Drop for DropFlag {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Release);
+    }
 }
 
 #[test]
@@ -119,7 +128,7 @@ fn timed_suspend_wakes_and_resumes_task() {
 #[test]
 fn external_request_suspends_and_resumes_from_handler() {
     compio::runtime::Runtime::new().unwrap().block_on(async {
-        let handler = Arc::new(|request: mica_runtime::ExternalRequest| {
+        let handler = Arc::new(|_, request: mica_runtime::ExternalRequest| {
             Box::pin(async move {
                 Value::list([
                     Value::symbol(request.service),
@@ -166,10 +175,135 @@ fn external_request_suspends_and_resumes_from_handler() {
 }
 
 #[test]
+fn external_request_admission_bounds_handler_concurrency() {
+    compio::runtime::Runtime::new().unwrap().block_on(async {
+        let starts = Arc::new(AtomicUsize::new(0));
+        let active = Arc::new(AtomicUsize::new(0));
+        let maximum_active = Arc::new(AtomicUsize::new(0));
+        let release = Arc::new(AtomicBool::new(false));
+        let handler = {
+            let starts = Arc::clone(&starts);
+            let active = Arc::clone(&active);
+            let maximum_active = Arc::clone(&maximum_active);
+            let release = Arc::clone(&release);
+            Arc::new(move |_, _: mica_runtime::ExternalRequest| {
+                let starts = Arc::clone(&starts);
+                let active = Arc::clone(&active);
+                let maximum_active = Arc::clone(&maximum_active);
+                let release = Arc::clone(&release);
+                Box::pin(async move {
+                    starts.fetch_add(1, Ordering::AcqRel);
+                    let now_active = active.fetch_add(1, Ordering::AcqRel) + 1;
+                    maximum_active.fetch_max(now_active, Ordering::AcqRel);
+                    while !release.load(Ordering::Acquire) {
+                        compio::time::sleep(Duration::from_millis(1)).await;
+                    }
+                    active.fetch_sub(1, Ordering::AcqRel);
+                    Value::nothing()
+                }) as crate::types::ExternalRequestFuture
+            })
+        };
+        let mut resources = DriverResources::new(TEST_WORKERS.unwrap());
+        resources.external_request_capacity = NonZeroUsize::new(1).unwrap();
+        let driver = CompioTaskDriver::builder(resources)
+            .external_request_handler(handler)
+            .build()
+            .unwrap();
+
+        let first = driver
+            .submit_source(
+                endpoint(60),
+                root_source("return external_request(:hold, nothing)"),
+            )
+            .await
+            .unwrap();
+        let second = driver
+            .submit_source(
+                endpoint(60),
+                root_source("return external_request(:hold, nothing)"),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(first.outcome, TaskOutcome::Suspended { .. }));
+        assert!(matches!(second.outcome, TaskOutcome::Suspended { .. }));
+
+        compio::time::sleep(Duration::from_millis(10)).await;
+        assert_eq!(starts.load(Ordering::Acquire), 1);
+        assert_eq!(maximum_active.load(Ordering::Acquire), 1);
+
+        release.store(true, Ordering::Release);
+        for _ in 0..50 {
+            if starts.load(Ordering::Acquire) == 2 && active.load(Ordering::Acquire) == 0 {
+                break;
+            }
+            compio::time::sleep(Duration::from_millis(1)).await;
+        }
+        assert_eq!(starts.load(Ordering::Acquire), 2);
+        assert_eq!(maximum_active.load(Ordering::Acquire), 1);
+        driver.shutdown().await.unwrap();
+    });
+}
+
+#[test]
+fn external_request_context_is_cancelled_with_its_task() {
+    compio::runtime::Runtime::new().unwrap().block_on(async {
+        let observed = Arc::new(Mutex::new(None));
+        let handler = {
+            let observed = Arc::clone(&observed);
+            Arc::new(
+                move |context: crate::ExternalRequestContext, _: mica_runtime::ExternalRequest| {
+                    *observed.lock().unwrap() = Some(context.clone());
+                    Box::pin(async move {
+                        context.cancellation.cancelled().await;
+                        Value::nothing()
+                    }) as crate::types::ExternalRequestFuture
+                },
+            )
+        };
+        let driver = CompioTaskDriver::spawn_with_workers_and_external_handler(
+            SourceRunner::new_empty(),
+            TEST_WORKERS,
+            Some(handler),
+        )
+        .unwrap();
+        let endpoint = endpoint(61);
+        let submitted = driver
+            .submit_source(
+                endpoint,
+                root_source("return external_request(:hold, nothing)"),
+            )
+            .await
+            .unwrap();
+
+        for _ in 0..50 {
+            if observed.lock().unwrap().is_some() {
+                break;
+            }
+            compio::time::sleep(Duration::from_millis(1)).await;
+        }
+        let context = observed
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("external handler did not start");
+        assert_eq!(context.task_id, submitted.task_id);
+        assert_eq!(context.endpoint, endpoint);
+        assert_eq!(context.principal, None);
+        assert_eq!(context.actor, None);
+
+        driver.cancel_task(submitted.task_id).await.unwrap();
+
+        assert!(context.cancellation.is_cancelled());
+        driver.shutdown().await.unwrap();
+    });
+}
+
+#[test]
 fn external_stream_request_delivers_events_to_mica_mailbox() {
     compio::runtime::Runtime::new().unwrap().block_on(async {
         let stream_handler = Arc::new(
-            |request: mica_runtime::ExternalRequest,
+            |_,
+             request: mica_runtime::ExternalRequest,
              emitter: crate::types::ExternalStreamEmitter| {
                 Box::pin(async move {
                     assert_eq!(request.service, Symbol::intern("llm_stream"));
@@ -261,7 +395,7 @@ fn missing_external_stream_handler_delivers_an_error_event() {
 #[test]
 fn vllm_embed_text_suspends_as_embedding_external_request() {
     compio::runtime::Runtime::new().unwrap().block_on(async {
-        let handler = Arc::new(|request: mica_runtime::ExternalRequest| {
+        let handler = Arc::new(|_, request: mica_runtime::ExternalRequest| {
             Box::pin(async move {
                 assert_eq!(request.service, Symbol::intern("embedding"));
                 assert_eq!(
@@ -324,7 +458,7 @@ fn vllm_embed_text_suspends_as_embedding_external_request() {
 #[test]
 fn openai_chat_completion_suspends_as_openai_external_request() {
     compio::runtime::Runtime::new().unwrap().block_on(async {
-        let handler = Arc::new(|request: mica_runtime::ExternalRequest| {
+        let handler = Arc::new(|_, request: mica_runtime::ExternalRequest| {
             Box::pin(async move {
                 assert_eq!(request.service, Symbol::intern("openai"));
                 assert_eq!(
@@ -416,7 +550,7 @@ fn load_agent_app(runner: &mut SourceRunner) {
 fn agent_command_sync_event_appends_user_message_and_suspends_for_llm() {
     compio::runtime::Runtime::new().unwrap().block_on(async {
         let stream_handler = Arc::new(
-            |request: mica_runtime::ExternalRequest, emitter: crate::ExternalStreamEmitter| {
+            |_, request: mica_runtime::ExternalRequest, emitter: crate::ExternalStreamEmitter| {
                 Box::pin(async move {
                     assert_eq!(request.service, Symbol::intern("openai_responses"));
                     let input = request
@@ -632,7 +766,7 @@ fn agent_responses_tool_call_round_trip_resubmits_full_context() {
         let stream_handler = {
             let request_count = Arc::clone(&request_count);
             Arc::new(
-                move |request: mica_runtime::ExternalRequest,
+                move |_, request: mica_runtime::ExternalRequest,
                       emitter: crate::ExternalStreamEmitter| {
                     let turn = request_count.fetch_add(1, Ordering::SeqCst);
                     Box::pin(async move {
@@ -846,7 +980,7 @@ fn agent_steering_cancels_the_active_stream_and_resubmits_full_context() {
             let request_count = Arc::clone(&request_count);
             let producer_observed_close = Arc::clone(&producer_observed_close);
             Arc::new(
-                move |request: mica_runtime::ExternalRequest,
+                move |_, request: mica_runtime::ExternalRequest,
                       emitter: crate::ExternalStreamEmitter| {
                     let turn = request_count.fetch_add(1, Ordering::SeqCst);
                     let producer_observed_close = Arc::clone(&producer_observed_close);
@@ -1087,7 +1221,7 @@ fn mica_query_host_request_runs_read_only_query_and_resumes_task() {
 #[test]
 fn root_startup_source_can_resume_vllm_embed_text() {
     compio::runtime::Runtime::new().unwrap().block_on(async {
-        let handler = Arc::new(|request: mica_runtime::ExternalRequest| {
+        let handler = Arc::new(|_, request: mica_runtime::ExternalRequest| {
             Box::pin(async move {
                 assert_eq!(request.service, Symbol::intern("embedding"));
                 Value::list([Value::float(1.0).unwrap(), Value::float(0.0).unwrap()])
@@ -1181,12 +1315,23 @@ fn log_returns_nothing_with_effect_authority() {
 #[test]
 fn external_request_timeout_resumes_with_error_value() {
     compio::runtime::Runtime::new().unwrap().block_on(async {
-        let handler = Arc::new(|_request: mica_runtime::ExternalRequest| {
-            Box::pin(async move {
-                compio::time::sleep(Duration::from_millis(50)).await;
-                Value::string("late")
-            }) as crate::types::ExternalRequestFuture
-        });
+        let dropped = Arc::new(AtomicBool::new(false));
+        let cancellation = Arc::new(Mutex::new(None));
+        let handler = {
+            let dropped = Arc::clone(&dropped);
+            let cancellation = Arc::clone(&cancellation);
+            Arc::new(
+                move |context: crate::ExternalRequestContext,
+                      _request: mica_runtime::ExternalRequest| {
+                    *cancellation.lock().unwrap() = Some(context.cancellation.clone());
+                    let drop_flag = DropFlag(Arc::clone(&dropped));
+                    Box::pin(async move {
+                        let _drop_flag = drop_flag;
+                        pending().await
+                    }) as crate::types::ExternalRequestFuture
+                },
+            )
+        };
         let driver = CompioTaskDriver::spawn_with_workers_and_external_handler(
             SourceRunner::new_empty(),
             TEST_WORKERS,
@@ -1210,6 +1355,14 @@ fn external_request_timeout_resumes_with_error_value() {
                 if *task_id == submitted.task_id
                     && value.error_code_symbol() == Some(Symbol::intern("ExternalTimeout"))
         )));
+        assert!(dropped.load(Ordering::Acquire));
+        assert!(
+            cancellation
+                .lock()
+                .unwrap()
+                .as_ref()
+                .is_some_and(crate::ExternalRequestCancellation::is_cancelled)
+        );
     });
 }
 
@@ -2118,7 +2271,7 @@ fn event_queue_backpressures_producers_without_losing_terminal_events() {
 #[test]
 fn shutdown_cancels_async_workers_and_joins_dispatcher() {
     compio::runtime::Runtime::new().unwrap().block_on(async {
-        let handler = Arc::new(|_: mica_runtime::ExternalRequest| {
+        let handler = Arc::new(|_, _: mica_runtime::ExternalRequest| {
             Box::pin(pending()) as crate::types::ExternalRequestFuture
         });
         let driver = CompioTaskDriver::spawn_with_workers_and_external_handler(

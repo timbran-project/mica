@@ -43,6 +43,28 @@ struct TaskWaiter {
     waker: Waker,
 }
 
+pub(crate) struct ExternalRequestAdmission {
+    capacity: NonZeroUsize,
+    state: Mutex<ExternalAdmissionState>,
+}
+
+#[derive(Default)]
+struct ExternalAdmissionState {
+    occupied: usize,
+    next_waiter_id: u64,
+    waiters: VecDeque<TaskWaiter>,
+}
+
+pub(crate) struct ExternalRequestAcquire {
+    admission: Arc<ExternalRequestAdmission>,
+    waiter_id: Option<u64>,
+    completed: bool,
+}
+
+pub(crate) struct ExternalRequestPermit {
+    admission: Arc<ExternalRequestAdmission>,
+}
+
 impl CpuAdmission {
     pub(crate) fn new(dispatch_capacity: NonZeroUsize, relation_parallelism: NonZeroUsize) -> Self {
         Self {
@@ -92,6 +114,138 @@ impl CpuAdmission {
         let state = self.state.lock().unwrap();
         (state.occupied, state.task_waiters.len())
     }
+}
+
+impl ExternalRequestAdmission {
+    pub(crate) fn new(capacity: NonZeroUsize) -> Self {
+        Self {
+            capacity,
+            state: Mutex::new(ExternalAdmissionState::default()),
+        }
+    }
+
+    pub(crate) fn acquire(self: &Arc<Self>) -> ExternalRequestAcquire {
+        ExternalRequestAcquire {
+            admission: Arc::clone(self),
+            waiter_id: None,
+            completed: false,
+        }
+    }
+
+    #[cfg(test)]
+    fn state(&self) -> (usize, usize) {
+        let state = self.state.lock().unwrap();
+        (state.occupied, state.waiters.len())
+    }
+}
+
+impl Future for ExternalRequestAcquire {
+    type Output = ExternalRequestPermit;
+
+    fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
+        let acquire = self.get_mut();
+        assert!(!acquire.completed, "completed admission polled again");
+        let mut wake_next = None;
+        let admitted = {
+            let mut state = acquire.admission.state.lock().unwrap();
+            match acquire.waiter_id {
+                Some(waiter_id) => {
+                    let position = state
+                        .waiters
+                        .iter()
+                        .position(|waiter| waiter.id == waiter_id)
+                        .expect("external request waiter should remain registered");
+                    if position == 0 && state.occupied < acquire.admission.capacity.get() {
+                        state.waiters.pop_front();
+                        state.occupied += 1;
+                        acquire.waiter_id = None;
+                        wake_next = external_waiter_waker(&state, acquire.admission.capacity);
+                        true
+                    } else {
+                        let waiter = &mut state.waiters[position];
+                        if !waiter.waker.will_wake(context.waker()) {
+                            waiter.waker = context.waker().clone();
+                        }
+                        false
+                    }
+                }
+                None if state.waiters.is_empty()
+                    && state.occupied < acquire.admission.capacity.get() =>
+                {
+                    state.occupied += 1;
+                    true
+                }
+                None => {
+                    let waiter_id = state.next_waiter_id;
+                    state.next_waiter_id = state.next_waiter_id.wrapping_add(1);
+                    state.waiters.push_back(TaskWaiter {
+                        id: waiter_id,
+                        waker: context.waker().clone(),
+                    });
+                    acquire.waiter_id = Some(waiter_id);
+                    false
+                }
+            }
+        };
+        if let Some(waker) = wake_next {
+            waker.wake();
+        }
+        if !admitted {
+            return Poll::Pending;
+        }
+        acquire.completed = true;
+        Poll::Ready(ExternalRequestPermit {
+            admission: Arc::clone(&acquire.admission),
+        })
+    }
+}
+
+impl Drop for ExternalRequestAcquire {
+    fn drop(&mut self) {
+        if self.completed {
+            return;
+        }
+        let Some(waiter_id) = self.waiter_id else {
+            return;
+        };
+        let wake = {
+            let mut state = self.admission.state.lock().unwrap();
+            let Some(position) = state
+                .waiters
+                .iter()
+                .position(|waiter| waiter.id == waiter_id)
+            else {
+                return;
+            };
+            state.waiters.remove(position);
+            (position == 0)
+                .then(|| external_waiter_waker(&state, self.admission.capacity))
+                .flatten()
+        };
+        if let Some(waker) = wake {
+            waker.wake();
+        }
+    }
+}
+
+impl Drop for ExternalRequestPermit {
+    fn drop(&mut self) {
+        let wake = {
+            let mut state = self.admission.state.lock().unwrap();
+            debug_assert!(state.occupied > 0);
+            state.occupied -= 1;
+            external_waiter_waker(&state, self.admission.capacity)
+        };
+        if let Some(waker) = wake {
+            waker.wake();
+        }
+    }
+}
+
+fn external_waiter_waker(state: &ExternalAdmissionState, capacity: NonZeroUsize) -> Option<Waker> {
+    (state.occupied < capacity.get())
+        .then(|| state.waiters.front().map(|waiter| waiter.waker.clone()))
+        .flatten()
 }
 
 impl ExecutionAdmission for CpuAdmission {
@@ -292,6 +446,20 @@ mod tests {
         permit
     }
 
+    fn poll_external(
+        admission: &mut Pin<Box<ExternalRequestAcquire>>,
+    ) -> Poll<ExternalRequestPermit> {
+        let mut context = Context::from_waker(Waker::noop());
+        admission.as_mut().poll(&mut context)
+    }
+
+    fn external_ready(poll: Poll<ExternalRequestPermit>) -> ExternalRequestPermit {
+        let Poll::Ready(permit) = poll else {
+            panic!("external request admission should be ready");
+        };
+        permit
+    }
+
     #[test]
     fn dispatch_waits_outside_pool_and_has_priority_over_parallel_work() {
         let capacity = NonZeroUsize::new(2).unwrap();
@@ -364,5 +532,43 @@ mod tests {
 
         admission.release_parallel(parallel_worker);
         drop(running);
+    }
+
+    #[test]
+    fn external_requests_are_admitted_in_fifo_order() {
+        let admission = Arc::new(ExternalRequestAdmission::new(NonZeroUsize::new(1).unwrap()));
+        let mut running = Box::pin(admission.acquire());
+        let running = external_ready(poll_external(&mut running));
+        let mut first = Box::pin(admission.acquire());
+        let mut second = Box::pin(admission.acquire());
+
+        assert!(poll_external(&mut first).is_pending());
+        assert!(poll_external(&mut second).is_pending());
+        assert_eq!(admission.state(), (1, 2));
+        drop(running);
+
+        let first = external_ready(poll_external(&mut first));
+        assert!(poll_external(&mut second).is_pending());
+        drop(first);
+        let second = external_ready(poll_external(&mut second));
+        drop(second);
+        assert_eq!(admission.state(), (0, 0));
+    }
+
+    #[test]
+    fn cancelling_front_external_waiter_allows_next_request_to_run() {
+        let admission = Arc::new(ExternalRequestAdmission::new(NonZeroUsize::new(1).unwrap()));
+        let mut running = Box::pin(admission.acquire());
+        let running = external_ready(poll_external(&mut running));
+        let mut cancelled = Box::pin(admission.acquire());
+        let mut next = Box::pin(admission.acquire());
+        assert!(poll_external(&mut cancelled).is_pending());
+        assert!(poll_external(&mut next).is_pending());
+
+        drop(cancelled);
+        drop(running);
+        let next = external_ready(poll_external(&mut next));
+        drop(next);
+        assert_eq!(admission.state(), (0, 0));
     }
 }

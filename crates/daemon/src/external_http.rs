@@ -31,7 +31,7 @@ pub fn handler() -> ExternalRequestHandler {
 }
 
 pub fn stream_handler() -> ExternalStreamRequestHandler {
-    Arc::new(move |request, emitter| {
+    Arc::new(move |_, request, emitter| {
         Box::pin(async move {
             compio::runtime::spawn(async move {
                 handle_external_stream_request(request, emitter).await;
@@ -51,7 +51,7 @@ fn handler_with_embedding_base_url(base_url: String) -> ExternalRequestHandler {
 
 fn handler_with_config(config: ExternalHttpConfig) -> ExternalRequestHandler {
     let config = Arc::new(config);
-    Arc::new(move |request| {
+    Arc::new(move |_, request| {
         let config = Arc::clone(&config);
         Box::pin(async move { handle_external_request(request, &config).await })
     })

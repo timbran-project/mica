@@ -18,13 +18,9 @@ use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 pub const DEFAULT_EVENT_QUEUE_CAPACITY: usize = 1024;
+pub const DEFAULT_EXTERNAL_REQUEST_CAPACITY: usize = 64;
 pub const DEFAULT_SUBSCRIPTION_QUEUE_BUDGET: usize = 256;
 
-/// Process resources reserved for one Mica driver.
-///
-/// A host must choose the dispatcher worker count. Other limits start from
-/// conservative defaults and remain explicit fields that can be adjusted before
-/// construction.
 /// Relation execution backend selected when the driver is constructed.
 #[derive(Clone)]
 pub enum RelationAcceleration {
@@ -47,6 +43,11 @@ impl fmt::Debug for RelationAcceleration {
     }
 }
 
+/// Process resources reserved for one Mica driver.
+///
+/// A host must choose the dispatcher worker count. Other limits start from
+/// conservative defaults and remain explicit fields that can be adjusted before
+/// construction.
 #[derive(Clone, Debug)]
 pub struct DriverResources {
     pub worker_count: NonZeroUsize,
@@ -54,6 +55,7 @@ pub struct DriverResources {
     pub affinity: DispatcherAffinity,
     pub task_limits: TaskLimits,
     pub event_queue_capacity: NonZeroUsize,
+    pub external_request_capacity: NonZeroUsize,
     pub subscription_queue_budget: NonZeroUsize,
     pub relation_acceleration: RelationAcceleration,
 }
@@ -66,6 +68,8 @@ impl DriverResources {
             affinity: DispatcherAffinity::None,
             task_limits: TaskLimits::default(),
             event_queue_capacity: NonZeroUsize::new(DEFAULT_EVENT_QUEUE_CAPACITY).unwrap(),
+            external_request_capacity: NonZeroUsize::new(DEFAULT_EXTERNAL_REQUEST_CAPACITY)
+                .unwrap(),
             subscription_queue_budget: NonZeroUsize::new(DEFAULT_SUBSCRIPTION_QUEUE_BUDGET)
                 .unwrap(),
             relation_acceleration: RelationAcceleration::Disabled,

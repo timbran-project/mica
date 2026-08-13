@@ -16,6 +16,7 @@ wgpu = ["dep:mica-relation-wgpu"]
 [dependencies]
 compio.workspace = true
 fast-telemetry.workspace = true
+futures-util.workspace = true
 mica-compiler.workspace = true
 mica-relation-wgpu = { workspace = true, optional = true }
 mica-runtime.workspace = true

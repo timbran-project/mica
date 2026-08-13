@@ -32,7 +32,6 @@ static ACTIVE_ASYNC_WORKERS: AtomicI64 = AtomicI64::new(0);
 static ACTIVE_TIMER_RESUME_WORKERS: AtomicI64 = AtomicI64::new(0);
 static ACTIVE_MAILBOX_TIMEOUT_WORKERS: AtomicI64 = AtomicI64::new(0);
 static ACTIVE_EXTERNAL_REQUEST_WORKERS: AtomicI64 = AtomicI64::new(0);
-static ACTIVE_EXTERNAL_REQUEST_TIMEOUT_WORKERS: AtomicI64 = AtomicI64::new(0);
 static ACTIVE_MAILBOX_RECV_WORKERS: AtomicI64 = AtomicI64::new(0);
 static ACTIVE_MAILBOX_WAKE_WORKERS: AtomicI64 = AtomicI64::new(0);
 static ACTIVE_SPAWN_CHILD_WORKERS: AtomicI64 = AtomicI64::new(0);
@@ -55,7 +54,6 @@ pub enum AsyncWorkerKind {
     TimerResume,
     MailboxTimeout,
     ExternalRequest,
-    ExternalRequestTimeout,
     MailboxRecv,
     MailboxWake,
     SpawnChild,
@@ -301,7 +299,6 @@ fn active_worker_counter(kind: AsyncWorkerKind) -> &'static AtomicI64 {
         AsyncWorkerKind::TimerResume => &ACTIVE_TIMER_RESUME_WORKERS,
         AsyncWorkerKind::MailboxTimeout => &ACTIVE_MAILBOX_TIMEOUT_WORKERS,
         AsyncWorkerKind::ExternalRequest => &ACTIVE_EXTERNAL_REQUEST_WORKERS,
-        AsyncWorkerKind::ExternalRequestTimeout => &ACTIVE_EXTERNAL_REQUEST_TIMEOUT_WORKERS,
         AsyncWorkerKind::MailboxRecv => &ACTIVE_MAILBOX_RECV_WORKERS,
         AsyncWorkerKind::MailboxWake => &ACTIVE_MAILBOX_WAKE_WORKERS,
         AsyncWorkerKind::SpawnChild => &ACTIVE_SPAWN_CHILD_WORKERS,

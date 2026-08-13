@@ -1775,7 +1775,7 @@ mod tests {
                 let actor = runner
                     .named_identity(Symbol::intern("agent/default"))
                     .unwrap();
-                let handler: mica_driver::ExternalRequestHandler = Arc::new(|request| {
+                let handler: mica_driver::ExternalRequestHandler = Arc::new(|_, request| {
                     Box::pin(async move {
                         assert_eq!(request.service, Symbol::intern("openai"));
                         compio::time::sleep(Duration::from_millis(50)).await;

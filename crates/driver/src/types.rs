@@ -24,10 +24,13 @@ use std::future::Future;
 use std::num::NonZeroUsize;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::task::Poll;
 
 pub type ExternalRequestFuture = Pin<Box<dyn Future<Output = Value> + 'static>>;
 pub type ExternalRequestHandler =
-    Arc<dyn Fn(ExternalRequest) -> ExternalRequestFuture + Send + Sync>;
+    Arc<dyn Fn(ExternalRequestContext, ExternalRequest) -> ExternalRequestFuture + Send + Sync>;
 pub type ExternalStreamEmitFuture = Pin<Box<dyn Future<Output = Result<(), String>> + 'static>>;
 
 #[derive(Clone)]
@@ -45,9 +48,73 @@ impl ExternalStreamEmitter {
     }
 }
 
-pub type ExternalStreamRequestHandler =
-    Arc<dyn Fn(ExternalRequest, ExternalStreamEmitter) -> ExternalRequestFuture + Send + Sync>;
+pub type ExternalStreamRequestHandler = Arc<
+    dyn Fn(ExternalRequestContext, ExternalRequest, ExternalStreamEmitter) -> ExternalRequestFuture
+        + Send
+        + Sync,
+>;
 pub type FileinIncludeLoader = Arc<dyn Fn(&str) -> Result<String, String> + Send + Sync>;
+
+#[derive(Clone)]
+pub struct ExternalRequestCancellation {
+    inner: Arc<ExternalRequestCancellationState>,
+}
+
+struct ExternalRequestCancellationState {
+    cancelled: AtomicBool,
+    wakers: Mutex<Vec<std::task::Waker>>,
+}
+
+impl ExternalRequestCancellation {
+    pub(crate) fn new() -> Self {
+        Self {
+            inner: Arc::new(ExternalRequestCancellationState {
+                cancelled: AtomicBool::new(false),
+                wakers: Mutex::new(Vec::new()),
+            }),
+        }
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.inner.cancelled.load(Ordering::Acquire)
+    }
+
+    pub async fn cancelled(&self) {
+        std::future::poll_fn(|context| {
+            if self.is_cancelled() {
+                return Poll::Ready(());
+            }
+            let mut wakers = self.inner.wakers.lock().unwrap();
+            if self.is_cancelled() {
+                return Poll::Ready(());
+            }
+            let waker = context.waker().clone();
+            if !wakers.iter().any(|entry| entry.will_wake(&waker)) {
+                wakers.push(waker);
+            }
+            Poll::Pending
+        })
+        .await
+    }
+
+    pub(crate) fn cancel(&self) {
+        if self.inner.cancelled.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        for waker in std::mem::take(&mut *self.inner.wakers.lock().unwrap()) {
+            waker.wake();
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct ExternalRequestContext {
+    pub task_id: TaskId,
+    pub principal: Option<Identity>,
+    pub actor: Option<Identity>,
+    pub endpoint: Identity,
+    pub cancellation: ExternalRequestCancellation,
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TaskContext {

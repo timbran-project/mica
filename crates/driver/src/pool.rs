@@ -11,17 +11,19 @@
 // You should have received a copy of the GNU Affero General Public License along
 // with this program. If not, see <https://www.gnu.org/licenses/>.
 
-use crate::execution::CpuAdmission;
+use crate::execution::{CpuAdmission, ExternalRequestAdmission};
 use crate::{
-    DEFAULT_EVENT_QUEUE_CAPACITY, DEFAULT_SUBSCRIPTION_QUEUE_BUDGET, DispatcherConfig, DriverError,
-    DriverEvent, DriverResources, DriverSubscriptionMailbox, DriverSubscriptionRequest,
-    EndpointCloseReport, ExternalRequestHandler, ExternalStreamEmitter,
-    ExternalStreamRequestHandler, FileinIncludeLoader, RelationAcceleration,
+    DEFAULT_EVENT_QUEUE_CAPACITY, DEFAULT_EXTERNAL_REQUEST_CAPACITY,
+    DEFAULT_SUBSCRIPTION_QUEUE_BUDGET, DispatcherConfig, DriverError, DriverEvent, DriverResources,
+    DriverSubscriptionMailbox, DriverSubscriptionRequest, EndpointCloseReport,
+    ExternalRequestCancellation, ExternalRequestContext, ExternalRequestHandler,
+    ExternalStreamEmitter, ExternalStreamRequestHandler, FileinIncludeLoader, RelationAcceleration,
     TaskCancellationReason, TaskContext, configure_dispatcher,
     metrics::{self, AsyncWorkerKind, DispatchOperation, WorkerOutcome},
 };
 use compio::dispatcher::Dispatcher;
 use compio::runtime::JoinHandle;
+use futures_util::future::{Either, select};
 #[cfg(feature = "wgpu")]
 use mica_relation_wgpu::{WgpuAccelerator, WgpuAcceleratorOptions};
 use mica_runtime::{
@@ -39,7 +41,7 @@ use std::num::NonZeroUsize;
 use std::pin::Pin;
 #[cfg(feature = "wgpu")]
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
 use std::time::{Duration, Instant};
@@ -86,6 +88,7 @@ struct PoolInner {
     runner: Arc<SharedSourceRunner>,
     dispatcher: Mutex<Option<Dispatcher>>,
     cpu_admission: Arc<CpuAdmission>,
+    external_request_admission: Arc<ExternalRequestAdmission>,
     external_request_handler: Option<ExternalRequestHandler>,
     external_stream_request_handler: Option<ExternalStreamRequestHandler>,
     subscription_queue_budget: NonZeroUsize,
@@ -123,6 +126,7 @@ enum DriverLifecycle {
 
 struct AsyncWorker {
     task_id: TaskId,
+    cancellation: Option<ExternalRequestCancellation>,
     handle: JoinHandle<()>,
 }
 
@@ -271,6 +275,7 @@ impl CompioTaskDriver {
             TaskLimits::default(),
             NonZeroUsize::new(DEFAULT_EVENT_QUEUE_CAPACITY).unwrap(),
             NonZeroUsize::new(DEFAULT_SUBSCRIPTION_QUEUE_BUDGET).unwrap(),
+            NonZeroUsize::new(DEFAULT_EXTERNAL_REQUEST_CAPACITY).unwrap(),
             RelationAcceleration::Automatic,
             external_request_handler,
             external_stream_request_handler,
@@ -298,6 +303,7 @@ impl CompioTaskDriver {
             resources.task_limits,
             resources.event_queue_capacity,
             resources.subscription_queue_budget,
+            resources.external_request_capacity,
             resources.relation_acceleration,
             external_request_handler,
             external_stream_request_handler,
@@ -312,6 +318,7 @@ impl CompioTaskDriver {
         task_limits: TaskLimits,
         event_queue_capacity: NonZeroUsize,
         subscription_queue_budget: NonZeroUsize,
+        external_request_capacity: NonZeroUsize,
         relation_acceleration: RelationAcceleration,
         external_request_handler: Option<ExternalRequestHandler>,
         external_stream_request_handler: Option<ExternalStreamRequestHandler>,
@@ -322,6 +329,8 @@ impl CompioTaskDriver {
             placement.worker_count,
             relation_parallelism,
         ));
+        let external_request_admission =
+            Arc::new(ExternalRequestAdmission::new(external_request_capacity));
         let dispatcher = builder
             .thread_names(|index| format!("mica-driver-pool-{index}"))
             .build()
@@ -410,6 +419,7 @@ impl CompioTaskDriver {
                 runner: Arc::new(runner.into_shared()),
                 dispatcher: Mutex::new(Some(dispatcher)),
                 cpu_admission,
+                external_request_admission,
                 external_request_handler,
                 external_stream_request_handler,
                 subscription_queue_budget,
@@ -999,7 +1009,12 @@ impl CompioTaskDriver {
                         state
                             .workers
                             .drain()
-                            .map(|(_, worker)| worker.handle)
+                            .map(|(_, worker)| {
+                                if let Some(cancellation) = worker.cancellation {
+                                    cancellation.cancel();
+                                }
+                                worker.handle
+                            })
                             .collect(),
                     )
                 }
@@ -1211,9 +1226,40 @@ impl CompioTaskDriver {
         }
         let worker_id = state.next_worker_id;
         state.next_worker_id = state.next_worker_id.wrapping_add(1).max(1);
-        state
-            .workers
-            .insert(worker_id, AsyncWorker { task_id, handle });
+        state.workers.insert(
+            worker_id,
+            AsyncWorker {
+                task_id,
+                cancellation: None,
+                handle,
+            },
+        );
+    }
+
+    fn track_external_worker(
+        &self,
+        task_id: TaskId,
+        cancellation: ExternalRequestCancellation,
+        handle: JoinHandle<()>,
+    ) {
+        let mut state = self.inner.state.lock().unwrap();
+        state.reap_finished_workers();
+        if state.lifecycle != DriverLifecycle::Running {
+            cancellation.cancel();
+            drop(state);
+            drop(handle);
+            return;
+        }
+        let worker_id = state.next_worker_id;
+        state.next_worker_id = state.next_worker_id.wrapping_add(1).max(1);
+        state.workers.insert(
+            worker_id,
+            AsyncWorker {
+                task_id,
+                cancellation: Some(cancellation),
+                handle,
+            },
+        );
     }
 
     async fn enqueue_event(&self, event: DriverEvent) {
@@ -1790,11 +1836,29 @@ impl CompioTaskDriver {
         let driver = self.clone();
         let handler = self.inner.external_request_handler.clone();
         let stream_handler = self.inner.external_stream_request_handler.clone();
+        let admission = Arc::clone(&self.inner.external_request_admission);
         let stream_sender = request
             .payload
             .map_get(&Value::symbol(Symbol::intern("stream_to")));
         let timeout = request.timeout_millis.map(Duration::from_millis);
         let service = request.service;
+        let task_context = self
+            .inner
+            .state
+            .lock()
+            .unwrap()
+            .contexts
+            .get(&task_id)
+            .cloned()
+            .expect("external request task context is registered");
+        let cancellation = ExternalRequestCancellation::new();
+        let request_context = ExternalRequestContext {
+            task_id,
+            principal: task_context.principal,
+            actor: task_context.actor,
+            endpoint: task_context.endpoint,
+            cancellation: cancellation.clone(),
+        };
         tracing::debug!(
             target: "mica_driver::pool",
             task_id,
@@ -1802,51 +1866,7 @@ impl CompioTaskDriver {
             timeout_millis = ?request.timeout_millis,
             "driver external request scheduled"
         );
-        let completed = Arc::new(AtomicBool::new(false));
-        if let Some(timeout) = timeout {
-            let timeout_driver = self.clone();
-            let timeout_completed = Arc::clone(&completed);
-            let timeout_service = service;
-            let handle = compio::runtime::spawn(async move {
-                metrics::async_worker_started(AsyncWorkerKind::ExternalRequestTimeout);
-                let start = Instant::now();
-                compio::time::sleep(timeout).await;
-                if timeout_completed
-                    .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-                    .is_err()
-                {
-                    metrics::async_worker_finished(
-                        AsyncWorkerKind::ExternalRequestTimeout,
-                        WorkerOutcome::Cancelled,
-                        start.elapsed(),
-                    );
-                    return;
-                }
-                let value = Value::error(
-                    Symbol::intern("ExternalTimeout"),
-                    Some("external request timed out"),
-                    None,
-                );
-                tracing::warn!(
-                    target: "mica_driver::pool",
-                    task_id,
-                    service = timeout_service.name().unwrap_or("<unnamed>"),
-                    "external request timed out"
-                );
-                let mut outcome = WorkerOutcome::Timeout;
-                if let Err(error) = timeout_driver.resume(task_id, value).await {
-                    outcome = timeout_driver
-                        .record_worker_resume_error(task_id, error)
-                        .await;
-                }
-                metrics::async_worker_finished(
-                    AsyncWorkerKind::ExternalRequestTimeout,
-                    outcome,
-                    start.elapsed(),
-                );
-            });
-            self.track_worker(task_id, handle);
-        }
+        let tracked_cancellation = cancellation.clone();
         let handle = compio::runtime::spawn(async move {
             metrics::async_worker_started(AsyncWorkerKind::ExternalRequest);
             let start = Instant::now();
@@ -1856,74 +1876,42 @@ impl CompioTaskDriver {
                 service = service.name().unwrap_or("<unnamed>"),
                 "driver external request started"
             );
-            let value = if let Some(stream_sender) = stream_sender {
-                match stream_handler {
-                    Some(handler) => {
-                        let emit_driver = driver.clone();
-                        let emitter = ExternalStreamEmitter::new(Arc::new(move |value| {
-                            let emit_driver = emit_driver.clone();
-                            let stream_sender = stream_sender.clone();
-                            Box::pin(async move {
-                                emit_driver
-                                    .deliver_external_mailbox(stream_sender, value)
-                                    .await
-                                    .map_err(|error| emit_driver.format_error(&error))
-                            })
-                        }));
-                        handler(request, emitter).await
-                    }
-                    None => {
-                        let message = "no external stream request handler is configured";
-                        let _ = driver
-                            .deliver_external_mailbox(
-                                stream_sender,
-                                Value::map([
-                                    (
-                                        Value::symbol(Symbol::intern("type")),
-                                        Value::symbol(Symbol::intern("error")),
-                                    ),
-                                    (
-                                        Value::symbol(Symbol::intern("message")),
-                                        Value::string(message),
-                                    ),
-                                ]),
-                            )
-                            .await;
-                        Value::error(Symbol::intern("ExternalUnavailable"), Some(message), None)
-                    }
-                }
-            } else if service == Symbol::intern("mica_query") {
-                driver.perform_mica_query_request(task_id, request).await
-            } else {
-                match handler {
-                    Some(handler) => handler(request).await,
-                    None => {
+            let operation = Box::pin(async {
+                let _permit = admission.acquire().await;
+                driver
+                    .perform_external_request(
+                        request_context,
+                        request,
+                        handler,
+                        stream_handler,
+                        stream_sender,
+                    )
+                    .await
+            });
+            let (value, mut outcome) = if let Some(timeout) = timeout {
+                match select(operation, Box::pin(compio::time::sleep(timeout))).await {
+                    Either::Left((value, _)) => (value, WorkerOutcome::Complete),
+                    Either::Right(((), _)) => {
+                        cancellation.cancel();
                         tracing::warn!(
                             target: "mica_driver::pool",
                             task_id,
                             service = service.name().unwrap_or("<unnamed>"),
-                            "external request has no configured handler"
+                            "external request timed out"
                         );
-                        Value::error(
-                            Symbol::intern("ExternalUnavailable"),
-                            Some("no external request handler is configured"),
-                            None,
+                        (
+                            Value::error(
+                                Symbol::intern("ExternalTimeout"),
+                                Some("external request timed out"),
+                                None,
+                            ),
+                            WorkerOutcome::Timeout,
                         )
                     }
                 }
+            } else {
+                (operation.await, WorkerOutcome::Complete)
             };
-            if completed
-                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-                .is_err()
-            {
-                metrics::async_worker_finished(
-                    AsyncWorkerKind::ExternalRequest,
-                    WorkerOutcome::Cancelled,
-                    start.elapsed(),
-                );
-                return;
-            }
-            let mut outcome = WorkerOutcome::Complete;
             if let Err(error) = driver.resume(task_id, value).await {
                 outcome = driver.record_worker_resume_error(task_id, error).await;
             } else {
@@ -1941,7 +1929,76 @@ impl CompioTaskDriver {
                 start.elapsed(),
             );
         });
-        self.track_worker(task_id, handle);
+        self.track_external_worker(task_id, tracked_cancellation, handle);
+    }
+
+    async fn perform_external_request(
+        &self,
+        context: ExternalRequestContext,
+        request: mica_runtime::ExternalRequest,
+        handler: Option<ExternalRequestHandler>,
+        stream_handler: Option<ExternalStreamRequestHandler>,
+        stream_sender: Option<Value>,
+    ) -> Value {
+        if let Some(stream_sender) = stream_sender {
+            let Some(handler) = stream_handler else {
+                let message = "no external stream request handler is configured";
+                let _ = self
+                    .deliver_external_mailbox(
+                        stream_sender,
+                        Value::map([
+                            (
+                                Value::symbol(Symbol::intern("type")),
+                                Value::symbol(Symbol::intern("error")),
+                            ),
+                            (
+                                Value::symbol(Symbol::intern("message")),
+                                Value::string(message),
+                            ),
+                        ]),
+                    )
+                    .await;
+                return Value::error(Symbol::intern("ExternalUnavailable"), Some(message), None);
+            };
+            let emit_driver = self.clone();
+            let emit_cancellation = context.cancellation.clone();
+            let emitter = ExternalStreamEmitter::new(Arc::new(move |value| {
+                let emit_driver = emit_driver.clone();
+                let stream_sender = stream_sender.clone();
+                let cancellation = emit_cancellation.clone();
+                Box::pin(async move {
+                    if cancellation.is_cancelled() {
+                        return Err("external request was cancelled".to_owned());
+                    }
+                    emit_driver
+                        .deliver_external_mailbox(stream_sender, value)
+                        .await
+                        .map_err(|error| emit_driver.format_error(&error))
+                })
+            }));
+            return handler(context, request, emitter).await;
+        }
+        if request.service == Symbol::intern("mica_query") {
+            return self
+                .perform_mica_query_request(context.task_id, request)
+                .await;
+        }
+        match handler {
+            Some(handler) => handler(context, request).await,
+            None => {
+                tracing::warn!(
+                    target: "mica_driver::pool",
+                    task_id = context.task_id,
+                    service = request.service.name().unwrap_or("<unnamed>"),
+                    "external request has no configured handler"
+                );
+                Value::error(
+                    Symbol::intern("ExternalUnavailable"),
+                    Some("no external request handler is configured"),
+                    None,
+                )
+            }
+        }
     }
 
     async fn deliver_external_mailbox(
@@ -2152,7 +2209,12 @@ impl PoolState {
         worker_ids
             .into_iter()
             .filter_map(|worker_id| self.workers.remove(&worker_id))
-            .map(|worker| worker.handle)
+            .map(|worker| {
+                if let Some(cancellation) = worker.cancellation {
+                    cancellation.cancel();
+                }
+                worker.handle
+            })
             .collect()
     }
 
