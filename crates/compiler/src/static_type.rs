@@ -12,10 +12,10 @@
 // with this program. If not, see <https://www.gnu.org/licenses/>.
 
 use crate::kinds::{KindInference, KindSet};
-use crate::{Binding, BindingId, HirCollectionItem, HirExpr, Literal};
+use crate::{Binding, BindingId, HirArg, HirCollectionItem, HirExpr, Literal};
 use mica_var::ValueKind;
 use std::cmp::{max, min};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
@@ -276,6 +276,16 @@ impl RelationType {
 
     pub fn heading(&self) -> impl Iterator<Item = &str> {
         self.alternatives[0].heading()
+    }
+
+    pub fn iteration_row(&self) -> RowShape {
+        let mut columns = self.alternatives[0].columns().to_vec();
+        for alternative in self.alternatives.iter().skip(1) {
+            for ((_, accumulated), (_, incoming)) in columns.iter_mut().zip(alternative.columns()) {
+                *accumulated = StaticType::union([accumulated.clone(), incoming.clone()]);
+            }
+        }
+        RowShape { columns }
     }
 
     fn is_subtype_of(&self, other: &Self) -> bool {
@@ -602,6 +612,7 @@ impl std::error::Error for StaticTypeError {}
 
 pub(crate) struct StaticTypeInference<'a> {
     bindings: &'a [Binding],
+    locals: Option<&'a HashMap<BindingId, StaticType>>,
     kinds: KindInference<'a>,
 }
 
@@ -613,8 +624,14 @@ impl<'a> StaticTypeInference<'a> {
     ) -> Self {
         Self {
             bindings,
+            locals: None,
             kinds: KindInference::new(bindings, direct_result, runtime_result),
         }
+    }
+
+    pub(crate) fn with_locals(mut self, locals: &'a HashMap<BindingId, StaticType>) -> Self {
+        self.locals = Some(locals);
+        self
     }
 
     pub(crate) fn expr(&self, expr: &HirExpr) -> StaticType {
@@ -624,10 +641,18 @@ impl<'a> StaticTypeInference<'a> {
                 StaticType::Literal(StaticLiteral::Symbol(name.clone()))
             }
             HirExpr::Relation { heading, rows, .. } => self.relation(heading, rows),
+            HirExpr::RelationAtom(atom) => self.relation_scan(&atom.args),
+            HirExpr::Call { callee, args, .. } => self
+                .relation_operation(callee, args)
+                .unwrap_or_else(|| static_type_from_kinds(self.kinds.expr(expr))),
             HirExpr::LocalRef { binding, .. } => self
-                .bindings
-                .get(binding.0 as usize)
-                .and_then(|binding| binding.declared_type.clone())
+                .locals
+                .and_then(|locals| locals.get(binding).cloned())
+                .or_else(|| {
+                    self.bindings
+                        .get(binding.0 as usize)
+                        .and_then(|binding| binding.declared_type.clone())
+                })
                 .unwrap_or_else(|| static_type_from_kinds(self.kinds.expr(expr))),
             _ => static_type_from_kinds(self.kinds.expr(expr)),
         }
@@ -685,6 +710,203 @@ impl<'a> StaticTypeInference<'a> {
                 .expect("relation literal alternatives share their heading"),
         )
     }
+
+    fn relation_scan(&self, args: &[HirArg]) -> StaticType {
+        let mut columns = args
+            .iter()
+            .filter_map(|arg| match &arg.value {
+                HirExpr::QueryVar { name, .. } => Some(name.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        columns.sort();
+        columns.dedup();
+        if columns.is_empty() {
+            return StaticType::Kind(ValueKind::Bool);
+        }
+        relation_type_or_dynamic(
+            [
+                RowShape::new(columns.into_iter().map(|name| (name, StaticType::Dynamic)))
+                    .expect("query output names are unique"),
+            ],
+            Cardinality::UNRESTRICTED,
+        )
+    }
+
+    fn relation_operation(&self, callee: &HirExpr, args: &[HirArg]) -> Option<StaticType> {
+        let HirExpr::ExternalRef { name, .. } = callee else {
+            return None;
+        };
+        match name.as_str() {
+            "project" => self.project(args),
+            "union" => self.union_or_difference(args, true),
+            "difference" => self.union_or_difference(args, false),
+            "natural_join" => self.natural_join(args),
+            _ => None,
+        }
+    }
+
+    fn project(&self, args: &[HirArg]) -> Option<StaticType> {
+        let source = args.first().map(|arg| self.expr(&arg.value))?;
+        let StaticType::Relation(source) = source else {
+            return None;
+        };
+        let mut columns = args
+            .iter()
+            .skip(1)
+            .map(|arg| match &arg.value {
+                HirExpr::Symbol { name, .. } => Some(name.as_str()),
+                _ => None,
+            })
+            .collect::<Option<Vec<_>>>()?;
+        columns.sort();
+        columns.dedup();
+        let mut alternatives = Vec::new();
+        for alternative in source.alternatives() {
+            let projected = columns
+                .iter()
+                .map(|column| {
+                    alternative
+                        .columns()
+                        .iter()
+                        .find(|(name, _)| name == column)
+                        .map(|(name, ty)| (name.clone(), ty.clone()))
+                })
+                .collect::<Option<Vec<_>>>()?;
+            alternatives.push(RowShape::new(projected).ok()?);
+        }
+        let cardinality = if columns.is_empty() {
+            Cardinality {
+                min: usize::from(source.cardinality().min > 0),
+                max: source
+                    .cardinality()
+                    .max
+                    .map(|maximum| usize::from(maximum > 0)),
+            }
+        } else {
+            Cardinality {
+                min: usize::from(source.cardinality().min > 0),
+                max: source.cardinality().max,
+            }
+        };
+        Some(relation_type_or_dynamic(alternatives, cardinality))
+    }
+
+    fn union_or_difference(&self, args: &[HirArg], union: bool) -> Option<StaticType> {
+        let [left, right] = args else {
+            return None;
+        };
+        let StaticType::Relation(left) = self.expr(&left.value) else {
+            return None;
+        };
+        let StaticType::Relation(right) = self.expr(&right.value) else {
+            return None;
+        };
+        if !left.same_heading(&right) {
+            return None;
+        }
+        let (alternatives, cardinality) = if union {
+            let alternatives = left
+                .alternatives()
+                .iter()
+                .chain(right.alternatives())
+                .cloned()
+                .collect::<Vec<_>>();
+            let cardinality = Cardinality {
+                min: max(left.cardinality().min, right.cardinality().min),
+                max: match (left.cardinality().max, right.cardinality().max) {
+                    (Some(left), Some(right)) => left.checked_add(right),
+                    _ => None,
+                },
+            };
+            (alternatives, cardinality)
+        } else {
+            (
+                left.alternatives().to_vec(),
+                Cardinality {
+                    min: 0,
+                    max: left.cardinality().max,
+                },
+            )
+        };
+        Some(relation_type_or_dynamic(alternatives, cardinality))
+    }
+
+    fn natural_join(&self, args: &[HirArg]) -> Option<StaticType> {
+        let [left, right] = args else {
+            return None;
+        };
+        let StaticType::Relation(left) = self.expr(&left.value) else {
+            return None;
+        };
+        let StaticType::Relation(right) = self.expr(&right.value) else {
+            return None;
+        };
+        let right_heading = right.heading().collect::<Vec<_>>();
+        let shared = left.heading().any(|name| right_heading.contains(&name));
+        let mut alternatives = Vec::new();
+        for left_row in left.alternatives() {
+            for right_row in right.alternatives() {
+                let mut columns = left_row.columns().to_vec();
+                let mut compatible = true;
+                for (name, right_type) in right_row.columns() {
+                    if let Some((_, left_type)) = columns.iter_mut().find(|(left, _)| left == name)
+                    {
+                        let intersection = left_type.intersection(right_type);
+                        if intersection == StaticType::Never {
+                            compatible = false;
+                            break;
+                        }
+                        *left_type = intersection;
+                    } else {
+                        columns.push((name.clone(), right_type.clone()));
+                    }
+                }
+                if compatible {
+                    alternatives.push(RowShape::new(columns).ok()?);
+                }
+            }
+        }
+        let compatible = !alternatives.is_empty();
+        if !compatible {
+            let mut columns = left.alternatives()[0].columns().to_vec();
+            for (name, right_type) in right.alternatives()[0].columns() {
+                if let Some((_, left_type)) = columns.iter_mut().find(|(left, _)| left == name) {
+                    *left_type = left_type.intersection(right_type);
+                } else {
+                    columns.push((name.clone(), right_type.clone()));
+                }
+            }
+            alternatives.push(RowShape::new(columns).ok()?);
+        }
+        let cardinality = if !compatible {
+            Cardinality::EMPTY
+        } else {
+            Cardinality {
+                min: if shared {
+                    0
+                } else {
+                    left.cardinality()
+                        .min
+                        .saturating_mul(right.cardinality().min)
+                },
+                max: match (left.cardinality().max, right.cardinality().max) {
+                    (Some(left), Some(right)) => left.checked_mul(right),
+                    _ => None,
+                },
+            }
+        };
+        Some(relation_type_or_dynamic(alternatives, cardinality))
+    }
+}
+
+fn relation_type_or_dynamic(
+    alternatives: impl IntoIterator<Item = RowShape>,
+    cardinality: Cardinality,
+) -> StaticType {
+    RelationType::new(alternatives, cardinality)
+        .map(StaticType::Relation)
+        .unwrap_or(StaticType::Dynamic)
 }
 
 fn static_literal_type(literal: &Literal) -> StaticType {
@@ -790,6 +1012,8 @@ fn constant_value(expr: &HirExpr) -> Option<ConstantValue> {
 mod tests {
     use super::*;
     use crate::{HirProgram, parse_semantic};
+    use mica_relation_kernel::relation_algebra;
+    use mica_var::{RelationValue, Symbol, Tuple, Value};
 
     fn row(columns: impl IntoIterator<Item = (&'static str, StaticType)>) -> RowShape {
         RowShape::new(columns.into_iter().map(|(name, ty)| (name.to_owned(), ty))).unwrap()
@@ -902,6 +1126,42 @@ mod tests {
     }
 
     #[test]
+    fn relation_iteration_preserves_heading_and_joins_variant_cell_types() {
+        let relation = RelationType::new(
+            [
+                row([
+                    (
+                        "case",
+                        StaticType::Literal(StaticLiteral::Symbol("ok".to_owned())),
+                    ),
+                    ("value", StaticType::Kind(ValueKind::String)),
+                ]),
+                row([
+                    (
+                        "case",
+                        StaticType::Literal(StaticLiteral::Symbol("error".to_owned())),
+                    ),
+                    ("value", StaticType::Kind(ValueKind::Error)),
+                ]),
+            ],
+            Cardinality::UNRESTRICTED,
+        )
+        .unwrap();
+        let iteration = relation.iteration_row();
+        assert_eq!(
+            iteration.heading().collect::<Vec<_>>(),
+            vec!["case", "value"]
+        );
+        assert_eq!(
+            iteration.columns()[1].1,
+            StaticType::union([
+                StaticType::Kind(ValueKind::String),
+                StaticType::Kind(ValueKind::Error),
+            ])
+        );
+    }
+
+    #[test]
     fn none_some_unit_empty_relation_and_nested_options_remain_distinct() {
         let none = relation(
             vec![row([("value", StaticType::Never)])],
@@ -964,6 +1224,137 @@ mod tests {
                 max: Some(1)
             }
         );
+    }
+
+    #[test]
+    fn relation_operations_preserve_headings_cells_and_conservative_cardinality() {
+        let projected = inferred("project([:id, :name] { [1, \"one\"], [2, \"two\"] }, :name)");
+        let StaticType::Relation(projected) = projected else {
+            panic!("expected projected relation type");
+        };
+        assert_eq!(projected.heading().collect::<Vec<_>>(), vec!["name"]);
+        assert_eq!(
+            projected.cardinality(),
+            Cardinality {
+                min: 1,
+                max: Some(2)
+            }
+        );
+        assert_eq!(
+            projected.alternatives()[0].columns()[0].1,
+            StaticType::Kind(ValueKind::String)
+        );
+
+        let union = inferred("union([:id] { [1], [2] }, [:id] { [2], [3], [4] })");
+        let StaticType::Relation(union) = union else {
+            panic!("expected union relation type");
+        };
+        assert_eq!(
+            union.cardinality(),
+            Cardinality {
+                min: 3,
+                max: Some(5)
+            }
+        );
+
+        let difference = inferred("difference([:id] { [1], [2] }, [:id] { [2] })");
+        let StaticType::Relation(difference) = difference else {
+            panic!("expected difference relation type");
+        };
+        assert_eq!(
+            difference.cardinality(),
+            Cardinality {
+                min: 0,
+                max: Some(2)
+            }
+        );
+
+        let joined =
+            inferred("natural_join([:id, :name] { [1, \"one\"] }, [:active, :id] { [true, 1] })");
+        let StaticType::Relation(joined) = joined else {
+            panic!("expected joined relation type");
+        };
+        assert_eq!(
+            joined.heading().collect::<Vec<_>>(),
+            vec!["active", "id", "name"]
+        );
+        assert_eq!(
+            joined.cardinality(),
+            Cardinality {
+                min: 0,
+                max: Some(1)
+            }
+        );
+    }
+
+    #[test]
+    fn relation_scans_publish_dynamic_cells_and_unrestricted_cardinality() {
+        let scan = inferred("Thing(?id, ?name)");
+        let StaticType::Relation(scan) = scan else {
+            panic!("expected scan relation type");
+        };
+        assert_eq!(scan.heading().collect::<Vec<_>>(), vec!["id", "name"]);
+        assert_eq!(scan.cardinality(), Cardinality::UNRESTRICTED);
+        assert!(
+            scan.alternatives()[0]
+                .columns()
+                .iter()
+                .all(|(_, ty)| *ty == StaticType::Dynamic)
+        );
+        assert_eq!(inferred("Thing(1)"), StaticType::Kind(ValueKind::Bool));
+    }
+
+    #[test]
+    fn dynamic_relation_operations_fall_back_without_false_shapes() {
+        assert_eq!(inferred("project(load(), :value)"), StaticType::Dynamic);
+        assert_eq!(inferred("union(load(), [:value] {})"), StaticType::Dynamic);
+    }
+
+    #[test]
+    fn inferred_operation_upper_bounds_cover_observed_set_results() {
+        let id = Symbol::intern("id");
+        let name = Symbol::intern("name");
+        let active = Symbol::intern("active");
+        let left = RelationValue::new(
+            [id, name],
+            [
+                Tuple::from([Value::int(1).unwrap(), Value::string("one")]),
+                Tuple::from([Value::int(2).unwrap(), Value::string("two")]),
+            ],
+        )
+        .unwrap();
+        let right = RelationValue::new(
+            [active, id],
+            [
+                Tuple::from([Value::bool(true), Value::int(1).unwrap()]),
+                Tuple::from([Value::bool(false), Value::int(3).unwrap()]),
+            ],
+        )
+        .unwrap();
+        let projected = relation_algebra::project(&left, [name]).unwrap();
+        let joined = relation_algebra::natural_join(&left, &right).unwrap();
+
+        for (source, observed) in [
+            (
+                "project([:id, :name] { [1, \"one\"], [2, \"two\"] }, :name)",
+                projected.len(),
+            ),
+            (
+                "natural_join([:id, :name] { [1, \"one\"], [2, \"two\"] }, [:active, :id] { [true, 1], [false, 3] })",
+                joined.len(),
+            ),
+        ] {
+            let StaticType::Relation(inferred) = inferred(source) else {
+                panic!("expected inferred relation");
+            };
+            assert!(
+                inferred
+                    .cardinality()
+                    .max
+                    .is_none_or(|maximum| observed <= maximum),
+                "observed {observed} rows exceeds inferred bound for {source}"
+            );
+        }
     }
 
     #[test]

@@ -123,6 +123,7 @@ pub enum ErrorField {
 pub enum KindCheckSite {
     Binding,
     Parameter,
+    Builtin,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
@@ -1119,6 +1120,209 @@ fn infer_opcode_kind(
     }
 }
 
+fn infer_type_facts(
+    register_count: usize,
+    opcodes: &[Opcode],
+    constants: &[Value],
+    operands: &[OperandRef],
+    query_bindings: &[QueryBinding],
+    catches: &[CompactCatchHandler],
+    kind_facts: &[Option<ValueKind>],
+) -> Box<[Option<TypeContract>]> {
+    let mut block_entries = vec![false; opcodes.len()];
+    if let Some(entry) = block_entries.first_mut() {
+        *entry = true;
+    }
+    let mut mark_target = |target: Target| {
+        if let Some(entry) = block_entries.get_mut(target.0 as usize) {
+            *entry = true;
+        }
+    };
+    for opcode in opcodes {
+        match opcode {
+            Opcode::Branch {
+                if_true, if_false, ..
+            } => {
+                mark_target(*if_true);
+                mark_target(*if_false);
+            }
+            Opcode::Jump { target } => mark_target(*target),
+            Opcode::EnterTry {
+                catches: handlers,
+                finally,
+                end,
+            } => {
+                for handler in table_range(catches, *handlers) {
+                    mark_target(handler.target);
+                }
+                if let Some(finally) = finally {
+                    mark_target(*finally);
+                }
+                mark_target(*end);
+            }
+            _ => {}
+        }
+    }
+
+    let mut registers = vec![None; register_count];
+    let mut facts = Vec::with_capacity(opcodes.len());
+    for (instruction, opcode) in opcodes.iter().enumerate() {
+        if block_entries[instruction] {
+            registers.fill(None);
+        }
+        let fact = infer_opcode_type(opcode, constants, operands, query_bindings, &registers)
+            .or_else(|| kind_facts[instruction].map(TypeContract::Kind));
+        if let Some(register) = opcode.kind_fact_register()
+            && let Some(slot) = registers.get_mut(register.0 as usize)
+        {
+            *slot = fact.clone();
+        }
+        facts.push(fact);
+        if matches!(
+            opcode,
+            Opcode::Branch { .. }
+                | Opcode::Jump { .. }
+                | Opcode::ExitTry
+                | Opcode::EndFinally
+                | Opcode::Return { .. }
+                | Opcode::Abort { .. }
+                | Opcode::Raise { .. }
+        ) {
+            registers.fill(None);
+        }
+    }
+    facts.into_boxed_slice()
+}
+
+fn infer_opcode_type(
+    opcode: &Opcode,
+    constants: &[Value],
+    operands: &[OperandRef],
+    query_bindings: &[QueryBinding],
+    registers: &[Option<TypeContract>],
+) -> Option<TypeContract> {
+    let operand_type = |operand: OperandRef| match operand {
+        OperandRef::Register(register) => registers.get(register.0 as usize)?.clone(),
+        OperandRef::Constant(constant) => constants.get(constant.0 as usize).map(value_contract),
+    };
+    match opcode {
+        Opcode::Load { value, .. } => constants.get(value.0 as usize).map(value_contract),
+        Opcode::Move { src, .. } => registers.get(src.0 as usize)?.clone(),
+        Opcode::CheckKind { expected, .. } => Some(TypeContract::Kind(*expected)),
+        Opcode::CheckType { expected, .. } => Some(expected.clone()),
+        Opcode::BuildRelation {
+            heading,
+            cells,
+            row_count,
+            ..
+        } => {
+            let heading = table_range(operands, *heading)
+                .iter()
+                .map(|operand| match operand {
+                    OperandRef::Constant(id) => constants.get(id.0 as usize)?.as_symbol(),
+                    OperandRef::Register(_) => None,
+                })
+                .collect::<Option<Vec<_>>>()?;
+            let cells = table_range(operands, *cells);
+            let arity = heading.len();
+            let mut order = (0..arity).collect::<Vec<_>>();
+            order.sort_by_key(|position| heading[*position]);
+            let mut alternatives = if *row_count == 0 {
+                vec![RelationRowContract {
+                    columns: order
+                        .iter()
+                        .map(|position| (heading[*position], TypeContract::Never))
+                        .collect(),
+                }]
+            } else {
+                (0..usize::from(*row_count))
+                    .map(|row| {
+                        Some(RelationRowContract {
+                            columns: order
+                                .iter()
+                                .map(|position| {
+                                    let cell = cells.get(row * arity + position)?;
+                                    Some((heading[*position], operand_type(*cell)?))
+                                })
+                                .collect::<Option<Vec<_>>>()?,
+                        })
+                    })
+                    .collect::<Option<Vec<_>>>()?
+            };
+            alternatives.sort();
+            alternatives.dedup();
+            Some(TypeContract::Relation(RelationTypeContract {
+                alternatives,
+                minimum_rows: usize::from(*row_count),
+                maximum_rows: Some(usize::from(*row_count)),
+            }))
+        }
+        Opcode::ScanBindings { outputs, .. } => {
+            let mut columns = table_range(query_bindings, *outputs)
+                .iter()
+                .map(|binding| (binding.name, TypeContract::Dynamic))
+                .collect::<Vec<_>>();
+            columns.sort_by_key(|(name, _)| *name);
+            Some(TypeContract::Relation(RelationTypeContract {
+                alternatives: vec![RelationRowContract { columns }],
+                minimum_rows: 0,
+                maximum_rows: None,
+            }))
+        }
+        _ => None,
+    }
+}
+
+fn value_contract(value: &Value) -> TypeContract {
+    if let Some(value) = value.as_bool() {
+        return TypeContract::Literal(TypeLiteralContract::Bool(value));
+    }
+    if let Some(value) = value.as_symbol() {
+        return TypeContract::Literal(TypeLiteralContract::Symbol(value));
+    }
+    if let Some(value) = value.as_error_code() {
+        return TypeContract::Literal(TypeLiteralContract::ErrorCode(value));
+    }
+    if value.is_empty_relation() {
+        return TypeContract::Literal(TypeLiteralContract::EmptyRelation);
+    }
+    if let Some(contract) = value.with_relation(|relation| {
+        if relation.arity() == 0 && relation.len() == 1 {
+            return TypeContract::Literal(TypeLiteralContract::Unit);
+        }
+        let alternatives = if relation.is_empty() {
+            vec![RelationRowContract {
+                columns: relation
+                    .heading()
+                    .iter()
+                    .map(|name| (*name, TypeContract::Never))
+                    .collect(),
+            }]
+        } else {
+            relation
+                .rows()
+                .iter()
+                .map(|row| RelationRowContract {
+                    columns: relation
+                        .heading()
+                        .iter()
+                        .zip(row.values())
+                        .map(|(name, value)| (*name, value_contract(value)))
+                        .collect(),
+                })
+                .collect()
+        };
+        TypeContract::Relation(RelationTypeContract {
+            alternatives,
+            minimum_rows: relation.len(),
+            maximum_rows: Some(relation.len()),
+        })
+    }) {
+        return contract;
+    }
+    TypeContract::Kind(value.kind())
+}
+
 fn infer_numeric_result_kind(
     op: RuntimeBinaryOp,
     left: Option<ValueKind>,
@@ -1234,6 +1438,7 @@ pub(crate) struct NaturalIntegerLoopSite {
     pub(crate) region_instruction_count: usize,
     pub(crate) registers: Box<[Register]>,
     pub(crate) collection_view_registers: Box<[Register]>,
+    pub(crate) relation_shapes: Box<[(Register, RelationTypeContract)]>,
     pub(crate) current: Register,
     pub(crate) delta: i64,
     pub(crate) limit: Register,
@@ -1254,6 +1459,7 @@ impl Debug for NaturalIntegerLoopSite {
             .field("region_instruction_count", &self.region_instruction_count)
             .field("registers", &self.registers)
             .field("collection_view_registers", &self.collection_view_registers)
+            .field("relation_shapes", &self.relation_shapes)
             .field("current", &self.current)
             .field("delta", &self.delta)
             .field("limit", &self.limit)
@@ -1283,6 +1489,7 @@ impl NativeProgramCache {
         opcodes: &[Opcode],
         constants: &[Value],
         kind_facts: &[Option<ValueKind>],
+        type_facts: &[Option<TypeContract>],
     ) -> Option<Self> {
         let integer_loop_sites = (2..opcodes.len())
             .filter_map(|branch_ip| recognize_integer_loop(opcodes, branch_ip))
@@ -1294,7 +1501,9 @@ impl NativeProgramCache {
             .into_boxed_slice();
         let natural_integer_loop_sites = (0..opcodes.len())
             .filter_map(|branch_ip| {
-                recognize_natural_integer_loop(opcodes, constants, kind_facts, branch_ip)
+                recognize_natural_integer_loop(
+                    opcodes, constants, kind_facts, type_facts, branch_ip,
+                )
             })
             .collect::<Vec<_>>()
             .into_boxed_slice();
@@ -1579,6 +1788,7 @@ fn recognize_natural_integer_loop(
     opcodes: &[Opcode],
     constants: &[Value],
     kind_facts: &[Option<ValueKind>],
+    type_facts: &[Option<TypeContract>],
     branch_ip: usize,
 ) -> Option<NaturalIntegerLoopSite> {
     let Opcode::Branch {
@@ -1697,6 +1907,11 @@ fn recognize_natural_integer_loop(
     ) {
         plan = specialized;
     }
+    let relation_shapes = relation_collection_shapes(
+        opcodes.get(..header_ip)?,
+        type_facts.get(..header_ip)?,
+        &collection_view_registers,
+    );
     Some(NaturalIntegerLoopSite {
         header_ip,
         branch_ip,
@@ -1705,6 +1920,7 @@ fn recognize_natural_integer_loop(
         region_instruction_count: region.len(),
         registers,
         collection_view_registers,
+        relation_shapes,
         current,
         delta,
         limit,
@@ -1712,6 +1928,35 @@ fn recognize_natural_integer_loop(
         plan,
         compiled: OnceLock::new(),
     })
+}
+
+#[cfg(feature = "cranelift")]
+fn relation_collection_shapes(
+    preheader: &[Opcode],
+    type_facts: &[Option<TypeContract>],
+    collection_registers: &[Register],
+) -> Box<[(Register, RelationTypeContract)]> {
+    let mut facts = BTreeMap::<Register, RelationTypeContract>::new();
+    for (opcode, fact) in preheader.iter().zip(type_facts) {
+        if let Some(register) = opcode.kind_fact_register() {
+            match fact {
+                Some(TypeContract::Relation(relation)) => {
+                    facts.insert(register, relation.clone());
+                }
+                _ => {
+                    facts.remove(&register);
+                }
+            }
+        }
+        if matches!(opcode, Opcode::Branch { .. } | Opcode::Jump { .. }) {
+            facts.clear();
+        }
+    }
+    collection_registers
+        .iter()
+        .filter_map(|register| facts.get(register).cloned().map(|ty| (*register, ty)))
+        .collect::<Vec<_>>()
+        .into_boxed_slice()
 }
 
 #[cfg(feature = "cranelift")]
@@ -2343,6 +2588,7 @@ pub struct Program {
     register_count: usize,
     opcodes: Arc<[Opcode]>,
     kind_facts: Arc<[Option<ValueKind>]>,
+    type_facts: Arc<[Option<TypeContract>]>,
     constants: Arc<[Value]>,
     list_items: Arc<[CompactListItem]>,
     map_items: Arc<[CompactMapItem]>,
@@ -2396,6 +2642,14 @@ impl Program {
         let kind = self.kind_facts.get(instruction).copied().flatten()?;
         let register = self.opcodes.get(instruction)?.kind_fact_register()?;
         Some((register, kind))
+    }
+
+    /// Returns the structural type established by an instruction on normal
+    /// fallthrough, together with the affected register.
+    pub fn type_fact_after(&self, instruction: usize) -> Option<(Register, &TypeContract)> {
+        let ty = self.type_facts.get(instruction)?.as_ref()?;
+        let register = self.opcodes.get(instruction)?.kind_fact_register()?;
+        Some((register, ty))
     }
 
     #[inline]
@@ -3261,13 +3515,23 @@ impl ProgramBuilder {
             &self.constants,
             &self.catches,
         );
+        let type_facts = infer_type_facts(
+            register_count,
+            &self.opcodes,
+            &self.constants,
+            &self.operands,
+            &self.query_bindings,
+            &self.catches,
+            &kind_facts,
+        );
         #[cfg(feature = "cranelift")]
         let native_cache =
-            NativeProgramCache::recognize(&self.opcodes, &self.constants, &kind_facts);
+            NativeProgramCache::recognize(&self.opcodes, &self.constants, &kind_facts, &type_facts);
         let program = Program {
             register_count,
             opcodes: self.opcodes.into(),
             kind_facts: kind_facts.into(),
+            type_facts: type_facts.into(),
             constants: self.constants.into(),
             list_items: self.list_items.into(),
             map_items: self.map_items.into(),
@@ -4513,6 +4777,7 @@ const KIND_FACT_UNKNOWN: u8 = u8::MAX;
 
 const KIND_CHECK_BINDING: u8 = 0;
 const KIND_CHECK_PARAMETER: u8 = 1;
+const KIND_CHECK_BUILTIN: u8 = 2;
 
 const BINARY_EQ: u8 = 0;
 const BINARY_NE: u8 = 1;
@@ -5252,6 +5517,7 @@ fn write_kind_check_site(out: &mut Vec<u8>, site: KindCheckSite) {
     out.push(match site {
         KindCheckSite::Binding => KIND_CHECK_BINDING,
         KindCheckSite::Parameter => KIND_CHECK_PARAMETER,
+        KindCheckSite::Builtin => KIND_CHECK_BUILTIN,
     });
 }
 
@@ -6138,6 +6404,7 @@ impl<'a> ByteReader<'a> {
         match self.read_u8()? {
             KIND_CHECK_BINDING => Ok(KindCheckSite::Binding),
             KIND_CHECK_PARAMETER => Ok(KindCheckSite::Parameter),
+            KIND_CHECK_BUILTIN => Ok(KindCheckSite::Builtin),
             _ => Err(artifact_error("unknown kind check site tag")),
         }
     }

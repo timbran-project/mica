@@ -1395,6 +1395,83 @@ fn program_kind_facts_propagate_exact_instruction_results() {
 }
 
 #[test]
+fn program_structural_facts_cover_literals_scans_and_control_flow_merges() {
+    let value = Symbol::intern("value");
+    let literal = Program::new(
+        1,
+        [
+            Instruction::BuildRelation {
+                dst: reg(0),
+                heading: vec![value],
+                cells: vec![v(int(1)), v(int(2))],
+                row_count: 2,
+            },
+            Instruction::Return { value: r(0) },
+        ],
+    )
+    .unwrap();
+    let Some((register, TypeContract::Relation(contract))) = literal.type_fact_after(0) else {
+        panic!("relation literal should publish a structural fact");
+    };
+    assert_eq!(register, reg(0));
+    assert_eq!(contract.minimum_rows, 2);
+    assert_eq!(contract.maximum_rows, Some(2));
+    assert_eq!(contract.alternatives[0].columns[0].0, value);
+    assert_eq!(
+        contract.alternatives[0].columns[0].1,
+        TypeContract::Kind(ValueKind::Int)
+    );
+
+    let scan = Program::new(
+        1,
+        [
+            Instruction::ScanBindings {
+                dst: reg(0),
+                relation: rel(1),
+                bindings: vec![None],
+                outputs: vec![QueryBinding {
+                    name: value,
+                    position: 0,
+                }],
+            },
+            Instruction::Return { value: r(0) },
+        ],
+    )
+    .unwrap();
+    let Some((_, TypeContract::Relation(contract))) = scan.type_fact_after(0) else {
+        panic!("relation scan should publish a structural fact");
+    };
+    assert_eq!(contract.minimum_rows, 0);
+    assert_eq!(contract.maximum_rows, None);
+    assert_eq!(
+        contract.alternatives[0].columns,
+        vec![(value, TypeContract::Dynamic)]
+    );
+
+    let merge = Program::new(
+        3,
+        [
+            Instruction::Load {
+                dst: reg(0),
+                value: Value::relation([value], [Tuple::from([int(1)])]).unwrap(),
+            },
+            Instruction::Branch {
+                condition: reg(1),
+                if_true: 2,
+                if_false: 2,
+            },
+            Instruction::Move {
+                dst: reg(2),
+                src: reg(0),
+            },
+            Instruction::Return { value: r(2) },
+        ],
+    )
+    .unwrap();
+    assert_eq!(merge.type_fact_after(2), None);
+}
+
+#[test]
 fn program_artifact_rejects_invalid_kind_check_fields() {
     let program = Program::new(
         1,

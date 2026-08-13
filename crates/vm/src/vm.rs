@@ -3565,6 +3565,7 @@ fn kind_check_error(
     let boundary = match site {
         KindCheckSite::Binding => "binding",
         KindCheckSite::Parameter => "parameter",
+        KindCheckSite::Builtin => "builtin result",
     };
     let subject = subject
         .name()
@@ -3589,6 +3590,7 @@ fn type_check_error(
     let boundary = match site {
         KindCheckSite::Binding => "binding",
         KindCheckSite::Parameter => "parameter",
+        KindCheckSite::Builtin => "builtin result",
     };
     let subject = subject
         .name()

@@ -14,11 +14,11 @@
 use crate::kinds::{KindInference, KindSet, iteration_binding_kinds};
 use crate::static_type::StaticTypeInference;
 use crate::{
-    BinaryOp, BindingId, Diagnostic, DispatchRestriction, EffectKind, HirArg, HirCatch,
-    HirCollectionItem, HirExpr, HirFunctionBody, HirItem, HirLoopBinding, HirMethodParam, HirPlace,
-    HirProgram, HirRecovery, HirRelationAtom, HirRuleBodyItem, HirRuleGuard, HirScatterBinding,
-    Literal, LocalKind, NodeId, ParamMode, ParseError, RelationType, RowShape, SemanticProgram,
-    Span, StaticLiteral, StaticType, UnaryOp, parse_semantic,
+    BinaryOp, BindingId, Cardinality, Diagnostic, DispatchRestriction, EffectKind, HirArg,
+    HirCatch, HirCollectionItem, HirExpr, HirFunctionBody, HirItem, HirLoopBinding, HirMethodParam,
+    HirPlace, HirProgram, HirRecovery, HirRelationAtom, HirRuleBodyItem, HirRuleGuard,
+    HirScatterBinding, Literal, LocalKind, NodeId, ParamMode, ParseError, RelationType, RowShape,
+    SemanticProgram, Span, StaticLiteral, StaticType, UnaryOp, parse_semantic,
 };
 use mica_relation_kernel::{
     Atom, ConflictPolicy, DispatchRelations, RelationId, RelationKernel, RelationMetadata, Rule,
@@ -392,7 +392,7 @@ impl CompileContext {
     }
 
     pub fn runtime_function_result(&self, name: &str) -> Option<BuiltinResultKind> {
-        self.runtime_functions.get(name).copied()
+        self.runtime_functions.get(name).cloned()
     }
 
     pub fn host_request_function(&self, name: &str) -> Option<&HostRequestFunction> {
@@ -1330,6 +1330,7 @@ struct ProgramCompiler<'a> {
     instructions: ProgramBuilder,
     next_register: u16,
     locals: HashMap<BindingId, Register>,
+    local_types: HashMap<BindingId, StaticType>,
     functions: HashMap<BindingId, FunctionInfo>,
     loops: Vec<LoopContext>,
     returned: bool,
@@ -1343,6 +1344,7 @@ struct FunctionInfo {
     min_arity: usize,
     max_arity: Option<usize>,
     result_kinds: KindSet,
+    result_type: StaticType,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1370,6 +1372,7 @@ impl<'a> ProgramCompiler<'a> {
             instructions: ProgramBuilder::new(),
             next_register: 0,
             locals: HashMap::new(),
+            local_types: HashMap::new(),
             functions: HashMap::new(),
             loops: Vec::new(),
             returned: false,
@@ -1487,6 +1490,7 @@ impl<'a> ProgramCompiler<'a> {
                     let dst = self.emit_function_value(*id, function)?;
                     self.enforce_binding_kind(*id, binding, value, dst)?;
                     self.locals.insert(binding, dst);
+                    self.record_local_type(binding, value);
                     return Ok(dst);
                 }
                 let dst = match value {
@@ -1503,6 +1507,7 @@ impl<'a> ProgramCompiler<'a> {
                 if let Some(binding) = binding {
                     if let Some(value) = value.as_deref() {
                         self.enforce_binding_kind(*id, *binding, value, dst)?;
+                        self.record_local_type(*binding, value);
                     }
                     self.locals.insert(*binding, dst);
                 } else {
@@ -2400,6 +2405,7 @@ impl<'a> ProgramCompiler<'a> {
         let runtime_result = |name: &str| runtime_result_kinds(self.context, name);
         let inferred = KindInference::new(&self.semantic.bindings, &direct_result, &runtime_result)
             .function_result(body);
+        let inferred_type = self.infer_simple_function_result_type(body);
         if let Some(expected) = result_kind
             && !inferred.is_subset(KindSet::exact(*expected))
         {
@@ -2419,29 +2425,30 @@ impl<'a> ProgramCompiler<'a> {
         }
         if let Some(expected_type) = result_type
             && !matches!(expected_type, StaticType::Kind(_))
+            && !inferred_type.is_subtype_of(expected_type)
         {
-            let inferred_type = self.infer_simple_function_result_type(body);
-            if !inferred_type.is_subtype_of(expected_type) {
-                let function = name
-                    .and_then(|binding| self.semantic.bindings.get(binding.0 as usize))
-                    .map_or_else(
-                        || "function result".to_owned(),
-                        |binding| binding.name.clone(),
-                    );
-                return Err(CompileError::StaticTypeMismatch {
-                    node: *id,
-                    span: self.span(*id),
-                    subject: function,
-                    expected: expected_type.to_string(),
-                    inferred: inferred_type.to_string(),
-                });
-            }
+            let function = name
+                .and_then(|binding| self.semantic.bindings.get(binding.0 as usize))
+                .map_or_else(
+                    || "function result".to_owned(),
+                    |binding| binding.name.clone(),
+                );
+            return Err(CompileError::StaticTypeMismatch {
+                node: *id,
+                span: self.span(*id),
+                subject: function,
+                expected: expected_type.to_string(),
+                inferred: inferred_type.to_string(),
+            });
         }
 
         let mut compiler = ProgramCompiler::new(self.semantic, self.context);
         compiler.next_register = (captures.len() + params.len()) as u16;
         for (idx, capture) in captures.iter().enumerate() {
             compiler.locals.insert(*capture, Register(idx as u16));
+            if let Some(ty) = self.local_types.get(capture) {
+                compiler.local_types.insert(*capture, ty.clone());
+            }
         }
         for (idx, param) in params.iter().enumerate() {
             compiler
@@ -2482,6 +2489,7 @@ impl<'a> ProgramCompiler<'a> {
             min_arity,
             max_arity,
             result_kinds: inferred,
+            result_type: inferred_type,
         })
     }
 
@@ -2725,9 +2733,13 @@ impl<'a> ProgramCompiler<'a> {
             return Err(self.unsupported(id, "builtin calls only support positional arguments"));
         }
         let dst = self.alloc_register();
-        let result_kind = match self.context.runtime_function_result(name) {
-            Some(BuiltinResultKind::Exact(kind)) => Some(kind),
-            Some(BuiltinResultKind::Dynamic) | None => None,
+        let result = self.context.runtime_function_result(name);
+        let (result_kind, structural) = match result {
+            Some(BuiltinResultKind::Exact(kind)) => (Some(kind), None),
+            Some(BuiltinResultKind::Structural(contract)) => {
+                (contract.exact_outer_kind(), Some(contract))
+            }
+            Some(BuiltinResultKind::Dynamic) | None => (None, None),
         };
         let name = Symbol::intern(name);
         if args.iter().any(|arg| arg.splice) {
@@ -2748,6 +2760,14 @@ impl<'a> ProgramCompiler<'a> {
                 name,
                 result_kind,
                 args,
+            });
+        }
+        if let Some(expected) = structural {
+            self.emit(Instruction::CheckType {
+                value: dst,
+                expected,
+                site: KindCheckSite::Builtin,
+                subject: name,
             });
         }
         Ok(dst)
@@ -4882,10 +4902,28 @@ impl<'a> ProgramCompiler<'a> {
         };
         let runtime_result = |name: &str| runtime_result_kinds(self.context, name);
         StaticTypeInference::new(&self.semantic.bindings, &direct_result, &runtime_result)
+            .with_locals(&self.local_types)
             .relation(heading, rows)
     }
 
     fn infer_expr_static_type(&self, source: &HirExpr) -> StaticType {
+        if let HirExpr::Call { callee, .. } = source {
+            match callee.as_ref() {
+                HirExpr::LocalRef { binding, .. } => {
+                    if let Some(function) = self.functions.get(binding) {
+                        return function.result_type.clone();
+                    }
+                }
+                HirExpr::ExternalRef { name, .. } => {
+                    if let Some(BuiltinResultKind::Structural(contract)) =
+                        self.context.runtime_function_result(name)
+                    {
+                        return static_type_from_contract(&contract);
+                    }
+                }
+                _ => {}
+            }
+        }
         let direct_result = |binding| {
             self.functions
                 .get(&binding)
@@ -4893,7 +4931,17 @@ impl<'a> ProgramCompiler<'a> {
         };
         let runtime_result = |name: &str| runtime_result_kinds(self.context, name);
         StaticTypeInference::new(&self.semantic.bindings, &direct_result, &runtime_result)
+            .with_locals(&self.local_types)
             .expr(source)
+    }
+
+    fn record_local_type(&mut self, binding: BindingId, source: &HirExpr) {
+        let metadata = &self.semantic.bindings[binding.0 as usize];
+        if metadata.assigned || metadata.declared_type.is_some() {
+            return;
+        }
+        self.local_types
+            .insert(binding, self.infer_expr_static_type(source));
     }
 
     fn infer_simple_function_result_type(&self, body: &HirFunctionBody) -> StaticType {
@@ -4938,6 +4986,7 @@ fn runtime_result_kinds(context: &CompileContext, name: &str) -> Option<KindSet>
     match context.runtime_function_result(name)? {
         BuiltinResultKind::Dynamic => None,
         BuiltinResultKind::Exact(kind) => Some(KindSet::exact(kind)),
+        BuiltinResultKind::Structural(contract) => contract.exact_outer_kind().map(KindSet::exact),
     }
 }
 
@@ -4966,6 +5015,58 @@ fn type_contract(ty: &StaticType) -> TypeContract {
         }),
         StaticType::Union(types) => TypeContract::Union(types.iter().map(type_contract).collect()),
         StaticType::Relation(relation) => TypeContract::Relation(relation_type_contract(relation)),
+    }
+}
+
+fn static_type_from_contract(contract: &TypeContract) -> StaticType {
+    match contract {
+        TypeContract::Dynamic => StaticType::Dynamic,
+        TypeContract::Never => StaticType::Never,
+        TypeContract::Kind(kind) => StaticType::Kind(*kind),
+        TypeContract::Literal(literal) => StaticType::Literal(match literal {
+            TypeLiteralContract::Bool(value) => StaticLiteral::Bool(*value),
+            TypeLiteralContract::Symbol(value) => {
+                let Some(name) = value.name() else {
+                    return StaticType::Dynamic;
+                };
+                StaticLiteral::Symbol(name.to_owned())
+            }
+            TypeLiteralContract::ErrorCode(value) => {
+                let Some(name) = value.name() else {
+                    return StaticType::Dynamic;
+                };
+                StaticLiteral::ErrorCode(name.to_owned())
+            }
+            TypeLiteralContract::Unit => StaticLiteral::Unit,
+            TypeLiteralContract::EmptyRelation => StaticLiteral::EmptyRelation,
+        }),
+        TypeContract::Union(types) => {
+            StaticType::union(types.iter().map(static_type_from_contract))
+        }
+        TypeContract::Relation(relation) => {
+            let alternatives = relation
+                .alternatives
+                .iter()
+                .map(|row| {
+                    RowShape::new(row.columns.iter().map(|(name, ty)| {
+                        (
+                            name.name().unwrap_or("<unnamed>").to_owned(),
+                            static_type_from_contract(ty),
+                        )
+                    }))
+                })
+                .collect::<Result<Vec<_>, _>>();
+            let Ok(alternatives) = alternatives else {
+                return StaticType::Dynamic;
+            };
+            let Ok(cardinality) = Cardinality::new(relation.minimum_rows, relation.maximum_rows)
+            else {
+                return StaticType::Dynamic;
+            };
+            RelationType::new(alternatives, cardinality)
+                .map(StaticType::Relation)
+                .unwrap_or(StaticType::Dynamic)
+        }
     }
 }
 
@@ -6349,6 +6450,115 @@ mod tests {
                  end\n\
                  return caught"
             ),
+            &context,
+            &mut task_manager,
+        )
+        .unwrap();
+        assert!(matches!(
+            submitted.outcome,
+            TaskOutcome::Complete { value, .. } if value == Value::bool(true)
+        ));
+    }
+
+    #[test]
+    fn inferred_relation_shapes_flow_through_unassigned_locals() {
+        let context = CompileContext::new()
+            .with_runtime_function_result("project", BuiltinResultKind::Exact(ValueKind::Relation))
+            .with_runtime_function_result(
+                "natural_join",
+                BuiltinResultKind::Exact(ValueKind::Relation),
+            );
+        let compiled = compile_source(
+            "let left = [:id, :name] { [1, \"one\"] }\n\
+             let right = [:active, :id] { [true, 1] }\n\
+             let joined = natural_join(left, right)\n\
+             let names: relation<{:name -> string}> where rows in 0..1 = project(joined, :name)\n\
+             return names",
+            &context,
+        )
+        .unwrap();
+
+        assert!(
+            !compiled
+                .program
+                .instructions()
+                .iter()
+                .any(|instruction| matches!(instruction, Instruction::CheckType { .. }))
+        );
+
+        let direct = compile_source(
+            "let make = fn() => [:value] { [42] }\n\
+             let made: relation<{:value -> int}> where rows in 1 = make()\n\
+             return made",
+            &CompileContext::new(),
+        )
+        .unwrap();
+        assert!(
+            !direct
+                .program
+                .instructions()
+                .iter()
+                .any(|instruction| matches!(instruction, Instruction::CheckType { .. }))
+        );
+    }
+
+    #[test]
+    fn structural_builtin_metadata_checks_once_and_feeds_following_inference() {
+        let contract = TypeContract::Relation(RelationTypeContract {
+            alternatives: vec![RelationRowContract {
+                columns: vec![(Symbol::intern("value"), TypeContract::Kind(ValueKind::Int))],
+            }],
+            minimum_rows: 0,
+            maximum_rows: Some(1),
+        });
+        let context = CompileContext::new().with_runtime_function_result(
+            "load_optional",
+            BuiltinResultKind::Structural(contract.clone()),
+        );
+        let compiled = compile_source(
+            "let loaded: relation<{:value -> int}> where rows in 0..1 = load_optional()\nreturn loaded",
+            &context,
+        )
+        .unwrap();
+        let checks = compiled
+            .program
+            .instructions()
+            .into_iter()
+            .filter_map(|instruction| match instruction {
+                Instruction::CheckType { expected, site, .. } => Some((expected, site)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(checks, vec![(contract, KindCheckSite::Builtin)]);
+    }
+
+    #[test]
+    fn structural_builtin_contract_failures_are_catchable_with_the_original_result() {
+        let contract = TypeContract::Relation(RelationTypeContract {
+            alternatives: vec![RelationRowContract {
+                columns: vec![(Symbol::intern("value"), TypeContract::Kind(ValueKind::Int))],
+            }],
+            minimum_rows: 0,
+            maximum_rows: Some(1),
+        });
+        let context = CompileContext::new().with_runtime_function_result(
+            "load_optional",
+            BuiltinResultKind::Structural(contract.clone()),
+        );
+        let builtins = BuiltinRegistry::new().with_builtin(
+            "load_optional",
+            BuiltinResultKind::Structural(contract),
+            invalid_result,
+        );
+        let mut task_manager =
+            TaskManager::new(RelationKernel::new()).with_builtins(Arc::new(builtins));
+        let submitted = submit_source_task(
+            "let caught = try\n\
+               load_optional()\n\
+             catch E_TYPE as problem\n\
+               problem.value\n\
+             end\n\
+             return caught == [:case, :value] { [:ok, \"wrong\"] }",
             &context,
             &mut task_manager,
         )

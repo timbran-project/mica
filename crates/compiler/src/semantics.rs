@@ -81,6 +81,7 @@ pub struct Binding {
     pub name: String,
     pub kind: LocalKind,
     pub mutable: bool,
+    pub assigned: bool,
     pub declared_type: Option<StaticType>,
     pub declared_kind: Option<ValueKind>,
     pub scope: ScopeId,
@@ -255,6 +256,7 @@ impl<'a> Analyzer<'a> {
             id,
             name,
             mutable: kind.mutable_by_default(),
+            assigned: false,
             kind,
             declared_type,
             declared_kind,
@@ -1461,6 +1463,7 @@ impl<'a> Analyzer<'a> {
             Expr::Name { id, name, span } => match self.resolve(name, *id, scope) {
                 ResolvedName::Local(binding) => {
                     if self.bindings[binding.0 as usize].mutable {
+                        self.bindings[binding.0 as usize].assigned = true;
                         HirPlace::Local { id: *id, binding }
                     } else {
                         self.diagnostic(

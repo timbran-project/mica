@@ -11,7 +11,7 @@
 // You should have received a copy of the GNU Affero General Public License along
 // with this program. If not, see <https://www.gnu.org/licenses/>.
 
-use crate::{AuthorityContext, CapabilityGrant, Emission, MailboxSend, RuntimeError};
+use crate::{AuthorityContext, CapabilityGrant, Emission, MailboxSend, RuntimeError, TypeContract};
 use mica_relation_kernel::{RelationId, RelationKernel, RelationWorkspace, Transaction, Tuple};
 use mica_var::{Identity, Symbol, Value, ValueKind};
 use std::collections::BTreeMap;
@@ -436,12 +436,14 @@ where
 /// Successful result-kind contract for a host builtin.
 ///
 /// Raised errors do not contribute to this contract. `Exact` results are validated by the VM
-/// before the destination register receives the value; `Dynamic` makes no successful-result claim.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+/// before the destination register receives the value. `Structural` publishes a full successful
+/// result contract for compiler checks, and `Dynamic` makes no successful-result claim.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub enum BuiltinResultKind {
     #[default]
     Dynamic,
     Exact(ValueKind),
+    Structural(TypeContract),
 }
 
 #[derive(Clone)]
@@ -492,13 +494,15 @@ impl BuiltinRegistry {
     }
 
     pub fn result_kind(&self, name: Symbol) -> Option<BuiltinResultKind> {
-        self.builtins.get(&name).map(|entry| entry.result_kind)
+        self.builtins
+            .get(&name)
+            .map(|entry| entry.result_kind.clone())
     }
 
     pub fn result_kinds(&self) -> impl Iterator<Item = (Symbol, BuiltinResultKind)> + '_ {
         self.builtins
             .iter()
-            .map(|(name, entry)| (*name, entry.result_kind))
+            .map(|(name, entry)| (*name, entry.result_kind.clone()))
     }
 
     pub fn contains(&self, name: Symbol) -> bool {
