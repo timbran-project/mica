@@ -138,6 +138,7 @@ pub enum DriverError {
     Configuration(String),
     Join(String),
     MissingTaskContext(TaskId),
+    EphemeralIdentityExhausted,
     TaskCancelled(TaskId),
     EndpointClosed(Identity),
     DriverStopped,
@@ -162,6 +163,7 @@ impl DriverError {
             | Self::Configuration(_)
             | Self::Join(_)
             | Self::MissingTaskContext(_)
+            | Self::EphemeralIdentityExhausted
             | Self::TaskCancelled(_)
             | Self::EndpointClosed(_)
             | Self::DriverStopped => None,
@@ -178,6 +180,9 @@ impl Display for DriverError {
             Self::Join(error) => write!(f, "driver task failed: {error}"),
             Self::MissingTaskContext(task_id) => {
                 write!(f, "missing task context for task {task_id}")
+            }
+            Self::EphemeralIdentityExhausted => {
+                write!(f, "ephemeral host identity space is exhausted")
             }
             Self::TaskCancelled(task_id) => write!(f, "task {task_id} was cancelled"),
             Self::EndpointClosed(endpoint) => write!(f, "endpoint {endpoint:?} is closed"),

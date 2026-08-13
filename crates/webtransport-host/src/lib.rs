@@ -22,7 +22,6 @@ pub use state::{InProcessWebTransportHost, SessionBinding, WebTransportTlsConfig
 use std::sync::atomic::AtomicU32;
 
 pub const DEFAULT_BIND: &str = "127.0.0.1:4433";
-pub const DAEMON_ENDPOINT_ID_START: u64 = 0x00ea_0000_0000_0000;
 
 const ENDPOINT_OUTPUT_HIGH_WATER_DATAGRAMS: usize = 128;
 const ENDPOINT_OUTPUT_DRAIN_DATAGRAMS: usize = 64;
@@ -40,7 +39,7 @@ mod tests {
     use crate::state::*;
     use crate::sync::*;
     use bytes::Bytes;
-    use mica_driver::CompioTaskDriver;
+    use mica_driver::{CompioTaskDriver, EPHEMERAL_HOST_IDENTITY_START};
     use mica_host_protocol::dom_event_payload_json;
     use mica_host_protocol::{
         DomEventPayload, SUPPORTED_DOM_ATTRIBUTES, SUPPORTED_DOM_TAGS, SyncEnvelope,
@@ -120,7 +119,7 @@ mod tests {
 
     #[test]
     fn effect_datagrams_preserve_bytes_and_strings() {
-        let endpoint = Identity::new(DAEMON_ENDPOINT_ID_START).unwrap();
+        let endpoint = Identity::new(EPHEMERAL_HOST_IDENTITY_START).unwrap();
         assert_eq!(
             effect_datagram(endpoint, &Value::bytes([0xde, 0xad, 0xbe, 0xef])).as_ref(),
             &[0xde, 0xad, 0xbe, 0xef]
@@ -151,7 +150,7 @@ mod tests {
 
     #[test]
     fn sync_effect_values_encode_view_datagrams() {
-        let endpoint = Identity::new(DAEMON_ENDPOINT_ID_START).unwrap();
+        let endpoint = Identity::new(EPHEMERAL_HOST_IDENTITY_START).unwrap();
         let datagram = effect_datagram(
             endpoint,
             &Value::list([
@@ -207,7 +206,7 @@ mod tests {
 
     #[test]
     fn active_sync_views_snapshot_does_not_hold_session_lock() {
-        let endpoint = Identity::new(DAEMON_ENDPOINT_ID_START).unwrap();
+        let endpoint = Identity::new(EPHEMERAL_HOST_IDENTITY_START).unwrap();
         let sessions = Arc::new(Mutex::new(HashMap::new()));
         let state = SessionState::new();
         state
@@ -244,7 +243,7 @@ mod tests {
 
     #[test]
     fn drop_session_writer_removes_active_views() {
-        let endpoint = Identity::new(DAEMON_ENDPOINT_ID_START).unwrap();
+        let endpoint = Identity::new(EPHEMERAL_HOST_IDENTITY_START).unwrap();
         let host = InProcessWebTransportHost::new_without_event_pump(test_driver(
             SourceRunner::new_empty(),
         ));
@@ -277,13 +276,13 @@ mod tests {
         ));
         assert_eq!(
             host.allocate_endpoint().unwrap(),
-            Identity::new(DAEMON_ENDPOINT_ID_START).unwrap()
+            Identity::new(EPHEMERAL_HOST_IDENTITY_START).unwrap()
         );
     }
 
     #[test]
     fn routed_effect_reaches_session_output() {
-        let endpoint = Identity::new(DAEMON_ENDPOINT_ID_START).unwrap();
+        let endpoint = Identity::new(EPHEMERAL_HOST_IDENTITY_START).unwrap();
         let output = SessionOutput::new();
         let sessions = Arc::new(Mutex::new(HashMap::new()));
         sessions.lock().unwrap().insert(
@@ -308,7 +307,7 @@ mod tests {
 
     #[test]
     fn unrelated_completed_task_does_not_refresh_views() {
-        let endpoint = Identity::new(DAEMON_ENDPOINT_ID_START).unwrap();
+        let endpoint = Identity::new(EPHEMERAL_HOST_IDENTITY_START).unwrap();
         let output = SessionOutput::new();
         let sync = Mutex::new(SessionSyncState::default());
         sync.lock().unwrap().pending_tasks.insert(

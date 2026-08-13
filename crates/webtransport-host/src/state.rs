@@ -11,8 +11,8 @@
 // You should have received a copy of the GNU Affero General Public License along
 // with this program. If not, see <https://www.gnu.org/licenses/>.
 
+use crate::ENDPOINT_OUTPUT_HIGH_WATER_DATAGRAMS;
 use crate::sync::{send_sync_envelope_to, start_event_pump, store_rendered_sync_view_in};
-use crate::{DAEMON_ENDPOINT_ID_START, ENDPOINT_OUTPUT_HIGH_WATER_DATAGRAMS};
 use bytes::Bytes;
 use mica_driver::{CompioTaskDriver, DriverSubscriptionMailbox};
 use mica_host_protocol::{DomNode, SyncEnvelope, SyncMessageKind};
@@ -25,7 +25,7 @@ use std::future::Future;
 use std::io::BufReader;
 use std::path::Path;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
 
@@ -46,7 +46,6 @@ pub struct InProcessWebTransportHost {
     pub(crate) subscription_mailbox: Arc<DriverSubscriptionMailbox>,
     pub(crate) subscription_views: Arc<Mutex<HashMap<CapabilityId, SyncViewKey>>>,
     pub(crate) stop_events: Arc<AtomicBool>,
-    pub(crate) next_endpoint: AtomicU64,
 }
 
 #[derive(Default)]
@@ -266,7 +265,6 @@ impl InProcessWebTransportHost {
             subscription_mailbox,
             subscription_views,
             stop_events,
-            next_endpoint: AtomicU64::new(DAEMON_ENDPOINT_ID_START),
         }
     }
 
@@ -283,13 +281,13 @@ impl InProcessWebTransportHost {
             sessions: Arc::new(Mutex::new(HashMap::new())),
             subscription_views: Arc::new(Mutex::new(HashMap::new())),
             stop_events: Arc::new(AtomicBool::new(false)),
-            next_endpoint: AtomicU64::new(DAEMON_ENDPOINT_ID_START),
         }
     }
 
     pub(crate) fn allocate_endpoint(&self) -> Result<Identity, String> {
-        let raw = self.next_endpoint.fetch_add(1, Ordering::Relaxed);
-        Identity::new(raw).ok_or_else(|| "endpoint identity space is exhausted".to_owned())
+        self.driver
+            .allocate_ephemeral_identity()
+            .map_err(|error| self.driver.format_error(&error))
     }
 
     #[cfg(test)]

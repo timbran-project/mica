@@ -14,7 +14,6 @@
 use mica_driver::CompioTaskDriver;
 use mica_var::Identity;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 pub mod codec;
 
@@ -28,8 +27,6 @@ mod sync;
 pub use server::{serve, serve_in_process};
 
 pub const DEFAULT_BIND: &str = "127.0.0.1:8080";
-pub const DAEMON_ENDPOINT_ID_START: u64 = 0x00ec_0000_0000_0000;
-pub const DAEMON_REQUEST_ID_START: u64 = 0x00eb_0000_0000_0000;
 
 #[derive(Clone, Debug)]
 pub struct RequestBinding {
@@ -41,8 +38,6 @@ pub struct InProcessWebHost {
     pub(crate) driver: Arc<CompioTaskDriver>,
     pub(crate) sync: sync::InProcessSyncHost,
     pub(crate) auth: Option<Arc<auth::AuthSubsystem>>,
-    next_endpoint: AtomicU64,
-    next_request: AtomicU64,
 }
 
 impl InProcessWebHost {
@@ -52,8 +47,6 @@ impl InProcessWebHost {
             sync: sync::InProcessSyncHost::new(driver.clone()),
             driver,
             auth: None,
-            next_endpoint: AtomicU64::new(DAEMON_ENDPOINT_ID_START),
-            next_request: AtomicU64::new(DAEMON_REQUEST_ID_START),
         }
     }
 
@@ -63,13 +56,15 @@ impl InProcessWebHost {
     }
 
     pub(crate) fn allocate_endpoint(&self) -> Result<Identity, String> {
-        let raw = self.next_endpoint.fetch_add(1, Ordering::Relaxed);
-        Identity::new(raw).ok_or_else(|| "endpoint identity space is exhausted".to_owned())
+        self.driver
+            .allocate_ephemeral_identity()
+            .map_err(|error| self.driver.format_error(&error))
     }
 
     pub(crate) fn allocate_request(&self) -> Result<Identity, String> {
-        let raw = self.next_request.fetch_add(1, Ordering::Relaxed);
-        Identity::new(raw).ok_or_else(|| "request identity space is exhausted".to_owned())
+        self.driver
+            .allocate_ephemeral_identity()
+            .map_err(|error| self.driver.format_error(&error))
     }
 }
 

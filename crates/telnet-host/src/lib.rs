@@ -31,7 +31,7 @@ pub mod codec;
 use crate::codec::{TelnetCodec, TelnetCodecError, TelnetItem, encode_telnet_line};
 
 pub const DEFAULT_BIND: &str = "127.0.0.1:7777";
-pub const DAEMON_ENDPOINT_ID_START: u64 = 0x00ed_0000_0000_0000;
+const ZMQ_ENDPOINT_ID_START: u64 = 0x00ff_ed00_0000_0000;
 
 const ENDPOINT_OUTPUT_HIGH_WATER_LINES: usize = 128;
 const ENDPOINT_OUTPUT_DRAIN_LINES: usize = 64;
@@ -46,7 +46,6 @@ pub struct InProcessTelnetHost {
     driver: Arc<CompioTaskDriver>,
     endpoints: Arc<Mutex<BTreeMap<Identity, Arc<EndpointOutput>>>>,
     stop_events: Arc<AtomicBool>,
-    next_endpoint: AtomicU64,
 }
 
 pub struct ZmqTelnetHost {
@@ -97,7 +96,6 @@ impl InProcessTelnetHost {
             driver,
             endpoints,
             stop_events,
-            next_endpoint: AtomicU64::new(DAEMON_ENDPOINT_ID_START),
         }
     }
 
@@ -107,13 +105,13 @@ impl InProcessTelnetHost {
             driver: Arc::new(driver),
             endpoints: Arc::new(Mutex::new(BTreeMap::new())),
             stop_events: Arc::new(AtomicBool::new(false)),
-            next_endpoint: AtomicU64::new(DAEMON_ENDPOINT_ID_START),
         }
     }
 
     fn allocate_endpoint(&self) -> Result<Identity, String> {
-        let raw = self.next_endpoint.fetch_add(1, Ordering::Relaxed);
-        Identity::new(raw).ok_or_else(|| "endpoint identity space is exhausted".to_owned())
+        self.driver
+            .allocate_ephemeral_identity()
+            .map_err(|error| self.driver.format_error(&error))
     }
 }
 
@@ -144,7 +142,7 @@ impl ZmqTelnetHost {
             rpc_endpoint: rpc_endpoint.into(),
             options,
             host_name: host_name.into(),
-            next_endpoint: AtomicU64::new(DAEMON_ENDPOINT_ID_START),
+            next_endpoint: AtomicU64::new(ZMQ_ENDPOINT_ID_START),
         }
     }
 

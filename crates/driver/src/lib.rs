@@ -36,10 +36,10 @@ pub use config::{
     DEFAULT_EVENT_QUEUE_CAPACITY, DEFAULT_SUBSCRIPTION_QUEUE_BUDGET, DriverResources,
 };
 pub use mica_runtime::{
-    AuthorityContext, FileinMode, FileinReport, ReadOnlySourceQueryOptions,
-    ReadOnlySourceQueryReport, ReadOnlySourceQueryStatus, RunReport, SubmittedTask,
-    SubscriptionInitialDelivery, SubscriptionSubject, SuspendKind, TaskId, TaskLimits, TaskOutcome,
-    TaskRequest,
+    AuthorityContext, EPHEMERAL_HOST_IDENTITY_END, EPHEMERAL_HOST_IDENTITY_START, FileinMode,
+    FileinReport, ReadOnlySourceQueryOptions, ReadOnlySourceQueryReport, ReadOnlySourceQueryStatus,
+    RunReport, SubmittedTask, SubscriptionInitialDelivery, SubscriptionSubject, SuspendKind,
+    TaskId, TaskLimits, TaskOutcome, TaskRequest,
 };
 pub use mica_var::{Identity, Symbol, Value};
 pub use pool::CompioTaskDriver;

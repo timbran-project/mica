@@ -80,6 +80,8 @@ use xml::reader::{EventReader, XmlEvent};
 const GENERATED_RELATION_ID_START: u64 = 0x00f0_0000_0000_0000;
 const GENERATED_IDENTITY_ID_START: u64 = 0x00e0_0000_0000_0000;
 const GENERATED_METHOD_ID_START: u64 = 0x00d1_0000_0000_0000;
+pub const EPHEMERAL_HOST_IDENTITY_START: u64 = 0x00ff_0000_0000_0000;
+pub const EPHEMERAL_HOST_IDENTITY_END: u64 = 0x00ff_8000_0000_0000;
 const NAMED_IDENTITY_RELATION_ID: u64 = 0x00df_ffff_ffff_ffff;
 const METHOD_SELECTOR_RELATION_ID: u64 = 0x00df_ffff_ffff_fffe;
 const PARAM_RELATION_ID: u64 = 0x00df_ffff_ffff_fffd;
@@ -3494,7 +3496,10 @@ fn ensure_named_identity(
     }
 
     let identity = loop {
-        let Some(identity) = Identity::new(*next_identity_id) else {
+        let Some(identity) = (*next_identity_id < GENERATED_IDENTITY_ID_START)
+            .then(|| Identity::new(*next_identity_id))
+            .flatten()
+        else {
             return Err(CompileError::Unsupported {
                 node: mica_compiler::NodeId(0),
                 span: None,
@@ -3530,7 +3535,10 @@ fn ensure_runtime_named_identity(
     }
 
     let identity = loop {
-        let Some(identity) = Identity::new(*next_identity_id) else {
+        let Some(identity) = (*next_identity_id < GENERATED_RELATION_ID_START)
+            .then(|| Identity::new(*next_identity_id))
+            .flatten()
+        else {
             return Err(CompileError::Unsupported {
                 node: mica_compiler::NodeId(0),
                 span: None,
@@ -3579,7 +3587,10 @@ fn ensure_declared_relation(
 
     let mut next_relation_id = next_generated_relation_id(kernel);
     loop {
-        let Some(relation) = Identity::new(next_relation_id) else {
+        let Some(relation) = (next_relation_id < EPHEMERAL_HOST_IDENTITY_START)
+            .then(|| Identity::new(next_relation_id))
+            .flatten()
+        else {
             return Err(unsupported_runner_error(
                 NodeId(0),
                 None,
@@ -3657,7 +3668,7 @@ fn next_generated_method_identity_id(kernel: &RelationKernel) -> u64 {
         .into_iter()
         .filter_map(|tuple| tuple.values().get(1).and_then(Value::as_identity))
         .map(|identity| identity.raw())
-        .filter(|raw| *raw >= GENERATED_METHOD_ID_START)
+        .filter(|raw| *raw >= GENERATED_METHOD_ID_START && *raw < GENERATED_IDENTITY_ID_START)
         .max()
         .and_then(|raw| raw.checked_add(1))
         .unwrap_or(GENERATED_METHOD_ID_START)
@@ -3671,7 +3682,7 @@ fn next_generated_identity_id(kernel: &RelationKernel) -> u64 {
         .into_iter()
         .filter_map(|tuple| tuple.values().get(1).and_then(Value::as_identity))
         .map(|identity| identity.raw())
-        .filter(|raw| *raw >= GENERATED_IDENTITY_ID_START)
+        .filter(|raw| *raw >= GENERATED_IDENTITY_ID_START && *raw < GENERATED_RELATION_ID_START)
         .max()
         .and_then(|raw| raw.checked_add(1))
         .unwrap_or(GENERATED_IDENTITY_ID_START)
@@ -3682,7 +3693,7 @@ fn next_generated_relation_id(kernel: &RelationKernel) -> u64 {
         .snapshot()
         .relation_metadata()
         .map(|metadata| metadata.id().raw())
-        .filter(|raw| *raw >= GENERATED_RELATION_ID_START)
+        .filter(|raw| *raw >= GENERATED_RELATION_ID_START && *raw < EPHEMERAL_HOST_IDENTITY_START)
         .max()
         .and_then(|raw| raw.checked_add(1))
         .unwrap_or(GENERATED_RELATION_ID_START)
@@ -5772,8 +5783,10 @@ impl Builtin for MakeRelationBuiltin {
         }
 
         loop {
-            let Some(relation) =
-                Identity::new(self.next_relation_id.fetch_add(1, Ordering::Relaxed))
+            let raw = self.next_relation_id.fetch_add(1, Ordering::Relaxed);
+            let Some(relation) = (raw < EPHEMERAL_HOST_IDENTITY_START)
+                .then(|| Identity::new(raw))
+                .flatten()
             else {
                 return Err(invalid_builtin_call(
                     "make_relation",
@@ -5825,8 +5838,10 @@ impl Builtin for MakeFunctionalRelationBuiltin {
         }
 
         loop {
-            let Some(relation) =
-                Identity::new(self.next_relation_id.fetch_add(1, Ordering::Relaxed))
+            let raw = self.next_relation_id.fetch_add(1, Ordering::Relaxed);
+            let Some(relation) = (raw < EPHEMERAL_HOST_IDENTITY_START)
+                .then(|| Identity::new(raw))
+                .flatten()
             else {
                 return Err(invalid_builtin_call(
                     "make_functional_relation",
@@ -5867,8 +5882,10 @@ impl Builtin for MakeIdentityBuiltin {
         }
 
         let identity = loop {
-            let Some(identity) =
-                Identity::new(self.next_identity_id.fetch_add(1, Ordering::Relaxed))
+            let raw = self.next_identity_id.fetch_add(1, Ordering::Relaxed);
+            let Some(identity) = (raw < GENERATED_RELATION_ID_START)
+                .then(|| Identity::new(raw))
+                .flatten()
             else {
                 return Err(invalid_builtin_call(
                     "make_identity",

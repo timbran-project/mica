@@ -24,18 +24,19 @@ use compio::dispatcher::Dispatcher;
 use compio::runtime::JoinHandle;
 use mica_relation_wgpu::{WgpuAccelerator, WgpuAcceleratorOptions};
 use mica_runtime::{
-    AuthorityContext, ExecutionContext, FileinMode, FileinReport, MailboxRecvRequest,
-    ReadOnlySourceQueryOptions, ReadOnlySourceQueryReport, ReadOnlySourceQueryStatus, RunReport,
-    RuntimeError, SYSTEM_ENDPOINT, SharedSourceRunner, SourceRunner, SourceTaskError, SpawnRequest,
-    SubmittedTask, SubscriptionRequest, SuspendKind, TaskError, TaskId, TaskInput, TaskLimits,
-    TaskManagerError, TaskOutcome, TaskRequest, Tuple,
+    AuthorityContext, EPHEMERAL_HOST_IDENTITY_END, EPHEMERAL_HOST_IDENTITY_START, ExecutionContext,
+    FileinMode, FileinReport, MailboxRecvRequest, ReadOnlySourceQueryOptions,
+    ReadOnlySourceQueryReport, ReadOnlySourceQueryStatus, RunReport, RuntimeError, SYSTEM_ENDPOINT,
+    SharedSourceRunner, SourceRunner, SourceTaskError, SpawnRequest, SubmittedTask,
+    SubscriptionRequest, SuspendKind, TaskError, TaskId, TaskInput, TaskLimits, TaskManagerError,
+    TaskOutcome, TaskRequest, Tuple,
 };
 use mica_var::{Identity, Symbol, Value};
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::future::Future;
 use std::num::NonZeroUsize;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::task::{Context, Poll, Waker};
 use std::time::{Duration, Instant};
@@ -82,6 +83,7 @@ struct PoolInner {
     external_request_handler: Option<ExternalRequestHandler>,
     external_stream_request_handler: Option<ExternalStreamRequestHandler>,
     subscription_queue_budget: NonZeroUsize,
+    next_ephemeral_identity: AtomicU64,
     state: Mutex<PoolState>,
 }
 
@@ -372,6 +374,7 @@ impl CompioTaskDriver {
                 external_request_handler,
                 external_stream_request_handler,
                 subscription_queue_budget,
+                next_ephemeral_identity: AtomicU64::new(EPHEMERAL_HOST_IDENTITY_START),
                 state: Mutex::new(state),
             }),
         })
@@ -391,6 +394,19 @@ impl CompioTaskDriver {
             .map_err(DriverError::Source)
     }
 
+    /// Allocates a process-local identity that is never written as durable
+    /// world identity policy.
+    pub fn allocate_ephemeral_identity(&self) -> Result<Identity, DriverError> {
+        let raw = self
+            .inner
+            .next_ephemeral_identity
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                (current < EPHEMERAL_HOST_IDENTITY_END).then_some(current + 1)
+            })
+            .map_err(|_| DriverError::EphemeralIdentityExhausted)?;
+        Identity::new(raw).ok_or(DriverError::EphemeralIdentityExhausted)
+    }
+
     pub fn format_error(&self, error: &DriverError) -> String {
         match error {
             DriverError::Source(error) => self.inner.runner.render_source_task_error(error),
@@ -401,6 +417,9 @@ impl CompioTaskDriver {
             DriverError::Join(error) => format!("driver task failed: {error}"),
             DriverError::MissingTaskContext(task_id) => {
                 format!("missing task context for task {task_id}")
+            }
+            DriverError::EphemeralIdentityExhausted => {
+                "ephemeral host identity space is exhausted".to_owned()
             }
             DriverError::TaskCancelled(task_id) => format!("task {task_id} was cancelled"),
             DriverError::EndpointClosed(endpoint) => {

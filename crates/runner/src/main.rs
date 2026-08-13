@@ -28,7 +28,6 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 const REPL_SETTLE_LIMIT: Duration = Duration::from_millis(50);
-const CLI_ENDPOINT_ID: u64 = 0x00ee_0000_0000_0000;
 
 #[derive(Parser)]
 #[command(name = "mica", about = "Run Mica source, fileins, fileouts, and REPLs")]
@@ -346,7 +345,9 @@ fn open_cli_session_with_fileins(
         .map(|actor| runner.named_identity(actor).map_err(format_source_error))
         .transpose()?;
     let driver = CompioTaskDriver::spawn(runner).map_err(format_driver_error)?;
-    let endpoint = cli_endpoint();
+    let endpoint = driver
+        .allocate_ephemeral_identity()
+        .map_err(format_driver_error)?;
     driver
         .open_endpoint(endpoint, actor, protocol)
         .map_err(format_driver_error)?;
@@ -363,10 +364,6 @@ fn load_fileins(runner: &mut SourceRunner, fileins: &[PathBuf]) -> Result<(), St
             .map_err(|error| format_source_error_with_source(error, file, &source))?;
     }
     Ok(())
-}
-
-fn cli_endpoint() -> Identity {
-    Identity::new(CLI_ENDPOINT_ID).unwrap()
 }
 
 async fn repl(cli: &Cli) -> Result<(), String> {

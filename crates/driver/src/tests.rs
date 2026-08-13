@@ -13,7 +13,7 @@
 
 use crate::{
     CompioTaskDriver, DriverError, DriverEvent, DriverResources, DriverSubscriptionRequest,
-    TaskCancellationReason,
+    EPHEMERAL_HOST_IDENTITY_START, TaskCancellationReason,
 };
 use mica_runtime::{
     AuthorityContext, EmbeddingProviderKind, FileinMode, ReadOnlySourceQueryOptions,
@@ -57,6 +57,21 @@ fn driver_runs_source_on_compio_task() {
             DriverEvent::TaskCompleted { task_id, value }
                 if *task_id == submitted.task_id && *value == Value::int(2).unwrap()
         )));
+    });
+}
+
+#[test]
+fn driver_allocates_one_ephemeral_identity_sequence_for_host_objects() {
+    compio::runtime::Runtime::new().unwrap().block_on(async {
+        let driver =
+            CompioTaskDriver::spawn_with_workers(SourceRunner::new_empty(), TEST_WORKERS).unwrap();
+
+        let endpoint = driver.allocate_ephemeral_identity().unwrap();
+        let request = driver.allocate_ephemeral_identity().unwrap();
+
+        assert_eq!(endpoint.raw(), EPHEMERAL_HOST_IDENTITY_START);
+        assert_eq!(request.raw(), EPHEMERAL_HOST_IDENTITY_START + 1);
+        driver.shutdown().await.unwrap();
     });
 }
 
