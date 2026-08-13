@@ -78,12 +78,43 @@ impl DriverSubscriptionMailbox {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DriverEvent {
-    TaskCompleted { task_id: TaskId, value: Value },
-    TaskAborted { task_id: TaskId, error: Value },
-    TaskFailed { task_id: TaskId, error: String },
-    TaskSuspended { task_id: TaskId, kind: SuspendKind },
-    SubscriptionReady { mailbox: u64 },
+    TaskCompleted {
+        task_id: TaskId,
+        value: Value,
+    },
+    TaskAborted {
+        task_id: TaskId,
+        error: Value,
+    },
+    TaskCancelled {
+        task_id: TaskId,
+        reason: TaskCancellationReason,
+    },
+    TaskFailed {
+        task_id: TaskId,
+        error: String,
+    },
+    TaskSuspended {
+        task_id: TaskId,
+        kind: SuspendKind,
+    },
+    SubscriptionReady {
+        mailbox: u64,
+    },
     Effect(Effect),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TaskCancellationReason {
+    Requested,
+    EndpointClosed,
+    DriverShutdown,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EndpointCloseReport {
+    pub relation_changes: usize,
+    pub cancelled_tasks: Vec<TaskId>,
 }
 
 #[derive(Debug)]
@@ -91,6 +122,8 @@ pub enum DriverError {
     Source(SourceTaskError),
     Join(String),
     MissingTaskContext(TaskId),
+    TaskCancelled(TaskId),
+    EndpointClosed(Identity),
 }
 
 impl TaskContext {
@@ -108,7 +141,10 @@ impl DriverError {
     pub fn source(&self) -> Option<&SourceTaskError> {
         match self {
             Self::Source(error) => Some(error),
-            Self::Join(_) | Self::MissingTaskContext(_) => None,
+            Self::Join(_)
+            | Self::MissingTaskContext(_)
+            | Self::TaskCancelled(_)
+            | Self::EndpointClosed(_) => None,
         }
     }
 }
@@ -121,6 +157,8 @@ impl Display for DriverError {
             Self::MissingTaskContext(task_id) => {
                 write!(f, "missing task context for task {task_id}")
             }
+            Self::TaskCancelled(task_id) => write!(f, "task {task_id} was cancelled"),
+            Self::EndpointClosed(endpoint) => write!(f, "endpoint {endpoint:?} is closed"),
         }
     }
 }

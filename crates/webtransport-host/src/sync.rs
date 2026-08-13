@@ -1028,7 +1028,9 @@ async fn process_driver_events(
                     refreshes.insert(key, (true, Some(pending.action), false));
                 }
             }
-            DriverEvent::TaskAborted { task_id, .. } | DriverEvent::TaskFailed { task_id, .. } => {
+            DriverEvent::TaskAborted { task_id, .. }
+            | DriverEvent::TaskCancelled { task_id, .. }
+            | DriverEvent::TaskFailed { task_id, .. } => {
                 if let Some((key, pending)) = take_pending_sync_task(sessions, task_id)
                     && pending.refresh
                 {

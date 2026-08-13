@@ -65,6 +65,7 @@ impl RequestFactScope {
         };
         self.driver
             .close_endpoint_and_retract_volatile_tuples_named(self.endpoint, tuples)
+            .map(|report| report.relation_changes)
     }
 }
 

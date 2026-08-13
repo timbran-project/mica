@@ -232,7 +232,11 @@ impl RpcHandler {
         vec![
             HostMessage::EndpointClosed {
                 endpoint,
-                reason: format!("closed {closed} task endpoint bindings"),
+                reason: format!(
+                    "closed {} task endpoint bindings and cancelled {} tasks",
+                    closed.relation_changes,
+                    closed.cancelled_tasks.len()
+                ),
             },
             accepted(request_id, None),
         ]
@@ -357,6 +361,24 @@ impl RpcHandler {
                 .tasks
                 .remove(&task_id)
                 .map(|peer| (peer, HostMessage::TaskFailed { task_id, error }))
+                .into_iter()
+                .collect(),
+            DriverEvent::TaskCancelled { task_id, reason } => self
+                .tasks
+                .remove(&task_id)
+                .map(|peer| {
+                    (
+                        peer,
+                        HostMessage::TaskFailed {
+                            task_id,
+                            error: Value::error(
+                                Symbol::intern("TaskCancelled"),
+                                Some(format!("task cancelled: {reason:?}")),
+                                None,
+                            ),
+                        },
+                    )
+                })
                 .into_iter()
                 .collect(),
             DriverEvent::TaskFailed { task_id, error } => self
