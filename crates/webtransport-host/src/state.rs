@@ -12,9 +12,11 @@
 // with this program. If not, see <https://www.gnu.org/licenses/>.
 
 use crate::ENDPOINT_OUTPUT_HIGH_WATER_DATAGRAMS;
-use crate::sync::{send_sync_envelope_to, start_event_pump, store_rendered_sync_view_in};
+use crate::sync::{process_driver_event, send_sync_envelope_to, store_rendered_sync_view_in};
 use bytes::Bytes;
-use mica_driver::{CompioTaskDriver, DriverSubscriptionMailbox};
+use mica_driver::{
+    DriverClient, DriverEventRegistration, DriverEventRouter, EndpointSession, SubscriptionMailbox,
+};
 use mica_host_protocol::{DomNode, SyncEnvelope, SyncMessageKind};
 use mica_runtime::TaskId;
 use mica_var::{CapabilityId, Identity, Value};
@@ -25,7 +27,6 @@ use std::future::Future;
 use std::io::BufReader;
 use std::path::Path;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
 
@@ -41,15 +42,16 @@ pub struct WebTransportTlsConfig {
 }
 
 pub struct InProcessWebTransportHost {
-    pub(crate) driver: Arc<CompioTaskDriver>,
+    pub(crate) client: DriverClient,
+    pub(crate) events: DriverEventRouter,
     pub(crate) sessions: Arc<Mutex<HashMap<Identity, Arc<SessionState>>>>,
-    pub(crate) subscription_mailbox: Arc<DriverSubscriptionMailbox>,
+    pub(crate) subscription_mailbox: Arc<SubscriptionMailbox>,
     pub(crate) subscription_views: Arc<Mutex<HashMap<CapabilityId, SyncViewKey>>>,
-    pub(crate) stop_events: Arc<AtomicBool>,
+    pub(crate) _event_registration: DriverEventRegistration,
 }
 
-#[derive(Default)]
 pub(crate) struct SessionState {
+    pub(crate) endpoint: EndpointSession,
     pub(crate) output: Arc<SessionOutput>,
     pub(crate) sync: Mutex<SessionSyncState>,
 }
@@ -137,8 +139,9 @@ pub(crate) enum SessionOutputReady {
 }
 
 impl SessionState {
-    pub(crate) fn new() -> Arc<Self> {
+    pub(crate) fn new(endpoint: EndpointSession) -> Arc<Self> {
         Arc::new(Self {
+            endpoint,
             output: SessionOutput::new(),
             sync: Mutex::new(SessionSyncState::default()),
         })
@@ -242,52 +245,48 @@ impl WebTransportTlsConfig {
 }
 
 impl InProcessWebTransportHost {
-    pub fn new(driver: CompioTaskDriver) -> Self {
-        let driver = Arc::new(driver);
+    pub fn new(client: DriverClient, events: &DriverEventRouter) -> Self {
         let sessions = Arc::new(Mutex::new(HashMap::new()));
         let subscription_mailbox = Arc::new(
-            driver
+            client
                 .create_subscription_mailbox()
                 .expect("WebTransport sync subscription mailbox creation must succeed"),
         );
         let subscription_views = Arc::new(Mutex::new(HashMap::new()));
-        let stop_events = Arc::new(AtomicBool::new(false));
-        start_event_pump(
-            driver.clone(),
-            sessions.clone(),
-            subscription_mailbox.clone(),
-            subscription_views.clone(),
-            stop_events.clone(),
-        );
+        let event_client = client.clone();
+        let event_sessions = Arc::clone(&sessions);
+        let event_mailbox = Arc::clone(&subscription_mailbox);
+        let event_views = Arc::clone(&subscription_views);
+        let event_registration = events.register(move |event| {
+            let client = event_client.clone();
+            let sessions = Arc::clone(&event_sessions);
+            let mailbox = Arc::clone(&event_mailbox);
+            let views = Arc::clone(&event_views);
+            async move {
+                if let Err(error) =
+                    process_driver_event(&client, &sessions, &mailbox, &views, event).await
+                {
+                    tracing::warn!(
+                        error = %error,
+                        "failed to process WebTransport sync driver event"
+                    );
+                }
+            }
+        });
         Self {
-            driver,
+            client,
+            events: events.clone(),
             sessions,
             subscription_mailbox,
             subscription_views,
-            stop_events,
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn new_without_event_pump(driver: CompioTaskDriver) -> Self {
-        let driver = Arc::new(driver);
-        Self {
-            subscription_mailbox: Arc::new(
-                driver
-                    .create_subscription_mailbox()
-                    .expect("WebTransport sync subscription mailbox creation must succeed"),
-            ),
-            driver,
-            sessions: Arc::new(Mutex::new(HashMap::new())),
-            subscription_views: Arc::new(Mutex::new(HashMap::new())),
-            stop_events: Arc::new(AtomicBool::new(false)),
+            _event_registration: event_registration,
         }
     }
 
     pub(crate) fn allocate_endpoint(&self) -> Result<Identity, String> {
-        self.driver
+        self.client
             .allocate_ephemeral_identity()
-            .map_err(|error| self.driver.format_error(&error))
+            .map_err(|error| self.client.format_error(&error))
     }
 
     #[cfg(test)]
@@ -345,16 +344,16 @@ impl InProcessWebTransportHost {
             if let Some(capability) = subscription.as_capability() {
                 subscription_views.remove(&capability);
             }
-            let _ = self.driver.cancel_subscription(subscription);
+            let _ = state.endpoint.cancel_subscription(subscription);
         }
     }
 }
 
 impl Drop for InProcessWebTransportHost {
     fn drop(&mut self) {
-        self.stop_events.store(true, Ordering::Relaxed);
         for state in self.sessions.lock().unwrap().values() {
             self.cancel_session_subscriptions(state);
+            let _ = state.endpoint.close_in_background();
         }
     }
 }
@@ -499,8 +498,8 @@ impl Future for SessionOutputRecv<'_> {
 }
 
 pub(crate) fn format_driver_error(
-    driver: &CompioTaskDriver,
+    client: &DriverClient,
     error: mica_driver::DriverError,
 ) -> String {
-    format!("error: {}", driver.format_error(&error))
+    format!("error: {}", client.format_error(&error))
 }

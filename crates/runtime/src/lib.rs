@@ -44,9 +44,7 @@ pub use mica_vm::{
     SuspendKind, VmHostContext, VmHostResponse, VmState,
 };
 pub use task::{Task, TaskError, TaskId, TaskLimits, TaskOutcome};
-pub use task_manager::{
-    Effect, EffectLog, SharedTaskManager, SuspendedTask, TaskManager, TaskManagerError,
-};
+pub use task_manager::{Effect, EffectLog, SuspendedTask, TaskManager, TaskManagerError};
 pub use types::{
     FileinMode, FileinReport, ReadOnlySourceQueryOptions, ReadOnlySourceQueryReport,
     ReadOnlySourceQueryStatus, RunReport, SharedSourceRunner, SourceRunner, SourceTaskError,
@@ -341,6 +339,26 @@ impl SourceRunner {
         })
     }
 
+    pub fn contains_named_tuple(
+        &self,
+        name: Symbol,
+        tuple: &Tuple,
+    ) -> Result<bool, SourceTaskError> {
+        let (relation, _) = relation_named(self.task_manager.kernel(), name).ok_or_else(|| {
+            unsupported_runner_error(
+                NodeId(0),
+                None,
+                format!("unknown relation :{}", name.name().unwrap_or("<unnamed>")),
+            )
+        })?;
+        self.task_manager
+            .kernel()
+            .snapshot()
+            .contains(relation, tuple)
+            .map_err(TaskManagerError::from)
+            .map_err(SourceTaskError::from)
+    }
+
     pub fn submit_source(
         &mut self,
         request: TaskRequest,
@@ -583,6 +601,10 @@ impl SourceRunner {
         self.task_manager.create_mailbox()
     }
 
+    pub fn close_mailbox(&self, receiver: &Value) -> Result<(), RuntimeError> {
+        self.task_manager.close_mailbox(receiver)
+    }
+
     pub fn mailbox_for_receiver(&self, receiver: &Value) -> Result<u64, RuntimeError> {
         self.task_manager.mailbox_for_receiver(receiver)
     }
@@ -639,6 +661,14 @@ impl SourceRunner {
 
     pub fn cancel_all_tasks(&mut self) -> Vec<(TaskId, SuspendKind)> {
         self.task_manager.cancel_all_tasks()
+    }
+
+    pub fn forget_terminal_task(&mut self, task_id: TaskId) {
+        self.task_manager.forget_terminal_task(task_id);
+    }
+
+    pub fn forget_all_terminal_tasks(&mut self) {
+        self.task_manager.forget_all_terminal_tasks();
     }
 
     pub fn open_endpoint(
@@ -705,6 +735,14 @@ impl SourceRunner {
         tuples: Vec<(Symbol, Tuple)>,
     ) -> Result<usize, SourceTaskError> {
         retract_volatile_tuples_named_in(self.task_manager.kernel(), tuples)
+    }
+
+    pub fn replace_volatile_tuples_named(
+        &mut self,
+        retract: Vec<(Symbol, Tuple)>,
+        assert: Vec<(Symbol, Tuple)>,
+    ) -> Result<usize, SourceTaskError> {
+        replace_volatile_tuples_named_in(self.task_manager.kernel(), retract, assert)
     }
 
     pub fn route_effect_targets(&self, target: Identity) -> Vec<Identity> {
@@ -1471,6 +1509,26 @@ impl SharedSourceRunner {
         })
     }
 
+    pub fn contains_named_tuple(
+        &self,
+        name: Symbol,
+        tuple: &Tuple,
+    ) -> Result<bool, SourceTaskError> {
+        let (relation, _) = relation_named(self.task_manager.kernel(), name).ok_or_else(|| {
+            unsupported_runner_error(
+                NodeId(0),
+                None,
+                format!("unknown relation :{}", name.name().unwrap_or("<unnamed>")),
+            )
+        })?;
+        self.task_manager
+            .kernel()
+            .snapshot()
+            .contains(relation, tuple)
+            .map_err(TaskManagerError::from)
+            .map_err(SourceTaskError::from)
+    }
+
     pub fn source_request_for_endpoint(
         &self,
         endpoint: Identity,
@@ -1799,6 +1857,14 @@ impl SharedSourceRunner {
         retract_volatile_tuples_named_in(self.task_manager.kernel(), tuples)
     }
 
+    pub fn replace_volatile_tuples_named(
+        &self,
+        retract: Vec<(Symbol, Tuple)>,
+        assert: Vec<(Symbol, Tuple)>,
+    ) -> Result<usize, SourceTaskError> {
+        replace_volatile_tuples_named_in(self.task_manager.kernel(), retract, assert)
+    }
+
     pub fn drain_emissions(&self) -> Vec<Effect> {
         self.task_manager.drain_emissions()
     }
@@ -1809,6 +1875,10 @@ impl SharedSourceRunner {
 
     pub fn create_mailbox(&self) -> Result<(Value, Value), RuntimeError> {
         self.task_manager.create_mailbox()
+    }
+
+    pub fn close_mailbox(&self, receiver: &Value) -> Result<(), RuntimeError> {
+        self.task_manager.close_mailbox(receiver)
     }
 
     pub fn mailbox_for_receiver(&self, receiver: &Value) -> Result<u64, RuntimeError> {
@@ -1867,6 +1937,10 @@ impl SharedSourceRunner {
 
     pub fn cancel_all_tasks(&self) -> Vec<(TaskId, SuspendKind)> {
         self.task_manager.cancel_all_tasks()
+    }
+
+    pub fn forget_terminal_task(&self, task_id: TaskId) {
+        self.task_manager.forget_terminal_task(task_id);
     }
 
     pub fn drain_routed_emissions(&self) -> Vec<Effect> {
@@ -6022,6 +6096,31 @@ fn retract_volatile_tuples_named_in(
     for (relation, tuple) in tuples {
         transaction
             .retract(relation, tuple)
+            .map_err(CompileError::from)?;
+    }
+    let result = transaction.commit().map_err(CompileError::from)?;
+    Ok(result.commit().changes().len())
+}
+
+fn replace_volatile_tuples_named_in(
+    kernel: &RelationKernel,
+    retract: Vec<(Symbol, Tuple)>,
+    assert: Vec<(Symbol, Tuple)>,
+) -> Result<usize, SourceTaskError> {
+    let retract = volatile_tuple_relations_required(kernel, retract)?;
+    let assert = volatile_tuple_relations_required(kernel, assert)?;
+    if retract.is_empty() && assert.is_empty() {
+        return Ok(0);
+    }
+    let mut transaction = kernel.begin();
+    for (relation, tuple) in retract {
+        transaction
+            .retract(relation, tuple)
+            .map_err(CompileError::from)?;
+    }
+    for (relation, tuple) in assert {
+        transaction
+            .assert(relation, tuple)
             .map_err(CompileError::from)?;
     }
     let result = transaction.commit().map_err(CompileError::from)?;

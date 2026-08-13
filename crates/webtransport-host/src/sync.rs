@@ -22,7 +22,7 @@ use crate::{
 };
 use bytes::Bytes;
 use mica_driver::{
-    CompioTaskDriver, DriverEvent, DriverSubscriptionMailbox, DriverSubscriptionRequest,
+    DriverClient, DriverEvent, DriverSubscriptionRequest, EndpointSession, SubscriptionMailbox,
 };
 use mica_host_protocol::{
     DomEventPayload, DomNode, SyncEnvelope, SyncMessageKind, SyncViewDependencySubject,
@@ -34,9 +34,21 @@ use mica_runtime::{SubscriptionInitialDelivery, SubscriptionSubject, TaskId, Tas
 use mica_var::{CapabilityId, Identity, Symbol, Value};
 use std::collections::{BTreeMap, HashMap};
 use std::num::NonZeroUsize;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
+
+fn endpoint_session(
+    host: &InProcessWebTransportHost,
+    endpoint: Identity,
+) -> Result<EndpointSession, String> {
+    host.sessions
+        .lock()
+        .unwrap()
+        .get(&endpoint)
+        .map(|state| state.endpoint.clone())
+        .ok_or_else(|| "WebTransport endpoint is not open".to_owned())
+}
 
 pub(crate) async fn route_incoming_datagram(
     host: &InProcessWebTransportHost,
@@ -75,11 +87,11 @@ async fn route_plain_datagram(
     crate::metrics::metrics()
         .incoming_datagrams
         .inc(IncomingDatagramKind::Plain);
-    host.driver
-        .input(endpoint, Value::bytes(datagram))
+    endpoint_session(host, endpoint)?
+        .input(Value::bytes(datagram))
         .await
         .map(|_| ())
-        .map_err(|error| format_driver_error(&host.driver, error))
+        .map_err(|error| format_driver_error(&host.client, error))
 }
 
 async fn route_dom_event(
@@ -109,10 +121,8 @@ async fn route_dom_event(
     }
 
     let sync_event_start = Instant::now();
-    let submitted = host
-        .driver
-        .submit_invocation_for_endpoint(
-            endpoint,
+    let submitted = endpoint_session(host, endpoint)?
+        .invoke(
             Symbol::intern("sync_event"),
             vec![
                 (Symbol::intern("session"), sync_u64_value(event.session_id)),
@@ -124,10 +134,12 @@ async fn route_dom_event(
             ],
         )
         .await
-        .map_err(|error| format_driver_error(&host.driver, error))?;
+        .map_err(|error| format_driver_error(&host.client, error))?;
     let sync_event_us = sync_event_start.elapsed().as_micros();
     trace.mark("sync_event");
-    let refresh_immediately = match submitted.outcome {
+    let task_id = submitted.task_id();
+    let initial_outcome = submitted.initial_report().outcome.clone();
+    let refresh_immediately = match initial_outcome {
         TaskOutcome::Complete { value, .. } => {
             tracing::trace!(
                 target: "mica_webtransport_host::sync",
@@ -139,7 +151,7 @@ async fn route_dom_event(
         TaskOutcome::Suspended { .. } => {
             if let Some(state) = host.sessions.lock().unwrap().get(&endpoint).cloned() {
                 state.sync.lock().unwrap().pending_tasks.insert(
-                    submitted.task_id,
+                    task_id,
                     PendingSyncTask {
                         session_id: event.session_id,
                         view_id: event.view_id,
@@ -147,6 +159,12 @@ async fn route_dom_event(
                         action: action.clone(),
                     },
                 );
+            }
+            if let Err(error) = host.events.watch_invocation(submitted) {
+                if let Some(state) = host.sessions.lock().unwrap().get(&endpoint).cloned() {
+                    state.sync.lock().unwrap().pending_tasks.remove(&task_id);
+                }
+                return Err(format_driver_error(&host.client, error));
             }
             false
         }
@@ -255,11 +273,10 @@ async fn refresh_active_sync_view(
         server_signature: view_state.server_signature,
         last_tree: view_state.last_tree,
     };
-    refresh_active_sync_view_for(&host.driver, &host.sessions, active, force_ack, action).await
+    refresh_active_sync_view_for(&host.sessions, active, force_ack, action).await
 }
 
 async fn refresh_active_sync_view_for(
-    driver: &CompioTaskDriver,
     sessions: &Arc<Mutex<HashMap<Identity, Arc<SessionState>>>>,
     active: ActiveSyncView,
     force_ack: bool,
@@ -268,7 +285,13 @@ async fn refresh_active_sync_view_for(
     let _refresh_timer = crate::metrics::start_sync_phase(SyncRenderPhase::Refresh);
     let refresh_start = Instant::now();
     let render_start = Instant::now();
-    let tree = render_sync_tree(driver, active.endpoint, active.view_id).await?;
+    let endpoint = sessions
+        .lock()
+        .unwrap()
+        .get(&active.endpoint)
+        .map(|state| state.endpoint.clone())
+        .ok_or_else(|| "WebTransport endpoint closed before refresh".to_owned())?;
+    let tree = render_sync_tree(&endpoint, active.view_id).await?;
     let render_us = render_start.elapsed().as_micros();
     let patches = active.last_tree.as_ref().map(|last_tree| {
         let _diff_timer = crate::metrics::start_sync_phase(SyncRenderPhase::Diff);
@@ -427,7 +450,8 @@ async fn render_sync_view(
                 .map(next_view_revision)
         })
         .unwrap_or(1);
-    let tree = render_sync_tree(&host.driver, endpoint, view_id).await?;
+    let endpoint = endpoint_session(host, endpoint)?;
+    let tree = render_sync_tree(&endpoint, view_id).await?;
     let rendered = rendered_sync_view(view_id, revision, tree);
     let elapsed = start.elapsed();
     crate::metrics::metrics()
@@ -439,16 +463,11 @@ async fn render_sync_view(
     Ok(rendered)
 }
 
-async fn render_sync_tree(
-    driver: &CompioTaskDriver,
-    endpoint: Identity,
-    view_id: u64,
-) -> Result<DomNode, String> {
+async fn render_sync_tree(endpoint: &EndpointSession, view_id: u64) -> Result<DomNode, String> {
     let trace = SyncTrace::new("render");
     let tree_value = {
         let _tree_timer = crate::metrics::start_sync_phase(SyncRenderPhase::Tree);
         submit_sync_invocation_for(
-            driver,
             endpoint,
             "sync_view_tree",
             vec![(Symbol::intern("view"), sync_u64_value(view_id))],
@@ -528,17 +547,16 @@ impl SyncTrace {
 }
 
 async fn submit_sync_invocation_for(
-    driver: &CompioTaskDriver,
-    endpoint: Identity,
+    endpoint: &EndpointSession,
     selector: &'static str,
     roles: Vec<(Symbol, Value)>,
 ) -> Result<Value, String> {
-    let submitted = driver
-        .submit_invocation_for_endpoint(endpoint, Symbol::intern(selector), roles)
+    let submitted = endpoint
+        .invoke(Symbol::intern(selector), roles)
         .await
-        .map_err(|error| format_driver_error(driver, error))?;
-    match submitted.outcome {
-        TaskOutcome::Complete { value, .. } => Ok(value),
+        .map_err(|error| error.to_string())?;
+    match &submitted.initial_report().outcome {
+        TaskOutcome::Complete { value, .. } => Ok(value.clone()),
         TaskOutcome::Aborted { error, .. } => Err(format!(
             "sync render invocation {selector} aborted: {error}"
         )),
@@ -652,7 +670,7 @@ async fn ensure_view_subscriptions(
         return Ok(());
     }
     let result = register_view_subscriptions(
-        &host.driver,
+        &host.client,
         &host.subscription_mailbox,
         &host.subscription_views,
         endpoint,
@@ -676,8 +694,8 @@ async fn ensure_view_subscriptions(
 }
 
 async fn register_view_subscriptions(
-    driver: &CompioTaskDriver,
-    subscription_mailbox: &DriverSubscriptionMailbox,
+    client: &DriverClient,
+    subscription_mailbox: &SubscriptionMailbox,
     subscription_views: &Arc<Mutex<HashMap<CapabilityId, SyncViewKey>>>,
     endpoint: Identity,
     state: &Arc<SessionState>,
@@ -685,8 +703,7 @@ async fn register_view_subscriptions(
     view_id: u64,
 ) -> Result<(), String> {
     let value = submit_sync_invocation_for(
-        driver,
-        endpoint,
+        &state.endpoint,
         "sync_view_dependencies",
         vec![(Symbol::intern("view"), sync_u64_value(view_id))],
     )
@@ -699,15 +716,15 @@ async fn register_view_subscriptions(
                 let arity = dependency.bindings.len() as u16;
                 (relation, arity)
             }
-            SyncViewRelation::Name(name) => driver
+            SyncViewRelation::Name(name) => client
                 .named_relation(name)
-                .map_err(|error| driver.format_error(&error))?,
+                .map_err(|error| client.format_error(&error))?,
         };
         if usize::from(arity) != dependency.bindings.len() {
-            cancel_subscriptions(driver, subscriptions);
+            cancel_subscriptions(&state.endpoint, subscriptions);
             return Err(format!(
                 "sync_view_dependencies binding count for relation {} was {}, expected {arity}",
-                driver.format_value(&Value::identity(relation)),
+                client.format_value(&Value::identity(relation)),
                 dependency.bindings.len(),
             ));
         }
@@ -721,9 +738,9 @@ async fn register_view_subscriptions(
                 bindings: dependency.bindings,
             },
         };
-        match driver
-            .register_subscription_for_endpoint(
-                endpoint,
+        match state
+            .endpoint
+            .subscribe(
                 subscription_mailbox,
                 DriverSubscriptionRequest {
                     subject,
@@ -736,8 +753,8 @@ async fn register_view_subscriptions(
         {
             Ok(subscription) => subscriptions.push(subscription),
             Err(error) => {
-                cancel_subscriptions(driver, subscriptions);
-                return Err(driver.format_error(&error));
+                cancel_subscriptions(&state.endpoint, subscriptions);
+                return Err(client.format_error(&error));
             }
         }
     }
@@ -768,16 +785,16 @@ async fn register_view_subscriptions(
     Ok(())
 }
 
-fn cancel_subscriptions(driver: &CompioTaskDriver, subscriptions: Vec<Value>) {
+fn cancel_subscriptions(endpoint: &EndpointSession, subscriptions: Vec<Value>) {
     for subscription in subscriptions {
-        let _ = driver.cancel_subscription(subscription);
+        let _ = endpoint.cancel_subscription(subscription);
     }
 }
 
 async fn reinstall_view_subscriptions(
-    driver: &CompioTaskDriver,
+    client: &DriverClient,
     sessions: &Arc<Mutex<HashMap<Identity, Arc<SessionState>>>>,
-    subscription_mailbox: &DriverSubscriptionMailbox,
+    subscription_mailbox: &SubscriptionMailbox,
     subscription_views: &Arc<Mutex<HashMap<CapabilityId, SyncViewKey>>>,
     key: SyncViewKey,
 ) -> Result<(), String> {
@@ -804,9 +821,9 @@ async fn reinstall_view_subscriptions(
             }
         }
     }
-    cancel_subscriptions(driver, subscriptions);
+    cancel_subscriptions(&state.endpoint, subscriptions);
     let result = register_view_subscriptions(
-        driver,
+        client,
         subscription_mailbox,
         subscription_views,
         key.endpoint,
@@ -856,7 +873,8 @@ async fn route_sync_envelope(
             {
                 return Ok(());
             }
-            let tree = render_sync_tree(&host.driver, endpoint, envelope.view_id).await?;
+            let endpoint_session = endpoint_session(host, endpoint)?;
+            let tree = render_sync_tree(&endpoint_session, envelope.view_id).await?;
             if envelope.client_revision > 0 {
                 let client_rendered =
                     rendered_sync_view(envelope.view_id, envelope.client_revision, tree.clone());
@@ -908,45 +926,14 @@ async fn route_sync_envelope(
             );
             Ok(())
         }
-        SyncMessageKind::ViewSnapshot | SyncMessageKind::ViewDelta => host
-            .driver
-            .input(
-                endpoint,
-                Value::bytes(encoded_sync_envelope(envelope.as_ref())),
-            )
-            .await
-            .map(|_| ())
-            .map_err(|error| format_driver_error(&host.driver, error)),
-    }
-}
-
-pub(crate) fn start_event_pump(
-    driver: Arc<CompioTaskDriver>,
-    sessions: Arc<Mutex<HashMap<Identity, Arc<SessionState>>>>,
-    subscription_mailbox: Arc<DriverSubscriptionMailbox>,
-    subscription_views: Arc<Mutex<HashMap<CapabilityId, SyncViewKey>>>,
-    stop_events: Arc<AtomicBool>,
-) {
-    compio::runtime::spawn(async move {
-        while !stop_events.load(Ordering::Relaxed) {
-            let events = driver.wait_events().await;
-            if let Err(error) = process_driver_events(
-                &driver,
-                &sessions,
-                &subscription_mailbox,
-                &subscription_views,
-                events,
-            )
-            .await
-            {
-                tracing::warn!(
-                    error = %error,
-                    "failed to process WebTransport sync driver events"
-                );
-            }
+        SyncMessageKind::ViewSnapshot | SyncMessageKind::ViewDelta => {
+            endpoint_session(host, endpoint)?
+                .input(Value::bytes(encoded_sync_envelope(envelope.as_ref())))
+                .await
+                .map(|_| ())
+                .map_err(|error| format_driver_error(&host.client, error))
         }
-    })
-    .detach();
+    }
 }
 
 #[cfg(test)]
@@ -1008,62 +995,59 @@ fn active_sync_view(
     })
 }
 
-async fn process_driver_events(
-    driver: &CompioTaskDriver,
+pub(crate) async fn process_driver_event(
+    client: &DriverClient,
     sessions: &Arc<Mutex<HashMap<Identity, Arc<SessionState>>>>,
-    subscription_mailbox: &DriverSubscriptionMailbox,
+    subscription_mailbox: &SubscriptionMailbox,
     subscription_views: &Arc<Mutex<HashMap<CapabilityId, SyncViewKey>>>,
-    events: Vec<DriverEvent>,
+    event: DriverEvent,
 ) -> Result<(), String> {
     let mut refreshes = HashMap::<SyncViewKey, (bool, Option<String>, bool)>::new();
-    for event in events {
-        match event {
-            DriverEvent::Effect(effect) => {
-                route_driver_effect(sessions, effect);
-            }
-            DriverEvent::TaskCompleted { task_id, value } => {
-                if let Some((key, pending)) = take_pending_sync_task(sessions, task_id)
-                    && pending.refresh
-                    && value != Value::bool(true)
-                {
-                    refreshes.insert(key, (true, Some(pending.action), false));
-                }
-            }
-            DriverEvent::TaskAborted { task_id, .. }
-            | DriverEvent::TaskCancelled { task_id, .. }
-            | DriverEvent::TaskFailed { task_id, .. } => {
-                if let Some((key, pending)) = take_pending_sync_task(sessions, task_id)
-                    && pending.refresh
-                {
-                    refreshes.insert(key, (true, Some(pending.action), false));
-                }
-            }
-            DriverEvent::SubscriptionReady { mailbox } if mailbox == subscription_mailbox.id() => {
-                let messages = driver
-                    .drain_subscription_mailbox(subscription_mailbox)
-                    .map_err(|error| driver.format_error(&error))?;
-                for message in messages {
-                    let Some((capability, kind)) = subscription_message(&message) else {
-                        continue;
-                    };
-                    let Some(key) = subscription_views.lock().unwrap().get(&capability).copied()
-                    else {
-                        continue;
-                    };
-                    let resynchronize = matches!(kind, "resynchronize" | "revoked");
-                    refreshes
-                        .entry(key)
-                        .and_modify(|refresh| refresh.2 |= resynchronize)
-                        .or_insert((false, None, resynchronize));
-                }
-            }
-            DriverEvent::SubscriptionReady { .. } | DriverEvent::TaskSuspended { .. } => {}
+    match event {
+        DriverEvent::Effect(effect) => {
+            route_driver_effect(sessions, effect);
         }
+        DriverEvent::TaskCompleted { task_id, value } => {
+            if let Some((key, pending)) = take_pending_sync_task(sessions, task_id)
+                && pending.refresh
+                && value != Value::bool(true)
+            {
+                refreshes.insert(key, (true, Some(pending.action), false));
+            }
+        }
+        DriverEvent::TaskAborted { task_id, .. }
+        | DriverEvent::TaskCancelled { task_id, .. }
+        | DriverEvent::TaskFailed { task_id, .. } => {
+            if let Some((key, pending)) = take_pending_sync_task(sessions, task_id)
+                && pending.refresh
+            {
+                refreshes.insert(key, (true, Some(pending.action), false));
+            }
+        }
+        DriverEvent::SubscriptionReady { mailbox } if mailbox == subscription_mailbox.id() => {
+            let messages = subscription_mailbox
+                .drain()
+                .map_err(|error| client.format_error(&error))?;
+            for message in messages {
+                let Some((capability, kind)) = subscription_message(&message) else {
+                    continue;
+                };
+                let Some(key) = subscription_views.lock().unwrap().get(&capability).copied() else {
+                    continue;
+                };
+                let resynchronize = matches!(kind, "resynchronize" | "revoked");
+                refreshes
+                    .entry(key)
+                    .and_modify(|refresh| refresh.2 |= resynchronize)
+                    .or_insert((false, None, resynchronize));
+            }
+        }
+        DriverEvent::SubscriptionReady { .. } | DriverEvent::TaskSuspended { .. } => {}
     }
     for (key, (force_ack, action, resynchronize)) in refreshes {
         if resynchronize {
             reinstall_view_subscriptions(
-                driver,
+                client,
                 sessions,
                 subscription_mailbox,
                 subscription_views,
@@ -1074,8 +1058,7 @@ async fn process_driver_events(
         let Some(active) = active_sync_view(sessions, key) else {
             continue;
         };
-        refresh_active_sync_view_for(driver, sessions, active, force_ack, action.as_deref())
-            .await?;
+        refresh_active_sync_view_for(sessions, active, force_ack, action.as_deref()).await?;
     }
     Ok(())
 }

@@ -13,13 +13,13 @@
 
 use crate::codec::{HttpRequest, HttpResponse};
 use crate::response::{
-    internal_error_response, is_sync_client_path, response_from_submitted, route_request,
+    internal_error_response, is_sync_client_path, response_from_outcome, route_request,
 };
 use crate::{InProcessWebHost, RequestBinding, format_driver_error};
-use mica_driver::{CompioTaskDriver, DriverError};
+use mica_driver::{EndpointConfiguration, EndpointSession};
 use mica_runtime::Tuple;
 use mica_var::{Identity, Symbol, Value};
-use std::sync::{Arc, OnceLock};
+use std::sync::OnceLock;
 
 #[derive(Clone, Debug)]
 pub(crate) struct RequestFact {
@@ -37,51 +37,35 @@ impl RequestFact {
 }
 
 struct RequestFactScope {
-    driver: Arc<CompioTaskDriver>,
-    endpoint: Identity,
-    tuples: Option<Vec<(Symbol, Tuple)>>,
+    endpoint: Option<EndpointSession>,
 }
 
 impl RequestFactScope {
-    fn new(
-        driver: Arc<CompioTaskDriver>,
-        endpoint: Identity,
-        tuples: Vec<(Symbol, Tuple)>,
-    ) -> Self {
+    fn new(endpoint: EndpointSession) -> Self {
         Self {
-            driver,
-            endpoint,
-            tuples: Some(tuples),
+            endpoint: Some(endpoint),
         }
     }
 
-    async fn close(mut self) -> Result<usize, DriverError> {
-        let Some(tuples) = self.tuples.take() else {
-            return Ok(0);
-        };
-        self.driver
-            .close_endpoint_and_retract_volatile_tuples_named(self.endpoint, tuples)
-            .await
-            .map(|report| report.relation_changes)
+    async fn close(mut self) -> Result<(), mica_driver::DriverError> {
+        let endpoint = self
+            .endpoint
+            .take()
+            .expect("request scope retains its endpoint");
+        endpoint.close().await?;
+        Ok(())
     }
 }
 
 impl Drop for RequestFactScope {
     fn drop(&mut self) {
-        let Some(tuples) = self.tuples.take() else {
+        let Some(endpoint) = self.endpoint.take() else {
             return;
         };
-        if let Err(error) = self.driver.retract_volatile_tuples_named(tuples) {
+        if let Err(error) = endpoint.close_in_background() {
             tracing::warn!(
-                endpoint = self.endpoint.raw(),
-                error = %self.driver.format_error(&error),
-                "failed to clean up volatile request facts"
-            );
-        }
-        if let Err(error) = self.driver.close_endpoint_in_background(self.endpoint) {
-            tracing::warn!(
-                endpoint = self.endpoint.raw(),
-                error = %self.driver.format_error(&error),
+                endpoint = endpoint.endpoint().raw(),
+                error = %error,
                 "failed to schedule request endpoint close"
             );
         }
@@ -131,7 +115,7 @@ pub(crate) async fn handle_in_process_request(
     let effective_actor = if let Some(auth) = &host.auth {
         if crate::auth::is_pre_auth_login_path(&request.path) {
             match host
-                .driver
+                .client
                 .named_identity(Symbol::intern(&auth.config.login_actor))
             {
                 Ok(actor) => Some(actor),
@@ -157,7 +141,7 @@ pub(crate) async fn handle_in_process_request(
 
             match auth.resolve_auth_context(cookie_header).await {
                 Ok(Some(ctx)) => {
-                    match host.driver.named_identity(Symbol::intern(&ctx.actor_name)) {
+                    match host.client.named_identity(Symbol::intern(&ctx.actor_name)) {
                         Ok(actor) => Some(actor),
                         Err(error) => {
                             tracing::warn!(
@@ -223,36 +207,34 @@ pub(crate) async fn handle_in_process_request(
         .iter()
         .map(|fact| (fact.relation, fact.tuple.clone()))
         .collect::<Vec<_>>();
-    if let Err(error) = host
-        .driver
-        .open_endpoint_with_context_and_volatile_tuples_named(
-            request_endpoint,
-            Some(binding.principal),
-            effective_actor,
-            Symbol::intern("http-request"),
-            request_tuples.clone(),
-        )
-    {
-        return internal_error_response(format_driver_error(&host.driver, error), close);
+    let mut configuration = EndpointConfiguration::new(Symbol::intern("http-request"))
+        .endpoint(request_endpoint)
+        .principal(binding.principal)
+        .volatile_facts(request_tuples);
+    if let Some(actor) = effective_actor {
+        configuration = configuration.actor(actor);
     }
-    let request_scope =
-        RequestFactScope::new(Arc::clone(&host.driver), request_endpoint, request_tuples);
+    let endpoint = match host.client.open_endpoint(configuration) {
+        Ok(endpoint) => endpoint,
+        Err(error) => {
+            return internal_error_response(format_driver_error(&host.client, error), close);
+        }
+    };
+    let request_scope = RequestFactScope::new(endpoint.clone());
 
-    let submitted = host
-        .driver
-        .submit_invocation_for_endpoint(
-            request_endpoint,
+    let submitted = endpoint
+        .invoke(
             Symbol::intern("http_request"),
             vec![(Symbol::intern("request"), Value::identity(request_id))],
         )
         .await;
     if let Err(error) = request_scope.close().await {
-        return internal_error_response(format_driver_error(&host.driver, error), close);
+        return internal_error_response(format_driver_error(&host.client, error), close);
     }
 
     match submitted {
-        Ok(submitted) => response_from_submitted(submitted, close),
-        Err(error) => internal_error_response(format_driver_error(&host.driver, error), close),
+        Ok(invocation) => response_from_outcome(invocation.initial_report().outcome.clone(), close),
+        Err(error) => internal_error_response(format_driver_error(&host.client, error), close),
     }
 }
 
@@ -339,19 +321,46 @@ fn request_facts(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mica_runtime::{SYSTEM_ENDPOINT, SourceRunner, TaskOutcome};
+    use mica_driver::{DriverAdministrator, DriverEventPumpTask, DriverOwner, DriverResources};
+    use mica_runtime::{SourceRunner, TaskOutcome};
     use std::cell::Cell;
     use std::future::pending;
     use std::num::NonZeroUsize;
     use std::rc::Rc;
+    use std::sync::Arc;
     use std::time::Duration;
 
-    fn test_host(source: &str) -> (Arc<InProcessWebHost>, Identity) {
+    struct TestHost {
+        host: Arc<InProcessWebHost>,
+        administrator: DriverAdministrator,
+        _owner: DriverOwner,
+        _event_pump: DriverEventPumpTask,
+    }
+
+    fn test_host(source: &str) -> (TestHost, Identity) {
         let mut runner = SourceRunner::new_empty();
         runner.run_filein(source).unwrap();
         let web = runner.named_identity(Symbol::intern("web")).unwrap();
-        let driver = CompioTaskDriver::spawn_with_workers(runner, NonZeroUsize::new(1)).unwrap();
-        (Arc::new(InProcessWebHost::new(driver)), web)
+        let resources = DriverResources::new(NonZeroUsize::new(1).unwrap());
+        let mut owner = DriverOwner::builder(resources)
+            .source_runner(runner)
+            .build()
+            .unwrap();
+        let events = owner.event_router();
+        let event_pump = owner
+            .take_event_pump()
+            .unwrap()
+            .spawn_router(events.clone());
+        let host = Arc::new(InProcessWebHost::new(owner.client(), &events));
+        (
+            TestHost {
+                host,
+                administrator: owner.administrator(),
+                _owner: owner,
+                _event_pump: event_pump,
+            },
+            web,
+        )
     }
 
     fn test_request(path: &str) -> HttpRequest {
@@ -376,36 +385,30 @@ mod tests {
             .into_iter()
             .map(|fact| (fact.relation, fact.tuple))
             .collect::<Vec<_>>();
-        host.driver
-            .open_endpoint_with_context_and_volatile_tuples_named(
-                endpoint,
-                Some(binding.principal),
-                binding.actor,
-                Symbol::intern("http-request"),
-                tuples.clone(),
-            )
-            .unwrap();
-        let scope = RequestFactScope::new(Arc::clone(&host.driver), endpoint, tuples);
+        let mut configuration = EndpointConfiguration::new(Symbol::intern("http-request"))
+            .endpoint(endpoint)
+            .principal(binding.principal)
+            .volatile_facts(tuples);
+        if let Some(actor) = binding.actor {
+            configuration = configuration.actor(actor);
+        }
+        let scope = RequestFactScope::new(host.client.open_endpoint(configuration).unwrap());
         (request_id, scope)
     }
 
-    async fn query_as(host: &InProcessWebHost, actor: Identity, source: &str) -> Value {
-        let request = mica_runtime::TaskRequest {
-            actor: Some(actor),
-            ..SourceRunner::root_source_request(source)
-        };
+    async fn query_as(host: &TestHost, _actor: Identity, source: &str) -> Value {
         let submitted = host
-            .driver
-            .submit_source(SYSTEM_ENDPOINT, request)
+            .administrator
+            .evaluate(source.to_owned())
             .await
             .unwrap();
-        let TaskOutcome::Complete { value, .. } = submitted.outcome else {
+        let TaskOutcome::Complete { value, .. } = &submitted.initial_report().outcome else {
             panic!("lifecycle query did not complete")
         };
-        value
+        value.clone()
     }
 
-    async fn assert_request_lifecycle_empty(host: &InProcessWebHost, actor: Identity) {
+    async fn assert_request_lifecycle_empty(host: &TestHost, actor: Identity) {
         for (source, heading) in [
             ("return HttpRequest(?request)", "request"),
             ("return EndpointOpen(?endpoint)", "endpoint"),
@@ -499,7 +502,7 @@ mod tests {
         compio::runtime::Runtime::new().unwrap().block_on(async {
             let (host, web) = test_host(include_str!("../../../apps/web/http-core.mica"));
             let response = handle_in_process_request(
-                &host,
+                &host.host,
                 &RequestBinding {
                     principal: web,
                     actor: Some(web),
@@ -510,7 +513,8 @@ mod tests {
             .await;
             assert_eq!(response.status, 200);
             assert!(
-                host.driver
+                host.host
+                    .client
                     .named_identity(Symbol::intern("endpoint:0"))
                     .is_err()
             );
@@ -555,7 +559,7 @@ mod tests {
         compio::runtime::Runtime::new().unwrap().block_on(async {
             let (host, web) = test_host(ABORTING_HTTP);
             let response = handle_in_process_request(
-                &host,
+                &host.host,
                 &RequestBinding {
                     principal: web,
                     actor: Some(web),
@@ -580,9 +584,9 @@ mod tests {
                 actor: Some(web),
             };
             let (cancelled_request, cancelled_scope) =
-                open_request_scope(&host, &binding, &test_request("/cancelled"));
+                open_request_scope(&host.host, &binding, &test_request("/cancelled"));
             let (live_request, live_scope) =
-                open_request_scope(&host, &binding, &test_request("/live"));
+                open_request_scope(&host.host, &binding, &test_request("/live"));
             let started = Rc::new(Cell::new(false));
             let task_started = Rc::clone(&started);
             let task = compio::runtime::spawn(async move {
@@ -618,13 +622,13 @@ mod tests {
                 principal: web,
                 actor: Some(web),
             };
-            let first_host = Arc::clone(&host);
+            let first_host = Arc::clone(&host.host);
             let first_binding = binding.clone();
             let first = compio::runtime::spawn(async move {
                 handle_in_process_request(&first_host, &first_binding, &test_request("/"), false)
                     .await
             });
-            let second_host = Arc::clone(&host);
+            let second_host = Arc::clone(&host.host);
             let second = compio::runtime::spawn(async move {
                 handle_in_process_request(&second_host, &binding, &test_request("/hello"), false)
                     .await

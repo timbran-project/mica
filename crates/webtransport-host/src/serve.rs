@@ -22,6 +22,7 @@ use bytes::{Buf, Bytes};
 use compio_quic::h3::quic::RecvStream as H3RecvStream;
 use compio_quic::{Endpoint, ServerBuilder};
 use h3_webtransport::server::WebTransportSession;
+use mica_driver::EndpointConfiguration;
 use mica_var::{Identity, Symbol};
 use std::future::poll_fn;
 use std::net::SocketAddr;
@@ -159,7 +160,17 @@ async fn handle_session(
     binding: SessionBinding,
 ) -> Result<(), String> {
     let endpoint = host.allocate_endpoint()?;
-    let state = SessionState::new();
+    let mut configuration = EndpointConfiguration::new(Symbol::intern("webtransport"))
+        .endpoint(endpoint)
+        .principal(binding.principal);
+    if let Some(actor) = binding.actor {
+        configuration = configuration.actor(actor);
+    }
+    let endpoint_session = host
+        .client
+        .open_endpoint(configuration)
+        .map_err(|error| format_driver_error(&host.client, error))?;
+    let state = SessionState::new(endpoint_session.clone());
     let output = state.output.clone();
     {
         let mut sessions = host.sessions.lock().unwrap();
@@ -169,16 +180,6 @@ async fn handle_session(
             .set(sessions.len() as i64);
     }
     crate::metrics::metrics().sessions_accepted.inc();
-    if let Err(error) = host.driver.open_endpoint_with_context(
-        endpoint,
-        Some(binding.principal),
-        binding.actor,
-        Symbol::intern("webtransport"),
-    ) {
-        drop_session_writer(&host, endpoint);
-        return Err(format_driver_error(&host.driver, error));
-    }
-
     let writer = compio::runtime::spawn(write_datagram_loop(session.clone(), output));
     let stream_reader = compio::runtime::spawn(read_uni_stream_loop(
         session.clone(),
@@ -186,7 +187,7 @@ async fn handle_session(
         endpoint,
     ));
     let result = read_datagram_loop(session, &host, endpoint).await;
-    let _ = host.driver.close_endpoint(endpoint).await;
+    let _ = endpoint_session.close_in_background();
     drop_session_writer(&host, endpoint);
     let _ = match writer.await {
         Ok(result) => result,

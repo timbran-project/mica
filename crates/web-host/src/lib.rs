@@ -11,7 +11,7 @@
 // You should have received a copy of the GNU Affero General Public License along
 // with this program. If not, see <https://www.gnu.org/licenses/>.
 
-use mica_driver::CompioTaskDriver;
+use mica_driver::{DriverClient, DriverEventRouter};
 use mica_var::Identity;
 use std::sync::Arc;
 
@@ -35,17 +35,16 @@ pub struct RequestBinding {
 }
 
 pub struct InProcessWebHost {
-    pub(crate) driver: Arc<CompioTaskDriver>,
+    pub(crate) client: DriverClient,
     pub(crate) sync: sync::InProcessSyncHost,
     pub(crate) auth: Option<Arc<auth::AuthSubsystem>>,
 }
 
 impl InProcessWebHost {
-    pub fn new(driver: CompioTaskDriver) -> Self {
-        let driver = Arc::new(driver);
+    pub fn new(client: DriverClient, events: &DriverEventRouter) -> Self {
         Self {
-            sync: sync::InProcessSyncHost::new(driver.clone()),
-            driver,
+            sync: sync::InProcessSyncHost::new(client.clone(), events),
+            client,
             auth: None,
         }
     }
@@ -56,21 +55,21 @@ impl InProcessWebHost {
     }
 
     pub(crate) fn allocate_endpoint(&self) -> Result<Identity, String> {
-        self.driver
+        self.client
             .allocate_ephemeral_identity()
-            .map_err(|error| self.driver.format_error(&error))
+            .map_err(|error| self.client.format_error(&error))
     }
 
     pub(crate) fn allocate_request(&self) -> Result<Identity, String> {
-        self.driver
+        self.client
             .allocate_ephemeral_identity()
-            .map_err(|error| self.driver.format_error(&error))
+            .map_err(|error| self.client.format_error(&error))
     }
 }
 
 pub(crate) fn format_driver_error(
-    driver: &mica_driver::CompioTaskDriver,
+    client: &DriverClient,
     error: mica_driver::DriverError,
 ) -> String {
-    format!("error: {}", driver.format_error(&error))
+    format!("error: {}", client.format_error(&error))
 }

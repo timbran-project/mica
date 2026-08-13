@@ -1,6 +1,5 @@
-use mica_driver::CompioTaskDriver;
+use mica_driver::DriverAdministrator;
 use mica_var::{Symbol, Value};
-use std::sync::Arc;
 
 use crate::{hash_password, verify_password};
 
@@ -151,7 +150,7 @@ pub struct SessionRecord {
 }
 
 pub struct MicaSessionStore {
-    driver: Arc<CompioTaskDriver>,
+    administrator: DriverAdministrator,
     schema: AuthSchema,
 }
 
@@ -180,8 +179,11 @@ impl std::fmt::Display for LocalUserCreateError {
 impl std::error::Error for LocalUserCreateError {}
 
 impl MicaSessionStore {
-    pub fn new(driver: Arc<CompioTaskDriver>, schema: AuthSchema) -> Self {
-        Self { driver, schema }
+    pub fn new(administrator: DriverAdministrator, schema: AuthSchema) -> Self {
+        Self {
+            administrator,
+            schema,
+        }
     }
 
     pub async fn create_session(&self, record: &SessionRecord) -> Result<(), String> {
@@ -233,11 +235,11 @@ return true
             last_seen_at = record.last_seen_at,
         );
         let report = self
-            .driver
-            .submit_root_source_report(source)
+            .administrator
+            .evaluate(source)
             .await
             .map_err(|e| format!("failed to create session: {e}"))?;
-        match report.outcome {
+        match report.initial_report().outcome.clone() {
             mica_runtime::TaskOutcome::Complete { .. } => Ok(()),
             mica_runtime::TaskOutcome::Aborted { error, .. } => {
                 Err(format!("create session aborted: {error}"))
@@ -276,11 +278,11 @@ return {{:session_id -> "{session_id}", :user_id -> user, :actor -> actor, :prov
             session_id = session_id,
         );
         let report = self
-            .driver
-            .submit_root_source_report(source)
+            .administrator
+            .evaluate(source)
             .await
             .map_err(|e| format!("failed to lookup session: {e}"))?;
-        match report.outcome {
+        match report.initial_report().outcome.clone() {
             mica_runtime::TaskOutcome::Complete { value, .. } => {
                 if value == Value::nothing() {
                     return Ok(None);
@@ -335,11 +337,11 @@ return true
             now = now,
         );
         let report = self
-            .driver
-            .submit_root_source_report(source)
+            .administrator
+            .evaluate(source)
             .await
             .map_err(|e| format!("failed to revoke session: {e}"))?;
-        match report.outcome {
+        match report.initial_report().outcome.clone() {
             mica_runtime::TaskOutcome::Complete { .. } => Ok(()),
             mica_runtime::TaskOutcome::Aborted { error, .. } => {
                 Err(format!("revoke session aborted: {error}"))
@@ -367,8 +369,8 @@ return true
             now = now,
         );
         let _ = self
-            .driver
-            .submit_root_source_report(source)
+            .administrator
+            .evaluate(source)
             .await
             .map_err(|e| format!("failed to update last seen: {e}"))?;
         Ok(())
@@ -413,11 +415,11 @@ return "{escaped_user_symbol}"
             escaped_user_symbol = escaped_user_symbol,
         );
         let report = self
-            .driver
-            .submit_root_source_report(source)
+            .administrator
+            .evaluate(source)
             .await
             .map_err(|e| format!("failed to ensure user exists: {e}"))?;
-        match report.outcome {
+        match report.initial_report().outcome.clone() {
             mica_runtime::TaskOutcome::Complete { value, .. } => value
                 .with_str(str::to_owned)
                 .ok_or_else(|| "ensure user returned non-string identity name".to_owned()),
@@ -476,11 +478,11 @@ return actor_symbol
             escaped_display_name = escaped_display_name,
         );
         let report = self
-            .driver
-            .submit_root_source_report(source)
+            .administrator
+            .evaluate(source)
             .await
             .map_err(|e| format!("failed to ensure user person exists: {e}"))?;
-        match report.outcome {
+        match report.initial_report().outcome.clone() {
             mica_runtime::TaskOutcome::Complete { value, .. } => value
                 .with_str(str::to_owned)
                 .ok_or_else(|| "ensure user person returned non-string identity name".to_owned()),
@@ -560,11 +562,11 @@ return string_slice(to_literal(user), 1, string_len(to_literal(user)))
             escaped_provider_sub = escaped_provider_sub,
         );
         let report = self
-            .driver
-            .submit_root_source_report(source)
+            .administrator
+            .evaluate(source)
             .await
             .map_err(|e| format!("failed to lookup local user: {e}"))?;
-        match report.outcome {
+        match report.initial_report().outcome.clone() {
             mica_runtime::TaskOutcome::Complete { value, .. } => {
                 if value == Value::nothing() {
                     return Ok(None);
@@ -603,11 +605,11 @@ return true
             role_symbol = role_symbol,
         );
         let report = self
-            .driver
-            .submit_root_source_report(source)
+            .administrator
+            .evaluate(source)
             .await
             .map_err(|e| format!("failed to grant user role: {e}"))?;
-        match report.outcome {
+        match report.initial_report().outcome.clone() {
             mica_runtime::TaskOutcome::Complete { .. } => Ok(()),
             mica_runtime::TaskOutcome::Aborted { error, .. } => {
                 Err(format!("grant user role aborted: {error}"))
@@ -638,11 +640,11 @@ return true
             escaped_password_hash = escaped_password_hash,
         );
         let report = self
-            .driver
-            .submit_root_source_report(source)
+            .administrator
+            .evaluate(source)
             .await
             .map_err(|e| format!("failed to set local password hash: {e}"))?;
-        match report.outcome {
+        match report.initial_report().outcome.clone() {
             mica_runtime::TaskOutcome::Complete { .. } => Ok(()),
             mica_runtime::TaskOutcome::Aborted { error, .. } => {
                 Err(format!("set local password hash aborted: {error}"))
@@ -677,11 +679,11 @@ return {{:user_id -> "{escaped_user_symbol}", :password_hash -> password_hash}}
             escaped_user_symbol = escaped_user_symbol,
         );
         let report = self
-            .driver
-            .submit_root_source_report(source)
+            .administrator
+            .evaluate(source)
             .await
             .map_err(|e| format!("failed to authenticate local user: {e}"))?;
-        let map = match report.outcome {
+        let map = match report.initial_report().outcome.clone() {
             mica_runtime::TaskOutcome::Complete { value, .. } => {
                 if value == Value::nothing() {
                     return Ok(None);
@@ -759,12 +761,37 @@ fn map_optional_int(value: &Value, key: &str) -> Result<Option<i64>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mica_driver::CompioTaskDriver;
+    use mica_driver::{DriverEventPumpTask, DriverOwner, DriverResources};
     use mica_runtime::SourceRunner;
     use std::num::NonZeroUsize;
 
-    fn test_driver(runner: SourceRunner) -> CompioTaskDriver {
-        CompioTaskDriver::spawn_with_workers(runner, NonZeroUsize::new(1)).unwrap()
+    struct TestStore {
+        store: MicaSessionStore,
+        _owner: DriverOwner,
+        _event_pump: DriverEventPumpTask,
+    }
+
+    impl std::ops::Deref for TestStore {
+        type Target = MicaSessionStore;
+
+        fn deref(&self) -> &Self::Target {
+            &self.store
+        }
+    }
+
+    fn test_store(runner: SourceRunner, schema: AuthSchema) -> TestStore {
+        let resources = DriverResources::new(NonZeroUsize::new(1).unwrap());
+        let mut owner = DriverOwner::builder(resources)
+            .source_runner(runner)
+            .build()
+            .unwrap();
+        let events = owner.event_router();
+        let event_pump = owner.take_event_pump().unwrap().spawn_router(events);
+        TestStore {
+            store: MicaSessionStore::new(owner.administrator(), schema),
+            _owner: owner,
+            _event_pump: event_pump,
+        }
     }
 
     fn session_schema() -> &'static str {
@@ -792,11 +819,8 @@ make_functional_relation(:source/Description, 2, [0])
 "#
     }
 
-    fn source_store(runner: SourceRunner) -> MicaSessionStore {
-        MicaSessionStore::new(
-            Arc::new(test_driver(runner)),
-            AuthSchema::namespaced("source"),
-        )
+    fn source_store(runner: SourceRunner) -> TestStore {
+        test_store(runner, AuthSchema::namespaced("source"))
     }
 
     #[test]
@@ -851,8 +875,8 @@ make_functional_relation(:source/Description, 2, [0])
 
             assert_eq!(user_id, "source/user_github_1001");
             let report = store
-                .driver
-                .submit_root_source_report(
+                .administrator
+                .evaluate(
                     r#"
 source/User(#source/user_github_1001) || return false
 source/UserExternalIdentity(:github, "1001", #source/user_github_1001) || return false
@@ -866,7 +890,7 @@ return true
                 .await
                 .unwrap();
             assert!(matches!(
-                report.outcome,
+                report.initial_report().outcome.clone(),
                 mica_runtime::TaskOutcome::Complete { value, .. } if value == Value::from(true)
             ));
         });
@@ -890,8 +914,8 @@ return true
 
             assert_eq!(first, second);
             let report = store
-                .driver
-                .submit_root_source_report(
+                .administrator
+                .evaluate(
                     r#"
 source/UserExternalIdentity(:github, "1001", #source/user_github_1001) || return false
 source/UserLogin(#source/user_github_1001, "new-login") || return false
@@ -903,7 +927,7 @@ return true
                 .await
                 .unwrap();
             assert!(matches!(
-                report.outcome,
+                report.initial_report().outcome.clone(),
                 mica_runtime::TaskOutcome::Complete { value, .. } if value == Value::from(true)
             ));
         });
@@ -927,8 +951,8 @@ return true
 
             assert_eq!(person_id, "source/person_github_1001");
             let report = store
-                .driver
-                .submit_root_source_report(
+                .administrator
+                .evaluate(
                     r#"
 source/Person(#source/person_github_1001) || return false
 source/UserPerson(#source/user_github_1001, #source/person_github_1001) || return false
@@ -942,7 +966,7 @@ return true
                 .await
                 .unwrap();
             assert!(matches!(
-                report.outcome,
+                report.initial_report().outcome.clone(),
                 mica_runtime::TaskOutcome::Complete { value, .. } if value == Value::from(true)
             ));
         });
@@ -1043,8 +1067,7 @@ make_functional_relation(:mud/Description, 2, [0])
 "#,
                 )
                 .unwrap();
-            let store =
-                MicaSessionStore::new(Arc::new(test_driver(runner)), AuthSchema::namespaced("mud"));
+            let store = test_store(runner, AuthSchema::namespaced("mud"));
 
             let user_id = store
                 .ensure_user_exists("alice", "github", "1001")
@@ -1058,8 +1081,8 @@ make_functional_relation(:mud/Description, 2, [0])
             assert_eq!(user_id, "mud/user_github_1001");
             assert_eq!(person_id, "mud/person_github_1001");
             let report = store
-                .driver
-                .submit_root_source_report(
+                .administrator
+                .evaluate(
                     r#"
 mud/User(#mud/user_github_1001) || return false
 mud/UserRole(#mud/user_github_1001, :mud/role_viewer) || return false
@@ -1072,7 +1095,7 @@ return true
                 .await
                 .unwrap();
             assert!(matches!(
-                report.outcome,
+                report.initial_report().outcome.clone(),
                 mica_runtime::TaskOutcome::Complete { value, .. } if value == Value::from(true)
             ));
         });
@@ -1109,16 +1132,15 @@ make_functional_relation(:mud/Description, 2, [0])
 "#,
                 )
                 .unwrap();
-            let store =
-                MicaSessionStore::new(Arc::new(test_driver(runner)), AuthSchema::namespaced("mud"));
+            let store = test_store(runner, AuthSchema::namespaced("mud"));
 
             let user_id = store
                 .ensure_user_exists("alice", "local", "alice")
                 .await
                 .unwrap();
             store
-                .driver
-                .submit_root_source_report(
+                .administrator
+                .evaluate(
                     r#"
 assert mud/DefaultUserPerson(#mud/user_local_alice, #alice)
 "#
@@ -1133,8 +1155,8 @@ assert mud/DefaultUserPerson(#mud/user_local_alice, #alice)
 
             assert_eq!(person_id, "alice");
             let report = store
-                .driver
-                .submit_root_source_report(
+                .administrator
+                .evaluate(
                     r##"
 mud/DisplayName(#alice, "Alice") || return false
 mud/UserPerson(#mud/user_local_alice, #alice) || return false
@@ -1147,7 +1169,7 @@ return true
                 .await
                 .unwrap();
             assert!(matches!(
-                report.outcome,
+                report.initial_report().outcome.clone(),
                 mica_runtime::TaskOutcome::Complete {
                     value,
                     ..

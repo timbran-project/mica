@@ -117,7 +117,7 @@ pub struct ExternalRequestContext {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct TaskContext {
+pub(crate) struct TaskContext {
     pub principal: Option<Identity>,
     pub actor: Option<Identity>,
     pub endpoint: Identity,
@@ -134,7 +134,7 @@ pub struct DriverSubscriptionRequest {
 }
 
 #[derive(Debug, Eq, PartialEq)]
-pub struct DriverSubscriptionMailbox {
+pub(crate) struct DriverSubscriptionMailbox {
     pub(crate) mailbox: u64,
     pub(crate) receiver: Value,
     pub(crate) sender: Value,
@@ -148,15 +148,14 @@ impl DriverSubscriptionMailbox {
 
 /// An ordered notification from the driver.
 ///
-/// Task submission and resumption return their immediate runtime outcome and
-/// also enqueue the corresponding lifecycle event. The return value supports
-/// request/response hosts, while this event stream is the authoritative source
-/// for asynchronous lifecycle changes, effects, and subscription readiness.
-/// Effects committed by a task precede that task's lifecycle event, and
-/// subscription readiness caused by the outcome follows its lifecycle event.
-/// Concurrent producers are ordered by admission to the queue.
-/// Terminal task events and effects are retained until a host drains them;
-/// repeated suspension and subscription-ready notifications may be coalesced.
+/// Effects, subscription readiness, and explicitly backgrounded task lifecycle
+/// changes delivered by the driver. An [`crate::InvocationHandle`] completes
+/// independently unless it is watched by a [`crate::DriverEventRouter`] or
+/// detached into this stream. Effects committed by a task precede its terminal
+/// completion, and subscription readiness follows the outcome that caused it.
+/// Concurrent producers are ordered by admission to the queue. Terminal task
+/// events and effects are retained until a host drains them; repeated suspension
+/// and subscription-ready notifications may be coalesced.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DriverEvent {
     TaskCompleted {
@@ -196,6 +195,20 @@ pub enum TaskCancellationReason {
 pub struct EndpointCloseReport {
     pub relation_changes: usize,
     pub cancelled_tasks: Vec<TaskId>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DriverResourceSnapshot {
+    pub ephemeral_identities: usize,
+    pub endpoints: usize,
+    pub subscription_mailboxes: usize,
+    pub subscriptions: usize,
+    pub active_tasks: usize,
+    pub suspended_tasks: usize,
+    pub timers: usize,
+    pub retained_terminal_tasks: usize,
+    pub queued_events: usize,
+    pub async_workers: usize,
 }
 
 #[derive(Debug)]

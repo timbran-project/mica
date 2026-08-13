@@ -1898,39 +1898,31 @@ mod tests {
             let runner = mica_runtime::SourceRunner::new_empty_with_embedding_provider(
                 mica_runtime::EmbeddingProviderKind::Vllm,
             );
-            let driver = mica_driver::CompioTaskDriver::spawn_with_workers_and_external_handler(
-                runner,
-                NonZeroUsize::new(1),
-                Some(handler_with_embedding_base_url(format!("http://{addr}/v1"))),
-            )
-            .unwrap();
+            let resources = mica_driver::DriverResources::new(NonZeroUsize::new(1).unwrap());
+            let mut owner = mica_driver::DriverOwner::builder(resources)
+                .source_runner(runner)
+                .external_request_handler(handler_with_embedding_base_url(format!(
+                    "http://{addr}/v1"
+                )))
+                .build()
+                .unwrap();
+            let mut event_pump = owner.take_event_pump().unwrap();
             let source = "return embed_text(\"source-workspace\", \"red brass lamp\")".to_owned();
-            let report = driver.submit_root_source_report(source).await.unwrap();
+            let invocation = owner.administrator().evaluate(source).await.unwrap();
             assert!(matches!(
-                report.outcome,
+                invocation.initial_report().outcome,
                 mica_runtime::TaskOutcome::Suspended { .. }
             ));
 
-            let mut events = Vec::new();
-            for _ in 0..50 {
-                events.extend(driver.drain_events());
-                if events.iter().any(|event| {
-                    matches!(
-                        event,
-                        mica_driver::DriverEvent::TaskCompleted { task_id, value }
-                            if *task_id == report.task_id
-                                && *value == Value::list([
-                                    Value::float(0.25).unwrap(),
-                                    Value::float(0.5).unwrap(),
-                                    Value::float(0.75).unwrap(),
-                                ])
-                    )
-                }) {
-                    return;
-                }
-                compio::time::sleep(std::time::Duration::from_millis(10)).await;
-            }
-            panic!("missing completed embed_text task event: {events:?}");
+            assert_eq!(
+                event_pump.drive_invocation(&invocation, |_| {}).await,
+                mica_driver::InvocationOutcome::Completed(Value::list([
+                    Value::float(0.25).unwrap(),
+                    Value::float(0.5).unwrap(),
+                    Value::float(0.75).unwrap(),
+                ]))
+            );
+            owner.shutdown(&mut event_pump, |_| {}).await.unwrap();
         });
     }
 

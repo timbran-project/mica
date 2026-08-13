@@ -13,7 +13,10 @@
 
 use compio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use compio::net::{TcpListener, TcpStream};
-use mica_driver::{CompioTaskDriver, DriverEvent};
+use mica_driver::{
+    DriverClient, DriverEvent, DriverEventRegistration, DriverEventRouter, EndpointConfiguration,
+    EndpointSession,
+};
 use mica_host_protocol::{HostMessage, PROTOCOL_VERSION};
 use mica_host_zmq::{ZmqHostSocket, ZmqSocketOptions};
 use mica_runtime::{SuspendKind, TaskOutcome};
@@ -22,7 +25,7 @@ use std::collections::{BTreeMap, VecDeque};
 use std::future::Future;
 use std::io::ErrorKind;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
 
@@ -43,9 +46,9 @@ pub struct ActorBinding {
 }
 
 pub struct InProcessTelnetHost {
-    driver: Arc<CompioTaskDriver>,
+    client: DriverClient,
     endpoints: Arc<Mutex<BTreeMap<Identity, Arc<EndpointOutput>>>>,
-    stop_events: Arc<AtomicBool>,
+    _event_registration: DriverEventRegistration,
 }
 
 pub struct ZmqTelnetHost {
@@ -87,37 +90,24 @@ struct ZmqSession {
 }
 
 impl InProcessTelnetHost {
-    pub fn new(driver: CompioTaskDriver) -> Self {
-        let driver = Arc::new(driver);
+    pub fn new(client: DriverClient, events: &DriverEventRouter) -> Self {
         let endpoints = Arc::new(Mutex::new(BTreeMap::new()));
-        let stop_events = Arc::new(AtomicBool::new(false));
-        start_event_pump(driver.clone(), endpoints.clone(), stop_events.clone());
+        let event_endpoints = Arc::clone(&endpoints);
+        let event_registration = events.register(move |event| {
+            route_driver_event(&event_endpoints, event);
+            async {}
+        });
         Self {
-            driver,
+            client,
             endpoints,
-            stop_events,
-        }
-    }
-
-    #[cfg(test)]
-    fn new_without_event_pump(driver: CompioTaskDriver) -> Self {
-        Self {
-            driver: Arc::new(driver),
-            endpoints: Arc::new(Mutex::new(BTreeMap::new())),
-            stop_events: Arc::new(AtomicBool::new(false)),
+            _event_registration: event_registration,
         }
     }
 
     fn allocate_endpoint(&self) -> Result<Identity, String> {
-        self.driver
+        self.client
             .allocate_ephemeral_identity()
-            .map_err(|error| self.driver.format_error(&error))
-    }
-}
-
-impl Drop for InProcessTelnetHost {
-    fn drop(&mut self) {
-        self.stop_events.store(true, Ordering::Relaxed);
+            .map_err(|error| self.client.format_error(&error))
     }
 }
 
@@ -319,7 +309,14 @@ async fn handle_connection(
         .lock()
         .unwrap()
         .insert(endpoint, output.clone());
-    open_endpoint(&host, endpoint, actor.identity)?;
+    let session = host
+        .client
+        .open_endpoint(
+            EndpointConfiguration::new(Symbol::intern("telnet"))
+                .endpoint(endpoint)
+                .actor(actor.identity),
+        )
+        .map_err(format_driver_error)?;
 
     let (read_half, write_half) = stream.into_split();
     let writer = compio::runtime::spawn(write_socket_loop(write_half, output));
@@ -330,8 +327,8 @@ async fn handle_connection(
         "Try: look, get coin, put coin box, north, say hello, quit.",
     )?;
 
-    let result = read_socket_loop(read_half, &host, endpoint, &actor.name).await;
-    let _ = host.driver.close_endpoint(endpoint).await;
+    let result = read_socket_loop(read_half, &host, &session, &actor.name).await;
+    let _ = session.close_in_background();
     drop_socket_writer(&host, endpoint);
     let _ = match writer.await {
         Ok(result) => result,
@@ -367,26 +364,25 @@ async fn handle_zmq_connection(
 async fn read_socket_loop<S: AsyncRead>(
     mut stream: S,
     host: &InProcessTelnetHost,
-    endpoint: Identity,
+    session: &EndpointSession,
     actor_name: &str,
 ) -> Result<(), String> {
     let mut codec = TelnetCodec::new();
     let mut pending = VecDeque::new();
     loop {
-        start_read_task(host, endpoint).await?;
+        start_read_task(session).await?;
         let line = read_telnet_line(&mut stream, &mut codec, &mut pending).await?;
         let Some(line) = line else {
             return Ok(());
         };
-        let outcomes = host
-            .driver
-            .input(endpoint, Value::string(line.clone()))
+        let outcomes = session
+            .input(Value::string(line.clone()))
             .await
             .map_err(format_driver_error)?;
         for outcome in outcomes {
             if let TaskOutcome::Complete { value, .. } = outcome {
                 let command = value.with_str(str::to_owned).unwrap_or(line.clone());
-                if handle_command(host, endpoint, actor_name, &command).await? {
+                if handle_command(host, session, actor_name, &command).await? {
                     return Ok(());
                 }
             }
@@ -444,13 +440,12 @@ async fn read_telnet_line<S: AsyncRead>(
     }
 }
 
-async fn start_read_task(host: &InProcessTelnetHost, endpoint: Identity) -> Result<(), String> {
-    let report = host
-        .driver
-        .submit_source_report(endpoint, None, "return read(:line)".to_owned())
+async fn start_read_task(session: &EndpointSession) -> Result<(), String> {
+    let invocation = session
+        .evaluate("return read(:line)".to_owned())
         .await
         .map_err(format_driver_error)?;
-    match report.outcome {
+    match &invocation.initial_report().outcome {
         TaskOutcome::Suspended {
             kind: SuspendKind::WaitingForInput(_),
             ..
@@ -714,20 +709,19 @@ fn is_terminal_response(request_id: u64, message: &HostMessage) -> bool {
 
 async fn handle_command(
     host: &InProcessTelnetHost,
-    endpoint: Identity,
+    session: &EndpointSession,
     actor_name: &str,
     command: &str,
 ) -> Result<bool, String> {
     if is_quit_command(command) {
-        send_line(host, endpoint, "Goodbye.")?;
+        send_line(host, session.endpoint(), "Goodbye.")?;
         return Ok(true);
     }
     let source = command_invocation_source(actor_name, command);
-    host.driver
-        .submit_source_report(endpoint, None, source)
+    session
+        .evaluate(source)
         .await
         .map_err(format_driver_error)?;
-    flush_routed_effects(host);
     Ok(false)
 }
 
@@ -741,16 +735,6 @@ fn command_invocation_source(actor_name: &str, command: &str) -> String {
 fn is_quit_command(command: &str) -> bool {
     let command = command.trim();
     command.eq_ignore_ascii_case("quit") || command.eq_ignore_ascii_case("exit")
-}
-
-fn open_endpoint(
-    host: &InProcessTelnetHost,
-    endpoint: Identity,
-    actor: Identity,
-) -> Result<(), String> {
-    host.driver
-        .open_endpoint(endpoint, Some(actor), Symbol::intern("telnet"))
-        .map_err(format_driver_error)
 }
 
 fn send_line(host: &InProcessTelnetHost, endpoint: Identity, line: &str) -> Result<(), String> {
@@ -796,29 +780,6 @@ async fn shutdown_socket_writer<S: AsyncWrite>(mut stream: S) -> Result<(), Stri
         Err(error) if error.kind() == ErrorKind::BrokenPipe => Ok(()),
         Err(error) if error.kind() == ErrorKind::ConnectionReset => Ok(()),
         Err(error) => Err(format!("failed to shut down connection writer: {error}")),
-    }
-}
-
-fn start_event_pump(
-    driver: Arc<CompioTaskDriver>,
-    endpoints: Arc<Mutex<BTreeMap<Identity, Arc<EndpointOutput>>>>,
-    stop_events: Arc<AtomicBool>,
-) {
-    compio::runtime::spawn(async move {
-        while !stop_events.load(Ordering::Relaxed) {
-            let events = driver.wait_events().await;
-            for event in events {
-                route_driver_event(&endpoints, event);
-            }
-        }
-    })
-    .detach();
-}
-
-fn flush_routed_effects(host: &InProcessTelnetHost) {
-    let events = host.driver.drain_events();
-    for event in events {
-        route_driver_event(&host.endpoints, event);
     }
 }
 
@@ -880,11 +841,21 @@ fn format_zmq_error(error: mica_host_zmq::ZmqTransportError) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mica_driver::{DriverEventPumpTask, DriverOwner, DriverResources};
     use mica_runtime::SourceRunner;
     use std::num::NonZeroUsize;
 
-    fn test_driver(runner: SourceRunner) -> CompioTaskDriver {
-        CompioTaskDriver::spawn_with_workers(runner, NonZeroUsize::new(1)).unwrap()
+    fn test_host(runner: SourceRunner) -> (DriverOwner, DriverEventPumpTask, InProcessTelnetHost) {
+        let resources = DriverResources::new(NonZeroUsize::new(1).unwrap());
+        let mut owner = DriverOwner::builder(resources)
+            .source_runner(runner)
+            .build()
+            .unwrap();
+        let router = owner.event_router();
+        let event_router = router.clone();
+        let event_pump = owner.take_event_pump().unwrap().spawn_router(event_router);
+        let host = InProcessTelnetHost::new(owner.client(), &router);
+        (owner, event_pump, host)
     }
 
     #[test]
@@ -941,40 +912,45 @@ mod tests {
 
     #[test]
     fn routed_command_effect_reaches_endpoint_sender() {
-        let mut runner = SourceRunner::new_empty();
-        runner
-            .run_filein(include_str!("../../../apps/shared/string.mica"))
-            .unwrap();
-        runner
-            .run_filein(include_str!("../../../apps/shared/events.mica"))
-            .unwrap();
-        runner
-            .run_filein(include_str!("../../../apps/mud/core.mica"))
-            .unwrap();
-        let alice = runner.named_identity(Symbol::intern("alice")).unwrap();
-        let host = InProcessTelnetHost::new_without_event_pump(test_driver(runner));
-        let endpoint = host.allocate_endpoint().unwrap();
-        let output = EndpointOutput::new();
-        host.endpoints
-            .lock()
-            .unwrap()
-            .insert(endpoint, output.clone());
-        open_endpoint(&host, endpoint, alice).unwrap();
-
-        let replies = host.driver.submit_source_report(
-            endpoint,
-            None,
-            "emit(#endpoint, \"hello\")".to_owned(),
-        );
         compio::runtime::Runtime::new().unwrap().block_on(async {
-            replies.await.unwrap();
-        });
-        flush_routed_effects(&host);
+            let mut runner = SourceRunner::new_empty();
+            runner
+                .run_filein(include_str!("../../../apps/shared/string.mica"))
+                .unwrap();
+            runner
+                .run_filein(include_str!("../../../apps/shared/events.mica"))
+                .unwrap();
+            runner
+                .run_filein(include_str!("../../../apps/mud/core.mica"))
+                .unwrap();
+            let alice = runner.named_identity(Symbol::intern("alice")).unwrap();
+            let (mut owner, event_task, host) = test_host(runner);
+            let endpoint = host.allocate_endpoint().unwrap();
+            let output = EndpointOutput::new();
+            host.endpoints
+                .lock()
+                .unwrap()
+                .insert(endpoint, output.clone());
+            let session = host
+                .client
+                .open_endpoint(
+                    EndpointConfiguration::new(Symbol::intern("telnet"))
+                        .endpoint(endpoint)
+                        .actor(alice),
+                )
+                .unwrap();
 
-        assert_eq!(output.try_recv().unwrap(), "hello");
-        compio::runtime::Runtime::new()
-            .unwrap()
-            .block_on(host.driver.close_endpoint(endpoint));
+            session
+                .evaluate("emit(#endpoint, \"hello\")".to_owned())
+                .await
+                .unwrap();
+            compio::time::sleep(std::time::Duration::from_millis(1)).await;
+            assert_eq!(output.try_recv().unwrap(), "hello");
+
+            session.close_in_background().unwrap();
+            let mut pump = event_task.stop().await.unwrap();
+            owner.shutdown(&mut pump, |_| {}).await.unwrap();
+        });
     }
 
     #[test]
@@ -997,20 +973,28 @@ mod tests {
                 .run_filein(include_str!("../../../apps/mud/command-parser.mica"))
                 .unwrap();
             let alice = runner.named_identity(Symbol::intern("alice")).unwrap();
-            let host = InProcessTelnetHost::new_without_event_pump(test_driver(runner));
+            let (mut owner, event_task, host) = test_host(runner);
             let endpoint = host.allocate_endpoint().unwrap();
             let output = EndpointOutput::new();
             host.endpoints
                 .lock()
                 .unwrap()
                 .insert(endpoint, output.clone());
-            open_endpoint(&host, endpoint, alice).unwrap();
+            let session = host
+                .client
+                .open_endpoint(
+                    EndpointConfiguration::new(Symbol::intern("telnet"))
+                        .endpoint(endpoint)
+                        .actor(alice),
+                )
+                .unwrap();
 
             assert!(
-                !handle_command(&host, endpoint, "alice", "look")
+                !handle_command(&host, &session, "alice", "look")
                     .await
                     .unwrap()
             );
+            compio::time::sleep(std::time::Duration::from_millis(1)).await;
 
             let line = output.try_recv().unwrap();
             assert_eq!(line, "First Room. You are standing in a plain stone room.");
@@ -1031,10 +1015,11 @@ mod tests {
                 "Bob is here, looking faintly puzzled."
             );
             assert!(
-                !handle_command(&host, endpoint, "alice", "push button")
+                !handle_command(&host, &session, "alice", "push button")
                     .await
                     .unwrap()
             );
+            compio::time::sleep(std::time::Duration::from_millis(1)).await;
 
             let line = output.try_recv().unwrap();
             assert_eq!(
@@ -1042,27 +1027,30 @@ mod tests {
                 "You press the red button. It clicks, then begins to hum."
             );
             compio::time::sleep(std::time::Duration::from_millis(1100)).await;
-            flush_routed_effects(&host);
 
             let line = output.try_recv().unwrap();
             assert_eq!(line, "The red button gives one final cheerful ding.");
             assert!(
-                !handle_command(&host, endpoint, "alice", "say hello")
+                !handle_command(&host, &session, "alice", "say hello")
                     .await
                     .unwrap()
             );
+            compio::time::sleep(std::time::Duration::from_millis(1)).await;
 
             let line = output.try_recv().unwrap();
             assert_eq!(line, "You say, \"hello\"");
             assert!(
-                !handle_command(&host, endpoint, "alice", "flailwildly")
+                !handle_command(&host, &session, "alice", "flailwildly")
                     .await
                     .unwrap()
             );
+            compio::time::sleep(std::time::Duration::from_millis(1)).await;
 
             let line = output.try_recv().unwrap();
             assert_eq!(line, "I do not understand that.");
-            let _ = host.driver.close_endpoint(endpoint).await;
+            session.close_in_background().unwrap();
+            let mut pump = event_task.stop().await.unwrap();
+            owner.shutdown(&mut pump, |_| {}).await.unwrap();
         });
     }
 
@@ -1070,26 +1058,31 @@ mod tests {
     fn endpoint_read_task_accepts_driver_input() {
         compio::runtime::Runtime::new().unwrap().block_on(async {
             let runner = SourceRunner::new_empty();
-            let host = InProcessTelnetHost::new_without_event_pump(test_driver(runner));
+            let (mut owner, event_task, host) = test_host(runner);
             let endpoint = host.allocate_endpoint().unwrap();
             host.endpoints
                 .lock()
                 .unwrap()
                 .insert(endpoint, EndpointOutput::new());
-            open_endpoint(&host, endpoint, endpoint).unwrap();
-
-            start_read_task(&host, endpoint).await.unwrap();
-            let outcomes = host
-                .driver
-                .input(endpoint, Value::string("look"))
-                .await
+            let session = host
+                .client
+                .open_endpoint(
+                    EndpointConfiguration::new(Symbol::intern("telnet"))
+                        .endpoint(endpoint)
+                        .actor(endpoint),
+                )
                 .unwrap();
+
+            start_read_task(&session).await.unwrap();
+            let outcomes = session.input(Value::string("look")).await.unwrap();
 
             assert!(matches!(
                 outcomes.as_slice(),
                 [TaskOutcome::Complete { value, .. }] if *value == Value::string("look")
             ));
-            let _ = host.driver.close_endpoint(endpoint).await;
+            session.close_in_background().unwrap();
+            let mut pump = event_task.stop().await.unwrap();
+            owner.shutdown(&mut pump, |_| {}).await.unwrap();
         });
     }
 }

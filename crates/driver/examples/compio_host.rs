@@ -12,8 +12,8 @@
 // with this program. If not, see <https://www.gnu.org/licenses/>.
 
 use mica_driver::{
-    CompioTaskDriver, DriverEvent, DriverResources, ExternalRequestFuture, ExternalRequestHandler,
-    Symbol, TaskOutcome, Value,
+    DriverEvent, DriverOwner, DriverResources, EndpointConfiguration, ExternalRequestFuture,
+    ExternalRequestHandler, InvocationOutcome, Symbol, Value,
 };
 use std::error::Error;
 use std::num::NonZeroUsize;
@@ -45,19 +45,20 @@ async fn run() -> Result<(), Box<dyn Error>> {
             request.payload
         }) as ExternalRequestFuture
     });
-    let driver = CompioTaskDriver::builder(resources)
+    let mut owner = DriverOwner::builder(resources)
         .initial_filein(HOST_UNIT, None)
         .external_request_handler(external_handler)
         .build()?;
+    let mut event_pump = owner.take_event_pump()?;
+    let client = owner.client();
 
-    let endpoint = driver.allocate_ephemeral_identity()?;
-    let actor = driver.named_identity(Symbol::intern("shell"))?;
-    driver.open_endpoint(endpoint, Some(actor), Symbol::intern("native-shell"))?;
+    let actor = client.named_identity(Symbol::intern("shell"))?;
+    let endpoint = client
+        .open_endpoint(EndpointConfiguration::new(Symbol::intern("native-shell")).actor(actor))?;
 
     // Translate one native input action into a Mica named-role invocation.
-    let submitted = driver
-        .submit_invocation_for_endpoint(
-            endpoint,
+    let invocation = endpoint
+        .invoke(
             Symbol::intern("native_round_trip"),
             vec![(
                 Symbol::intern("text"),
@@ -65,36 +66,28 @@ async fn run() -> Result<(), Box<dyn Error>> {
             )],
         )
         .await?;
-    assert!(matches!(submitted.outcome, TaskOutcome::Suspended { .. }));
 
-    let result = 'events: loop {
-        for event in driver.wait_events().await {
-            match event {
-                DriverEvent::Effect(effect) => {
-                    // A graphical host would invalidate or redraw native state here.
-                    println!("redraw: {}", driver.format_value(&effect.value));
-                }
-                DriverEvent::TaskCompleted { task_id, value } if task_id == submitted.task_id => {
-                    break 'events value;
-                }
-                DriverEvent::TaskAborted { task_id, error } if task_id == submitted.task_id => {
-                    return Err(
-                        format!("Mica task aborted: {}", driver.format_value(&error)).into(),
-                    );
-                }
-                DriverEvent::TaskFailed { task_id, error } if task_id == submitted.task_id => {
-                    return Err(format!("Mica task failed: {error}").into());
-                }
-                DriverEvent::TaskCancelled { task_id, reason } if task_id == submitted.task_id => {
-                    return Err(format!("Mica task was cancelled: {reason:?}").into());
-                }
-                _ => {}
+    let outcome = event_pump
+        .drive_invocation(&invocation, |event| {
+            if let DriverEvent::Effect(effect) = event {
+                // A graphical host would invalidate or redraw native state here.
+                println!("redraw: {}", client.format_value(&effect.value));
             }
+        })
+        .await;
+    let result = match outcome {
+        InvocationOutcome::Completed(value) => value,
+        InvocationOutcome::Aborted(error) => {
+            return Err(format!("Mica task aborted: {}", client.format_value(&error)).into());
+        }
+        InvocationOutcome::Failed(error) => return Err(format!("Mica task failed: {error}").into()),
+        InvocationOutcome::Cancelled(reason) => {
+            return Err(format!("Mica task was cancelled: {reason:?}").into());
         }
     };
-    println!("completed: {}", driver.format_value(&result));
+    println!("completed: {}", client.format_value(&result));
 
-    driver.close_endpoint(endpoint).await;
-    driver.shutdown().await?;
+    endpoint.close_with_pump(&mut event_pump, |_| {}).await?;
+    owner.shutdown(&mut event_pump, |_| {}).await?;
     Ok(())
 }

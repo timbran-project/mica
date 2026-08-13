@@ -171,6 +171,30 @@ impl SubscriptionRuntimeHandle {
         capabilities.len()
     }
 
+    pub(crate) fn cancel_for_mailbox(&self, receiver: &Value) -> Result<usize, RuntimeError> {
+        let mailbox = self.mailboxes.mailbox_for_receiver(receiver)?;
+        let mut state = self.state.lock().unwrap();
+        let capabilities = state
+            .subscriptions
+            .iter()
+            .filter_map(|(capability, subscription)| {
+                self.mailboxes
+                    .mailbox_for_sender(&subscription.request.sender)
+                    .ok()
+                    .filter(|current| *current == mailbox)
+                    .map(|_| *capability)
+            })
+            .collect::<Vec<_>>();
+        for capability in &capabilities {
+            let Some(active) = state.subscriptions.remove(capability) else {
+                continue;
+            };
+            state.remove_subscription_index(*capability, &active.request.subject);
+            self.mailboxes.release_subscription(&active.capability);
+        }
+        Ok(capabilities.len())
+    }
+
     pub(crate) fn cancel_all(&self) -> usize {
         let mut state = self.state.lock().unwrap();
         let subscriptions = std::mem::take(&mut state.subscriptions);

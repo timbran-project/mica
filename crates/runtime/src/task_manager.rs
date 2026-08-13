@@ -549,7 +549,7 @@ pub struct TaskManager {
     builtins: Arc<BuiltinRegistry>,
 }
 
-pub struct SharedTaskManager {
+pub(crate) struct SharedTaskManager {
     kernel: Arc<RelationKernel>,
     next_task_id: AtomicU64,
     state: Mutex<SharedTaskState>,
@@ -643,6 +643,11 @@ impl TaskManager {
 
     pub fn create_mailbox(&self) -> Result<(Value, Value), RuntimeError> {
         self.mailboxes.create_mailbox()
+    }
+
+    pub fn close_mailbox(&self, receiver: &Value) -> Result<(), RuntimeError> {
+        self.subscriptions.cancel_for_mailbox(receiver)?;
+        MailboxRuntime::close_mailbox(&self.mailboxes, receiver)
     }
 
     pub fn mailbox_for_receiver(&self, receiver: &Value) -> Result<u64, RuntimeError> {
@@ -841,7 +846,7 @@ impl TaskManager {
         &self.builtins
     }
 
-    pub fn into_shared(self) -> SharedTaskManager {
+    pub(crate) fn into_shared(self) -> SharedTaskManager {
         SharedTaskManager {
             kernel: Arc::new(self.kernel),
             next_task_id: AtomicU64::new(self.next_task_id),
@@ -1046,6 +1051,23 @@ impl TaskManager {
 
     pub fn completed(&self, task_id: TaskId) -> Option<&TaskOutcome> {
         self.completed.get(&task_id)
+    }
+
+    pub fn forget_terminal_task(&mut self, task_id: TaskId) {
+        self.completed.remove(&task_id);
+        self.cancelled.remove(&task_id);
+        crate::metrics::metrics()
+            .completed_tasks
+            .set(self.completed.len() as i64);
+        crate::metrics::metrics()
+            .cancelled_tasks
+            .set(self.cancelled.len() as i64);
+    }
+
+    pub fn forget_all_terminal_tasks(&mut self) {
+        self.completed.clear();
+        self.cancelled.clear();
+        crate::metrics::metrics().completed_tasks.set(0);
     }
 
     pub fn suspended_len(&self) -> usize {
@@ -1285,6 +1307,11 @@ impl SharedTaskManager {
         self.mailboxes.create_mailbox()
     }
 
+    pub fn close_mailbox(&self, receiver: &Value) -> Result<(), RuntimeError> {
+        self.subscriptions.cancel_for_mailbox(receiver)?;
+        MailboxRuntime::close_mailbox(&self.mailboxes, receiver)
+    }
+
     pub fn mailbox_for_receiver(&self, receiver: &Value) -> Result<u64, RuntimeError> {
         self.mailboxes.mailbox_for_receiver(receiver)
     }
@@ -1461,6 +1488,18 @@ impl SharedTaskManager {
 
     pub fn completed_len(&self) -> usize {
         self.state.lock().unwrap().completed.len()
+    }
+
+    pub fn forget_terminal_task(&self, task_id: TaskId) {
+        let mut state = self.state.lock().unwrap();
+        state.completed.remove(&task_id);
+        state.cancelled.remove(&task_id);
+        crate::metrics::metrics()
+            .completed_tasks
+            .set(state.completed.len() as i64);
+        crate::metrics::metrics()
+            .cancelled_tasks
+            .set(state.cancelled.len() as i64);
     }
 
     pub fn cancel_task(&self, task_id: TaskId) -> Result<SuspendKind, TaskManagerError> {

@@ -20,6 +20,14 @@ use std::sync::Arc;
 pub const DEFAULT_EVENT_QUEUE_CAPACITY: usize = 1024;
 pub const DEFAULT_EXTERNAL_REQUEST_CAPACITY: usize = 64;
 pub const DEFAULT_SUBSCRIPTION_QUEUE_BUDGET: usize = 256;
+pub const DEFAULT_ACTIVE_TASK_CAPACITY: usize = 4096;
+pub const DEFAULT_SUSPENDED_TASK_CAPACITY: usize = 1024;
+pub const DEFAULT_TIMER_CAPACITY: usize = 1024;
+pub const DEFAULT_TERMINAL_TASK_RETENTION: usize = 1024;
+pub const DEFAULT_ENDPOINT_CAPACITY: usize = 1024;
+pub const DEFAULT_SUBSCRIPTION_CAPACITY: usize = 4096;
+pub const DEFAULT_SUBSCRIPTION_MAILBOX_CAPACITY: usize = 64;
+pub const DEFAULT_EPHEMERAL_IDENTITY_CAPACITY: usize = 65_536;
 
 /// Relation execution backend selected when the driver is constructed.
 #[derive(Clone)]
@@ -57,6 +65,14 @@ pub struct DriverResources {
     pub event_queue_capacity: NonZeroUsize,
     pub external_request_capacity: NonZeroUsize,
     pub subscription_queue_budget: NonZeroUsize,
+    pub active_task_capacity: NonZeroUsize,
+    pub suspended_task_capacity: NonZeroUsize,
+    pub timer_capacity: NonZeroUsize,
+    pub terminal_task_retention: NonZeroUsize,
+    pub endpoint_capacity: NonZeroUsize,
+    pub subscription_capacity: NonZeroUsize,
+    pub subscription_mailbox_capacity: NonZeroUsize,
+    pub ephemeral_identity_capacity: NonZeroUsize,
     pub relation_acceleration: RelationAcceleration,
 }
 
@@ -71,6 +87,16 @@ impl DriverResources {
             external_request_capacity: NonZeroUsize::new(DEFAULT_EXTERNAL_REQUEST_CAPACITY)
                 .unwrap(),
             subscription_queue_budget: NonZeroUsize::new(DEFAULT_SUBSCRIPTION_QUEUE_BUDGET)
+                .unwrap(),
+            active_task_capacity: NonZeroUsize::new(DEFAULT_ACTIVE_TASK_CAPACITY).unwrap(),
+            suspended_task_capacity: NonZeroUsize::new(DEFAULT_SUSPENDED_TASK_CAPACITY).unwrap(),
+            timer_capacity: NonZeroUsize::new(DEFAULT_TIMER_CAPACITY).unwrap(),
+            terminal_task_retention: NonZeroUsize::new(DEFAULT_TERMINAL_TASK_RETENTION).unwrap(),
+            endpoint_capacity: NonZeroUsize::new(DEFAULT_ENDPOINT_CAPACITY).unwrap(),
+            subscription_capacity: NonZeroUsize::new(DEFAULT_SUBSCRIPTION_CAPACITY).unwrap(),
+            subscription_mailbox_capacity: NonZeroUsize::new(DEFAULT_SUBSCRIPTION_MAILBOX_CAPACITY)
+                .unwrap(),
+            ephemeral_identity_capacity: NonZeroUsize::new(DEFAULT_EPHEMERAL_IDENTITY_CAPACITY)
                 .unwrap(),
             relation_acceleration: RelationAcceleration::Disabled,
         }

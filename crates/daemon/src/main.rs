@@ -16,7 +16,10 @@ use compio::net::TcpListener;
 use compio::runtime::{JoinHandle, Runtime};
 use fast_telemetry_export::dogstatsd::DogStatsDConfig;
 use mica_auth::{AuthConfig, AuthConfigError, MicaSessionStore};
-use mica_driver::{CompioTaskDriver, DriverEvent};
+use mica_driver::{
+    DriverClient, DriverEventPump, DriverEventRegistration, DriverEventRouter, DriverOwner,
+    DriverResources, InvocationOutcome,
+};
 use mica_host_zmq::{ZmqHostSocket, ZmqSocketOptions};
 use mica_relation_kernel::FjallDurabilityMode;
 use mica_runtime::{EmbeddingProviderKind, SourceRunner, TaskOutcome};
@@ -204,11 +207,21 @@ impl Drop for ShutdownSignals {
 struct ServerTask {
     name: &'static str,
     handle: JoinHandle<Result<(), String>>,
+    _event_registration: Option<DriverEventRegistration>,
 }
 
 impl ServerTask {
     fn new(name: &'static str, handle: JoinHandle<Result<(), String>>) -> Self {
-        Self { name, handle }
+        Self {
+            name,
+            handle,
+            _event_registration: None,
+        }
+    }
+
+    fn with_event_registration(mut self, registration: DriverEventRegistration) -> Self {
+        self._event_registration = Some(registration);
+        self
     }
 }
 
@@ -333,22 +346,30 @@ async fn run_async(cli: Cli) -> Result<(), String> {
     } else {
         None
     };
-    let driver = CompioTaskDriver::spawn_with_workers_and_external_handlers(
-        runner,
-        cli.driver_threads,
-        Some(external_http::handler()),
-        Some(external_http::stream_handler()),
-    )
-    .map_err(format_driver_error)?;
+    let worker_count = cli.driver_threads.unwrap_or_else(|| {
+        std::thread::available_parallelism().unwrap_or(NonZeroUsize::new(1).unwrap())
+    });
+    let mut resources = DriverResources::new(worker_count);
+    resources.relation_acceleration = mica_driver::RelationAcceleration::Automatic;
+    let mut owner = DriverOwner::builder(resources)
+        .source_runner(runner)
+        .external_request_handler(external_http::handler())
+        .external_stream_request_handler(external_http::stream_handler())
+        .build()
+        .map_err(format_driver_error)?;
     metrics::metrics().drivers_started.inc();
     let dogstatsd_task =
         dogstatsd_endpoint.map(|endpoint| start_dogstatsd_export(endpoint, dogstatsd_interval));
+    let mut event_pump = owner.take_event_pump().map_err(format_driver_error)?;
     for source in &cli.startup_sources {
-        run_startup_source(&driver, source).await?;
+        run_startup_source(&owner, &mut event_pump, source).await?;
     }
+    let event_router = owner.event_router();
+    let event_pump_task = event_pump.spawn_router(event_router.clone());
+    let client = owner.client();
     let mut server_tasks = Vec::new();
     if let Some(rpc_bind) = cli.rpc_bind {
-        server_tasks.push(start_rpc_server(driver.clone(), rpc_bind)?);
+        server_tasks.push(start_rpc_server(client.clone(), &event_router, rpc_bind)?);
     }
     let (auth_enabled, auth_config) = match AuthConfig::from_env() {
         Ok(config) => (true, Some(config)),
@@ -370,12 +391,11 @@ async fn run_async(cli: Cli) -> Result<(), String> {
         metrics::metrics()
             .endpoints_started
             .inc(metrics::DaemonEndpoint::Web);
-        let mut host = InProcessWebHost::new(driver.clone());
+        let mut host = InProcessWebHost::new(client.clone(), &event_router);
 
         if auth_enabled {
             let config = auth_config.unwrap();
-            let session_store =
-                MicaSessionStore::new(Arc::new(driver.clone()), config.schema.clone());
+            let session_store = MicaSessionStore::new(owner.administrator(), config.schema.clone());
             bootstrap_local_users(&session_store).await?;
             let auth_subsystem = mica_web_host::auth::AuthSubsystem::new(config, session_store);
             host = host.with_auth(auth_subsystem);
@@ -407,7 +427,7 @@ async fn run_async(cli: Cli) -> Result<(), String> {
             metrics::metrics()
                 .endpoints_started
                 .inc(metrics::DaemonEndpoint::WebTransport);
-            let host = InProcessWebTransportHost::new(driver.clone());
+            let host = InProcessWebTransportHost::new(client.clone(), &event_router);
             let handle = compio::runtime::spawn(serve_webtransport(endpoint, host, binding, None));
             server_tasks.push(ServerTask::new("webtransport", handle));
         }
@@ -428,7 +448,7 @@ async fn run_async(cli: Cli) -> Result<(), String> {
             .inc(metrics::DaemonEndpoint::Telnet);
         let handle = compio::runtime::spawn(serve_telnet(
             listener,
-            InProcessTelnetHost::new(driver.clone()),
+            InProcessTelnetHost::new(client, &event_router),
             actor,
             None,
         ));
@@ -446,8 +466,12 @@ async fn run_async(cli: Cli) -> Result<(), String> {
         let _ = dogstatsd_task.cancel().await;
     }
     tracing::info!("shutting down task driver and relation store");
-    driver
-        .shutdown()
+    let mut event_pump = event_pump_task
+        .stop()
+        .await
+        .map_err(|error| format!("failed to stop task driver event pump: {error}"))?;
+    owner
+        .shutdown(&mut event_pump, |_| {})
         .await
         .map_err(|error| format!("failed to shut down task driver: {error}"))?;
     tracing::info!("daemon shutdown complete");
@@ -627,7 +651,11 @@ fn required_json_string(
     Ok(value.to_owned())
 }
 
-fn start_rpc_server(driver: CompioTaskDriver, endpoint: String) -> Result<ServerTask, String> {
+fn start_rpc_server(
+    client: DriverClient,
+    event_router: &DriverEventRouter,
+    endpoint: String,
+) -> Result<ServerTask, String> {
     let context = zmq::Context::new();
     let socket = ZmqHostSocket::bind(
         &context,
@@ -640,14 +668,23 @@ fn start_rpc_server(driver: CompioTaskDriver, endpoint: String) -> Result<Server
     metrics::metrics()
         .endpoints_started
         .inc(metrics::DaemonEndpoint::Rpc);
+    let events = Arc::new(rpc::RpcEventQueue::default());
+    let event_queue = Arc::clone(&events);
+    let event_registration = event_router.register(move |event| {
+        let event_queue = Arc::clone(&event_queue);
+        async move {
+            event_queue.push(event);
+        }
+    });
+    let rpc_router = event_router.clone();
     let handle = compio::runtime::spawn(async move {
         let _context = context;
-        let mut handler = rpc::RpcHandler::new(driver);
+        let mut handler = rpc::RpcHandler::new(client, rpc_router, events);
         rpc::serve_zmq_rpc_forever(&socket, &mut handler)
             .await
             .map_err(|error| error.to_string())
     });
-    Ok(ServerTask::new("rpc", handle))
+    Ok(ServerTask::new("rpc", handle).with_event_registration(event_registration))
 }
 
 fn start_dogstatsd_export(endpoint: String, interval: Duration) -> JoinHandle<()> {
@@ -740,7 +777,11 @@ fn log_startup_source_end(source: &str, rendered_report: &str) {
     );
 }
 
-async fn run_startup_source(driver: &CompioTaskDriver, source: &str) -> Result<(), String> {
+async fn run_startup_source(
+    owner: &DriverOwner,
+    event_pump: &mut DriverEventPump,
+    source: &str,
+) -> Result<(), String> {
     log_startup_source_begin(source);
     let is_source_retrieval_indexing = is_source_retrieval_indexing_source(source);
     let should_follow_spawned_child = startup_source_should_follow_spawned_child(source);
@@ -750,8 +791,9 @@ async fn run_startup_source(driver: &CompioTaskDriver, source: &str) -> Result<(
     if track_source_retrieval_indexing {
         metrics::source_retrieval_indexing_started();
     }
-    let report = driver
-        .submit_root_source_report(source.to_owned())
+    let invocation = owner
+        .administrator()
+        .evaluate(source.to_owned())
         .await
         .map_err(|error| {
             if track_source_retrieval_indexing {
@@ -759,6 +801,7 @@ async fn run_startup_source(driver: &CompioTaskDriver, source: &str) -> Result<(
             }
             format_driver_error(error)
         })?;
+    let report = invocation.initial_report();
     if !matches!(report.outcome, TaskOutcome::Suspended { .. }) {
         if track_source_retrieval_indexing {
             record_source_retrieval_indexing_report_outcome(start, &report.outcome);
@@ -766,69 +809,53 @@ async fn run_startup_source(driver: &CompioTaskDriver, source: &str) -> Result<(
         log_startup_source_end(source, &report.render());
         return Ok(());
     }
-    let tracked_task_id = report.task_id;
-    loop {
-        for event in driver.wait_events().await {
-            match event {
-                DriverEvent::TaskCompleted { task_id, value } if task_id == tracked_task_id => {
-                    if should_follow_spawned_child
-                        && let Some(child_task_id) = spawned_child_task_id(&value)
-                    {
-                        tracing::info!(
-                            description = startup_source_description(source),
-                            parent_task_id = task_id,
-                            child_task_id,
-                            "startup source spawned background task"
-                        );
-                        log_startup_source_end(
-                            source,
-                            &format!("spawned background task {child_task_id}"),
-                        );
-                        return Ok(());
-                    }
-                    if track_source_retrieval_indexing {
-                        metrics::source_retrieval_indexing_completed(
-                            start.elapsed(),
-                            value.as_int(),
-                        );
-                    }
-                    log_startup_source_end(source, &format!("completed with {}", value));
-                    return Ok(());
-                }
-                DriverEvent::TaskAborted { task_id, error } if task_id == tracked_task_id => {
-                    if track_source_retrieval_indexing {
-                        metrics::source_retrieval_indexing_failed(start.elapsed());
-                    }
-                    return Err(format!(
-                        "startup source {} aborted with {}",
-                        startup_source_description(source),
-                        error
-                    ));
-                }
-                DriverEvent::TaskFailed { task_id, error } if task_id == tracked_task_id => {
-                    if track_source_retrieval_indexing {
-                        metrics::source_retrieval_indexing_failed(start.elapsed());
-                    }
-                    return Err(format!(
-                        "startup source {} failed: {error}",
-                        startup_source_description(source)
-                    ));
-                }
-                DriverEvent::TaskSuspended { task_id, kind }
-                    if task_id == tracked_task_id && !startup_suspend_can_resume(&kind) =>
-                {
-                    if track_source_retrieval_indexing {
-                        metrics::source_retrieval_indexing_failed(start.elapsed());
-                    }
-                    return Err(format!(
-                        "startup source {} suspended without an automatic resume: {:?}",
-                        startup_source_description(source),
-                        kind
-                    ));
-                }
-                _ => {}
+    if let TaskOutcome::Suspended { kind, .. } = &report.outcome
+        && !startup_suspend_can_resume(kind)
+    {
+        return Err(format!(
+            "startup source {} suspended without an automatic resume: {:?}",
+            startup_source_description(source),
+            kind
+        ));
+    }
+    let outcome = event_pump.drive_invocation(&invocation, |_| {}).await;
+    match outcome {
+        InvocationOutcome::Completed(value) => {
+            if should_follow_spawned_child
+                && let Some(child_task_id) = spawned_child_task_id(&value)
+            {
+                tracing::info!(
+                    description = startup_source_description(source),
+                    parent_task_id = invocation.task_id(),
+                    child_task_id,
+                    "startup source spawned background task"
+                );
+                log_startup_source_end(source, &format!("spawned background task {child_task_id}"));
+                return Ok(());
             }
+            if track_source_retrieval_indexing {
+                metrics::source_retrieval_indexing_completed(start.elapsed(), value.as_int());
+            }
+            log_startup_source_end(source, &format!("completed with {value}"));
+            Ok(())
         }
+        InvocationOutcome::Aborted(error) => {
+            if track_source_retrieval_indexing {
+                metrics::source_retrieval_indexing_failed(start.elapsed());
+            }
+            Err(format!(
+                "startup source {} aborted with {error}",
+                startup_source_description(source)
+            ))
+        }
+        InvocationOutcome::Failed(error) => Err(format!(
+            "startup source {} failed: {error}",
+            startup_source_description(source)
+        )),
+        InvocationOutcome::Cancelled(reason) => Err(format!(
+            "startup source {} was cancelled: {reason:?}",
+            startup_source_description(source)
+        )),
     }
 }
 

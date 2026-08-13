@@ -16,6 +16,7 @@
 mod affinity;
 mod builder;
 mod config;
+mod embedding;
 mod execution;
 pub mod metrics;
 mod pool;
@@ -24,27 +25,37 @@ mod types;
 pub use affinity::{
     DispatcherAffinity, DispatcherConfig, DispatcherPlacement, configure_dispatcher,
 };
-pub use builder::{CompioTaskDriverBuilder, DriverDurability, DriverStorage};
+pub use builder::{DriverBuilder, DriverDurability, DriverStorage};
 pub use config::{
-    DEFAULT_EVENT_QUEUE_CAPACITY, DEFAULT_EXTERNAL_REQUEST_CAPACITY,
-    DEFAULT_SUBSCRIPTION_QUEUE_BUDGET, DriverResources, RelationAcceleration,
+    DEFAULT_ACTIVE_TASK_CAPACITY, DEFAULT_ENDPOINT_CAPACITY, DEFAULT_EPHEMERAL_IDENTITY_CAPACITY,
+    DEFAULT_EVENT_QUEUE_CAPACITY, DEFAULT_EXTERNAL_REQUEST_CAPACITY, DEFAULT_SUBSCRIPTION_CAPACITY,
+    DEFAULT_SUBSCRIPTION_MAILBOX_CAPACITY, DEFAULT_SUBSCRIPTION_QUEUE_BUDGET,
+    DEFAULT_SUSPENDED_TASK_CAPACITY, DEFAULT_TERMINAL_TASK_RETENTION, DEFAULT_TIMER_CAPACITY,
+    DriverResources, RelationAcceleration,
+};
+pub use embedding::{
+    DriverAdministrator, DriverClient, DriverEventPump, DriverEventPumpTask,
+    DriverEventRegistration, DriverEventRouter, DriverOwner, DriverWake, EndpointConfiguration,
+    EndpointSession, InvocationDiagnostics, InvocationHandle, InvocationOutcome, NamedTuple,
+    SubscriptionMailbox,
 };
 #[cfg(feature = "wgpu")]
 pub use mica_relation_wgpu::{WgpuAccelerator, WgpuAcceleratorOptions};
 pub use mica_runtime::{
     AuthorityContext, EPHEMERAL_HOST_IDENTITY_END, EPHEMERAL_HOST_IDENTITY_START, FileinMode,
     FileinReport, ReadOnlySourceQueryOptions, ReadOnlySourceQueryReport, ReadOnlySourceQueryStatus,
-    RelationAccelerator, RunReport, SubmittedTask, SubscriptionInitialDelivery,
-    SubscriptionSubject, SuspendKind, TaskId, TaskLimits, TaskOutcome, TaskRequest,
+    RelationAccelerator, RunReport, SourceRunner, SubscriptionInitialDelivery, SubscriptionSubject,
+    SuspendKind, TaskId, TaskLimits, TaskOutcome, Tuple,
 };
 pub use mica_var::{Identity, Symbol, Value};
-pub use pool::CompioTaskDriver;
+pub(crate) use pool::CompioTaskDriver;
 pub use types::{
-    DriverError, DriverEvent, DriverSubscriptionMailbox, DriverSubscriptionRequest,
+    DriverError, DriverEvent, DriverResourceSnapshot, DriverSubscriptionRequest,
     EndpointCloseReport, ExternalRequestCancellation, ExternalRequestContext,
     ExternalRequestFuture, ExternalRequestHandler, ExternalStreamEmitFuture, ExternalStreamEmitter,
-    ExternalStreamRequestHandler, FileinIncludeLoader, TaskCancellationReason, TaskContext,
+    ExternalStreamRequestHandler, FileinIncludeLoader, TaskCancellationReason,
 };
+pub(crate) use types::{DriverSubscriptionMailbox, TaskContext};
 
 #[cfg(test)]
 mod tests;

@@ -39,7 +39,10 @@ mod tests {
     use crate::state::*;
     use crate::sync::*;
     use bytes::Bytes;
-    use mica_driver::{CompioTaskDriver, EPHEMERAL_HOST_IDENTITY_START};
+    use mica_driver::{
+        DriverEventPumpTask, DriverOwner, DriverResources, EPHEMERAL_HOST_IDENTITY_START,
+        EndpointConfiguration,
+    };
     use mica_host_protocol::dom_event_payload_json;
     use mica_host_protocol::{
         DomEventPayload, SUPPORTED_DOM_ATTRIBUTES, SUPPORTED_DOM_TAGS, SyncEnvelope,
@@ -57,8 +60,34 @@ mod tests {
 
     type TestChunkMap = HashMap<u32, (u32, u32, Vec<Option<Vec<u8>>>)>;
 
-    fn test_driver(runner: SourceRunner) -> CompioTaskDriver {
-        CompioTaskDriver::spawn_with_workers(runner, NonZeroUsize::new(1)).unwrap()
+    fn test_host(
+        runner: SourceRunner,
+    ) -> (DriverOwner, DriverEventPumpTask, InProcessWebTransportHost) {
+        let resources = DriverResources::new(NonZeroUsize::new(1).unwrap());
+        let mut owner = DriverOwner::builder(resources)
+            .source_runner(runner)
+            .build()
+            .unwrap();
+        let events = owner.event_router();
+        let event_pump = owner
+            .take_event_pump()
+            .unwrap()
+            .spawn_router(events.clone());
+        let host = InProcessWebTransportHost::new(owner.client(), &events);
+        (owner, event_pump, host)
+    }
+
+    fn test_session_state(
+        host: &InProcessWebTransportHost,
+        endpoint: Identity,
+    ) -> Arc<SessionState> {
+        let allocated = host.client.allocate_ephemeral_identity().unwrap();
+        assert_eq!(allocated, endpoint);
+        let endpoint = host
+            .client
+            .open_endpoint(EndpointConfiguration::new(Symbol::intern("test")).endpoint(allocated))
+            .unwrap();
+        SessionState::new(endpoint)
     }
 
     #[test]
@@ -206,138 +235,121 @@ mod tests {
 
     #[test]
     fn active_sync_views_snapshot_does_not_hold_session_lock() {
-        let endpoint = Identity::new(EPHEMERAL_HOST_IDENTITY_START).unwrap();
-        let sessions = Arc::new(Mutex::new(HashMap::new()));
-        let state = SessionState::new();
-        state
-            .sync
-            .lock()
-            .unwrap()
-            .record_incoming_view(&SyncEnvelope {
-                kind: SyncMessageKind::NeedView,
-                session_id: 7,
-                view_id: 11,
-                client_revision: 0,
-                client_signature: 0,
-                server_revision: 0,
-                server_signature: 0,
-                payload: Vec::new(),
-            });
-        sessions.lock().unwrap().insert(endpoint, state.clone());
+        compio::runtime::Runtime::new().unwrap().block_on(async {
+            let endpoint = Identity::new(EPHEMERAL_HOST_IDENTITY_START).unwrap();
+            let (_owner, _pump, host) = test_host(SourceRunner::new_empty());
+            let sessions = Arc::new(Mutex::new(HashMap::new()));
+            let state = test_session_state(&host, endpoint);
+            state
+                .sync
+                .lock()
+                .unwrap()
+                .record_incoming_view(&SyncEnvelope {
+                    kind: SyncMessageKind::NeedView,
+                    session_id: 7,
+                    view_id: 11,
+                    client_revision: 0,
+                    client_signature: 0,
+                    server_revision: 0,
+                    server_signature: 0,
+                    payload: Vec::new(),
+                });
+            sessions.lock().unwrap().insert(endpoint, state.clone());
 
-        assert_eq!(
-            active_sync_views(&sessions),
-            vec![ActiveSyncView {
-                endpoint,
-                session_id: 7,
-                view_id: 11,
-                client_revision: 0,
-                client_signature: 0,
-                server_revision: 0,
-                server_signature: 0,
-                last_tree: None,
-            }]
-        );
-        assert!(state.sync.try_lock().is_ok());
+            assert_eq!(
+                active_sync_views(&sessions),
+                vec![ActiveSyncView {
+                    endpoint,
+                    session_id: 7,
+                    view_id: 11,
+                    client_revision: 0,
+                    client_signature: 0,
+                    server_revision: 0,
+                    server_signature: 0,
+                    last_tree: None,
+                }]
+            );
+            assert!(state.sync.try_lock().is_ok());
+        });
     }
 
     #[test]
     fn drop_session_writer_removes_active_views() {
-        let endpoint = Identity::new(EPHEMERAL_HOST_IDENTITY_START).unwrap();
-        let host = InProcessWebTransportHost::new_without_event_pump(test_driver(
-            SourceRunner::new_empty(),
-        ));
-        let state = SessionState::new();
-        state
-            .sync
-            .lock()
-            .unwrap()
-            .record_incoming_view(&SyncEnvelope {
-                kind: SyncMessageKind::HaveView,
-                session_id: 7,
-                view_id: 11,
-                client_revision: 1,
-                client_signature: 305,
-                server_revision: 1,
-                server_signature: 305,
-                payload: Vec::new(),
-            });
-        host.sessions.lock().unwrap().insert(endpoint, state);
+        compio::runtime::Runtime::new().unwrap().block_on(async {
+            let endpoint = Identity::new(EPHEMERAL_HOST_IDENTITY_START).unwrap();
+            let (_owner, _pump, host) = test_host(SourceRunner::new_empty());
+            let state = test_session_state(&host, endpoint);
+            state
+                .sync
+                .lock()
+                .unwrap()
+                .record_incoming_view(&SyncEnvelope {
+                    kind: SyncMessageKind::HaveView,
+                    session_id: 7,
+                    view_id: 11,
+                    client_revision: 1,
+                    client_signature: 305,
+                    server_revision: 1,
+                    server_signature: 305,
+                    payload: Vec::new(),
+                });
+            host.sessions.lock().unwrap().insert(endpoint, state);
 
-        assert_eq!(host.active_sync_views().len(), 1);
-        drop_session_writer(&host, endpoint);
-        assert!(host.active_sync_views().is_empty());
+            assert_eq!(host.active_sync_views().len(), 1);
+            drop_session_writer(&host, endpoint);
+            assert!(host.active_sync_views().is_empty());
+        });
     }
 
     #[test]
     fn endpoint_allocation_uses_webtransport_identity_space() {
-        let host = InProcessWebTransportHost::new_without_event_pump(test_driver(
-            SourceRunner::new_empty(),
-        ));
-        assert_eq!(
-            host.allocate_endpoint().unwrap(),
-            Identity::new(EPHEMERAL_HOST_IDENTITY_START).unwrap()
-        );
+        compio::runtime::Runtime::new().unwrap().block_on(async {
+            let (_owner, _pump, host) = test_host(SourceRunner::new_empty());
+            assert_eq!(
+                host.allocate_endpoint().unwrap(),
+                Identity::new(EPHEMERAL_HOST_IDENTITY_START).unwrap()
+            );
+        });
     }
 
     #[test]
     fn routed_effect_reaches_session_output() {
-        let endpoint = Identity::new(EPHEMERAL_HOST_IDENTITY_START).unwrap();
-        let output = SessionOutput::new();
-        let sessions = Arc::new(Mutex::new(HashMap::new()));
-        sessions.lock().unwrap().insert(
-            endpoint,
-            Arc::new(SessionState {
-                output: output.clone(),
-                sync: Mutex::new(SessionSyncState::default()),
-            }),
-        );
+        compio::runtime::Runtime::new().unwrap().block_on(async {
+            let endpoint = Identity::new(EPHEMERAL_HOST_IDENTITY_START).unwrap();
+            let (_owner, _pump, host) = test_host(SourceRunner::new_empty());
+            let output = SessionOutput::new();
+            let sessions = Arc::new(Mutex::new(HashMap::new()));
+            let endpoint_session = test_session_state(&host, endpoint).endpoint.clone();
+            sessions.lock().unwrap().insert(
+                endpoint,
+                Arc::new(SessionState {
+                    endpoint: endpoint_session,
+                    output: output.clone(),
+                    sync: Mutex::new(SessionSyncState::default()),
+                }),
+            );
 
-        route_driver_effect(
-            &sessions,
-            mica_runtime::Effect {
-                task_id: 1,
-                target: endpoint,
-                value: Value::string("hello"),
-            },
-        );
+            route_driver_effect(
+                &sessions,
+                mica_runtime::Effect {
+                    task_id: 1,
+                    target: endpoint,
+                    value: Value::string("hello"),
+                },
+            );
 
-        assert_eq!(output.try_recv().unwrap().as_ref(), b"hello");
+            assert_eq!(output.try_recv().unwrap().as_ref(), b"hello");
+        });
     }
 
     #[test]
     fn unrelated_completed_task_does_not_refresh_views() {
-        let endpoint = Identity::new(EPHEMERAL_HOST_IDENTITY_START).unwrap();
-        let output = SessionOutput::new();
-        let sync = Mutex::new(SessionSyncState::default());
-        sync.lock().unwrap().pending_tasks.insert(
-            11,
-            PendingSyncTask {
-                session_id: 7,
-                view_id: 9,
-                refresh: true,
-                action: "look".to_owned(),
-            },
-        );
-        let sessions = Arc::new(Mutex::new(HashMap::from([(
-            endpoint,
-            Arc::new(SessionState { output, sync }),
-        )])));
-
-        let routed = take_pending_sync_task(&sessions, 12);
-
-        assert!(routed.is_none());
-        assert_eq!(
-            sessions
-                .lock()
-                .unwrap()
-                .get(&endpoint)
-                .unwrap()
-                .sync
-                .lock()
-                .unwrap()
-                .pending_tasks,
-            HashMap::from([(
+        compio::runtime::Runtime::new().unwrap().block_on(async {
+            let endpoint = Identity::new(EPHEMERAL_HOST_IDENTITY_START).unwrap();
+            let (_owner, _pump, host) = test_host(SourceRunner::new_empty());
+            let output = SessionOutput::new();
+            let sync = Mutex::new(SessionSyncState::default());
+            sync.lock().unwrap().pending_tasks.insert(
                 11,
                 PendingSyncTask {
                     session_id: 7,
@@ -345,8 +357,40 @@ mod tests {
                     refresh: true,
                     action: "look".to_owned(),
                 },
-            )])
-        );
+            );
+            let sessions = Arc::new(Mutex::new(HashMap::from([(
+                endpoint,
+                Arc::new(SessionState {
+                    endpoint: test_session_state(&host, endpoint).endpoint.clone(),
+                    output,
+                    sync,
+                }),
+            )])));
+
+            let routed = take_pending_sync_task(&sessions, 12);
+
+            assert!(routed.is_none());
+            assert_eq!(
+                sessions
+                    .lock()
+                    .unwrap()
+                    .get(&endpoint)
+                    .unwrap()
+                    .sync
+                    .lock()
+                    .unwrap()
+                    .pending_tasks,
+                HashMap::from([(
+                    11,
+                    PendingSyncTask {
+                        session_id: 7,
+                        view_id: 9,
+                        refresh: true,
+                        action: "look".to_owned(),
+                    },
+                )])
+            );
+        });
     }
 
     #[test]
@@ -361,8 +405,7 @@ mod tests {
 
             let runner = sync_chat_runner();
             let principal = runner.named_identity(Symbol::intern("web")).unwrap();
-            let driver = test_driver(runner);
-            let host = InProcessWebTransportHost::new(driver.clone());
+            let (_owner, _event_pump, host) = test_host(runner);
             let binding = SessionBinding {
                 principal,
                 actor: None,
@@ -439,8 +482,7 @@ mod tests {
 
             let runner = sync_chat_runner();
             let principal = runner.named_identity(Symbol::intern("web")).unwrap();
-            let driver = test_driver(runner);
-            let host = InProcessWebTransportHost::new(driver.clone());
+            let (_owner, _event_pump, host) = test_host(runner);
             let binding = SessionBinding {
                 principal,
                 actor: None,
@@ -496,8 +538,7 @@ mod tests {
 
             let runner = sync_chat_runner();
             let principal = runner.named_identity(Symbol::intern("web")).unwrap();
-            let driver = test_driver(runner);
-            let host = InProcessWebTransportHost::new(driver.clone());
+            let (_owner, _event_pump, host) = test_host(runner);
             let binding = SessionBinding {
                 principal,
                 actor: None,
@@ -540,8 +581,7 @@ mod tests {
 
             let runner = sync_chat_runner();
             let principal = runner.named_identity(Symbol::intern("web")).unwrap();
-            let driver = test_driver(runner);
-            let host = InProcessWebTransportHost::new(driver.clone());
+            let (_owner, _event_pump, host) = test_host(runner);
             let binding = SessionBinding {
                 principal,
                 actor: None,
@@ -582,8 +622,7 @@ mod tests {
 
             let runner = sync_chat_runner();
             let principal = runner.named_identity(Symbol::intern("web")).unwrap();
-            let driver = test_driver(runner);
-            let host = InProcessWebTransportHost::new(driver.clone());
+            let (_owner, _event_pump, host) = test_host(runner);
             let binding = SessionBinding {
                 principal,
                 actor: None,

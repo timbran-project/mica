@@ -3690,6 +3690,49 @@ fn runner_volatile_host_fact_batches_are_atomic() {
 }
 
 #[test]
+fn runner_replaces_volatile_host_facts_in_one_commit() {
+    let mut runner = SourceRunner::new_empty();
+    runner
+        .run_source("make_relation(:CurrentValue, 2, :volatile)")
+        .unwrap();
+    let subject = Identity::new(0x00eb_0000_0000_0042).unwrap();
+    let relation = Symbol::intern("CurrentValue");
+    let old = (
+        relation,
+        Tuple::from([Value::identity(subject), Value::int(1).unwrap()]),
+    );
+    let new = (
+        relation,
+        Tuple::from([Value::identity(subject), Value::int(2).unwrap()]),
+    );
+    runner
+        .assert_volatile_tuples_named(vec![old.clone()])
+        .unwrap();
+    let version = runner.task_manager.kernel().snapshot().version();
+
+    assert_eq!(
+        runner
+            .replace_volatile_tuples_named(vec![old], vec![new])
+            .unwrap(),
+        2
+    );
+    assert_eq!(
+        runner.task_manager.kernel().snapshot().version(),
+        version + 1
+    );
+    let report = runner
+        .run_source("return CurrentValue(?subject, ?value)")
+        .unwrap();
+    assert_completed_value(
+        &report,
+        query_relation(
+            ["subject", "value"],
+            [[Value::identity(subject), Value::int(2).unwrap()]],
+        ),
+    );
+}
+
+#[test]
 fn runner_assume_actor_requires_principal_specific_policy() {
     let mut runner = SourceRunner::new_empty();
     runner.run_source("make_identity(:account)").unwrap();

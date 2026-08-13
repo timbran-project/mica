@@ -11,22 +11,157 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-use mica_driver::{CompioTaskDriver, DriverEvent};
+use mica_driver::{
+    DriverClient, DriverEvent, DriverEventRouter, EndpointConfiguration, EndpointSession,
+};
 use mica_host_protocol::{HostMessage, PROTOCOL_VERSION};
 use mica_host_zmq::{PeerId, ZmqHostSocket, ZmqTransportError};
 use mica_var::{Identity, Symbol, Value};
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fmt;
+use std::future::poll_fn;
+use std::sync::{Arc, Mutex};
+use std::task::{Poll, Waker};
 
 const DEFAULT_DRAIN_LIMIT: u32 = 64;
 const MAX_DRAIN_LIMIT: u32 = 1024;
+const RPC_EVENT_CAPACITY: usize = 1024;
+const RPC_OUTPUT_CAPACITY: usize = 1024;
 
 type RoutedReplies = Vec<(PeerId, HostMessage)>;
 
 pub(crate) struct RpcHandler {
-    driver: CompioTaskDriver,
+    client: DriverClient,
+    router: DriverEventRouter,
+    events: Arc<RpcEventQueue>,
     endpoints: BTreeMap<Identity, EndpointState>,
     tasks: BTreeMap<u64, PeerId>,
+}
+
+#[derive(Default)]
+pub(crate) struct RpcEventQueue {
+    state: Mutex<RpcEventQueueState>,
+}
+
+#[derive(Default)]
+struct RpcEventQueueState {
+    events: VecDeque<DriverEvent>,
+    targets: HashMap<Identity, usize>,
+    tasks: HashSet<u64>,
+    saturated: bool,
+    waker: Option<Waker>,
+}
+
+impl RpcEventQueue {
+    pub(crate) fn push(&self, event: DriverEvent) {
+        let waker = {
+            let mut state = self.state.lock().unwrap();
+            match &event {
+                DriverEvent::Effect(effect) if state.targets.contains_key(&effect.target) => {
+                    state.enqueue(event);
+                }
+                DriverEvent::TaskCompleted { task_id, .. }
+                | DriverEvent::TaskAborted { task_id, .. }
+                | DriverEvent::TaskCancelled { task_id, .. }
+                | DriverEvent::TaskFailed { task_id, .. }
+                    if state.tasks.remove(task_id) =>
+                {
+                    state.enqueue(event);
+                }
+                DriverEvent::Effect(_)
+                | DriverEvent::TaskCompleted { .. }
+                | DriverEvent::TaskAborted { .. }
+                | DriverEvent::TaskCancelled { .. }
+                | DriverEvent::TaskFailed { .. }
+                | DriverEvent::TaskSuspended { .. }
+                | DriverEvent::SubscriptionReady { .. } => {}
+            }
+            state.waker.take()
+        };
+        if let Some(waker) = waker {
+            waker.wake();
+        }
+    }
+
+    fn register_endpoint(&self, endpoint: Identity, actor: Option<Identity>) {
+        let mut state = self.state.lock().unwrap();
+        state.add_target(endpoint);
+        if let Some(actor) = actor {
+            state.add_target(actor);
+        }
+    }
+
+    fn unregister_endpoint(&self, endpoint: Identity, actor: Option<Identity>) {
+        let mut state = self.state.lock().unwrap();
+        state.remove_target(endpoint);
+        if let Some(actor) = actor {
+            state.remove_target(actor);
+        }
+    }
+
+    fn register_task(&self, task_id: u64) {
+        self.state.lock().unwrap().tasks.insert(task_id);
+    }
+
+    async fn wait_for_terminal(&self, task_id: u64) -> Result<(), ()> {
+        poll_fn(|context| {
+            let mut state = self.state.lock().unwrap();
+            if state.saturated {
+                return Poll::Ready(Err(()));
+            }
+            if state.events.iter().any(|event| {
+                matches!(
+                    event,
+                    DriverEvent::TaskCompleted { task_id: current, .. }
+                        | DriverEvent::TaskAborted { task_id: current, .. }
+                        | DriverEvent::TaskCancelled { task_id: current, .. }
+                        | DriverEvent::TaskFailed { task_id: current, .. }
+                        if *current == task_id
+                )
+            }) {
+                return Poll::Ready(Ok(()));
+            }
+            state.waker = Some(context.waker().clone());
+            Poll::Pending
+        })
+        .await
+    }
+
+    fn drain(&self) -> RpcEventDrain {
+        let mut state = self.state.lock().unwrap();
+        let events = state.events.drain(..).collect();
+        let saturated = std::mem::take(&mut state.saturated);
+        RpcEventDrain { events, saturated }
+    }
+}
+
+impl RpcEventQueueState {
+    fn enqueue(&mut self, event: DriverEvent) {
+        if self.events.len() >= RPC_EVENT_CAPACITY {
+            self.saturated = true;
+            return;
+        }
+        self.events.push_back(event);
+    }
+
+    fn add_target(&mut self, target: Identity) {
+        *self.targets.entry(target).or_default() += 1;
+    }
+
+    fn remove_target(&mut self, target: Identity) {
+        let Some(count) = self.targets.get_mut(&target) else {
+            return;
+        };
+        *count -= 1;
+        if *count == 0 {
+            self.targets.remove(&target);
+        }
+    }
+}
+
+struct RpcEventDrain {
+    events: Vec<DriverEvent>,
+    saturated: bool,
 }
 
 #[derive(Debug)]
@@ -35,6 +170,7 @@ pub(crate) enum RpcServerError {
 }
 
 struct EndpointState {
+    endpoint: EndpointSession,
     peer: PeerId,
     actor: Option<Identity>,
     output: VecDeque<Value>,
@@ -91,9 +227,15 @@ pub(crate) async fn serve_zmq_rpc_forever(
 }
 
 impl RpcHandler {
-    pub(crate) fn new(driver: CompioTaskDriver) -> Self {
+    pub(crate) fn new(
+        client: DriverClient,
+        router: DriverEventRouter,
+        events: Arc<RpcEventQueue>,
+    ) -> Self {
         Self {
-            driver,
+            client,
+            router,
+            events,
             endpoints: BTreeMap::new(),
             tasks: BTreeMap::new(),
         }
@@ -181,33 +323,30 @@ impl RpcHandler {
                 "grant tokens are not implemented yet",
             )];
         }
-        if self
-            .endpoints
-            .get(&endpoint)
-            .is_some_and(|state| state.peer != *peer)
-        {
+        if self.endpoints.contains_key(&endpoint) {
             return vec![rejected(
                 request_id,
                 "E_ENDPOINT_IN_USE",
-                "endpoint is already open for another peer",
+                "endpoint is already open",
             )];
         }
-        match self
-            .driver
-            .open_endpoint(endpoint, actor, Symbol::intern(&protocol))
-        {
-            Ok(()) => {
-                self.endpoints
-                    .entry(endpoint)
-                    .and_modify(|state| {
-                        state.peer = peer.clone();
-                        state.actor = actor;
-                    })
-                    .or_insert_with(|| EndpointState {
+        let mut configuration =
+            EndpointConfiguration::new(Symbol::intern(&protocol)).endpoint(endpoint);
+        if let Some(actor) = actor {
+            configuration = configuration.actor(actor);
+        }
+        match self.client.open_endpoint(configuration) {
+            Ok(endpoint_session) => {
+                self.events.register_endpoint(endpoint, actor);
+                self.endpoints.insert(
+                    endpoint,
+                    EndpointState {
+                        endpoint: endpoint_session,
                         peer: peer.clone(),
                         actor,
                         output: VecDeque::new(),
-                    });
+                    },
+                );
                 vec![accepted(request_id, None)]
             }
             Err(error) => vec![rejected(request_id, "E_OPEN_ENDPOINT", error.to_string())],
@@ -227,8 +366,13 @@ impl RpcHandler {
                 "endpoint is not open",
             )];
         }
-        let closed = self.driver.close_endpoint(endpoint).await;
-        self.endpoints.remove(&endpoint);
+        let endpoint_session = self.endpoints.get(&endpoint).unwrap().endpoint.clone();
+        let closed = match endpoint_session.close().await {
+            Ok(report) => report,
+            Err(error) => return vec![rejected(request_id, "E_CLOSE_ENDPOINT", error.to_string())],
+        };
+        let state = self.endpoints.remove(&endpoint).unwrap();
+        self.events.unregister_endpoint(endpoint, state.actor);
         vec![
             HostMessage::EndpointClosed {
                 endpoint,
@@ -243,7 +387,7 @@ impl RpcHandler {
     }
 
     fn resolve_identity(&self, request_id: u64, name: Symbol) -> Vec<HostMessage> {
-        match self.driver.named_identity(name) {
+        match self.client.named_identity(name) {
             Ok(identity) => vec![HostMessage::IdentityResolved {
                 request_id,
                 name,
@@ -272,14 +416,28 @@ impl RpcHandler {
                 "endpoint is not open",
             )];
         }
-        match self
-            .driver
-            .submit_source_as_actor(endpoint, actor, source)
-            .await
-        {
-            Ok(submitted) => {
-                self.tasks.insert(submitted.task_id, peer.clone());
-                vec![accepted(request_id, Some(submitted.task_id))]
+        let state = self.endpoints.get(&endpoint).unwrap();
+        if state.actor != Some(actor) {
+            return vec![rejected(
+                request_id,
+                "E_ACTOR_MISMATCH",
+                "submitted actor does not match the open endpoint actor",
+            )];
+        }
+        match state.endpoint.evaluate(source).await {
+            Ok(invocation) => {
+                let task_id = invocation.task_id();
+                let completed = invocation.try_outcome().is_some();
+                self.tasks.insert(task_id, peer.clone());
+                self.events.register_task(task_id);
+                if let Err(error) = self.router.watch_invocation(invocation) {
+                    self.tasks.remove(&task_id);
+                    return vec![rejected(request_id, "E_SUBMIT_SOURCE", error.to_string())];
+                }
+                if completed {
+                    let _ = self.events.wait_for_terminal(task_id).await;
+                }
+                vec![accepted(request_id, Some(task_id))]
             }
             Err(error) => vec![rejected(request_id, "E_SUBMIT_SOURCE", error.to_string())],
         }
@@ -299,7 +457,14 @@ impl RpcHandler {
                 "endpoint is not open",
             )];
         }
-        match self.driver.input(endpoint, value).await {
+        match self
+            .endpoints
+            .get(&endpoint)
+            .unwrap()
+            .endpoint
+            .input(value)
+            .await
+        {
             Ok(_) => vec![accepted(request_id, None)],
             Err(error) => vec![rejected(request_id, "E_SUBMIT_INPUT", error.to_string())],
         }
@@ -342,11 +507,41 @@ impl RpcHandler {
     }
 
     fn drain_driver_messages(&mut self) -> RoutedReplies {
-        self.driver
-            .drain_events()
+        let drain = self.events.drain();
+        let mut messages = drain
+            .events
             .into_iter()
             .flat_map(|event| self.route_driver_event(event))
-            .collect()
+            .collect::<RoutedReplies>();
+        if drain.saturated {
+            let tasks = std::mem::take(&mut self.tasks);
+            let peers = self
+                .endpoints
+                .values()
+                .map(|state| state.peer.clone())
+                .chain(tasks.into_values())
+                .collect::<Vec<_>>();
+            let mut unique_peers = Vec::new();
+            for peer in peers {
+                if !unique_peers.contains(&peer) {
+                    unique_peers.push(peer);
+                }
+            }
+            messages.extend(unique_peers.into_iter().map(|peer| {
+                (
+                    peer,
+                    HostMessage::TaskFailed {
+                        task_id: 0,
+                        error: Value::error(
+                            Symbol::intern("E_RPC_EVENT_SATURATION"),
+                            Some("RPC event delivery capacity was exhausted".to_owned()),
+                            None,
+                        ),
+                    },
+                )
+            }));
+        }
+        messages
     }
 
     fn route_driver_event(&mut self, event: DriverEvent) -> RoutedReplies {
@@ -404,6 +599,22 @@ impl RpcHandler {
                     let Some(state) = self.endpoints.get_mut(&target) else {
                         continue;
                     };
+                    if state.output.len() >= RPC_OUTPUT_CAPACITY {
+                        messages.push((
+                            state.peer.clone(),
+                            HostMessage::TaskFailed {
+                                task_id: 0,
+                                error: Value::error(
+                                    Symbol::intern("E_RPC_OUTPUT_SATURATION"),
+                                    Some(format!(
+                                        "RPC endpoint {target:?} output capacity was exhausted"
+                                    )),
+                                    None,
+                                ),
+                            },
+                        ));
+                        continue;
+                    }
                     state.output.push_back(effect.value.clone());
                     messages.push((
                         state.peer.clone(),
@@ -482,8 +693,12 @@ fn normalized_drain_limit(limit: u32) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mica_driver::{
+        DriverEventPumpTask, DriverEventRegistration, DriverEventRouter, DriverOwner,
+        DriverResources, EndpointConfiguration,
+    };
     use mica_host_zmq::ZmqSocketOptions;
-    use mica_runtime::{SourceRunner, TaskOutcome};
+    use mica_runtime::{Effect, SourceRunner, TaskOutcome};
     use std::num::NonZeroUsize;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -494,16 +709,111 @@ mod tests {
         Identity::new(raw).unwrap()
     }
 
-    fn seeded_driver() -> (CompioTaskDriver, Identity) {
+    #[test]
+    fn rpc_event_queue_filters_targets_and_registered_invocations() {
+        let queue = RpcEventQueue::default();
+        let rpc_endpoint = endpoint(0x00ef_0000_0000_1001);
+        let actor = endpoint(0x00ef_0000_0000_1002);
+        queue.register_endpoint(rpc_endpoint, Some(actor));
+
+        queue.push(DriverEvent::Effect(Effect {
+            task_id: 1,
+            target: endpoint(0x00ef_0000_0000_1003),
+            value: Value::string("unrelated"),
+        }));
+        queue.push(DriverEvent::TaskCompleted {
+            task_id: 7,
+            value: Value::nothing(),
+        });
+        assert!(queue.drain().events.is_empty());
+
+        queue.register_task(7);
+        queue.push(DriverEvent::TaskCompleted {
+            task_id: 7,
+            value: Value::nothing(),
+        });
+        queue.push(DriverEvent::Effect(Effect {
+            task_id: 7,
+            target: actor,
+            value: Value::string("owned"),
+        }));
+        let drain = queue.drain();
+        assert!(!drain.saturated);
+        assert!(matches!(
+            drain.events.as_slice(),
+            [DriverEvent::TaskCompleted { task_id: 7, .. }, DriverEvent::Effect(effect)]
+                if effect.target == actor
+        ));
+    }
+
+    #[test]
+    fn rpc_event_queue_reports_saturation_at_its_fixed_bound() {
+        let queue = RpcEventQueue::default();
+        let rpc_endpoint = endpoint(0x00ef_0000_0000_1011);
+        queue.register_endpoint(rpc_endpoint, None);
+        for task_id in 0..=RPC_EVENT_CAPACITY as u64 {
+            queue.register_task(task_id);
+            queue.push(DriverEvent::TaskCompleted {
+                task_id,
+                value: Value::nothing(),
+            });
+        }
+        let drain = queue.drain();
+        assert_eq!(drain.events.len(), RPC_EVENT_CAPACITY);
+        assert!(drain.saturated);
+    }
+
+    struct SeededDriver {
+        owner: DriverOwner,
+        _event_pump: DriverEventPumpTask,
+        _event_registration: DriverEventRegistration,
+        events: Arc<RpcEventQueue>,
+        router: DriverEventRouter,
+        actor: Identity,
+    }
+
+    impl SeededDriver {
+        fn handler(&self) -> RpcHandler {
+            RpcHandler::new(
+                self.owner.client(),
+                self.router.clone(),
+                Arc::clone(&self.events),
+            )
+        }
+    }
+
+    fn seeded_driver() -> SeededDriver {
         let mut runner = SourceRunner::new_empty();
         runner.run_source("make_relation(:GrantEffect, 1)").unwrap();
         runner.run_source("make_identity(:alice)").unwrap();
         runner.run_source("assert GrantEffect(#alice)").unwrap();
         let alice = runner.named_identity(Symbol::intern("alice")).unwrap();
-        (
-            CompioTaskDriver::spawn_with_workers(runner, NonZeroUsize::new(1)).unwrap(),
-            alice,
-        )
+        let resources = DriverResources::new(NonZeroUsize::new(1).unwrap());
+        let mut owner = DriverOwner::builder(resources)
+            .source_runner(runner)
+            .build()
+            .unwrap();
+        let router = owner.event_router();
+        let events = Arc::new(RpcEventQueue::default());
+        let event_queue = Arc::clone(&events);
+        let event_registration = router.register(move |event| {
+            let event_queue = Arc::clone(&event_queue);
+            async move {
+                event_queue.push(event);
+            }
+        });
+        let event_pump = owner
+            .take_event_pump()
+            .unwrap()
+            .spawn_router(router.clone());
+        SeededDriver {
+            owner,
+            _event_pump: event_pump,
+            _event_registration: event_registration,
+            events,
+            router,
+            actor: alice,
+        }
     }
 
     fn peer(id: u8) -> PeerId {
@@ -527,9 +837,10 @@ mod tests {
     #[test]
     fn rpc_handler_accepts_endpoint_and_submits_source() {
         compio::runtime::Runtime::new().unwrap().block_on(async {
-            let (driver, actor) = seeded_driver();
+            let seeded = seeded_driver();
+            let actor = seeded.actor;
             let endpoint = endpoint(0x00ef_0000_0000_0001);
-            let mut handler = RpcHandler::new(driver);
+            let mut handler = seeded.handler();
 
             assert_eq!(
                 dispatch(
@@ -537,7 +848,7 @@ mod tests {
                     HostMessage::OpenEndpoint {
                         request_id: 1,
                         endpoint,
-                        actor: None,
+                        actor: Some(actor),
                         protocol: "test".to_owned(),
                         grant_token: None,
                     },
@@ -593,8 +904,8 @@ mod tests {
     #[test]
     fn rpc_handler_rejects_grant_tokens_until_validation_exists() {
         compio::runtime::Runtime::new().unwrap().block_on(async {
-            let (driver, _) = seeded_driver();
-            let mut handler = RpcHandler::new(driver);
+            let seeded = seeded_driver();
+            let mut handler = seeded.handler();
             assert_eq!(
                 dispatch(
                     &mut handler,
@@ -619,15 +930,16 @@ mod tests {
     #[test]
     fn rpc_handler_routes_failed_source_as_rejection() {
         compio::runtime::Runtime::new().unwrap().block_on(async {
-            let (driver, actor) = seeded_driver();
+            let seeded = seeded_driver();
+            let actor = seeded.actor;
             let endpoint = endpoint(0x00ef_0000_0000_0003);
-            let mut handler = RpcHandler::new(driver);
+            let mut handler = seeded.handler();
             dispatch(
                 &mut handler,
                 HostMessage::OpenEndpoint {
                     request_id: 1,
                     endpoint,
-                    actor: None,
+                    actor: Some(actor),
                     protocol: "test".to_owned(),
                     grant_token: None,
                 },
@@ -660,9 +972,10 @@ mod tests {
     #[test]
     fn rpc_handler_routes_actor_effects_to_actor_endpoint() {
         compio::runtime::Runtime::new().unwrap().block_on(async {
-            let (driver, actor) = seeded_driver();
+            let seeded = seeded_driver();
+            let actor = seeded.actor;
             let endpoint = endpoint(0x00ef_0000_0000_0007);
-            let mut handler = RpcHandler::new(driver);
+            let mut handler = seeded.handler();
             dispatch(
                 &mut handler,
                 HostMessage::OpenEndpoint {
@@ -718,8 +1031,9 @@ mod tests {
     #[test]
     fn rpc_handler_resolves_named_identity() {
         compio::runtime::Runtime::new().unwrap().block_on(async {
-            let (driver, actor) = seeded_driver();
-            let mut handler = RpcHandler::new(driver);
+            let seeded = seeded_driver();
+            let actor = seeded.actor;
+            let mut handler = seeded.handler();
 
             assert_eq!(
                 dispatch(
@@ -763,18 +1077,24 @@ mod tests {
     #[test]
     fn source_runner_identity_request_uses_actor_context() {
         compio::runtime::Runtime::new().unwrap().block_on(async {
-            let (driver, actor) = seeded_driver();
-            let submitted = driver
-                .submit_source_as_actor(
-                    endpoint(0x00ef_0000_0000_0004),
-                    actor,
-                    "return actor()".to_owned(),
+            let seeded = seeded_driver();
+            let actor = seeded.actor;
+            let endpoint = seeded
+                .owner
+                .client()
+                .open_endpoint(
+                    EndpointConfiguration::new(Symbol::intern("test"))
+                        .endpoint(endpoint(0x00ef_0000_0000_0004))
+                        .actor(actor),
                 )
+                .unwrap();
+            let submitted = endpoint
+                .evaluate("return actor()".to_owned())
                 .await
                 .unwrap();
             assert!(matches!(
-                submitted.outcome,
-                TaskOutcome::Complete { value, .. } if value == Value::identity(actor)
+                &submitted.initial_report().outcome,
+                TaskOutcome::Complete { value, .. } if *value == Value::identity(actor)
             ));
         });
     }
@@ -795,8 +1115,8 @@ mod tests {
                 ZmqSocketOptions::default(),
             )
             .unwrap();
-            let (driver, _) = seeded_driver();
-            let mut handler = RpcHandler::new(driver);
+            let seeded = seeded_driver();
+            let mut handler = seeded.handler();
 
             let server = compio::runtime::spawn(async move {
                 serve_zmq_rpc_once(&router, &mut handler).await.unwrap();
@@ -837,8 +1157,8 @@ mod tests {
                 ZmqSocketOptions::default(),
             )
             .unwrap();
-            let (driver, _) = seeded_driver();
-            let mut handler = RpcHandler::new(driver);
+            let seeded = seeded_driver();
+            let mut handler = seeded.handler();
             let endpoint = endpoint(0x00ef_0000_0000_0005);
 
             let server = compio::runtime::spawn(async move {
@@ -882,15 +1202,16 @@ mod tests {
     #[test]
     fn rpc_handler_can_drain_delayed_driver_events() {
         compio::runtime::Runtime::new().unwrap().block_on(async {
-            let (driver, actor) = seeded_driver();
+            let seeded = seeded_driver();
+            let actor = seeded.actor;
             let endpoint = endpoint(0x00ef_0000_0000_0006);
-            let mut handler = RpcHandler::new(driver);
+            let mut handler = seeded.handler();
             dispatch(
                 &mut handler,
                 HostMessage::OpenEndpoint {
                     request_id: 1,
                     endpoint,
-                    actor: None,
+                    actor: Some(actor),
                     protocol: "test".to_owned(),
                     grant_token: None,
                 },
@@ -929,9 +1250,10 @@ mod tests {
     #[test]
     fn rpc_handler_routes_delayed_events_to_endpoint_peer() {
         compio::runtime::Runtime::new().unwrap().block_on(async {
-            let (driver, actor) = seeded_driver();
+            let seeded = seeded_driver();
+            let actor = seeded.actor;
             let endpoint = endpoint(0x00ef_0000_0000_0008);
-            let mut handler = RpcHandler::new(driver);
+            let mut handler = seeded.handler();
             let owner = peer(1);
             let other = peer(2);
 
@@ -941,7 +1263,7 @@ mod tests {
                     HostMessage::OpenEndpoint {
                         request_id: 1,
                         endpoint,
-                        actor: None,
+                        actor: Some(actor),
                         protocol: "test".to_owned(),
                         grant_token: None,
                     },

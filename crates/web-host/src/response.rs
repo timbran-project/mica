@@ -15,7 +15,7 @@ use crate::codec::{
     HttpCodecError, HttpRequest, HttpResponse, is_valid_header_name, is_valid_header_value,
     is_valid_response_reason,
 };
-use mica_runtime::{SubmittedTask, TaskOutcome};
+use mica_runtime::TaskOutcome;
 use mica_var::{Symbol, Value};
 
 pub(crate) fn route_request(request: &HttpRequest, close: bool) -> HttpResponse {
@@ -118,8 +118,8 @@ pub(crate) fn internal_error_response(message: impl Into<String>, close: bool) -
     )
 }
 
-pub(crate) fn response_from_submitted(submitted: SubmittedTask, close: bool) -> HttpResponse {
-    match submitted.outcome {
+pub(crate) fn response_from_outcome(outcome: TaskOutcome, close: bool) -> HttpResponse {
+    match outcome {
         TaskOutcome::Complete { value, .. } => {
             decode_response_value(value, close).unwrap_or_else(|error| {
                 internal_error_response(format!("invalid HTTP response value: {error}"), close)

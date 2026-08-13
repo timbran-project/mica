@@ -25,8 +25,9 @@ manifest.
 
 ## Ownership model
 
-A host should normally construct one process-long `CompioTaskDriver` with an explicit
-`DriverResources` policy. The driver owns:
+A host constructs one process-long `DriverOwner` with an explicit `DriverResources` policy. The
+owner is not cloneable and has sole authority to take the event pump and perform final shutdown.
+It owns:
 
 - a Compio dispatcher and its configured worker threads for synchronous runtime work;
 - admission budgets for dispatched work, parallel relation execution, and external requests;
@@ -34,19 +35,42 @@ A host should normally construct one process-long `CompioTaskDriver` with an exp
 - endpoint registrations, subscription mailboxes, and the bounded event queue; and
 - the selected in-memory or Fjall relation store.
 
-Driver clones share this state; they do not create more worker pools. Driver asynchronous methods
-and internal workers run on the embedding application's Compio executor. The host therefore keeps
-its Compio runtime alive until `CompioTaskDriver::shutdown` completes.
+A cloneable `DriverClient` provides process services such as endpoint creation and name lookup, but
+cannot consume events or shut down the process. Driver asynchronous methods and internal workers
+run on the embedding application's Compio executor. The host therefore keeps its Compio runtime
+alive until `DriverOwner::shutdown` completes.
 
-An endpoint is the lifetime boundary for a session or native client. Allocate its identity with
-`CompioTaskDriver::allocate_ephemeral_identity`, open it before accepting input, and close it when
-the native owner disappears. Closing an endpoint rejects further submissions, cancels its suspended
-tasks and external work, removes its subscriptions, and retracts its volatile endpoint relations.
+`DriverClient::allocate_ephemeral_identity` is the single allocator for endpoint, request, and
+other process-local identities in Mica's reserved host range. Identities in that range must be
+allocated by the same driver before they are used to open an endpoint. The allocation count is
+bounded by `DriverResources::ephemeral_identity_capacity` and exposed in the resource snapshot;
+protocol-owned identities outside the reserved range remain valid.
 
-`shutdown` is shared and idempotent. It rejects new work, cancels tracked asynchronous work and
-suspended tasks, closes endpoints and subscriptions, flushes persistence, and joins dispatcher
-threads. The host must continue draining driver events while shutdown is in progress if producers
-have already filled the bounded event queue.
+An `EndpointSession` is the lifetime boundary for a session or native client. The driver owns its
+endpoint context, invocations, input, subscriptions, cancellation, and named volatile fact scopes.
+Closing
+it rejects further submissions, waits for admitted endpoint operations to reach a stable outcome,
+cancels its suspended tasks and external work, removes its subscriptions, and retracts its scoped
+volatile relations. `replace_volatile_scope` performs a validated atomic relation transaction,
+allowing a host to reconcile one complete endpoint-owned fact set without exposing an intermediate
+state.
+
+An `InvocationHandle` carries the task ID, selector, endpoint context, cancellation, initial report,
+and independently awaitable terminal outcome. A host either awaits it, registers it with
+`DriverEventRouter::watch_invocation`, or explicitly calls `detach` to transfer it to the background
+event stream. There is no second implicit terminal-event path competing with the handle.
+The unique, non-cloneable `DriverEventPump` preserves ordered effects and subscription readiness.
+`drive_invocation`, endpoint close, and owner shutdown drive that same pump while awaiting their
+result, so a saturated bounded event queue cannot deadlock control flow. A multi-host process can
+run the pump through `DriverEventRouter`; each registered handler has an ordered bounded queue and a
+tracked Compio worker. An asynchronous handler can therefore call back into Mica without blocking
+the sole event pump. If a handler falls behind its explicit queue bound, the router disconnects it
+and logs the saturation instead of deadlocking every other host.
+
+`DriverOwner::shutdown` rejects new work, cancels tracked asynchronous work and suspended tasks,
+closes endpoints and subscriptions, flushes persistence, and joins dispatcher threads. Unexpected
+owner drop starts a best-effort event-discarding shutdown so queue saturation cannot strand worker
+threads, but normal hosts should always await explicit pump-driven shutdown.
 
 ## Host boundary
 
@@ -68,12 +92,17 @@ future. A handler that starts its own operating-system work must use
 `ExternalRequestCancellation::cancelled` to stop that child work. Stream emitters reject values
 after cancellation.
 
-The driver event queue has one logical consumer. `wait_events` and `drain_events` divide the same
-stream if called concurrently. Effects committed by a task precede its lifecycle event, and
-subscription readiness caused by that outcome follows it. Terminal task events and effects apply
-backpressure and are retained; repeated equivalent suspension and subscription-ready events may be
-coalesced. A submission also returns its immediate outcome for request/response control flow, while
-the event stream remains the host's source for asynchronous lifecycle changes.
+The event pump is the sole consumer of the bounded driver event queue. Effects committed by a task
+precede its completion, and subscription readiness caused by that outcome follows it. Terminal
+events for watched or detached invocations and effects apply backpressure and are retained; repeated
+equivalent suspension and subscription-ready events may be coalesced. Endpoints, active tasks,
+suspended tasks, timers, ephemeral identities, retained terminal tombstones, queued events,
+asynchronous workers, subscription mailboxes, subscriptions, external requests, and subscription
+deliveries all have explicit host resource limits.
+
+`DriverEventPump::set_wake_handler` supplies the readiness edge needed by Winit event-loop proxies.
+`wait` and `drive_until` are ordinary Compio futures and can be selected with socket, terminal, or
+application futures without polling sleeps.
 
 ## Features
 

@@ -12,7 +12,7 @@
 // with this program. If not, see <https://www.gnu.org/licenses/>.
 
 use crate::{
-    CompioTaskDriver, DriverError, DriverResources, ExternalRequestHandler,
+    CompioTaskDriver, DriverError, DriverOwner, DriverResources, ExternalRequestHandler,
     ExternalStreamRequestHandler, FileinIncludeLoader,
 };
 use mica_runtime::{FileinMode, SourceRunner};
@@ -58,19 +58,21 @@ enum InitialFilein {
     },
 }
 
-pub struct CompioTaskDriverBuilder {
+pub struct DriverBuilder {
     resources: DriverResources,
     storage: DriverStorage,
+    source_runner: Option<SourceRunner>,
     initial_fileins: Vec<InitialFilein>,
     external_request_handler: Option<ExternalRequestHandler>,
     external_stream_request_handler: Option<ExternalStreamRequestHandler>,
 }
 
-impl CompioTaskDriverBuilder {
+impl DriverBuilder {
     pub fn new(resources: DriverResources) -> Self {
         Self {
             resources,
             storage: DriverStorage::Memory,
+            source_runner: None,
             initial_fileins: Vec::new(),
             external_request_handler: None,
             external_stream_request_handler: None,
@@ -79,6 +81,11 @@ impl CompioTaskDriverBuilder {
 
     pub fn storage(mut self, storage: DriverStorage) -> Self {
         self.storage = storage;
+        self
+    }
+
+    pub fn source_runner(mut self, runner: SourceRunner) -> Self {
+        self.source_runner = Some(runner);
         self
     }
 
@@ -123,11 +130,21 @@ impl CompioTaskDriverBuilder {
         self
     }
 
-    pub fn build(self) -> Result<CompioTaskDriver, DriverError> {
+    pub fn build(self) -> Result<DriverOwner, DriverError> {
+        self.build_driver().map(DriverOwner::new)
+    }
+
+    pub(crate) fn build_driver(self) -> Result<CompioTaskDriver, DriverError> {
         self.resources.validate()?;
-        let mut runner = match self.storage {
-            DriverStorage::Memory => SourceRunner::new_empty(),
-            DriverStorage::Fjall { path, durability } => {
+        if self.source_runner.is_some() && !matches!(self.storage, DriverStorage::Memory) {
+            return Err(DriverError::Configuration(
+                "a source runner and driver storage cannot both be configured".to_owned(),
+            ));
+        }
+        let mut runner = match (self.source_runner, self.storage) {
+            (Some(runner), DriverStorage::Memory) => runner,
+            (None, DriverStorage::Memory) => SourceRunner::new_empty(),
+            (None, DriverStorage::Fjall { path, durability }) => {
                 #[cfg(feature = "fjall")]
                 {
                     SourceRunner::open_fjall(path, durability.into())
@@ -141,17 +158,20 @@ impl CompioTaskDriverBuilder {
                     ));
                 }
             }
+            (Some(_), DriverStorage::Fjall { .. }) => unreachable!("validated above"),
         };
         for filein in self.initial_fileins {
-            match filein {
+            let reports: Vec<_> = match filein {
                 InitialFilein::Source {
                     source,
                     include_loader,
                 } => match include_loader {
                     Some(loader) => runner
                         .run_filein_with_include_loader(&source, |path| loader(path))
-                        .map(|_| ()),
-                    None => runner.run_filein(&source).map(|_| ()),
+                        .map(|reports| reports.into_iter().map(|report| report.task_id).collect()),
+                    None => runner
+                        .run_filein(&source)
+                        .map(|reports| reports.into_iter().map(|report| report.task_id).collect()),
                 },
                 InitialFilein::Unit {
                     unit,
@@ -163,13 +183,30 @@ impl CompioTaskDriverBuilder {
                         .run_filein_with_unit_and_include_loader(unit, &source, mode, |path| {
                             loader(path)
                         })
-                        .map(|_| ()),
-                    None => runner.run_filein_with_unit(unit, &source, mode).map(|_| ()),
+                        .map(|report| {
+                            report
+                                .reports
+                                .into_iter()
+                                .map(|report| report.task_id)
+                                .collect()
+                        }),
+                    None => runner
+                        .run_filein_with_unit(unit, &source, mode)
+                        .map(|report| {
+                            report
+                                .reports
+                                .into_iter()
+                                .map(|report| report.task_id)
+                                .collect()
+                        }),
                 },
             }
             .map_err(DriverError::Source)?;
+            for task_id in reports {
+                runner.forget_terminal_task(task_id);
+            }
         }
-        CompioTaskDriver::spawn_with_resources_and_external_handlers(
+        CompioTaskDriver::spawn(
             runner,
             self.resources,
             self.external_request_handler,
@@ -193,7 +230,7 @@ mod tests {
                 "label.txt" => Ok("embedded".to_owned()),
                 _ => Err(format!("unknown include {path}")),
             });
-            let driver = CompioTaskDriver::builder(resources)
+            let driver = DriverOwner::builder(resources)
                 .initial_filein("make_identity(:base)", None)
                 .initial_filein_unit(
                     Symbol::intern("equipment"),
@@ -203,7 +240,7 @@ mod tests {
                     FileinMode::Add,
                     Some(include_loader),
                 )
-                .build()
+                .build_driver()
                 .unwrap();
 
             driver.named_identity(Symbol::intern("base")).unwrap();
@@ -227,24 +264,24 @@ mod tests {
             ));
             let _ = std::fs::remove_dir_all(&path);
             let resources = DriverResources::new(NonZeroUsize::new(1).unwrap());
-            let driver = CompioTaskDriver::builder(resources.clone())
+            let driver = DriverOwner::builder(resources.clone())
                 .storage(DriverStorage::Fjall {
                     path: path.clone(),
                     durability: DriverDurability::Relaxed,
                 })
                 .initial_filein("make_identity(:persisted)", None)
-                .build()
+                .build_driver()
                 .unwrap();
 
             driver.shutdown().await.unwrap();
             drop(driver);
 
-            let reopened = CompioTaskDriver::builder(resources)
+            let reopened = DriverOwner::builder(resources)
                 .storage(DriverStorage::Fjall {
                     path: path.clone(),
                     durability: DriverDurability::Relaxed,
                 })
-                .build()
+                .build_driver()
                 .unwrap();
             reopened
                 .named_identity(Symbol::intern("persisted"))
@@ -259,12 +296,12 @@ mod tests {
     #[test]
     fn reports_unavailable_fjall_provider_without_changing_the_api() {
         let resources = DriverResources::new(NonZeroUsize::new(1).unwrap());
-        let result = CompioTaskDriver::builder(resources)
+        let result = DriverOwner::builder(resources)
             .storage(DriverStorage::Fjall {
                 path: PathBuf::from("unused"),
                 durability: DriverDurability::Strict,
             })
-            .build();
+            .build_driver();
 
         assert!(matches!(
             result,

@@ -11,19 +11,28 @@
 // You should have received a copy of the GNU Affero General Public License along
 // with this program. If not, see <https://www.gnu.org/licenses/>.
 
+use crate::embedding::{
+    DriverWake, InvocationDiagnostics, InvocationHandle, InvocationOutcome, InvocationState,
+};
 use crate::execution::{CpuAdmission, ExternalRequestAdmission};
 use crate::{
-    DEFAULT_EVENT_QUEUE_CAPACITY, DEFAULT_EXTERNAL_REQUEST_CAPACITY,
-    DEFAULT_SUBSCRIPTION_QUEUE_BUDGET, DispatcherConfig, DriverError, DriverEvent, DriverResources,
-    DriverSubscriptionMailbox, DriverSubscriptionRequest, EndpointCloseReport,
-    ExternalRequestCancellation, ExternalRequestContext, ExternalRequestHandler,
-    ExternalStreamEmitter, ExternalStreamRequestHandler, FileinIncludeLoader, RelationAcceleration,
+    DEFAULT_ACTIVE_TASK_CAPACITY, DEFAULT_ENDPOINT_CAPACITY, DEFAULT_EPHEMERAL_IDENTITY_CAPACITY,
+    DEFAULT_EVENT_QUEUE_CAPACITY, DEFAULT_SUBSCRIPTION_CAPACITY,
+    DEFAULT_SUBSCRIPTION_MAILBOX_CAPACITY, DEFAULT_SUSPENDED_TASK_CAPACITY,
+    DEFAULT_TERMINAL_TASK_RETENTION, DEFAULT_TIMER_CAPACITY, DispatcherConfig, DriverError,
+    DriverEvent, DriverResourceSnapshot, DriverResources, DriverSubscriptionMailbox,
+    DriverSubscriptionRequest, EndpointCloseReport, ExternalRequestCancellation,
+    ExternalRequestContext, ExternalRequestHandler, ExternalStreamEmitter,
+    ExternalStreamRequestHandler, FileinIncludeLoader, RelationAcceleration,
     TaskCancellationReason, TaskContext, configure_dispatcher,
     metrics::{self, AsyncWorkerKind, DispatchOperation, WorkerOutcome},
 };
+#[cfg(test)]
+use crate::{DEFAULT_EXTERNAL_REQUEST_CAPACITY, DEFAULT_SUBSCRIPTION_QUEUE_BUDGET};
 use compio::dispatcher::Dispatcher;
 use compio::runtime::JoinHandle;
 use futures_util::future::{Either, select};
+use futures_util::task::{ArcWake, waker};
 #[cfg(feature = "wgpu")]
 use mica_relation_wgpu::{WgpuAccelerator, WgpuAcceleratorOptions};
 use mica_runtime::{
@@ -35,7 +44,7 @@ use mica_runtime::{
     TaskOutcome, TaskRequest, Tuple,
 };
 use mica_var::{Identity, Symbol, Value};
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::future::Future;
 use std::num::NonZeroUsize;
 use std::pin::Pin;
@@ -69,18 +78,28 @@ fn relation_accelerator() -> &'static AutomaticRelationAccelerator {
 }
 
 #[derive(Clone)]
-pub struct CompioTaskDriver {
+pub(crate) struct CompioTaskDriver {
     inner: Arc<PoolInner>,
 }
 
 impl CompioTaskDriver {
-    pub fn builder(resources: DriverResources) -> crate::CompioTaskDriverBuilder {
-        crate::CompioTaskDriverBuilder::new(resources)
-    }
-
     #[cfg(test)]
     pub(crate) fn inner_runner(&self) -> Arc<SharedSourceRunner> {
         Arc::clone(&self.inner.runner)
+    }
+
+    pub(crate) fn same_driver(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.inner, &other.inner)
+    }
+
+    pub(crate) fn set_wake_handler(&self, handler: Option<Arc<dyn DriverWake>>) {
+        *self.inner.wake_handler.lock().unwrap() = handler.clone();
+        if self.inner.state.lock().unwrap().events.is_empty() {
+            return;
+        }
+        if let Some(handler) = handler {
+            handler.wake();
+        }
     }
 }
 
@@ -93,6 +112,7 @@ struct PoolInner {
     external_stream_request_handler: Option<ExternalStreamRequestHandler>,
     subscription_queue_budget: NonZeroUsize,
     next_ephemeral_identity: AtomicU64,
+    wake_handler: Mutex<Option<Arc<dyn DriverWake>>>,
     state: Mutex<PoolState>,
 }
 
@@ -101,20 +121,54 @@ struct PoolState {
     shutdown_error: Option<String>,
     in_flight_dispatches: usize,
     idle_wakers: Vec<Waker>,
+    endpoint_activities: HashMap<Identity, usize>,
+    endpoint_idle_wakers: HashMap<Identity, Vec<Waker>>,
     shutdown_wakers: Vec<Waker>,
     contexts: BTreeMap<TaskId, TaskContext>,
-    cancelled_tasks: HashSet<TaskId>,
+    invocations: HashMap<TaskId, Arc<InvocationState>>,
+    active_tasks: HashSet<TaskId>,
+    terminal_tasks: HashMap<TaskId, TerminalTaskKind>,
+    terminal_order: VecDeque<TaskId>,
     closed_endpoints: HashSet<Identity>,
-    open_endpoints: HashSet<Identity>,
+    endpoints: HashMap<Identity, EndpointResources>,
+    allocated_ephemeral_identities: HashSet<Identity>,
+    volatile_fact_owners: BTreeMap<(Symbol, Tuple), VolatileFactOwnership>,
     input_waiters: BTreeMap<Identity, Vec<TaskId>>,
     mailbox_waiters: BTreeMap<u64, VecDeque<MailboxWaiter>>,
-    external_subscription_mailboxes: HashSet<u64>,
+    external_subscription_mailboxes: HashMap<u64, Value>,
+    subscriptions: HashMap<Value, SubscriptionOwner>,
     events: VecDeque<DriverEvent>,
+    discard_events: bool,
     event_wakers: Vec<Waker>,
     event_space_wakers: Vec<Waker>,
     event_capacity: usize,
+    active_task_capacity: usize,
+    suspended_task_capacity: usize,
+    timer_capacity: usize,
+    terminal_task_retention: usize,
+    endpoint_capacity: usize,
+    subscription_capacity: usize,
+    subscription_mailbox_capacity: usize,
+    ephemeral_identity_capacity: usize,
     next_worker_id: u64,
     workers: HashMap<u64, AsyncWorker>,
+}
+
+#[derive(Clone, Default)]
+struct EndpointResources {
+    scopes: HashMap<Symbol, BTreeSet<(Symbol, Tuple)>>,
+    subscriptions: HashSet<Value>,
+}
+
+#[derive(Clone, Copy)]
+struct VolatileFactOwnership {
+    owners: usize,
+    asserted_by_driver: bool,
+}
+
+struct SubscriptionOwner {
+    endpoint: Identity,
+    mailbox: u64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -124,8 +178,17 @@ enum DriverLifecycle {
     Stopped,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TerminalTaskKind {
+    Completed,
+    Aborted,
+    Cancelled,
+    Failed,
+}
+
 struct AsyncWorker {
     task_id: TaskId,
+    timer: bool,
     cancellation: Option<ExternalRequestCancellation>,
     handle: JoinHandle<()>,
 }
@@ -134,8 +197,18 @@ struct DispatchActivity {
     inner: Arc<PoolInner>,
 }
 
+struct EndpointActivity {
+    inner: Arc<PoolInner>,
+    endpoint: Identity,
+}
+
 struct DriverIdle<'a> {
     driver: &'a CompioTaskDriver,
+}
+
+struct EndpointIdle<'a> {
+    driver: &'a CompioTaskDriver,
+    endpoint: Identity,
 }
 
 struct DriverStopped<'a> {
@@ -147,6 +220,16 @@ struct EventEnqueue<'a> {
     event: Option<DriverEvent>,
 }
 
+struct WakeOnReady<F> {
+    future: Pin<Box<F>>,
+    inner: Arc<PoolInner>,
+}
+
+struct ReadinessWaker {
+    runtime_waker: Waker,
+    inner: Arc<PoolInner>,
+}
+
 impl Default for PoolState {
     fn default() -> Self {
         Self {
@@ -154,18 +237,35 @@ impl Default for PoolState {
             shutdown_error: None,
             in_flight_dispatches: 0,
             idle_wakers: Vec::new(),
+            endpoint_activities: HashMap::new(),
+            endpoint_idle_wakers: HashMap::new(),
             shutdown_wakers: Vec::new(),
             contexts: BTreeMap::new(),
-            cancelled_tasks: HashSet::new(),
+            invocations: HashMap::new(),
+            active_tasks: HashSet::new(),
+            terminal_tasks: HashMap::new(),
+            terminal_order: VecDeque::new(),
             closed_endpoints: HashSet::new(),
-            open_endpoints: HashSet::new(),
+            endpoints: HashMap::new(),
+            allocated_ephemeral_identities: HashSet::new(),
+            volatile_fact_owners: BTreeMap::new(),
             input_waiters: BTreeMap::new(),
             mailbox_waiters: BTreeMap::new(),
-            external_subscription_mailboxes: HashSet::new(),
+            external_subscription_mailboxes: HashMap::new(),
+            subscriptions: HashMap::new(),
             events: VecDeque::new(),
+            discard_events: false,
             event_wakers: Vec::new(),
             event_space_wakers: Vec::new(),
             event_capacity: DEFAULT_EVENT_QUEUE_CAPACITY,
+            active_task_capacity: DEFAULT_ACTIVE_TASK_CAPACITY,
+            suspended_task_capacity: DEFAULT_SUSPENDED_TASK_CAPACITY,
+            timer_capacity: DEFAULT_TIMER_CAPACITY,
+            terminal_task_retention: DEFAULT_TERMINAL_TASK_RETENTION,
+            endpoint_capacity: DEFAULT_ENDPOINT_CAPACITY,
+            subscription_capacity: DEFAULT_SUBSCRIPTION_CAPACITY,
+            subscription_mailbox_capacity: DEFAULT_SUBSCRIPTION_MAILBOX_CAPACITY,
+            ephemeral_identity_capacity: DEFAULT_EPHEMERAL_IDENTITY_CAPACITY,
             next_worker_id: 1,
             workers: HashMap::new(),
         }
@@ -183,14 +283,7 @@ pub struct DriverEvents<'a> {
 }
 
 impl CompioTaskDriver {
-    pub fn spawn(runner: SourceRunner) -> Result<Self, DriverError> {
-        Self::spawn_with_workers(runner, None)
-    }
-
-    pub fn spawn_empty() -> Result<Self, DriverError> {
-        Self::spawn(SourceRunner::new_empty())
-    }
-
+    #[cfg(test)]
     pub fn spawn_with_workers(
         runner: SourceRunner,
         workers: Option<NonZeroUsize>,
@@ -198,6 +291,7 @@ impl CompioTaskDriver {
         Self::spawn_with_workers_and_external_handler(runner, workers, None)
     }
 
+    #[cfg(test)]
     pub fn spawn_with_workers_and_external_handler(
         runner: SourceRunner,
         workers: Option<NonZeroUsize>,
@@ -214,6 +308,7 @@ impl CompioTaskDriver {
         )
     }
 
+    #[cfg(test)]
     pub fn spawn_with_workers_and_external_handlers(
         runner: SourceRunner,
         workers: Option<NonZeroUsize>,
@@ -231,37 +326,7 @@ impl CompioTaskDriver {
         )
     }
 
-    pub fn spawn_with_config(
-        runner: SourceRunner,
-        config: DispatcherConfig,
-    ) -> Result<Self, DriverError> {
-        Self::spawn_with_config_and_external_handler(runner, config, None)
-    }
-
-    pub fn spawn_with_external_handler(
-        runner: SourceRunner,
-        handler: ExternalRequestHandler,
-    ) -> Result<Self, DriverError> {
-        Self::spawn_with_config_and_external_handler(
-            runner,
-            DispatcherConfig::default(),
-            Some(handler),
-        )
-    }
-
-    pub fn spawn_with_config_and_external_handler(
-        runner: SourceRunner,
-        config: DispatcherConfig,
-        external_request_handler: Option<ExternalRequestHandler>,
-    ) -> Result<Self, DriverError> {
-        Self::spawn_with_config_and_external_handlers(
-            runner,
-            config,
-            external_request_handler,
-            None,
-        )
-    }
-
+    #[cfg(test)]
     pub fn spawn_with_config_and_external_handlers(
         runner: SourceRunner,
         config: DispatcherConfig,
@@ -276,20 +341,29 @@ impl CompioTaskDriver {
             NonZeroUsize::new(DEFAULT_EVENT_QUEUE_CAPACITY).unwrap(),
             NonZeroUsize::new(DEFAULT_SUBSCRIPTION_QUEUE_BUDGET).unwrap(),
             NonZeroUsize::new(DEFAULT_EXTERNAL_REQUEST_CAPACITY).unwrap(),
+            NonZeroUsize::new(DEFAULT_ACTIVE_TASK_CAPACITY).unwrap(),
+            NonZeroUsize::new(DEFAULT_SUSPENDED_TASK_CAPACITY).unwrap(),
+            NonZeroUsize::new(DEFAULT_TIMER_CAPACITY).unwrap(),
+            NonZeroUsize::new(DEFAULT_TERMINAL_TASK_RETENTION).unwrap(),
+            NonZeroUsize::new(DEFAULT_ENDPOINT_CAPACITY).unwrap(),
+            NonZeroUsize::new(DEFAULT_SUBSCRIPTION_CAPACITY).unwrap(),
+            NonZeroUsize::new(DEFAULT_SUBSCRIPTION_MAILBOX_CAPACITY).unwrap(),
+            NonZeroUsize::new(DEFAULT_EPHEMERAL_IDENTITY_CAPACITY).unwrap(),
             RelationAcceleration::Automatic,
             external_request_handler,
             external_stream_request_handler,
         )
     }
 
+    #[cfg(test)]
     pub fn spawn_with_resources(
         runner: SourceRunner,
         resources: DriverResources,
     ) -> Result<Self, DriverError> {
-        Self::spawn_with_resources_and_external_handlers(runner, resources, None, None)
+        Self::spawn(runner, resources, None, None)
     }
 
-    pub fn spawn_with_resources_and_external_handlers(
+    pub(crate) fn spawn(
         runner: SourceRunner,
         resources: DriverResources,
         external_request_handler: Option<ExternalRequestHandler>,
@@ -304,6 +378,14 @@ impl CompioTaskDriver {
             resources.event_queue_capacity,
             resources.subscription_queue_budget,
             resources.external_request_capacity,
+            resources.active_task_capacity,
+            resources.suspended_task_capacity,
+            resources.timer_capacity,
+            resources.terminal_task_retention,
+            resources.endpoint_capacity,
+            resources.subscription_capacity,
+            resources.subscription_mailbox_capacity,
+            resources.ephemeral_identity_capacity,
             resources.relation_acceleration,
             external_request_handler,
             external_stream_request_handler,
@@ -319,6 +401,14 @@ impl CompioTaskDriver {
         event_queue_capacity: NonZeroUsize,
         subscription_queue_budget: NonZeroUsize,
         external_request_capacity: NonZeroUsize,
+        active_task_capacity: NonZeroUsize,
+        suspended_task_capacity: NonZeroUsize,
+        timer_capacity: NonZeroUsize,
+        terminal_task_retention: NonZeroUsize,
+        endpoint_capacity: NonZeroUsize,
+        subscription_capacity: NonZeroUsize,
+        subscription_mailbox_capacity: NonZeroUsize,
+        ephemeral_identity_capacity: NonZeroUsize,
         relation_acceleration: RelationAcceleration,
         external_request_handler: Option<ExternalRequestHandler>,
         external_stream_request_handler: Option<ExternalStreamRequestHandler>,
@@ -407,11 +497,20 @@ impl CompioTaskDriver {
                 execution_context = execution_context.with_accelerator(accelerator);
             }
         }
-        let runner = runner
+        let mut runner = runner
             .with_task_limits(task_limits)
             .with_execution_context(execution_context);
+        runner.forget_all_terminal_tasks();
         let state = PoolState {
             event_capacity: event_queue_capacity.get(),
+            active_task_capacity: active_task_capacity.get(),
+            suspended_task_capacity: suspended_task_capacity.get(),
+            timer_capacity: timer_capacity.get(),
+            terminal_task_retention: terminal_task_retention.get(),
+            endpoint_capacity: endpoint_capacity.get(),
+            subscription_capacity: subscription_capacity.get(),
+            subscription_mailbox_capacity: subscription_mailbox_capacity.get(),
+            ephemeral_identity_capacity: ephemeral_identity_capacity.get(),
             ..PoolState::default()
         };
         Ok(Self {
@@ -424,6 +523,7 @@ impl CompioTaskDriver {
                 external_stream_request_handler,
                 subscription_queue_budget,
                 next_ephemeral_identity: AtomicU64::new(EPHEMERAL_HOST_IDENTITY_START),
+                wake_handler: Mutex::new(None),
                 state: Mutex::new(state),
             }),
         })
@@ -446,6 +546,15 @@ impl CompioTaskDriver {
     /// Allocates a process-local identity that is never written as durable
     /// world identity policy.
     pub fn allocate_ephemeral_identity(&self) -> Result<Identity, DriverError> {
+        let mut state = self.inner.state.lock().unwrap();
+        if state.lifecycle != DriverLifecycle::Running {
+            return Err(DriverError::DriverStopped);
+        }
+        if state.allocated_ephemeral_identities.len() >= state.ephemeral_identity_capacity {
+            return Err(DriverError::Configuration(
+                "driver ephemeral identity capacity is exhausted".to_owned(),
+            ));
+        }
         let raw = self
             .inner
             .next_ephemeral_identity
@@ -453,7 +562,9 @@ impl CompioTaskDriver {
                 (current < EPHEMERAL_HOST_IDENTITY_END).then_some(current + 1)
             })
             .map_err(|_| DriverError::EphemeralIdentityExhausted)?;
-        Identity::new(raw).ok_or(DriverError::EphemeralIdentityExhausted)
+        let identity = Identity::new(raw).ok_or(DriverError::EphemeralIdentityExhausted)?;
+        state.allocated_ephemeral_identities.insert(identity);
+        Ok(identity)
     }
 
     pub fn format_error(&self, error: &DriverError) -> String {
@@ -485,6 +596,7 @@ impl CompioTaskDriver {
         self.inner.runner.render_task_value(value)
     }
 
+    #[cfg(test)]
     pub async fn submit_source(
         &self,
         endpoint: Identity,
@@ -503,38 +615,23 @@ impl CompioTaskDriver {
         Ok(submitted)
     }
 
-    pub async fn submit_source_report(
+    pub(crate) async fn submit_source_handle(
         &self,
         endpoint: Identity,
-        actor: Option<Symbol>,
         source: String,
-    ) -> Result<RunReport, DriverError> {
-        self.ensure_endpoint_open(endpoint)?;
-        let mut request = match actor {
-            Some(actor) => self
-                .inner
-                .runner
-                .source_request_as(actor, source)
-                .map_err(DriverError::Source)?,
-            None => self
-                .inner
-                .runner
-                .source_request_for_endpoint(endpoint, source)
-                .map_err(DriverError::Source)?,
-        };
-        request.endpoint = endpoint;
-        let context = TaskContext::from_request(&request, endpoint);
+    ) -> Result<InvocationHandle, DriverError> {
+        let _activity = self.begin_endpoint_activity(endpoint)?;
         let runner = Arc::clone(&self.inner.runner);
-        let submitted = self
+        let (context, submitted) = self
             .dispatch(DispatchOperation::Submit, move || async move {
-                runner.submit_source(request)
+                let request = runner.source_request_for_endpoint(endpoint, source)?;
+                let context = TaskContext::from_request(&request, endpoint);
+                let submitted = runner.submit_source(request)?;
+                Ok((context, submitted))
             })
             .await?;
-        self.handle_submitted(context, submitted.clone()).await?;
-        Ok(self
-            .inner
-            .runner
-            .report_outcome(submitted.task_id, submitted.outcome))
+        self.install_invocation_handle(Symbol::intern("eval"), context, submitted)
+            .await
     }
 
     pub async fn run_read_only_source_query(
@@ -543,7 +640,7 @@ impl CompioTaskDriver {
         source: String,
         options: ReadOnlySourceQueryOptions,
     ) -> Result<ReadOnlySourceQueryReport, DriverError> {
-        self.ensure_endpoint_open(endpoint)?;
+        let _activity = self.begin_endpoint_activity(endpoint)?;
         let runner = Arc::clone(&self.inner.runner);
         self.dispatch(DispatchOperation::Submit, move || async move {
             runner.run_read_only_source_query_for_endpoint(endpoint, source, options)
@@ -551,6 +648,7 @@ impl CompioTaskDriver {
         .await
     }
 
+    #[cfg(test)]
     pub async fn submit_root_source_report(
         &self,
         source: String,
@@ -573,6 +671,27 @@ impl CompioTaskDriver {
             .inner
             .runner
             .report_outcome(submitted.task_id, submitted.outcome))
+    }
+
+    pub(crate) async fn submit_root_source_handle(
+        &self,
+        source: String,
+    ) -> Result<InvocationHandle, DriverError> {
+        self.ensure_running()?;
+        let context = TaskContext {
+            principal: None,
+            actor: None,
+            endpoint: SYSTEM_ENDPOINT,
+            authority: AuthorityContext::root(),
+        };
+        let runner = Arc::clone(&self.inner.runner);
+        let submitted = self
+            .dispatch(DispatchOperation::RootSubmit, move || async move {
+                runner.submit_root_source(source)
+            })
+            .await?;
+        self.install_invocation_handle(Symbol::intern("eval"), context, submitted)
+            .await
     }
 
     pub async fn check_filein(
@@ -613,6 +732,9 @@ impl CompioTaskDriver {
                 }
             })
             .await?;
+        for task_report in &report.reports {
+            self.inner.runner.forget_terminal_task(task_report.task_id);
+        }
         self.enqueue_pending_effects().await;
         Ok(report)
     }
@@ -625,30 +747,7 @@ impl CompioTaskDriver {
         .await
     }
 
-    pub async fn submit_source_as_actor(
-        &self,
-        endpoint: Identity,
-        actor: Identity,
-        source: String,
-    ) -> Result<SubmittedTask, DriverError> {
-        self.ensure_endpoint_open(endpoint)?;
-        let mut request = self
-            .inner
-            .runner
-            .source_request_as_identity(actor, source)
-            .map_err(DriverError::Source)?;
-        request.endpoint = endpoint;
-        let context = TaskContext::from_request(&request, endpoint);
-        let runner = Arc::clone(&self.inner.runner);
-        let submitted = self
-            .dispatch(DispatchOperation::Submit, move || async move {
-                runner.submit_source(request)
-            })
-            .await?;
-        self.handle_submitted(context, submitted.clone()).await?;
-        Ok(submitted)
-    }
-
+    #[cfg(test)]
     pub async fn submit_invocation(
         &self,
         endpoint: Identity,
@@ -668,15 +767,13 @@ impl CompioTaskDriver {
         Ok(submitted)
     }
 
-    pub async fn submit_invocation_for_endpoint(
+    pub(crate) async fn submit_invocation_handle(
         &self,
         endpoint: Identity,
         selector: Symbol,
         roles: Vec<(Symbol, Value)>,
-    ) -> Result<SubmittedTask, DriverError> {
-        self.ensure_endpoint_open(endpoint)?;
-        let trace_selector = selector;
-        let dispatch_start = Instant::now();
+    ) -> Result<InvocationHandle, DriverError> {
+        let _activity = self.begin_endpoint_activity(endpoint)?;
         let runner = Arc::clone(&self.inner.runner);
         let (context, submitted) = self
             .dispatch(DispatchOperation::Invoke, move || async move {
@@ -686,36 +783,81 @@ impl CompioTaskDriver {
                 Ok((context, submitted))
             })
             .await?;
-        tracing::debug!(
-            selector = trace_selector.name().unwrap_or("<unnamed>"),
-            task_id = submitted.task_id,
-            elapsed_us = dispatch_start.elapsed().as_micros(),
-            "driver invocation dispatched"
-        );
-        let handle_start = Instant::now();
-        self.handle_submitted(context, submitted.clone()).await?;
-        tracing::debug!(
-            selector = trace_selector.name().unwrap_or("<unnamed>"),
-            task_id = submitted.task_id,
-            elapsed_us = handle_start.elapsed().as_micros(),
-            "driver invocation outcome processed"
-        );
-        Ok(submitted)
+        self.install_invocation_handle(selector, context, submitted)
+            .await
+    }
+
+    async fn install_invocation_handle(
+        &self,
+        selector: Symbol,
+        context: TaskContext,
+        submitted: SubmittedTask,
+    ) -> Result<InvocationHandle, DriverError> {
+        let task_id = submitted.task_id;
+        let initial_report = self
+            .inner
+            .runner
+            .report_outcome(task_id, submitted.outcome.clone());
+        let state = Arc::new(InvocationState::new(
+            InvocationDiagnostics {
+                task_id,
+                selector,
+                endpoint: context.endpoint,
+                principal: context.principal,
+                actor: context.actor,
+            },
+            initial_report,
+        ));
+        self.inner
+            .state
+            .lock()
+            .unwrap()
+            .invocations
+            .insert(task_id, Arc::clone(&state));
+        if let Err(error) = self.handle_submitted(context, submitted).await {
+            self.inner
+                .state
+                .lock()
+                .unwrap()
+                .invocations
+                .remove(&task_id);
+            return Err(error);
+        }
+        Ok(InvocationHandle::new(self.clone(), state))
     }
 
     pub async fn resume(&self, task_id: TaskId, value: Value) -> Result<TaskOutcome, DriverError> {
-        let context = {
+        let (context, _activity) = {
             let mut state = self.inner.state.lock().unwrap();
-            state.remove_mailbox_waiter(task_id);
-            let context = match state.contexts.remove(&task_id) {
-                Some(context) => context,
-                None if state.cancelled_tasks.contains(&task_id) => {
+            let context = match state.contexts.get(&task_id) {
+                Some(context) => context.clone(),
+                None if state.terminal_tasks.get(&task_id)
+                    == Some(&TerminalTaskKind::Cancelled) =>
+                {
                     return Err(DriverError::TaskCancelled(task_id));
                 }
                 None => return Err(DriverError::MissingTaskContext(task_id)),
             };
+            if state.lifecycle != DriverLifecycle::Running {
+                return Err(DriverError::DriverStopped);
+            }
+            if state.closed_endpoints.contains(&context.endpoint) {
+                return Err(DriverError::EndpointClosed(context.endpoint));
+            }
+            state.contexts.remove(&task_id);
+            state.remove_mailbox_waiter(task_id);
+            *state
+                .endpoint_activities
+                .entry(context.endpoint)
+                .or_default() += 1;
             state.record_metrics();
-            context
+            (
+                context.clone(),
+                EndpointActivity {
+                    inner: Arc::clone(&self.inner),
+                    endpoint: context.endpoint,
+                },
+            )
         };
         let runner = Arc::clone(&self.inner.runner);
         let request = TaskRequest {
@@ -746,7 +888,7 @@ impl CompioTaskDriver {
         endpoint: Identity,
         value: Value,
     ) -> Result<Vec<TaskOutcome>, DriverError> {
-        self.ensure_endpoint_open(endpoint)?;
+        let _activity = self.begin_endpoint_activity(endpoint)?;
         let task_ids = self
             .inner
             .state
@@ -760,6 +902,7 @@ impl CompioTaskDriver {
         Ok(outcomes)
     }
 
+    #[cfg(test)]
     pub fn open_endpoint(
         &self,
         endpoint: Identity,
@@ -773,25 +916,9 @@ impl CompioTaskDriver {
             .map_err(DriverError::Source)?;
         let mut state = self.inner.state.lock().unwrap();
         state.closed_endpoints.remove(&endpoint);
-        state.open_endpoints.insert(endpoint);
-        Ok(())
-    }
-
-    pub fn open_endpoint_with_context(
-        &self,
-        endpoint: Identity,
-        principal: Option<Identity>,
-        actor: Option<Identity>,
-        protocol: Symbol,
-    ) -> Result<(), DriverError> {
-        self.ensure_running()?;
-        self.inner
-            .runner
-            .open_endpoint_with_context(endpoint, principal, actor, protocol)
-            .map_err(DriverError::Source)?;
-        let mut state = self.inner.state.lock().unwrap();
-        state.closed_endpoints.remove(&endpoint);
-        state.open_endpoints.insert(endpoint);
+        state
+            .endpoints
+            .insert(endpoint, EndpointResources::default());
         Ok(())
     }
 
@@ -803,65 +930,157 @@ impl CompioTaskDriver {
         protocol: Symbol,
         tuples: Vec<(Symbol, Tuple)>,
     ) -> Result<usize, DriverError> {
-        self.ensure_running()?;
+        let tuples = tuples.into_iter().collect::<BTreeSet<_>>();
+        let mut state = self.inner.state.lock().unwrap();
+        if state.lifecycle != DriverLifecycle::Running {
+            return Err(DriverError::DriverStopped);
+        }
+        if state.endpoints.contains_key(&endpoint) {
+            return Err(DriverError::Configuration(format!(
+                "endpoint {endpoint:?} is already open"
+            )));
+        }
+        if (EPHEMERAL_HOST_IDENTITY_START..EPHEMERAL_HOST_IDENTITY_END).contains(&endpoint.raw())
+            && !state.allocated_ephemeral_identities.contains(&endpoint)
+        {
+            return Err(DriverError::Configuration(format!(
+                "endpoint {endpoint:?} is in the driver-reserved identity range but was not allocated by this driver"
+            )));
+        }
+        if state.endpoints.len() >= state.endpoint_capacity {
+            return Err(DriverError::Configuration(
+                "driver endpoint capacity is exhausted".to_owned(),
+            ));
+        }
+        let mut asserted = Vec::new();
+        let mut ownership = Vec::with_capacity(tuples.len());
+        for fact @ (relation, tuple) in &tuples {
+            if state.volatile_fact_owners.contains_key(fact) {
+                ownership.push((fact.clone(), None));
+                continue;
+            }
+            let present = self
+                .inner
+                .runner
+                .contains_named_tuple(*relation, tuple)
+                .map_err(DriverError::Source)?;
+            ownership.push((fact.clone(), Some(!present)));
+            if !present {
+                asserted.push(fact.clone());
+            }
+        }
         let changes = self
             .inner
             .runner
             .open_endpoint_with_context_and_volatile_tuples_named(
-                endpoint, principal, actor, protocol, tuples,
+                endpoint, principal, actor, protocol, asserted,
             )
             .map_err(DriverError::Source)?;
-        let mut state = self.inner.state.lock().unwrap();
+        for (fact, first_owner_asserted) in ownership {
+            match state.volatile_fact_owners.get_mut(&fact) {
+                Some(owner) => owner.owners += 1,
+                None => {
+                    state.volatile_fact_owners.insert(
+                        fact,
+                        VolatileFactOwnership {
+                            owners: 1,
+                            asserted_by_driver: first_owner_asserted
+                                .expect("a first owner records fact provenance"),
+                        },
+                    );
+                }
+            }
+        }
+        state.endpoints.insert(
+            endpoint,
+            EndpointResources {
+                scopes: HashMap::from([(Symbol::intern("endpoint"), tuples)]),
+                subscriptions: HashSet::new(),
+            },
+        );
         state.closed_endpoints.remove(&endpoint);
-        state.open_endpoints.insert(endpoint);
         Ok(changes)
     }
 
+    #[cfg(test)]
     pub async fn close_endpoint(&self, endpoint: Identity) -> EndpointCloseReport {
-        self.mark_endpoint_closed(endpoint);
-        let cancelled_tasks = self.cancel_endpoint_tasks(endpoint).await;
-        let report = EndpointCloseReport {
-            relation_changes: self.inner.runner.close_endpoint(endpoint),
-            cancelled_tasks,
-        };
-        self.finish_endpoint_close(endpoint);
-        report
+        self.close_endpoint_resources(endpoint)
+            .await
+            .expect("test endpoint close should succeed")
     }
 
-    /// Starts endpoint closure for use by a host's synchronous drop guard.
-    ///
-    /// New submissions are rejected before this method returns. The actual
-    /// close is tracked as driver-owned work and is joined or cancelled by
-    /// [`Self::shutdown`]. Hosts with an asynchronous control path should await
-    /// [`Self::close_endpoint`] directly.
-    pub fn close_endpoint_in_background(&self, endpoint: Identity) -> Result<(), DriverError> {
-        self.ensure_running()?;
-        self.mark_endpoint_closed(endpoint);
-        let driver = self.clone();
-        let handle = compio::runtime::spawn(async move {
-            driver.close_endpoint(endpoint).await;
-        });
-        self.track_worker(0, handle);
-        Ok(())
-    }
-
-    pub async fn close_endpoint_and_retract_volatile_tuples_named(
+    pub async fn close_endpoint_resources(
         &self,
         endpoint: Identity,
-        tuples: Vec<(Symbol, Tuple)>,
     ) -> Result<EndpointCloseReport, DriverError> {
         self.mark_endpoint_closed(endpoint);
+        self.wait_until_endpoint_idle(endpoint).await;
         let cancelled_tasks = self.cancel_endpoint_tasks(endpoint).await;
+        let mut state = self.inner.state.lock().unwrap();
+        let Some(resources) = state.endpoints.get(&endpoint).cloned() else {
+            return Ok(EndpointCloseReport {
+                relation_changes: 0,
+                cancelled_tasks,
+            });
+        };
+        let owned_facts = resources
+            .scopes
+            .into_values()
+            .flatten()
+            .collect::<BTreeSet<_>>();
+        let retract = owned_facts
+            .iter()
+            .filter(|fact| {
+                state
+                    .volatile_fact_owners
+                    .get(*fact)
+                    .is_some_and(|owner| owner.owners == 1 && owner.asserted_by_driver)
+            })
+            .cloned()
+            .collect();
         let relation_changes = self
             .inner
             .runner
-            .close_endpoint_and_retract_volatile_tuples_named(endpoint, tuples)
+            .close_endpoint_and_retract_volatile_tuples_named(endpoint, retract)
             .map_err(DriverError::Source)?;
-        self.finish_endpoint_close(endpoint);
+        state.endpoints.remove(&endpoint);
+        for fact in owned_facts {
+            let Some(owner) = state.volatile_fact_owners.get_mut(&fact) else {
+                continue;
+            };
+            owner.owners -= 1;
+            if owner.owners == 0 {
+                state.volatile_fact_owners.remove(&fact);
+            }
+        }
+        for subscription in resources.subscriptions {
+            state.subscriptions.remove(&subscription);
+        }
         Ok(EndpointCloseReport {
             relation_changes,
             cancelled_tasks,
         })
+    }
+
+    pub(crate) fn close_endpoint_resources_in_background(
+        &self,
+        endpoint: Identity,
+    ) -> Result<(), DriverError> {
+        self.ensure_running()?;
+        self.mark_endpoint_closed(endpoint);
+        let driver = self.clone();
+        let future = self.wake_on_ready(async move {
+            let _ = driver.close_endpoint_resources(endpoint).await;
+        });
+        let handle =
+            compio::runtime::Runtime::try_with_current(move |runtime| runtime.spawn(future))
+                .map_err(|_| {
+                    DriverError::Configuration(
+                        "background endpoint close requires an active Compio runtime".to_owned(),
+                    )
+                })?;
+        let _ = self.track_worker(0, false, handle);
+        Ok(())
     }
 
     pub async fn cancel_task(&self, task_id: TaskId) -> Result<SuspendKind, DriverError> {
@@ -869,30 +1088,207 @@ impl CompioTaskDriver {
             .await
     }
 
-    pub fn assert_volatile_tuples_named(
-        &self,
-        tuples: Vec<(Symbol, Tuple)>,
-    ) -> Result<usize, DriverError> {
-        self.ensure_running()?;
-        self.inner
-            .runner
-            .assert_volatile_tuples_named(tuples)
-            .map_err(DriverError::Source)
+    pub(crate) fn detach_invocation(&self, task_id: TaskId) -> Result<(), DriverError> {
+        let mut state = self.inner.state.lock().unwrap();
+        if !state.contexts.contains_key(&task_id) {
+            return Err(DriverError::Configuration(format!(
+                "task {task_id} is not a suspended invocation"
+            )));
+        }
+        if state.invocations.remove(&task_id).is_none() {
+            return Err(DriverError::Configuration(format!(
+                "task {task_id} does not have an invocation handle"
+            )));
+        }
+        Ok(())
     }
 
-    pub fn retract_volatile_tuples_named(
+    pub(crate) async fn publish_watched_invocation(
         &self,
-        tuples: Vec<(Symbol, Tuple)>,
+        task_id: TaskId,
+        outcome: InvocationOutcome,
+    ) {
+        let event = match outcome {
+            InvocationOutcome::Completed(value) => DriverEvent::TaskCompleted { task_id, value },
+            InvocationOutcome::Aborted(error) => DriverEvent::TaskAborted { task_id, error },
+            InvocationOutcome::Cancelled(reason) => DriverEvent::TaskCancelled { task_id, reason },
+            InvocationOutcome::Failed(error) => DriverEvent::TaskFailed { task_id, error },
+        };
+        self.enqueue_event(event).await;
+    }
+
+    pub fn replace_endpoint_volatile_scope(
+        &self,
+        endpoint: Identity,
+        scope: Symbol,
+        facts: Vec<(Symbol, Tuple)>,
     ) -> Result<usize, DriverError> {
-        self.ensure_running()?;
-        self.inner
+        let mut state = self.inner.state.lock().unwrap();
+        self.ensure_endpoint_resource_update(&state, endpoint)?;
+        self.replace_endpoint_volatile_scope_locked(
+            &mut state,
+            endpoint,
+            scope,
+            facts.into_iter().collect(),
+        )
+    }
+
+    pub fn apply_endpoint_volatile_scope_diff(
+        &self,
+        endpoint: Identity,
+        scope: Symbol,
+        retract: Vec<(Symbol, Tuple)>,
+        assert: Vec<(Symbol, Tuple)>,
+    ) -> Result<usize, DriverError> {
+        let mut state = self.inner.state.lock().unwrap();
+        self.ensure_endpoint_resource_update(&state, endpoint)?;
+        let previous = state
+            .endpoints
+            .get(&endpoint)
+            .and_then(|resources| resources.scopes.get(&scope))
+            .cloned()
+            .unwrap_or_default();
+        let retract = retract.into_iter().collect::<BTreeSet<_>>();
+        if let Some((relation, tuple)) = retract.difference(&previous).next() {
+            return Err(DriverError::Configuration(format!(
+                "volatile scope {} cannot retract {}{tuple:?} because it does not own that fact",
+                scope.name().unwrap_or("<unnamed>"),
+                relation.name().unwrap_or("<unnamed>"),
+            )));
+        }
+        let mut next = previous;
+        for fact in retract {
+            next.remove(&fact);
+        }
+        next.extend(assert);
+        self.replace_endpoint_volatile_scope_locked(&mut state, endpoint, scope, next)
+    }
+
+    fn ensure_endpoint_resource_update(
+        &self,
+        state: &PoolState,
+        endpoint: Identity,
+    ) -> Result<(), DriverError> {
+        if state.lifecycle != DriverLifecycle::Running {
+            return Err(DriverError::DriverStopped);
+        }
+        if state.closed_endpoints.contains(&endpoint) || !state.endpoints.contains_key(&endpoint) {
+            return Err(DriverError::EndpointClosed(endpoint));
+        }
+        Ok(())
+    }
+
+    fn replace_endpoint_volatile_scope_locked(
+        &self,
+        state: &mut PoolState,
+        endpoint: Identity,
+        scope: Symbol,
+        next_scope: BTreeSet<(Symbol, Tuple)>,
+    ) -> Result<usize, DriverError> {
+        let resources = state
+            .endpoints
+            .get(&endpoint)
+            .expect("an open endpoint has driver-owned resources");
+        let previous_scope = resources.scopes.get(&scope).cloned().unwrap_or_default();
+        let other_facts = resources
+            .scopes
+            .iter()
+            .filter(|(current, _)| **current != scope)
+            .flat_map(|(_, facts)| facts.iter().cloned())
+            .collect::<BTreeSet<_>>();
+        let previous_owned = previous_scope
+            .union(&other_facts)
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        let next_owned = next_scope
+            .union(&other_facts)
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        let lost = previous_owned
+            .difference(&next_owned)
+            .cloned()
+            .collect::<Vec<_>>();
+        let gained = next_owned
+            .difference(&previous_owned)
+            .cloned()
+            .collect::<Vec<_>>();
+        let retract = lost
+            .iter()
+            .filter(|fact| {
+                state
+                    .volatile_fact_owners
+                    .get(*fact)
+                    .is_some_and(|owner| owner.owners == 1 && owner.asserted_by_driver)
+            })
+            .cloned()
+            .collect();
+        let mut assert = Vec::new();
+        let mut first_owner_provenance = Vec::new();
+        for fact @ (relation, tuple) in &gained {
+            if state.volatile_fact_owners.contains_key(fact) {
+                continue;
+            }
+            let present = self
+                .inner
+                .runner
+                .contains_named_tuple(*relation, tuple)
+                .map_err(DriverError::Source)?;
+            first_owner_provenance.push((fact.clone(), !present));
+            if !present {
+                assert.push(fact.clone());
+            }
+        }
+        let changes = self
+            .inner
             .runner
-            .retract_volatile_tuples_named(tuples)
-            .map_err(DriverError::Source)
+            .replace_volatile_tuples_named(retract, assert)
+            .map_err(DriverError::Source)?;
+        for fact in lost {
+            let owner = state
+                .volatile_fact_owners
+                .get_mut(&fact)
+                .expect("an endpoint-owned fact has provenance");
+            owner.owners -= 1;
+            if owner.owners == 0 {
+                state.volatile_fact_owners.remove(&fact);
+            }
+        }
+        for fact in gained {
+            if let Some(owner) = state.volatile_fact_owners.get_mut(&fact) {
+                owner.owners += 1;
+                continue;
+            }
+            let asserted_by_driver = first_owner_provenance
+                .iter()
+                .find_map(|(current, asserted)| (current == &fact).then_some(*asserted))
+                .expect("a first owner records fact provenance");
+            state.volatile_fact_owners.insert(
+                fact,
+                VolatileFactOwnership {
+                    owners: 1,
+                    asserted_by_driver,
+                },
+            );
+        }
+        state
+            .endpoints
+            .get_mut(&endpoint)
+            .expect("an open endpoint retains resources")
+            .scopes
+            .insert(scope, next_scope);
+        Ok(changes)
     }
 
     pub fn create_subscription_mailbox(&self) -> Result<DriverSubscriptionMailbox, DriverError> {
-        self.ensure_running()?;
+        let mut state = self.inner.state.lock().unwrap();
+        if state.lifecycle != DriverLifecycle::Running {
+            return Err(DriverError::DriverStopped);
+        }
+        if state.external_subscription_mailboxes.len() >= state.subscription_mailbox_capacity {
+            return Err(DriverError::Configuration(
+                "driver subscription mailbox capacity is exhausted".to_owned(),
+            ));
+        }
         let (receiver, sender) = self
             .inner
             .runner
@@ -903,12 +1299,9 @@ impl CompioTaskDriver {
             .runner
             .mailbox_for_receiver(&receiver)
             .map_err(runtime_driver_error)?;
-        self.inner
-            .state
-            .lock()
-            .unwrap()
+        state
             .external_subscription_mailboxes
-            .insert(mailbox);
+            .insert(mailbox, receiver.clone());
         Ok(DriverSubscriptionMailbox {
             mailbox,
             receiver,
@@ -922,7 +1315,23 @@ impl CompioTaskDriver {
         mailbox: &DriverSubscriptionMailbox,
         request: DriverSubscriptionRequest,
     ) -> Result<Value, DriverError> {
-        self.ensure_endpoint_open(endpoint)?;
+        let _activity = self.begin_endpoint_activity(endpoint)?;
+        {
+            let state = self.inner.state.lock().unwrap();
+            if state.subscriptions.len() >= state.subscription_capacity {
+                return Err(DriverError::Configuration(
+                    "driver subscription capacity is exhausted".to_owned(),
+                ));
+            }
+            if !state
+                .external_subscription_mailboxes
+                .contains_key(&mailbox.mailbox)
+            {
+                return Err(DriverError::Configuration(
+                    "subscription mailbox is closed".to_owned(),
+                ));
+            }
+        }
         let subscription = self
             .inner
             .runner
@@ -940,6 +1349,29 @@ impl CompioTaskDriver {
                 },
             )
             .map_err(DriverError::Source)?;
+        {
+            let mut state = self.inner.state.lock().unwrap();
+            if state.lifecycle != DriverLifecycle::Running
+                || state.closed_endpoints.contains(&endpoint)
+            {
+                drop(state);
+                let _ = self.inner.runner.cancel_subscription(subscription.clone());
+                return Err(DriverError::EndpointClosed(endpoint));
+            }
+            state.subscriptions.insert(
+                subscription.clone(),
+                SubscriptionOwner {
+                    endpoint,
+                    mailbox: mailbox.mailbox,
+                },
+            );
+            state
+                .endpoints
+                .get_mut(&endpoint)
+                .expect("an active endpoint retains resources")
+                .subscriptions
+                .insert(subscription.clone());
+        }
         let delivered = self.inner.runner.take_subscription_deliveries();
         let mut queue = VecDeque::new();
         self.route_mailbox_deliveries(delivered, &mut queue).await?;
@@ -947,12 +1379,63 @@ impl CompioTaskDriver {
         Ok(subscription)
     }
 
-    pub fn cancel_subscription(&self, subscription: Value) -> Result<(), DriverError> {
+    pub fn cancel_subscription_for_endpoint(
+        &self,
+        endpoint: Identity,
+        subscription: Value,
+    ) -> Result<(), DriverError> {
         self.ensure_running()?;
+        let mut state = self.inner.state.lock().unwrap();
+        let Some(owner) = state.subscriptions.get(&subscription) else {
+            return Err(DriverError::Configuration(
+                "subscription is not active".to_owned(),
+            ));
+        };
+        if owner.endpoint != endpoint {
+            return Err(DriverError::Configuration(
+                "endpoint cannot cancel a subscription it does not own".to_owned(),
+            ));
+        }
         self.inner
             .runner
-            .cancel_subscription(subscription)
-            .map_err(runtime_driver_error)
+            .cancel_subscription(subscription.clone())
+            .map_err(runtime_driver_error)?;
+        state.subscriptions.remove(&subscription);
+        if let Some(resources) = state.endpoints.get_mut(&endpoint) {
+            resources.subscriptions.remove(&subscription);
+        }
+        Ok(())
+    }
+
+    pub fn close_subscription_mailbox(
+        &self,
+        mailbox: &DriverSubscriptionMailbox,
+    ) -> Result<(), DriverError> {
+        let mut state = self.inner.state.lock().unwrap();
+        let Some(receiver) = state
+            .external_subscription_mailboxes
+            .remove(&mailbox.mailbox)
+        else {
+            return Ok(());
+        };
+        self.inner
+            .runner
+            .close_mailbox(&receiver)
+            .map_err(runtime_driver_error)?;
+        let subscriptions = state
+            .subscriptions
+            .iter()
+            .filter_map(|(subscription, owner)| {
+                (owner.mailbox == mailbox.mailbox).then_some((subscription.clone(), owner.endpoint))
+            })
+            .collect::<Vec<_>>();
+        for (subscription, endpoint) in subscriptions {
+            state.subscriptions.remove(&subscription);
+            if let Some(resources) = state.endpoints.get_mut(&endpoint) {
+                resources.subscriptions.remove(&subscription);
+            }
+        }
+        Ok(())
     }
 
     pub fn drain_subscription_mailbox(
@@ -1051,12 +1534,44 @@ impl CompioTaskDriver {
         }
         self.inner.runner.cancel_all_subscriptions();
 
-        let endpoints = {
+        let (endpoints, volatile_facts, subscription_mailboxes) = {
             let mut state = self.inner.state.lock().unwrap();
-            state.open_endpoints.drain().collect::<Vec<_>>()
+            let endpoints = state
+                .endpoints
+                .drain()
+                .map(|(endpoint, _)| endpoint)
+                .collect::<Vec<_>>();
+            let volatile_facts = std::mem::take(&mut state.volatile_fact_owners)
+                .into_iter()
+                .filter_map(|(fact, ownership)| ownership.asserted_by_driver.then_some(fact))
+                .collect::<Vec<_>>();
+            let subscription_mailboxes = state
+                .external_subscription_mailboxes
+                .drain()
+                .map(|(_, receiver)| receiver)
+                .collect::<Vec<_>>();
+            state.subscriptions.clear();
+            (endpoints, volatile_facts, subscription_mailboxes)
         };
+        if let Err(error) = self
+            .inner
+            .runner
+            .replace_volatile_tuples_named(volatile_facts, Vec::new())
+        {
+            worker_error = Some(format!(
+                "failed to retract driver-owned volatile facts during shutdown: {}",
+                self.inner.runner.render_source_task_error(&error)
+            ));
+        }
         for endpoint in endpoints {
             self.inner.runner.close_endpoint(endpoint);
+        }
+        for receiver in subscription_mailboxes {
+            if let Err(error) = self.inner.runner.close_mailbox(&receiver) {
+                worker_error = Some(format!(
+                    "failed to close subscription mailbox during shutdown: {error:?}"
+                ));
+            }
         }
 
         let persistence_error = self.inner.runner.flush_persistence().err().map(|error| {
@@ -1095,6 +1610,54 @@ impl CompioTaskDriver {
         self.inner.state.lock().unwrap().lifecycle == DriverLifecycle::Stopped
     }
 
+    pub(crate) fn shutdown_in_background_discarding_events(&self) -> bool {
+        if compio::runtime::Runtime::try_with_current(|_| ()).is_err() {
+            return false;
+        }
+        let space_wakers = {
+            let mut state = self.inner.state.lock().unwrap();
+            if state.lifecycle != DriverLifecycle::Running {
+                return true;
+            }
+            state.discard_events = true;
+            state.events.clear();
+            std::mem::take(&mut state.event_space_wakers)
+        };
+        for waker in space_wakers {
+            waker.wake();
+        }
+        let driver = self.clone();
+        let shutdown = self.wake_on_ready(async move {
+            let _ = driver.shutdown().await;
+        });
+        compio::runtime::Runtime::try_with_current(move |runtime| {
+            runtime.spawn(shutdown).detach();
+        })
+        .is_ok()
+    }
+
+    pub fn resource_snapshot(&self) -> DriverResourceSnapshot {
+        let mut state = self.inner.state.lock().unwrap();
+        state.reap_finished_workers();
+        DriverResourceSnapshot {
+            ephemeral_identities: state.allocated_ephemeral_identities.len(),
+            endpoints: state.endpoints.len(),
+            subscription_mailboxes: state.external_subscription_mailboxes.len(),
+            subscriptions: state.subscriptions.len(),
+            active_tasks: state.active_tasks.len(),
+            suspended_tasks: state.contexts.len(),
+            timers: state.workers.values().filter(|worker| worker.timer).count(),
+            retained_terminal_tasks: state.terminal_tasks.len() + self.inner.runner.completed_len(),
+            queued_events: state.events.len(),
+            async_workers: state.workers.len(),
+        }
+    }
+
+    pub(crate) fn event_queue_capacity(&self) -> NonZeroUsize {
+        NonZeroUsize::new(self.inner.state.lock().unwrap().event_capacity)
+            .expect("driver event capacity is non-zero")
+    }
+
     fn ensure_running(&self) -> Result<(), DriverError> {
         if self.inner.state.lock().unwrap().lifecycle != DriverLifecycle::Running {
             return Err(DriverError::DriverStopped);
@@ -1102,6 +1665,7 @@ impl CompioTaskDriver {
         Ok(())
     }
 
+    #[cfg(test)]
     fn ensure_endpoint_open(&self, endpoint: Identity) -> Result<(), DriverError> {
         let state = self.inner.state.lock().unwrap();
         if state.lifecycle != DriverLifecycle::Running {
@@ -1116,15 +1680,6 @@ impl CompioTaskDriver {
     fn mark_endpoint_closed(&self, endpoint: Identity) {
         let mut state = self.inner.state.lock().unwrap();
         state.closed_endpoints.insert(endpoint);
-    }
-
-    fn finish_endpoint_close(&self, endpoint: Identity) {
-        self.inner
-            .state
-            .lock()
-            .unwrap()
-            .open_endpoints
-            .remove(&endpoint);
     }
 
     async fn cancel_endpoint_tasks(&self, endpoint: Identity) -> Vec<TaskId> {
@@ -1157,7 +1712,7 @@ impl CompioTaskDriver {
         let (kind, workers) = {
             let mut state = self.inner.state.lock().unwrap();
             let Some(_) = state.contexts.remove(&task_id) else {
-                if state.cancelled_tasks.contains(&task_id) {
+                if state.terminal_tasks.get(&task_id) == Some(&TerminalTaskKind::Cancelled) {
                     return Err(DriverError::TaskCancelled(task_id));
                 }
                 return Err(DriverError::MissingTaskContext(task_id));
@@ -1168,23 +1723,27 @@ impl CompioTaskDriver {
                 .cancel_task(task_id)
                 .map_err(DriverError::Source)?;
             state.remove_task_waiters(task_id);
-            state.cancelled_tasks.insert(task_id);
+            state.record_terminal_task(task_id, TerminalTaskKind::Cancelled);
             let workers = state.take_task_workers(task_id);
             state.record_metrics();
             (kind, workers)
         };
         drop(workers);
-        self.enqueue_event(DriverEvent::TaskCancelled { task_id, reason })
-            .await;
+        if !self.complete_invocation(task_id, InvocationOutcome::Cancelled(reason)) {
+            self.enqueue_event(DriverEvent::TaskCancelled { task_id, reason })
+                .await;
+        }
+        self.inner.runner.forget_terminal_task(task_id);
         Ok(kind)
     }
 
     async fn record_cancelled_task(&self, task_id: TaskId, reason: TaskCancellationReason) {
         let should_record = {
             let mut state = self.inner.state.lock().unwrap();
-            if !state.cancelled_tasks.insert(task_id) {
+            if state.terminal_tasks.contains_key(&task_id) {
                 false
             } else {
+                state.record_terminal_task(task_id, TerminalTaskKind::Cancelled);
                 state.remove_task_waiters(task_id);
                 state.contexts.remove(&task_id);
                 state.record_metrics();
@@ -1192,9 +1751,42 @@ impl CompioTaskDriver {
             }
         };
         if should_record {
-            self.enqueue_event(DriverEvent::TaskCancelled { task_id, reason })
+            if !self.complete_invocation(task_id, InvocationOutcome::Cancelled(reason)) {
+                self.enqueue_event(DriverEvent::TaskCancelled { task_id, reason })
+                    .await;
+            }
+            self.inner.runner.forget_terminal_task(task_id);
+        }
+    }
+
+    async fn fail_suspended_task_for_capacity(
+        &self,
+        task_id: TaskId,
+        resource: &str,
+    ) -> Result<(), DriverError> {
+        let error = format!("driver {resource} capacity is exhausted");
+        let workers = {
+            let mut state = self.inner.state.lock().unwrap();
+            if state.contexts.remove(&task_id).is_none() {
+                return Ok(());
+            }
+            self.inner
+                .runner
+                .cancel_task(task_id)
+                .map_err(DriverError::Source)?;
+            state.remove_task_waiters(task_id);
+            state.record_terminal_task(task_id, TerminalTaskKind::Failed);
+            let workers = state.take_task_workers(task_id);
+            state.record_metrics();
+            workers
+        };
+        drop(workers);
+        if !self.complete_invocation(task_id, InvocationOutcome::Failed(error.clone())) {
+            self.enqueue_event(DriverEvent::TaskFailed { task_id, error })
                 .await;
         }
+        self.inner.runner.forget_terminal_task(task_id);
+        Ok(())
     }
 
     fn begin_dispatch(&self) -> Result<DispatchActivity, DriverError> {
@@ -1208,21 +1800,55 @@ impl CompioTaskDriver {
         })
     }
 
+    fn begin_endpoint_activity(&self, endpoint: Identity) -> Result<EndpointActivity, DriverError> {
+        let mut state = self.inner.state.lock().unwrap();
+        if state.lifecycle != DriverLifecycle::Running {
+            return Err(DriverError::DriverStopped);
+        }
+        if state.closed_endpoints.contains(&endpoint) {
+            return Err(DriverError::EndpointClosed(endpoint));
+        }
+        *state.endpoint_activities.entry(endpoint).or_default() += 1;
+        Ok(EndpointActivity {
+            inner: Arc::clone(&self.inner),
+            endpoint,
+        })
+    }
+
     fn wait_until_idle(&self) -> DriverIdle<'_> {
         DriverIdle { driver: self }
+    }
+
+    fn wait_until_endpoint_idle(&self, endpoint: Identity) -> EndpointIdle<'_> {
+        EndpointIdle {
+            driver: self,
+            endpoint,
+        }
     }
 
     fn wait_until_stopped(&self) -> DriverStopped<'_> {
         DriverStopped { driver: self }
     }
 
-    fn track_worker(&self, task_id: TaskId, handle: JoinHandle<()>) {
+    fn wake_on_ready<F>(&self, future: F) -> WakeOnReady<F>
+    where
+        F: Future,
+    {
+        WakeOnReady {
+            future: Box::pin(future),
+            inner: Arc::clone(&self.inner),
+        }
+    }
+
+    fn track_worker(&self, task_id: TaskId, timer: bool, handle: JoinHandle<()>) -> bool {
         let mut state = self.inner.state.lock().unwrap();
         state.reap_finished_workers();
-        if state.lifecycle != DriverLifecycle::Running {
+        let timer_saturated = timer
+            && state.workers.values().filter(|worker| worker.timer).count() >= state.timer_capacity;
+        if state.lifecycle != DriverLifecycle::Running || timer_saturated {
             drop(state);
             drop(handle);
-            return;
+            return false;
         }
         let worker_id = state.next_worker_id;
         state.next_worker_id = state.next_worker_id.wrapping_add(1).max(1);
@@ -1230,10 +1856,12 @@ impl CompioTaskDriver {
             worker_id,
             AsyncWorker {
                 task_id,
+                timer,
                 cancellation: None,
                 handle,
             },
         );
+        true
     }
 
     fn track_external_worker(
@@ -1256,6 +1884,7 @@ impl CompioTaskDriver {
             worker_id,
             AsyncWorker {
                 task_id,
+                timer: false,
                 cancellation: Some(cancellation),
                 handle,
             },
@@ -1342,16 +1971,53 @@ impl CompioTaskDriver {
     ) -> Result<(), DriverError> {
         while let Some((task_id, context, outcome)) = queue.pop_front() {
             let delivered_mailboxes = self.delivered_mailboxes(&outcome);
+            let admitted = self.inner.state.lock().unwrap().admit_active_task(task_id);
+            if !admitted {
+                if matches!(&outcome, TaskOutcome::Suspended { .. }) {
+                    self.inner
+                        .runner
+                        .cancel_task(task_id)
+                        .map_err(DriverError::Source)?;
+                }
+                self.enqueue_pending_effects().await;
+                let handled = self.complete_invocation(
+                    task_id,
+                    InvocationOutcome::Failed(
+                        "driver active task capacity is exhausted".to_owned(),
+                    ),
+                );
+                if !handled {
+                    self.enqueue_event(DriverEvent::TaskFailed {
+                        task_id,
+                        error: "driver active task capacity is exhausted".to_owned(),
+                    })
+                    .await;
+                }
+                self.route_mailbox_deliveries(delivered_mailboxes, queue)
+                    .await?;
+                self.inner
+                    .state
+                    .lock()
+                    .unwrap()
+                    .record_terminal_task(task_id, TerminalTaskKind::Failed);
+                self.inner.runner.forget_terminal_task(task_id);
+                continue;
+            }
             let mut timer = None;
             let mut spawn = None;
             let mut mailbox_recv = None;
             let mut external_request = None;
             let mut task_event = None;
             let mut cancellation = None;
+            let mut capacity_failure = None;
+            let mut terminal_kind = None;
+            let mut invocation_outcome = None;
             {
                 let mut state = self.inner.state.lock().unwrap();
                 match outcome {
                     TaskOutcome::Complete { value, .. } => {
+                        terminal_kind = Some(TerminalTaskKind::Completed);
+                        invocation_outcome = Some(InvocationOutcome::Completed(value.clone()));
                         tracing::debug!(
                             target: "mica_driver::pool",
                             task_id,
@@ -1363,6 +2029,8 @@ impl CompioTaskDriver {
                         task_event = Some(DriverEvent::TaskCompleted { task_id, value });
                     }
                     TaskOutcome::Aborted { error, .. } => {
+                        terminal_kind = Some(TerminalTaskKind::Aborted);
+                        invocation_outcome = Some(InvocationOutcome::Aborted(error.clone()));
                         tracing::error!(
                             target: "mica_driver::pool",
                             task_id,
@@ -1388,6 +2056,8 @@ impl CompioTaskDriver {
                         };
                         if let Some(reason) = cancellation_reason {
                             cancellation = Some(reason);
+                        } else if state.contexts.len() >= state.suspended_task_capacity {
+                            capacity_failure = Some("suspended task");
                         } else {
                             tracing::debug!(
                                 target: "mica_driver::pool",
@@ -1440,11 +2110,57 @@ impl CompioTaskDriver {
                 self.record_cancelled_task(task_id, reason).await;
                 continue;
             }
+            if let Some(resource) = capacity_failure {
+                let error = format!("driver {resource} capacity is exhausted");
+                self.inner
+                    .runner
+                    .cancel_task(task_id)
+                    .map_err(DriverError::Source)?;
+                self.enqueue_pending_effects().await;
+                if !self.complete_invocation(task_id, InvocationOutcome::Failed(error.clone())) {
+                    self.enqueue_event(DriverEvent::TaskFailed { task_id, error })
+                        .await;
+                }
+                self.route_mailbox_deliveries(delivered_mailboxes, queue)
+                    .await?;
+                self.inner
+                    .state
+                    .lock()
+                    .unwrap()
+                    .record_terminal_task(task_id, TerminalTaskKind::Failed);
+                self.inner.runner.forget_terminal_task(task_id);
+                continue;
+            }
             self.enqueue_pending_effects().await;
-            self.enqueue_event(task_event.expect("non-cancelled outcome has an event"))
-                .await;
-            if let Some(duration) = timer {
-                self.spawn_timer_resume(task_id, duration);
+            let invocation_suspended = invocation_outcome.is_none()
+                && self
+                    .inner
+                    .state
+                    .lock()
+                    .unwrap()
+                    .invocations
+                    .contains_key(&task_id);
+            let invocation_terminal = invocation_outcome
+                .map(|outcome| self.complete_invocation(task_id, outcome))
+                .unwrap_or(false);
+            if !invocation_terminal && !invocation_suspended {
+                self.enqueue_event(task_event.expect("non-cancelled outcome has an event"))
+                    .await;
+            }
+            if let Some(kind) = terminal_kind {
+                self.inner
+                    .state
+                    .lock()
+                    .unwrap()
+                    .record_terminal_task(task_id, kind);
+                self.inner.runner.forget_terminal_task(task_id);
+            }
+            if let Some(duration) = timer
+                && !self.spawn_timer_resume(task_id, duration)
+            {
+                self.fail_suspended_task_for_capacity(task_id, "timer")
+                    .await?;
+                continue;
             }
             if let Some(request) = mailbox_recv {
                 self.handle_mailbox_recv(task_id, request, queue).await?;
@@ -1536,8 +2252,11 @@ impl CompioTaskDriver {
                 queue.push_back((submitted.task_id, ctx, submitted.outcome));
                 return Ok(());
             }
-            if let Some(timeout) = timeout {
-                self.spawn_mailbox_timeout(task_id, timeout);
+            if let Some(timeout) = timeout
+                && !self.spawn_mailbox_timeout(task_id, timeout)
+            {
+                self.fail_suspended_task_for_capacity(task_id, "timer")
+                    .await?;
             }
             Ok(())
         }
@@ -1573,9 +2292,9 @@ impl CompioTaskDriver {
         Ok(ready)
     }
 
-    fn spawn_mailbox_timeout(&self, task_id: TaskId, duration: Duration) {
+    fn spawn_mailbox_timeout(&self, task_id: TaskId, duration: Duration) -> bool {
         let driver = self.clone();
-        let handle = compio::runtime::spawn(async move {
+        let future = self.wake_on_ready(async move {
             metrics::async_worker_started(AsyncWorkerKind::MailboxTimeout);
             let start = Instant::now();
             compio::time::sleep(duration).await;
@@ -1604,7 +2323,8 @@ impl CompioTaskDriver {
                 start.elapsed(),
             );
         });
-        self.track_worker(task_id, handle);
+        let handle = compio::runtime::spawn(future);
+        self.track_worker(task_id, true, handle)
     }
 
     async fn wake_mailbox_waiters(
@@ -1669,7 +2389,7 @@ impl CompioTaskDriver {
             let mut task_mailboxes = Vec::new();
             let mut external_mailboxes = Vec::new();
             for mailbox in mailboxes {
-                if state.external_subscription_mailboxes.contains(&mailbox) {
+                if state.external_subscription_mailboxes.contains_key(&mailbox) {
                     external_mailboxes.push(mailbox);
                 } else {
                     task_mailboxes.push(mailbox);
@@ -1813,9 +2533,9 @@ impl CompioTaskDriver {
         Ok((context, submitted))
     }
 
-    fn spawn_timer_resume(&self, task_id: TaskId, duration: Duration) {
+    fn spawn_timer_resume(&self, task_id: TaskId, duration: Duration) -> bool {
         let driver = self.clone();
-        let handle = compio::runtime::spawn(async move {
+        let future = self.wake_on_ready(async move {
             metrics::async_worker_started(AsyncWorkerKind::TimerResume);
             let start = Instant::now();
             compio::time::sleep(duration).await;
@@ -1825,7 +2545,8 @@ impl CompioTaskDriver {
             }
             metrics::async_worker_finished(AsyncWorkerKind::TimerResume, outcome, start.elapsed());
         });
-        self.track_worker(task_id, handle);
+        let handle = compio::runtime::spawn(future);
+        self.track_worker(task_id, true, handle)
     }
 
     fn spawn_external_request_resume(
@@ -1867,7 +2588,7 @@ impl CompioTaskDriver {
             "driver external request scheduled"
         );
         let tracked_cancellation = cancellation.clone();
-        let handle = compio::runtime::spawn(async move {
+        let future = self.wake_on_ready(async move {
             metrics::async_worker_started(AsyncWorkerKind::ExternalRequest);
             let start = Instant::now();
             tracing::debug!(
@@ -1929,6 +2650,7 @@ impl CompioTaskDriver {
                 start.elapsed(),
             );
         });
+        let handle = compio::runtime::spawn(future);
         self.track_external_worker(task_id, tracked_cancellation, handle);
     }
 
@@ -2058,11 +2780,35 @@ impl CompioTaskDriver {
     async fn record_task_failure(&self, task_id: TaskId, error: DriverError) {
         let rendered = self.format_error(&error);
         tracing::error!(task_id, error = %rendered, "driver task failed");
-        self.enqueue_event(DriverEvent::TaskFailed {
-            task_id,
-            error: rendered,
-        })
-        .await;
+        if !self.complete_invocation(task_id, InvocationOutcome::Failed(rendered.clone())) {
+            self.enqueue_event(DriverEvent::TaskFailed {
+                task_id,
+                error: rendered,
+            })
+            .await;
+        }
+        self.inner
+            .state
+            .lock()
+            .unwrap()
+            .record_terminal_task(task_id, TerminalTaskKind::Failed);
+        self.inner.runner.forget_terminal_task(task_id);
+    }
+
+    fn complete_invocation(&self, task_id: TaskId, outcome: InvocationOutcome) -> bool {
+        let state = self
+            .inner
+            .state
+            .lock()
+            .unwrap()
+            .invocations
+            .remove(&task_id);
+        if let Some(state) = state {
+            state.complete(outcome);
+            true
+        } else {
+            false
+        }
     }
 
     async fn record_worker_resume_error(
@@ -2070,7 +2816,12 @@ impl CompioTaskDriver {
         task_id: TaskId,
         error: DriverError,
     ) -> WorkerOutcome {
-        if matches!(error, DriverError::TaskCancelled(_)) {
+        if matches!(
+            error,
+            DriverError::TaskCancelled(_)
+                | DriverError::EndpointClosed(_)
+                | DriverError::DriverStopped
+        ) {
             return WorkerOutcome::Cancelled;
         }
         self.record_task_failure(task_id, error).await;
@@ -2103,11 +2854,41 @@ impl Future for DriverEvents<'_> {
     }
 }
 
+impl<F> Future for WakeOnReady<F>
+where
+    F: Future,
+{
+    type Output = F::Output;
+
+    fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
+        let relay = waker(Arc::new(ReadinessWaker {
+            runtime_waker: context.waker().clone(),
+            inner: Arc::clone(&self.inner),
+        }));
+        self.future.as_mut().poll(&mut Context::from_waker(&relay))
+    }
+}
+
+impl ArcWake for ReadinessWaker {
+    fn wake_by_ref(arc_self: &Arc<Self>) {
+        arc_self.runtime_waker.wake_by_ref();
+        let handler = arc_self.inner.wake_handler.lock().unwrap().clone();
+        if let Some(handler) = handler {
+            handler.wake();
+        }
+    }
+}
+
 impl Future for EventEnqueue<'_> {
     type Output = ();
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let mut state = self.driver.inner.state.lock().unwrap();
+        if state.discard_events {
+            drop(state);
+            self.event.take();
+            return Poll::Ready(());
+        }
         let event = self.event.as_ref().expect("event is present while pending");
         if state.coalesces(event) {
             drop(state);
@@ -2126,12 +2907,19 @@ impl Future for EventEnqueue<'_> {
             return Poll::Pending;
         }
         let event = self.event.take().unwrap();
+        let was_empty = state.events.is_empty();
         state.events.push_back(event);
         let event_wakers = std::mem::take(&mut state.event_wakers);
         state.record_metrics();
         drop(state);
         for waker in event_wakers {
             waker.wake();
+        }
+        if was_empty {
+            let handler = self.driver.inner.wake_handler.lock().unwrap().clone();
+            if let Some(handler) = handler {
+                handler.wake();
+            }
         }
         Poll::Ready(())
     }
@@ -2142,7 +2930,7 @@ impl Future for DriverIdle<'_> {
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let mut state = self.driver.inner.state.lock().unwrap();
-        if state.in_flight_dispatches == 0 {
+        if state.in_flight_dispatches == 0 && state.endpoint_activities.is_empty() {
             return Poll::Ready(());
         }
         let waker = cx.waker().clone();
@@ -2152,6 +2940,23 @@ impl Future for DriverIdle<'_> {
             .any(|entry| entry.will_wake(&waker))
         {
             state.idle_wakers.push(waker);
+        }
+        Poll::Pending
+    }
+}
+
+impl Future for EndpointIdle<'_> {
+    type Output = ();
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let mut state = self.driver.inner.state.lock().unwrap();
+        if !state.endpoint_activities.contains_key(&self.endpoint) {
+            return Poll::Ready(());
+        }
+        let waker = cx.waker().clone();
+        let wakers = state.endpoint_idle_wakers.entry(self.endpoint).or_default();
+        if !wakers.iter().any(|entry| entry.will_wake(&waker)) {
+            wakers.push(waker);
         }
         Poll::Pending
     }
@@ -2194,7 +2999,62 @@ impl Drop for DispatchActivity {
     }
 }
 
+impl Drop for EndpointActivity {
+    fn drop(&mut self) {
+        let (endpoint_wakers, idle_wakers) = {
+            let mut state = self.inner.state.lock().unwrap();
+            let Some(activities) = state.endpoint_activities.get_mut(&self.endpoint) else {
+                return;
+            };
+            *activities = activities.saturating_sub(1);
+            if *activities > 0 {
+                return;
+            }
+            state.endpoint_activities.remove(&self.endpoint);
+            let endpoint_wakers = state
+                .endpoint_idle_wakers
+                .remove(&self.endpoint)
+                .unwrap_or_default();
+            let idle_wakers =
+                if state.endpoint_activities.is_empty() && state.in_flight_dispatches == 0 {
+                    std::mem::take(&mut state.idle_wakers)
+                } else {
+                    Vec::new()
+                };
+            (endpoint_wakers, idle_wakers)
+        };
+        for waker in endpoint_wakers.into_iter().chain(idle_wakers) {
+            waker.wake();
+        }
+    }
+}
+
 impl PoolState {
+    fn admit_active_task(&mut self, task_id: TaskId) -> bool {
+        if self.active_tasks.contains(&task_id) {
+            return true;
+        }
+        if self.active_tasks.len() >= self.active_task_capacity {
+            return false;
+        }
+        self.active_tasks.insert(task_id);
+        true
+    }
+
+    fn record_terminal_task(&mut self, task_id: TaskId, kind: TerminalTaskKind) {
+        self.active_tasks.remove(&task_id);
+        self.contexts.remove(&task_id);
+        if self.terminal_tasks.insert(task_id, kind).is_none() {
+            self.terminal_order.push_back(task_id);
+        }
+        while self.terminal_order.len() > self.terminal_task_retention {
+            let Some(expired) = self.terminal_order.pop_front() else {
+                break;
+            };
+            self.terminal_tasks.remove(&expired);
+        }
+    }
+
     fn reap_finished_workers(&mut self) {
         self.workers
             .retain(|_, worker| !worker.handle.is_finished());

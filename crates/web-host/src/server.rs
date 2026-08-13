@@ -19,6 +19,7 @@ use crate::sync::{self, SyncRequestKind};
 use crate::{InProcessWebHost, RequestBinding, format_driver_error};
 use compio::io::{AsyncRead, AsyncWriteExt};
 use compio::net::{TcpListener, TcpStream};
+use mica_driver::EndpointConfiguration;
 use mica_var::Symbol;
 use std::sync::Arc;
 
@@ -124,16 +125,17 @@ async fn handle_in_process_connection(
     binding: RequestBinding,
 ) -> Result<(), String> {
     let connection_endpoint = host.allocate_endpoint()?;
-    if let Err(error) = host.driver.open_endpoint_with_context(
-        connection_endpoint,
-        Some(binding.principal),
-        binding.actor,
-        Symbol::intern("http"),
-    ) {
-        host.driver.close_endpoint(connection_endpoint).await;
-        return Err(format_driver_error(&host.driver, error));
+    let mut configuration = EndpointConfiguration::new(Symbol::intern("http"))
+        .endpoint(connection_endpoint)
+        .principal(binding.principal);
+    if let Some(actor) = binding.actor {
+        configuration = configuration.actor(actor);
     }
-    let driver = Arc::clone(&host.driver);
+    let endpoint = host
+        .client
+        .open_endpoint(configuration)
+        .map_err(|error| format_driver_error(&host.client, error))?;
+    let close_client = host.client.clone();
     let result = async move {
         let mut codec = HttpCodec::new();
         loop {
@@ -214,7 +216,9 @@ async fn handle_in_process_connection(
         }
     }
     .await;
-    driver.close_endpoint(connection_endpoint).await;
+    endpoint
+        .close_in_background()
+        .map_err(|error| format_driver_error(&close_client, error))?;
     result
 }
 

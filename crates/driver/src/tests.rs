@@ -12,8 +12,8 @@
 // with this program. If not, see <https://www.gnu.org/licenses/>.
 
 use crate::{
-    CompioTaskDriver, DriverError, DriverEvent, DriverResources, DriverSubscriptionRequest,
-    EPHEMERAL_HOST_IDENTITY_START, TaskCancellationReason,
+    CompioTaskDriver, DriverError, DriverEvent, DriverOwner, DriverResources,
+    DriverSubscriptionRequest, EPHEMERAL_HOST_IDENTITY_START, TaskCancellationReason,
 };
 use mica_runtime::{
     AuthorityContext, EmbeddingProviderKind, FileinMode, ReadOnlySourceQueryOptions,
@@ -80,6 +80,60 @@ fn driver_allocates_one_ephemeral_identity_sequence_for_host_objects() {
 
         assert_eq!(endpoint.raw(), EPHEMERAL_HOST_IDENTITY_START);
         assert_eq!(request.raw(), EPHEMERAL_HOST_IDENTITY_START + 1);
+        assert_eq!(driver.resource_snapshot().ephemeral_identities, 2);
+        driver.shutdown().await.unwrap();
+    });
+}
+
+#[test]
+fn driver_enforces_ephemeral_identity_capacity() {
+    crate::test_support::run(async {
+        let mut resources = DriverResources::new(TEST_WORKERS.unwrap());
+        resources.ephemeral_identity_capacity = NonZeroUsize::new(1).unwrap();
+        let driver =
+            CompioTaskDriver::spawn_with_resources(SourceRunner::new_empty(), resources).unwrap();
+
+        driver.allocate_ephemeral_identity().unwrap();
+        assert!(matches!(
+            driver.allocate_ephemeral_identity(),
+            Err(DriverError::Configuration(message))
+                if message.contains("ephemeral identity capacity")
+        ));
+        driver.shutdown().await.unwrap();
+    });
+}
+
+#[test]
+fn driver_rejects_unallocated_endpoints_in_its_ephemeral_identity_range() {
+    crate::test_support::run(async {
+        let driver =
+            CompioTaskDriver::spawn_with_workers(SourceRunner::new_empty(), TEST_WORKERS).unwrap();
+        let endpoint = Identity::new(EPHEMERAL_HOST_IDENTITY_START).unwrap();
+
+        assert!(matches!(
+            driver.open_endpoint_with_context_and_volatile_tuples_named(
+                endpoint,
+                None,
+                None,
+                Symbol::intern("test"),
+                Vec::new(),
+            ),
+            Err(DriverError::Configuration(message))
+                if message.contains("was not allocated by this driver")
+        ));
+
+        let allocated = driver.allocate_ephemeral_identity().unwrap();
+        assert_eq!(allocated, endpoint);
+        driver
+            .open_endpoint_with_context_and_volatile_tuples_named(
+                allocated,
+                None,
+                None,
+                Symbol::intern("test"),
+                Vec::new(),
+            )
+            .unwrap();
+        driver.close_endpoint_resources(allocated).await.unwrap();
         driver.shutdown().await.unwrap();
     });
 }
@@ -205,9 +259,9 @@ fn external_request_admission_bounds_handler_concurrency() {
         };
         let mut resources = DriverResources::new(TEST_WORKERS.unwrap());
         resources.external_request_capacity = NonZeroUsize::new(1).unwrap();
-        let driver = CompioTaskDriver::builder(resources)
+        let driver = DriverOwner::builder(resources)
             .external_request_handler(handler)
-            .build()
+            .build_driver()
             .unwrap();
 
         let first = driver
@@ -1661,10 +1715,10 @@ fn relation_subscription_delivery_notifies_external_driver_mailbox() {
         let observer = runner.named_identity(Symbol::intern("observer")).unwrap();
         let observed = runner.named_relation(Symbol::intern("Observed")).unwrap().0;
         let observer_endpoint = endpoint(37);
-        runner
+        let driver = CompioTaskDriver::spawn_with_workers(runner, TEST_WORKERS).unwrap();
+        driver
             .open_endpoint(observer_endpoint, Some(observer), Symbol::intern("test"))
             .unwrap();
-        let driver = CompioTaskDriver::spawn_with_workers(runner, TEST_WORKERS).unwrap();
         let mailbox = driver.create_subscription_mailbox().unwrap();
         let subscription = driver
             .register_subscription_for_endpoint(
@@ -1702,7 +1756,9 @@ fn relation_subscription_delivery_notifies_external_driver_mailbox() {
             Some(Some(Value::symbol(Symbol::intern("changes"))))
         );
 
-        driver.cancel_subscription(subscription).unwrap();
+        driver
+            .cancel_subscription_for_endpoint(observer_endpoint, subscription)
+            .unwrap();
         driver
             .submit_source(endpoint(39), root_source("assert Observed(2)"))
             .await
@@ -2170,7 +2226,7 @@ fn endpoint_close_cancels_suspended_tasks() {
         assert_eq!(report.relation_changes, 3);
         assert_eq!(report.cancelled_tasks, vec![submitted.task_id]);
         assert_eq!(driver.inner_runner().suspended_len(), 0);
-        assert_eq!(driver.inner_runner().cancelled_len(), 1);
+        assert_eq!(driver.inner_runner().cancelled_len(), 0);
         assert!(driver.drain_events().iter().any(|event| matches!(
             event,
             DriverEvent::TaskCancelled { task_id, reason }
@@ -2244,6 +2300,121 @@ fn event_queue_backpressures_producers_without_losing_terminal_events() {
             driver.drain_events().as_slice(),
             [DriverEvent::TaskCompleted { task_id, .. }] if *task_id == second.task_id
         ));
+    });
+}
+
+#[test]
+fn driver_enforces_task_and_terminal_resource_budgets() {
+    crate::test_support::run(async {
+        let mut resources = DriverResources::new(TEST_WORKERS.unwrap());
+        resources.active_task_capacity = NonZeroUsize::new(1).unwrap();
+        resources.suspended_task_capacity = NonZeroUsize::new(1).unwrap();
+        resources.timer_capacity = NonZeroUsize::new(1).unwrap();
+        resources.terminal_task_retention = NonZeroUsize::new(2).unwrap();
+        let driver =
+            CompioTaskDriver::spawn_with_resources(SourceRunner::new_empty(), resources).unwrap();
+
+        let suspended = driver
+            .submit_source(endpoint(44), root_source("return suspend()"))
+            .await
+            .unwrap();
+        let rejected = driver
+            .submit_source(endpoint(44), root_source("return 2"))
+            .await
+            .unwrap();
+        let events = driver.drain_events();
+        assert!(events.iter().any(|event| matches!(
+            event,
+            DriverEvent::TaskFailed { task_id, error }
+                if *task_id == rejected.task_id && error.contains("active task capacity")
+        )));
+        assert_eq!(driver.resource_snapshot().active_tasks, 1);
+
+        driver.cancel_task(suspended.task_id).await.unwrap();
+        driver.drain_events();
+        for value in 0..4 {
+            driver
+                .submit_source(endpoint(44), root_source(&format!("return {value}")))
+                .await
+                .unwrap();
+            driver.drain_events();
+        }
+
+        let snapshot = driver.resource_snapshot();
+        assert_eq!(snapshot.active_tasks, 0);
+        assert_eq!(snapshot.suspended_tasks, 0);
+        assert_eq!(snapshot.retained_terminal_tasks, 2);
+        assert_eq!(driver.inner_runner().completed_len(), 0);
+        driver.shutdown().await.unwrap();
+    });
+}
+
+#[test]
+fn driver_rejects_suspensions_above_timer_budget() {
+    crate::test_support::run(async {
+        let mut resources = DriverResources::new(TEST_WORKERS.unwrap());
+        resources.active_task_capacity = NonZeroUsize::new(4).unwrap();
+        resources.suspended_task_capacity = NonZeroUsize::new(4).unwrap();
+        resources.timer_capacity = NonZeroUsize::new(1).unwrap();
+        let driver =
+            CompioTaskDriver::spawn_with_resources(SourceRunner::new_empty(), resources).unwrap();
+
+        let first = driver
+            .submit_source(endpoint(45), root_source("suspend(60)\nreturn 1"))
+            .await
+            .unwrap();
+        let second = driver
+            .submit_source(endpoint(45), root_source("suspend(60)\nreturn 2"))
+            .await
+            .unwrap();
+        let events = driver.drain_events();
+        assert!(events.iter().any(|event| matches!(
+            event,
+            DriverEvent::TaskFailed { task_id, error }
+                if *task_id == second.task_id && error.contains("timer capacity")
+        )));
+        let snapshot = driver.resource_snapshot();
+        assert_eq!(snapshot.active_tasks, 1);
+        assert_eq!(snapshot.suspended_tasks, 1);
+        assert_eq!(snapshot.timers, 1);
+
+        driver.cancel_task(first.task_id).await.unwrap();
+        driver.drain_events();
+        driver.shutdown().await.unwrap();
+    });
+}
+
+#[test]
+fn driver_rejects_suspensions_above_suspended_task_budget() {
+    crate::test_support::run(async {
+        let mut resources = DriverResources::new(TEST_WORKERS.unwrap());
+        resources.active_task_capacity = NonZeroUsize::new(4).unwrap();
+        resources.suspended_task_capacity = NonZeroUsize::new(1).unwrap();
+        resources.timer_capacity = NonZeroUsize::new(4).unwrap();
+        let driver =
+            CompioTaskDriver::spawn_with_resources(SourceRunner::new_empty(), resources).unwrap();
+
+        let first = driver
+            .submit_source(endpoint(46), root_source("return suspend()"))
+            .await
+            .unwrap();
+        let second = driver
+            .submit_source(endpoint(46), root_source("return suspend()"))
+            .await
+            .unwrap();
+        let events = driver.drain_events();
+        assert!(events.iter().any(|event| matches!(
+            event,
+            DriverEvent::TaskFailed { task_id, error }
+                if *task_id == second.task_id && error.contains("suspended task capacity")
+        )));
+        let snapshot = driver.resource_snapshot();
+        assert_eq!(snapshot.active_tasks, 1);
+        assert_eq!(snapshot.suspended_tasks, 1);
+
+        driver.cancel_task(first.task_id).await.unwrap();
+        driver.drain_events();
+        driver.shutdown().await.unwrap();
     });
 }
 
