@@ -1357,6 +1357,51 @@ fn structural_patterns_bind_exact_rows_if_let_and_relation_loops() {
 }
 
 #[test]
+fn constructed_variant_matches_eliminate_relation_construction_and_shape_guards() {
+    let mut runner = SourceRunner::new_empty();
+    let source = "return match some(5)\n\
+                  case some(value) if value > 10\n\
+                    0\n\
+                  case some(value)\n\
+                    value + 1\n\
+                  end";
+    let compiled = mica_compiler::compile_source(source, &runner.context).unwrap();
+    assert!(!compiled.program.instructions().iter().any(|instruction| {
+        matches!(
+            instruction,
+            Instruction::BuildRelation { .. }
+                | Instruction::RelationPattern { .. }
+                | Instruction::RelationCell { .. }
+        )
+    }));
+
+    let report = runner.run_source(source).unwrap();
+    assert!(
+        matches!(
+            &report.outcome,
+            TaskOutcome::Complete { value, .. } if *value == Value::int(6).unwrap()
+        ),
+        "{}",
+        report.render()
+    );
+
+    let boxed = runner
+        .run_source(
+            "fn escape(value)\n\
+               return value\n\
+             end\n\
+             return match escape(some(5))\n\
+             case some(value)\n\
+               value + 1\n\
+             case _\n\
+               0\n\
+             end",
+        )
+        .unwrap();
+    assert_eq!(boxed.outcome, report.outcome);
+}
+
+#[test]
 fn structural_match_requires_exhaustive_closed_cases_and_dynamic_wildcards() {
     let runner = SourceRunner::new_empty();
     let option_error = mica_compiler::compile_source(

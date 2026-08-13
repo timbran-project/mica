@@ -455,6 +455,13 @@ impl Value {
         RelationValue::new(heading, rows).map(Self::from)
     }
 
+    pub fn small_relation(
+        heading: impl IntoIterator<Item = Symbol>,
+        row: Option<Tuple>,
+    ) -> Result<Self, RelationValueError> {
+        RelationValue::new_small(heading, row).map(Self::from)
+    }
+
     pub fn range(start: Value, end: Option<Value>) -> Self {
         Self::heap(HeapValue::Range { start, end })
     }

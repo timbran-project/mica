@@ -1883,6 +1883,7 @@ fn is_expr_node(kind: SyntaxKind) -> bool {
         SyntaxKind::LetExpr
             | SyntaxKind::ConstExpr
             | SyntaxKind::IfExpr
+            | SyntaxKind::MatchExpr
             | SyntaxKind::BeginExpr
             | SyntaxKind::ForExpr
             | SyntaxKind::WhileExpr

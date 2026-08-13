@@ -43,6 +43,7 @@ const REPEATED_DISPATCH_ITERATIONS: u64 = 1_024;
 const THREE_SITE_DISPATCH_ROUNDS: u64 = REPEATED_DISPATCH_ITERATIONS / 3;
 const THREE_SITE_DISPATCHES_PER_TASK: u64 = THREE_SITE_DISPATCH_ROUNDS * 3;
 const CALL_PATH_INVOCATIONS: u64 = 8_192;
+const STRUCTURAL_MATCH_ITERATIONS: u64 = 4_096;
 const CONCURRENT_DISPATCH_THREADS: usize = 4;
 const RELATION_SCAN_ROWS: usize = 1_024;
 const MAX_CALL_DEPTH: usize = 64;
@@ -477,6 +478,41 @@ impl TaskBenchContext {
 
     fn compiler_range_loop() -> Self {
         Self::compiler_range_loop_with_iterations(INTEGER_LOOP_ITERATIONS)
+    }
+
+    fn structural_constructor_match_loop(eliminate: bool) -> Self {
+        let setup = if eliminate {
+            String::new()
+        } else {
+            "fn escape(value)\n  return value\nend\n".to_owned()
+        };
+        let scrutinee = if eliminate {
+            "some(i)"
+        } else {
+            "escape(some(i))"
+        };
+        let fallback = if eliminate {
+            String::new()
+        } else {
+            "case _\n  0\n".to_owned()
+        };
+        let source = format!(
+            "{setup}let i = 0\n\
+             let total = 0\n\
+             while i < {STRUCTURAL_MATCH_ITERATIONS}\n\
+               let value = match {scrutinee}\n\
+               case some(payload)\n\
+                 payload\n\
+               {fallback}end\n\
+               total = total + value\n\
+               i = i + 1\n\
+             end\n\
+             return total"
+        );
+        let program = compile_source(&source, &CompileContext::new())
+            .unwrap()
+            .program;
+        Self::from_program(RelationKernel::new(), program, Workload::task(1_000_000))
     }
 
     fn compiler_range_loop_with_iterations(iterations: u64) -> Self {
@@ -1611,6 +1647,21 @@ fn run_concurrent_integer_tasks(
     ConcurrentWorkerResult::operations(bytecodes).with_counter("tasks", tasks)
 }
 
+fn run_concurrent_structural_match_tasks(
+    context: &ConcurrentTaskBenchContext,
+    control: &ConcurrentBenchControl,
+) -> ConcurrentWorkerResult {
+    let mut task_id = ((control.thread_index() as u64) + 1) << 48;
+    let mut tasks = 0_u64;
+    while !control.should_stop() {
+        context.run_one(task_id);
+        task_id = task_id.wrapping_add(1);
+        tasks = tasks.wrapping_add(1);
+    }
+    ConcurrentWorkerResult::operations(tasks.wrapping_mul(STRUCTURAL_MATCH_ITERATIONS))
+        .with_counter("tasks", tasks)
+}
+
 fn run_concurrent_relation_scans(
     context: &ConcurrentTaskBenchContext,
     control: &ConcurrentBenchControl,
@@ -2089,6 +2140,19 @@ benchmark_main!(
             }
         });
 
+        runner.group::<TaskBenchContext>("structural constructor match warm", |group| {
+            for (name, eliminate) in [("boxed", false), ("eliminated", true)] {
+                let factory = move || TaskBenchContext::structural_constructor_match_loop(eliminate);
+                group
+                    .throughput(Throughput::per_operation(
+                        STRUCTURAL_MATCH_ITERATIONS,
+                        "matches",
+                    ))
+                    .factory(&factory)
+                    .bench(&format!("structural_constructor_match_{name}"), run_tasks);
+            }
+        });
+
         runner.group::<TaskBenchContext>("value kind facts warm", |group| {
             for (backend, interpret_only) in [("interpreter", true), ("cranelift", false)] {
                 for (fact_source, annotated) in [("inferred", false), ("annotated_proven", true)] {
@@ -2408,6 +2472,16 @@ benchmark_main!(
             threads: CONCURRENT_DISPATCH_THREADS,
             run: run_concurrent_integer_tasks,
         }];
+        let single_structural_match_worker = [ConcurrentWorker {
+            name: "structural match",
+            threads: 1,
+            run: run_concurrent_structural_match_tasks,
+        }];
+        let concurrent_structural_match_workers = [ConcurrentWorker {
+            name: "structural match",
+            threads: CONCURRENT_DISPATCH_THREADS,
+            run: run_concurrent_structural_match_tasks,
+        }];
         let single_relation_scan_worker = [ConcurrentWorker {
             name: "relation scan",
             threads: 1,
@@ -2521,6 +2595,38 @@ benchmark_main!(
                 TaskBenchContext::three_site_positional_dispatch(),
             )
         };
+        runner.concurrent_group::<ConcurrentTaskBenchContext>(
+            "structural constructor match concurrent",
+            |group| {
+                for (name, eliminate) in [("boxed", false), ("eliminated", true)] {
+                    let factory = move |_| {
+                        ConcurrentTaskBenchContext::from_task_context(
+                            TaskBenchContext::structural_constructor_match_loop(eliminate),
+                        )
+                    };
+                    for (threads, workers) in [
+                        (1, single_structural_match_worker.as_slice()),
+                        (
+                            CONCURRENT_DISPATCH_THREADS,
+                            concurrent_structural_match_workers.as_slice(),
+                        ),
+                    ] {
+                        group
+                            .sample_duration(Duration::from_millis(50))
+                            .throughput(Throughput::per_operation(1, "matches"))
+                            .metadata("representation", name)
+                            .metadata("threads", threads.to_string())
+                            .factory(&factory)
+                            .bench(
+                                &format!(
+                                    "structural_constructor_match_{name}_{threads}_threads"
+                                ),
+                                workers,
+                            );
+                    }
+                }
+            },
+        );
         runner.concurrent_group::<ConcurrentTaskBenchContext>(
             "relation scan construction concurrent",
             |group| {

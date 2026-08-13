@@ -23,15 +23,21 @@ const CONCURRENT_THREADS: usize = 4;
 #[derive(Clone, Copy)]
 enum Representation {
     BoxedRelation,
+    KnownShapeRelation,
     Components,
 }
 
 impl Representation {
-    const ALL: [Self; 2] = [Self::BoxedRelation, Self::Components];
+    const ALL: [Self; 3] = [
+        Self::BoxedRelation,
+        Self::KnownShapeRelation,
+        Self::Components,
+    ];
 
     const fn name(self) -> &'static str {
         match self {
             Self::BoxedRelation => "boxed_relation",
+            Self::KnownShapeRelation => "known_shape_relation",
             Self::Components => "components",
         }
     }
@@ -105,6 +111,9 @@ impl SmallRelationContext {
     fn construct(&self) -> ConstructedValue {
         match self.representation {
             Representation::BoxedRelation => ConstructedValue::Boxed(self.boxed_relation()),
+            Representation::KnownShapeRelation => {
+                ConstructedValue::Boxed(self.known_shape_relation())
+            }
             Representation::Components => ConstructedValue::Components(ComponentValue {
                 present: self.shape.is_present(),
                 error: self.shape.is_error(),
@@ -128,6 +137,29 @@ impl SmallRelationContext {
                 Value::relation(
                     [self.case_column, self.value_column],
                     [Tuple::from([Value::symbol(case), self.payload.clone()])],
+                )
+                .unwrap()
+            }
+        }
+    }
+
+    fn known_shape_relation(&self) -> Value {
+        match self.shape {
+            Shape::None => Value::small_relation([self.value_column], None).unwrap(),
+            Shape::Some => Value::small_relation(
+                [self.value_column],
+                Some(Tuple::from([self.payload.clone()])),
+            )
+            .unwrap(),
+            Shape::Ok | Shape::Error => {
+                let case = if self.shape.is_error() {
+                    self.error_symbol
+                } else {
+                    self.ok_symbol
+                };
+                Value::small_relation(
+                    [self.case_column, self.value_column],
+                    Some(Tuple::from([Value::symbol(case), self.payload.clone()])),
                 )
                 .unwrap()
             }
@@ -210,7 +242,7 @@ fn extract_concurrently(
 benchmark_main!(
     BenchmarkMainOptions {
         filter_help: Some(
-            "all, construct, extract, boxed_relation, components, none, some, ok, error, or any benchmark name substring"
+            "all, construct, extract, boxed_relation, known_shape_relation, components, none, some, ok, error, or any benchmark name substring"
                 .to_owned()
         ),
         runtime: micromeasure::BenchmarkRuntimeOptions {

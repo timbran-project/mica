@@ -1409,6 +1409,13 @@ struct RelationPatternSpec {
     bindings: Vec<(Symbol, BindingId)>,
 }
 
+#[derive(Clone, Copy)]
+struct StandardConstructor<'a> {
+    id: NodeId,
+    name: &'a str,
+    args: Option<&'a [HirArg]>,
+}
+
 impl<'a> ProgramCompiler<'a> {
     fn new(semantic: &'a SemanticProgram, context: &'a CompileContext) -> Self {
         Self {
@@ -2874,32 +2881,7 @@ impl<'a> ProgramCompiler<'a> {
         name: &str,
         args: &[HirArg],
     ) -> Result<Register, CompileError> {
-        if args.iter().any(|arg| arg.role.is_some() || arg.splice) || args.len() != 1 {
-            return Err(self.unsupported(id, format!("{name} expects one positional argument")));
-        }
-        let source = &args[0].value;
-        let value = self.compile_expr_for_value(source)?;
-        if name == "err" {
-            let inferred = self.infer_expr_static_type(source);
-            let expected = StaticType::Kind(ValueKind::Error);
-            if inferred.is_disjoint(&expected) {
-                return Err(CompileError::ValueKindMismatch {
-                    node: expr_id(source),
-                    span: self.span(expr_id(source)),
-                    subject: "err argument".to_owned(),
-                    expected: ValueKind::Error,
-                    inferred: inferred.to_string(),
-                });
-            }
-            if !inferred.is_subtype_of(&expected) {
-                self.emit(Instruction::CheckKind {
-                    value,
-                    expected: ValueKind::Error,
-                    site: KindCheckSite::Builtin,
-                    subject: Symbol::intern("err"),
-                });
-            }
-        }
+        let value = self.compile_standard_constructor_payload(id, name, args)?;
         let (heading, cells) = match name {
             "some" => (
                 vec![Symbol::intern("value")],
@@ -2929,6 +2911,41 @@ impl<'a> ProgramCompiler<'a> {
             row_count: 1,
         });
         Ok(dst)
+    }
+
+    fn compile_standard_constructor_payload(
+        &mut self,
+        id: NodeId,
+        name: &str,
+        args: &[HirArg],
+    ) -> Result<Register, CompileError> {
+        if args.iter().any(|arg| arg.role.is_some() || arg.splice) || args.len() != 1 {
+            return Err(self.unsupported(id, format!("{name} expects one positional argument")));
+        }
+        let source = &args[0].value;
+        let value = self.compile_expr_for_value(source)?;
+        if name == "err" {
+            let inferred = self.infer_expr_static_type(source);
+            let expected = StaticType::Kind(ValueKind::Error);
+            if inferred.is_disjoint(&expected) {
+                return Err(CompileError::ValueKindMismatch {
+                    node: expr_id(source),
+                    span: self.span(expr_id(source)),
+                    subject: "err argument".to_owned(),
+                    expected: ValueKind::Error,
+                    inferred: inferred.to_string(),
+                });
+            }
+            if !inferred.is_subtype_of(&expected) {
+                self.emit(Instruction::CheckKind {
+                    value,
+                    expected: ValueKind::Error,
+                    site: KindCheckSite::Builtin,
+                    subject: Symbol::intern("err"),
+                });
+            }
+        }
+        Ok(value)
     }
 
     fn compile_dynamic_invoke_call(
@@ -3733,6 +3750,19 @@ impl<'a> ProgramCompiler<'a> {
     ) -> Result<Register, CompileError> {
         let scrutinee_type = self.infer_expr_static_type(value);
         self.validate_match_exhaustiveness(id, &scrutinee_type, cases)?;
+        if cases.iter().all(|case| {
+            matches!(
+                case.pattern,
+                HirMatchPattern::Wildcard
+                    | HirMatchPattern::None
+                    | HirMatchPattern::Some(_)
+                    | HirMatchPattern::Ok(_)
+                    | HirMatchPattern::Err(_)
+            )
+        }) && let Some(constructed) = standard_constructor(value)
+        {
+            return self.compile_constructed_match(id, constructed, &scrutinee_type, cases);
+        }
 
         let scrutinee = self.compile_expr_for_value(value)?;
         let dst = self.alloc_register();
@@ -3825,6 +3855,89 @@ impl<'a> ProgramCompiler<'a> {
             || (exhaustive
                 && !branch_returns.is_empty()
                 && branch_returns.iter().all(|returned| *returned));
+        Ok(dst)
+    }
+
+    fn compile_constructed_match(
+        &mut self,
+        id: NodeId,
+        constructed: StandardConstructor<'_>,
+        scrutinee_type: &StaticType,
+        cases: &[HirMatchCase],
+    ) -> Result<Register, CompileError> {
+        let payload = match constructed.args {
+            Some(args) => Some(self.compile_standard_constructor_payload(
+                constructed.id,
+                constructed.name,
+                args,
+            )?),
+            None => None,
+        };
+        let dst = self.alloc_register();
+        self.emit(Instruction::Load {
+            dst,
+            value: Value::unit(),
+        });
+        let saved_locals = self.locals.clone();
+        let saved_types = self.local_types.clone();
+        let saved_returned = self.returned;
+        self.returned = false;
+        let mut end_jumps = Vec::new();
+        let mut guard_failures = Vec::new();
+        let mut branch_returns = Vec::new();
+
+        for case in cases {
+            if !constructed_pattern_matches(constructed.name, &case.pattern) {
+                continue;
+            }
+            let next_case = self.instructions.len();
+            for branch in guard_failures.drain(..) {
+                self.patch_false_target(branch, next_case)?;
+            }
+            self.locals = saved_locals.clone();
+            self.local_types = saved_types.clone();
+            let binding = match &case.pattern {
+                HirMatchPattern::Some(binding)
+                | HirMatchPattern::Ok(binding)
+                | HirMatchPattern::Err(binding) => Some(*binding),
+                _ => None,
+            };
+            if let Some(binding) = binding {
+                let payload = payload.expect("payload pattern requires a constructed payload");
+                self.locals.insert(binding, payload);
+                self.local_types.insert(
+                    binding,
+                    match_binding_type(scrutinee_type, &case.pattern, Symbol::intern("value")),
+                );
+            }
+            if let Some(guard) = &case.guard {
+                let guard = self.compile_expr_for_value(guard)?;
+                let branch = self.emit_branch(guard, self.instructions.len() + 1, 0);
+                guard_failures.push(branch);
+            }
+            let (value, returned) = self.compile_branch_items(&case.body)?;
+            branch_returns.push(returned);
+            if let Some(value) = value {
+                self.emit(Instruction::Move { dst, src: value });
+            }
+            if !returned {
+                end_jumps.push(self.emit_jump(0));
+            }
+            if case.guard.is_none() {
+                break;
+            }
+        }
+        if !guard_failures.is_empty() {
+            return Err(self.unsupported(id, "constructed match has no unguarded fallback"));
+        }
+        let end = self.instructions.len();
+        for jump in end_jumps {
+            self.patch_jump(jump, end)?;
+        }
+        self.locals = saved_locals;
+        self.local_types = saved_types;
+        self.returned = saved_returned
+            || (!branch_returns.is_empty() && branch_returns.iter().all(|returned| *returned));
         Ok(dst)
     }
 
@@ -5398,6 +5511,38 @@ fn relation_pattern_spec(pattern: &HirMatchPattern) -> Option<RelationPatternSpe
             .map(|(column, binding)| (Symbol::intern(column), binding))
             .collect(),
     })
+}
+
+fn standard_constructor(expr: &HirExpr) -> Option<StandardConstructor<'_>> {
+    match expr {
+        HirExpr::ExternalRef { id, name } if name == "none" => Some(StandardConstructor {
+            id: *id,
+            name,
+            args: None,
+        }),
+        HirExpr::Call { id, callee, args } => {
+            let HirExpr::ExternalRef { name, .. } = callee.as_ref() else {
+                return None;
+            };
+            matches!(name.as_str(), "some" | "ok" | "err").then_some(StandardConstructor {
+                id: *id,
+                name,
+                args: Some(args),
+            })
+        }
+        _ => None,
+    }
+}
+
+fn constructed_pattern_matches(name: &str, pattern: &HirMatchPattern) -> bool {
+    matches!(pattern, HirMatchPattern::Wildcard)
+        || matches!(
+            (name, pattern),
+            ("none", HirMatchPattern::None)
+                | ("some", HirMatchPattern::Some(_))
+                | ("ok", HirMatchPattern::Ok(_))
+                | ("err", HirMatchPattern::Err(_))
+        )
 }
 
 fn match_is_exhaustive(scrutinee: &StaticType, cases: &[HirMatchCase]) -> bool {

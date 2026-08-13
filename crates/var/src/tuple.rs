@@ -132,6 +132,33 @@ impl RelationValue {
         })
     }
 
+    /// Constructs a relation with at most one row without allocating sorting
+    /// scratch when its heading is already canonical.
+    pub fn new_small(
+        heading: impl IntoIterator<Item = Symbol>,
+        row: Option<Tuple>,
+    ) -> Result<Self, RelationValueError> {
+        let heading = heading.into_iter().collect::<Vec<_>>();
+        if heading.len() > u16::MAX as usize {
+            return Err(RelationValueError::HeadingTooWide(heading.len()));
+        }
+        if !heading.windows(2).all(|columns| columns[0] < columns[1]) {
+            return Self::new(heading, row);
+        }
+        if let Some(row) = &row
+            && row.arity() != heading.len()
+        {
+            return Err(RelationValueError::ArityMismatch {
+                expected: heading.len(),
+                actual: row.arity(),
+            });
+        }
+        Ok(Self {
+            heading: heading.into(),
+            rows: row.into_iter().collect::<Vec<_>>().into(),
+        })
+    }
+
     pub fn heading(&self) -> &[Symbol] {
         &self.heading
     }
@@ -286,6 +313,31 @@ mod tests {
                 expected: 1,
                 actual: 0
             }
+        );
+    }
+
+    #[test]
+    fn small_relation_constructor_preserves_general_canonical_semantics() {
+        let left = Symbol::intern("left");
+        let right = Symbol::intern("right");
+        let row = Tuple::from([Value::int(1).unwrap(), Value::string("one")]);
+        assert_eq!(
+            RelationValue::new_small([left, right], Some(row.clone())).unwrap(),
+            RelationValue::new([left, right], [row]).unwrap()
+        );
+
+        let unsorted = Tuple::from([Value::string("one"), Value::int(1).unwrap()]);
+        assert_eq!(
+            RelationValue::new_small([right, left], Some(unsorted.clone())).unwrap(),
+            RelationValue::new([right, left], [unsorted]).unwrap()
+        );
+        assert_eq!(
+            RelationValue::new_small([left], None).unwrap(),
+            RelationValue::new([left], []).unwrap()
+        );
+        assert_eq!(
+            RelationValue::new_small([left, left], None).unwrap_err(),
+            RelationValueError::DuplicateColumn(left)
         );
     }
 }

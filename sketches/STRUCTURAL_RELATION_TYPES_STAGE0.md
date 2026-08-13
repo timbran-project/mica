@@ -176,3 +176,30 @@ matching, side-exit materialization tests, and application-shaped benchmarks exi
 - Matching and row binding will load cells by known heading position and will not allocate row maps.
 - Installed live aliases and structured `error` result payloads are fixed requirements for the next
   stages.
+
+## Stage 7 Measurement
+
+Stage 7 retained two bounded optimizations: a canonical at-most-one-row constructor for boxed
+relations, and compiler elimination when a standard constructor is matched directly. The retained
+benchmarks remain reproducible with:
+
+```sh
+cargo bench -p mica-var --bench small_relation_representations -- construct_known_shape_relation_some
+cargo bench -p mica-runtime --bench task_benches -- structural_constructor_match
+```
+
+On the same 20-core aarch64 host, canonical known-shape `some` construction improved from a median
+139.18 ns to 123.70 ns serially. Four-worker combined latency improved from 43.42 ns to 37.69 ns.
+
+The compiled task benchmark performs 4,096 constructor-and-match operations per task. Direct
+elimination improved median throughput from 2.21 million to 8.40 million matches per second in the
+serial benchmark, from 2.16 million to 8.25 million with one coordinated worker, and from 6.30
+million to 17.96 million with four workers. Differential runtime tests confirm that boxed and
+eliminated paths return the same observable value.
+
+These results justify retaining canonical construction and local elimination. They do not yet
+justify general JIT escape analysis, side-exit materialization, hidden interpreter registers, or a
+specialized call convention: the benchmark intentionally concentrates constructor-and-match work,
+while no migrated application profile yet identifies a bounded region where those broader
+mechanisms win end to end. Those mechanisms remain deferred until Stage 8 application usage supplies
+that evidence.

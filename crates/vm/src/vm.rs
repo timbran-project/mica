@@ -1639,7 +1639,12 @@ impl RegisterVm {
                         .map(|row| Tuple::new(row.iter().cloned()))
                         .collect()
                 };
-                let value = Value::relation(heading, rows).map_err(|error| {
+                let value = if *row_count <= 1 {
+                    Value::small_relation(heading, rows.into_iter().next())
+                } else {
+                    Value::relation(heading, rows)
+                }
+                .map_err(|error| {
                     RuntimeError::ProgramArtifact(format!("invalid relation literal: {error}"))
                 })?;
                 self.write_register_unchecked(*dst, value);
