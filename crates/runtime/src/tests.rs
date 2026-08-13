@@ -5266,6 +5266,66 @@ fn runner_fjall_filein_replacement_reopens_atomic_state() {
 }
 
 #[test]
+fn shared_runner_installs_replaces_checks_and_files_out_units() {
+    let shared = SourceRunner::new_empty().into_shared();
+    let unit = Symbol::intern("equipment");
+    shared
+        .run_filein_with_unit_and_include_loader(
+            unit,
+            "make_identity(:sensor)\n\
+             make_relation(:Label, 2)\n\
+             assert Label(#sensor, include_text(\"label.txt\"))\n\
+             verb equipment_label(item)\n\
+               return one Label(item, ?label)\n\
+             end\n",
+            FileinMode::Add,
+            |path| match path {
+                "label.txt" => Ok("original".to_owned()),
+                _ => Err(format!("unknown include {path}")),
+            },
+        )
+        .unwrap();
+    let initial = shared
+        .submit_root_source("return :equipment_label(item: #sensor)")
+        .unwrap();
+    assert!(matches!(
+        initial.outcome,
+        TaskOutcome::Complete { value, .. } if value == Value::string("original")
+    ));
+
+    let checked = shared.check_filein("make_identity(:checked_only)").unwrap();
+    assert_eq!(checked.len(), 1);
+    assert!(
+        shared
+            .named_identity(Symbol::intern("checked_only"))
+            .is_err()
+    );
+
+    shared
+        .run_filein_with_unit(
+            unit,
+            "make_identity(:sensor)\n\
+             make_relation(:Label, 2)\n\
+             assert Label(#sensor, \"replacement\")\n\
+             verb equipment_label(item)\n\
+               return one Label(item, ?label)\n\
+             end\n",
+            FileinMode::Replace,
+        )
+        .unwrap();
+    let replacement = shared
+        .submit_root_source("return :equipment_label(item: #sensor)")
+        .unwrap();
+    assert!(matches!(
+        replacement.outcome,
+        TaskOutcome::Complete { value, .. } if value == Value::string("replacement")
+    ));
+    let filed_out = shared.fileout_unit(unit).unwrap();
+    assert!(filed_out.contains("replacement"));
+    assert!(!filed_out.contains("original"));
+}
+
+#[test]
 fn runner_fjall_failed_filein_replacement_reopens_original_state() {
     let path = std::env::temp_dir().join(format!(
         "mica-runtime-fjall-{}-{}",

@@ -17,6 +17,7 @@ use mica_var::{Identity, Symbol, Value};
 use mica_vm::AuthorityContext;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
+use std::sync::Mutex;
 
 use crate::task::{TaskId, TaskLimits, TaskOutcome};
 use crate::task_manager::{SharedTaskManager, TaskManager, TaskManagerError};
@@ -66,6 +67,7 @@ pub struct SourceRunner {
 pub struct SharedSourceRunner {
     pub(crate) task_manager: SharedTaskManager,
     pub(crate) host_request_functions: Arc<[(String, HostRequestFunction)]>,
+    pub(crate) filein_lock: Mutex<()>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

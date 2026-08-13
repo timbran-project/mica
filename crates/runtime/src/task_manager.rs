@@ -1148,6 +1148,20 @@ impl SharedTaskManager {
         &self.builtins
     }
 
+    pub(crate) fn fork_with_kernel(&self, kernel: RelationKernel) -> TaskManager {
+        TaskManager::new(kernel)
+            .with_limits(self.limits)
+            .with_resolver(self.resolver.clone())
+            .with_builtins(self.builtins.clone())
+    }
+
+    pub(crate) fn record_completed_outcome(&self, outcome: TaskOutcome) -> TaskId {
+        debug_assert!(matches!(outcome, TaskOutcome::Complete { .. }));
+        let task_id = self.allocate_task_id();
+        self.record_outcome(task_id, outcome, None);
+        task_id
+    }
+
     pub fn submit_with_context(
         &self,
         program: Arc<Program>,
@@ -1257,6 +1271,14 @@ impl SharedTaskManager {
 
     pub fn drain_mailbox(&self, receiver: Value) -> Result<Vec<Value>, RuntimeError> {
         self.mailboxes.drain_receiver(receiver)
+    }
+
+    pub fn dispatch_subscriptions(&self) -> Result<Vec<u64>, RuntimeError> {
+        let mut operations = Vec::new();
+        self.kernel.at_publication_boundary(|snapshot| {
+            self.subscriptions
+                .apply_boundary(&self.kernel, snapshot, &mut operations)
+        })
     }
 
     pub fn create_mailbox(&self) -> Result<(Value, Value), RuntimeError> {

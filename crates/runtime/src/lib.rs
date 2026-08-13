@@ -210,6 +210,7 @@ impl SourceRunner {
         SharedSourceRunner {
             task_manager: self.task_manager.into_shared(),
             host_request_functions: self.host_request_functions,
+            filein_lock: std::sync::Mutex::new(()),
         }
     }
 
@@ -1351,6 +1352,81 @@ impl SourceRunner {
 }
 
 impl SharedSourceRunner {
+    pub fn check_filein(&self, source: &str) -> Result<Vec<RunReport>, SourceTaskError> {
+        self.check_filein_with_include_loader(source, |_| {
+            Err("filein includes require an include loader".to_owned())
+        })
+    }
+
+    pub fn check_filein_with_include_loader(
+        &self,
+        source: &str,
+        load_include: impl FnMut(&str) -> Result<String, String>,
+    ) -> Result<Vec<RunReport>, SourceTaskError> {
+        let _filein = self.filein_lock.lock().unwrap();
+        let mut staged = self.staged_filein_runner();
+        staged.check_filein_with_include_loader(source, load_include)
+    }
+
+    pub fn run_filein_with_unit(
+        &self,
+        unit: Symbol,
+        source: &str,
+        mode: FileinMode,
+    ) -> Result<FileinReport, SourceTaskError> {
+        self.run_filein_with_unit_and_include_loader(unit, source, mode, |_| {
+            Err("filein includes require an include loader".to_owned())
+        })
+    }
+
+    pub fn run_filein_with_unit_and_include_loader(
+        &self,
+        unit: Symbol,
+        source: &str,
+        mode: FileinMode,
+        load_include: impl FnMut(&str) -> Result<String, String>,
+    ) -> Result<FileinReport, SourceTaskError> {
+        let _filein = self.filein_lock.lock().unwrap();
+        let expected_version = self.task_manager.kernel().snapshot().version();
+        let mut staged = self.staged_filein_runner();
+        let mut report =
+            staged.run_filein_with_unit_and_include_loader(unit, source, mode, load_include)?;
+        ensure_filein_replacement_completed(&report.reports)?;
+        self.task_manager
+            .kernel()
+            .commit_staged_snapshot(expected_version, staged.task_manager.kernel().snapshot())
+            .map_err(CompileError::from)?;
+        if let Err(error) = self.task_manager.dispatch_subscriptions() {
+            tracing::error!(
+                ?error,
+                "failed to dispatch atomic filein subscription batches"
+            );
+        }
+        for task_report in &mut report.reports {
+            task_report.task_id = self
+                .task_manager
+                .record_completed_outcome(task_report.outcome.clone());
+        }
+        Ok(report)
+    }
+
+    pub fn fileout_unit(&self, unit: Symbol) -> Result<String, SourceTaskError> {
+        Ok(fileout_unit_source(self.task_manager.kernel(), unit).map_err(CompileError::from)?)
+    }
+
+    fn staged_filein_runner(&self) -> SourceRunner {
+        let kernel = self.task_manager.kernel().fork_in_memory();
+        let mut context = compile_context_from_catalog(&kernel, self.task_manager.builtins());
+        apply_host_request_functions(&mut context, &self.host_request_functions);
+        let next_method_identity_id = next_generated_method_identity_id(&kernel);
+        SourceRunner {
+            context,
+            task_manager: self.task_manager.fork_with_kernel(kernel),
+            host_request_functions: self.host_request_functions.clone(),
+            next_method_identity_id,
+        }
+    }
+
     pub fn named_identity(&self, name: Symbol) -> Result<Identity, SourceTaskError> {
         identity_named_in_kernel(self.task_manager.kernel(), name)?.ok_or_else(|| {
             unsupported_runner_error(
