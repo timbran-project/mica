@@ -28,7 +28,7 @@ mod vm_tests;
 pub use embedding::{EmbeddingProvider, EmbeddingProviderKind};
 pub use json::{JsonValueError, float_to_literal, value_from_json_text};
 pub use mica_relation_kernel::{
-    ExecutionAdmission, ExecutionContext, RelationAccelerator, Tuple,
+    ExecutionAdmission, ExecutionContext, FjallDurabilityMode, RelationAccelerator, Tuple,
     metrics as relation_kernel_metrics,
 };
 pub use mica_vm::metrics as vm_metrics;
@@ -66,9 +66,8 @@ use mica_host_protocol::{
     snapshot_payload_json, sync_payload_signature,
 };
 use mica_relation_kernel::{
-    ConflictPolicy, DispatchRelations, FjallDurabilityMode, FjallStateProvider, KernelError,
-    RelationDurability, RelationId, RelationKernel, RelationMetadata, RelationRead, RelationSource,
-    relation_algebra,
+    ConflictPolicy, DispatchRelations, FjallStateProvider, KernelError, RelationDurability,
+    RelationId, RelationKernel, RelationMetadata, RelationRead, RelationSource, relation_algebra,
 };
 use mica_var::{Identity, PRIMITIVE_PROTOTYPES, RelationValue, Symbol, Value, ValueKind};
 use std::collections::{BTreeMap, BTreeSet};

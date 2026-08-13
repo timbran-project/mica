@@ -18,6 +18,7 @@
 //! suspensions and endpoint input.
 
 mod affinity;
+mod builder;
 mod config;
 mod execution;
 pub mod metrics;
@@ -30,10 +31,17 @@ mod tests;
 pub use affinity::{
     DispatcherAffinity, DispatcherConfig, DispatcherPlacement, configure_dispatcher,
 };
+pub use builder::{CompioTaskDriverBuilder, DriverDurability, DriverStorage};
 pub use config::{
     DEFAULT_EVENT_QUEUE_CAPACITY, DEFAULT_SUBSCRIPTION_QUEUE_BUDGET, DriverResources,
 };
-pub use mica_runtime::TaskLimits;
+pub use mica_runtime::{
+    AuthorityContext, FileinMode, FileinReport, ReadOnlySourceQueryOptions,
+    ReadOnlySourceQueryReport, ReadOnlySourceQueryStatus, RunReport, SubmittedTask,
+    SubscriptionInitialDelivery, SubscriptionSubject, SuspendKind, TaskId, TaskLimits, TaskOutcome,
+    TaskRequest,
+};
+pub use mica_var::{Identity, Symbol, Value};
 pub use pool::CompioTaskDriver;
 pub use types::{
     DriverError, DriverEvent, DriverSubscriptionMailbox, DriverSubscriptionRequest,

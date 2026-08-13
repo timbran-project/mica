@@ -134,6 +134,7 @@ pub struct EndpointCloseReport {
 #[derive(Debug)]
 pub enum DriverError {
     Source(SourceTaskError),
+    Storage(String),
     Configuration(String),
     Join(String),
     MissingTaskContext(TaskId),
@@ -157,7 +158,8 @@ impl DriverError {
     pub fn source(&self) -> Option<&SourceTaskError> {
         match self {
             Self::Source(error) => Some(error),
-            Self::Configuration(_)
+            Self::Storage(_)
+            | Self::Configuration(_)
             | Self::Join(_)
             | Self::MissingTaskContext(_)
             | Self::TaskCancelled(_)
@@ -171,6 +173,7 @@ impl Display for DriverError {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Source(error) => write!(f, "{}", format_source_task_error(error)),
+            Self::Storage(error) => write!(f, "failed to open driver storage: {error}"),
             Self::Configuration(error) => write!(f, "invalid driver configuration: {error}"),
             Self::Join(error) => write!(f, "driver task failed: {error}"),
             Self::MissingTaskContext(task_id) => {

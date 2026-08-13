@@ -65,7 +65,12 @@ pub struct CompioTaskDriver {
 }
 
 impl CompioTaskDriver {
-    pub fn inner_runner(&self) -> Arc<SharedSourceRunner> {
+    pub fn builder(resources: DriverResources) -> crate::CompioTaskDriverBuilder {
+        crate::CompioTaskDriverBuilder::new(resources)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn inner_runner(&self) -> Arc<SharedSourceRunner> {
         Arc::clone(&self.inner.runner)
     }
 }
@@ -389,6 +394,7 @@ impl CompioTaskDriver {
     pub fn format_error(&self, error: &DriverError) -> String {
         match error {
             DriverError::Source(error) => self.inner.runner.render_source_task_error(error),
+            DriverError::Storage(error) => format!("failed to open driver storage: {error}"),
             DriverError::Configuration(error) => {
                 format!("invalid driver configuration: {error}")
             }
@@ -746,10 +752,29 @@ impl CompioTaskDriver {
     pub async fn close_endpoint(&self, endpoint: Identity) -> EndpointCloseReport {
         self.mark_endpoint_closed(endpoint);
         let cancelled_tasks = self.cancel_endpoint_tasks(endpoint).await;
-        EndpointCloseReport {
+        let report = EndpointCloseReport {
             relation_changes: self.inner.runner.close_endpoint(endpoint),
             cancelled_tasks,
-        }
+        };
+        self.finish_endpoint_close(endpoint);
+        report
+    }
+
+    /// Starts endpoint closure for use by a host's synchronous drop guard.
+    ///
+    /// New submissions are rejected before this method returns. The actual
+    /// close is tracked as driver-owned work and is joined or cancelled by
+    /// [`Self::shutdown`]. Hosts with an asynchronous control path should await
+    /// [`Self::close_endpoint`] directly.
+    pub fn close_endpoint_in_background(&self, endpoint: Identity) -> Result<(), DriverError> {
+        self.ensure_running()?;
+        self.mark_endpoint_closed(endpoint);
+        let driver = self.clone();
+        let handle = compio::runtime::spawn(async move {
+            driver.close_endpoint(endpoint).await;
+        });
+        self.track_worker(0, handle);
+        Ok(())
     }
 
     pub async fn close_endpoint_and_retract_volatile_tuples_named(
@@ -764,6 +789,7 @@ impl CompioTaskDriver {
             .runner
             .close_endpoint_and_retract_volatile_tuples_named(endpoint, tuples)
             .map_err(DriverError::Source)?;
+        self.finish_endpoint_close(endpoint);
         Ok(EndpointCloseReport {
             relation_changes,
             cancelled_tasks,
@@ -1009,8 +1035,16 @@ impl CompioTaskDriver {
 
     fn mark_endpoint_closed(&self, endpoint: Identity) {
         let mut state = self.inner.state.lock().unwrap();
-        state.open_endpoints.remove(&endpoint);
         state.closed_endpoints.insert(endpoint);
+    }
+
+    fn finish_endpoint_close(&self, endpoint: Identity) {
+        self.inner
+            .state
+            .lock()
+            .unwrap()
+            .open_endpoints
+            .remove(&endpoint);
     }
 
     async fn cancel_endpoint_tasks(&self, endpoint: Identity) -> Vec<TaskId> {

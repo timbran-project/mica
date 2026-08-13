@@ -71,15 +71,18 @@ impl Drop for RequestFactScope {
         let Some(tuples) = self.tuples.take() else {
             return;
         };
-        if let Err(error) = self
-            .driver
-            .inner_runner()
-            .close_endpoint_and_retract_volatile_tuples_named(self.endpoint, tuples)
-        {
+        if let Err(error) = self.driver.retract_volatile_tuples_named(tuples) {
             tracing::warn!(
                 endpoint = self.endpoint.raw(),
-                error = %self.driver.inner_runner().render_source_task_error(&error),
+                error = %self.driver.format_error(&error),
                 "failed to clean up volatile request facts"
+            );
+        }
+        if let Err(error) = self.driver.close_endpoint_in_background(self.endpoint) {
+            tracing::warn!(
+                endpoint = self.endpoint.raw(),
+                error = %self.driver.format_error(&error),
+                "failed to schedule request endpoint close"
             );
         }
     }
@@ -508,7 +511,6 @@ mod tests {
             assert_eq!(response.status, 200);
             assert!(
                 host.driver
-                    .inner_runner()
                     .named_identity(Symbol::intern("endpoint:0"))
                     .is_err()
             );
