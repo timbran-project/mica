@@ -222,6 +222,14 @@ impl SourceRunner {
         }
     }
 
+    pub fn flush_persistence(&self) -> Result<(), SourceTaskError> {
+        self.task_manager
+            .kernel()
+            .flush_persistence()
+            .map_err(TaskManagerError::from)
+            .map_err(SourceTaskError::from)
+    }
+
     pub fn run_source(&mut self, source: &str) -> Result<RunReport, SourceTaskError> {
         let submitted = self.submit_source(Self::root_source_request(source))?;
         Ok(self.report(submitted.task_id, submitted.outcome))
@@ -1360,6 +1368,14 @@ impl SourceRunner {
 }
 
 impl SharedSourceRunner {
+    pub fn flush_persistence(&self) -> Result<(), SourceTaskError> {
+        self.task_manager
+            .kernel()
+            .flush_persistence()
+            .map_err(TaskManagerError::from)
+            .map_err(SourceTaskError::from)
+    }
+
     pub fn check_filein(&self, source: &str) -> Result<Vec<RunReport>, SourceTaskError> {
         self.check_filein_with_include_loader(source, |_| {
             Err("filein includes require an include loader".to_owned())

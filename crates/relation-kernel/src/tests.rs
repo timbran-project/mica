@@ -2084,6 +2084,8 @@ fn fjall_provider_reopens_loads_and_continues_committing() {
         let result = tx.commit().unwrap();
         assert_eq!(result.commit().version(), 3);
         assert_eq!(provider.queued_version(), 3);
+        kernel.flush_persistence().unwrap();
+        assert_eq!(provider.completed_version(), 3);
     }
 
     let provider = FjallStateProvider::open(store.path()).unwrap();

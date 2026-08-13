@@ -114,6 +114,17 @@ impl FjallCommitWriter {
         self.write_error.lock().unwrap().clone()
     }
 
+    pub(super) fn flush(&self) -> Result<(), String> {
+        self.check_writer_error()?;
+        let (reply_tx, reply_rx) = mpsc::channel();
+        self.sender
+            .send(WriterMessage::Flush { reply: reply_tx })
+            .map_err(|error| format!("fjall commit writer is stopped: {error}"))?;
+        reply_rx
+            .recv()
+            .map_err(|error| format!("fjall commit writer dropped flush reply: {error}"))?
+    }
+
     fn check_writer_error(&self) -> Result<(), String> {
         match self.last_write_error() {
             Some(error) => Err(format!("fjall commit writer failed: {error}")),
@@ -143,6 +154,9 @@ enum WriterMessage {
     Shutdown {
         reply: mpsc::Sender<()>,
     },
+    Flush {
+        reply: mpsc::Sender<Result<(), String>>,
+    },
 }
 
 fn writer_loop(
@@ -171,6 +185,13 @@ fn writer_loop(
             WriterMessage::Shutdown { reply } => {
                 let _ = reply.send(());
                 break;
+            }
+            WriterMessage::Flush { reply } => {
+                let result = match write_error.lock().unwrap().clone() {
+                    Some(error) => Err(format!("fjall commit writer failed: {error}")),
+                    None => Ok(()),
+                };
+                let _ = reply.send(result);
             }
         }
     }

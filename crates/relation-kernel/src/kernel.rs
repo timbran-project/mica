@@ -591,6 +591,11 @@ impl RelationKernel {
     pub(crate) fn commit_guard(&self) -> MutexGuard<'_, ()> {
         self.commit_lock.lock().unwrap()
     }
+
+    pub fn flush_persistence(&self) -> Result<(), KernelError> {
+        let _guard = self.commit_lock.lock().unwrap();
+        self.provider.flush().map_err(KernelError::Persistence)
+    }
 }
 
 fn settled_snapshot_relation_changes(

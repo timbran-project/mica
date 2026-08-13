@@ -32,4 +32,8 @@ pub struct PersistedKernelState {
 
 pub trait CommitProvider: Send + Sync {
     fn persist_commit(&self, commit: &Commit) -> Result<(), String>;
+
+    fn flush(&self) -> Result<(), String> {
+        Ok(())
+    }
 }

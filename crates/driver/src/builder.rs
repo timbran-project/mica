@@ -216,6 +216,45 @@ mod tests {
         });
     }
 
+    #[cfg(feature = "fjall")]
+    #[test]
+    fn shutdown_flushes_relaxed_persistent_storage() {
+        compio::runtime::Runtime::new().unwrap().block_on(async {
+            let path = std::env::temp_dir().join(format!(
+                "mica-driver-shutdown-flush-{}-{}",
+                std::process::id(),
+                Symbol::intern("shutdown_flushes_relaxed_persistent_storage").id()
+            ));
+            let _ = std::fs::remove_dir_all(&path);
+            let resources = DriverResources::new(NonZeroUsize::new(1).unwrap());
+            let driver = CompioTaskDriver::builder(resources.clone())
+                .storage(DriverStorage::Fjall {
+                    path: path.clone(),
+                    durability: DriverDurability::Relaxed,
+                })
+                .initial_filein("make_identity(:persisted)", None)
+                .build()
+                .unwrap();
+
+            driver.shutdown().await.unwrap();
+            drop(driver);
+
+            let reopened = CompioTaskDriver::builder(resources)
+                .storage(DriverStorage::Fjall {
+                    path: path.clone(),
+                    durability: DriverDurability::Relaxed,
+                })
+                .build()
+                .unwrap();
+            reopened
+                .named_identity(Symbol::intern("persisted"))
+                .unwrap();
+            reopened.shutdown().await.unwrap();
+            drop(reopened);
+            let _ = std::fs::remove_dir_all(path);
+        });
+    }
+
     #[cfg(not(feature = "fjall"))]
     #[test]
     fn reports_unavailable_fjall_provider_without_changing_the_api() {

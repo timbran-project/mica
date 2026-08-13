@@ -116,4 +116,8 @@ impl CommitProvider for FjallStateProvider {
     fn persist_commit(&self, commit: &Commit) -> Result<(), String> {
         self.writer.persist_commit(commit)
     }
+
+    fn flush(&self) -> Result<(), String> {
+        self.writer.flush()
+    }
 }

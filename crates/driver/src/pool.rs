@@ -1044,6 +1044,13 @@ impl CompioTaskDriver {
             self.inner.runner.close_endpoint(endpoint);
         }
 
+        let persistence_error = self.inner.runner.flush_persistence().err().map(|error| {
+            format!(
+                "failed to flush persistent state: {}",
+                self.inner.runner.render_source_task_error(&error)
+            )
+        });
+
         let dispatcher = self.inner.dispatcher.lock().unwrap().take();
         let join_error = match dispatcher {
             Some(dispatcher) => dispatcher
@@ -1053,7 +1060,7 @@ impl CompioTaskDriver {
                 .map(|error| format!("failed to join dispatcher: {error}")),
             None => None,
         };
-        let error = worker_error.or(join_error);
+        let error = worker_error.or(persistence_error).or(join_error);
         let shutdown_wakers = {
             let mut state = self.inner.state.lock().unwrap();
             state.shutdown_error = error.clone();
