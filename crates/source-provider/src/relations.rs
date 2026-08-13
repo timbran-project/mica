@@ -231,7 +231,7 @@ impl LocalSourceProvider {
             ));
         }
 
-        let root = one_value(
+        let root = expect_single_value(
             reader,
             root_relation,
             &[Some(repository.clone()), None],
@@ -276,7 +276,7 @@ impl LocalSourceProvider {
         let root_relation = relation_id(reader, "source/RepositoryRoot", 2).ok_or_else(|| {
             invalid_relation(relation, "missing relation source/RepositoryRoot/2")
         })?;
-        let root = one_value(
+        let root = expect_single_value(
             reader,
             root_relation,
             &[Some(repository.clone()), None],
@@ -2563,11 +2563,11 @@ impl ComputedRelation for FileDiffLineRelation {
                 line.old_line
                     .map(|line| int_value(metadata.id(), line as i64))
                     .transpose()?
-                    .unwrap_or_else(Value::nothing),
+                    .map_or_else(Value::option_none, Value::option_some),
                 line.new_line
                     .map(|line| int_value(metadata.id(), line as i64))
                     .transpose()?
-                    .unwrap_or_else(Value::nothing),
+                    .map_or_else(Value::option_none, Value::option_some),
                 Value::symbol(Symbol::intern(line.kind)),
                 Value::string(line.text),
             ]));

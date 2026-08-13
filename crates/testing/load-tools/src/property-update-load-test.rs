@@ -319,7 +319,8 @@ fn property_update_filein(num_objects: usize, num_properties: usize) -> String {
     source.push_str(
         "\n\
          verb read_property(actor @ #player, item @ #test_object, property)\n\
-           return one PropertyValue(item, property, ?value)\n\
+           let exactly {:value -> value} = PropertyValue(item, property, ?value)\n\
+           return value\n\
          end\n\
          \n\
          verb update_property(actor @ #player, item @ #test_object, property, value)\n\

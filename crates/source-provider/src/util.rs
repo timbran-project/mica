@@ -11,7 +11,7 @@ pub(crate) fn relation_id(
     reader.relation_id(Symbol::intern(name), arity)
 }
 
-pub(crate) fn one_value(
+pub(crate) fn expect_single_value(
     reader: &dyn RelationRead,
     relation: RelationId,
     bindings: &[Option<Value>],

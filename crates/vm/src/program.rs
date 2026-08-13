@@ -283,7 +283,7 @@ pub enum SuspendKind {
     Commit,
     Never,
     TimedMillis(u64),
-    WaitingForInput(Value),
+    WaitingForInput(Option<Value>),
     MailboxRecv(MailboxRecvRequest),
     Spawn(SpawnRequest),
     ExternalRequest(ExternalRequest),
@@ -360,10 +360,6 @@ pub enum Instruction {
         dst: Register,
         error: Register,
         field: ErrorField,
-    },
-    One {
-        dst: Register,
-        src: Register,
     },
     CollectionLen {
         dst: Register,
@@ -728,10 +724,6 @@ pub(crate) enum Opcode {
         error: Register,
         field: ErrorField,
     },
-    One {
-        dst: Register,
-        src: Register,
-    },
     CollectionLen {
         dst: Register,
         collection: Register,
@@ -966,7 +958,6 @@ impl Opcode {
             | Self::Index { dst, .. }
             | Self::SetIndex { dst, .. }
             | Self::ErrorField { dst, .. }
-            | Self::One { dst, .. }
             | Self::CollectionLen { dst, .. }
             | Self::CollectionKeyAt { dst, .. }
             | Self::CollectionValueAt { dst, .. }
@@ -2819,7 +2810,7 @@ impl Program {
 
     pub fn to_bytes(&self) -> Result<Vec<u8>, RuntimeError> {
         let mut out = Vec::new();
-        out.extend_from_slice(b"MICAPRG8");
+        out.extend_from_slice(b"MICAPRG9");
         write_u32(&mut out, self.register_count as u32);
         write_u32(&mut out, self.opcodes.len() as u32);
         for instruction in self.instructions() {
@@ -2833,7 +2824,7 @@ impl Program {
 
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, RuntimeError> {
         let mut input = ByteReader::new(bytes);
-        input.expect_magic(b"MICAPRG8")?;
+        input.expect_magic(b"MICAPRG9")?;
         let register_count = input.read_u32()? as usize;
         let instruction_count = input.read_u32()? as usize;
         let mut instructions = Vec::with_capacity(instruction_count);
@@ -3020,10 +3011,6 @@ impl Program {
                 dst: *dst,
                 error: *error,
                 field: *field,
-            },
-            Opcode::One { dst, src } => Instruction::One {
-                dst: *dst,
-                src: *src,
             },
             Opcode::CollectionLen { dst, collection } => Instruction::CollectionLen {
                 dst: *dst,
@@ -3772,7 +3759,6 @@ impl ProgramBuilder {
             Instruction::ErrorField { dst, error, field } => {
                 Opcode::ErrorField { dst, error, field }
             }
-            Instruction::One { dst, src } => Opcode::One { dst, src },
             Instruction::CollectionLen { dst, collection } => {
                 Opcode::CollectionLen { dst, collection }
             }
@@ -4508,10 +4494,6 @@ fn validate_instruction(
             validate_register(register_count, *dst)?;
             validate_register(register_count, *error)
         }
-        Instruction::One { dst, src } => {
-            validate_register(register_count, *dst)?;
-            validate_register(register_count, *src)
-        }
         Instruction::CollectionLen { dst, collection }
         | Instruction::CollectionKeyAt {
             dst, collection, ..
@@ -4911,7 +4893,6 @@ const INST_RAISE: u8 = 31;
 const INST_ERROR_FIELD: u8 = 32;
 const INST_BUILTIN_CALL: u8 = 33;
 const INST_SCAN_BINDINGS: u8 = 34;
-const INST_ONE: u8 = 35;
 const INST_SUSPEND_VALUE: u8 = 36;
 const INST_READ: u8 = 37;
 const INST_COMMIT_VALUE: u8 = 38;
@@ -5224,12 +5205,6 @@ fn write_instruction(out: &mut Vec<u8>, instruction: &Instruction) -> Result<(),
             write_register(out, *dst);
             write_register(out, *error);
             write_error_field(out, *field);
-            Ok(())
-        }
-        Instruction::One { dst, src } => {
-            out.push(INST_ONE);
-            write_register(out, *dst);
-            write_register(out, *src);
             Ok(())
         }
         Instruction::CollectionLen { dst, collection } => {
@@ -6155,10 +6130,6 @@ impl<'a> ByteReader<'a> {
                 error: self.read_register()?,
                 field: self.read_error_field()?,
             },
-            INST_ONE => Instruction::One {
-                dst: self.read_register()?,
-                src: self.read_register()?,
-            },
             INST_COLLECTION_LEN => Instruction::CollectionLen {
                 dst: self.read_register()?,
                 collection: self.read_register()?,
@@ -6612,7 +6583,7 @@ impl<'a> ByteReader<'a> {
 
     fn read_value(&mut self) -> Result<Value, RuntimeError> {
         Ok(match self.read_u8()? {
-            VALUE_EMPTY_RELATION => Value::nothing(),
+            VALUE_EMPTY_RELATION => Value::empty_relation(),
             VALUE_BOOL => Value::bool(self.read_u8()? != 0),
             VALUE_INT => Value::int(self.read_i64()?).map_err(|error| {
                 artifact_error(format!("invalid serialized integer value: {error:?}"))

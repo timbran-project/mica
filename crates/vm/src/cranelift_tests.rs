@@ -189,7 +189,7 @@ fn natural_accumulator_program_with_limit(total: Value, limit: usize) -> Arc<Pro
                 },
                 Instruction::Load {
                     dst: register(2),
-                    value: Value::nothing(),
+                    value: Value::empty_relation(),
                 },
                 Instruction::Load {
                     dst: register(3),
@@ -255,7 +255,7 @@ fn checked_natural_accumulator_program() -> Arc<Program> {
                 },
                 Instruction::Load {
                     dst: register(2),
-                    value: Value::nothing(),
+                    value: Value::empty_relation(),
                 },
                 Instruction::Load {
                     dst: register(3),
@@ -1018,7 +1018,7 @@ fn natural_countdown_program(iterations: usize) -> Arc<Program> {
                 },
                 Instruction::Load {
                     dst: register(2),
-                    value: Value::nothing(),
+                    value: Value::empty_relation(),
                 },
                 Instruction::Load {
                     dst: register(3),
@@ -1175,7 +1175,7 @@ fn natural_branch_program(
                 },
                 Instruction::Load {
                     dst: register(7),
-                    value: Value::nothing(),
+                    value: Value::empty_relation(),
                 },
                 Instruction::Binary {
                     dst: register(6),
@@ -1253,7 +1253,7 @@ fn natural_scaled_countdown_program() -> Arc<Program> {
                 },
                 Instruction::Load {
                     dst: register(2),
-                    value: Value::nothing(),
+                    value: Value::empty_relation(),
                 },
                 Instruction::Load {
                     dst: register(3),
@@ -1445,7 +1445,7 @@ fn natural_comparison_program(
                 },
                 Instruction::Load {
                     dst: register(1),
-                    value: Value::nothing(),
+                    value: Value::empty_relation(),
                 },
                 Instruction::Load {
                     dst: register(2),

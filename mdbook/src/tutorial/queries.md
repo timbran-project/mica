@@ -68,9 +68,7 @@ appear.
 A relation value is iterable. Each observed row appears as a binding map:
 
 ```mica
-for row in LocatedAt(?item, ?site)
-  let item = row[:item]
-  let site = row[:site]
+for {item, site} in LocatedAt(?item, ?site)
   // Work with item and site.
 end
 ```
@@ -78,21 +76,27 @@ end
 The maps are an observation interface for rows. Mica does not eagerly allocate a map for every
 answer before iteration.
 
-## Ask for One Value Deliberately
+## Bind Cardinality Deliberately
 
 A functional relation often has one answer for a concrete key:
 
 ```mica
-let label = one Label(#sensor_17, ?text)
+let exactly {text} = Label(#sensor_17, ?text)
+let label = text
 ```
 
-`one` has three outcomes:
+`let exactly` requires exactly one row and binds its named cells. Zero or multiple rows raise
+`E_CARDINALITY`. When no label is a valid state, branch explicitly:
 
-- one matching value: return that value;
-- no matches: return `nothing`;
-- more than one match: raise `E_AMBIGUOUS`.
+```mica
+if let {text} = Label(#sensor_17, ?text)
+  return some(text)
+else
+  return none
+end
+```
 
-The ambiguity error is important. Taking an arbitrary row would hide corrupt data or a mistaken
+The cardinality error is important. Taking an arbitrary row would hide corrupt data or a mistaken
 cardinality assumption.
 
 Functional binary relations also support property-style syntax:
@@ -102,7 +106,9 @@ let label = #sensor_17.label
 ```
 
 This is relation sugar. It does not read a field from an identity record. The expression still asks
-the declared `Label` relation for the value keyed by `#sensor_17`.
+the declared `Label` relation for the value keyed by `#sensor_17`. Dot reads require a value; a
+missing fact raises `E_CARDINALITY`, so optional query binding is the right form for expected
+absence.
 
 ## Wildcards Match Without Naming
 

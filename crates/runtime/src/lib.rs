@@ -3541,7 +3541,7 @@ fn source_literal(
         return "()".to_owned();
     }
     if value.is_empty_relation() {
-        return "nothing".to_owned();
+        return "[] {}".to_owned();
     }
     match value.kind() {
         ValueKind::Bool => value.as_bool().unwrap().to_string(),
@@ -3609,7 +3609,7 @@ fn source_literal(
                 }
                 if let Some(payload) = error.value() {
                     if error.message().is_none() {
-                        out.push_str(", nothing");
+                        out.push_str(", none");
                     }
                     out.push_str(", ");
                     out.push_str(&source_literal(payload, identity_names, relation_names));
@@ -4349,8 +4349,16 @@ fn default_builtins(embedding_provider: Arc<dyn embedding::EmbeddingProvider>) -
             BuiltinResultKind::Exact(ValueKind::List),
             tasks_builtin,
         )
-        .with_builtin("actor", BuiltinResultKind::Dynamic, actor_builtin)
-        .with_builtin("principal", BuiltinResultKind::Dynamic, principal_builtin)
+        .with_builtin(
+            "actor",
+            option_builtin_result(TypeContract::Kind(ValueKind::Identity)),
+            actor_builtin,
+        )
+        .with_builtin(
+            "principal",
+            option_builtin_result(TypeContract::Kind(ValueKind::Identity)),
+            principal_builtin,
+        )
         .with_builtin(
             "endpoint",
             BuiltinResultKind::Exact(ValueKind::Identity),
@@ -4373,7 +4381,7 @@ fn default_builtins(embedding_provider: Arc<dyn embedding::EmbeddingProvider>) -
         )
         .with_builtin(
             "frob_delegate",
-            BuiltinResultKind::Dynamic,
+            BuiltinResultKind::Exact(ValueKind::Identity),
             frob_delegate_builtin,
         )
         .with_builtin("frob_value", BuiltinResultKind::Dynamic, frob_value_builtin)
@@ -4389,7 +4397,7 @@ fn default_builtins(embedding_provider: Arc<dyn embedding::EmbeddingProvider>) -
         )
         .with_builtin(
             "from_literal",
-            BuiltinResultKind::Dynamic,
+            result_builtin_result(TypeContract::Dynamic),
             from_literal_builtin,
         )
         .with_builtin(
@@ -4493,6 +4501,46 @@ fn default_builtins(embedding_provider: Arc<dyn embedding::EmbeddingProvider>) -
 
 fn unit_builtin_result() -> BuiltinResultKind {
     BuiltinResultKind::Structural(TypeContract::Literal(TypeLiteralContract::Unit))
+}
+
+pub(crate) fn option_builtin_result(payload: TypeContract) -> BuiltinResultKind {
+    BuiltinResultKind::Structural(TypeContract::Relation(RelationTypeContract {
+        alternatives: vec![RelationRowContract {
+            columns: vec![(Symbol::intern("value"), payload)],
+        }],
+        minimum_rows: 0,
+        maximum_rows: Some(1),
+    }))
+}
+
+pub(crate) fn result_builtin_result(payload: TypeContract) -> BuiltinResultKind {
+    let row = |mut columns: Vec<(Symbol, TypeContract)>| {
+        columns.sort_by_key(|(name, _)| *name);
+        RelationRowContract { columns }
+    };
+    BuiltinResultKind::Structural(TypeContract::Relation(RelationTypeContract {
+        alternatives: vec![
+            row(vec![
+                (
+                    Symbol::intern("case"),
+                    TypeContract::Literal(TypeLiteralContract::Symbol(Symbol::intern("error"))),
+                ),
+                (
+                    Symbol::intern("value"),
+                    TypeContract::Kind(ValueKind::Error),
+                ),
+            ]),
+            row(vec![
+                (
+                    Symbol::intern("case"),
+                    TypeContract::Literal(TypeLiteralContract::Symbol(Symbol::intern("ok"))),
+                ),
+                (Symbol::intern("value"), payload),
+            ]),
+        ],
+        minimum_rows: 1,
+        maximum_rows: Some(1),
+    }))
 }
 
 fn emit_builtin(
@@ -4648,32 +4696,44 @@ fn subscribe_changes_builtin(
         .as_symbol()
         .and_then(Symbol::name)
         .ok_or_else(|| invalid_builtin_call("subscribe_changes", "subject must be a symbol"))?;
+    let relation = standard_option_payload(&args[2]).ok_or_else(|| {
+        invalid_builtin_call("subscribe_changes", "relation must be an option value")
+    })?;
     let bindings = args[3]
         .with_list(|values| {
             values
                 .iter()
-                .map(|value| (!value.is_empty_relation()).then(|| value.clone()))
-                .collect::<Vec<_>>()
+                .map(standard_option_payload)
+                .collect::<Option<Vec<_>>>()
         })
-        .ok_or_else(|| invalid_builtin_call("subscribe_changes", "bindings must be a list"))?;
+        .flatten()
+        .ok_or_else(|| {
+            invalid_builtin_call(
+                "subscribe_changes",
+                "bindings must be a list of option values",
+            )
+        })?;
     let subject = match subject_name {
         "catalogue" => {
-            if !args[2].is_empty_relation()
-                || !bindings.is_empty()
-                || !context.authority().is_root()
-            {
+            if relation.is_some() || !bindings.is_empty() || !context.authority().is_root() {
                 return Err(invalid_builtin_call(
                     "subscribe_changes",
-                    "catalogue subscriptions require root authority, nothing for relation, and empty bindings",
+                    "catalogue subscriptions require root authority, none for relation, and empty bindings",
                 ));
             }
             SubscriptionSubject::Catalogue
         }
         "facts" | "relation" => {
-            let relation = args[2]
+            let relation_value = relation.as_ref().ok_or_else(|| {
+                invalid_builtin_call(
+                    "subscribe_changes",
+                    "fact and relation subscriptions require some(relation)",
+                )
+            })?;
+            let relation = relation_value
                 .as_identity()
                 .or_else(|| {
-                    args[2]
+                    relation_value
                         .as_symbol()
                         .and_then(|name| relation_named(context.kernel(), name))
                         .map(|(relation, _)| relation)
@@ -4734,18 +4794,22 @@ fn subscribe_changes_builtin(
     };
     let cursor = match args.get(5) {
         None => None,
-        Some(value) if value.is_empty_relation() => None,
-        Some(value) => Some(
-            value
-                .as_int()
-                .and_then(|cursor| u64::try_from(cursor).ok())
-                .ok_or_else(|| {
-                    invalid_builtin_call(
-                        "subscribe_changes",
-                        "cursor must be a non-negative integer or nothing",
-                    )
-                })?,
-        ),
+        Some(value) => standard_option_payload(value)
+            .ok_or_else(|| {
+                invalid_builtin_call("subscribe_changes", "cursor must be an option value")
+            })?
+            .map(|value| {
+                value
+                    .as_int()
+                    .and_then(|cursor| u64::try_from(cursor).ok())
+                    .ok_or_else(|| {
+                        invalid_builtin_call(
+                            "subscribe_changes",
+                            "cursor must be a non-negative integer or none",
+                        )
+                    })
+            })
+            .transpose()?,
     };
     let queue_budget = args
         .get(6)
@@ -4759,6 +4823,10 @@ fn subscribe_changes_builtin(
         cursor,
         queue_budget,
     })
+}
+
+fn standard_option_payload(value: &Value) -> Option<Option<Value>> {
+    value.option_payload()
 }
 
 fn cancel_subscription_builtin(
@@ -4809,10 +4877,13 @@ fn frob_delegate_builtin(
             "expected frob_delegate(value)",
         ));
     }
-    Ok(args[0]
-        .frob_delegate()
-        .map(Value::identity)
-        .unwrap_or_else(Value::nothing))
+    args[0].frob_delegate().map(Value::identity).ok_or_else(|| {
+        raised_builtin_error(
+            "E_TYPE",
+            "frob_delegate expected a frob",
+            Some(args[0].clone()),
+        )
+    })
 }
 
 fn frob_value_builtin(
@@ -4885,12 +4956,38 @@ fn from_literal_builtin(
     };
     let ast = parse_ast(&source);
     if !ast.errors.is_empty() || ast.items.len() != 1 {
-        return Ok(Value::nothing());
+        let message = ast
+            .errors
+            .first()
+            .map_or("expected one literal expression", |error| {
+                error.message.as_str()
+            });
+        return Ok(Value::result_err(Value::error(
+            Symbol::intern("E_PARSE"),
+            Some(message),
+            Some(Value::string(source)),
+        )));
     }
     let Item::Expr { expr, .. } = &ast.items[0] else {
-        return Ok(Value::nothing());
+        return Ok(Value::result_err(Value::error(
+            Symbol::intern("E_TYPE"),
+            Some("expected a literal expression"),
+            Some(Value::string(source)),
+        )));
     };
-    value_from_literal_expr(context, expr).map(|value| value.unwrap_or_else(Value::nothing))
+    match value_from_literal_expr(context, expr) {
+        Ok(Some(value)) => Ok(Value::result_ok(value)),
+        Ok(None) => Ok(Value::result_err(Value::error(
+            Symbol::intern("E_TYPE"),
+            Some("unsupported literal expression"),
+            Some(Value::string(source)),
+        ))),
+        Err(error) => Ok(Value::result_err(Value::error(
+            Symbol::intern("E_PARSE"),
+            Some(format!("{error:?}")),
+            Some(Value::string(source)),
+        ))),
+    }
 }
 
 fn to_symbol_builtin(
@@ -5189,7 +5286,6 @@ fn literal_value(literal: &Literal) -> Result<Option<Value>, RuntimeError> {
         Literal::Bytes(value) => Ok(Some(Value::bytes(value))),
         Literal::Bool(value) => Ok(Some(Value::bool(*value))),
         Literal::ErrorCode(value) => Ok(Some(Value::error_code(Symbol::intern(value)))),
-        Literal::Nothing => Ok(Some(Value::nothing())),
         Literal::Unit => Ok(Some(Value::unit())),
     }
 }
@@ -5900,7 +5996,9 @@ fn runtime_identity_builtin(
     if !args.is_empty() {
         return Err(invalid_builtin_call(name, format!("expected {name}()")));
     }
-    Ok(identity.map(Value::identity).unwrap_or_else(Value::nothing))
+    Ok(identity
+        .map(Value::identity)
+        .map_or_else(Value::option_none, Value::option_some))
 }
 
 fn unsupported_runner_error(
@@ -7144,7 +7242,6 @@ fn validate_read_only_expr(
             }
             Ok(())
         }
-        HirExpr::One { expr, .. } => validate_read_only_expr(semantic, expr),
         HirExpr::Break { .. } | HirExpr::Continue { .. } => Ok(()),
         HirExpr::Try {
             body,
@@ -7855,7 +7952,7 @@ fn render_value(
         return "()".to_owned();
     }
     if value.is_empty_relation() {
-        return "nothing".to_owned();
+        return "[] {}".to_owned();
     }
     match value.kind() {
         ValueKind::Bool => value.as_bool().unwrap().to_string(),
@@ -7920,7 +8017,7 @@ fn render_value(
                 }
                 if let Some(payload) = error.value() {
                     if error.message().is_none() {
-                        out.push_str(", nothing");
+                        out.push_str(", none");
                     }
                     out.push_str(", ");
                     out.push_str(&render_value(payload, identity_names, relation_names));

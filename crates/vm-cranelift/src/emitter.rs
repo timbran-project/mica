@@ -1126,10 +1126,13 @@ mod tests {
             Probe::compile(|builder, value, _| ValueEmitter::emit_checked_int_neg(builder, value));
         for value in [VALUE_INT_MIN, -1_000, -1, 0, 1, 1_000, VALUE_INT_MAX] {
             let value = Value::int(value).unwrap();
-            assert_eq!(negate.run(&value, &Value::nothing()), value.checked_neg());
+            assert_eq!(
+                negate.run(&value, &Value::empty_relation()),
+                value.checked_neg()
+            );
         }
         assert_eq!(
-            negate.run(&Value::float(1.0).unwrap(), &Value::nothing()),
+            negate.run(&Value::float(1.0).unwrap(), &Value::empty_relation()),
             None,
         );
     }
@@ -1208,14 +1211,20 @@ mod tests {
             Value::float(3.5).unwrap(),
             Value::float(0.0).unwrap(),
         ] {
-            assert_eq!(negate.run(&value, &Value::nothing()), value.checked_neg());
+            assert_eq!(
+                negate.run(&value, &Value::empty_relation()),
+                value.checked_neg()
+            );
         }
         assert_eq!(
-            negate.run(&Value::int(VALUE_INT_MIN).unwrap(), &Value::nothing()),
+            negate.run(
+                &Value::int(VALUE_INT_MIN).unwrap(),
+                &Value::empty_relation()
+            ),
             None,
         );
         assert_eq!(
-            negate.run(&Value::string("not numeric"), &Value::nothing()),
+            negate.run(&Value::string("not numeric"), &Value::empty_relation()),
             None,
         );
     }
@@ -1263,18 +1272,24 @@ mod tests {
         });
         for value in [-31.5f32, -0.0, 0.0, 0.1, 31.5] {
             let value = Value::float(value).unwrap();
-            assert_eq!(negate.run(&value, &Value::nothing()), value.checked_neg());
+            assert_eq!(
+                negate.run(&value, &Value::empty_relation()),
+                value.checked_neg()
+            );
         }
         assert_eq!(
             negate
-                .run(&Value::float(0.0).unwrap(), &Value::nothing())
+                .run(&Value::float(0.0).unwrap(), &Value::empty_relation())
                 .unwrap()
                 .as_float()
                 .unwrap()
                 .to_bits(),
             0,
         );
-        assert_eq!(negate.run(&Value::int(1).unwrap(), &Value::nothing()), None);
+        assert_eq!(
+            negate.run(&Value::int(1).unwrap(), &Value::empty_relation()),
+            None
+        );
     }
 
     #[test]
@@ -1318,7 +1333,7 @@ mod tests {
     fn emitted_immediate_equality_matches_value_equality() {
         let probe = Probe::compile(ValueEmitter::emit_immediate_eq);
         let values = [
-            Value::nothing(),
+            Value::empty_relation(),
             Value::bool(false),
             Value::bool(true),
             Value::int(-1).unwrap(),
@@ -1350,7 +1365,7 @@ mod tests {
             ScalarComparison::GreaterThanOrEqual,
         ];
         let values = [
-            Value::nothing(),
+            Value::empty_relation(),
             Value::bool(false),
             Value::bool(true),
             Value::int(-1).unwrap(),
@@ -1432,7 +1447,7 @@ mod tests {
     fn emitted_truthiness_matches_vm_fast_cases() {
         let probe = Probe::compile(|builder, value, _| ValueEmitter::emit_truthy(builder, value));
         let cases = [
-            (Value::nothing(), false),
+            (Value::empty_relation(), false),
             (Value::bool(false), false),
             (Value::bool(true), true),
             (Value::int(0).unwrap(), true),
@@ -1441,15 +1456,15 @@ mod tests {
         ];
         for (value, expected) in cases {
             assert_eq!(
-                probe.run(&value, &Value::nothing()),
+                probe.run(&value, &Value::empty_relation()),
                 Some(Value::bool(expected)),
             );
         }
-        assert_eq!(probe.run(&Value::list([]), &Value::nothing()), None,);
+        assert_eq!(probe.run(&Value::list([]), &Value::empty_relation()), None,);
         assert_eq!(
             probe.run(
                 &Value::relation([Symbol::intern("value")], []).unwrap(),
-                &Value::nothing(),
+                &Value::empty_relation(),
             ),
             None,
         );
@@ -1459,7 +1474,7 @@ mod tests {
     fn emitted_not_matches_vm_fast_cases() {
         let probe = Probe::compile(|builder, value, _| ValueEmitter::emit_not(builder, value));
         let cases = [
-            (Value::nothing(), true),
+            (Value::empty_relation(), true),
             (Value::bool(false), true),
             (Value::bool(true), false),
             (Value::int(0).unwrap(), false),
@@ -1468,15 +1483,15 @@ mod tests {
         ];
         for (value, expected) in cases {
             assert_eq!(
-                probe.run(&value, &Value::nothing()),
+                probe.run(&value, &Value::empty_relation()),
                 Some(Value::bool(expected)),
             );
         }
-        assert_eq!(probe.run(&Value::list([]), &Value::nothing()), None);
+        assert_eq!(probe.run(&Value::list([]), &Value::empty_relation()), None);
         assert_eq!(
             probe.run(
                 &Value::relation([Symbol::intern("value")], []).unwrap(),
-                &Value::nothing(),
+                &Value::empty_relation(),
             ),
             None,
         );

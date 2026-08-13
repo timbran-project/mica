@@ -138,8 +138,9 @@ end
 
 verb ui/retrieval_text(entity)
   let text = ui/actor_name(entity)
-  let description = entity.description
-  if description != nothing
+  let descriptions = Description(entity, ?description)
+  if descriptions
+    let exactly {:description -> description} = descriptions
     text = string_concat(text, string_concat(": ", description))
   end
   return text
@@ -187,14 +188,15 @@ end
 
 verb ui/retrieval_panel_node(actor @ #player, selected)
   let children = [dom <div class="retrieval-toolbar">{ui/retrieval_action_node()}</div>]
-  let plan = endpoint().session/retrievalPlan
-  if plan == nothing
+  let plans = session/RetrievalPlan(endpoint(), ?plan)
+  if not plans
     children = [@children, dom <p class="muted">Run retrieval to see related rooms, people, and objects.</p>]
     return dom <section class="panel retrieval-panel">
       <h3>Related context</h3>
       {@children}
     </section>
   end
+  let exactly {:plan -> plan} = plans
 
   let items = []
   for found in ContextForPlan(?context, plan)
@@ -202,8 +204,8 @@ verb ui/retrieval_panel_node(actor @ #player, selected)
     let subject = context.contextSubject
     if subject != selected && CanSee(actor, subject)
       let score = context.contextScore
-      let status = one IndexEntryStatus(ui/retrieval_index(), subject, ui/retrieval_model(), ?status)
-      if status == nothing
+      let exactly {:status -> status} = IndexEntryStatus(ui/retrieval_index(), subject, ui/retrieval_model(), ?status)
+      if status == none
         status = "unknown"
       end
       items = [@items, ui/retrieval_result_row_node(actor, subject, score, status)]
@@ -227,8 +229,12 @@ verb ui/handle_sync_action(source @ #ui/retrieval_action<_>, endpoint, session, 
   end
 
   let current = ui/current_actor()
-  let selected = endpoint.session/inspect
-  if current == nothing || selected == nothing || CanSee(current, selected) == false
+  let selections = session/Inspect(endpoint, ?selected)
+  if current == none || not selections
+    return false
+  end
+  let exactly {:selected -> selected} = selections
+  if CanSee(current, selected) == false
     return false
   end
 

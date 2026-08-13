@@ -86,14 +86,14 @@ impl ComputedRelation for ExactEmbeddingSearchRelation {
             let Some(embedding) = membership.values().get(1).cloned() else {
                 continue;
             };
-            let vector_row = one_value(
+            let vector_row = expect_single_value(
                 reader,
                 embedding_vector,
                 &[Some(embedding.clone()), None],
                 metadata.id(),
                 "expected EmbeddingVector(embedding, payload)",
             )?;
-            let subject = one_value(
+            let subject = expect_single_value(
                 reader,
                 embedding_of,
                 &[Some(embedding.clone()), None],
@@ -201,7 +201,7 @@ fn host_score_to_value(relation: RelationId, score: f64) -> Result<Value, Kernel
         .map_err(|_| invalid_relation(relation, "host score is not a finite binary32 value"))
 }
 
-fn one_value(
+fn expect_single_value(
     reader: &dyn RelationRead,
     relation: RelationId,
     bindings: &[Option<Value>],
@@ -342,15 +342,15 @@ mod tests {
                  assert VectorIndexMetric(#main_index, \"cosine\")\n\
                  assert TextUnit(#unit_one)\n\
                  assert TextUnitText(#unit_one, \"red brass lamp\")\n\
-                 return index_text_unit(nothing, #main_index, #unit_one, \"host-test\")",
+                 return index_text_unit(none, #main_index, #unit_one, \"host-test\")",
             )
             .unwrap();
 
         let query = runner
             .run_source(
-                "let embedding = one VectorIndexContains(#main_index, ?embedding)\n\
-                 let subject = one EmbeddingOf(embedding, ?subject)\n\
-                 let model = one EmbeddingModel(embedding, ?model)\n\
+                "let exactly {:embedding -> embedding} = VectorIndexContains(#main_index, ?embedding)\n\
+                 let exactly {:subject -> subject} = EmbeddingOf(embedding, ?subject)\n\
+                 let exactly {:model -> model} = EmbeddingModel(embedding, ?model)\n\
                  return [embedding, subject, model]",
             )
             .unwrap();
@@ -387,14 +387,14 @@ mod tests {
                  assert VectorIndexMetric(#main_index, \"cosine\")\n\
                  assert TextUnit(#unit_one)\n\
                  assert TextUnitText(#unit_one, \"red brass lamp\")\n\
-                 return index_text_unit(nothing, #main_index, #unit_one, \"custom-model\")",
+                 return index_text_unit(none, #main_index, #unit_one, \"custom-model\")",
             )
             .unwrap();
 
         let query = runner
             .run_source(
-                "let embedding = one VectorIndexContains(#main_index, ?embedding)\n\
-                 let vector = one EmbeddingVector(embedding, ?vector)\n\
+                "let exactly {:embedding -> embedding} = VectorIndexContains(#main_index, ?embedding)\n\
+                 let exactly {:vector -> vector} = EmbeddingVector(embedding, ?vector)\n\
                  return vector",
             )
             .unwrap();
@@ -441,7 +441,7 @@ mod tests {
         runner
             .run_source(
                 "assert TextUnitText(#unit_one, \"red brass lamp\")\n\
-                 index_text_unit(nothing, #main_index, #unit_one, \"host-test\")",
+                 index_text_unit(none, #main_index, #unit_one, \"host-test\")",
             )
             .unwrap();
 
@@ -473,8 +473,8 @@ mod tests {
             .run_source(
                 "let status = retrieval/text_unit_status(#main_index, #unit_one, \"host-test\")\n\
                  let refresh = EmbeddingRefreshNeeded(#main_index, #unit_one, \"host-test\")\n\
-                 let embedding = one IndexEntryEmbedding(#main_index, #unit_one, \"host-test\", ?embedding)\n\
-                 let embedding_status = one EmbeddingStatus(embedding, ?status)\n\
+                 let exactly {:embedding -> embedding} = IndexEntryEmbedding(#main_index, #unit_one, \"host-test\", ?embedding)\n\
+                 let exactly {:status -> embedding_status} = EmbeddingStatus(embedding, ?status)\n\
                  let indexed = VectorIndexContains(#main_index, embedding)\n\
                  return [status, refresh, embedding_status, indexed]",
             )
@@ -510,28 +510,28 @@ mod tests {
                  assert TextUnitText(#unit_one, \"lamp oil brass light\")\n\
                  assert TextUnitText(#unit_two, \"apple orchard green fruit\")\n\
                  assert CanRetrieveSubject(#main_index, #unit_one)\n\
-                 index_text_unit(nothing, #main_index, #unit_one, \"host-test\")\n\
-                 index_text_unit(nothing, #main_index, #unit_two, \"host-test\")\n\
+                 index_text_unit(none, #main_index, #unit_one, \"host-test\")\n\
+                 index_text_unit(none, #main_index, #unit_two, \"host-test\")\n\
                  return answer_question(#main_index, #main_index, \"brass lamp\", 2, \"host-test\")",
             )
             .unwrap();
 
         let report = runner
             .run_source(
-                "let answer = one Answer(?answer)\n\
-                 let question = one Question(?question)\n\
-                 let plan = one RetrievalPlan(?plan)\n\
-                 let context = one RetrievedContext(?context)\n\
-                 let embedding = one IndexEntryEmbedding(#main_index, #unit_one, \"host-test\", ?embedding)\n\
-                 let question_text = one QuestionText(question, ?text)\n\
-                 let plan_kind = one PlanKind(plan, ?kind)\n\
-                 let plan_model = one PlanModel(plan, ?model)\n\
-                 let context_reason = one ContextReason(context, ?reason)\n\
-                 let context_version = one ContextSnapshotVersion(context, ?snapshot_version)\n\
-                 let answer_context = one AnswerContextText(answer, ?context_text)\n\
-                 let answer_status = one AnswerStatus(answer, ?status)\n\
-                 let embedding_status = one EmbeddingStatus(embedding, ?status)\n\
-                 return [question_text, plan_kind, plan_model, context_reason, context_version != nothing, string_contains(answer_context, \"lamp oil\"), answer_status, embedding_status]",
+                "let exactly {:answer -> answer} = Answer(?answer)\n\
+                 let exactly {:question -> question} = Question(?question)\n\
+                 let exactly {:plan -> plan} = RetrievalPlan(?plan)\n\
+                 let exactly {:context -> context} = RetrievedContext(?context)\n\
+                 let exactly {:embedding -> embedding} = IndexEntryEmbedding(#main_index, #unit_one, \"host-test\", ?embedding)\n\
+                 let exactly {:text -> question_text} = QuestionText(question, ?text)\n\
+                 let exactly {:kind -> plan_kind} = PlanKind(plan, ?kind)\n\
+                 let exactly {:model -> plan_model} = PlanModel(plan, ?model)\n\
+                 let exactly {:reason -> context_reason} = ContextReason(context, ?reason)\n\
+                 let exactly {:snapshot_version -> context_version} = ContextSnapshotVersion(context, ?snapshot_version)\n\
+                 let exactly {:context_text -> answer_context} = AnswerContextText(answer, ?context_text)\n\
+                 let exactly {:status -> answer_status} = AnswerStatus(answer, ?status)\n\
+                 let exactly {:status -> embedding_status} = EmbeddingStatus(embedding, ?status)\n\
+                 return [question_text, plan_kind, plan_model, context_reason, context_version != none, string_contains(answer_context, \"lamp oil\"), answer_status, embedding_status]",
             )
             .unwrap();
 
@@ -571,8 +571,8 @@ mod tests {
                  assert TextUnitText(#unit_allowed, \"lamp oil brass light\")\n\
                  assert TextUnitText(#unit_hidden, \"lamp oil secret room\")\n\
                  assert CanRetrieveSubject(#actor, #unit_allowed)\n\
-                 index_text_unit(nothing, #main_index, #unit_allowed, \"host-test\")\n\
-                 index_text_unit(nothing, #main_index, #unit_hidden, \"host-test\")\n\
+                 index_text_unit(none, #main_index, #unit_allowed, \"host-test\")\n\
+                 index_text_unit(none, #main_index, #unit_hidden, \"host-test\")\n\
                  return retrieve_context(#actor, #main_index, \"brass lamp\", 5, \"host-test\")",
             )
             .unwrap();
@@ -582,7 +582,7 @@ mod tests {
                 "let has_allowed = false\n\
                  let has_hidden = false\n\
                  for found in RetrievedContext(?context)\n\
-                   let subject = one ContextSubject(found[:context], ?subject)\n\
+                   let exactly {:subject -> subject} = ContextSubject(found[:context], ?subject)\n\
                    if subject == #unit_allowed\n\
                      has_allowed = true\n\
                    elseif subject == #unit_hidden\n\
@@ -619,19 +619,19 @@ mod tests {
                  assert TextUnit(#unit_one)\n\
                  assert TextUnitText(#unit_one, \"red brass lamp\")\n\
                  assert CanRetrieveSubject(#main_index, #unit_one)\n\
-                 index_text_unit(nothing, #main_index, #unit_one, \"host-test\")\n\
+                 index_text_unit(none, #main_index, #unit_one, \"host-test\")\n\
                  answer_question(#main_index, #main_index, \"brass lamp\", 1, \"host-test\")\n\
                  retract TextUnitText(#unit_one, _)\n\
                  assert TextUnitText(#unit_one, \"blue steel lantern\")\n\
-                 let answer = one Answer(?answer)\n\
+                 let exactly {:answer -> answer} = Answer(?answer)\n\
                  return answer_refresh_status(answer)",
             )
             .unwrap();
 
         let report = runner
             .run_source(
-                "let answer = one Answer(?answer)\n\
-                 let status = one AnswerStatus(answer, ?status)\n\
+                "let exactly {:answer -> answer} = Answer(?answer)\n\
+                 let exactly {:status -> status} = AnswerStatus(answer, ?status)\n\
                  let needs_review = AnswerNeedsReview(answer)\n\
                  let refresh = AnswerRefreshNeeded(answer)\n\
                  return [status, needs_review, refresh]",
@@ -684,14 +684,14 @@ mod tests {
 
         let report = runner
             .run_source(
-                "let plan = one session/RetrievalPlan(endpoint(), ?plan)\n\
-                 let question = one PlanForQuestion(plan, ?question)\n\
+                "let exactly {:plan -> plan} = session/RetrievalPlan(endpoint(), ?plan)\n\
+                 let exactly {:question -> question} = PlanForQuestion(plan, ?question)\n\
                  let has_context = false\n\
                  for found in ContextForPlan(?context, plan)\n\
                    has_context = true\n\
                  end\n\
-                 let status = one IndexEntryStatus(#retrieval/mud_world, #coin, \"mud-world\", ?status)\n\
-                 let prompt = one QuestionText(question, ?text)\n\
+                 let exactly {:status -> status} = IndexEntryStatus(#retrieval/mud_world, #coin, \"mud-world\", ?status)\n\
+                 let exactly {:text -> prompt} = QuestionText(question, ?text)\n\
                  return [status, prompt, has_context]",
             )
             .unwrap();
@@ -745,7 +745,7 @@ mod tests {
         let report = runner
             .run_source_as(
                 Symbol::intern("alice"),
-                "return sync_event(endpoint(), nothing, 21, \"submit\", \"\", \"mud_retrieve_related\", {})",
+                "return sync_event(endpoint(), none, 21, \"submit\", \"\", \"mud_retrieve_related\", {})",
             )
             .unwrap();
         let TaskOutcome::Complete { value, .. } = report.outcome else {
@@ -755,7 +755,7 @@ mod tests {
 
         let panel = runner
             .run_source(
-                "let plan = one session/RetrievalPlan(endpoint(), ?plan)\n\
+                "let exactly {:plan -> plan} = session/RetrievalPlan(endpoint(), ?plan)\n\
                  let has_context = false\n\
                  for found in ContextForPlan(?context, plan)\n\
                    has_context = true\n\

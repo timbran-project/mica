@@ -15,7 +15,7 @@ verb command/match_object(actor @ #player, token @ #string)
     end
   end
 
-  return nothing
+  return none
 end
 
 verb command/bind_pattern(actor @ #player, raw @ #string, tokens @ #list, pattern)
@@ -25,32 +25,30 @@ verb command/bind_pattern(actor @ #player, raw @ #string, tokens @ #list, patter
   let pattern_index = 0
 
   while true
-    let part = one command/PatternPart(pattern, pattern_index, ?kind, ?argument)
-    if part == nothing
+    let parts = command/PatternPart(pattern, pattern_index, ?kind, ?argument)
+    if not parts
       break
     end
-
-    let kind = part[:kind]
-    let argument = part[:argument]
+    let exactly {:kind -> kind, :argument -> argument} = parts
 
     if kind == :optional_prep
-      if command/Preposition(argument, index_or(tokens, position, nothing))
+      if command/Preposition(argument, index_or(tokens, position, none))
         position = position + 1
       end
     elseif kind == :prep
-      if command/Preposition(argument, index_or(tokens, position, nothing)) == false
+      if command/Preposition(argument, index_or(tokens, position, none)) == false
         return {:status -> :no_match}
       end
       roles[:prep] = argument
       position = position + 1
     elseif kind == :object_role
-      if index_or(tokens, position, nothing) == nothing
+      if index_or(tokens, position, none) == none
         return {:status -> :missing_argument}
       end
 
-      let obj = command/match_object(actor, index_or(tokens, position, nothing))
-      if obj == nothing
-        return {:status -> :not_visible, :token -> index_or(tokens, position, nothing)}
+      let obj = command/match_object(actor, index_or(tokens, position, none))
+      if obj == none
+        return {:status -> :not_visible, :token -> index_or(tokens, position, none)}
       end
 
       roles[argument] = obj
@@ -63,7 +61,7 @@ verb command/bind_pattern(actor @ #player, raw @ #string, tokens @ #list, patter
       roles[:message] = message
       consumes_rest = true
     elseif kind == :eol
-      if index_or(tokens, position, nothing) != nothing
+      if index_or(tokens, position, none) != none
         return {:status -> :no_match}
       end
     else
@@ -73,7 +71,7 @@ verb command/bind_pattern(actor @ #player, raw @ #string, tokens @ #list, patter
     pattern_index = pattern_index + 1
   end
 
-  if consumes_rest == false && index_or(tokens, position, nothing) != nothing
+  if consumes_rest == false && index_or(tokens, position, none) != none
     return {:status -> :no_match}
   end
 
@@ -87,9 +85,11 @@ verb command(actor @ #player, endpoint, line)
     if string_starts_with(raw, prefix)
       let message = trim(string_slice(raw, string_len(prefix), string_len(raw)))
       if message == ""
-        let missing = one command/MissingArgumentMessage(shortcut[:selector], ?message)
-        if missing == nothing
-          missing = "I need more information."
+        let messages = command/MissingArgumentMessage(shortcut[:selector], ?message)
+        let missing = "I need more information."
+        if messages
+          let exactly {:message -> configured} = messages
+          missing = configured
         end
         event/notify_to(actor, endpoint, missing)
         return false
@@ -106,14 +106,14 @@ verb command(actor @ #player, endpoint, line)
   end
 
   if tokens[0] == "go"
-    if index_or(tokens, 1, nothing) == nothing
+    if index_or(tokens, 1, none) == none
       event/notify_to(actor, endpoint, "Go where?")
       return false
     end
     return :go(actor: actor, direction: tokens[1])
   end
 
-  if one Exit(actor.locatedIn, tokens[0], ?destination) != nothing
+  if Exit(actor.locatedIn, tokens[0], ?destination)
     return :go(actor: actor, direction: tokens[0])
   end
 
@@ -125,34 +125,38 @@ verb command(actor @ #player, endpoint, line)
     return :go(actor: actor, direction: tokens[0])
   end
 
-  let selector = one command/VerbAlias(tokens[0], ?selector)
-  if selector == nothing
+  let selectors = command/VerbAlias(tokens[0], ?selector)
+  if not selectors
     event/notify_to(actor, endpoint, "I do not understand that.")
     return false
   end
+  let exactly {:selector -> selector} = selectors
 
   let saw_not_visible = false
-  let not_visible_token = nothing
-  let missing_message = nothing
+  let not_visible_token = none
+  let missing_message = none
   for found in command/Pattern(selector, ?dispatch_selector, ?pattern)
     let bound = command/bind_pattern(actor, raw, tokens, found[:pattern])
     if bound[:status] == :ok
       return invoke(found[:dispatch_selector], bound[:roles])
     elseif bound[:status] == :not_visible
       saw_not_visible = true
-      if not_visible_token == nothing
+      if not_visible_token == none
         not_visible_token = bound[:token]
       end
-    elseif bound[:status] == :missing_argument && missing_message == nothing
-      missing_message = one command/MissingArgumentMessage(found[:dispatch_selector], ?message)
-      if missing_message == nothing
+    elseif bound[:status] == :missing_argument && missing_message == none
+      let messages = command/MissingArgumentMessage(found[:dispatch_selector], ?message)
+      if not messages
         missing_message = "I need more information."
+      else
+        let exactly {:message -> message} = messages
+        missing_message = message
       end
     end
   end
 
   if saw_not_visible
-    if not_visible_token == nothing
+    if not_visible_token == none
       event/notify_to(actor, endpoint, "I do not see that.")
     else
       event/notify_to(actor, endpoint, string_concat("I do not see \"", not_visible_token, "\" here."))
@@ -160,7 +164,7 @@ verb command(actor @ #player, endpoint, line)
     return false
   end
 
-  if missing_message != nothing
+  if missing_message != none
     event/notify_to(actor, endpoint, missing_message)
     return false
   end

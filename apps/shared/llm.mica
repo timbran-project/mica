@@ -21,7 +21,7 @@ end
 verb llm/responses_stream(model @ #string, input, instructions, options, tools, sender)
   let opts = llm/ensure_stream(options)
   let request_tools = tools
-  if request_tools == nothing
+  if request_tools == none
     request_tools = []
   end
   return llm_responses_stream(model, input, instructions, opts, request_tools, sender)
@@ -30,14 +30,14 @@ end
 verb llm/chat_stream(model @ #string, messages, options, tools, sender)
   let opts = llm/ensure_stream(options)
   let request_tools = tools
-  if request_tools == nothing
+  if request_tools == none
     request_tools = []
   end
   return llm_chat_stream_to(model, messages, opts, request_tools, sender)
 end
 
 verb llm/ensure_stream(options)
-  if options == nothing
+  if options == none
     return {:stream -> true}
   end
   let opts = {:stream -> true}

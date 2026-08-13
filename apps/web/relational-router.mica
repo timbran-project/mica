@@ -98,7 +98,7 @@ verb http_html(status, body)
 end
 
 verb http_request(request)
-  let route = one SelectedRoute(request, ?route)
+  let exactly {:route -> route} = SelectedRoute(request, ?route)
 
   if route == :home
     return http_html(200, "<!doctype html><title>Mica Router</title><h1>Mica Router</h1><p>Selected by relations.</p>")

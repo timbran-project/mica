@@ -115,7 +115,7 @@ fn representative_kind_values() -> Vec<(ValueKind, Value)> {
         (ValueKind::List, Value::list([int(1), int(2)])),
         (ValueKind::Map, Value::map([(sym("key"), int(1))])),
         (ValueKind::Range, Value::range(int(1), Some(int(3)))),
-        (ValueKind::Relation, Value::nothing()),
+        (ValueKind::Relation, Value::empty_relation()),
         (
             ValueKind::Relation,
             Value::relation(
@@ -461,7 +461,7 @@ fn kind_check_failures_are_catchable_for_every_expected_kind() {
                 Instruction::ExitTry,
                 Instruction::Return { value: r(1) },
                 Instruction::Return {
-                    value: v(Value::nothing()),
+                    value: v(Value::empty_relation()),
                 },
             ],
         )
@@ -601,7 +601,7 @@ fn structural_type_checks_enforce_heading_discriminator_cells_and_cardinality() 
                 Instruction::ExitTry,
                 Instruction::Return { value: r(1) },
                 Instruction::Return {
-                    value: v(Value::nothing()),
+                    value: v(Value::empty_relation()),
                 },
             ],
         )
@@ -676,7 +676,7 @@ fn kind_checks_consume_exactly_one_instruction_on_success_and_failure() {
             Instruction::ExitTry,
             Instruction::Return { value: r(1) },
             Instruction::Return {
-                value: v(Value::nothing()),
+                value: v(Value::empty_relation()),
             },
         ],
     )
@@ -1292,7 +1292,7 @@ fn program_artifact_round_trips_kind_checks_and_rejects_stale_magic() {
     .unwrap();
     let bytes = program.to_bytes().unwrap();
 
-    assert_eq!(&bytes[..8], b"MICAPRG8");
+    assert_eq!(&bytes[..8], b"MICAPRG9");
     assert_eq!(
         program.kind_fact_after(0),
         Some((reg(0), ValueKind::Relation)),
@@ -1334,7 +1334,7 @@ fn program_artifact_round_trips_structural_type_contracts() {
     .unwrap();
     let bytes = program.to_bytes().unwrap();
 
-    assert_eq!(&bytes[..8], b"MICAPRG8");
+    assert_eq!(&bytes[..8], b"MICAPRG9");
     assert_eq!(
         program.kind_fact_after(0),
         Some((reg(0), ValueKind::Relation))
@@ -1617,7 +1617,7 @@ fn completed_task_does_not_open_another_transaction() {
     let program = Program::new(
         0,
         [Instruction::Return {
-            value: v(Value::nothing()),
+            value: v(Value::empty_relation()),
         }],
     )
     .unwrap();
@@ -1754,7 +1754,7 @@ fn binary_divide_by_zero_raises_catchable_error() {
             Instruction::ExitTry,
             Instruction::Return { value: r(3) },
             Instruction::Return {
-                value: v(Value::nothing()),
+                value: v(Value::empty_relation()),
             },
         ],
     )
@@ -1810,64 +1810,6 @@ fn scan_bindings_returns_relation_values() {
             retries: 0,
         }
     );
-}
-
-#[test]
-fn one_extracts_single_query_binding_value() {
-    let kernel = kernel_with_world_relations();
-    let room = int(300);
-    let program = Program::new(
-        2,
-        [
-            Instruction::Load {
-                dst: reg(0),
-                value: Value::list([Value::map([(sym("room"), room.clone())])]),
-            },
-            Instruction::One {
-                dst: reg(1),
-                src: reg(0),
-            },
-            Instruction::Return { value: r(1) },
-        ],
-    )
-    .unwrap();
-    assert_eq!(
-        run_program(&kernel, program, 100).unwrap(),
-        TaskOutcome::Complete {
-            value: room,
-            effects: vec![],
-            mailbox_sends: Vec::new(),
-            retries: 0,
-        }
-    );
-}
-
-#[test]
-fn one_raises_on_ambiguous_query_results() {
-    let kernel = kernel_with_world_relations();
-    let program = Program::new(
-        2,
-        [
-            Instruction::Load {
-                dst: reg(0),
-                value: Value::list([
-                    Value::map([(sym("room"), int(300))]),
-                    Value::map([(sym("room"), int(301))]),
-                ]),
-            },
-            Instruction::One {
-                dst: reg(1),
-                src: reg(0),
-            },
-        ],
-    )
-    .unwrap();
-
-    assert!(matches!(
-        run_program(&kernel, program, 100).unwrap(),
-        TaskOutcome::Aborted { error, .. }
-            if error.error_code_symbol() == Some(Symbol::intern("E_AMBIGUOUS"))
-    ));
 }
 
 #[test]
@@ -2080,7 +2022,7 @@ fn read_commits_effects_and_returns_supplied_input() {
     assert_eq!(
         first,
         TaskOutcome::Suspended {
-            kind: SuspendKind::WaitingForInput(sym("line")),
+            kind: SuspendKind::WaitingForInput(Some(sym("line"))),
             effects: vec![emitted(strv("prompt"))],
             mailbox_sends: Vec::new(),
             retries: 0,
@@ -2452,7 +2394,7 @@ fn task_manager_rejects_unknown_and_completed_resume() {
         Program::new(
             0,
             [Instruction::Return {
-                value: v(Value::nothing()),
+                value: v(Value::empty_relation()),
             }],
         )
         .unwrap(),
@@ -2485,7 +2427,7 @@ fn task_manager_cancels_suspended_task() {
                     kind: SuspendKind::Never,
                 },
                 Instruction::Return {
-                    value: v(Value::nothing()),
+                    value: v(Value::empty_relation()),
                 },
             ],
         )
@@ -2524,7 +2466,7 @@ fn shared_task_manager_cancels_suspended_task() {
                     kind: SuspendKind::Never,
                 },
                 Instruction::Return {
-                    value: v(Value::nothing()),
+                    value: v(Value::empty_relation()),
                 },
             ],
         )
@@ -2547,7 +2489,7 @@ fn shared_task_manager_cancels_suspended_task() {
             .resume_with_context(
                 task_id,
                 AuthorityContext::root(),
-                Value::nothing(),
+                Value::empty_relation(),
                 RuntimeContext::default(),
             )
             .unwrap_err(),
@@ -2566,7 +2508,7 @@ fn shared_task_manager_cancels_all_suspended_tasks() {
                     kind: SuspendKind::Never,
                 },
                 Instruction::Return {
-                    value: v(Value::nothing()),
+                    value: v(Value::empty_relation()),
                 },
             ],
         )
@@ -3254,8 +3196,8 @@ fn error_field_instruction_extracts_rich_error_parts() {
         TaskOutcome::Complete {
             value: Value::list([
                 err("E_NOT_PORTABLE"),
-                strv("That cannot be taken."),
-                strv("lamp")
+                Value::option_some(strv("That cannot be taken.")),
+                Value::option_some(strv("lamp"))
             ]),
             effects: vec![],
             mailbox_sends: Vec::new(),
@@ -3321,7 +3263,7 @@ fn try_catches_raised_error_by_code() {
             Instruction::ExitTry,
             Instruction::Return { value: r(1) },
             Instruction::Return {
-                value: v(Value::nothing()),
+                value: v(Value::empty_relation()),
             },
         ],
     )
@@ -3373,7 +3315,7 @@ fn raise_unwinds_across_activation_to_caller_handler() {
             Instruction::ExitTry,
             Instruction::Return { value: r(1) },
             Instruction::Return {
-                value: v(Value::nothing()),
+                value: v(Value::empty_relation()),
             },
         ],
     )
@@ -3478,7 +3420,7 @@ fn call_depth_limit_is_enforced() {
         Program::new(
             0,
             [Instruction::Return {
-                value: v(Value::nothing()),
+                value: v(Value::empty_relation()),
             }],
         )
         .unwrap(),

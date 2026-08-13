@@ -212,10 +212,6 @@ pub enum HirExpr {
         expr: Box<HirExpr>,
         catches: Vec<HirRecovery>,
     },
-    One {
-        id: NodeId,
-        expr: Box<HirExpr>,
-    },
     Break {
         id: NodeId,
     },

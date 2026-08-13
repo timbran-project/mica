@@ -60,7 +60,7 @@ impl WorkloadCase {
         let expected = if self.hit {
             Value::int((self.map_size - 1) as i64).unwrap()
         } else {
-            Value::nothing()
+            Value::empty_relation()
         };
         let program = Program::new(
             8,

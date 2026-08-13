@@ -172,7 +172,7 @@ impl ReadOnlySourceQueryReport {
                 Value::symbol(Symbol::intern("task_id")),
                 self.task_id
                     .and_then(|task_id| Value::int(task_id as i64).ok())
-                    .unwrap_or_else(Value::nothing),
+                    .map_or_else(Value::option_none, Value::option_some),
             ),
             (
                 Value::symbol(Symbol::intern("status")),
@@ -180,11 +180,15 @@ impl ReadOnlySourceQueryReport {
             ),
             (
                 Value::symbol(Symbol::intern("value")),
-                self.value.clone().unwrap_or_else(Value::nothing),
+                self.value
+                    .clone()
+                    .map_or_else(Value::option_none, Value::option_some),
             ),
             (
                 Value::symbol(Symbol::intern("error")),
-                self.error.clone().unwrap_or_else(Value::nothing),
+                self.error
+                    .clone()
+                    .map_or_else(Value::option_none, Value::option_some),
             ),
             (
                 Value::symbol(Symbol::intern("diagnostics")),

@@ -28,7 +28,7 @@ relation query because `AssignedTo` begins with an uppercase letter.
 let value = expression
 const fixed = expression
 value = value + 1
-let [first, ?middle = nothing, @rest] = values
+let [first, ?middle = none, @rest] = values
 
 fn add(left, right) => left + right
 
@@ -90,18 +90,21 @@ retract AssignedTo(#inspection, _)
 
 AssignedTo(#inspection, #technician)
 AssignedTo(?work, #technician)
-one Label(#sensor, ?label)
+let exactly {label} = Label(#sensor, ?label)
+if let {location} = LocatedAt(#sensor, ?location)
+  return some(location)
+end
 
 [:work, :owner] { [#inspection, #alice], [#repair, #bob] }
 [] {}
-[] {[]}
+()
 ```
 
 `[0]` is a zero-based key-position list for a functional relation. `?thing` and `?name` are query
 variables that bind returned values. `_` is a wildcard that matches without binding.
 
 A relation literal has a unique symbol heading followed by rows of exactly that arity. `[] {}` is
-also spelled `nothing`; `[] {[]}` is the zero-column unit relation.
+the zero-column empty relation; `()` is the zero-column unit relation.
 
 `assert` and `retract` require relation atoms. `require` accepts any boolean condition:
 
@@ -168,7 +171,7 @@ finally
 end
 
 recover risky()
-catch E_FAIL => nothing
+catch E_FAIL => none
 catch => "fallback"
 end
 ```

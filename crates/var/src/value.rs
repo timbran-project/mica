@@ -306,7 +306,7 @@ impl Value {
     }
 
     #[inline(always)]
-    pub const fn nothing() -> Self {
+    pub const fn empty_relation() -> Self {
         Self::pack(TAG_EMPTY_RELATION, 0)
     }
 
@@ -460,6 +460,41 @@ impl Value {
         row: Option<Tuple>,
     ) -> Result<Self, RelationValueError> {
         RelationValue::new_small(heading, row).map(Self::from)
+    }
+
+    pub fn option_none() -> Self {
+        Self::small_relation([Symbol::intern("value")], None)
+            .expect("the standard option heading is valid")
+    }
+
+    pub fn option_some(value: Value) -> Self {
+        Self::small_relation([Symbol::intern("value")], Some(Tuple::from([value])))
+            .expect("the standard option row matches its heading")
+    }
+
+    pub fn option_payload(&self) -> Option<Option<Value>> {
+        self.with_relation(|relation| {
+            if relation.heading() != [Symbol::intern("value")] || relation.len() > 1 {
+                return None;
+            }
+            Some(relation.rows().first().map(|row| row.values()[0].clone()))
+        })?
+    }
+
+    pub fn result_ok(value: Value) -> Self {
+        Self::standard_result("ok", value)
+    }
+
+    pub fn result_err(error: Value) -> Self {
+        Self::standard_result("error", error)
+    }
+
+    fn standard_result(case: &str, value: Value) -> Self {
+        Self::small_relation(
+            [Symbol::intern("case"), Symbol::intern("value")],
+            Some(Tuple::from([Value::symbol(Symbol::intern(case)), value])),
+        )
+        .expect("the standard result row matches its heading")
     }
 
     pub fn range(start: Value, end: Option<Value>) -> Self {
@@ -917,7 +952,7 @@ impl Drop for Value {
 
 impl Default for Value {
     fn default() -> Self {
-        Self::nothing()
+        Self::empty_relation()
     }
 }
 
@@ -956,7 +991,7 @@ impl From<Identity> for Value {
 impl From<RelationValue> for Value {
     fn from(value: RelationValue) -> Self {
         if value.arity() == 0 && value.is_empty() {
-            return Self::nothing();
+            return Self::empty_relation();
         }
         Self::heap(HeapValue::Relation(value))
     }

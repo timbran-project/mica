@@ -24,6 +24,7 @@ use crate::{
 use mica_relation_kernel::{
     Atom, ConflictPolicy, DispatchRelations, RelationId, RelationKernel, RelationMetadata, Rule,
     RuleBodyItem, RuleComparisonOp, RuleDefinition, RuleGuard, Term, Transaction, Tuple,
+    frob_only_dispatch_restriction, unrestricted_dispatch_restriction,
 };
 use mica_var::{Identity, Symbol, Value, ValueError, ValueKind};
 use mica_vm::{
@@ -703,10 +704,7 @@ impl<'a> ContextValidator<'a> {
             }
             HirExpr::RelationAtom(atom) => self.validate_relation_atom(atom),
             HirExpr::FactChange { atom, .. } => self.validate_relation_atom(atom),
-            HirExpr::Require { condition, .. }
-            | HirExpr::One {
-                expr: condition, ..
-            } => {
+            HirExpr::Require { condition, .. } => {
                 self.validate_expr(condition, ExprUse::Value);
             }
             HirExpr::Index {
@@ -1119,7 +1117,6 @@ fn literal_value_for_rule(
         Literal::Bytes(value) => Ok(Value::bytes(value)),
         Literal::Bool(value) => Ok(Value::bool(*value)),
         Literal::ErrorCode(value) => Ok(Value::error_code(Symbol::intern(value))),
-        Literal::Nothing => Ok(Value::nothing()),
         Literal::Unit => Ok(Value::unit()),
     }
 }
@@ -1245,7 +1242,7 @@ fn compile_installed_params(
             let binding = &semantic.bindings[param.binding.as_u32() as usize];
             let restriction = match &param.restriction {
                 Some(restriction) => compile_param_restriction(param.id, context, restriction)?,
-                None => Value::nothing(),
+                None => unrestricted_dispatch_restriction(),
             };
             Ok(InstalledParam {
                 name: binding.name.clone(),
@@ -1275,7 +1272,7 @@ fn compile_param_restriction(
                 name: restriction.prototype.clone(),
             })?;
     if restriction.frob_only {
-        Ok(Value::frob(identity, Value::nothing()))
+        Ok(frob_only_dispatch_restriction(identity))
     } else {
         Ok(Value::identity(identity))
     }
@@ -1556,7 +1553,7 @@ impl<'a> ProgramCompiler<'a> {
                         let dst = self.alloc_register();
                         self.emit(Instruction::Load {
                             dst,
-                            value: Value::nothing(),
+                            value: Value::empty_relation(),
                         });
                         dst
                     }
@@ -1671,7 +1668,6 @@ impl<'a> ProgramCompiler<'a> {
                 ..
             } => self.compile_raise(error, message.as_deref(), value.as_deref()),
             HirExpr::Recover { id, expr, catches } => self.compile_recover(*id, expr, catches),
-            HirExpr::One { expr, .. } => self.compile_one(expr),
             HirExpr::Block { items, .. } => {
                 let saved = self.locals.clone();
                 let mut last_value = None;
@@ -2007,7 +2003,7 @@ impl<'a> ProgramCompiler<'a> {
             let dst = self.alloc_register();
             self.emit(Instruction::Load {
                 dst,
-                value: Value::nothing(),
+                value: Value::empty_relation(),
             });
             dst
         }))
@@ -2095,7 +2091,7 @@ impl<'a> ProgramCompiler<'a> {
             }
             None => self.emit(Instruction::Load {
                 dst,
-                value: Value::nothing(),
+                value: Value::empty_relation(),
             }),
         }
         let end = self.instructions.len();
@@ -4262,13 +4258,6 @@ impl<'a> ProgramCompiler<'a> {
         Ok(dst)
     }
 
-    fn compile_one(&mut self, expr: &HirExpr) -> Result<Register, CompileError> {
-        let src = self.compile_expr_for_value(expr)?;
-        let dst = self.alloc_register();
-        self.emit(Instruction::One { dst, src });
-        Ok(dst)
-    }
-
     fn compile_try(
         &mut self,
         id: NodeId,
@@ -4293,7 +4282,7 @@ impl<'a> ProgramCompiler<'a> {
             let error = self.alloc_register();
             self.emit(Instruction::Load {
                 dst: error,
-                value: Value::nothing(),
+                value: Value::empty_relation(),
             });
             vec![CatchHandler {
                 code: None,
@@ -4308,7 +4297,7 @@ impl<'a> ProgramCompiler<'a> {
                         let register = self.alloc_register();
                         self.emit(Instruction::Load {
                             dst: register,
-                            value: Value::nothing(),
+                            value: Value::empty_relation(),
                         });
                         self.locals.insert(binding, register);
                         register
@@ -4436,7 +4425,7 @@ impl<'a> ProgramCompiler<'a> {
         let dst = self.alloc_register();
         self.emit(Instruction::Load {
             dst,
-            value: Value::nothing(),
+            value: Value::empty_relation(),
         });
 
         let has_dynamic_catch = catches
@@ -4446,7 +4435,7 @@ impl<'a> ProgramCompiler<'a> {
             let error = self.alloc_register();
             self.emit(Instruction::Load {
                 dst: error,
-                value: Value::nothing(),
+                value: Value::empty_relation(),
             });
             vec![CatchHandler {
                 code: None,
@@ -4461,7 +4450,7 @@ impl<'a> ProgramCompiler<'a> {
                         let register = self.alloc_register();
                         self.emit(Instruction::Load {
                             dst: register,
-                            value: Value::nothing(),
+                            value: Value::empty_relation(),
                         });
                         self.locals.insert(binding, register);
                         register
@@ -4636,7 +4625,7 @@ impl<'a> ProgramCompiler<'a> {
         let dst = self.alloc_register();
         self.emit(Instruction::Load {
             dst,
-            value: Value::nothing(),
+            value: Value::empty_relation(),
         });
         Ok(dst)
     }
@@ -4654,7 +4643,7 @@ impl<'a> ProgramCompiler<'a> {
         let dst = self.alloc_register();
         self.emit(Instruction::Load {
             dst,
-            value: Value::nothing(),
+            value: Value::empty_relation(),
         });
         Ok(dst)
     }
@@ -5113,7 +5102,6 @@ impl<'a> ProgramCompiler<'a> {
             Literal::Bytes(value) => Ok(Value::bytes(value)),
             Literal::Bool(value) => Ok(Value::bool(*value)),
             Literal::ErrorCode(value) => Ok(Value::error_code(Symbol::intern(value))),
-            Literal::Nothing => Ok(Value::nothing()),
             Literal::Unit => Ok(Value::unit()),
         }
     }
@@ -5800,7 +5788,6 @@ fn expr_id(expr: &HirExpr) -> NodeId {
         | HirExpr::Return { id, .. }
         | HirExpr::Raise { id, .. }
         | HirExpr::Recover { id, .. }
-        | HirExpr::One { id, .. }
         | HirExpr::Break { id }
         | HirExpr::Continue { id }
         | HirExpr::Try { id, .. }
@@ -6025,7 +6012,7 @@ mod tests {
             "try\n\
                raise E_NOT_PORTABLE, \"That cannot be taken.\", :lamp\n\
              catch E_NOT_PORTABLE as err\n\
-               return (err.code == E_NOT_PORTABLE) and (err.message == \"That cannot be taken.\") and (err.value == :lamp)\n\
+               return (err.code == E_NOT_PORTABLE) and (err.message == some(\"That cannot be taken.\")) and (err.value == some(:lamp))\n\
              end",
             &context,
             &mut task_manager,
@@ -6054,7 +6041,7 @@ mod tests {
              catch err if err.code == E_PERMISSION\n\
                false\n\
              catch err if err.code == E_NO_EXIT\n\
-               err.message == \"No exit.\"\n\
+               err.message == some(\"No exit.\")\n\
              end\n\
              return handled",
             &context,
@@ -6426,6 +6413,33 @@ mod tests {
     }
 
     #[test]
+    fn compiled_task_rejects_non_list_splices() {
+        let context = CompileContext::new();
+        let kernel = RelationKernel::new();
+        let mut task_manager = TaskManager::new(kernel);
+        let submitted = submit_source_task(
+            "try\n\
+               return [1, @2]\n\
+             catch E_TYPE as problem\n\
+               return problem.value\n\
+             end",
+            &context,
+            &mut task_manager,
+        )
+        .unwrap();
+
+        assert_eq!(
+            submitted.outcome,
+            TaskOutcome::Complete {
+                value: Value::option_some(Value::int(2).unwrap()),
+                effects: vec![],
+                mailbox_sends: Vec::new(),
+                retries: 0,
+            }
+        );
+    }
+
+    #[test]
     fn compiled_task_runs_scatter_assignment_with_required_optional_and_rest_parts() {
         let context = CompileContext::new();
         let kernel = RelationKernel::new();
@@ -6631,7 +6645,7 @@ mod tests {
             "let pair = [#coin, #room]\n\
              assert LocatedIn(@pair)\n\
              let prefix = [#coin]\n\
-             let place = one LocatedIn(@prefix, ?place)\n\
+             let exactly {:place -> place} = LocatedIn(@prefix, ?place)\n\
              retract LocatedIn(@prefix, ?old_place)\n\
              return place == #room && not LocatedIn(@pair)",
             &context,
@@ -7136,7 +7150,7 @@ mod tests {
                    let outcome: {contract} = offending\n\
                    false\n\
                  catch E_TYPE as problem\n\
-                   problem.value == offending\n\
+                   problem.value == some(offending)\n\
                  end\n\
                  return caught"
             ),
@@ -7248,7 +7262,7 @@ mod tests {
              catch E_TYPE as problem\n\
                problem.value\n\
              end\n\
-             return caught == [:case, :value] { [:ok, \"wrong\"] }",
+             return caught == some([:case, :value] { [:ok, \"wrong\"] })",
             &context,
             &mut task_manager,
         )
@@ -7929,7 +7943,7 @@ mod tests {
             TaskOutcome::Suspended {
                 kind: SuspendKind::WaitingForInput(value),
                 ..
-            } if value == Value::symbol(Symbol::intern("line"))
+            } if value == Some(Value::symbol(Symbol::intern("line")))
         ));
 
         let read_without_metadata = submit_source_task(
@@ -7944,7 +7958,7 @@ mod tests {
             TaskOutcome::Suspended {
                 kind: SuspendKind::WaitingForInput(value),
                 ..
-            } if value == Value::nothing()
+            } if value.is_none()
         ));
     }
 
@@ -8469,7 +8483,7 @@ mod tests {
                return first + rest[0] + rest[1]\n\
              end\n\
              fn empty(first, @rest)\n\
-               return (first == 1) and (rest[0] == nothing)\n\
+               return (first == 1) and (rest == [])\n\
              end\n\
              return sum(1, 2, 3) + if empty(1)\n\
                10\n\

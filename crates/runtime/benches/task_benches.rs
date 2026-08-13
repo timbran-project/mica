@@ -280,7 +280,7 @@ impl TaskBenchContext {
         let program = Program::new(
             0,
             [Instruction::Return {
-                value: value(Value::nothing()),
+                value: value(Value::empty_relation()),
             }],
         )
         .unwrap();

@@ -38,8 +38,8 @@ verb http_login_icon_label_node(icon, label)
 end
 
 verb http_request(request)
-  let http_method = one RequestMethod(request, ?m)
-  let path = one RequestPath(request, ?path)
+  let exactly {:m -> http_method} = RequestMethod(request, ?m)
+  let exactly {:path -> path} = RequestPath(request, ?path)
 
   if http_method == "GET" && (path == "/auth/login" || string_starts_with(path, "/auth/login?"))
     return http_html(200, http_login_document(path))
@@ -73,8 +73,10 @@ verb http_login_document(path)
     sign_in_class = "auth-tab active"
   end
 
+  let github_enabled = mud/RuntimeConfig(#mud/config_github_auth, true)
+  let local_password_enabled = mud/RuntimeConfig(#mud/config_local_password_auth, true)
   let github_actions = []
-  if #mud/config_github_auth.mud/runtimeConfig == true
+  if github_enabled
     github_actions = [dom <a class="github-signin" href={start_url}>
       <span class="github-mark" aria-hidden="true">GH</span>
       {http_login_icon_label_node(github_icon, github_label)}
@@ -82,7 +84,7 @@ verb http_login_document(path)
   end
 
   let local_forms = []
-  if #mud/config_local_password_auth.mud/runtimeConfig == true
+  if local_password_enabled
     if create_mode == true
       local_forms = [dom <form class="local-signin" method="post" action="/auth/create">
         <input type="hidden" name="return" value="/mud" />
@@ -102,7 +104,7 @@ verb http_login_document(path)
   end
 
   let empty_state = []
-  if #mud/config_github_auth.mud/runtimeConfig != true && #mud/config_local_password_auth.mud/runtimeConfig != true
+  if not github_enabled && not local_password_enabled
     empty_state = [dom <p class="empty">No sign-in method is enabled for this MUD.</p>]
   end
 

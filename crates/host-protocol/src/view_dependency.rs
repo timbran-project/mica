@@ -73,11 +73,15 @@ fn decode_dependency(index: usize, value: &Value) -> Result<SyncViewDependency, 
                     bindings.with_list(|bindings| {
                         bindings
                             .iter()
-                            .map(|binding| (!binding.is_empty_relation()).then(|| binding.clone()))
-                            .collect::<Vec<_>>()
+                            .map(|binding| {
+                                binding.option_payload().ok_or_else(|| {
+                                    dependency_error(index, "bindings must contain option values")
+                                })
+                            })
+                            .collect::<Result<Vec<_>, _>>()
                     })
                 })
-                .ok_or_else(|| dependency_error(index, "bindings must be a list"))?;
+                .ok_or_else(|| dependency_error(index, "bindings must be a list"))??;
             Ok(SyncViewDependency {
                 subject,
                 relation,
@@ -116,7 +120,10 @@ mod tests {
             ),
             (
                 Value::symbol(Symbol::intern("bindings")),
-                Value::list([Value::identity(actor), Value::nothing()]),
+                Value::list([
+                    Value::option_some(Value::identity(actor)),
+                    Value::option_none(),
+                ]),
             ),
         ])]);
 
@@ -137,7 +144,10 @@ mod tests {
                 Value::symbol(Symbol::intern("subject")),
                 Value::symbol(Symbol::intern("catalogue")),
             ),
-            (Value::symbol(Symbol::intern("relation")), Value::nothing()),
+            (
+                Value::symbol(Symbol::intern("relation")),
+                Value::option_none(),
+            ),
             (Value::symbol(Symbol::intern("bindings")), Value::list([])),
         ])]);
 

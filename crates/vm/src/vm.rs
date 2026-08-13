@@ -95,7 +95,7 @@ impl Frame {
             });
         }
 
-        let mut registers = vec![Value::nothing(); register_count];
+        let mut registers = vec![Value::empty_relation(); register_count];
         for (slot, arg) in registers.iter_mut().zip(args) {
             *slot = arg;
         }
@@ -943,7 +943,6 @@ fn opcode_name(opcode: &Opcode) -> &'static str {
         Opcode::Index { .. } => "Index",
         Opcode::SetIndex { .. } => "SetIndex",
         Opcode::ErrorField { .. } => "ErrorField",
-        Opcode::One { .. } => "One",
         Opcode::CollectionLen { .. } => "CollectionLen",
         Opcode::CollectionKeyAt { .. } => "CollectionKeyAt",
         Opcode::CollectionValueAt { .. } => "CollectionValueAt",
@@ -1603,7 +1602,10 @@ impl RegisterVm {
                 Ok(VmHostResponse::Continue)
             }
             Opcode::BuildList { dst, items } => {
-                let value = self.build_list(program, program.list_items(*items));
+                let value = match self.build_list(program, program.list_items(*items)) {
+                    Ok(value) => value,
+                    Err(error) => return self.begin_raise(error),
+                };
                 self.write_register_unchecked(*dst, value);
                 self.advance_ip_unchecked();
                 Ok(VmHostResponse::Continue)
@@ -1714,13 +1716,7 @@ impl RegisterVm {
                 Ok(VmHostResponse::Continue)
             }
             Opcode::ErrorField { dst, error, field } => {
-                let value = error_field_value(self.read_register_unchecked(*error), *field);
-                self.write_register_unchecked(*dst, value);
-                self.advance_ip_unchecked();
-                Ok(VmHostResponse::Continue)
-            }
-            Opcode::One { dst, src } => {
-                let value = match one_value(self.read_register_unchecked(*src)) {
+                let value = match error_field_value(self.read_register_unchecked(*error), *field) {
                     Ok(value) => value,
                     Err(error) => return self.begin_raise(error),
                 };
@@ -2407,9 +2403,7 @@ impl RegisterVm {
                 Ok(VmHostResponse::Suspend(SuspendKind::Commit))
             }
             Opcode::Read { dst, metadata } => {
-                let metadata = metadata
-                    .map(|metadata| self.resolve_operand_ref(program, metadata))
-                    .unwrap_or_else(Value::nothing);
+                let metadata = metadata.map(|metadata| self.resolve_operand_ref(program, metadata));
                 self.advance_ip_unchecked();
                 self.state.pending_resume = Some(*dst);
                 Ok(VmHostResponse::Suspend(SuspendKind::WaitingForInput(
@@ -2821,7 +2815,7 @@ impl RegisterVm {
     }
 
     #[inline]
-    fn build_list(&self, program: &Program, items: &[CompactListItem]) -> Value {
+    fn build_list(&self, program: &Program, items: &[CompactListItem]) -> Result<Value, Value> {
         let mut values = Vec::new();
         for item in items {
             match item {
@@ -2833,12 +2827,16 @@ impl RegisterVm {
                     let Some(()) = splice.with_list(|items| {
                         values.extend(items.iter().cloned());
                     }) else {
-                        return Value::nothing();
+                        return Err(Value::error(
+                            Symbol::intern("E_TYPE"),
+                            Some("list splice requires a list"),
+                            Some(splice),
+                        ));
                     };
                 }
             }
         }
-        Value::list(values)
+        Ok(Value::list(values))
     }
 
     fn resolve_list_items(
@@ -3338,20 +3336,31 @@ fn index_error(collection: &Value, index: &Value) -> Value {
     )
 }
 
-fn error_field_value(error: &Value, field: ErrorField) -> Value {
+fn error_field_value(error: &Value, field: ErrorField) -> Result<Value, Value> {
     if let Some(code) = error.as_error_code() {
-        return match field {
+        return Ok(match field {
             ErrorField::Code => Value::error_code(code),
-            ErrorField::Message | ErrorField::Value => Value::nothing(),
-        };
+            ErrorField::Message | ErrorField::Value => Value::option_none(),
+        });
     }
     error
         .with_error(|error| match field {
             ErrorField::Code => Value::error_code(error.code()),
-            ErrorField::Message => error.message().map_or_else(Value::nothing, Value::string),
-            ErrorField::Value => error.value().cloned().unwrap_or_else(Value::nothing),
+            ErrorField::Message => error.message().map_or_else(Value::option_none, |message| {
+                Value::option_some(Value::string(message))
+            }),
+            ErrorField::Value => error
+                .value()
+                .cloned()
+                .map_or_else(Value::option_none, Value::option_some),
         })
-        .unwrap_or_else(Value::nothing)
+        .ok_or_else(|| {
+            Value::error(
+                Symbol::intern("E_TYPE"),
+                Some("error field access requires an error or error code"),
+                Some(error.clone()),
+            )
+        })
 }
 
 fn collection_len(collection: &Value) -> Value {
@@ -3439,29 +3448,29 @@ fn relation_row_value(relation: &RelationValue, index: usize) -> Option<Value> {
 
 fn collection_key_at(collection: &Value, index: &Value) -> Value {
     let Some(index) = ordinal_index(index) else {
-        return Value::nothing();
+        return Value::empty_relation();
     };
     if collection.list_len().is_some() || collection.kind() == ValueKind::Relation {
         return i64::try_from(index)
             .ok()
             .and_then(|index| Value::int(index).ok())
-            .unwrap_or_else(Value::nothing);
+            .unwrap_or_else(Value::empty_relation);
     }
     if collection.with_range(|_, _| ()).is_some() {
         return i64::try_from(index)
             .ok()
             .and_then(|index| Value::int(index).ok())
-            .unwrap_or_else(Value::nothing);
+            .unwrap_or_else(Value::empty_relation);
     }
     collection
         .with_map(|entries| entries.get(index).map(|(key, _)| key.clone()))
         .flatten()
-        .unwrap_or_else(Value::nothing)
+        .unwrap_or_else(Value::empty_relation)
 }
 
 fn collection_value_at(collection: &Value, index: &Value) -> Value {
     let Some(index) = ordinal_index(index) else {
-        return Value::nothing();
+        return Value::empty_relation();
     };
     collection
         .list_get(index)
@@ -3490,43 +3499,7 @@ fn collection_value_at(collection: &Value, index: &Value) -> Value {
                 .with_map(|entries| entries.get(index).map(|(_, value)| value.clone()))
                 .flatten()
         })
-        .unwrap_or_else(Value::nothing)
-}
-
-fn one_value(value: &Value) -> Result<Value, Value> {
-    if let Some(result) = value.with_relation(|relation| match relation.len() {
-        0 => Ok(Value::nothing()),
-        1 if relation.arity() == 1 => Ok(relation.rows()[0].values()[0].clone()),
-        1 => Ok(relation_row_value(relation, 0).unwrap()),
-        _ => Err(ambiguous_one(value)),
-    }) {
-        return result;
-    }
-
-    let Some(len) = value.list_len() else {
-        return Ok(Value::nothing());
-    };
-    match len {
-        0 => Ok(Value::nothing()),
-        1 => {
-            let row = value.list_get(0).unwrap_or_else(Value::nothing);
-            if row.map_len() == Some(1) {
-                return Ok(row
-                    .with_map(|entries| entries[0].1.clone())
-                    .unwrap_or_else(Value::nothing));
-            }
-            Ok(row)
-        }
-        _ => Err(ambiguous_one(value)),
-    }
-}
-
-fn ambiguous_one(value: &Value) -> Value {
-    Value::error(
-        Symbol::intern("E_AMBIGUOUS"),
-        Some("one expected at most one result"),
-        Some(value.clone()),
-    )
+        .unwrap_or_else(Value::empty_relation)
 }
 
 fn select_authorized_method_call(

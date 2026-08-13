@@ -51,7 +51,7 @@ ChatRenderedMessage(room, message, seq, author, text) :-
 verb chat_room_revision(room: int) -> int
   let revision: int = 0
   for found in ChatMessage(room, ?message)
-    let seq: int = one MessageSeq(found[:message], ?seq)
+    let exactly {:seq -> seq} = MessageSeq(found[:message], ?seq)
     if seq > revision
       revision = seq
     end
@@ -63,8 +63,8 @@ end
 // Seeded message keys are identities while posted message keys are frobs, so this boundary remains
 // dynamic.
 verb chat_message_node(message) -> map
-  let author: string = one MessageAuthor(message, ?author)
-  let text: string = one MessageText(message, ?text)
+  let exactly {:author -> author} = MessageAuthor(message, ?author)
+  let exactly {:text -> text} = MessageText(message, ?text)
   let node: map = dom <li data-sync-key={to_literal(message)}>
     <span class="author">{author}</span>: {text}
   </li>
@@ -94,7 +94,7 @@ end
 
 verb sync_event(endpoint: identity, session: int, view: int, event: string, target: string, action: string, fields: map) -> bool
   if event == "submit" && target == "chat-composer" && action == "chat_post"
-    let room: int = one ChatView(view, ?room)
+    let exactly {:room -> room} = ChatView(view, ?room)
     let posted: bool = chat_post(endpoint, room, fields[:actor], fields[:text])
     return posted
   end
@@ -103,12 +103,12 @@ verb sync_event(endpoint: identity, session: int, view: int, event: string, targ
 end
 
 verb sync_view_dependencies(view: int) -> list
-  let room: int = one ChatView(view, ?room)
-  return [{:subject -> :relation, :relation -> :ChatRenderedMessage, :bindings -> [room, nothing, nothing, nothing, nothing]}]
+  let exactly {:room -> room} = ChatView(view, ?room)
+  return [{:subject -> :relation, :relation -> :ChatRenderedMessage, :bindings -> [some(room), none, none, none, none]}]
 end
 
 verb sync_view_tree(view: int) -> map
-  let room: int = one ChatView(view, ?room)
+  let exactly {:room -> room} = ChatView(view, ?room)
   let messages = []
   for found in ChatMessage(room, ?message)
     messages = [@messages, chat_message_node(found[:message])]

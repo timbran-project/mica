@@ -152,7 +152,10 @@ fn runner_string_primitives_support_character_level_munging() {
         assert!(matches!(
             report.outcome,
             TaskOutcome::Complete { value, .. }
-                if value == Value::list([Value::string(message), payload])
+                if value == Value::list([
+                    Value::option_some(Value::string(message)),
+                    Value::option_some(payload),
+                ])
         ));
     }
     assert!(matches!(
@@ -168,11 +171,11 @@ fn runner_string_primitives_support_character_level_munging() {
             .unwrap()
             .outcome,
         TaskOutcome::Complete { value, .. }
-            if value == Value::list([
+            if value == Value::option_some(Value::list([
                 Value::string("abc"),
                 Value::int(0).unwrap(),
                 Value::int(4).unwrap(),
-            ])
+            ]))
     ));
     assert!(matches!(
         runner
@@ -280,7 +283,7 @@ fn runner_string_primitives_support_character_level_munging() {
     ));
     assert!(matches!(
         runner
-            .run_source("return parse_ordinal(\"twenty-first\")")
+            .run_source("return match parse_ordinal(\"twenty-first\")\ncase ok(value)\n  value\ncase err(problem)\n  raise problem.code\nend")
             .unwrap()
             .outcome,
         TaskOutcome::Complete { value, .. } if value == Value::int(21).unwrap()
@@ -298,14 +301,15 @@ fn runner_string_primitives_support_character_level_munging() {
     ));
     assert!(matches!(
         runner.run_source("return os_getenv(\"PATH\")").unwrap().outcome,
-        TaskOutcome::Complete { value, .. } if value.with_str(|s| !s.is_empty()).unwrap_or(false)
+        TaskOutcome::Complete { value, .. }
+            if value.option_payload().flatten().and_then(|value| value.with_str(|s| !s.is_empty())) == Some(true)
     ));
     assert!(matches!(
         runner
             .run_source("return os_getenv(\"MICA_DEFINITELY_NOT_SET_xyzzy\")")
             .unwrap()
             .outcome,
-        TaskOutcome::Complete { value, .. } if value == Value::nothing()
+        TaskOutcome::Complete { value, .. } if value == Value::option_none()
     ));
 }
 
@@ -340,6 +344,7 @@ fn default_builtin_result_contracts_classify_exact_and_dynamic_calls() {
         ("is_frob", ValueKind::Bool),
         ("project", ValueKind::Relation),
         ("make_identity", ValueKind::Identity),
+        ("frob_delegate", ValueKind::Identity),
     ] {
         assert_eq!(
             runner.context.runtime_function_result(name),
@@ -363,18 +368,36 @@ fn default_builtin_result_contracts_classify_exact_and_dynamic_calls() {
         );
     }
 
+    for name in ["os_getenv", "actor", "principal"] {
+        assert!(
+            matches!(
+                runner.context.runtime_function_result(name),
+                Some(BuiltinResultKind::Structural(TypeContract::Relation(contract)))
+                    if contract.minimum_rows == 0 && contract.maximum_rows == Some(1)
+            ),
+            "unexpected option contract for {name}"
+        );
+    }
+
+    for name in ["from_literal", "parse_ordinal"] {
+        assert!(
+            matches!(
+                runner.context.runtime_function_result(name),
+                Some(BuiltinResultKind::Structural(TypeContract::Relation(contract)))
+                    if contract.minimum_rows == 1
+                        && contract.maximum_rows == Some(1)
+                        && contract.alternatives.len() == 2
+            ),
+            "unexpected result contract for {name}"
+        );
+    }
+
     for name in [
         "json_decode",
-        "from_literal",
         "frob_value",
         "emit",
         "mailbox_send",
         "index_or",
-        "parse_ordinal",
-        "os_getenv",
-        "frob_delegate",
-        "actor",
-        "principal",
         "openai_chat_completion",
     ] {
         assert_eq!(
@@ -600,8 +623,8 @@ fn runner_string_filein_installs_primitive_prototype_verbs() {
             .outcome,
         TaskOutcome::Complete { value, .. }
             if value == Value::list([
-                Value::string("binding `part` requires string, got int"),
-                Value::int(2).unwrap(),
+                Value::option_some(Value::string("binding `part` requires string, got int")),
+                Value::option_some(Value::int(2).unwrap()),
             ])
     ));
 }
@@ -664,8 +687,8 @@ fn runner_chat_filein_enforces_value_kind_contracts() {
             .outcome,
         TaskOutcome::Complete { value, .. }
             if value == Value::list([
-                Value::string("parameter `actor` requires string, got int"),
-                Value::int(7).unwrap(),
+                Value::option_some(Value::string("parameter `actor` requires string, got int")),
+                Value::option_some(Value::int(7).unwrap()),
             ])
     ));
 }
@@ -723,7 +746,7 @@ fn runner_empty_relation_results_are_falsey() {
                    empty_list_branch = true\n\
                  end\n\
                  let non_empty_list_branch = false\n\
-                 if [nothing]\n\
+                 if [none]\n\
                    non_empty_list_branch = true\n\
                  end\n\
                  let empty_relation_branch = false\n\
@@ -759,11 +782,11 @@ fn runner_to_literal_renders_parseable_value_source() {
 
     assert!(matches!(
         runner
-            .run_source("return to_literal([nothing, true, 42, \"x\", :foo])")
+            .run_source("return to_literal([none, true, 42, \"x\", :foo])")
             .unwrap()
             .outcome,
         TaskOutcome::Complete { value, .. }
-            if value == Value::string("[nothing, true, 42, \"x\", :foo]")
+            if value == Value::string("[[:value] {}, true, 42, \"x\", :foo]")
     ));
     assert!(matches!(
         runner
@@ -801,8 +824,13 @@ fn runner_from_literal_parses_to_literal_output() {
     assert!(matches!(
         runner
             .run_source(
-                "let value = [nothing, true, -42, \"x\", b\"3q2-7w==\", :foo, #take_event, {:a -> 1}, 2.._]
-                 return from_literal(to_literal(value)) == value"
+                "let value = [none, true, -42, \"x\", b\"3q2-7w==\", :foo, #take_event, {:a -> 1}, 2.._]
+                 return match from_literal(to_literal(value))\n\
+                 case ok(decoded)\n\
+                   decoded == value\n\
+                 case err(problem)\n\
+                   false\n\
+                 end"
             )
             .unwrap()
             .outcome,
@@ -812,7 +840,12 @@ fn runner_from_literal_parses_to_literal_output() {
         runner
             .run_source(
                 "let value = [:outer] { [[:inner] { [1] }] }
-                 return from_literal(to_literal(value)) == value"
+                 return match from_literal(to_literal(value))
+                 case ok(decoded)
+                   decoded == value
+                 case err(problem)
+                   false
+                 end"
             )
             .unwrap()
             .outcome,
@@ -820,7 +853,7 @@ fn runner_from_literal_parses_to_literal_output() {
     ));
     assert!(matches!(
         runner
-            .run_source("return from_literal(to_literal(#take_event<[\"coin\"]>))")
+            .run_source("return match from_literal(to_literal(#take_event<[\"coin\"]>))\ncase ok(value)\n  value\ncase err(problem)\n  raise problem.code\nend")
             .unwrap()
             .outcome,
         TaskOutcome::Complete { value, .. }
@@ -833,7 +866,12 @@ fn runner_from_literal_parses_to_literal_output() {
         runner
             .run_source(
                 "let value = [:thing, :count] { [#take_event, 2], [#take_event, 1] }
-                 return from_literal(to_literal(value)) == value"
+                 return match from_literal(to_literal(value))
+                 case ok(decoded)
+                   decoded == value
+                 case err(problem)
+                   false
+                 end"
             )
             .unwrap()
             .outcome,
@@ -875,7 +913,8 @@ fn annotated_bindings_raise_catchable_type_errors_at_dynamic_writes() {
 
     assert!(matches!(
         report.outcome,
-        TaskOutcome::Complete { value, .. } if value == Value::string("wrong")
+        TaskOutcome::Complete { value, .. }
+            if value == Value::option_some(Value::string("wrong"))
     ));
 }
 
@@ -885,7 +924,14 @@ fn annotated_parameters_raise_catchable_type_errors_at_each_call_boundary() {
     for source in [
         "fn accept(value: int) -> int => value
          try
-           return accept(from_literal(\"\\\"wrong\\\"\"))
+           let parsed = from_literal(\"\\\"wrong\\\"\")
+           let decoded = match parsed
+           case ok(value)
+             value
+           case err(problem)
+             raise problem.code
+           end
+           return accept(decoded)
          catch E_TYPE as err
            return [err.message, err.value]
          end",
@@ -893,7 +939,14 @@ fn annotated_parameters_raise_catchable_type_errors_at_each_call_boundary() {
          let typed = fn(value: int) -> int => value + offset
          let accept = typed
          try
-           return accept(from_literal(\"\\\"wrong\\\"\"))
+           let parsed = from_literal(\"\\\"wrong\\\"\")
+           let decoded = match parsed
+           case ok(value)
+             value
+           case err(problem)
+             raise problem.code
+           end
+           return accept(decoded)
          catch E_TYPE as err
            return [err.message, err.value]
          end",
@@ -903,8 +956,8 @@ fn annotated_parameters_raise_catchable_type_errors_at_each_call_boundary() {
             report.outcome,
             TaskOutcome::Complete { value, .. }
                 if value == Value::list([
-                    Value::string("parameter `value` requires int, got string"),
-                    Value::string("wrong"),
+                    Value::option_some(Value::string("parameter `value` requires int, got string")),
+                    Value::option_some(Value::string("wrong")),
                 ])
         ));
     }
@@ -985,10 +1038,10 @@ fn annotated_collection_bindings_raise_catchable_type_errors() {
             report.outcome,
             TaskOutcome::Complete { value, .. }
                 if value == Value::list([
-                    Value::string(format!(
+                    Value::option_some(Value::string(format!(
                         "binding `{subject}` requires int, got string"
-                    )),
-                    Value::string("wrong"),
+                    ))),
+                    Value::option_some(Value::string("wrong")),
                 ])
         ));
     }
@@ -1042,8 +1095,8 @@ fn installed_verb_annotations_check_after_dispatch_without_fallback() {
         report.outcome,
         TaskOutcome::Complete { value, .. }
             if value == Value::list([
-                Value::string("parameter `value` requires int, got string"),
-                Value::string("wrong"),
+                Value::option_some(Value::string("parameter `value` requires int, got string")),
+                Value::option_some(Value::string("wrong")),
             ])
     ));
 
@@ -1111,15 +1164,15 @@ fn annotated_relation_bindings_accept_dynamic_immediate_and_heap_values() {
 
     assert!(matches!(
         runner
-            .run_source("let rows: relation = from_literal(\"nothing\")\nreturn rows")
+            .run_source("let parsed = from_literal(\"[] {}\")\nlet rows: relation = match parsed\ncase ok(value)\n  value\ncase err(problem)\n  raise problem.code\nend\nreturn rows")
             .unwrap()
             .outcome,
-        TaskOutcome::Complete { value, .. } if value == Value::nothing()
+        TaskOutcome::Complete { value, .. } if value == Value::empty_relation()
     ));
     assert!(matches!(
         runner
             .run_source(
-                "let rows: relation = from_literal(\"[:item] {[1]}\")\nreturn rows"
+                "let parsed = from_literal(\"[:item] {[1]}\")\nlet rows: relation = match parsed\ncase ok(value)\n  value\ncase err(problem)\n  raise problem.code\nend\nreturn rows"
             )
             .unwrap()
             .outcome,
@@ -1151,7 +1204,8 @@ fn annotated_integer_bindings_check_division_result_kinds() {
             )
             .unwrap()
             .outcome,
-        TaskOutcome::Complete { value, .. } if value == Value::float(1.5).unwrap()
+        TaskOutcome::Complete { value, .. }
+            if value == Value::option_some(Value::float(1.5).unwrap())
     ));
 }
 
@@ -1184,7 +1238,7 @@ fn relation_literals_construct_dynamic_empty_and_unit_relations() {
     let report = runner
         .run_source(
             "let count = 1
-             return [[:thing, :count] { [7, count + 1], [7, count + 1] }, nothing == [] {}, [] {} == [] {[]}, not (not [] {}), not (not [] {[]})]",
+             return [[:thing, :count] { [7, count + 1], [7, count + 1] }, none == [] {}, [] {} == [] {[]}, not (not [] {}), not (not [] {[]})]",
         )
         .unwrap();
 
@@ -1197,7 +1251,7 @@ fn relation_literals_construct_dynamic_empty_and_unit_relations() {
         TaskOutcome::Complete { value, .. }
             if value == Value::list([
                 relation,
-                Value::bool(true),
+                Value::bool(false),
                 Value::bool(false),
                 Value::bool(false),
                 Value::bool(true),
@@ -1259,12 +1313,48 @@ fn standard_relational_values_distinguish_unit_option_and_result_cases() {
             if value == Value::string("[:value] {[()]}")
     ));
     let round_trip = runner
-        .run_source("return from_literal(to_literal(some(())))")
+        .run_source("return match from_literal(to_literal(some(())))\ncase ok(value)\n  value\ncase err(problem)\n  raise problem.code\nend")
         .unwrap();
     assert!(matches!(
         round_trip.outcome,
         TaskOutcome::Complete { value, .. } if value == values[4]
     ));
+}
+
+#[test]
+fn structural_value_example_handles_nested_options_and_results() {
+    let mut runner = SourceRunner::new_empty();
+    runner
+        .run_filein(include_str!(
+            "../../../apps/examples/structural-values.mica"
+        ))
+        .unwrap();
+
+    for (source, expected) in [
+        (
+            "return :example/describe_optional(value: none)",
+            "not supplied",
+        ),
+        (
+            "return :example/describe_optional(value: some(none))",
+            "supplied without text",
+        ),
+        (
+            "return :example/describe_optional(value: some(some(\"ready\")))",
+            "ready",
+        ),
+        (
+            "return :example/parse_ordinal(text: \"twenty-first\")",
+            "ordinal 21",
+        ),
+    ] {
+        let report = runner.run_source(source).unwrap();
+        assert!(
+            matches!(report.outcome, TaskOutcome::Complete { ref value, .. } if *value == Value::string(expected)),
+            "{}",
+            report.render()
+        );
+    }
 }
 
 #[test]
@@ -1285,7 +1375,7 @@ fn structural_match_is_expression_valued_guarded_and_allocation_free() {
                     case ok(number)\n\
                       number\n\
                     case err(problem)\n\
-                      recover raise problem.code, problem.message, problem.value\n\
+                      recover raise problem.code\n\
                       catch E_SAMPLE => -1\n\
                       end\n\
                     end\n\
@@ -1443,7 +1533,11 @@ fn missing_or_invalid_indexes_raise_catchable_errors() {
         assert!(matches!(
             report.outcome,
             TaskOutcome::Complete { value, .. }
-                if value.with_list(|values| values.len() == 2) == Some(true)
+                if value
+                    .option_payload()
+                    .flatten()
+                    .and_then(|payload| payload.with_list(|values| values.len() == 2))
+                    == Some(true)
         ));
     }
 }
@@ -1603,13 +1697,26 @@ fn runner_agent_core_resolves_default_model_with_env_override() {
         .run_filein(include_str!("../../../apps/agent/core.mica"))
         .unwrap();
 
-    assert!(matches!(
-        runner
-            .run_source("return agent/resolve_model(#agent/default)")
-            .unwrap()
-            .outcome,
-        TaskOutcome::Complete { value, .. } if value == Value::string("deepseek/deepseek-v4-pro")
-    ));
+    let configured_model = runner
+        .run_source("return AgentModel(#agent/default, ?model)")
+        .unwrap()
+        .outcome;
+    assert!(
+        matches!(configured_model, TaskOutcome::Complete { ref value, .. } if value.with_relation(|relation| relation.len()) == Some(1)),
+        "{configured_model:?}"
+    );
+
+    let default_model = runner
+        .run_source("return agent/resolve_model(#agent/default)")
+        .unwrap()
+        .outcome;
+    assert!(
+        matches!(
+        default_model,
+        TaskOutcome::Complete { ref value, .. } if *value == Value::string("deepseek/deepseek-v4-pro")
+        ),
+        "{default_model:?}"
+    );
 
     assert!(matches!(
         runner
@@ -1853,7 +1960,7 @@ fn runner_agent_workspaces_binds_default_agent_to_source_root() {
     ));
     assert!(matches!(
         runner
-            .run_source("return one WorkspaceRoot(workspace/active(#agent/default), ?root)")
+            .run_source("let exactly {:root -> root} = WorkspaceRoot(workspace/active(#agent/default), ?root)\nreturn root")
             .unwrap()
             .outcome,
         TaskOutcome::Complete { value, .. } if value == Value::string("/tmp/agent-test-root")
@@ -1863,7 +1970,7 @@ fn runner_agent_workspaces_binds_default_agent_to_source_root() {
             .run_source("return agent/transcript(#agent/default)")
             .unwrap()
             .outcome,
-        TaskOutcome::Complete { value, .. } if value == Value::nothing()
+        TaskOutcome::Complete { value, .. } if value == Value::option_none()
     ));
 }
 
@@ -2436,10 +2543,14 @@ fn runner_mud_command_parser_runs_in_mica() {
     let report = runner
         .run_source("return :command(actor: #alice, endpoint: endpoint(), line: \"look\")")
         .unwrap();
-    assert!(matches!(
-        report.outcome,
-        TaskOutcome::Complete { value, .. } if value == Value::bool(true)
-    ));
+    assert!(
+        matches!(
+            report.outcome,
+            TaskOutcome::Complete { ref value, .. } if *value == Value::bool(true)
+        ),
+        "{}",
+        report.render()
+    );
     let emissions = runner.drain_emissions();
     assert!(
         emissions.iter().all(
@@ -2635,7 +2746,7 @@ fn runner_mud_core_derives_exits_and_recursive_location() {
     let coin = runner.named_identity(Symbol::intern("coin")).unwrap();
 
     let report = runner
-        .run_source("return one Exit(#north_room, \"south\", ?destination)")
+        .run_source("let exactly {:destination -> destination} = Exit(#north_room, \"south\", ?destination)\nreturn destination")
         .unwrap();
     assert!(matches!(
         report.outcome,
@@ -2653,8 +2764,8 @@ fn runner_mud_core_derives_exits_and_recursive_location() {
         .unwrap();
     let report = runner
         .run_source(
-            "let event = one event/Delivery(#alice, ?event)\n\
-                 let source = one event/Source(event, ?source)\n\
+            "let exactly {:event -> event} = event/Delivery(#alice, ?event)\n\
+                 let exactly {:source -> source} = event/Source(event, ?source)\n\
                  return [frob_delegate(source), event/bindings(source)[:item]]",
         )
         .unwrap();
@@ -2686,7 +2797,7 @@ fn runner_mud_core_derives_exits_and_recursive_location() {
         TaskOutcome::Complete { value, .. } if value == Value::bool(true)
     ));
     let report = runner
-        .run_source("return one LocatedIn(#alice, ?room)")
+        .run_source("let exactly {:room -> room} = LocatedIn(#alice, ?room)\nreturn room")
         .unwrap();
     assert!(
         matches!(
@@ -2705,7 +2816,7 @@ fn runner_mud_core_derives_exits_and_recursive_location() {
         TaskOutcome::Complete { value, .. } if value == Value::bool(false)
     ));
     let report = runner
-        .run_source("return one LocatedIn(#alice, ?room)")
+        .run_source("let exactly {:room -> room} = LocatedIn(#alice, ?room)\nreturn room")
         .unwrap();
     assert!(matches!(
         report.outcome,
@@ -2720,7 +2831,7 @@ fn runner_mud_core_derives_exits_and_recursive_location() {
         TaskOutcome::Complete { value, .. } if value == Value::bool(true)
     ));
     let report = runner
-        .run_source("return one LocatedIn(#coin, ?room)")
+        .run_source("let exactly {:room -> room} = LocatedIn(#coin, ?room)\nreturn room")
         .unwrap();
     assert!(matches!(
         report.outcome,
@@ -2735,7 +2846,7 @@ fn runner_mud_core_derives_exits_and_recursive_location() {
         TaskOutcome::Complete { value, .. } if value == Value::bool(true)
     ));
     let report = runner
-        .run_source("return one LocatedIn(#alice, ?room)")
+        .run_source("let exactly {:room -> room} = LocatedIn(#alice, ?room)\nreturn room")
         .unwrap();
     assert!(matches!(
         report.outcome,
@@ -2750,7 +2861,7 @@ fn runner_mud_core_derives_exits_and_recursive_location() {
         TaskOutcome::Complete { value, .. } if value == Value::bool(true)
     ));
     let report = runner
-        .run_source("return one LocatedIn(#alice, ?room)")
+        .run_source("let exactly {:room -> room} = LocatedIn(#alice, ?room)\nreturn room")
         .unwrap();
     assert!(matches!(
         report.outcome,
@@ -2765,7 +2876,7 @@ fn runner_mud_core_derives_exits_and_recursive_location() {
         TaskOutcome::Complete { value, .. } if value == Value::bool(true)
     ));
     let report = runner
-        .run_source("return one LocatedIn(#alice, ?room)")
+        .run_source("let exactly {:room -> room} = LocatedIn(#alice, ?room)\nreturn room")
         .unwrap();
     assert!(matches!(
         report.outcome,
@@ -2784,7 +2895,7 @@ fn runner_mud_core_derives_exits_and_recursive_location() {
         .run_source("return builder/room_named_in_area(#hotel_area, \"Library\")")
         .unwrap();
     assert!(
-        matches!(report.outcome, TaskOutcome::Complete { ref value, .. } if *value == Value::nothing()),
+        matches!(report.outcome, TaskOutcome::Complete { ref value, .. } if *value == Value::option_none()),
         "{}",
         report.render()
     );
@@ -2814,7 +2925,7 @@ fn runner_mud_core_derives_exits_and_recursive_location() {
     };
     let dug = runner
         .run_source(
-            "return :create_passage(actor: #alice, from: #first_room, to: builder/room_named_in_area(#hotel_area, \"Balcony\"), label: \"out\", return_label: nothing)",
+            "return :create_passage(actor: #alice, from: #first_room, to: builder/room_named_in_area(#hotel_area, \"Balcony\"), label: \"out\", return_label: none)",
         )
         .unwrap();
     assert!(
@@ -2823,7 +2934,7 @@ fn runner_mud_core_derives_exits_and_recursive_location() {
         dug.render()
     );
     let report = runner
-        .run_source("return one Exit(#first_room, \"out\", ?destination)")
+        .run_source("let exactly {:destination -> destination} = Exit(#first_room, \"out\", ?destination)\nreturn destination")
         .unwrap();
     assert!(
         matches!(report.outcome, TaskOutcome::Complete { ref value, .. } if *value == balcony),
@@ -2831,10 +2942,14 @@ fn runner_mud_core_derives_exits_and_recursive_location() {
         report.render()
     );
     let report = runner
-        .run_source("return one Exit(builder/room_named_in_area(#hotel_area, \"Balcony\"), \"in\", ?destination)")
+        .run_source("return Exit(builder/room_named_in_area(#hotel_area, \"Balcony\"), \"in\", ?destination)")
         .unwrap();
     assert!(
-        matches!(report.outcome, TaskOutcome::Complete { ref value, .. } if *value == Value::nothing()),
+        matches!(
+            report.outcome,
+            TaskOutcome::Complete { ref value, .. }
+                if value.with_relation(|relation| relation.is_empty()).unwrap_or(false)
+        ),
         "{}",
         report.render()
     );
@@ -2850,7 +2965,7 @@ fn runner_mud_core_derives_exits_and_recursive_location() {
         dug.render()
     );
     let report = runner
-        .run_source("return one Exit(#first_room, \"east\", ?destination)")
+        .run_source("let exactly {:destination -> destination} = Exit(#first_room, \"east\", ?destination)\nreturn destination")
         .unwrap();
     assert!(
         matches!(report.outcome, TaskOutcome::Complete { ref value, .. } if *value == library),
@@ -2870,7 +2985,7 @@ fn runner_mud_core_derives_exits_and_recursive_location() {
         .run_source("return builder/room_named_in_area(#hotel_area, \"Shed\")")
         .unwrap();
     assert!(
-        matches!(report.outcome, TaskOutcome::Complete { ref value, .. } if *value == Value::nothing()),
+        matches!(report.outcome, TaskOutcome::Complete { ref value, .. } if *value == Value::option_none()),
         "{}",
         report.render()
     );
@@ -2892,7 +3007,7 @@ fn runner_mud_core_derives_exits_and_recursive_location() {
         _ => panic!("unexpected @dig outcome: {}", dug.render()),
     };
     let report = runner
-        .run_source("return one Exit(#first_room, \"portal\", ?destination)")
+        .run_source("let exactly {:destination -> destination} = Exit(#first_room, \"portal\", ?destination)\nreturn destination")
         .unwrap();
     assert!(
         matches!(report.outcome, TaskOutcome::Complete { ref value, .. } if *value == studio),
@@ -2910,7 +3025,7 @@ fn runner_mud_core_derives_exits_and_recursive_location() {
         described.render()
     );
     let report = runner
-        .run_source("return one PassageDescription(builder/passage_from(#first_room, \"portal\"), #first_room, ?description)")
+        .run_source("let exactly {:description -> description} = PassageDescription(builder/passage_from(#first_room, \"portal\"), #first_room, ?description)\nreturn description")
         .unwrap();
     assert!(
         matches!(
@@ -3059,11 +3174,13 @@ fn runner_mud_core_derives_exits_and_recursive_location() {
         "{}",
         hidden.render()
     );
-    let report = runner
-        .run_source("return #coin.locatedIn == nothing")
-        .unwrap();
+    let report = runner.run_source("return LocatedIn(#coin, ?room)").unwrap();
     assert!(
-        matches!(report.outcome, TaskOutcome::Complete { ref value, .. } if *value == Value::bool(true)),
+        matches!(
+            report.outcome,
+            TaskOutcome::Complete { ref value, .. }
+                if value.with_relation(|relation| relation.is_empty()).unwrap_or(false)
+        ),
         "{}",
         report.render()
     );
@@ -3094,10 +3211,12 @@ fn runner_mud_core_derives_exits_and_recursive_location() {
         removed.render()
     );
     let report = runner
-        .run_source("return one Exit(#first_room, \"portal\", ?destination)")
+        .run_source(
+            "if let {:destination -> destination} = Exit(#first_room, \"portal\", ?destination)\n  return false\nend\nreturn true",
+        )
         .unwrap();
     assert!(
-        matches!(report.outcome, TaskOutcome::Complete { ref value, .. } if *value == Value::nothing()),
+        matches!(report.outcome, TaskOutcome::Complete { ref value, .. } if *value == Value::bool(true)),
         "{}",
         report.render()
     );
@@ -3244,8 +3363,8 @@ fn runner_mud_auth_sync_view_tree_renders() {
                     })
                     .unwrap_or(false)
         ),
-        "{:?}",
-        report.outcome
+        "{}",
+        report.render()
     );
 
     let report = runner
@@ -3293,7 +3412,7 @@ fn runner_mud_auth_sync_view_tree_renders() {
     let request = runner
         .source_request_for_endpoint(
             endpoint,
-            "return sync_event(endpoint(), nothing, 21, \"submit\", \"\", \"mud_command\", {})",
+            "return sync_event(endpoint(), none, 21, \"submit\", \"\", \"mud_command\", {})",
         )
         .unwrap();
     let report = runner.submit_source(request).unwrap();
@@ -3306,7 +3425,7 @@ fn runner_mud_auth_sync_view_tree_renders() {
     let request = runner
         .source_request_for_endpoint(
             endpoint,
-            "let ok = sync_event(endpoint(), nothing, 21, \"input\", \"\", \"mud_command\", {:text -> \"get \", :suggest -> \"true\", :suggest_index -> \"0\"})\n\
+            "let ok = sync_event(endpoint(), none, 21, \"input\", \"\", \"mud_command\", {:text -> \"get \", :suggest -> \"true\", :suggest_index -> \"0\"})\n\
              return ok && endpoint().session/commandDraft == \"get \"",
         )
         .unwrap();
@@ -3336,7 +3455,7 @@ fn runner_mud_auth_sync_view_tree_renders() {
     let request = runner
         .source_request_for_endpoint(
             endpoint,
-            "let ok = sync_event(endpoint(), nothing, 21, \"submit\", \"\", \"mud_edit_entity\", {:entity -> to_literal(#coin), :name -> \"doubloon\", :aliases -> \"coin, shiny coin\", :description -> \"A direct-manipulation edit.\", :portable -> \"true\", :visible_here -> \"true\"})\n\
+            "let ok = sync_event(endpoint(), none, 21, \"submit\", \"\", \"mud_edit_entity\", {:entity -> to_literal(#coin), :name -> \"doubloon\", :aliases -> \"coin, shiny coin\", :description -> \"A direct-manipulation edit.\", :portable -> \"true\", :visible_here -> \"true\"})\n\
              return ok && #coin.name == \"doubloon\" && #coin.description == \"A direct-manipulation edit.\" && Portable(#coin) && #coin.locatedIn == #first_room && command/match_object(#alice, \"shiny coin\") == #coin",
         )
         .unwrap();
@@ -3350,7 +3469,7 @@ fn runner_mud_auth_sync_view_tree_renders() {
     let request = runner
         .source_request_for_endpoint(
             endpoint,
-            "return sync_event(endpoint(), nothing, 21, \"input\", \"\", \"mud_object_browser_search\", {:query -> \"wooden\"})",
+            "return sync_event(endpoint(), none, 21, \"input\", \"\", \"mud_object_browser_search\", {:query -> \"wooden\"})",
         )
         .unwrap();
     let report = runner.submit_source(request).unwrap();
@@ -3430,7 +3549,7 @@ fn runner_mud_auth_sync_view_tree_renders() {
     let request = runner
         .source_request_for_endpoint(
             endpoint,
-            "return sync_event(endpoint(), nothing, 21, \"submit\", \"\", \"mud_mica_method_limit\", {:mode -> \"all\"})",
+            "return sync_event(endpoint(), none, 21, \"submit\", \"\", \"mud_mica_method_limit\", {:mode -> \"all\"})",
         )
         .unwrap();
     let report = runner.submit_source(request).unwrap();
@@ -3460,7 +3579,7 @@ fn runner_mud_auth_sync_view_tree_renders() {
     let request = runner
         .source_request_for_endpoint(
             endpoint,
-            "return sync_event(endpoint(), nothing, 21, \"input\", \"\", \"mud_mica_browser_search\", {:query -> \"room\"})",
+            "return sync_event(endpoint(), none, 21, \"input\", \"\", \"mud_mica_browser_search\", {:query -> \"room\"})",
         )
         .unwrap();
     let report = runner.submit_source(request).unwrap();
@@ -3524,7 +3643,7 @@ fn runner_resume_task_uses_continuation_request_authority() {
             authority: AuthorityContext::root(),
             input: TaskInput::Continuation {
                 task_id,
-                value: Value::nothing(),
+                value: Value::empty_relation(),
             },
         })
         .unwrap();
@@ -3575,7 +3694,7 @@ fn runner_suspend_returns_continuation_value() {
 }
 
 #[test]
-fn runner_commit_yields_and_resumes_with_nothing() {
+fn runner_commit_yields_and_resumes_with_unit() {
     let mut runner = SourceRunner::new_empty();
     let submitted = runner
         .submit_source(TaskRequest {
@@ -3602,14 +3721,14 @@ fn runner_commit_yields_and_resumes_with_nothing() {
             authority: AuthorityContext::root(),
             input: TaskInput::Continuation {
                 task_id: submitted.task_id,
-                value: Value::nothing(),
+                value: Value::empty_relation(),
             },
         })
         .unwrap();
 
     assert!(matches!(
         outcome,
-        TaskOutcome::Complete { value, .. } if value == Value::nothing()
+        TaskOutcome::Complete { value, .. } if value == Value::empty_relation()
     ));
 }
 
@@ -3657,8 +3776,8 @@ fn runner_context_builtins_return_runtime_identities() {
         TaskOutcome::Complete { value, .. }
             if value.with_list(<[Value]>::to_vec).unwrap()
                 == vec![
-                    Value::identity(alice),
-                    Value::identity(alice),
+                    Value::option_some(Value::identity(alice)),
+                    Value::option_some(Value::identity(alice)),
                     Value::identity(endpoint),
                 ]
     ));
@@ -3676,8 +3795,8 @@ fn runner_context_builtins_return_system_endpoint_without_actor_context() {
         TaskOutcome::Complete { value, .. }
             if value.with_list(<[Value]>::to_vec).unwrap()
                 == vec![
-                    Value::nothing(),
-                    Value::nothing(),
+                    Value::option_none(),
+                    Value::option_none(),
                     Value::identity(SYSTEM_ENDPOINT),
                 ]
     ));
@@ -3776,7 +3895,8 @@ fn runner_endpoint_invocation_uses_principal_authority_without_actor() {
                  assert CanRead(#web, :RequestPath)\n\
                  assert CanInvoke(#web, :http_request)\n\
                  verb http_request(request)\n\
-                   return one RequestPath(request, ?path)\n\
+                   let exactly {:path -> path} = RequestPath(request, ?path)\n\
+                   return path\n\
                  end\n",
         )
         .unwrap();
@@ -4027,7 +4147,7 @@ fn runner_assume_actor_requires_principal_specific_policy() {
     let actor = runner.submit_source(actor_request).unwrap();
     assert!(matches!(
         actor.outcome,
-        TaskOutcome::Complete { value, .. } if value == Value::identity(bob)
+        TaskOutcome::Complete { value, .. } if value == Value::option_some(Value::identity(bob))
     ));
 }
 
@@ -4074,7 +4194,7 @@ fn runner_assume_actor_rolls_back_with_aborted_task() {
     let actor = runner.submit_source(actor_request).unwrap();
     assert!(matches!(
         actor.outcome,
-        TaskOutcome::Complete { value, .. } if value == Value::identity(alice)
+        TaskOutcome::Complete { value, .. } if value == Value::option_some(Value::identity(alice))
     ));
 }
 
@@ -4165,7 +4285,7 @@ fn runner_read_waits_for_input_and_returns_continuation_value() {
         TaskOutcome::Suspended {
             kind: SuspendKind::WaitingForInput(value),
             ..
-        } if value == Value::symbol(Symbol::intern("line"))
+        } if value == Some(Value::symbol(Symbol::intern("line")))
     ));
 
     let outcome = runner
@@ -4585,7 +4705,7 @@ fn runner_iterates_relation_rows_as_binding_maps() {
 }
 
 #[test]
-fn runner_one_returns_a_map_for_multi_column_relation_rows() {
+fn exact_binding_returns_a_map_for_multi_column_relation_rows() {
     let mut runner = SourceRunner::new_empty();
     runner.run_source("make_identity(:thing)").unwrap();
     runner.run_source("make_identity(:room)").unwrap();
@@ -4595,7 +4715,7 @@ fn runner_one_returns_a_map_for_multi_column_relation_rows() {
     let room = runner.actor_identity(Symbol::intern("room")).unwrap();
 
     let report = runner
-        .run_source("return one Location(?thing, ?room)")
+        .run_source("let exactly {:thing -> thing, :room -> room} = Location(?thing, ?room)\nreturn {:thing -> thing, :room -> room}")
         .unwrap();
 
     assert!(matches!(
@@ -4609,18 +4729,20 @@ fn runner_one_returns_a_map_for_multi_column_relation_rows() {
 }
 
 #[test]
-fn runner_one_rejects_ambiguous_relation_values() {
+fn exact_binding_rejects_ambiguous_relation_values() {
     let mut runner = SourceRunner::new_empty();
     runner.run_source("make_relation(:Number, 1)").unwrap();
     runner.run_source("assert Number(1)").unwrap();
     runner.run_source("assert Number(2)").unwrap();
 
-    let report = runner.run_source("return one Number(?number)").unwrap();
+    let report = runner
+        .run_source("let exactly {:number -> number} = Number(?number)\nreturn number")
+        .unwrap();
 
     assert!(matches!(
         report.outcome,
         TaskOutcome::Aborted { error, .. }
-            if error.error_code_symbol() == Some(Symbol::intern("E_AMBIGUOUS"))
+            if error.error_code_symbol() == Some(Symbol::intern("E_CARDINALITY"))
                 && error.with_error(|error| {
                     error.value() == Some(&query_relation(
                         ["number"],
@@ -4699,7 +4821,7 @@ fn runner_relation_project_supports_zero_columns_and_reports_unknown_columns() {
 }
 
 #[test]
-fn runner_one_and_dot_read_project_functional_relations() {
+fn exact_binding_and_dot_read_project_functional_relations() {
     let mut runner = SourceRunner::new_empty();
     runner.run_source("make_identity(:thing)").unwrap();
     runner.run_source("make_identity(:room)").unwrap();
@@ -4709,7 +4831,7 @@ fn runner_one_and_dot_read_project_functional_relations() {
     runner.run_source("assert Location(#thing, #room)").unwrap();
 
     let one = runner
-        .run_source("return one Location(#thing, ?room)")
+        .run_source("let exactly {:room -> room} = Location(#thing, ?room)\nreturn room")
         .unwrap();
     let dot = runner.run_source("return #thing.location").unwrap();
 
@@ -4882,10 +5004,10 @@ fn runner_inspects_and_disables_rules() {
 
     let rules = runner.run_source("return rules(:VisibleTo)").unwrap();
     let source = runner
-        .run_source("return describe_rule(one rules(:VisibleTo))")
+        .run_source("let matches = rules(:VisibleTo)\nreturn describe_rule(matches[0])")
         .unwrap();
     let disabled = runner
-        .run_source("disable_rule(one rules(:VisibleTo))")
+        .run_source("let matches = rules(:VisibleTo)\nreturn disable_rule(matches[0])")
         .unwrap();
     let query = runner.run_source("return VisibleTo(#alice, ?obj)").unwrap();
 
@@ -4910,8 +5032,8 @@ fn runner_inspects_and_disables_rules() {
         unknown_relation.outcome,
         TaskOutcome::Complete { value, .. }
             if value == Value::list([
-                Value::string("unknown relation :Missing"),
-                Value::symbol(Symbol::intern("Missing")),
+                Value::option_some(Value::string("unknown relation :Missing")),
+                Value::option_some(Value::symbol(Symbol::intern("Missing"))),
             ])
     ));
     runner.run_source("make_identity(:not_a_rule)").unwrap();
@@ -4929,8 +5051,8 @@ fn runner_inspects_and_disables_rules() {
         unknown_rule.outcome,
         TaskOutcome::Complete { value, .. }
             if value == Value::list([
-                Value::string("rule does not exist"),
-                Value::identity(not_a_rule),
+                Value::option_some(Value::string("rule does not exist")),
+                Value::option_some(Value::identity(not_a_rule)),
             ])
     ));
 }
@@ -4976,8 +5098,8 @@ fn runner_fileouts_active_rules() {
         unknown_relation.outcome,
         TaskOutcome::Complete { value, .. }
             if value == Value::list([
-                Value::string("unknown relation :Missing"),
-                Value::symbol(Symbol::intern("Missing")),
+                Value::option_some(Value::string("unknown relation :Missing")),
+                Value::option_some(Value::symbol(Symbol::intern("Missing"))),
             ])
     ));
 }
@@ -4987,7 +5109,7 @@ fn runner_queries_system_catalog_relations() {
     let mut runner = SourceRunner::new_empty();
 
     let report = runner
-        .run_source("return one RelationName(?relation, :RelationName)")
+        .run_source("let exactly {:relation -> relation} = RelationName(?relation, :RelationName)\nreturn relation")
         .unwrap();
 
     assert!(matches!(
@@ -5010,8 +5132,9 @@ fn runner_queries_identity_neighbourhood_relations() {
 
     let report = runner
         .run_source(
-            "let relation = one RelationName(?relation, :LocatedIn)\n\
-                 return one MentionedFact(#coin, relation, 0, ?tuple)",
+            "let exactly {:relation -> relation} = RelationName(?relation, :LocatedIn)\n\
+                 let exactly {:tuple -> tuple} = MentionedFact(#coin, relation, 0, ?tuple)\n\
+                 return tuple",
         )
         .unwrap();
 
@@ -5044,8 +5167,8 @@ fn runner_filters_reflection_rows_by_underlying_relation_authority() {
     let report = runner
         .run_source_as(
             Symbol::intern("programmer"),
-            "let located = one RelationName(?located, :LocatedIn)\n\
-                 let secret = one RelationName(?secret, :Secret)\n\
+            "let exactly {:located -> located} = RelationName(?located, :LocatedIn)\n\
+                 let exactly {:secret -> secret} = RelationName(?secret, :Secret)\n\
                  let visible = MentionedFact(#coin, located, ?position, ?tuple)\n\
                  let hidden = MentionedFact(#coin, secret, ?hidden_position, ?hidden_tuple)\n\
                  return [visible, hidden]",
@@ -5244,7 +5367,7 @@ fn runner_fileout_preserves_frob_fact_literals() {
         .run_filein_with_unit(unit, &source, FileinMode::Add)
         .unwrap();
     let query = imported
-        .run_source("return frob_value(one CompiledEvent(?event))[:item]")
+        .run_source("let exactly {:event -> event} = CompiledEvent(?event)\nreturn frob_value(event)[:item]")
         .unwrap();
     assert!(matches!(
         query.outcome,
@@ -5268,7 +5391,8 @@ fn runner_fileout_preserves_slash_qualified_names() {
                  assert ui/Visible(#ui/alice, #ui/lamp)\n\
                  ui/CanSee(actor, obj) :- ui/Visible(actor, obj)\n\
                  verb ui/look(actor, item)\n\
-                   return one ui/Name(item, ?name)\n\
+                   let exactly {:name -> name} = ui/Name(item, ?name)\n\
+                   return name\n\
                  end\n",
             FileinMode::Add,
         )
@@ -5455,7 +5579,8 @@ fn runner_failed_filein_replacement_preserves_source_unit() {
                  assert Label(#sensor, \"original\")\n\
                  Operational(item) :- Label(item, ?label)\n\
                  verb equipment_label(item)\n\
-                   return one Label(item, ?label)\n\
+                   let exactly {:label -> label} = Label(item, ?label)\n\
+                   return label\n\
                  end\n",
             FileinMode::Add,
         )
@@ -5569,7 +5694,8 @@ fn runner_fjall_filein_replacement_reopens_atomic_state() {
                  assert Label(#sensor, \"original\")\n\
                  Ready(item) :- Label(item, \"original\")\n\
                  verb equipment_label(item)\n\
-                   return one Label(item, ?label)\n\
+                   let exactly {:label -> label} = Label(item, ?label)\n\
+                   return label\n\
                  end\n",
                 FileinMode::Add,
             )
@@ -5586,7 +5712,8 @@ fn runner_fjall_filein_replacement_reopens_atomic_state() {
                  assert CalibrationState(#sensor, :current)\n\
                  Ready(item) :- Label(item, \"replacement\")\n\
                  verb equipment_label(item)\n\
-                   return one Label(item, ?label)\n\
+                   let exactly {:label -> label} = Label(item, ?label)\n\
+                   return label\n\
                  end\n",
                 FileinMode::Replace,
             )
@@ -5632,7 +5759,8 @@ fn shared_runner_installs_replaces_checks_and_files_out_units() {
              make_relation(:Label, 2)\n\
              assert Label(#sensor, include_text(\"label.txt\"))\n\
              verb equipment_label(item)\n\
-               return one Label(item, ?label)\n\
+               let exactly {:label -> label} = Label(item, ?label)\n\
+               return label\n\
              end\n",
             FileinMode::Add,
             |path| match path {
@@ -5664,7 +5792,8 @@ fn shared_runner_installs_replaces_checks_and_files_out_units() {
              make_relation(:Label, 2)\n\
              assert Label(#sensor, \"replacement\")\n\
              verb equipment_label(item)\n\
-               return one Label(item, ?label)\n\
+               let exactly {:label -> label} = Label(item, ?label)\n\
+               return label\n\
              end\n",
             FileinMode::Replace,
         )
@@ -6073,10 +6202,14 @@ fn runner_mailbox_allocates_fresh_directional_caps() {
         )
         .unwrap();
 
-    assert!(matches!(
-        report.outcome,
-        TaskOutcome::Complete { value, .. } if value == Value::bool(true)
-    ));
+    assert!(
+        matches!(
+            report.outcome,
+            TaskOutcome::Complete { ref value, .. } if *value == Value::bool(true)
+        ),
+        "{}",
+        report.render()
+    );
 }
 
 #[test]
@@ -6135,7 +6268,7 @@ fn runner_relation_subscription_delivers_snapshot_then_ordered_settled_changes()
             authority: AuthorityContext::root(),
             input: TaskInput::Source(
                 "let caps = mailbox()\n\
-                 let subscription = subscribe_changes(caps[1], :relation, :Derived, [nothing], :snapshot)\n\
+                 let subscription = subscribe_changes(caps[1], :relation, some(:Derived), [none], :snapshot)\n\
                  commit()\n\
                  assert Base(2)\n\
                  commit()\n\
@@ -6159,7 +6292,7 @@ fn runner_relation_subscription_delivers_snapshot_then_ordered_settled_changes()
             authority: AuthorityContext::root(),
             input: TaskInput::Continuation {
                 task_id: submitted.task_id,
-                value: Value::nothing(),
+                value: Value::empty_relation(),
             },
         })
         .unwrap();
@@ -6178,7 +6311,7 @@ fn runner_relation_subscription_delivers_snapshot_then_ordered_settled_changes()
             authority: AuthorityContext::root(),
             input: TaskInput::Continuation {
                 task_id: submitted.task_id,
-                value: Value::nothing(),
+                value: Value::empty_relation(),
             },
         })
         .unwrap();
@@ -6225,7 +6358,7 @@ fn runner_subscription_overflow_replaces_incremental_batches_with_resynchronizat
             authority: AuthorityContext::root(),
             input: TaskInput::Source(
                 "let caps = mailbox()\n\
-                 let subscription = subscribe_changes(caps[1], :facts, :Observed, [nothing], :changes, nothing, 1)\n\
+                 let subscription = subscribe_changes(caps[1], :facts, some(:Observed), [none], :changes, none, 1)\n\
                  commit()\n\
                  assert Observed(1)\n\
                  commit()\n\
@@ -6253,7 +6386,7 @@ fn runner_subscription_overflow_replaces_incremental_batches_with_resynchronizat
                 authority: AuthorityContext::root(),
                 input: TaskInput::Continuation {
                     task_id: submitted.task_id,
-                    value: Value::nothing(),
+                    value: Value::empty_relation(),
                 },
             })
             .unwrap();
@@ -6289,7 +6422,7 @@ fn runner_subscription_refreshes_authority_before_filtering_values() {
             alice,
             SYSTEM_ENDPOINT,
             "let caps = mailbox()\n\
-             let subscription = subscribe_changes(caps[1], :relation, :Observed, [nothing], :changes)\n\
+             let subscription = subscribe_changes(caps[1], :relation, some(:Observed), [none], :changes)\n\
              commit()\n\
              return caps[0]",
         )
@@ -6336,7 +6469,7 @@ fn runner_subscription_cancellation_takes_effect_at_its_commit_boundary() {
             authority: AuthorityContext::root(),
             input: TaskInput::Source(
                 "let caps = mailbox()\n\
-                 let subscription = subscribe_changes(caps[1], :facts, :Observed, [nothing], :changes)\n\
+                 let subscription = subscribe_changes(caps[1], :facts, some(:Observed), [none], :changes)\n\
                  commit()\n\
                  cancel_subscription(subscription)\n\
                  commit()\n\
@@ -6357,7 +6490,7 @@ fn runner_subscription_cancellation_takes_effect_at_its_commit_boundary() {
                 authority: AuthorityContext::root(),
                 input: TaskInput::Continuation {
                     task_id: submitted.task_id,
-                    value: Value::nothing(),
+                    value: Value::empty_relation(),
                 },
             })
             .unwrap();
@@ -6382,7 +6515,7 @@ fn runner_catalogue_subscription_receives_non_task_catalogue_commits() {
             authority: AuthorityContext::root(),
             input: TaskInput::Source(
                 "let caps = mailbox()\n\
-                 let subscription = subscribe_changes(caps[1], :catalogue, nothing, [], :changes)\n\
+                 let subscription = subscribe_changes(caps[1], :catalogue, none, [], :changes)\n\
                  commit()\n\
                  return caps[0]"
                     .to_owned(),
@@ -6397,7 +6530,7 @@ fn runner_catalogue_subscription_receives_non_task_catalogue_commits() {
             authority: AuthorityContext::root(),
             input: TaskInput::Continuation {
                 task_id: submitted.task_id,
-                value: Value::nothing(),
+                value: Value::empty_relation(),
             },
         })
         .unwrap();
@@ -6430,7 +6563,7 @@ fn runner_relation_subscription_rebuilds_after_rule_catalogue_change() {
             authority: AuthorityContext::root(),
             input: TaskInput::Source(
                 "let caps = mailbox()\n\
-                 let subscription = subscribe_changes(caps[1], :relation, :Derived, [nothing], :changes)\n\
+                 let subscription = subscribe_changes(caps[1], :relation, some(:Derived), [none], :changes)\n\
                  commit()\n\
                  return caps[0]"
                     .to_owned(),
@@ -6445,7 +6578,7 @@ fn runner_relation_subscription_rebuilds_after_rule_catalogue_change() {
             authority: AuthorityContext::root(),
             input: TaskInput::Continuation {
                 task_id: submitted.task_id,
-                value: Value::nothing(),
+                value: Value::empty_relation(),
             },
         })
         .unwrap();
@@ -6478,7 +6611,7 @@ fn runner_discards_subscription_registration_when_task_aborts() {
     let report = runner
         .run_source(
             "let caps = mailbox()\n\
-             let subscription = subscribe_changes(caps[1], :facts, :Observed, [nothing], :changes)\n\
+             let subscription = subscribe_changes(caps[1], :facts, some(:Observed), [none], :changes)\n\
              raise E_INVARG, \"abort registration\"",
         )
         .unwrap();

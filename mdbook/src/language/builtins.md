@@ -20,17 +20,17 @@ authority may raise `E_PERM`.
 | `lower(text)`                              | lowercase string                                     |
 | `words(text)`                              | parsed word list                                     |
 | `edit_distance(left, right)`               | character edit distance                              |
-| `parse_ordinal(text)`                      | parsed ordinal integer, or `nothing`                 |
+| `parse_ordinal(text)`                      | `result<int>`                                        |
 | `url_encode_component(text)`               | percent-encoded URL component                        |
 | `url_decode_component(text)`               | decoded URL component                                |
 | `sort(list)`                               | canonically sorted list                              |
 | `to_symbol(text)`                          | named symbol                                         |
 | `to_literal(value)`                        | parseable Mica value text                            |
-| `from_literal(text)`                       | value parsed from literal text                       |
+| `from_literal(text)`                       | `result<dynamic>`                                    |
 | `map_pairs(map)`                           | list of two-item key/value lists                     |
 | `index_or(collection, index, default)`     | list, map, or relation lookup with a default         |
 | `json_encode(value)` / `json_decode(text)` | JSON conversion                                      |
-| `os_getenv(name)`                          | environment value, or `nothing`                      |
+| `os_getenv(name)`                          | `option<string>`                                     |
 
 `os_getenv` exposes host process state and should not be treated as durable world state.
 
@@ -55,7 +55,7 @@ See [Relations](./relations.md#relation-value-algebra) for heading and duplicate
 | `destroy_identity(#identity)`                                | number of retracted facts                  |
 | `rules(:Relation)`                                           | active rule identities for a head relation |
 | `describe_rule(#rule)`                                       | installed rule source                      |
-| `disable_rule(#rule)`                                        | `nothing`                                  |
+| `disable_rule(#rule)`                                        | `()`                                       |
 | `fileout(:unit)`                                             | source owned by a filein unit              |
 | `fileout_rules([:Relation])`                                 | active rule source                         |
 | `tasks()`                                                    | current task snapshots                     |
@@ -67,17 +67,17 @@ rule-disabling operations require administrative authority.
 
 | Function                                | Result                                   |
 | --------------------------------------- | ---------------------------------------- |
-| `actor()`                               | current actor identity, or `nothing`     |
-| `principal()`                           | current principal identity, or `nothing` |
+| `actor()`                               | `option<identity>`                       |
+| `principal()`                           | `option<identity>`                       |
 | `endpoint()`                            | current endpoint identity                |
 | `assume_actor(#actor)`                  | newly bound actor identity               |
 | `emit(target, value)`                   | emitted value                            |
-| `log(message)` / `log(:level, message)` | `nothing`                                |
+| `log(message)` / `log(:level, message)` | `()`                                     |
 | `mailbox()`                             | `[receiver, sender]` capabilities        |
 | `mailbox_send(sender, value)`           | sent value                               |
-| `mailbox_close(receiver)`               | `nothing`                                |
+| `mailbox_close(receiver)`               | `()`                                     |
 | `subscribe_changes(...)`                | subscription capability                  |
-| `cancel_subscription(subscription)`     | `nothing`                                |
+| `cancel_subscription(subscription)`     | `()`                                     |
 
 Log levels are `:trace`, `:debug`, `:info`, `:warn`, and `:error`. Effects and mailbox sends are
 published at commit. Subscriptions are specified in [Subscriptions](../runtime/subscriptions.md).

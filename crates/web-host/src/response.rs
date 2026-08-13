@@ -141,14 +141,14 @@ pub(crate) fn decode_response_value(value: Value, close: bool) -> Result<HttpRes
             close,
         ));
     }
-    if value == Value::nothing() {
+    if value == Value::unit() {
         return Ok(with_connection_header(
             HttpResponse::new(204, "No Content", Vec::new()),
             close,
         ));
     }
     if value.map_len().is_none() {
-        return Err("response must be a string, nothing, or response map".to_owned());
+        return Err("response must be a string, unit, or response map".to_owned());
     }
     let status = map_int(&value, "status")?.unwrap_or(200);
     if !(100..=999).contains(&status) {

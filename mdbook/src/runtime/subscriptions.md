@@ -12,8 +12,8 @@ let [receiver, sender] = mailbox()
 let subscription = subscribe_changes(
   sender,
   :relation,
-  :ReadyForReview,
-  [#reviewer, nothing],
+  some(:ReadyForReview),
+  [some(#reviewer), none],
   :snapshot
 )
 commit()
@@ -33,15 +33,15 @@ subscribe_changes(sender, subject, relation, bindings, initial[, cursor[, queue_
 | `:relation`  | changes to the complete stored-and-derived relation result |
 | `:catalogue` | relation and rule catalogue changes; root authority only   |
 
-For `:facts` and `:relation`, `relation` is its identity or name symbol. `bindings` has exactly one
-entry per relation position. A concrete value restricts that position; `nothing` leaves it open. The
+For `:facts` and `:relation`, `relation` is `some(identity-or-name)`. `bindings` has exactly one
+entry per relation position. `some(value)` restricts that position; `none` leaves it open. The
 example observes rows of `ReadyForReview` whose first position is `#reviewer`.
 
-For `:catalogue`, pass `nothing` as the relation and `[]` as the bindings.
+For `:catalogue`, pass `none` as the relation and `[]` as the bindings.
 
 `initial` is `:snapshot` to receive current matching rows followed by changes, or `:changes` to
 receive only changes after registration. A non-negative cursor may resume change delivery from
-retained commit history. Pass `nothing` when no cursor is available. The queue budget defaults to 64
+retained commit history. Pass `none` when no cursor is available. The queue budget defaults to 64
 messages and must be a non-negative integer.
 
 Registration becomes active when the surrounding task commits.
@@ -115,7 +115,7 @@ The runtime checks read authority from the task's current runtime context. It do
 ordinary argument that merely happens to identify an actor. Authority is refreshed at boundaries;
 loss of permission produces a revocation marker.
 
-Bind every stable column you can. A subscription with `[nothing, nothing]` observes the entire
+Bind every stable column you can. A subscription with `[none, none]` observes the entire
 binary relation and consumes queue capacity for unrelated rows. Bounded delivery prevents a slow
 consumer from growing memory without limit; resynchronization is the explicit recovery path.
 
@@ -125,11 +125,11 @@ A synchronized view can declare the relation patterns that determine its rendere
 
 ```mica
 verb sync_view_dependencies(view)
-  let project = one ProjectView(view, ?project)
+  let exactly {project} = ProjectView(view, ?project)
   return [{
     :subject -> :relation,
-    :relation -> :ProjectStatus,
-    :bindings -> [project, nothing]
+    :relation -> some(:ProjectStatus),
+    :bindings -> [some(project), none]
   }]
 end
 ```

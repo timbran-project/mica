@@ -104,9 +104,9 @@ fn scratch(limit: i64) -> [u64; 7] {
         int_bits(0),
         int_bits(limit),
         bits(Value::bool(true)),
-        bits(Value::nothing()),
-        bits(Value::nothing()),
-        bits(Value::nothing()),
+        bits(Value::empty_relation()),
+        bits(Value::empty_relation()),
+        bits(Value::empty_relation()),
     ]
 }
 
@@ -180,9 +180,9 @@ fn float_collection_scratch(limit: usize) -> [u64; 8] {
         int_bits(limit as i64),
         bits(Value::bool(true)),
         int_bits(1),
-        bits(Value::nothing()),
-        bits(Value::nothing()),
-        bits(Value::nothing()),
+        bits(Value::empty_relation()),
+        bits(Value::empty_relation()),
+        bits(Value::empty_relation()),
     ]
 }
 
@@ -265,9 +265,9 @@ fn float_arithmetic_scratch(limit: i64) -> [u64; 8] {
         int_bits(limit),
         bits(Value::bool(true)),
         int_bits(1),
-        bits(Value::nothing()),
-        bits(Value::nothing()),
-        bits(Value::nothing()),
+        bits(Value::empty_relation()),
+        bits(Value::empty_relation()),
+        bits(Value::empty_relation()),
     ]
 }
 
@@ -585,7 +585,7 @@ fn unboxed_float_division_by_zero_side_exits_atomically() {
 fn generated_range_value_at_emits_checked_integer_values_without_helpers() {
     let compiled = CompiledNaturalLoop::compile(&collection_value_plan()).unwrap();
     let range = [NaturalLoopCollectionView::range(-5, 5).unwrap()];
-    let mut scratch = [bits(Value::nothing()), int_bits(7)];
+    let mut scratch = [bits(Value::empty_relation()), int_bits(7)];
 
     assert_eq!(
         compiled.run(&mut scratch, &range, 1),
@@ -615,7 +615,7 @@ fn generated_range_value_at_side_exits_on_invalid_indices_and_bounds() {
     ];
 
     for (range, index) in cases {
-        let mut scratch = [bits(Value::nothing()), index];
+        let mut scratch = [bits(Value::empty_relation()), index];
         assert_eq!(
             compiled.run(&mut scratch, &[range], 1),
             NaturalLoopOutcome::SideExit,
@@ -627,7 +627,7 @@ fn generated_range_value_at_side_exits_on_invalid_indices_and_bounds() {
 fn generated_range_key_at_emits_checked_zero_based_ordinals_without_helpers() {
     let compiled = CompiledNaturalLoop::compile(&collection_key_plan()).unwrap();
     let range = [NaturalLoopCollectionView::range(10, 20).unwrap()];
-    let mut scratch = [bits(Value::nothing()), int_bits(7)];
+    let mut scratch = [bits(Value::empty_relation()), int_bits(7)];
 
     assert_eq!(
         compiled.run(&mut scratch, &range, 1),
@@ -645,7 +645,7 @@ fn generated_range_key_at_side_exits_on_invalid_ordinals() {
     let compiled = CompiledNaturalLoop::compile(&collection_key_plan()).unwrap();
     let range = [NaturalLoopCollectionView::range(10, 20).unwrap()];
     for index in [int_bits(-1), bits(Value::float(1.0).unwrap())] {
-        let mut scratch = [bits(Value::nothing()), index];
+        let mut scratch = [bits(Value::empty_relation()), index];
         assert_eq!(
             compiled.run(&mut scratch, &range, 1),
             NaturalLoopOutcome::SideExit,
@@ -661,7 +661,7 @@ fn generated_list_access_emits_immediate_values_and_ordinals_without_helpers() {
         Value::bool(true),
     ];
     let view = [NaturalLoopCollectionView::list(&values)];
-    let mut value_scratch = [bits(Value::nothing()), int_bits(1)];
+    let mut value_scratch = [bits(Value::empty_relation()), int_bits(1)];
     let value_compiled = CompiledNaturalLoop::compile(&collection_value_plan()).unwrap();
 
     assert!(matches!(
@@ -671,7 +671,7 @@ fn generated_list_access_emits_immediate_values_and_ordinals_without_helpers() {
     assert_eq!(value(value_scratch[0]).as_float(), Some(2.5));
     assert_eq!(value_compiled.imported_helper_count(), 0);
 
-    let mut key_scratch = [bits(Value::nothing()), int_bits(2)];
+    let mut key_scratch = [bits(Value::empty_relation()), int_bits(2)];
     let key_compiled = CompiledNaturalLoop::compile(&collection_key_plan()).unwrap();
     assert!(matches!(
         key_compiled.run(&mut key_scratch, &view, 1),
@@ -686,7 +686,7 @@ fn generated_list_index_emits_checked_values_without_calling_map_helper() {
     let values = [Value::int(4).unwrap(), Value::int(9).unwrap()];
     let view = [NaturalLoopCollectionView::list(&values)];
     let compiled = CompiledNaturalLoop::compile(&index_plan()).unwrap();
-    let mut scratch = [bits(Value::nothing()), int_bits(1)];
+    let mut scratch = [bits(Value::empty_relation()), int_bits(1)];
 
     assert!(matches!(
         compiled.run(&mut scratch, &view, 1),
@@ -698,7 +698,7 @@ fn generated_list_index_emits_checked_values_without_calling_map_helper() {
     assert_eq!(compiled.imported_helper_count(), 1);
 
     for index in [int_bits(-1), int_bits(2), bits(Value::float(0.0).unwrap())] {
-        let mut scratch = [bits(Value::nothing()), index];
+        let mut scratch = [bits(Value::empty_relation()), index];
         assert_eq!(
             compiled.run(&mut scratch, &view, 1),
             NaturalLoopOutcome::SideExit,
@@ -735,7 +735,7 @@ fn generated_map_index_uses_native_canonical_order_for_immediate_keys() {
             borrowed_value_bits(&entries[4].1),
         ),
     ] {
-        let mut scratch = [bits(Value::nothing()), borrowed_value_bits(&key)];
+        let mut scratch = [bits(Value::empty_relation()), borrowed_value_bits(&key)];
         assert_eq!(
             compiled.run(&mut scratch, &view, 1),
             NaturalLoopOutcome::Complete {
@@ -778,7 +778,7 @@ fn generated_map_index_uses_canonical_helper_for_heap_keys() {
 
     for key in &keys {
         let expected = map.map_get(key).unwrap();
-        let mut scratch = [bits(Value::nothing()), borrowed_value_bits(key)];
+        let mut scratch = [bits(Value::empty_relation()), borrowed_value_bits(key)];
         assert!(matches!(
             compiled.run(&mut scratch, &view, 1),
             NaturalLoopOutcome::Complete { .. }
@@ -786,7 +786,7 @@ fn generated_map_index_uses_canonical_helper_for_heap_keys() {
         assert_eq!(scratch[0], borrowed_value_bits(&expected), "key {key:?}");
     }
     for missing in [Value::string("missing"), Value::list([])] {
-        let mut scratch = [bits(Value::nothing()), borrowed_value_bits(&missing)];
+        let mut scratch = [bits(Value::empty_relation()), borrowed_value_bits(&missing)];
         assert_eq!(
             compiled.run(&mut scratch, &view, 1),
             NaturalLoopOutcome::SideExit,
@@ -798,7 +798,7 @@ fn generated_map_index_uses_canonical_helper_for_heap_keys() {
 #[test]
 fn generated_map_index_matches_value_lookup_across_immediate_kinds() {
     let keys = [
-        Value::nothing(),
+        Value::empty_relation(),
         Value::bool(false),
         Value::bool(true),
         Value::int(-7).unwrap(),
@@ -826,7 +826,7 @@ fn generated_map_index_matches_value_lookup_across_immediate_kinds() {
 
     for key in keys.iter().filter(|key| key.is_immediate()) {
         let expected = map.map_get(key).unwrap();
-        let mut scratch = [bits(Value::nothing()), borrowed_value_bits(key)];
+        let mut scratch = [bits(Value::empty_relation()), borrowed_value_bits(key)];
         assert!(matches!(
             compiled.run(&mut scratch, &view, 1),
             NaturalLoopOutcome::Complete { .. }
@@ -834,7 +834,7 @@ fn generated_map_index_matches_value_lookup_across_immediate_kinds() {
         assert_eq!(scratch[0], borrowed_value_bits(&expected), "key {key:?}");
     }
     for missing in [Value::int(99).unwrap(), Value::float(0.5).unwrap()] {
-        let mut scratch = [bits(Value::nothing()), borrowed_value_bits(&missing)];
+        let mut scratch = [bits(Value::empty_relation()), borrowed_value_bits(&missing)];
         assert_eq!(
             compiled.run(&mut scratch, &view, 1),
             NaturalLoopOutcome::SideExit,
@@ -853,7 +853,7 @@ fn generated_map_index_accepts_immediate_operands() {
         mica_var::Symbol::intern("direct"),
     )))
     .unwrap();
-    let mut scratch = [bits(Value::nothing())];
+    let mut scratch = [bits(Value::empty_relation())];
 
     assert!(matches!(
         compiled.run(&mut scratch, &view, 1),
@@ -882,7 +882,7 @@ fn generated_heap_map_index_helper_executes_concurrently() {
                 panic!("expected map value");
             };
             let view = [NaturalLoopCollectionView::map(entries)];
-            let mut scratch = [bits(Value::nothing()), borrowed_value_bits(&key)];
+            let mut scratch = [bits(Value::empty_relation()), borrowed_value_bits(&key)];
             barrier.wait();
             let outcome = compiled.run(&mut scratch, &view, 1);
             (outcome, scratch[0])
@@ -908,7 +908,7 @@ fn generated_collection_access_preserves_heap_words_and_checks_ordinals() {
     let view = [NaturalLoopCollectionView::list(&values)];
     let compiled = CompiledNaturalLoop::compile(&collection_value_plan()).unwrap();
 
-    let mut scratch = [bits(Value::nothing()), int_bits(0)];
+    let mut scratch = [bits(Value::empty_relation()), int_bits(0)];
     assert!(matches!(
         compiled.run(&mut scratch, &view, 1),
         NaturalLoopOutcome::Complete { .. }
@@ -916,7 +916,7 @@ fn generated_collection_access_preserves_heap_words_and_checks_ordinals() {
     assert_eq!(scratch[0], borrowed_value_bits(&values[0]));
 
     for index in [int_bits(-1), int_bits(1)] {
-        let mut scratch = [bits(Value::nothing()), index];
+        let mut scratch = [bits(Value::empty_relation()), index];
         assert_eq!(
             compiled.run(&mut scratch, &view, 1),
             NaturalLoopOutcome::SideExit,
@@ -934,7 +934,7 @@ fn generated_map_access_emits_immediate_keys_and_values_without_helpers() {
         ),
     ];
     let view = [NaturalLoopCollectionView::map(&entries)];
-    let mut key_scratch = [bits(Value::nothing()), int_bits(1)];
+    let mut key_scratch = [bits(Value::empty_relation()), int_bits(1)];
     let key_compiled = CompiledNaturalLoop::compile(&collection_key_plan()).unwrap();
     assert!(matches!(
         key_compiled.run(&mut key_scratch, &view, 1),
@@ -945,7 +945,7 @@ fn generated_map_access_emits_immediate_keys_and_values_without_helpers() {
         Some(mica_var::Symbol::intern("key"))
     );
 
-    let mut value_scratch = [bits(Value::nothing()), int_bits(0)];
+    let mut value_scratch = [bits(Value::empty_relation()), int_bits(0)];
     let value_compiled = CompiledNaturalLoop::compile(&collection_value_plan()).unwrap();
     assert!(matches!(
         value_compiled.run(&mut value_scratch, &view, 1),
@@ -1010,10 +1010,10 @@ fn generated_numeric_arithmetic_matches_float_and_mixed_value_semantics() {
         let mut scratch = [
             borrowed_value_bits(&left),
             borrowed_value_bits(&right),
-            bits(Value::nothing()),
-            bits(Value::nothing()),
-            bits(Value::nothing()),
-            bits(Value::nothing()),
+            bits(Value::empty_relation()),
+            bits(Value::empty_relation()),
+            bits(Value::empty_relation()),
+            bits(Value::empty_relation()),
         ];
         assert_eq!(
             compiled.run(&mut scratch, &[], 4),
@@ -1040,10 +1040,10 @@ fn generated_numeric_arithmetic_side_exits_on_invalid_or_non_finite_results() {
         let mut scratch = [
             borrowed_value_bits(&left),
             borrowed_value_bits(&right),
-            bits(Value::nothing()),
-            bits(Value::nothing()),
-            bits(Value::nothing()),
-            bits(Value::nothing()),
+            bits(Value::empty_relation()),
+            bits(Value::empty_relation()),
+            bits(Value::empty_relation()),
+            bits(Value::empty_relation()),
         ];
         assert_eq!(
             compiled.run(&mut scratch, &[], 4),
@@ -1066,7 +1066,7 @@ fn generated_numeric_division_matches_value_semantics() {
         let mut scratch = [
             borrowed_value_bits(&left),
             borrowed_value_bits(&right),
-            bits(Value::nothing()),
+            bits(Value::empty_relation()),
         ];
         assert_eq!(
             compiled.run(&mut scratch, &[], 1),
@@ -1093,7 +1093,7 @@ fn generated_numeric_remainder_matches_value_semantics() {
         let mut scratch = [
             borrowed_value_bits(&left),
             borrowed_value_bits(&right),
-            bits(Value::nothing()),
+            bits(Value::empty_relation()),
         ];
         assert_eq!(
             compiled.run(&mut scratch, &[], 1),
@@ -1120,7 +1120,7 @@ fn generated_numeric_division_and_remainder_side_exit_on_errors() {
             let mut scratch = [
                 borrowed_value_bits(left),
                 borrowed_value_bits(right),
-                bits(Value::nothing()),
+                bits(Value::empty_relation()),
             ];
             assert_eq!(
                 compiled.run(&mut scratch, &[], 1),
@@ -1132,7 +1132,7 @@ fn generated_numeric_division_and_remainder_side_exit_on_errors() {
     let mut scratch = [
         bits(Value::int(VALUE_INT_MIN).unwrap()),
         bits(Value::int(-1).unwrap()),
-        bits(Value::nothing()),
+        bits(Value::empty_relation()),
     ];
     assert_eq!(
         divide.run(&mut scratch, &[], 1),
@@ -1141,7 +1141,7 @@ fn generated_numeric_division_and_remainder_side_exit_on_errors() {
     let mut scratch = [
         bits(Value::float(f32::MAX).unwrap()),
         bits(Value::float(0.5).unwrap()),
-        bits(Value::nothing()),
+        bits(Value::empty_relation()),
     ];
     assert_eq!(
         divide.run(&mut scratch, &[], 1),
@@ -1181,7 +1181,7 @@ fn generated_equality_calls_one_helper_for_heap_and_mixed_numeric_values() {
         let mut scratch = [
             borrowed_value_bits(&left),
             borrowed_value_bits(&right),
-            bits(Value::nothing()),
+            bits(Value::empty_relation()),
         ];
         assert_eq!(
             compiled.run(&mut scratch, &[], 1),
@@ -1204,7 +1204,7 @@ fn generated_language_ordering_calls_one_helper_for_heap_and_mixed_numeric_value
     let mut scratch = [
         borrowed_value_bits(&left),
         borrowed_value_bits(&right),
-        bits(Value::nothing()),
+        bits(Value::empty_relation()),
     ];
     assert!(matches!(
         not_equal.run(&mut scratch, &[], 1),
@@ -1253,7 +1253,7 @@ fn generated_language_ordering_calls_one_helper_for_heap_and_mixed_numeric_value
             let mut scratch = [
                 borrowed_value_bits(left),
                 borrowed_value_bits(right),
-                bits(Value::nothing()),
+                bits(Value::empty_relation()),
             ];
             assert_eq!(
                 compiled.run(&mut scratch, &[], 1),
@@ -1282,7 +1282,7 @@ fn generated_heap_equality_helper_executes_concurrently() {
             let mut scratch = [
                 borrowed_value_bits(&left),
                 borrowed_value_bits(&right),
-                bits(Value::nothing()),
+                bits(Value::empty_relation()),
             ];
             barrier.wait();
             let outcome = compiled.run(&mut scratch, &[], 1);
@@ -1319,7 +1319,7 @@ fn generated_language_ordering_helper_executes_concurrently() {
             let mut scratch = [
                 borrowed_value_bits(&left),
                 borrowed_value_bits(&right),
-                bits(Value::nothing()),
+                bits(Value::empty_relation()),
             ];
             barrier.wait();
             let outcome = compiled.run(&mut scratch, &[], 1);
@@ -1354,10 +1354,10 @@ fn generated_mixed_numeric_arithmetic_executes_concurrently() {
             let mut scratch = [
                 borrowed_value_bits(&left),
                 borrowed_value_bits(&right),
-                bits(Value::nothing()),
-                bits(Value::nothing()),
-                bits(Value::nothing()),
-                bits(Value::nothing()),
+                bits(Value::empty_relation()),
+                bits(Value::empty_relation()),
+                bits(Value::empty_relation()),
+                bits(Value::empty_relation()),
             ];
             barrier.wait();
             let outcome = compiled.run(&mut scratch, &[], 4);
@@ -1392,7 +1392,7 @@ fn generated_float_remainder_helper_executes_concurrently() {
             let mut scratch = [
                 borrowed_value_bits(&left),
                 borrowed_value_bits(&right),
-                bits(Value::nothing()),
+                bits(Value::empty_relation()),
             ];
             barrier.wait();
             let outcome = compiled.run(&mut scratch, &[], 1);

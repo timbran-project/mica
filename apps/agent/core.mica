@@ -95,8 +95,9 @@ assert Delegates(#agent/default, #operator, 0)
 assert Delegates(#operator, #agent, 0)
 
 verb workspace/active(agent @ #agent)
-  let workspace = agent.agentWorkspace
-  if workspace != nothing
+  let workspaces = AgentWorkspace(agent, ?workspace)
+  if workspaces
+    let exactly {:workspace -> workspace} = workspaces
     return workspace
   end
 
@@ -104,23 +105,25 @@ verb workspace/active(agent @ #agent)
     return found[:w]
   end
 
-  return nothing
+  return none
 end
 
 verb workspace/name(workspace)
-  let name = workspace.name
-  if name == nothing
+  let names = Name(workspace, ?name)
+  if not names
     return to_literal(workspace)
   end
+  let exactly {:name -> name} = names
   return name
 end
 
 verb agent/name(agent @ #agent)
-  let name = agent.description
-  if name == nothing
+  let descriptions = Description(agent, ?description)
+  if not descriptions
     return to_literal(agent)
   end
-  return name
+  let exactly {:description -> description} = descriptions
+  return description
 end
 
 verb message/role_label(role @ #string)
@@ -150,8 +153,9 @@ verb message/class(role @ #string)
 end
 
 verb agent/ensure_transcript(agent @ #agent, workspace)
-  let existing = one TranscriptAgent(?t, agent)
-  if existing != nothing
+  let transcripts = TranscriptAgent(?transcript, agent)
+  if transcripts
+    let exactly {:transcript -> existing} = transcripts
     return existing
   end
 
@@ -163,12 +167,17 @@ verb agent/ensure_transcript(agent @ #agent, workspace)
 end
 
 verb agent/transcript(agent @ #agent)
-  return one TranscriptAgent(?transcript, agent)
+  let transcripts = TranscriptAgent(?transcript, agent)
+  if not transcripts
+    return none
+  end
+  let exactly {:transcript -> transcript} = transcripts
+  return some(transcript)
 end
 
 verb agent/append_message(agent @ #agent, role @ #string, content @ #string)
   let workspace = workspace/active(agent)
-  if workspace == nothing
+  if workspace == none
     return false
   end
 
@@ -222,14 +231,14 @@ verb agent/messages_ordered(transcript)
   let ordered = []
   let next_seq = 0
   while list_size_lt(ordered, total)
-    let found_at = nothing
+    let found_at = none
     for message in unsorted
       let seq = message.messageSeq
       if seq == next_seq
         found_at = message
       end
     end
-    if found_at != nothing
+    if found_at != none
       ordered = [@ordered, found_at]
       next_seq = next_seq + 1
     else
@@ -267,17 +276,19 @@ end
 
 verb agent/resolve_model(agent @ #agent)
   let env_model = os_getenv("MICA_AGENT_MODEL")
-  if env_model != nothing
-    return env_model
+  if let some(model) = env_model
+    return model
   end
 
-  let configured = agent.agentModel
-  if configured != nothing
+  let configured_models = AgentModel(agent, ?model)
+  if configured_models
+    let exactly {:model -> configured} = configured_models
     return configured
   end
 
-  let default = #agent/default.agentModel
-  if default != nothing
+  let default_models = AgentModel(#agent/default, ?model)
+  if default_models
+    let exactly {:model -> default} = default_models
     return default
   end
 

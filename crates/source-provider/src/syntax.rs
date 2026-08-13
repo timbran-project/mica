@@ -407,7 +407,6 @@ fn mica_highlights(text: &str) -> Vec<HighlightSpan> {
             | SyntaxKind::ReturnKw
             | SyntaxKind::RaiseKw
             | SyntaxKind::RecoverKw
-            | SyntaxKind::OneKw
             | SyntaxKind::SpawnKw
             | SyntaxKind::AfterKw
             | SyntaxKind::NotKw
@@ -425,8 +424,7 @@ fn mica_highlights(text: &str) -> Vec<HighlightSpan> {
             | SyntaxKind::RetractKw
             | SyntaxKind::RequireKw
             | SyntaxKind::TrueKw
-            | SyntaxKind::FalseKw
-            | SyntaxKind::NothingKw => "keyword",
+            | SyntaxKind::FalseKw => "keyword",
             SyntaxKind::ErrorCode => "error",
             _ => {
                 index += 1;

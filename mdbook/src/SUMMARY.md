@@ -20,6 +20,7 @@
 - [Shared Equipment Service](./examples/equipment-service.md)
 - [Approval Workflow](./examples/approval-workflow.md)
 - [Recursive Dependency Planner](./examples/dependency-planner.md)
+- [Structural Options and Results](./examples/structural-values.md)
 
 # Language Reference
 
@@ -27,6 +28,7 @@
 - [Program Structure](./language/program-structure.md)
 - [Syntax Quick Reference](./language/syntax.md)
 - [Values](./language/values.md)
+- [Structural Relation Types](./language/structural-relation-types.md)
 - [Expressions and Bindings](./language/expressions-and-bindings.md)
 - [Operators, Indexing, and Calls](./language/operators-and-calls.md)
 - [Value-Kind Annotations](./language/value-kind-annotations.md)

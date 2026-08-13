@@ -42,7 +42,6 @@ pub enum SyntaxKind {
     ReturnKw,
     RaiseKw,
     RecoverKw,
-    OneKw,
     SpawnKw,
     AfterKw,
     NotKw,
@@ -61,7 +60,6 @@ pub enum SyntaxKind {
     RequireKw,
     TrueKw,
     FalseKw,
-    NothingKw,
     LParen,
     RParen,
     LBracket,
@@ -125,7 +123,6 @@ pub enum SyntaxKind {
     ReturnExpr,
     RaiseExpr,
     RecoverExpr,
-    OneExpr,
     SpawnExpr,
     RecoverClause,
     BreakExpr,
@@ -209,7 +206,6 @@ impl SyntaxKind {
                 | Self::ReturnKw
                 | Self::RaiseKw
                 | Self::RecoverKw
-                | Self::OneKw
                 | Self::SpawnKw
                 | Self::AfterKw
                 | Self::NotKw
@@ -228,7 +224,6 @@ impl SyntaxKind {
                 | Self::RequireKw
                 | Self::TrueKw
                 | Self::FalseKw
-                | Self::NothingKw
         )
     }
 }

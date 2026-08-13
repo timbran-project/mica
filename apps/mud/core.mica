@@ -352,7 +352,7 @@ assert command/Form(:yawn)
 assert command/Form(:stretch)
 
 assert command/Pattern(:look, :look, #command/pattern/look_room)
-assert command/PatternPart(#command/pattern/look_room, 0, :eol, nothing)
+assert command/PatternPart(#command/pattern/look_room, 0, :eol, none)
 
 assert command/Pattern(:look, :examine, #command/pattern/look_target)
 assert command/PatternPart(#command/pattern/look_target, 0, :optional_prep, :at)
@@ -372,7 +372,7 @@ assert command/Pattern(:set_entity_portable_command, :set_entity_portable_comman
 assert command/Pattern(:set_entity_fixed_command, :set_entity_fixed_command, #command/pattern/message_command)
 assert command/Pattern(:show_entity_here_command, :show_entity_here_command, #command/pattern/message_command)
 assert command/Pattern(:hide_entity_here_command, :hide_entity_here_command, #command/pattern/message_command)
-assert command/PatternPart(#command/pattern/message_command, 0, :message, nothing)
+assert command/PatternPart(#command/pattern/message_command, 0, :message, none)
 
 assert command/Pattern(:get, :get, #command/pattern/get)
 assert command/PatternPart(#command/pattern/get, 0, :object_role, :item)
@@ -394,10 +394,10 @@ assert command/Pattern(:push, :push, #command/pattern/push)
 assert command/PatternPart(#command/pattern/push, 0, :object_role, :target)
 
 assert command/Pattern(:say, :say, #command/pattern/say)
-assert command/PatternPart(#command/pattern/say, 0, :message, nothing)
+assert command/PatternPart(#command/pattern/say, 0, :message, none)
 
 assert command/Pattern(:emote, :emote, #command/pattern/emote)
-assert command/PatternPart(#command/pattern/emote, 0, :message, nothing)
+assert command/PatternPart(#command/pattern/emote, 0, :message, none)
 
 assert command/Pattern(:nod, :nod, #command/pattern/social_none)
 assert command/Pattern(:nod, :nod_at, #command/pattern/social_at)
@@ -430,8 +430,8 @@ assert command/PatternPart(#command/pattern/social_at, 0, :prep, :at)
 assert command/PatternPart(#command/pattern/social_at, 1, :object_role, :target)
 assert command/PatternPart(#command/pattern/social_to, 0, :prep, :to)
 assert command/PatternPart(#command/pattern/social_to, 1, :object_role, :target)
-assert command/PatternPart(#command/pattern/social_none, 0, :eol, nothing)
-assert command/PatternPart(#command/pattern/think, 0, :message, nothing)
+assert command/PatternPart(#command/pattern/social_none, 0, :eol, none)
+assert command/PatternPart(#command/pattern/think, 0, :message, none)
 
 assert command/Preposition(:at, "at")
 assert command/Preposition(:inside, "in")
@@ -913,20 +913,20 @@ verb event/next_seq(listener @ #player)
 end
 
 verb event/record_source(listener @ #player, source @ #event<_>)
-  let replace_group = event/metadata(source, :replace_group, nothing)
-  if replace_group != nothing
-    let existing = nothing
+  let replace_group = event/metadata(source, :replace_group, none)
+  if replace_group != none
+    let existing = none
     let existing_seq = -1
     for found in event/Delivery(listener, ?event)
       let candidate = found[:event]
       let candidate_source = candidate.event/source
-      if event/metadata(candidate_source, :group, nothing) == replace_group && candidate.event/seq > existing_seq
+      if event/metadata(candidate_source, :group, none) == replace_group && candidate.event/seq > existing_seq
         existing = candidate
         existing_seq = candidate.event/seq
       end
     end
 
-    if existing != nothing
+    if existing != none
       existing.event/source = source
       existing.event/text = event/render(source, listener)
       return existing
@@ -992,11 +992,11 @@ end
 
 verb event/scene_at(event @ #event<_>, room @ #room)
   let payload = frob_value(event)
-  let bindings = index_or(payload, :bindings, nothing)
-  if bindings == nothing
+  let bindings = index_or(payload, :bindings, none)
+  if bindings == none
     bindings = {}
   end
-  if index_or(bindings, :location, nothing) == nothing
+  if index_or(bindings, :location, none) == none
     bindings[:location] = room
     payload[:bindings] = bindings
   end
@@ -1012,8 +1012,9 @@ verb look(actor @ #player)
 
   for found in LocatedIn(?item, room)
     let item = found[:item]
-    let text = item.description
-    if item != actor && text != nothing
+    let descriptions = Description(item, ?text)
+    if item != actor && descriptions
+      let exactly {:text -> text} = descriptions
       event/notify(actor, text)
     end
   end
@@ -1043,7 +1044,7 @@ verb look_in(actor @ #player, target @ #container)
   for found in LocatedIn(?item, target)
     let item = found[:item]
     let text = item.description
-    if text != nothing
+    if text != none
       found_any = true
       event/notify(actor, text)
     end
@@ -1057,11 +1058,19 @@ verb look_in(actor @ #player, target @ #container)
 end
 
 verb passage/label_for(passage, room)
-  let label = one PassageLabel(passage, room, ?label)
-  if label == nothing
-    label = one PassageAlias(passage, room, ?alias)
+  let labels = PassageLabel(passage, room, ?label)
+  let label = none
+  if labels
+    let exactly {:label -> found_label} = labels
+    label = found_label
+  else
+    let aliases = PassageAlias(passage, room, ?alias)
+    if aliases
+      let exactly {:alias -> alias} = aliases
+      label = alias
+    end
   end
-  if label == nothing
+  if label == none
     label = "somewhere"
   end
 
@@ -1069,8 +1078,8 @@ verb passage/label_for(passage, room)
 end
 
 verb passage/describe_from(passage, room)
-  let description = one PassageDescription(passage, room, ?description)
-  if description != nothing
+  let exactly {:description -> description} = PassageDescription(passage, room, ?description)
+  if description != none
     return description
   end
 
@@ -1079,17 +1088,17 @@ end
 
 verb go(actor @ #player, direction)
   let room = actor.locatedIn
-  let passage_id = nothing
-  let destination = nothing
+  let passage_id = none
+  let destination = none
   for found in PassageSide(?passage, room, ?candidate)
     let candidate_passage = found[:passage]
-    if passage_id == nothing && PassageAlias(candidate_passage, room, direction) && PassageOpen(candidate_passage, true)
+    if passage_id == none && PassageAlias(candidate_passage, room, direction) && PassageOpen(candidate_passage, true)
       passage_id = candidate_passage
       destination = found[:candidate]
     end
   end
 
-  if destination == nothing
+  if destination == none
     event/notify(actor, "You cannot go that way.")
     return false
   end
@@ -1119,7 +1128,7 @@ end
 verb builder/current_area(actor @ #player)
   let room = actor.locatedIn
   let area = room.roomInArea
-  if area == nothing
+  if area == none
     event/notify(actor, "This room is not in an area.")
   end
 
@@ -1139,12 +1148,12 @@ verb builder/room_named_in_area(area @ #area, name @ #string)
   for found in RoomInArea(?room, area)
     let room = found[:room]
     let room_name = room.name
-    if room_name != nothing && lower(room_name) == wanted
+    if room_name != none && lower(room_name) == wanted
       return room
     end
   end
 
-  return nothing
+  return none
 end
 
 verb builder/passage_between(from @ #room, to @ #room)
@@ -1152,7 +1161,7 @@ verb builder/passage_between(from @ #room, to @ #room)
     return found[:passage]
   end
 
-  return nothing
+  return none
 end
 
 verb builder/passage_from(from @ #room, command @ #string)
@@ -1163,7 +1172,7 @@ verb builder/passage_from(from @ #room, command @ #string)
     end
   end
 
-  return nothing
+  return none
 end
 
 verb builder/opposite_direction(direction @ #string)
@@ -1195,7 +1204,7 @@ verb build_room(actor @ #player, name @ #string)
   end
 
   let area = builder/current_area(actor)
-  if area == nothing
+  if area == none
     return false
   end
 
@@ -1206,7 +1215,7 @@ verb build_room(actor @ #player, name @ #string)
   end
 
   let existing = builder/room_named_in_area(area, trimmed)
-  if existing != nothing
+  if existing != none
     event/notify(actor, "That room already exists in this area.")
     return false
   end
@@ -1228,14 +1237,14 @@ end
 
 verb builder/parse_dig(spec @ #string)
   let tokens = words(lower(spec))
-  if index_or(tokens, 0, nothing) == nothing || index_or(tokens, 1, nothing) != "to"
+  if index_or(tokens, 0, none) == none || index_or(tokens, 1, none) != "to"
     return {:ok -> false}
   end
 
   let direction = tokens[0]
   let target_words = []
   let index = 2
-  while index_or(tokens, index, nothing) != nothing
+  while index_or(tokens, index, none) != none
     target_words = [@target_words, tokens[index]]
     index = index + 1
   end
@@ -1250,13 +1259,13 @@ verb create_passage(actor @ #player, from @ #room, to @ #room, label @ #string, 
 
   let from_area = from.roomInArea
   let to_area = to.roomInArea
-  if from_area == nothing || to_area == nothing || from_area != to_area
+  if from_area == none || to_area == none || from_area != to_area
     event/notify(actor, "Passages can only connect rooms in the same area.")
     return false
   end
 
   let existing = builder/passage_between(from, to)
-  if existing != nothing
+  if existing != none
     event/notify(actor, "Those rooms already have a passage.")
     return false
   end
@@ -1268,7 +1277,7 @@ verb create_passage(actor @ #player, from @ #room, to @ #room, label @ #string, 
   end
 
   let reverse = ""
-  if return_label != nothing
+  if return_label != none
     reverse = lower(trim(return_label))
     if reverse == ""
       reverse = builder/opposite_direction(direction)
@@ -1302,12 +1311,12 @@ verb create_passage_command(actor @ #player, message @ #string)
   end
 
   let area = builder/current_area(actor)
-  if area == nothing
+  if area == none
     return false
   end
 
   let target = builder/room_named_in_area(area, parsed[:target])
-  if target == nothing
+  if target == none
     event/notify(actor, "No room by that name exists in this area.")
     return false
   end
@@ -1333,7 +1342,7 @@ end
 
 verb remove_passage_command(actor @ #player, message @ #string)
   let passage = builder/passage_from(actor.locatedIn, message)
-  if passage == nothing
+  if passage == none
     event/notify(actor, "No passage matches that direction.")
     return false
   end
@@ -1421,7 +1430,7 @@ end
 verb builder/resolve_edit_target(actor @ #player, target @ #string)
   let wanted = lower(trim(target))
   if wanted == ""
-    return nothing
+    return none
   end
 
   if wanted == "here" || wanted == "room" || wanted == "this room"
@@ -1433,12 +1442,12 @@ verb builder/resolve_edit_target(actor @ #player, target @ #string)
   end
 
   let passage = builder/passage_from(actor.locatedIn, wanted)
-  if passage != nothing
+  if passage != none
     return passage
   end
 
   let obj = command/match_object(actor, wanted)
-  if obj != nothing
+  if obj != none
     return obj
   end
 
@@ -1450,14 +1459,14 @@ verb builder/resolve_edit_target(actor @ #player, target @ #string)
   end
 
   let area = builder/current_area(actor)
-  if area != nothing
+  if area != none
     let room = builder/room_named_in_area(area, wanted)
-    if room != nothing
+    if room != none
       return room
     end
   end
 
-  return nothing
+  return none
 end
 
 verb set_entity_description(actor @ #player, entity, description @ #string)
@@ -1465,7 +1474,7 @@ verb set_entity_description(actor @ #player, entity, description @ #string)
     return false
   end
 
-  if frob_delegate(entity) == #passage
+  if is_frob(entity) && frob_delegate(entity) == #passage
     event/notify(actor, "Use passage editing for exits.")
     return false
   end
@@ -1486,7 +1495,7 @@ verb set_entity_name(actor @ #player, entity, name @ #string)
     return false
   end
 
-  if frob_delegate(entity) == #passage
+  if is_frob(entity) && frob_delegate(entity) == #passage
     event/notify(actor, "Use passage editing for exits.")
     return false
   end
@@ -1510,7 +1519,7 @@ verb set_entity_aliases(actor @ #player, entity, aliases_text @ #string)
     return false
   end
 
-  if frob_delegate(entity) == #passage
+  if is_frob(entity) && frob_delegate(entity) == #passage
     event/notify(actor, "Use passage editing for exits.")
     return false
   end
@@ -1532,7 +1541,7 @@ verb set_entity_mobility(actor @ #player, entity, portable)
     return false
   end
 
-  if Delegates(entity, #room, 0) || Delegates(entity, #player, 0) || frob_delegate(entity) == #passage
+  if Delegates(entity, #room, 0) || Delegates(entity, #player, 0) || is_frob(entity) && frob_delegate(entity) == #passage
     return true
   end
 
@@ -1548,12 +1557,12 @@ verb set_entity_visibility(actor @ #player, entity, visible_here)
     return false
   end
 
-  if Delegates(entity, #room, 0) || Delegates(entity, #player, 0) || frob_delegate(entity) == #passage
+  if Delegates(entity, #room, 0) || Delegates(entity, #player, 0) || is_frob(entity) && frob_delegate(entity) == #passage
     return true
   end
 
   let room = actor.locatedIn
-  if room == nothing
+  if room == none
     return false
   end
 
@@ -1603,12 +1612,12 @@ verb set_passage_description_command(actor @ #player, message @ #string)
   end
 
   let target = builder/resolve_edit_target(actor, parsed[:target])
-  if target == nothing
+  if target == none
     event/notify(actor, "No room, thing, or passage matches that target.")
     return false
   end
 
-  if frob_delegate(target) == #passage
+  if is_frob(target) && frob_delegate(target) == #passage
     return set_passage_description(actor, target, actor.locatedIn, parsed[:value], true)
   end
 
@@ -1623,7 +1632,7 @@ verb set_entity_name_command(actor @ #player, message @ #string)
   end
 
   let target = builder/resolve_edit_target(actor, parsed[:target])
-  if target == nothing || frob_delegate(target) == #passage
+  if target == none || is_frob(target) && frob_delegate(target) == #passage
     event/notify(actor, "No room or thing matches that target.")
     return false
   end
@@ -1639,7 +1648,7 @@ verb set_entity_aliases_command(actor @ #player, message @ #string)
   end
 
   let target = builder/resolve_edit_target(actor, parsed[:target])
-  if target == nothing || frob_delegate(target) == #passage
+  if target == none || is_frob(target) && frob_delegate(target) == #passage
     event/notify(actor, "No room or thing matches that target.")
     return false
   end
@@ -1649,7 +1658,7 @@ end
 
 verb set_entity_portable_command(actor @ #player, message @ #string)
   let target = builder/resolve_edit_target(actor, message)
-  if target == nothing || Delegates(target, #room, 0) || Delegates(target, #player, 0) || frob_delegate(target) == #passage
+  if target == none || Delegates(target, #room, 0) || Delegates(target, #player, 0) || is_frob(target) && frob_delegate(target) == #passage
     event/notify(actor, "No thing matches that target.")
     return false
   end
@@ -1659,7 +1668,7 @@ end
 
 verb set_entity_fixed_command(actor @ #player, message @ #string)
   let target = builder/resolve_edit_target(actor, message)
-  if target == nothing || Delegates(target, #room, 0) || Delegates(target, #player, 0) || frob_delegate(target) == #passage
+  if target == none || Delegates(target, #room, 0) || Delegates(target, #player, 0) || is_frob(target) && frob_delegate(target) == #passage
     event/notify(actor, "No thing matches that target.")
     return false
   end
@@ -1669,7 +1678,7 @@ end
 
 verb show_entity_here_command(actor @ #player, message @ #string)
   let target = builder/resolve_edit_target(actor, message)
-  if target == nothing || Delegates(target, #room, 0) || Delegates(target, #player, 0) || frob_delegate(target) == #passage
+  if target == none || Delegates(target, #room, 0) || Delegates(target, #player, 0) || is_frob(target) && frob_delegate(target) == #passage
     event/notify(actor, "No thing matches that target.")
     return false
   end
@@ -1679,7 +1688,7 @@ end
 
 verb hide_entity_here_command(actor @ #player, message @ #string)
   let target = builder/resolve_edit_target(actor, message)
-  if target == nothing || Delegates(target, #room, 0) || Delegates(target, #player, 0) || frob_delegate(target) == #passage
+  if target == none || Delegates(target, #room, 0) || Delegates(target, #player, 0) || is_frob(target) && frob_delegate(target) == #passage
     event/notify(actor, "No thing matches that target.")
     return false
   end
@@ -1766,7 +1775,7 @@ verb push(actor @ #player, target @ #thing)
   assert ButtonArmed(target)
   event/notify(actor, "You press the red button. It clicks, then begins to hum.")
   let task = spawn :button_resolves(actor: actor, target: target, room: room) after 0.25
-  return task != nothing
+  return task != none
 end
 
 verb button_resolves(actor @ #player, target @ #thing, room @ #room)

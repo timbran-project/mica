@@ -345,7 +345,6 @@ impl<'a> KindInference<'a> {
                 }
                 result
             }
-            HirExpr::One { expr, .. } => self.flow(expr).with_normal(KindSet::ALL),
             HirExpr::Break { .. } | HirExpr::Continue { .. } | HirExpr::Error { .. } => {
                 KindFlow::unreachable()
             }
@@ -594,7 +593,7 @@ const fn literal_kind(literal: &Literal) -> ValueKind {
         Literal::Bytes(_) => ValueKind::Bytes,
         Literal::Bool(_) => ValueKind::Bool,
         Literal::ErrorCode(_) => ValueKind::ErrorCode,
-        Literal::Unit | Literal::Nothing => ValueKind::Relation,
+        Literal::Unit => ValueKind::Relation,
     }
 }
 

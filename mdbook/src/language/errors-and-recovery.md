@@ -25,7 +25,12 @@ program.
 try
   risky()
 catch E_PERMISSION as err
-  emit(actor, err.message)
+  match err.message
+  case some(message)
+    emit(actor, message)
+  case none
+    emit(actor, "Permission denied.")
+  end
 catch
   emit(actor, "Something went wrong.")
 finally
@@ -45,12 +50,15 @@ err.message
 err.value
 ```
 
+`code` is always present. `message` is `option<string>` and `value` is `option<dynamic>` because a
+raised error may omit either field.
+
 `recover` is the expression-level form. It evaluates an expression and maps selected errors to
 replacement values:
 
 ```mica
-let description = recover one Description(item, ?text)
-catch E_AMBIGUOUS => "It is hard to describe."
+let description = recover item.description
+catch E_CARDINALITY => "It is hard to describe."
 catch => "You see nothing special."
 end
 ```

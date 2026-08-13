@@ -723,14 +723,14 @@ mod tests {
         }));
         queue.push(DriverEvent::TaskCompleted {
             task_id: 7,
-            value: Value::nothing(),
+            value: Value::unit(),
         });
         assert!(queue.drain().events.is_empty());
 
         queue.register_task(7);
         queue.push(DriverEvent::TaskCompleted {
             task_id: 7,
-            value: Value::nothing(),
+            value: Value::unit(),
         });
         queue.push(DriverEvent::Effect(Effect {
             task_id: 7,
@@ -755,7 +755,7 @@ mod tests {
             queue.register_task(task_id);
             queue.push(DriverEvent::TaskCompleted {
                 task_id,
-                value: Value::nothing(),
+                value: Value::unit(),
             });
         }
         let drain = queue.drain();
@@ -876,7 +876,8 @@ mod tests {
                         request_id: 2,
                         task_id: Some(_),
                     },
-                ] if *target == endpoint && *value == Value::identity(actor)
+                ] if *target == endpoint
+                    && *value == Value::option_some(Value::identity(actor))
             ));
 
             let replies = dispatch(
@@ -1094,7 +1095,8 @@ mod tests {
                 .unwrap();
             assert!(matches!(
                 &submitted.initial_report().outcome,
-                TaskOutcome::Complete { value, .. } if *value == Value::identity(actor)
+                TaskOutcome::Complete { value, .. }
+                    if *value == Value::option_some(Value::identity(actor))
             ));
         });
     }

@@ -103,15 +103,25 @@ verb retrieval/answer_value(question, index, limit, model @ #string)
 end
 
 verb retrieval/index_entry_status(index, subject, model @ #string, text @ #string)
-  let embedding = one IndexEntryEmbedding(index, subject, model, ?embedding)
-  if embedding == nothing
+  let embeddings = IndexEntryEmbedding(index, subject, model, ?embedding)
+  if not embeddings
     retract IndexEntryStatus(index, subject, model, _)
     assert IndexEntryStatus(index, subject, model, "missing")
     assert EmbeddingRefreshNeeded(index, subject, model)
     return "missing"
   end
+  let exactly {:embedding -> embedding} = embeddings
 
-  let stored_text = one IndexEntrySourceText(index, subject, model, ?stored_text)
+  let stored_texts = IndexEntrySourceText(index, subject, model, ?stored_text)
+  if not stored_texts
+    retract IndexEntryStatus(index, subject, model, _)
+    assert IndexEntryStatus(index, subject, model, "stale")
+    assert EmbeddingRefreshNeeded(index, subject, model)
+    retract VectorIndexContains(index, embedding)
+    embedding.embeddingStatus = "stale"
+    return "stale"
+  end
+  let exactly {:stored_text -> stored_text} = stored_texts
   if stored_text != text
     retract IndexEntryStatus(index, subject, model, _)
     assert IndexEntryStatus(index, subject, model, "stale")
@@ -129,13 +139,14 @@ verb retrieval/index_entry_status(index, subject, model @ #string, text @ #strin
 end
 
 verb retrieval/text_unit_status(index, unit, model @ #string)
-  let text = unit.textUnitText
-  if text == nothing
+  let texts = TextUnitText(unit, ?text)
+  if not texts
     retract IndexEntryStatus(index, unit, model, _)
     assert IndexEntryStatus(index, unit, model, "missing")
     assert EmbeddingRefreshNeeded(index, unit, model)
     return "missing"
   end
+  let exactly {:text -> text} = texts
 
   return retrieval/index_entry_status(index, unit, model, text)
 end
@@ -146,10 +157,8 @@ verb ensure_subject_embedding(actor, index, subject, text @ #string, model @ #st
 
   let status = retrieval/index_entry_status(index, subject, model, text)
   if status == "ready"
-    let embedding = one IndexEntryEmbedding(index, subject, model, ?embedding)
-    if embedding != nothing
-      return embedding
-    end
+    let exactly {:embedding -> embedding} = IndexEntryEmbedding(index, subject, model, ?embedding)
+    return embedding
   end
 
   let embedding = frob(#retrieval/embedding, {:index -> index, :model -> model, :subject -> subject, :text -> text})
@@ -213,10 +222,15 @@ verb answer_refresh_status(answer)
   let stale = false
   for found in AnswerCitation(answer, ?subject)
     let subject = found[:subject]
-    let current = subject.textUnitText
-    let recorded = one AnswerCitationText(answer, subject, ?text)
-    if current != recorded
+    let current_texts = TextUnitText(subject, ?text)
+    let exactly {:text -> recorded} = AnswerCitationText(answer, subject, ?text)
+    if not current_texts
       stale = true
+    else
+      let exactly {:text -> current} = current_texts
+      if current != recorded
+        stale = true
+      end
     end
   end
 

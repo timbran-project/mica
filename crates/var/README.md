@@ -5,7 +5,7 @@ relation kernel, runtime, compiler, and runner.
 
 The central type is `Value`, a one-word tagged value. Immediate values such as identities, symbols,
 booleans, small integers, reduced-precision floats, and error codes stay inline. The zero-column
-empty relation, spelled `nothing` in source, also has an immediate representation. Larger immutable
+empty relation, spelled `[] {}` in source, also has an immediate representation. Larger immutable
 data such as strings, bytes, lists, maps, and finite relations live on the heap and are shared with
 `Arc`.
 

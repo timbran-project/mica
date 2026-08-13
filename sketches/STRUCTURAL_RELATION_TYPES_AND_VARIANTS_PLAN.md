@@ -5,10 +5,10 @@ Revised: 2026-08-13
 
 ## Status
 
-Proposed staged design and implementation plan. The syntax in this document is exploratory and is
-not current Mica syntax. This revision chooses a coherent direction for query cardinality, unit,
-absence, and failure; the remaining structural type syntax and allocation questions still require
-Stage 0 validation. This document should remain a sketch until those experiments are resolved.
+Implemented through Stages 0–8 on 2026-08-13. Structural types, live aliases, unit, option/result
+values, structural matching and row binding, strict absence boundaries, and the bounded Stage 7
+optimizations described here are current Mica behaviour. Broader escape analysis and specialized
+calling conventions remain deliberately deferred pending application-shaped evidence.
 
 ## Executive Position
 

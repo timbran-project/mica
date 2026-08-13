@@ -9,9 +9,9 @@ unresolved parser collision, and the representation benchmark found a large enou
 to retain scalar replacement as a later measured optimization. Correctness continues to use ordinary
 relation values at observable boundaries.
 
-The executable parser does not yet accept structural types, row bindings, type declarations, or
-unit. It now diagnoses empty parentheses explicitly instead of accepting `()` and lowering an error
-node that could be mistaken for `nothing`.
+This document records the Stage 0 baseline. Stages 1–8 subsequently made structural types, row
+bindings, live type declarations, unit, option/result variants, and exhaustive structural matching
+part of executable Mica source.
 
 ## Grammar Probe
 
@@ -203,3 +203,26 @@ specialized call convention: the benchmark intentionally concentrates constructo
 while no migrated application profile yet identifies a bounded region where those broader
 mechanisms win end to end. Those mechanisms remain deferred until Stage 8 application usage supplies
 that evidence.
+
+## Stage 8 Migration Outcome
+
+The source and runtime migration completed on 2026-08-13:
+
+- `one` and `nothing` have no lexer, parser, compiler, bytecode, VM, formatter, or application
+  surface and no compatibility aliases;
+- bare return, fallthrough, and side-effect-only operations produce unit;
+- functional dot reads, indexing, and exact row binding are strict, while expected query absence
+  uses optional row binding;
+- actor, principal, environment, subscription, error, host-protocol, and report omissions use
+  structural options;
+- parsing APIs return structural results with retained errors;
+- JSON null uses an explicit tagged map and does not convert to an empty relation;
+- durable dispatch restrictions use named alternatives rather than an empty-relation marker; and
+- application fileins and the language reference use the current forms.
+
+The retained application audit now reports 135 loop bindings, 117 functional dot reads, and 326
+index operations, with no `one` expressions, `nothing` literals, or parse failures. The remaining
+dot reads are required-value contracts and the remaining indexes are strict or use an explicit
+`index_or` fallback. Compiler/VM scratch registers, collection-iteration end state, the relation
+codec, and explicit `[] {}` values retain the internal empty-relation representation; none crosses
+an API boundary as an absence sentinel.

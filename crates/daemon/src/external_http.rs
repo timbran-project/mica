@@ -18,7 +18,8 @@ use http::Method;
 use mica_driver::{ExternalRequestHandler, ExternalStreamEmitter, ExternalStreamRequestHandler};
 use mica_runtime::ExternalRequest;
 use mica_runtime::json::{
-    json_from_value as runtime_json_from_value, value_from_json as runtime_value_from_json,
+    json_from_value as runtime_json_from_value, json_null_value,
+    value_from_json as runtime_value_from_json,
     value_from_json_text as runtime_value_from_json_text,
 };
 use mica_var::{Symbol, Value};
@@ -520,7 +521,7 @@ fn normalize_openai_tool_call_value(response: Value) -> Result<Value, String> {
         let message = message
             .map_set(Value::symbol(Symbol::intern("tool_calls")), tool_calls)
             .and_then(|message| {
-                message.map_set(Value::symbol(Symbol::intern("content")), Value::nothing())
+                message.map_set(Value::symbol(Symbol::intern("content")), json_null_value())
             })
             .expect("OpenAI message must remain a map");
         *choice = choice
@@ -1368,9 +1369,7 @@ fn openai_responses_json(payload: &Value) -> Result<serde_json::Value, String> {
     object
         .entry("include".to_owned())
         .or_insert_with(|| serde_json::json!(["reasoning.encrypted_content"]));
-    if let Some(instructions) = map_get(payload, "instructions")
-        && instructions != Value::nothing()
-    {
+    if let Some(instructions) = map_get(payload, "instructions") {
         object.insert("instructions".to_owned(), json_from_value(&instructions)?);
     }
     if let Some(tools) = map_get(payload, "tools") {
@@ -1764,7 +1763,7 @@ mod tests {
             .and_then(|choices| choices.list_get(0))
             .and_then(|choice| map_get(&choice, "message"))
             .unwrap();
-        assert_eq!(map_get(&message, "content"), Some(Value::nothing()));
+        assert_eq!(map_get(&message, "content"), Some(json_null_value()));
         assert_eq!(map_get(&message, "tool_calls").unwrap().list_len(), Some(1));
     }
 

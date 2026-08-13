@@ -10,7 +10,8 @@ make_functional_relation(:Label, 2, [0])
 assert Label(#sensor, "temperature sensor")
 
 verb inspect(actor, subject)
-  return one Label(subject, ?label)
+  let exactly {label} = Label(subject, ?label)
+  return label
 end
 ```
 

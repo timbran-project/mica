@@ -12,8 +12,8 @@
 // with this program. If not, see <https://www.gnu.org/licenses/>.
 
 use mica_compiler::{
-    Arg, Ast, CatchClause, CollectionItem, Expr, FunctionBody, Item, Literal, Param,
-    RecoveryClause, ScatterBinding, parse_ast,
+    Arg, Ast, CatchClause, CollectionItem, Expr, FunctionBody, Item, Param, RecoveryClause,
+    ScatterBinding, parse_ast,
 };
 use std::collections::BTreeMap;
 use std::env;
@@ -31,21 +31,6 @@ enum Parent {
     Collection,
     Default,
     AssignmentTarget,
-}
-
-impl Parent {
-    const fn nothing_category(self) -> &'static str {
-        match self {
-            Self::Return => "returned sentinel",
-            Self::Binding => "local sentinel",
-            Self::Comparison => "sentinel comparison",
-            Self::Condition => "sentinel condition",
-            Self::CallArgument => "call argument sentinel",
-            Self::Collection => "stored or nested sentinel",
-            Self::Default => "default sentinel",
-            Self::Other | Self::AssignmentTarget => "other sentinel",
-        }
-    }
 }
 
 #[derive(Default)]
@@ -102,10 +87,6 @@ impl Audit {
 
     fn visit_expr(&mut self, file: &Path, expr: &Expr, parent: Parent) {
         match expr {
-            Expr::Literal {
-                value: Literal::Nothing,
-                ..
-            } => self.add(file, parent.nothing_category()),
             Expr::Literal { .. }
             | Expr::Name { .. }
             | Expr::QueryVar { .. }
@@ -274,17 +255,6 @@ impl Audit {
                     self.visit_recovery(file, catch);
                 }
             }
-            Expr::One { expr, .. } => {
-                let category = if contains_query_var(expr) {
-                    "one query extraction"
-                } else if matches!(expr.as_ref(), Expr::List { .. } | Expr::Map { .. }) {
-                    "one collection extraction"
-                } else {
-                    "one other extraction"
-                };
-                self.add(file, category);
-                self.visit_expr(file, expr, Parent::Other);
-            }
             Expr::Try {
                 body,
                 catches,
@@ -347,39 +317,6 @@ impl Audit {
             self.visit_expr(file, condition, Parent::Condition);
         }
         self.visit_expr(file, &catch.value, Parent::Other);
-    }
-}
-
-fn contains_query_var(expr: &Expr) -> bool {
-    match expr {
-        Expr::QueryVar { .. } => true,
-        Expr::Call { callee, args, .. }
-        | Expr::RoleCall {
-            selector: callee,
-            args,
-            ..
-        } => contains_query_var(callee) || args.iter().any(|arg| contains_query_var(&arg.value)),
-        Expr::ReceiverCall {
-            receiver,
-            selector,
-            args,
-            ..
-        } => {
-            contains_query_var(receiver)
-                || contains_query_var(selector)
-                || args.iter().any(|arg| contains_query_var(&arg.value))
-        }
-        Expr::Unary { expr, .. }
-        | Expr::One { expr, .. }
-        | Expr::Effect { expr, .. }
-        | Expr::Frob { value: expr, .. } => contains_query_var(expr),
-        Expr::Binary { left, right, .. }
-        | Expr::Assign {
-            target: left,
-            value: right,
-            ..
-        } => contains_query_var(left) || contains_query_var(right),
-        _ => false,
     }
 }
 

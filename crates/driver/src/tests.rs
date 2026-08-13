@@ -167,7 +167,11 @@ fn timed_suspend_wakes_and_resumes_task() {
             .submit_source(endpoint(2), root_source("suspend(0.001)\nreturn \"awake\""))
             .await
             .unwrap();
-        assert!(matches!(submitted.outcome, TaskOutcome::Suspended { .. }));
+        assert!(
+            matches!(submitted.outcome, TaskOutcome::Suspended { .. }),
+            "{:?}",
+            submitted.outcome
+        );
 
         compio::time::sleep(Duration::from_millis(20)).await;
 
@@ -253,7 +257,7 @@ fn external_request_admission_bounds_handler_concurrency() {
                         compio::time::sleep(Duration::from_millis(1)).await;
                     }
                     active.fetch_sub(1, Ordering::AcqRel);
-                    Value::nothing()
+                    Value::unit()
                 }) as crate::types::ExternalRequestFuture
             })
         };
@@ -267,14 +271,14 @@ fn external_request_admission_bounds_handler_concurrency() {
         let first = driver
             .submit_source(
                 endpoint(60),
-                root_source("return external_request(:hold, nothing)"),
+                root_source("return external_request(:hold, none)"),
             )
             .await
             .unwrap();
         let second = driver
             .submit_source(
                 endpoint(60),
-                root_source("return external_request(:hold, nothing)"),
+                root_source("return external_request(:hold, none)"),
             )
             .await
             .unwrap();
@@ -309,7 +313,7 @@ fn external_request_context_is_cancelled_with_its_task() {
                     *observed.lock().unwrap() = Some(context.clone());
                     Box::pin(async move {
                         context.cancellation.cancelled().await;
-                        Value::nothing()
+                        Value::unit()
                     }) as crate::types::ExternalRequestFuture
                 },
             )
@@ -324,7 +328,7 @@ fn external_request_context_is_cancelled_with_its_task() {
         let submitted = driver
             .submit_source(
                 endpoint,
-                root_source("return external_request(:hold, nothing)"),
+                root_source("return external_request(:hold, none)"),
             )
             .await
             .unwrap();
@@ -398,7 +402,11 @@ fn external_stream_request_delivers_events_to_mica_mailbox() {
             .await
             .unwrap();
 
-        assert!(matches!(submitted.outcome, TaskOutcome::Suspended { .. }));
+        assert!(
+            matches!(submitted.outcome, TaskOutcome::Suspended { .. }),
+            "{:?}",
+            submitted.outcome
+        );
         compio::time::sleep(Duration::from_millis(20)).await;
 
         assert!(driver.drain_events().iter().any(|event| matches!(
@@ -709,7 +717,7 @@ fn agent_command_sync_event_appends_user_message_and_suspends_for_llm() {
             .submit_source(
                 ep,
                 root_source(
-                    "return sync_event(endpoint(), nothing, 31, \"submit\", \"\", \"agent_command\", {:text -> \"hello from test\"})",
+                    "return sync_event(endpoint(), none, 31, \"submit\", \"\", \"agent_command\", {:text -> \"hello from test\"})",
                 ),
             )
             .await
@@ -718,7 +726,11 @@ fn agent_command_sync_event_appends_user_message_and_suspends_for_llm() {
         // The loop calls ui/flush (which calls commit()) before the LLM
         // request, so the first suspend may be a Commit. Wait for the
         // task to complete (the external stream handler sends canned events).
-        assert!(matches!(submitted.outcome, TaskOutcome::Suspended { .. }));
+        assert!(
+            matches!(submitted.outcome, TaskOutcome::Suspended { .. }),
+            "{:?}",
+            submitted.outcome
+        );
         let mut completed = None;
         for _ in 0..100 {
             for event in driver.drain_events() {
@@ -744,37 +756,49 @@ fn agent_command_sync_event_appends_user_message_and_suspends_for_llm() {
             .submit_source(
                 ep,
                 root_source(
-                    "let t = agent/transcript(#agent/default)\n\
-                     let role = nothing\n\
-                     let content = nothing\n\
-                     let status = nothing\n\
-                     let response_id = nothing\n\
+                    "let exactly {:value -> t} = agent/transcript(#agent/default)\n\
+                     let role = none\n\
+                     let content = none\n\
+                     let status = none\n\
+                     let response_id = none\n\
                      for message in agent/messages_ordered(t)\n\
                        role = message.messageRole\n\
                        content = message.messageContent\n\
-                       status = message.messageStatus\n\
-                       response_id = message.messageResponseId\n\
+                       let statuses = MessageStatus(message, ?status)\n\
+                       if statuses\n\
+                         let exactly {:status -> current_status} = statuses\n\
+                         status = current_status\n\
+                       end\n\
+                       let response_ids = MessageResponseId(message, ?response_id)\n\
+                       if response_ids\n\
+                         let exactly {:response_id -> current_response_id} = response_ids\n\
+                         response_id = current_response_id\n\
+                       end\n\
                      end\n\
                      return [role, content, status, response_id]",
                 ),
             )
             .await
             .unwrap();
-        assert!(matches!(
-            query.outcome,
-            TaskOutcome::Complete { value, .. } if value == Value::list([
-                Value::string("assistant"),
-                Value::string("synthetic assistant reply"),
-                Value::string("complete"),
-                Value::string("resp_test"),
-            ])
-        ));
+        assert!(
+            matches!(
+                query.outcome,
+                TaskOutcome::Complete { ref value, .. } if *value == Value::list([
+                    Value::string("assistant"),
+                    Value::string("synthetic assistant reply"),
+                    Value::string("complete"),
+                    Value::string("resp_test"),
+                ])
+            ),
+            "{:?}",
+            query.outcome
+        );
 
         let input_query = driver
             .submit_source(
                 ep,
                 root_source(
-                    "let t = agent/transcript(#agent/default)\n\
+                    "let exactly {:value -> t} = agent/transcript(#agent/default)\n\
                      return agent/llm_responses_input(t)",
                 ),
             )
@@ -958,12 +982,16 @@ fn agent_responses_tool_call_round_trip_resubmits_full_context() {
             .submit_source(
                 ep,
                 root_source(
-                    "return sync_event(endpoint(), nothing, 31, \"submit\", \"\", \"agent_command\", {:text -> \"use a tool\"})",
+                    "return sync_event(endpoint(), none, 31, \"submit\", \"\", \"agent_command\", {:text -> \"use a tool\"})",
                 ),
             )
             .await
             .unwrap();
-        assert!(matches!(submitted.outcome, TaskOutcome::Suspended { .. }));
+        assert!(
+            matches!(submitted.outcome, TaskOutcome::Suspended { .. }),
+            "{:?}",
+            submitted.outcome
+        );
 
         let mut completed = false;
         for _ in 0..200 {
@@ -982,9 +1010,9 @@ fn agent_responses_tool_call_round_trip_resubmits_full_context() {
             .submit_source(
                 ep,
                 root_source(
-                    "let found = one ToolCallId(?call, \"call_test\")\n\
-                     let t = agent/transcript(#agent/default)\n\
-                     let last_content = nothing\n\
+                    "let exactly {:call -> found} = ToolCallId(?call, \"call_test\")\n\
+                     let exactly {:value -> t} = agent/transcript(#agent/default)\n\
+                     let last_content = none\n\
                      for message in agent/messages_ordered(t)\n\
                        last_content = message.messageContent\n\
                      end\n\
@@ -1116,12 +1144,16 @@ fn agent_steering_cancels_the_active_stream_and_resubmits_full_context() {
             .submit_source(
                 ep,
                 root_source(
-                    "return sync_event(endpoint(), nothing, 31, \"submit\", \"\", \"agent_command\", {:text -> \"initial request\"})",
+                    "return sync_event(endpoint(), none, 31, \"submit\", \"\", \"agent_command\", {:text -> \"initial request\"})",
                 ),
             )
             .await
             .unwrap();
-        assert!(matches!(first.outcome, TaskOutcome::Suspended { .. }));
+        assert!(
+            matches!(first.outcome, TaskOutcome::Suspended { .. }),
+            "{:?}",
+            first.outcome
+        );
 
         for _ in 0..100 {
             if request_count.load(Ordering::SeqCst) > 0 {
@@ -1133,7 +1165,7 @@ fn agent_steering_cancels_the_active_stream_and_resubmits_full_context() {
             .submit_source(
                 ep,
                 root_source(
-                    "return sync_event(endpoint(), nothing, 31, \"submit\", \"\", \"agent_command\", {:text -> \"change direction\"})",
+                    "return sync_event(endpoint(), none, 31, \"submit\", \"\", \"agent_command\", {:text -> \"change direction\"})",
                 ),
             )
             .await
@@ -1158,10 +1190,16 @@ fn agent_steering_cancels_the_active_stream_and_resubmits_full_context() {
             .submit_source(
                 ep,
                 root_source(
-                    "let t = agent/transcript(#agent/default)\n\
+                    "let exactly {:value -> t} = agent/transcript(#agent/default)\n\
                      let rows = []\n\
                      for message in agent/messages_ordered(t)\n\
-                       rows = [@rows, [message.messageRole, message.messageContent, message.messageStatus]]\n\
+                       let status = none\n\
+                       let statuses = MessageStatus(message, ?status)\n\
+                       if statuses\n\
+                         let exactly {:status -> current_status} = statuses\n\
+                         status = current_status\n\
+                       end\n\
+                       rows = [@rows, [message.messageRole, message.messageContent, status]]\n\
                      end\n\
                      return rows",
                 ),
@@ -1171,9 +1209,9 @@ fn agent_steering_cancels_the_active_stream_and_resubmits_full_context() {
         assert!(matches!(
             query.outcome,
             TaskOutcome::Complete { value, .. } if value == Value::list([
-                Value::list([Value::string("user"), Value::string("initial request"), Value::nothing()]),
+                Value::list([Value::string("user"), Value::string("initial request"), Value::option_none()]),
                 Value::list([Value::string("assistant"), Value::string("partial"), Value::string("cancelled")]),
-                Value::list([Value::string("user"), Value::string("change direction"), Value::nothing()]),
+                Value::list([Value::string("user"), Value::string("change direction"), Value::option_none()]),
                 Value::list([Value::string("assistant"), Value::string("final reply"), Value::string("complete")]),
             ])
         ));
@@ -1206,7 +1244,7 @@ fn mica_query_host_request_runs_read_only_query_and_resumes_task() {
             .submit_source(
                 endpoint,
                 root_source(
-                    "return mica_query(\"return one ThingName(#lamp, ?name)\", {:max_output_chars -> 100})",
+                    "return mica_query(\"let exactly {:name -> name} = ThingName(#lamp, ?name)\\nreturn name\", {:max_output_chars -> 100})",
                 ),
             )
             .await
@@ -1242,7 +1280,7 @@ fn mica_query_host_request_runs_read_only_query_and_resumes_task() {
         );
         assert_eq!(
             value.map_get(&Value::symbol(Symbol::intern("value"))),
-            Some(Value::string("Lamp"))
+            Some(Value::option_some(Value::string("Lamp")))
         );
         assert_eq!(
             value.map_get(&Value::symbol(Symbol::intern("rendered"))),
@@ -1439,7 +1477,7 @@ fn spawn_commits_parent_and_runs_child_task() {
                    else\n\
                      emit(endpoint, \"missed parent\")\n\
                    end\n\
-                   return nothing\n\
+                   return ()\n\
                  end\n",
             )
             .unwrap();
@@ -1504,7 +1542,7 @@ fn spawn_runs_receiver_positional_child_task() {
                end\n\
                verb inspect(receiver, actor)\n\
                  emit(endpoint(), [receiver, actor])\n\
-                 return nothing\n\
+                 return ()\n\
                end\n",
             )
             .unwrap();
@@ -1568,7 +1606,7 @@ fn mailbox_recv_drains_messages_sent_before_wait() {
             .run_filein(
                 "verb send_reply(reply)\n\
                  mailbox_send(reply, \"done\")\n\
-                 return nothing\n\
+                 return ()\n\
                end\n",
             )
             .unwrap();
@@ -1618,7 +1656,7 @@ fn mailbox_recv_waits_until_sender_commits() {
                 "verb delayed_send(reply)\n\
                  suspend(0.001)\n\
                  mailbox_send(reply, \"late\")\n\
-                 return nothing\n\
+                 return ()\n\
                end\n",
             )
             .unwrap();
@@ -1664,7 +1702,7 @@ fn relation_subscription_delivery_wakes_mailbox_receiver_after_publication() {
                 endpoint(35),
                 root_source(
                     "let caps = mailbox()\n\
-                     let subscription = subscribe_changes(caps[1], :relation, :Observed, [nothing], :changes)\n\
+                     let subscription = subscribe_changes(caps[1], :relation, some(:Observed), [none], :changes)\n\
                      commit()\n\
                      return mailbox_recv([caps[0]], 1)",
                 ),
@@ -2234,7 +2272,7 @@ fn endpoint_close_cancels_suspended_tasks() {
                     && *reason == TaskCancellationReason::EndpointClosed
         )));
         assert!(matches!(
-            driver.resume(submitted.task_id, Value::nothing()).await,
+            driver.resume(submitted.task_id, Value::unit()).await,
             Err(DriverError::TaskCancelled(task_id)) if task_id == submitted.task_id
         ));
     });
@@ -2437,7 +2475,7 @@ fn shutdown_cancels_async_workers_and_joins_dispatcher() {
         let submitted = driver
             .submit_source(
                 endpoint,
-                root_source("return external_request(:pending, nothing)"),
+                root_source("return external_request(:pending, none)"),
             )
             .await
             .unwrap();

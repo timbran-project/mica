@@ -106,9 +106,9 @@ impl NaturalIntegerLoopContext {
                 int_bits(0),
                 int_bits(INTEGER_LOOP_ITERATIONS as i64),
                 borrowed_value_bits(&Value::bool(true)),
-                borrowed_value_bits(&Value::nothing()),
-                borrowed_value_bits(&Value::nothing()),
-                borrowed_value_bits(&Value::nothing()),
+                borrowed_value_bits(&Value::empty_relation()),
+                borrowed_value_bits(&Value::empty_relation()),
+                borrowed_value_bits(&Value::empty_relation()),
             ],
         }
     }

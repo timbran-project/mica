@@ -1,8 +1,10 @@
 use crate::{
     BuiltinContext, BuiltinRegistry, BuiltinResultKind, RuntimeError, builtin_char_list_arg,
-    builtin_string_arg, builtin_usize_arg, invalid_builtin_call, raised_builtin_error,
+    builtin_string_arg, builtin_usize_arg, invalid_builtin_call, option_builtin_result,
+    raised_builtin_error, result_builtin_result,
 };
-use mica_var::{Value, ValueKind};
+use mica_var::{Symbol, Value, ValueKind};
+use mica_vm::TypeContract;
 
 pub(crate) fn install(registry: BuiltinRegistry) -> BuiltinRegistry {
     registry
@@ -78,7 +80,7 @@ pub(crate) fn install(registry: BuiltinRegistry) -> BuiltinRegistry {
         )
         .with_builtin(
             "parse_ordinal",
-            BuiltinResultKind::Dynamic,
+            result_builtin_result(TypeContract::Kind(ValueKind::Int)),
             parse_ordinal_builtin,
         )
         .with_builtin(
@@ -86,7 +88,11 @@ pub(crate) fn install(registry: BuiltinRegistry) -> BuiltinRegistry {
             BuiltinResultKind::Exact(ValueKind::String),
             lower_builtin,
         )
-        .with_builtin("os_getenv", BuiltinResultKind::Dynamic, os_getenv_builtin)
+        .with_builtin(
+            "os_getenv",
+            option_builtin_result(TypeContract::Kind(ValueKind::String)),
+            os_getenv_builtin,
+        )
 }
 
 fn string_len_builtin(
@@ -378,8 +384,13 @@ fn parse_ordinal_builtin(
     let text = builtin_string_arg("parse_ordinal", args, 0)?;
     match parse_ordinal_text(&text) {
         Some(value) => Value::int(value)
+            .map(Value::result_ok)
             .map_err(|_| invalid_builtin_call("parse_ordinal", "ordinal is out of range")),
-        None => Ok(Value::nothing()),
+        None => Ok(Value::result_err(Value::error(
+            Symbol::intern("E_PARSE"),
+            Some("invalid ordinal"),
+            Some(Value::string(text)),
+        ))),
     }
 }
 
@@ -407,8 +418,8 @@ fn os_getenv_builtin(
     }
     let name = builtin_string_arg("os_getenv", args, 0)?;
     match std::env::var(&name) {
-        Ok(value) => Ok(Value::string(value)),
-        Err(_) => Ok(Value::nothing()),
+        Ok(value) => Ok(Value::option_some(Value::string(value))),
+        Err(_) => Ok(Value::option_none()),
     }
 }
 

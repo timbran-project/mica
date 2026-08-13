@@ -45,13 +45,13 @@ verb ui/tool_call_node(call)
   let name = "unknown"
   let arguments = ""
   let status = ""
-  if call.toolCallName != nothing
+  if call.toolCallName != none
     name = call.toolCallName
   end
-  if call.toolCallArguments != nothing
+  if call.toolCallArguments != none
     arguments = call.toolCallArguments
   end
-  if call.toolCallStatus != nothing
+  if call.toolCallStatus != none
     status = call.toolCallStatus
   end
   let glyph = ui/tool_status_glyph(status)
@@ -70,13 +70,13 @@ verb ui/tool_message_body_node(message)
   let parsed = from_literal(content)
   let tool_call_id = "unknown"
   let result_content = content
-  if parsed != nothing
-    let maybe_id = index_or(parsed, :tool_call_id, nothing)
-    if maybe_id != nothing
+  if let ok(value) = parsed
+    let maybe_id = index_or(value, :tool_call_id, none)
+    if maybe_id != none
       tool_call_id = maybe_id
     end
-    let maybe_content = index_or(parsed, :content, nothing)
-    if maybe_content != nothing
+    let maybe_content = index_or(value, :content, none)
+    if maybe_content != none
       result_content = maybe_content
     end
   end
@@ -109,7 +109,7 @@ verb ui/message_body_node(message)
   end
 
   let content = message.messageContent
-  if content == nothing
+  if content == none
     content = ""
   end
 
@@ -138,11 +138,14 @@ verb ui/message_node(message)
 end
 
 verb ui/transcript_node(agent @ #agent, revision, limit)
-  let transcript = agent/transcript(agent)
+  let transcript_option = agent/transcript(agent)
+  let transcript = none
   let messages = []
   let count = 0
 
-  if transcript != nothing
+  if transcript_option
+    let exactly {:value -> selected_transcript} = transcript_option
+    transcript = selected_transcript
     for message in agent/messages_ordered(transcript)
       count = count + 1
     end
@@ -159,17 +162,20 @@ verb ui/transcript_node(agent @ #agent, revision, limit)
 
     let rendered = 0
     let index = 0
-    if transcript != nothing
-      for message in agent/messages_ordered(transcript)
-        if index >= first_rendered
-          messages = [@messages, ui/message_node(message)]
-          rendered = rendered + 1
-        end
-        index = index + 1
+    for message in agent/messages_ordered(transcript)
+      if index >= first_rendered
+        messages = [@messages, ui/message_node(message)]
+        rendered = rendered + 1
       end
+      index = index + 1
     end
 
-    let streaming = endpoint().session/isStreaming
+    let streaming = false
+    let streaming_rows = session/IsStreaming(endpoint(), ?value)
+    if streaming_rows
+      let exactly {:value -> configured_streaming} = streaming_rows
+      streaming = configured_streaming
+    end
     if streaming == true
       messages = [@messages, dom <li class="message-line assistant typing-indicator"><div class="message-line-main"><span class="message-role"><span class="message-glyph assistant-glyph">*</span><span>Agent</span></span><span class="typing-dots"><span class="typing-dot"></span><span class="typing-dot"></span><span class="typing-dot"></span></span></div></li>]
     end
@@ -199,14 +205,15 @@ verb ui/transcript_node(agent @ #agent, revision, limit)
 end
 
 verb ui/latest_message_node(agent @ #agent, revision)
-  let transcript = agent/transcript(agent)
-  if transcript == nothing
+  let transcript_option = agent/transcript(agent)
+  if not transcript_option
     return dom <section id="latest-message" class="latest-message empty">
       <span class="muted">No transcript yet.</span>
     </section>
   end
+  let exactly {:value -> transcript} = transcript_option
 
-  let latest = nothing
+  let latest = none
   let latest_seq = -1
   for message in agent/messages(transcript)
     let seq = message.messageSeq
@@ -216,7 +223,7 @@ verb ui/latest_message_node(agent @ #agent, revision)
     end
   end
 
-  if latest == nothing
+  if latest == none
     return dom <section id="latest-message" class="latest-message empty">
       <span class="muted">No messages yet.</span>
     </section>

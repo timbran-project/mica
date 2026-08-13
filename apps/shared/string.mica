@@ -91,5 +91,5 @@ verb strip_prefix(text @ #string: string, prefix @ #string: string)
     return string_slice(text, string_len(prefix), string_len(text))
   end
 
-  return nothing
+  return none
 end

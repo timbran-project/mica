@@ -255,16 +255,21 @@ return true
         let source = format!(
             r#"
 let session_id = to_symbol("{session_id}")
-{auth_session}(session_id) || return nothing
-let user = one {session_user}(session_id, ?user)
-let actor = one {session_actor}(session_id, ?actor)
-let provider = one {session_provider}(session_id, ?provider)
-let provider_sub = one {session_provider_sub}(session_id, ?provider_sub)
-let issued_at = one {session_issued_at}(session_id, ?issued_at)
-let expires_at = one {session_expires_at}(session_id, ?expires_at)
-let revoked_at = one {session_revoked_at}(session_id, ?revoked_at)
-let last_seen_at = one {session_last_seen_at}(session_id, ?last_seen_at)
-return {{:session_id -> "{session_id}", :user_id -> user, :actor -> actor, :provider -> provider, :provider_sub -> provider_sub, :issued_at -> issued_at, :expires_at -> expires_at, :revoked_at -> revoked_at, :last_seen_at -> last_seen_at}}
+{auth_session}(session_id) || return none
+let exactly {{:user -> user}} = {session_user}(session_id, ?user)
+let exactly {{:actor -> actor}} = {session_actor}(session_id, ?actor)
+let exactly {{:provider -> provider}} = {session_provider}(session_id, ?provider)
+let exactly {{:provider_sub -> provider_sub}} = {session_provider_sub}(session_id, ?provider_sub)
+let exactly {{:issued_at -> issued_at}} = {session_issued_at}(session_id, ?issued_at)
+let exactly {{:expires_at -> expires_at}} = {session_expires_at}(session_id, ?expires_at)
+let revoked_at = none
+let revoked = {session_revoked_at}(session_id, ?revoked_at)
+if revoked
+  let exactly {{:revoked_at -> value}} = revoked
+  revoked_at = some(value)
+end
+let exactly {{:last_seen_at -> last_seen_at}} = {session_last_seen_at}(session_id, ?last_seen_at)
+return some({{:session_id -> "{session_id}", :user_id -> user, :actor -> actor, :provider -> provider, :provider_sub -> provider_sub, :issued_at -> issued_at, :expires_at -> expires_at, :revoked_at -> revoked_at, :last_seen_at -> last_seen_at}})
 "#,
             auth_session = schema.auth_session,
             session_user = schema.session_user,
@@ -284,9 +289,12 @@ return {{:session_id -> "{session_id}", :user_id -> user, :actor -> actor, :prov
             .map_err(|e| format!("failed to lookup session: {e}"))?;
         match report.initial_report().outcome.clone() {
             mica_runtime::TaskOutcome::Complete { value, .. } => {
-                if value == Value::nothing() {
+                let Some(value) = value.option_payload() else {
+                    return Err("session lookup returned a non-option value".to_owned());
+                };
+                let Some(value) = value else {
                     return Ok(None);
-                }
+                };
                 let map = &value;
                 let user_id = map_string(map, "user_id")?;
                 let actor = map_string(map, "actor")?;
@@ -448,10 +456,12 @@ return "{escaped_user_symbol}"
             r#"
 let user = make_identity(to_symbol("{escaped_user_id}"))
 let person_symbol = to_symbol("{escaped_person_symbol}")
-let current_default = one {default_user_person}(user, ?person)
-let actor = current_default
+let defaults = {default_user_person}(user, ?person)
+let actor = none
 let actor_symbol = ""
-if current_default != nothing
+if defaults
+  let exactly {{:person -> current_default}} = defaults
+  actor = current_default
   actor_symbol = string_slice(to_literal(current_default), 1, string_len(to_literal(current_default)))
 else
   let person = make_identity(person_symbol)
@@ -554,9 +564,12 @@ return actor_symbol
         let escaped_provider_sub = mica_escape(provider_sub);
         let source = format!(
             r#"
-let user = one {user_external_identity}(:local, "{escaped_provider_sub}", ?user)
-user != nothing || return nothing
-return string_slice(to_literal(user), 1, string_len(to_literal(user)))
+let users = {user_external_identity}(:local, "{escaped_provider_sub}", ?user)
+if not users
+  return none
+end
+let exactly {{:user -> user}} = users
+return some(string_slice(to_literal(user), 1, string_len(to_literal(user))))
 "#,
             user_external_identity = schema.user_external_identity,
             escaped_provider_sub = escaped_provider_sub,
@@ -568,9 +581,12 @@ return string_slice(to_literal(user), 1, string_len(to_literal(user)))
             .map_err(|e| format!("failed to lookup local user: {e}"))?;
         match report.initial_report().outcome.clone() {
             mica_runtime::TaskOutcome::Complete { value, .. } => {
-                if value == Value::nothing() {
+                let Some(value) = value.option_payload() else {
+                    return Err("lookup local user returned a non-option value".to_owned());
+                };
+                let Some(value) = value else {
                     return Ok(None);
-                }
+                };
                 value
                     .with_str(str::to_owned)
                     .map(Some)
@@ -667,11 +683,17 @@ return true
         let escaped_user_symbol = mica_escape(&user_symbol);
         let source = format!(
             r#"
-let user = one {user_external_identity}(:local, "{escaped_provider_sub}", ?user)
-user != nothing || return nothing
-let password_hash = one {local_password_hash}(user, ?password_hash)
-password_hash != nothing || return nothing
-return {{:user_id -> "{escaped_user_symbol}", :password_hash -> password_hash}}
+let users = {user_external_identity}(:local, "{escaped_provider_sub}", ?user)
+if not users
+  return none
+end
+let exactly {{:user -> user}} = users
+let password_hashes = {local_password_hash}(user, ?password_hash)
+if not password_hashes
+  return none
+end
+let exactly {{:password_hash -> password_hash}} = password_hashes
+return some({{:user_id -> "{escaped_user_symbol}", :password_hash -> password_hash}})
 "#,
             user_external_identity = schema.user_external_identity,
             local_password_hash = schema.local_password_hash,
@@ -683,19 +705,20 @@ return {{:user_id -> "{escaped_user_symbol}", :password_hash -> password_hash}}
             .evaluate(source)
             .await
             .map_err(|e| format!("failed to authenticate local user: {e}"))?;
-        let map = match report.initial_report().outcome.clone() {
-            mica_runtime::TaskOutcome::Complete { value, .. } => {
-                if value == Value::nothing() {
-                    return Ok(None);
-                }
-                value
-            }
+        let option = match report.initial_report().outcome.clone() {
+            mica_runtime::TaskOutcome::Complete { value, .. } => value,
             mica_runtime::TaskOutcome::Aborted { error, .. } => {
                 return Err(format!("authenticate local user aborted: {error}"));
             }
             mica_runtime::TaskOutcome::Suspended { .. } => {
                 return Err("authenticate local user suspended unexpectedly".to_owned());
             }
+        };
+        let Some(map) = option.option_payload() else {
+            return Err("authenticate local user returned a non-option value".to_owned());
+        };
+        let Some(map) = map else {
+            return Ok(None);
         };
         let user_id = map_string(&map, "user_id")?;
         let password_hash = map_string(&map, "password_hash")?;
@@ -749,13 +772,16 @@ fn map_optional_int(value: &Value, key: &str) -> Result<Option<i64>, String> {
     let Some(inner) = value.map_get(&key_val) else {
         return Ok(None);
     };
-    if inner == Value::nothing() {
+    let Some(inner) = inner.option_payload() else {
+        return Err(format!("session field {key} is not an option"));
+    };
+    let Some(inner) = inner else {
         return Ok(None);
-    }
+    };
     inner
         .as_int()
         .map(Some)
-        .ok_or_else(|| format!("session field {key} is not an integer or nothing"))
+        .ok_or_else(|| format!("session field {key} is not an optional integer"))
 }
 
 #[cfg(test)]
@@ -1161,7 +1187,7 @@ assert mud/DefaultUserPerson(#mud/user_local_alice, #alice)
 mud/DisplayName(#alice, "Alice") || return false
 mud/UserPerson(#mud/user_local_alice, #alice) || return false
 let generated = from_literal("#mud/person_local_alice")
-generated != nothing && mud/UserPerson(#mud/user_local_alice, generated) && return false
+generated != none && mud/UserPerson(#mud/user_local_alice, generated) && return false
 return true
 "##
                     .to_owned(),

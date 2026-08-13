@@ -200,7 +200,7 @@ verb template/pronoun_type(token @ #string)
     return :reflexive
   end
 
-  return nothing
+  return none
 end
 
 verb template/parse_binding_suffix(token @ #string)
@@ -233,8 +233,8 @@ verb template/pronoun_token(token @ #string)
   end
 
   let pronoun = template/pronoun_type(base)
-  if pronoun == nothing
-    return nothing
+  if pronoun == none
+    return none
   end
 
   return #template/pronoun<{:binding -> binding, :pronoun -> pronoun, :cap -> cap}>
@@ -257,7 +257,7 @@ verb template/verb_token(token @ #string)
     return #template/conjugation<{:binding -> binding, :verb_name -> verb_name}>
   end
 
-  return nothing
+  return none
 end
 
 verb template/split_once(text @ #string, separator @ #string)
@@ -299,12 +299,12 @@ verb template/parse_token(token @ #string)
   end
 
   let pronoun = template/pronoun_token(trimmed)
-  if pronoun != nothing
+  if pronoun != none
     return pronoun
   end
 
   let verb_part = template/verb_token(trimmed)
-  if verb_part != nothing
+  if verb_part != none
     return verb_part
   end
 
@@ -398,8 +398,8 @@ verb template/conjugation(binding, verb_name @ #string)
 end
 
 verb template/binding_name(bindings @ #map, binding, viewer)
-  let value = index_or(bindings, binding, nothing)
-  if value == nothing
+  let value = index_or(bindings, binding, none)
+  if value == none
     return "<no-binding>"
   end
 
@@ -416,7 +416,7 @@ verb template/binding_value_text(value @ #identity, viewer)
   end
 
   let name = value.name
-  if name != nothing
+  if name != none
     return name
   end
 
@@ -425,33 +425,33 @@ end
 
 verb template/binding_value(bindings @ #map, binding)
   if binding == :actor
-    return index_or(bindings, :actor, nothing)
+    return index_or(bindings, :actor, none)
   elseif binding == :this
-    let value = index_or(bindings, :this, nothing)
-    if value == nothing
-      value = index_or(bindings, :target, nothing)
+    let value = index_or(bindings, :this, none)
+    if value == none
+      value = index_or(bindings, :target, none)
     end
     return value
   elseif binding == :dobj
-    let value = index_or(bindings, :dobj, nothing)
-    if value == nothing
-      value = index_or(bindings, :item, nothing)
+    let value = index_or(bindings, :dobj, none)
+    if value == none
+      value = index_or(bindings, :item, none)
     end
-    if value == nothing
-      value = index_or(bindings, :target, nothing)
+    if value == none
+      value = index_or(bindings, :target, none)
     end
     return value
   elseif binding == :iobj
-    let value = index_or(bindings, :iobj, nothing)
-    if value == nothing
-      value = index_or(bindings, :container, nothing)
+    let value = index_or(bindings, :iobj, none)
+    if value == none
+      value = index_or(bindings, :container, none)
     end
     return value
   elseif binding == :location
-    return index_or(bindings, :location, nothing)
+    return index_or(bindings, :location, none)
   end
 
-  return index_or(bindings, binding, nothing)
+  return index_or(bindings, binding, none)
 end
 
 verb template/reference_text(value, viewer, binding, cap)
@@ -491,7 +491,7 @@ verb template/render_part(part @ #template/name<_>, bindings @ #map, viewer)
   let data = frob_value(part)
   let value = template/binding_value(bindings, data[:binding])
   let name = "<no-binding>"
-  if value != nothing
+  if value != none
     name = template/binding_value_text(value, viewer)
   end
 
@@ -505,7 +505,7 @@ end
 verb template/render_part(part @ #template/reference<_>, bindings @ #map, viewer)
   let data = frob_value(part)
   let value = template/binding_value(bindings, data[:binding])
-  if value == nothing
+  if value == none
     return "<no-binding>"
   end
 
@@ -525,7 +525,7 @@ end
 verb template/render_part(part @ #template/article<_>, bindings @ #map, viewer)
   let data = frob_value(part)
   let value = template/binding_value(bindings, data[:binding])
-  if value == nothing
+  if value == none
     return "<no-binding>"
   end
 
@@ -587,28 +587,28 @@ end
 
 verb template/pronoun_for(value @ #identity, pronoun)
   if pronoun == :subject
-    let text = one PronounSubject(value, ?text)
-    if text != nothing
+    let exactly {:text -> text} = PronounSubject(value, ?text)
+    if text != none
       return text
     end
   elseif pronoun == :object_case
-    let text = one PronounObject(value, ?text)
-    if text != nothing
+    let exactly {:text -> text} = PronounObject(value, ?text)
+    if text != none
       return text
     end
   elseif pronoun == :possessive_adjective
-    let text = one PronounPossessiveAdjective(value, ?text)
-    if text != nothing
+    let exactly {:text -> text} = PronounPossessiveAdjective(value, ?text)
+    if text != none
       return text
     end
   elseif pronoun == :possessive_noun
-    let text = one PronounPossessiveNoun(value, ?text)
-    if text != nothing
+    let exactly {:text -> text} = PronounPossessiveNoun(value, ?text)
+    if text != none
       return text
     end
   elseif pronoun == :reflexive
-    let text = one PronounReflexive(value, ?text)
-    if text != nothing
+    let exactly {:text -> text} = PronounReflexive(value, ?text)
+    if text != none
       return text
     end
   end
@@ -626,7 +626,7 @@ verb template/render_part(part @ #template/pronoun<_>, bindings @ #map, viewer)
   let text = template/pronoun_default(data[:pronoun])
   if value == viewer
     text = template/self_pronoun(data[:pronoun])
-  elseif value != nothing
+  elseif value != none
     text = template/pronoun_for(value, data[:pronoun])
   end
 

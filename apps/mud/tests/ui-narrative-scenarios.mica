@@ -30,7 +30,7 @@ end
 verb test/ui_narrative_renders_structured_events()
   event/notify(#alice, "structured notice")
   let source = test/latest_event_source(#alice)
-  let latest = nothing
+  let latest = none
   let latest_seq = -1
   for found in event/Delivery(#alice, ?event)
     let event = found[:event]
@@ -41,8 +41,8 @@ verb test/ui_narrative_renders_structured_events()
     end
   end
   let literal = to_literal(ui/event_body_node(latest, #alice))
-  test/assert_true(source != nothing, "notify stores event source")
-  test/assert_equal(event/metadata(source, :label, nothing), "utility", "notify source label")
+  test/assert_true(source != none, "notify stores event source")
+  test/assert_equal(event/metadata(source, :label, none), "utility", "notify source label")
   test/assert_true(string_contains(literal, "event-quote"), "notify DOM quote")
   test/assert_true(string_contains(literal, "structured notice"), "notify DOM text")
 

@@ -5,7 +5,7 @@ exits the current function, verb, or task body.
 
 Expression-oriented does not mean every form is pure. It means forms compose and produce values. A
 relation query returns a boolean or relation value. `assert` and `retract` change the current
-transaction and return `nothing`, the zero-column empty relation. `emit` records a pending effect
+transaction and return `()`. `emit` records a pending effect
 and returns the emitted value. This keeps the language surface uniform without pretending that all
 expressions are side-effect free.
 
@@ -48,7 +48,7 @@ form keeps that shape visible at the call site.
 Scatter patterns support required, optional, and rest parts:
 
 ```mica
-let [head, ?middle = nothing, @tail] = values
+let [head, ?middle = none, @tail] = values
 ```
 
 Required names bind by position. Optional names use their default when the source list is too short.

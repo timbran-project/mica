@@ -31,8 +31,8 @@ grant #web
 end
 
 verb http_request(request)
-  let http_method = one RequestMethod(request, ?m)
-  let path = one RequestPath(request, ?path)
+  let exactly {:m -> http_method} = RequestMethod(request, ?m)
+  let exactly {:path -> path} = RequestPath(request, ?path)
 
   if http_method == "GET" && (path == "/" || path == "/agent" || string_starts_with(path, "/agent?"))
     return http_html(200, http/document(31))
@@ -68,10 +68,10 @@ verb agent/completions_payload(path)
   let items = []
   let count = 0
   for ws_row in Workspace(?ws)
-    let repo_row = one WorkspaceRevision(ws_row[:ws], ?revision)
-    if repo_row != nothing
-      let repository = one source/RevisionOf(repo_row, ?repository)
-      if repository != nothing
+    let exactly {:revision -> repo_row} = WorkspaceRevision(ws_row[:ws], ?revision)
+    if repo_row != none
+      let exactly {:repository -> repository} = source/RevisionOf(repo_row, ?repository)
+      if repository != none
         for entry_row in source/RepositoryEntry(repository, repo_row, "", ?child_path, ?kind, ?entry_name)
           if count < limit && entry_row[:kind] == "directory"
             let dir_path = entry_row[:child_path]

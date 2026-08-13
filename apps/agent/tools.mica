@@ -92,67 +92,76 @@ assert ToolEnabled(#workspace/default, #tool/ls)
 
 // Helpers
 verb tool/source_repository(workspace)
-  let revision = one WorkspaceRevision(workspace, ?revision)
-  if revision == nothing
-    return nothing
+  let revisions = WorkspaceRevision(workspace, ?revision)
+  if not revisions
+    return none
   end
-  return one source/RevisionOf(revision, ?repository)
+  let exactly {:revision -> revision} = revisions
+  let repositories = source/RevisionOf(revision, ?repository)
+  if not repositories
+    return none
+  end
+  let exactly {:repository -> repository} = repositories
+  return repository
 end
 
 verb tool/source_revision(workspace)
-  return one WorkspaceRevision(workspace, ?revision)
+  let exactly {:revision -> revision} = WorkspaceRevision(workspace, ?revision)
+  return revision
 end
 
 verb tool/workspace_bound(workspace)
-  return tool/source_repository(workspace) != nothing
+  return tool/source_repository(workspace) != none
 end
 
 verb tool/args_string(arguments, key)
-  let value = index_or(arguments, key, nothing)
-  if value == nothing
+  let value = index_or(arguments, key, none)
+  if value == none
     return ""
   end
   return trim(value)
 end
 
 verb tool/args_int(arguments, key)
-  let value = index_or(arguments, key, nothing)
-  if value == nothing
+  let value = index_or(arguments, key, none)
+  if value == none
     return 0
   end
   let parsed = parse_ordinal(value)
-  if parsed == nothing
-    return 0
+  return match parsed
+  case ok(number)
+    number
+  case err(problem)
+    0
   end
-  return parsed
 end
 
 // Individual tools.
 
 verb tool/read(agent @ #agent, arguments @ #map)
   let workspace = workspace/active(agent)
-  if workspace == nothing || tool/workspace_bound(workspace) == false
-    return {:status -> "error", :error -> "workspace not bound to a source repository", :value -> nothing}
+  if workspace == none || tool/workspace_bound(workspace) == false
+    return {:status -> "error", :error -> "workspace not bound to a source repository", :value -> none}
   end
   let repository = tool/source_repository(workspace)
   let revision = tool/source_revision(workspace)
 
   let path = tool/args_string(arguments, :path)
   if path == ""
-    return {:status -> "error", :error -> "missing path argument", :value -> nothing}
+    return {:status -> "error", :error -> "missing path argument", :value -> none}
   end
   if path == "." || path == "./"
-    return {:status -> "error", :error -> "path must be a file path, not a directory", :value -> nothing}
+    return {:status -> "error", :error -> "path must be a file path, not a directory", :value -> none}
   end
 
-  let file_row = one source/FileText(repository, revision, path, ?text, ?hash)
-  if file_row == nothing
-    return {:status -> "error", :error -> string_concat("file not found: ", path), :value -> nothing}
+  let file_rows = source/FileText(repository, revision, path, ?text, ?hash)
+  if not file_rows
+    return {:status -> "error", :error -> string_concat("file not found: ", path), :value -> none}
   end
-  let text = file_row[:text]
+  let exactly {:text -> text, :hash -> hash} = file_rows
 
-  let line_count = one source/FileLineCount(repository, revision, path, ?line_count)
-  if line_count == nothing
+  let exactly {:line_count -> line_count} = source/FileLineCount(repository, revision, path, ?line_count)
+  if line_count == none
     line_count = 0
   end
 
@@ -161,13 +170,13 @@ end
 
 verb tool/grep(agent @ #agent, arguments @ #map)
   let workspace = workspace/active(agent)
-  if workspace == nothing || tool/workspace_bound(workspace) == false
-    return {:status -> "error", :error -> "workspace not bound to a source repository", :value -> nothing}
+  if workspace == none || tool/workspace_bound(workspace) == false
+    return {:status -> "error", :error -> "workspace not bound to a source repository", :value -> none}
   end
 
   let pattern = tool/args_string(arguments, :pattern)
   if pattern == ""
-    return {:status -> "error", :error -> "missing pattern argument", :value -> nothing}
+    return {:status -> "error", :error -> "missing pattern argument", :value -> none}
   end
 
   let limit = tool/args_int(arguments, :limit)
@@ -254,13 +263,13 @@ end
 
 verb tool/glob(agent @ #agent, arguments @ #map)
   let workspace = workspace/active(agent)
-  if workspace == nothing || tool/workspace_bound(workspace) == false
-    return {:status -> "error", :error -> "workspace not bound to a source repository", :value -> nothing}
+  if workspace == none || tool/workspace_bound(workspace) == false
+    return {:status -> "error", :error -> "workspace not bound to a source repository", :value -> none}
   end
 
   let pattern = tool/args_string(arguments, :pattern)
   if pattern == ""
-    return {:status -> "error", :error -> "missing pattern argument", :value -> nothing}
+    return {:status -> "error", :error -> "missing pattern argument", :value -> none}
   end
   let path_prefix = tool/args_string(arguments, :path)
   if path_prefix == "." || path_prefix == "./"
@@ -294,8 +303,8 @@ end
 
 verb tool/ls(agent @ #agent, arguments @ #map)
   let workspace = workspace/active(agent)
-  if workspace == nothing || tool/workspace_bound(workspace) == false
-    return {:status -> "error", :error -> "workspace not bound to a source repository", :value -> nothing}
+  if workspace == none || tool/workspace_bound(workspace) == false
+    return {:status -> "error", :error -> "workspace not bound to a source repository", :value -> none}
   end
   let repository = tool/source_repository(workspace)
   let revision = tool/source_revision(workspace)
@@ -341,7 +350,7 @@ verb tool/invoke(agent @ #agent, tool_name @ #string, arguments @ #map)
   elseif tool_name == "ls"
     return tool/ls(agent, arguments)
   else
-    return {:status -> "error", :error -> string_concat("unknown tool: ", tool_name), :value -> nothing}
+    return {:status -> "error", :error -> string_concat("unknown tool: ", tool_name), :value -> none}
   end
 end
 
@@ -349,17 +358,17 @@ end
 
 verb agent/build_tools(agent @ #agent)
   let workspace = workspace/active(agent)
-  if workspace == nothing
+  if workspace == none
     return []
   end
 
   let tools = []
   for found in ToolEnabled(workspace, ?tool)
     let tool = found[:tool]
-    let name = one ToolName(tool, ?name)
-    let description = one ToolDescription(tool, ?description)
-    let parameters = one ToolParameters(tool, ?parameters)
-    if name != nothing && description != nothing && parameters != nothing
+    let exactly {:name -> name} = ToolName(tool, ?name)
+    let exactly {:description -> description} = ToolDescription(tool, ?description)
+    let exactly {:parameters -> parameters} = ToolParameters(tool, ?parameters)
+    if name != none && description != none && parameters != none
       let spec = {:type -> "function", :function -> {:name -> name, :description -> description, :parameters -> json_decode(parameters)}}
       tools = [@tools, spec]
     end
@@ -369,17 +378,17 @@ end
 
 verb agent/build_responses_tools(agent @ #agent)
   let workspace = workspace/active(agent)
-  if workspace == nothing
+  if workspace == none
     return []
   end
 
   let tools = []
   for found in ToolEnabled(workspace, ?tool)
     let tool = found[:tool]
-    let name = one ToolName(tool, ?name)
-    let description = one ToolDescription(tool, ?description)
-    let parameters = one ToolParameters(tool, ?parameters)
-    if name != nothing && description != nothing && parameters != nothing
+    let exactly {:name -> name} = ToolName(tool, ?name)
+    let exactly {:description -> description} = ToolDescription(tool, ?description)
+    let exactly {:parameters -> parameters} = ToolParameters(tool, ?parameters)
+    if name != none && description != none && parameters != none
       let spec = {:type -> "function", :name -> name, :description -> description, :parameters -> json_decode(parameters)}
       tools = [@tools, spec]
     end
@@ -388,8 +397,8 @@ verb agent/build_responses_tools(agent @ #agent)
 end
 
 verb agent/tool_calls(response @ #map)
-  let calls = index_or(response, :tool_calls, nothing)
-  if calls == nothing
+  let calls = index_or(response, :tool_calls, none)
+  if calls == none
     return []
   end
   return calls
@@ -400,11 +409,11 @@ verb agent/tool_calls(response)
 end
 
 verb agent/record_tool_call(assistant_message, event)
-  let call_id = index_or(event, :call_id, nothing)
-  let tool_name = index_or(event, :name, nothing)
-  let arguments = index_or(event, :arguments, nothing)
-  if call_id == nothing || tool_name == nothing || arguments == nothing
-    return nothing
+  let call_id = index_or(event, :call_id, none)
+  let tool_name = index_or(event, :name, none)
+  let arguments = index_or(event, :arguments, none)
+  if call_id == none || tool_name == none || arguments == none
+    return none
   end
   let tool_call = frob(#tool_call, {:assistant_message -> assistant_message, :call_id -> call_id})
   assert ToolCall(tool_call)
@@ -420,29 +429,30 @@ end
 // Cap on tool-call rounds per user message. Stage 4 replaces this with a
 // needs-follow-up loop driven by session/SteeringQueue and session/FollowUpQueue.
 verb agent/max_tool_rounds(agent @ #agent)
-  let n = agent.agentMaxToolRounds
-  if n == nothing
+  let configured = AgentMaxToolRounds(agent, ?rounds)
+  if not configured
     return 4
   end
-  return n
+  let exactly {:rounds -> rounds} = configured
+  return rounds
 end
 
 verb agent/execute_tool_calls(agent @ #agent, assistant_message, calls)
   let executed = []
   for call in calls
-    let call_id = index_or(call, :id, nothing)
-    let tool_name = index_or(call, :name, nothing)
-    let args_text = index_or(call, :arguments, nothing)
-    if call_id == nothing || tool_name == nothing || args_text == nothing
+    let call_id = index_or(call, :id, none)
+    let tool_name = index_or(call, :name, none)
+    let args_text = index_or(call, :arguments, none)
+    if call_id == none || tool_name == none || args_text == none
       executed = [@executed, {:tool_call_id -> call_id, :content -> "(malformed tool call)"}]
     else
       let args = json_decode(args_text)
-      if args == nothing
+      if args == none
         args = {}
       end
 
-      let tool_call = index_or(call, :entity, nothing)
-      if tool_call == nothing
+      let tool_call = index_or(call, :entity, none)
+      if tool_call == none
         tool_call = frob(#tool_call, {:assistant_message -> assistant_message, :call_id -> call_id})
         assert ToolCall(tool_call)
         assert ToolCallMessage(tool_call, assistant_message)
@@ -461,11 +471,11 @@ verb agent/execute_tool_calls(agent @ #agent, assistant_message, calls)
       end
       tool_call.toolCallStatus = result[:status]
 
-      let content = index_or(result, :rendered, nothing)
-      if content == nothing
-        content = index_or(result, :error, nothing)
+      let content = index_or(result, :rendered, none)
+      if content == none
+        content = index_or(result, :error, none)
       end
-      if content == nothing
+      if content == none
         content = ""
       end
 
@@ -492,7 +502,7 @@ verb agent/llm_messages_with_tools(transcript)
   for message in agent/messages_ordered(transcript)
     let role = message.messageRole
     let content = message.messageContent
-    if content == nothing
+    if content == none
       content = ""
     end
     if role == "user"
@@ -500,10 +510,10 @@ verb agent/llm_messages_with_tools(transcript)
     elseif role == "assistant"
       let calls = []
       for found in ToolCallMessage(?call, message)
-        let call_id = one ToolCallId(found[:call], ?id)
-        let call_name = one ToolCallName(found[:call], ?name)
-        let call_args = one ToolCallArguments(found[:call], ?args)
-        if call_id != nothing && call_name != nothing && call_args != nothing
+        let exactly {:id -> call_id} = ToolCallId(found[:call], ?id)
+        let exactly {:name -> call_name} = ToolCallName(found[:call], ?name)
+        let exactly {:args -> call_args} = ToolCallArguments(found[:call], ?args)
+        if call_id != none && call_name != none && call_args != none
           calls = [@calls, {:id -> call_id, :type -> "function", :function -> {:name -> call_name, :arguments -> call_args}}]
         end
       end
@@ -514,18 +524,18 @@ verb agent/llm_messages_with_tools(transcript)
       end
     elseif role == "tool"
       let parsed = from_literal(content)
-      if parsed == nothing
-        messages = [@messages, llm/tool_message("unknown", string_concat("(malformed tool result: ", content, ")"))]
-      else
-        let tool_call_id = index_or(parsed, :tool_call_id, nothing)
-        if tool_call_id == nothing
+      if let ok(value) = parsed
+        let tool_call_id = index_or(value, :tool_call_id, none)
+        if tool_call_id == none
           tool_call_id = "unknown"
         end
-        let tool_content = index_or(parsed, :content, nothing)
-        if tool_content == nothing
+        let tool_content = index_or(value, :content, none)
+        if tool_content == none
           tool_content = "(missing content)"
         end
         messages = [@messages, llm/tool_message(tool_call_id, tool_content)]
+      else
+        messages = [@messages, llm/tool_message("unknown", string_concat("(malformed tool result: ", content, ")"))]
       end
     elseif role == "system"
       messages = [@messages, llm/system_message(content)]
@@ -540,14 +550,15 @@ verb agent/llm_responses_input(transcript)
   for message in agent/messages_ordered(transcript)
     let role = message.messageRole
     let content = message.messageContent
-    if content == nothing
+    if content == none
       content = ""
     end
     if role == "user" || role == "system"
       input = [@input, {:role -> role, :content -> content}]
     elseif role == "assistant"
-      let response_items = message.messageResponseItems
-      if response_items != nothing
+      let response_item_rows = MessageResponseItems(message, ?items)
+      if response_item_rows
+        let exactly {:items -> response_items} = response_item_rows
         for item in response_items
           input = [@input, item]
         end
@@ -556,20 +567,20 @@ verb agent/llm_responses_input(transcript)
           input = [@input, {:role -> "assistant", :content -> content}]
         end
         for found in ToolCallMessage(?call, message)
-          let call_id = one ToolCallId(found[:call], ?id)
-          let call_name = one ToolCallName(found[:call], ?name)
-          let call_args = one ToolCallArguments(found[:call], ?args)
-          if call_id != nothing && call_name != nothing && call_args != nothing
+          let exactly {:id -> call_id} = ToolCallId(found[:call], ?id)
+          let exactly {:name -> call_name} = ToolCallName(found[:call], ?name)
+          let exactly {:args -> call_args} = ToolCallArguments(found[:call], ?args)
+          if call_id != none && call_name != none && call_args != none
             input = [@input, {:type -> "function_call", :call_id -> call_id, :name -> call_name, :arguments -> call_args}]
           end
         end
       end
     elseif role == "tool"
       let parsed = from_literal(content)
-      if parsed != nothing
-        let call_id = index_or(parsed, :tool_call_id, nothing)
-        let output = index_or(parsed, :content, nothing)
-        if call_id != nothing && output != nothing
+      if let ok(value) = parsed
+        let call_id = index_or(value, :tool_call_id, none)
+        let output = index_or(value, :content, none)
+        if call_id != none && output != none
           input = [@input, {:type -> "function_call_output", :call_id -> call_id, :output -> output}]
         end
       end
@@ -580,18 +591,19 @@ end
 
 verb agent/resolve_api(agent @ #agent)
   let from_env = os_getenv("MICA_AGENT_API")
-  if from_env != nothing
-    return from_env
+  if let some(api) = from_env
+    return api
   end
-  let configured = agent.agentApi
-  if configured != nothing
+  let configured_apis = AgentApi(agent, ?api)
+  if configured_apis
+    let exactly {:api -> configured} = configured_apis
     return configured
   end
   return "responses"
 end
 
 verb agent/stream_events(message)
-  if index_or(message, :type, nothing) == :batch
+  if index_or(message, :type, none) == :batch
     return index_or(message, :events, [])
   end
   return [message]
@@ -615,7 +627,7 @@ verb agent/chat_with_tools(agent @ #agent, transcript)
   end
 
   let [receiver, sender] = mailbox()
-  let steering_subscription = subscribe_changes(sender, :facts, :session/SteeringQueue, [endpoint(), nothing], :changes)
+  let steering_subscription = subscribe_changes(sender, :facts, some(:session/SteeringQueue), [some(endpoint()), none], :changes)
   let assistant_message = agent/append_message(agent, "assistant", "")
   assistant_message.messageStatus = "streaming"
   ui/flush(endpoint())
@@ -630,7 +642,7 @@ verb agent/chat_with_tools(agent @ #agent, transcript)
   let pending_text = ""
   let published_text = false
   let calls = []
-  let completed_response = nothing
+  let completed_response = none
   let done = false
   let failed = false
   let cancelled = false
@@ -638,12 +650,12 @@ verb agent/chat_with_tools(agent @ #agent, transcript)
     let ready = mailbox_recv([receiver])
     for group in ready
       for message in group[1]
-        if index_or(message, :kind, nothing) == :changes && session/steering_count(endpoint()) > 0
+        if index_or(message, :kind, none) == :changes && session/steering_count(endpoint()) > 0
           done = true
           cancelled = true
         else
           for event in agent/stream_events(message)
-            let kind = index_or(event, :type, nothing)
+            let kind = index_or(event, :type, none)
             if kind == :text_delta
               let delta = index_or(event, :delta, "")
               text = string_concat(text, delta)
@@ -656,11 +668,11 @@ verb agent/chat_with_tools(agent @ #agent, transcript)
               end
             elseif kind == :tool_call_ready
               let call = agent/record_tool_call(assistant_message, event)
-              if call != nothing
+              if call != none
                 calls = [@calls, call]
               end
             elseif kind == :completed
-              completed_response = index_or(event, :response, nothing)
+              completed_response = index_or(event, :response, none)
               if text == ""
                 text = index_or(event, :text, "")
               end
@@ -686,21 +698,21 @@ verb agent/chat_with_tools(agent @ #agent, transcript)
   end
 
   assistant_message.messageContent = text
-  if completed_response != nothing
-    let response_id = index_or(completed_response, :id, nothing)
-    let response_model = index_or(completed_response, :model, nothing)
-    let response_usage = index_or(completed_response, :usage, nothing)
-    let response_items = index_or(completed_response, :output, nothing)
-    if response_id != nothing
+  if completed_response != none
+    let response_id = index_or(completed_response, :id, none)
+    let response_model = index_or(completed_response, :model, none)
+    let response_usage = index_or(completed_response, :usage, none)
+    let response_items = index_or(completed_response, :output, none)
+    if response_id != none
       assistant_message.messageResponseId = response_id
     end
-    if response_model != nothing
+    if response_model != none
       assistant_message.messageModel = response_model
     end
-    if response_usage != nothing
+    if response_usage != none
       assistant_message.messageUsage = response_usage
     end
-    if response_items != nothing
+    if response_items != none
       assistant_message.messageResponseItems = response_items
     end
   end
@@ -730,7 +742,7 @@ verb agent/chat_with_tools(agent @ #agent, transcript)
     return {:message -> assistant_message, :text -> text, :tool_calls -> [], :cancelled -> true}
   end
   if failed
-    return nothing
+    return none
   end
   return {:message -> assistant_message, :text -> text, :tool_calls -> calls}
 end
@@ -739,18 +751,22 @@ end
 // The loop task and the sync event task share these relations. Conflicts
 // are retried by the runtime, so concurrent push/drain is safe.
 verb session/steering_push(endpoint, message @ #string)
-  let current = endpoint.session/SteeringQueue
-  if current == nothing
-    current = []
+  let current = []
+  let queues = session/SteeringQueue(endpoint, ?queue)
+  if queues
+    let exactly {:queue -> configured_queue} = queues
+    current = configured_queue
   end
   endpoint().session/SteeringQueue = [@current, message]
   endpoint.session/SteeringQueue = [@current, message]
 end
 
 verb session/steering_drain(endpoint)
-  let current = endpoint.session/SteeringQueue
-  if current == nothing
-    current = []
+  let current = []
+  let queues = session/SteeringQueue(endpoint, ?queue)
+  if queues
+    let exactly {:queue -> configured_queue} = queues
+    current = configured_queue
   end
   endpoint().session/SteeringQueue = []
   endpoint.session/SteeringQueue = []
@@ -758,18 +774,22 @@ verb session/steering_drain(endpoint)
 end
 
 verb session/followup_push(endpoint, message @ #string)
-  let current = endpoint.session/FollowUpQueue
-  if current == nothing
-    current = []
+  let current = []
+  let queues = session/FollowUpQueue(endpoint, ?queue)
+  if queues
+    let exactly {:queue -> configured_queue} = queues
+    current = configured_queue
   end
   endpoint().session/FollowUpQueue = [@current, message]
   endpoint.session/FollowUpQueue = [@current, message]
 end
 
 verb session/followup_drain(endpoint)
-  let current = endpoint.session/FollowUpQueue
-  if current == nothing
-    current = []
+  let current = []
+  let queues = session/FollowUpQueue(endpoint, ?queue)
+  if queues
+    let exactly {:queue -> configured_queue} = queues
+    current = configured_queue
   end
   endpoint().session/FollowUpQueue = []
   endpoint.session/FollowUpQueue = []
@@ -777,18 +797,20 @@ verb session/followup_drain(endpoint)
 end
 
 verb session/steering_count(endpoint)
-  let current = endpoint.session/SteeringQueue
-  if current == nothing
+  let queues = session/SteeringQueue(endpoint, ?queue)
+  if not queues
     return 0
   end
+  let exactly {:queue -> current} = queues
   return list_count(current)
 end
 
 verb session/followup_count(endpoint)
-  let current = endpoint.session/FollowUpQueue
-  if current == nothing
+  let queues = session/FollowUpQueue(endpoint, ?queue)
+  if not queues
     return 0
   end
+  let exactly {:queue -> current} = queues
   return list_count(current)
 end
 
@@ -839,17 +861,17 @@ verb agent/run_loop_body(agent @ #agent, transcript)
     catch err
       agent/append_message(agent, "assistant", string_concat("(LLM error: ", to_literal(err), ")"))
       ui/flush(endpoint())
-      response = nothing
+      response = none
     end
 
-    if response == nothing
+    if response == none
       round = max_rounds
     elseif index_or(response, :cancelled, false) == true
       // The next loop iteration drains the committed steering queue and
       // submits it with the complete transcript state.
     else
-      let text = index_or(response, :text, nothing)
-      if text == nothing
+      let text = index_or(response, :text, none)
+      if text == none
         text = ""
       end
       let calls = agent/tool_calls(response)

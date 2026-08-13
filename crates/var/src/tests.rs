@@ -54,7 +54,7 @@ fn process_local_value_abi_matches_value_layout() {
 #[test]
 fn process_local_value_abi_classifies_heap_ownership() {
     let immediate_values = [
-        Value::nothing(),
+        Value::empty_relation(),
         Value::bool(true),
         Value::int(1).unwrap(),
         Value::float(1.5).unwrap(),
@@ -80,7 +80,7 @@ fn process_local_value_abi_classifies_heap_ownership() {
         .unwrap(),
         Value::range(Value::int(1).unwrap(), Some(Value::int(2).unwrap())),
         Value::error(Symbol::intern("E_VALUE_ABI_HEAP"), None::<Box<str>>, None),
-        Value::frob(Identity::new(1).unwrap(), Value::nothing()),
+        Value::frob(Identity::new(1).unwrap(), Value::empty_relation()),
     ];
     for value in heap_values {
         assert!(!value_is_immediate(borrowed_value_bits(&value)));
@@ -189,12 +189,12 @@ fn process_local_value_abi_orders_borrowed_words_without_taking_ownership() {
 
 #[test]
 fn immediate_constructors_round_trip() {
-    let nothing = Value::nothing();
-    assert_eq!(nothing.kind(), ValueKind::Relation);
-    assert!(nothing.is_empty_relation());
-    assert_eq!(nothing.with_relation(|relation| relation.arity()), Some(0));
-    assert_eq!(nothing.with_relation(|relation| relation.len()), Some(0));
-    assert_eq!(Value::relation([], []).unwrap(), nothing);
+    let none = Value::empty_relation();
+    assert_eq!(none.kind(), ValueKind::Relation);
+    assert!(none.is_empty_relation());
+    assert_eq!(none.with_relation(|relation| relation.arity()), Some(0));
+    assert_eq!(none.with_relation(|relation| relation.len()), Some(0));
+    assert_eq!(Value::relation([], []).unwrap(), none);
     let unit = Value::unit();
     assert!(unit.is_unit());
     assert!(!unit.is_empty_relation());
@@ -777,7 +777,7 @@ fn value_walk_pairs_enter_and_leave_events() {
 #[test]
 fn value_codec_round_trips_serializable_values() {
     let values = [
-        Value::nothing(),
+        Value::empty_relation(),
         Value::bool(true),
         Value::bool(false),
         Value::int(INT_MIN).unwrap(),
@@ -825,7 +825,7 @@ fn value_codec_round_trips_serializable_values() {
 #[test]
 fn value_codec_uses_little_endian_inline_words() {
     let values = [
-        Value::nothing(),
+        Value::empty_relation(),
         Value::bool(true),
         Value::int(-123).unwrap(),
         Value::float(12.5).unwrap(),
@@ -853,7 +853,7 @@ fn value_codec_sink_matches_vec_encoder() {
     }
 
     let values = [
-        Value::nothing(),
+        Value::empty_relation(),
         Value::identity(Identity::new(42).unwrap()),
         Value::string("brass lamp"),
         Value::bytes([1, 2, 3, 4]),
@@ -1052,7 +1052,7 @@ fn value_codec_rejects_unnamed_symbols_and_trailing_bytes() {
     );
 
     encoded.clear();
-    encode_value(&Value::nothing(), &mut encoded).unwrap();
+    encode_value(&Value::empty_relation(), &mut encoded).unwrap();
     encoded.push(0xff);
     assert_eq!(
         decode_value_exact(&encoded),
@@ -1165,7 +1165,7 @@ fn total_order_is_stable() {
         Value::float(1.0).unwrap(),
         Value::int(1).unwrap(),
         Value::bool(true),
-        Value::nothing(),
+        Value::empty_relation(),
     ];
     let mut sorted = values.clone();
     sorted.sort();

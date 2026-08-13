@@ -15,7 +15,7 @@ Current value families include:
 - identity values such as `#alice`;
 - lists such as `[1, 2, 3]`;
 - maps such as `{:name -> "sensor"}`;
-- immutable relation values, including `nothing`;
+- immutable relation values, including structural options and results;
 - frobs such as `#event<{:actor -> #alice}>`;
 - bytes;
 - ephemeral capability values.
@@ -42,11 +42,12 @@ E_PERMISSION
 [:work, :owner] { [#inspection, #alice], [#repair, #bob] }
 ```
 
-`nothing` is the source alias for the zero-column empty relation. It is not a separate value kind,
-and it does not mean SQL `NULL`. It is equal to `[] {}` and is falsey because it has no rows. The
-zero-column unit relation `[] {[]}` contains one empty row and is truthy. An empty relation with a
-heading, such as `[:thing] {}`, is also falsey but remains distinct from `nothing` because its
-heading is part of the value.
+`[] {}` is the zero-column empty relation. It is falsey because it has no rows, but it is not an
+absence or null sentinel. Unit is written `()` and is equivalent to `[] {[]}`: a zero-column
+relation containing one empty row. It is truthy. An empty relation with a heading, such as
+`[:thing] {}`, is also falsey but remains distinct from `[] {}` because its heading is part of the
+value. Expected absence uses `none` and `some(value)`; see
+[Structural Relation Types](./structural-relation-types.md).
 
 Relation literals have a symbol heading followed by a set of rows:
 
@@ -60,9 +61,9 @@ Relation literals have a symbol heading followed by a set of rows:
 Each row must match the heading arity. Heading names must be unique. Relations have set semantics,
 so duplicate rows are removed and row order is not observable.
 
-At the JSON boundary, JSON `null` maps to `nothing` and `nothing` maps back to `null`. Other
-relation values have no implicit JSON representation and must be projected into lists or maps
-explicitly.
+At the JSON boundary, JSON `null` maps to the explicit tagged map `{:json -> :null}` and that tag
+maps back to `null`. Relation values, including options, have no implicit JSON representation and
+must be projected into lists or maps explicitly.
 
 Indexing is strict. Reading an absent list position, relation row, or map key raises `E_INDEX`;
 invalid index types and out-of-range indexed assignments raise the same error. Optional bindings

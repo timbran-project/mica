@@ -193,8 +193,8 @@ mod tests {
 
         let report = runner
             .run_source(
-                "let text = one source/FileText(#repo, #rev, \"Cargo.toml\", ?text, ?hash)\n\
-                 return string_contains(text[:text], \"[package]\")",
+                "let exactly {text, hash} = source/FileText(#repo, #rev, \"Cargo.toml\", ?text, ?hash)\n\
+                 return string_contains(text, \"[package]\")",
             )
             .unwrap();
         assert!(matches!(
@@ -210,8 +210,8 @@ mod tests {
 
         let report = runner
             .run_source(
-                "let row = one source/FileLines(#repo, #rev, \"Cargo.toml\", 1, 2, ?lines, ?hash)\n\
-                 return row[:lines]",
+                "let exactly {lines, hash} = source/FileLines(#repo, #rev, \"Cargo.toml\", 1, 2, ?lines, ?hash)\n\
+                 return lines",
             )
             .unwrap();
         let TaskOutcome::Complete { value, .. } = report.outcome else {
@@ -232,7 +232,7 @@ mod tests {
 
         let report = runner
             .run_source(
-                "let line_count = one source/FileLineCount(#repo, #rev, \"Cargo.toml\", ?line_count)\n\
+                "let exactly {line_count} = source/FileLineCount(#repo, #rev, \"Cargo.toml\", ?line_count)\n\
                  return line_count",
             )
             .unwrap();
@@ -254,7 +254,7 @@ mod tests {
                      return entry[:kind]\n\
                    end\n\
                  end\n\
-                 return nothing",
+                 return none",
             )
             .unwrap();
         assert!(matches!(
@@ -375,8 +375,8 @@ mod tests {
             let git_dir = remote.canonicalize().unwrap().display().to_string();
             let report = runner
                 .run_source(&format!(
-                    "let row = one source/GitReceivedRefUpdate({git_dir:?}, ?update_id, ?target_ref, ?ref_name, ?commit_id, ?first_parent_id, ?change_id, ?subject, ?author_name, ?author_email, ?author_time, ?received_at)\n\
-                     return {{:target_ref -> row[:target_ref], :ref_name -> row[:ref_name], :first_parent_id -> row[:first_parent_id], :change_id -> row[:change_id], :subject -> row[:subject], :author_email -> row[:author_email]}}"
+                    "let exactly {{update_id, target_ref, ref_name, commit_id, first_parent_id, change_id, subject, author_name, author_email, author_time, received_at}} = source/GitReceivedRefUpdate({git_dir:?}, ?update_id, ?target_ref, ?ref_name, ?commit_id, ?first_parent_id, ?change_id, ?subject, ?author_name, ?author_email, ?author_time, ?received_at)\n\
+                     return {{:target_ref -> target_ref, :ref_name -> ref_name, :first_parent_id -> first_parent_id, :change_id -> change_id, :subject -> subject, :author_email -> author_email}}"
                 ))
                 .expect("received ref update query should run");
 
@@ -435,7 +435,7 @@ mod tests {
             let mut runner = SourceRunner::new_empty();
             load_source_relations_at(&mut runner, &work.display().to_string());
             let report = runner
-                .run_source("return one source/RefTarget(#repo, \"refs/heads/main\", ?commit)")
+                .run_source("let exactly {commit} = source/RefTarget(#repo, \"refs/heads/main\", ?commit)\nreturn commit")
                 .expect("ref target query should run");
 
             let TaskOutcome::Complete { value, .. } = report.outcome else {
@@ -446,7 +446,7 @@ mod tests {
             let git_dir = remote.canonicalize().unwrap().display().to_string();
             let remote_report = runner
                 .run_source(&format!(
-                    "return one source/GitRefTarget({git_dir:?}, \"refs/heads/main\", ?commit)"
+                    "let exactly {{commit}} = source/GitRefTarget({git_dir:?}, \"refs/heads/main\", ?commit)\nreturn commit"
                 ))
                 .expect("git ref target query should run");
             let TaskOutcome::Complete { value, .. } = remote_report.outcome else {
@@ -455,11 +455,11 @@ mod tests {
             assert_eq!(value, Value::string(head.trim()));
 
             let missing = runner
-                .run_source("return one source/RefTarget(#repo, \"refs/heads/missing\", ?commit)")
+                .run_source("if let {commit} = source/RefTarget(#repo, \"refs/heads/missing\", ?commit)\n  return some(commit)\nend\nreturn none")
                 .expect("missing ref query should run");
             assert!(matches!(
                 missing.outcome,
-                TaskOutcome::Complete { value, .. } if value == Value::nothing()
+                TaskOutcome::Complete { value, .. } if value == Value::option_none()
             ));
         });
         fs::remove_dir_all(&tmp).expect("temporary git ref dir should remove");
@@ -497,7 +497,7 @@ mod tests {
         let report = runner
             .run_source(
                 "for item in source/SyntaxOutline(#repo, #rev, \"src/lib.rs\", ?node, ?kind, ?name, ?start_line, ?end_line, ?start_byte, ?end_byte)\n\
-                   return item[:kind] != nothing\n\
+                   return item[:kind] != none\n\
                  end\n\
                  return false",
             )
@@ -574,8 +574,8 @@ mod tests {
 
         let report = runner
             .run_source(
-                "let row = one source/SyntaxLine(#repo, #rev, \"src/lib.rs\", 1, 8, 1, ?segments, ?hash)\n\
-                 return row[:segments]",
+                "let exactly {segments, hash} = source/SyntaxLine(#repo, #rev, \"src/lib.rs\", 1, 8, 1, ?segments, ?hash)\n\
+                 return segments",
             )
             .unwrap();
         let TaskOutcome::Complete { value, .. } = report.outcome else {
@@ -604,8 +604,8 @@ mod tests {
 
         let report = runner
             .run_source(
-                "let item = one source/SyntaxNodeAt(#repo, #rev, \"src/lib.rs\", 2500, ?node, ?kind, ?name, ?start_line, ?end_line, ?start_byte, ?end_byte)\n\
-                 return item[:node] != nothing",
+                "let exactly {node, kind, name, start_line, end_line, start_byte, end_byte} = source/SyntaxNodeAt(#repo, #rev, \"src/lib.rs\", 2500, ?node, ?kind, ?name, ?start_line, ?end_line, ?start_byte, ?end_byte)\n\
+                 return node != none",
             )
             .unwrap();
         assert!(matches!(
@@ -630,18 +630,18 @@ mod tests {
             .run_source(&format!(
                 "for def in source/DefinitionAt(#repo, #rev, \"src/retrieval.rs\", {offset}, ?symbol, ?name, ?kind, ?target_path, ?start_line, ?end_line, ?start_byte, ?end_byte, ?provider)\n\
                    if def[:target_path] == \"src/retrieval.rs\"\n\
-                     return def\n\
+                     return some(def)\n\
                    end\n\
                  end\n\
-                 return nothing"
+                 return none"
             ))
             .unwrap();
             let TaskOutcome::Complete { value, .. } = report.outcome else {
                 panic!("expected complete outcome, got {:?}", report.outcome);
             };
-            if value == Value::nothing() {
+            let Some(value) = value.option_payload().expect("expected definition option") else {
                 return;
-            }
+            };
             let symbol = value
                 .with_map(|entries| {
                     entries
@@ -657,15 +657,16 @@ mod tests {
             .run_source(&format!(
                 "for reference in source/ReferencesOf(#repo, #rev, {symbol:?}, ?path, ?start_line, ?end_line, ?start_byte, ?end_byte, ?provider, ?name)\n\
                    if reference[:path] == \"src/retrieval.rs\"\n\
-                     return reference[:provider]\n\
+                     return some(reference[:provider])\n\
                    end\n\
                  end\n\
-                 return nothing"
+                 return none"
             ))
             .unwrap();
             assert!(matches!(
                 report.outcome,
-                TaskOutcome::Complete { value, .. } if value.with_str(|provider| provider.contains("rust-analyzer")).unwrap_or(false)
+                TaskOutcome::Complete { value, .. }
+                    if value.option_payload().flatten().and_then(|value| value.with_str(|provider| provider.contains("rust-analyzer"))).unwrap_or(false)
             ));
         });
     }
@@ -688,7 +689,7 @@ mod tests {
                          return [def[:symbol], def[:target_path], def[:start_line], def[:provider]]\n\
                        end\n\
                      end\n\
-                     return nothing"
+                     return none"
                 ))
                 .unwrap();
             let TaskOutcome::Complete { value, .. } = report.outcome else {
@@ -736,7 +737,7 @@ mod tests {
                          return result[:provider]\n\
                        end\n\
                      end\n\
-                     return nothing",
+                     return none",
                 )
                 .unwrap();
             assert!(matches!(
@@ -859,7 +860,7 @@ mod tests {
                              return [unit[:kind], unit[:title], unit[:start_line], unit[:end_line], unit[:model], string_contains(unit[:text], \"actual corpus retrieval phrase\")]\n\
                            end\n\
                          end\n\
-                         return nothing",
+                         return none",
                     )
                     .unwrap();
                 let TaskOutcome::Complete { value, .. } = report.outcome else {
@@ -983,12 +984,12 @@ mod tests {
                 load_source_relations_at(&mut runner, &root_path.display().to_string());
                 let report = runner
                     .run_source(
-                        "let first_path = nothing\n\
+                        "let first_path = none\n\
                          let first_line = 0\n\
-                         let first_snippet = nothing\n\
+                         let first_snippet = none\n\
                          let saw_generated_book = false\n\
                          for result in source/TextSearch(\"btree\", 8, \"all\", ?unit, ?score, ?path, ?start_line, ?end_line, ?kind, ?title, ?snippet)\n\
-                           if first_path == nothing\n\
+                           if first_path == none\n\
                              first_path = result[:path]\n\
                              first_line = result[:start_line]\n\
                              first_snippet = result[:snippet]\n\
@@ -1056,7 +1057,7 @@ mod tests {
                     "for def in source/DefinitionAt(#repo, #rev, {source_path:?}, {offset}, ?symbol, ?name, ?kind, ?target_path, ?start_line, ?end_line, ?start_byte, ?end_byte, ?provider)\n\
                        return [def[:name], def[:kind], def[:target_path], def[:start_line], def[:provider]]\n\
                      end\n\
-                     return nothing",
+                     return none",
                     source_path = source_path,
                 ))
                 .unwrap();
@@ -1090,11 +1091,11 @@ mod tests {
             let report = runner
                 .run_source(
                     "for index in source/SourceIndex(?index)\n\
-                       let status = one source/IndexStatus(index[:index], ?status)\n\
-                       let error = one source/IndexBuildError(index[:index], ?error)\n\
+                       let exactly {:status -> status} = source/IndexStatus(index[:index], ?status)\n\
+                       let exactly {:error -> error} = source/IndexBuildError(index[:index], ?error)\n\
                        return [status, error]\n\
                      end\n\
-                     return nothing",
+                     return none",
                 )
                 .unwrap();
             let TaskOutcome::Complete { value, .. } = report.outcome else {
@@ -1126,21 +1127,22 @@ mod tests {
             .run_source(&format!(
                 "for def in source/DefinitionAt(#repo, #rev, \"src/retrieval.rs\", {offset}, ?symbol, ?name, ?kind, ?target_path, ?start_line, ?end_line, ?start_byte, ?end_byte, ?provider)\n\
                    if def[:target_path] == \"src/retrieval.rs\"\n\
-                     return def[:provider]\n\
+                     return some(def[:provider])\n\
                    end\n\
                  end\n\
-                 return nothing"
+                 return none"
             ))
             .unwrap();
             let TaskOutcome::Complete { value, .. } = &report.outcome else {
                 panic!("expected complete outcome, got {:?}", report.outcome);
             };
-            if value == &Value::nothing() {
+            if value == &Value::option_none() {
                 return;
             }
             assert!(matches!(
                 report.outcome,
-                TaskOutcome::Complete { value, .. } if value.with_str(|provider| provider.contains("rust-analyzer")).unwrap_or(false)
+                TaskOutcome::Complete { value, .. }
+                    if value.option_payload().flatten().and_then(|value| value.with_str(|provider| provider.contains("rust-analyzer"))).unwrap_or(false)
             ));
         });
     }
@@ -1161,21 +1163,22 @@ mod tests {
             .run_source(&format!(
                 "for def in source/DefinitionAt(#repo, #rev, \"src/lib.rs\", {offset}, ?symbol, ?name, ?kind, ?target_path, ?start_line, ?end_line, ?start_byte, ?end_byte, ?provider)\n\
                    if def[:target_path] == \"src/retrieval.rs\"\n\
-                     return def[:start_line]\n\
+                     return some(def[:start_line])\n\
                    end\n\
                  end\n\
-                 return nothing"
+                 return none"
             ))
             .unwrap();
             let TaskOutcome::Complete { value, .. } = &report.outcome else {
                 panic!("expected complete outcome, got {:?}", report.outcome);
             };
-            if value == &Value::nothing() {
+            if value == &Value::option_none() {
                 return;
             }
             assert!(matches!(
                 report.outcome,
-                TaskOutcome::Complete { value, .. } if value.as_int() == Some(1)
+                TaskOutcome::Complete { value, .. }
+                    if value.option_payload().flatten().and_then(|value| value.as_int()) == Some(1)
             ));
         });
     }
@@ -1199,21 +1202,22 @@ mod tests {
             .run_source(&format!(
                 "for def in source/DefinitionAt(#repo, #rev, \"crates/runtime/src/lib.rs\", {offset}, ?symbol, ?name, ?kind, ?target_path, ?start_line, ?end_line, ?start_byte, ?end_byte, ?provider)\n\
                    if def[:target_path] == \"crates/runtime/src/retrieval.rs\"\n\
-                     return def[:start_line]\n\
+                     return some(def[:start_line])\n\
                    end\n\
                  end\n\
-                 return nothing"
+                 return none"
             ))
             .unwrap();
             let TaskOutcome::Complete { value, .. } = &report.outcome else {
                 panic!("expected complete outcome, got {:?}", report.outcome);
             };
-            if value == &Value::nothing() {
+            if value == &Value::option_none() {
                 return;
             }
             assert!(matches!(
                 report.outcome,
-                TaskOutcome::Complete { value, .. } if value.as_int() == Some(1)
+                TaskOutcome::Complete { value, .. }
+                    if value.option_payload().flatten().and_then(|value| value.as_int()) == Some(1)
             ));
         });
     }

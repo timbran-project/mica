@@ -98,7 +98,7 @@ end
 verb ui/event_template_part_nodes(source, part @ #template/name<_>, bindings @ #map, viewer)
   let data = frob_value(part)
   let value = template/binding_value(bindings, data[:binding])
-  if value == nothing
+  if value == none
     return [dom_text("<no-binding>")]
   end
 
@@ -116,7 +116,7 @@ end
 verb ui/event_template_part_nodes(source, part @ #template/reference<_>, bindings @ #map, viewer)
   let data = frob_value(part)
   let value = template/binding_value(bindings, data[:binding])
-  if value == nothing
+  if value == none
     return [dom_text("<no-binding>")]
   end
 
@@ -148,7 +148,7 @@ end
 verb ui/event_template_part_nodes(source, part @ #template/article<_>, bindings @ #map, viewer)
   let data = frob_value(part)
   let value = template/binding_value(bindings, data[:binding])
-  if value == nothing
+  if value == none
     return [dom_text("<no-binding>")]
   end
 
@@ -213,16 +213,16 @@ end
 
 verb ui/event_body_for(source @ #event/button<_>, viewer)
   let bindings = event/bindings(source)
-  let target = index_or(bindings, :target, nothing)
-  if target == nothing
+  let target = index_or(bindings, :target, none)
+  if target == none
     target = #red_button
   end
   return dom <div class="event-text">{ui/event_object_node(source, target, viewer)} gives one final cheerful ding.</div>
 end
 
 verb ui/event_class(source)
-  let class = event/metadata(source, :class, nothing)
-  if class != nothing
+  let class = event/metadata(source, :class, none)
+  if class != none
     return class
   end
 
@@ -262,8 +262,8 @@ verb ui/event_class(source @ #event/button<_>)
 end
 
 verb ui/event_label(source)
-  let label = event/metadata(source, :label, nothing)
-  if label != nothing
+  let label = event/metadata(source, :label, none)
+  if label != none
     return label
   end
 
@@ -312,23 +312,23 @@ end
 verb ui/event_meta_node(source, seq)
   let chips = [ui/event_meta_chip_node("kind", ui/event_label(source))]
   let bindings = event/bindings(source)
-  let actor = index_or(bindings, :actor, nothing)
-  if actor != nothing
+  let actor = index_or(bindings, :actor, none)
+  if actor != none
     chips = [@chips, ui/event_meta_chip_node("actor", ui/actor_name(actor))]
   end
 
-  let item = index_or(bindings, :item, nothing)
-  if item != nothing
+  let item = index_or(bindings, :item, none)
+  if item != none
     chips = [@chips, ui/event_meta_chip_node("item", ui/actor_name(item))]
   end
 
-  let container = index_or(bindings, :container, nothing)
-  if container != nothing
+  let container = index_or(bindings, :container, none)
+  if container != none
     chips = [@chips, ui/event_meta_chip_node("container", ui/actor_name(container))]
   end
 
-  let message = index_or(bindings, :message, nothing)
-  if message != nothing
+  let message = index_or(bindings, :message, none)
+  if message != none
     chips = [@chips, ui/event_meta_chip_node("message", message)]
   end
 
@@ -347,7 +347,7 @@ verb ui/event_node(event)
 end
 
 verb ui/latest_event_node(actor @ #player, revision)
-  let latest = nothing
+  let latest = none
   let latest_seq = -1
   for found in event/Delivery(actor, ?event)
     let seq = found[:event].event/seq
@@ -357,7 +357,7 @@ verb ui/latest_event_node(actor @ #player, revision)
     end
   end
 
-  if latest == nothing
+  if latest == none
     return dom <section id="latest-event" class="latest-event empty">
       <span class="muted">No events yet.</span>
     </section>

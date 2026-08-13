@@ -19,7 +19,7 @@ use std::hash::{Hash, Hasher};
 
 fn leaf_value() -> impl Strategy<Value = Value> {
     prop_oneof![
-        Just(Value::nothing()),
+        Just(Value::empty_relation()),
         any::<bool>().prop_map(Value::bool),
         (-(1i64 << 55)..(1i64 << 55)).prop_map(|value| Value::int(value).unwrap()),
         any::<f32>().prop_map(|value| Value::float(value).unwrap()),

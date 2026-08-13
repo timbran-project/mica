@@ -21,7 +21,8 @@ then:
 
 ```mica
 assert Label(#sensor, "temperature sensor")
-return one Label(#sensor, ?label)
+let exactly {label} = Label(#sensor, ?label)
+return label
 ```
 
 The first task creates an identity and a functional relation keyed by position 0. After it commits,
@@ -48,7 +49,8 @@ changes stored world state when the task commits. A verb definition such as:
 
 ```mica
 verb describe(actor, item)
-  return one Description(item, ?text)
+  let exactly {text} = Description(item, ?text)
+  return text
 end
 ```
 
@@ -78,7 +80,8 @@ For example, this source installs a verb:
 
 ```mica
 verb describe(actor, item)
-  return one Description(item, ?text)
+  let exactly {text} = Description(item, ?text)
+  return text
 end
 ```
 
@@ -100,8 +103,9 @@ A task body is ordinary Mica code. It may compute values, query relations, asser
 call builtins, emit effects, or invoke verbs:
 
 ```mica
-let work = one AssignedTo(?work, actor)
-emit(actor, one Description(work, ?text))
+let exactly {work} = AssignedTo(?work, actor)
+let exactly {text} = Description(work, ?text)
+emit(actor, text)
 ```
 
 The task body is expression-oriented. Forms such as `assert`, `emit`, and assignment still produce

@@ -38,7 +38,7 @@ The positions in a relation are ordinal. `InstalledAt(#sensor, #lab)` means posi
 and position 1 is `#lab`. The positions do not have stored column names. Names come from the
 relation and from how queries bind variables.
 
-Mica values are ordinary values when stored in relations. `nothing` denotes the zero-column empty
+Mica values are ordinary values when stored in relations. `[] {}` denotes the zero-column empty
 relation; it is not SQL `NULL`, and Mica does not use SQL's three-valued logic.
 
 Create a relation with a builtin:
@@ -137,7 +137,8 @@ Functional relations declare key positions and support single-value projection:
 ```mica
 make_functional_relation(:Label, 2, [0])
 assert Label(#sensor, "temperature sensor")
-return one Label(#sensor, ?label)
+let exactly {label} = Label(#sensor, ?label)
+return label
 ```
 
 The key-position list is zero-based. In `make_functional_relation(:Label, 2, [0])`, position 0 is
@@ -148,13 +149,10 @@ Functional relation metadata is a real constraint used by replacement and dot su
 documentation. Code that assigns through a functional relation replaces the tuple for that key
 rather than adding another competing fact.
 
-`one` projects at most one result. It is useful for relations such as `Label`, where the program
-expects a single value and should fail loudly if the data is ambiguous.
-
-If the query produces zero results, `one` returns `nothing`, the zero-column empty relation. If it
-produces more than one result, `one` raises `E_AMBIGUOUS`. If the single result has exactly one free
-variable, `one` returns that variable's value. If the single result has multiple free variables, the
-result shape is a binding map.
+`let exactly` binds the named cells of exactly one result row. Zero or multiple rows raise
+`E_CARDINALITY`. When absence is expected, `if let {label} = Label(#sensor, ?label)` takes its
+`else` branch for zero rows and still raises for multiple rows. A query expression itself always
+remains a relation value.
 
 See [Keys and Single-Valued Relations](./keyed-relations.md) for a fuller explanation of keys,
 replacement, property-style access, and composite keys.
@@ -187,8 +185,8 @@ symbol heading followed by rows:
 [:person, :name] { [#alice, "Alice"], [#bob, "Bob"] }
 ```
 
-`nothing` is exactly `[] {}`. The zero-column unit relation is `[] {[]}`. These are different
-values: the former has no rows and is falsey, while the latter has one empty row and is truthy.
+The empty relation is `[] {}`. Unit is `()` (equivalent to `[] {[]}`). These are different values:
+the former has no rows and is falsey, while the latter has one empty row and is truthy.
 
 Dot sugar is only valid for declared functional binary relations:
 
@@ -200,9 +198,10 @@ return #sensor.label
 This is convenient, but it is still relation access. The assignment replaces the
 `Label(#sensor, value)` fact for the key `#sensor`; it does not write a field inside a record.
 
-The dot name maps to a declared functional binary relation. A read such as `#sensor.label` is
-equivalent to a single-result projection such as `one Label(#sensor, ?label)`. If there is no
-matching tuple, the result is `nothing`. There is no fallback to hidden object storage.
+The dot name maps to a declared functional binary relation. A read such as `#sensor.label` requires
+exactly one matching `Label(#sensor, value)` tuple. A missing or ambiguous value raises
+`E_CARDINALITY`; use optional query binding when absence is expected. There is no fallback to hidden
+object storage.
 
 Mica relation calls are closer to Datalog predicates than SQL `SELECT` statements. Named relations
 have no implicit row ids, no stored column names, and no SQL `NULL`. Query variables provide the

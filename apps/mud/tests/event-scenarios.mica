@@ -17,7 +17,7 @@ verb test/assert_true(value, label @ #string)
 end
 
 verb test/latest_event_source(actor @ #player)
-  let latest = nothing
+  let latest = none
   let latest_seq = -1
   for found in event/Delivery(actor, ?event)
     let event = found[:event]
@@ -28,7 +28,7 @@ verb test/latest_event_source(actor @ #player)
     end
   end
 
-  if latest == nothing
+  if latest == none
     raise E_INVARG, "no delivered event"
   end
 
@@ -100,14 +100,14 @@ verb test/command_parser_records_structured_utility_events()
   test/assert_equal(:command(actor: #alice, endpoint: endpoint(), line: "up"), false, "blocked direction command")
   let source = test/latest_event_source(#alice)
   test/assert_equal(frob_delegate(source), #event/utility, "blocked command utility delegate")
-  test/assert_equal(event/metadata(source, :label, nothing), "utility", "blocked command utility label")
-  test/assert_equal(event/metadata(source, :class, nothing), "event-line utility", "blocked command utility class")
+  test/assert_equal(event/metadata(source, :label, none), "utility", "blocked command utility label")
+  test/assert_equal(event/metadata(source, :class, none), "event-line utility", "blocked command utility class")
   test/assert_equal(event/bindings(source)[:message], "You cannot go that way.", "blocked command utility message")
 
   test/assert_equal(:command(actor: #alice, endpoint: endpoint(), line: "flailwildly"), false, "unknown command")
   source = test/latest_event_source(#alice)
   test/assert_equal(frob_delegate(source), #event/utility, "unknown command utility delegate")
-  test/assert_equal(event/metadata(source, :label, nothing), "utility", "unknown command utility label")
+  test/assert_equal(event/metadata(source, :label, none), "utility", "unknown command utility label")
   test/assert_equal(event/bindings(source)[:message], "I do not understand that.", "unknown command utility message")
 
   test/assert_equal(:command(actor: #alice, endpoint: endpoint(), line: "\"hello from shortcut"), true, "say shortcut command")
@@ -123,7 +123,7 @@ verb test/social_commands_emit_perspective_events()
   test/assert_equal(:command(actor: #alice, endpoint: endpoint(), line: "dance"), true, "dance command")
   let source = test/latest_event_source(#alice)
   test/assert_equal(frob_delegate(source), #event/social, "dance social delegate")
-  test/assert_equal(event/metadata(source, :label, nothing), "social", "dance social label")
+  test/assert_equal(event/metadata(source, :label, none), "social", "dance social label")
   test/assert_equal(event/render(source, #alice), "You dance.", "dance actor render")
   test/assert_equal(event/render(source, #bob), "Alice dances.", "dance observer render")
 
@@ -232,8 +232,8 @@ verb test/event_delivery_replaces_group_for_listener()
   test/assert_equal(replaced, delivered, "replacement keeps delivery identity")
   test/assert_equal(replaced.event/seq, seq, "replacement keeps sequence")
   test/assert_equal(replaced.event/text, "You find the coin.", "replacement updates text")
-  test/assert_equal(event/metadata(replaced.event/source, :group, nothing), :inspect_coin, "replacement stores group")
-  test/assert_equal(event/metadata(replaced.event/source, :replace_group, nothing), :inspect_coin, "replacement stores replacement marker")
+  test/assert_equal(event/metadata(replaced.event/source, :group, none), :inspect_coin, "replacement stores group")
+  test/assert_equal(event/metadata(replaced.event/source, :replace_group, none), :inspect_coin, "replacement stores replacement marker")
 
   let count = 0
   for found in event/Delivery(#alice, ?event)

@@ -40,9 +40,10 @@ The supported source names are:
 These names are contextual rather than reserved words. A local may still be named `int` or
 `relation` when the name is not in an annotation position.
 
-Each annotation is exact. There is currently no union, nullable, numeric-supertype, collection
-element, function-signature, relation-heading, or user-defined type syntax. In particular, `int`
-does not accept `float`, even when the values compare as numerically equal.
+Each value-kind annotation is exact. `int` does not accept `float`, even when the values compare as
+numerically equal. Structural relation types and aliases refine the `relation` kind with headings,
+cell types, alternatives, and cardinality; see
+[Structural Relation Types](./structural-relation-types.md).
 
 ## Supported Boundaries
 
@@ -127,8 +128,8 @@ fn decode_count(source: string) -> int
 end
 ```
 
-Bare returns and fallthrough results produce `nothing`, whose kind is `relation`. A scalar result
-annotation therefore rejects those paths.
+Bare returns and fallthrough results produce `()`, whose structural type is `unit` and whose outer
+kind is `relation`. A scalar result annotation therefore rejects those paths.
 
 ## Outer Kinds
 
@@ -143,8 +144,8 @@ An exact outer kind does not imply a structural or behavioural contract:
   kinds and does not prove that an arbitrary function call has a particular result.
 - `error` says only that the value is a structured error value. It does not restrict the error code,
   message, or payload.
-- `relation` accepts both immediate `nothing` and heap-backed relation values. It does not constrain
-  a heading or row shape.
+- `relation` accepts every relation value. Use a structural relation type when heading, row shape,
+  discriminator, cell types, or cardinality are part of the contract.
 
 ## Dispatch Is Independent
 

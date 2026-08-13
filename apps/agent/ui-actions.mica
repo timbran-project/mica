@@ -1,35 +1,39 @@
 // Browser-originated UI action routing for the server-owned agent view.
 
 verb ui/sync_action_source(action)
-  let delegate = action.ui/syncAction
-  if delegate == nothing
-    return nothing
+  let delegates = ui/SyncAction(action, ?delegate)
+  if not delegates
+    return none
   end
-  return frob(delegate, action)
+  let exactly {:delegate -> found_delegate} = delegates
+  return some(frob(found_delegate, action))
 end
 
 verb ui/form_text(fields, key)
-  let value = index_or(fields, key, nothing)
-  if value == nothing
+  let value = index_or(fields, key, none)
+  if value == none
     return ""
   end
   return trim(value)
 end
 
 verb ui/form_raw_text(fields, key)
-  let value = index_or(fields, key, nothing)
-  if value == nothing
+  let value = index_or(fields, key, none)
+  if value == none
     return ""
   end
   return value
 end
 
 verb ui/form_index(fields, key)
-  let value = parse_ordinal(ui/form_text(fields, key))
-  if value == nothing || value < 0
-    return 0
+  return match parse_ordinal(ui/form_text(fields, key))
+  case ok(value) if value >= 0
+    value
+  case ok(ignored)
+    0
+  case err(problem)
+    0
   end
-  return value
 end
 
 verb ui/handle_sync_action(source @ #ui/sync_action<_>, endpoint, session, view, event, target, fields)
@@ -41,9 +45,11 @@ verb ui/handle_sync_action(source @ #ui/load_older_messages_action<_>, endpoint,
     return false
   end
 
-  let current_limit = endpoint.session/transcriptLimit
-  if current_limit == nothing
-    current_limit = 40
+  let current_limit = 40
+  let limits = session/TranscriptLimit(endpoint, ?limit)
+  if limits
+    let exactly {:limit -> configured_limit} = limits
+    current_limit = configured_limit
   end
   let new_limit = current_limit + 40
   endpoint.session/transcriptLimit = new_limit
@@ -56,18 +62,27 @@ verb ui/handle_sync_action(source @ #ui/inspect_action<_>, endpoint, session, vi
   end
 
   let current = ui/current_agent()
-  if current == nothing
+  if current == none
     return false
   end
 
-  let selected = ui/entity_from_literal(fields[:entity])
+  let selected_option = ui/entity_from_literal(fields[:entity])
+  if not selected_option
+    return false
+  end
+  let exactly {:value -> selected} = selected_option
   if ui/can_inspect_entity(current, selected) == false
     return false
   end
 
   endpoint().session/inspect = selected
   endpoint.session/inspect = selected
-  let pulse = endpoint.session/inspectPulse
+  let pulse = "odd"
+  let pulses = session/InspectPulse(endpoint, ?pulse)
+  if pulses
+    let exactly {:pulse -> configured_pulse} = pulses
+    pulse = configured_pulse
+  end
   if pulse == "odd"
     pulse = "even"
   else
@@ -84,12 +99,16 @@ verb ui/handle_sync_action(source @ #ui/select_workspace_action<_>, endpoint, se
   end
 
   let current = ui/current_agent()
-  if current == nothing
+  if current == none
     return false
   end
 
-  let workspace = ui/entity_from_literal(fields[:entity])
-  if workspace == nothing || Delegates(workspace, #workspace, 0) == false
+  let workspace_option = ui/entity_from_literal(fields[:entity])
+  if not workspace_option
+    return false
+  end
+  let exactly {:value -> workspace} = workspace_option
+  if Delegates(workspace, #workspace, 0) == false
     return false
   end
 
@@ -103,7 +122,7 @@ verb ui/handle_sync_action(source @ #ui/command_action<_>, endpoint, session, vi
   end
 
   let current = ui/current_agent()
-  if current == nothing
+  if current == none
     return false
   end
 
@@ -121,7 +140,12 @@ verb ui/handle_sync_action(source @ #ui/command_action<_>, endpoint, session, vi
   // When the agent is streaming, route the message to the steering or
   // follow-up queue instead of starting a new loop. The mode field is
   // set by the client: default (empty/absent) = steer, "follow_up" = queue.
-  let streaming = endpoint.session/isStreaming
+  let streaming = false
+  let streaming_rows = session/IsStreaming(endpoint, ?value)
+  if streaming_rows
+    let exactly {:value -> configured_streaming} = streaming_rows
+    streaming = configured_streaming
+  end
   if streaming == true
     let mode = ui/form_text(fields, :mode)
     if mode == "follow_up"
@@ -136,16 +160,20 @@ verb ui/handle_sync_action(source @ #ui/command_action<_>, endpoint, session, vi
 
   agent/append_message(current, "user", line)
 
-  let selected = ui/entity_from_literal(index_or(fields, :entity, nothing))
-  if selected != nothing && ui/can_inspect_entity(current, selected)
-    endpoint().session/inspect = selected
-    endpoint.session/inspect = selected
+  let selected_option = ui/entity_from_literal(index_or(fields, :entity, none))
+  if selected_option
+    let exactly {:value -> selected} = selected_option
+    if ui/can_inspect_entity(current, selected)
+      endpoint().session/inspect = selected
+      endpoint.session/inspect = selected
+    end
   end
   endpoint().session/commandDraft = ""
   endpoint.session/commandDraft = ""
 
-  let transcript = agent/transcript(current)
-  if transcript != nothing
+  let transcript_option = agent/transcript(current)
+  if transcript_option
+    let exactly {:value -> transcript} = transcript_option
     agent/run_loop(current, transcript)
   end
 
@@ -158,7 +186,7 @@ verb ui/handle_sync_action(source @ #ui/object_browser_search_action<_>, endpoin
   end
 
   let current = ui/current_agent()
-  if current == nothing
+  if current == none
     return false
   end
 
@@ -173,9 +201,10 @@ verb ui/handle_sync_action(source @ #ui/object_browser_search_action<_>, endpoin
 end
 
 verb sync_event(endpoint, session, view, event, target, action, fields)
-  let source = ui/sync_action_source(action)
-  if source == nothing
+  let source_option = ui/sync_action_source(action)
+  if not source_option
     return false
   end
+  let exactly {:value -> source} = source_option
   return ui/handle_sync_action(source, endpoint, session, view, event, target, fields)
 end

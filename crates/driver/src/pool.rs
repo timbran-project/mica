@@ -2540,7 +2540,7 @@ impl CompioTaskDriver {
             let start = Instant::now();
             compio::time::sleep(duration).await;
             let mut outcome = WorkerOutcome::Complete;
-            if let Err(error) = driver.resume(task_id, Value::nothing()).await {
+            if let Err(error) = driver.resume(task_id, Value::unit()).await {
                 outcome = driver.record_worker_resume_error(task_id, error).await;
             }
             metrics::async_worker_finished(AsyncWorkerKind::TimerResume, outcome, start.elapsed());
@@ -3145,9 +3145,6 @@ fn read_only_query_options_from_payload(
     let Some(value) = payload.map_get(&Value::symbol(Symbol::intern("options"))) else {
         return Ok(options);
     };
-    if value == Value::nothing() {
-        return Ok(options);
-    }
     let Some(entries) = value.with_map(<[(Value, Value)]>::to_vec) else {
         return Err("mica_query options must be a map".to_owned());
     };
@@ -3180,13 +3177,16 @@ fn usize_option(name: &str, value: &Value) -> Result<usize, String> {
 
 fn mica_query_error_value(message: impl Into<String>) -> Value {
     Value::map([
-        (Value::symbol(Symbol::intern("task_id")), Value::nothing()),
+        (
+            Value::symbol(Symbol::intern("task_id")),
+            Value::option_none(),
+        ),
         (
             Value::symbol(Symbol::intern("status")),
             Value::string(ReadOnlySourceQueryStatus::Error.as_str()),
         ),
-        (Value::symbol(Symbol::intern("value")), Value::nothing()),
-        (Value::symbol(Symbol::intern("error")), Value::nothing()),
+        (Value::symbol(Symbol::intern("value")), Value::option_none()),
+        (Value::symbol(Symbol::intern("error")), Value::option_none()),
         (
             Value::symbol(Symbol::intern("diagnostics")),
             Value::list([Value::string(message.into())]),

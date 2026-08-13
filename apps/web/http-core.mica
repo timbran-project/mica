@@ -48,8 +48,8 @@ verb http_html(status, body)
 end
 
 verb http_request(request)
-  let http_method = one RequestMethod(request, ?m)
-  let path = one RequestPath(request, ?path)
+  let exactly {:m -> http_method} = RequestMethod(request, ?m)
+  let exactly {:path -> path} = RequestPath(request, ?path)
 
   if http_method == "GET" && path == "/"
     return http_html(200, "<!doctype html><title>Mica</title><h1>Mica</h1><p>Hello from Mica.</p>")

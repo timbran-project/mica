@@ -24,62 +24,62 @@ verb openai/chat_with_options(model @ #string, messages, options @ #map)
 end
 
 verb openai/assistant_text(response @ #map)
-  let choices = index_or(response, :choices, nothing)
-  if choices == nothing || choices == []
-    return nothing
+  let choices = index_or(response, :choices, none)
+  if choices == none || choices == []
+    return none
   end
 
   let first = choices[0]
-  if first == nothing
-    return nothing
+  if first == none
+    return none
   end
 
-  let message = index_or(first, :message, nothing)
-  if message == nothing
-    return nothing
+  let message = index_or(first, :message, none)
+  if message == none
+    return none
   end
 
-  return index_or(message, :content, nothing)
+  return index_or(message, :content, none)
 end
 
 verb openai/assistant_text(response)
-  return nothing
+  return none
 end
 
 verb openai/assistant_reasoning(response @ #map)
-  let choices = index_or(response, :choices, nothing)
-  if choices == nothing || choices == []
-    return nothing
+  let choices = index_or(response, :choices, none)
+  if choices == none || choices == []
+    return none
   end
 
   let first = choices[0]
-  if first == nothing
-    return nothing
+  if first == none
+    return none
   end
 
-  let message = index_or(first, :message, nothing)
-  if message == nothing
-    return nothing
+  let message = index_or(first, :message, none)
+  if message == none
+    return none
   end
 
-  let reasoning = index_or(message, :reasoning, nothing)
-  if reasoning != nothing && reasoning != ""
+  let reasoning = index_or(message, :reasoning, none)
+  if reasoning != none && reasoning != ""
     return reasoning
   end
 
-  reasoning = index_or(message, :reasoning_content, nothing)
-  if reasoning != nothing && reasoning != ""
+  reasoning = index_or(message, :reasoning_content, none)
+  if reasoning != none && reasoning != ""
     return reasoning
   end
 
-  let reasoning_details = index_or(message, :reasoning_details, nothing)
-  if reasoning_details != nothing && reasoning_details != []
+  let reasoning_details = index_or(message, :reasoning_details, none)
+  if reasoning_details != none && reasoning_details != []
     return to_literal(reasoning_details)
   end
 
-  return nothing
+  return none
 end
 
 verb openai/assistant_reasoning(response)
-  return nothing
+  return none
 end

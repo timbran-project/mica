@@ -609,7 +609,7 @@ fn branch_loop_fixture(toggle_flag: bool, instruction_count: u64) -> ProgramFixt
             },
             Instruction::Load {
                 dst: reg(7),
-                value: Value::nothing(),
+                value: Value::empty_relation(),
             },
             Instruction::Binary {
                 dst: reg(6),
@@ -820,7 +820,7 @@ impl VmHost for BenchmarkHost {
         debug_assert_eq!(name, Symbol::intern("benchmark_noop"));
         debug_assert!(args.is_empty());
         self.builtin_calls += 1;
-        Ok(Value::nothing())
+        Ok(Value::empty_relation())
     }
 }
 

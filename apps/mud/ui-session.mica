@@ -284,24 +284,24 @@ grant role #player
 end
 
 verb ui/actor_name(obj)
-  if frob_delegate(obj) == #passage
+  if is_frob(obj) && frob_delegate(obj) == #passage
     let current = ui/current_actor()
-    if current != nothing
+    if current != none
       return ui/passage_name(current, obj)
     end
     return "passage"
   end
 
-  let name = obj.name
-  if name == nothing
+  let names = Name(obj, ?name)
+  if not names
     return to_literal(obj)
   end
-
+  let exactly {:name -> name} = names
   return name
 end
 
 verb ui/direction_text(direction)
-  if direction == nothing
+  if direction == none
     return ""
   end
 
@@ -333,17 +333,18 @@ verb ui/can_build(actor @ #player)
 end
 
 verb ui/current_actor()
-  let current = actor()
-  if current != nothing && Delegates(current, #player, 0)
-    return current
+  if let some(current) = actor()
+    if Delegates(current, #player, 0)
+      return current
+    end
   end
 
-  return nothing
+  return none
 end
 
 verb ui/ensure_actor_location(actor @ #player)
   let room = actor.locatedIn
-  if room == nothing
+  if room == none
     actor.locatedIn = #first_room
     return #first_room
   end
@@ -352,16 +353,21 @@ verb ui/ensure_actor_location(actor @ #player)
 end
 
 verb ui/entity_from_literal(text)
-  if text == nothing
-    return nothing
+  if text == none
+    return none
   end
 
-  return from_literal(text)
+  return match from_literal(text)
+  case ok(value)
+    some(value)
+  case err(problem)
+    none
+  end
 end
 
 verb ui/passage_visible_from(actor @ #player, passage)
   let room = actor.locatedIn
-  if room == nothing
+  if room == none
     return false
   end
 
@@ -370,16 +376,16 @@ end
 
 verb ui/passage_room_for(actor @ #player, passage)
   let room = actor.locatedIn
-  if room != nothing && PassageSide(passage, room, ?destination)
+  if room != none && PassageSide(passage, room, ?destination)
     return room
   end
 
-  return nothing
+  return none
 end
 
 verb ui/passage_name(actor @ #player, passage)
   let room = ui/passage_room_for(actor, passage)
-  if room == nothing
+  if room == none
     return "passage"
   end
 
@@ -387,19 +393,20 @@ verb ui/passage_name(actor @ #player, passage)
 end
 
 verb ui/description_text(actor @ #player, entity)
-  if frob_delegate(entity) == #passage
+  if is_frob(entity) && frob_delegate(entity) == #passage
     let room = ui/passage_room_for(actor, entity)
-    if room == nothing
+    if room == none
       return ""
     end
     return passage/describe_from(entity, room)
   end
 
-  return entity.description
+  let exactly {:description -> description} = Description(entity, ?description)
+  return description
 end
 
 verb ui/can_inspect_entity(actor @ #player, entity)
-  if entity == nothing
+  if entity == none
     return false
   end
 
@@ -411,7 +418,7 @@ verb ui/can_inspect_entity(actor @ #player, entity)
     return true
   end
 
-  return frob_delegate(entity) == #passage && ui/passage_visible_from(actor, entity)
+  return is_frob(entity) && frob_delegate(entity) == #passage && ui/passage_visible_from(actor, entity)
 end
 
 verb ui/can_program(actor @ #player)
@@ -420,7 +427,7 @@ end
 
 verb ui/narrative_cutoff()
   let current = ui/current_actor()
-  if current == nothing
+  if current == none
     return 0
   end
 
@@ -445,64 +452,70 @@ end
 verb sync_view_dependencies(view)
   let endpoint = endpoint()
   let current = ui/current_actor()
+  let current_binding = none
+  if current != none
+    current_binding = some(current)
+  end
   let dependencies = []
-  dependencies = [@dependencies, ui/fact_dependency(:ui/View, [view])]
-  dependencies = [@dependencies, ui/fact_dependency(:session/Actor, [endpoint, nothing])]
-  dependencies = [@dependencies, ui/fact_dependency(:session/Inspect, [endpoint, nothing])]
-  dependencies = [@dependencies, ui/fact_dependency(:session/InspectPulse, [endpoint, nothing])]
-  dependencies = [@dependencies, ui/fact_dependency(:session/NarrativeLimit, [endpoint, nothing])]
-  dependencies = [@dependencies, ui/fact_dependency(:session/CommandDraft, [endpoint, nothing])]
-  dependencies = [@dependencies, ui/fact_dependency(:session/CommandSuggest, [endpoint, nothing])]
-  dependencies = [@dependencies, ui/fact_dependency(:session/CommandSuggestIndex, [endpoint, nothing])]
-  dependencies = [@dependencies, ui/fact_dependency(:session/ObjectBrowserQuery, [endpoint, nothing])]
-  dependencies = [@dependencies, ui/fact_dependency(:session/RetrievalPlan, [endpoint, nothing])]
-  dependencies = [@dependencies, ui/view_dependency(:Delegates, [nothing, nothing, nothing])]
-  dependencies = [@dependencies, ui/view_dependency(:Name, [nothing, nothing])]
-  dependencies = [@dependencies, ui/view_dependency(:Description, [nothing, nothing])]
-  dependencies = [@dependencies, ui/fact_dependency(:LocatedIn, [nothing, nothing])]
-  dependencies = [@dependencies, ui/fact_dependency(:RoomInArea, [nothing, nothing])]
-  dependencies = [@dependencies, ui/fact_dependency(:Portable, [nothing])]
-  dependencies = [@dependencies, ui/fact_dependency(:PassageInArea, [nothing, nothing])]
-  dependencies = [@dependencies, ui/fact_dependency(:PassageSide, [nothing, nothing, nothing])]
-  dependencies = [@dependencies, ui/fact_dependency(:PassageLabel, [nothing, nothing, nothing])]
-  dependencies = [@dependencies, ui/fact_dependency(:PassageAlias, [nothing, nothing, nothing])]
-  dependencies = [@dependencies, ui/fact_dependency(:PassageDescription, [nothing, nothing, nothing])]
-  dependencies = [@dependencies, ui/fact_dependency(:PassageAmbient, [nothing, nothing, nothing])]
-  dependencies = [@dependencies, ui/fact_dependency(:PassageOpen, [nothing, nothing])]
-  dependencies = [@dependencies, ui/view_dependency(:Exit, [nothing, nothing, nothing])]
-  dependencies = [@dependencies, ui/view_dependency(:ReachableRoom, [nothing, nothing, nothing])]
-  dependencies = [@dependencies, ui/fact_dependency(:Builder, [nothing])]
-  dependencies = [@dependencies, ui/view_dependency(:CanSee, [nothing, nothing])]
-  dependencies = [@dependencies, ui/view_dependency(:Carrying, [nothing, nothing])]
-  dependencies = [@dependencies, ui/view_dependency(:PresentActor, [nothing, nothing])]
-  dependencies = [@dependencies, ui/view_dependency(:event/NarrativeEntry, [current, nothing, nothing, nothing])]
-  dependencies = [@dependencies, ui/fact_dependency(:ContextForPlan, [nothing, nothing])]
-  dependencies = [@dependencies, ui/fact_dependency(:ContextSubject, [nothing, nothing])]
-  dependencies = [@dependencies, ui/fact_dependency(:ContextScore, [nothing, nothing])]
-  dependencies = [@dependencies, ui/fact_dependency(:ContextReason, [nothing, nothing])]
-  dependencies = [@dependencies, ui/fact_dependency(:IndexEntryStatus, [nothing, nothing, nothing, nothing])]
-  if current != nothing && ui/can_program(current)
-    dependencies = [@dependencies, ui/fact_dependency(:ui/MicaInspect, [endpoint, nothing])]
-    dependencies = [@dependencies, ui/fact_dependency(:ui/MicaInspectBack, [endpoint, nothing])]
-    dependencies = [@dependencies, ui/fact_dependency(:ui/MicaInspectLayout, [endpoint, nothing])]
-    dependencies = [@dependencies, ui/fact_dependency(:ui/MicaMethodMode, [endpoint, nothing])]
-    dependencies = [@dependencies, ui/fact_dependency(:ui/MicaMethodLimit, [endpoint, nothing])]
-    dependencies = [@dependencies, ui/fact_dependency(:ui/MicaBrowserQuery, [endpoint, nothing])]
-    dependencies = [@dependencies, ui/view_dependency(:Relation, [nothing])]
+  dependencies = [@dependencies, ui/fact_dependency(:ui/View, [some(view)])]
+  dependencies = [@dependencies, ui/fact_dependency(:session/Actor, [some(endpoint), none])]
+  dependencies = [@dependencies, ui/fact_dependency(:session/Inspect, [some(endpoint), none])]
+  dependencies = [@dependencies, ui/fact_dependency(:session/InspectPulse, [some(endpoint), none])]
+  dependencies = [@dependencies, ui/fact_dependency(:session/NarrativeLimit, [some(endpoint), none])]
+  dependencies = [@dependencies, ui/fact_dependency(:session/CommandDraft, [some(endpoint), none])]
+  dependencies = [@dependencies, ui/fact_dependency(:session/CommandSuggest, [some(endpoint), none])]
+  dependencies = [@dependencies, ui/fact_dependency(:session/CommandSuggestIndex, [some(endpoint), none])]
+  dependencies = [@dependencies, ui/fact_dependency(:session/ObjectBrowserQuery, [some(endpoint), none])]
+  dependencies = [@dependencies, ui/fact_dependency(:session/RetrievalPlan, [some(endpoint), none])]
+  dependencies = [@dependencies, ui/view_dependency(:Delegates, [none, none, none])]
+  dependencies = [@dependencies, ui/view_dependency(:Name, [none, none])]
+  dependencies = [@dependencies, ui/view_dependency(:Description, [none, none])]
+  dependencies = [@dependencies, ui/fact_dependency(:LocatedIn, [none, none])]
+  dependencies = [@dependencies, ui/fact_dependency(:RoomInArea, [none, none])]
+  dependencies = [@dependencies, ui/fact_dependency(:Portable, [none])]
+  dependencies = [@dependencies, ui/fact_dependency(:PassageInArea, [none, none])]
+  dependencies = [@dependencies, ui/fact_dependency(:PassageSide, [none, none, none])]
+  dependencies = [@dependencies, ui/fact_dependency(:PassageLabel, [none, none, none])]
+  dependencies = [@dependencies, ui/fact_dependency(:PassageAlias, [none, none, none])]
+  dependencies = [@dependencies, ui/fact_dependency(:PassageDescription, [none, none, none])]
+  dependencies = [@dependencies, ui/fact_dependency(:PassageAmbient, [none, none, none])]
+  dependencies = [@dependencies, ui/fact_dependency(:PassageOpen, [none, none])]
+  dependencies = [@dependencies, ui/view_dependency(:Exit, [none, none, none])]
+  dependencies = [@dependencies, ui/view_dependency(:ReachableRoom, [none, none, none])]
+  dependencies = [@dependencies, ui/fact_dependency(:Builder, [none])]
+  dependencies = [@dependencies, ui/view_dependency(:CanSee, [none, none])]
+  dependencies = [@dependencies, ui/view_dependency(:Carrying, [none, none])]
+  dependencies = [@dependencies, ui/view_dependency(:PresentActor, [none, none])]
+  dependencies = [@dependencies, ui/view_dependency(:event/NarrativeEntry, [current_binding, none, none, none])]
+  dependencies = [@dependencies, ui/fact_dependency(:ContextForPlan, [none, none])]
+  dependencies = [@dependencies, ui/fact_dependency(:ContextSubject, [none, none])]
+  dependencies = [@dependencies, ui/fact_dependency(:ContextScore, [none, none])]
+  dependencies = [@dependencies, ui/fact_dependency(:ContextReason, [none, none])]
+  dependencies = [@dependencies, ui/fact_dependency(:IndexEntryStatus, [none, none, none, none])]
+  if current != none && ui/can_program(current)
+    dependencies = [@dependencies, ui/fact_dependency(:ui/MicaInspect, [some(endpoint), none])]
+    dependencies = [@dependencies, ui/fact_dependency(:ui/MicaInspectBack, [some(endpoint), none])]
+    dependencies = [@dependencies, ui/fact_dependency(:ui/MicaInspectLayout, [some(endpoint), none])]
+    dependencies = [@dependencies, ui/fact_dependency(:ui/MicaMethodMode, [some(endpoint), none])]
+    dependencies = [@dependencies, ui/fact_dependency(:ui/MicaMethodLimit, [some(endpoint), none])]
+    dependencies = [@dependencies, ui/fact_dependency(:ui/MicaBrowserQuery, [some(endpoint), none])]
+    dependencies = [@dependencies, ui/view_dependency(:Relation, [none])]
   end
   return dependencies
 end
 
 verb sync_view_tree(view)
   let current = ui/current_actor()
-  if ui/View(view) == false || current == nothing
+  if ui/View(view) == false || current == none
     return ui/auth_required_node()
   end
   ui/ensure_actor_location(current)
 
-  let limit = endpoint().session/narrativeLimit
-  if limit == nothing
-    limit = 40
+  let limit = 40
+  let limits = session/NarrativeLimit(endpoint(), ?limit)
+  if limits
+    let exactly {:limit -> configured_limit} = limits
+    limit = configured_limit
   end
   let revision = ui/narrative_cutoff()
   return ui/world_view_node(current, revision, limit)

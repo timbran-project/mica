@@ -70,8 +70,8 @@ source. See [Filein and Fileout](./filein-fileout.md).
 
 ## Runtime Context and Tasks
 
-`actor()`, `principal()`, and `endpoint()` expose the current task context. Missing actor or
-principal values return `nothing`; every task has an endpoint.
+`actor()`, `principal()`, and `endpoint()` expose the current task context. Actor and principal
+return `option<identity>` because either may be absent; every task has an endpoint.
 
 Endpoint state is represented by volatile relations: `Endpoint`, `EndpointActor`,
 `EndpointPrincipal`, `EndpointProtocol`, and `EndpointOpen`. It is process-lifetime state and is not

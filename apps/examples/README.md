@@ -7,7 +7,9 @@ These fileins back the complete examples in `mdbook/src/examples/`:
 - `approval-workflow.mica` models a business workflow with comparison rules and explicit domain
   eligibility;
 - `dependency-planner.mica` uses positive recursion to derive transitive dependencies and outage
-  impact.
+  impact;
+- `structural-values.mica` demonstrates nested options and recoverable result handling without a
+  sentinel value.
 
 Load each example into a separate store. The guide uses temporary Fjall stores so state persists
 between filein and eval commands without mixing the examples together.

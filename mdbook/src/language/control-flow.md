@@ -8,7 +8,7 @@ if Calibrated(instrument)
 elseif RequiresCalibration(instrument)
   return false
 else
-  return nothing
+  return false
 end
 ```
 
@@ -70,12 +70,14 @@ for key, value in properties
 end
 ```
 
-Relation queries are also iterable because they return relation values. Each observed row is exposed
-as a binding map:
+Relation queries are also iterable because they return relation values. A structural row pattern
+binds the projected cells directly:
 
 ```mica
-for found in AssignedTo(?work, actor)
-  emit(actor, one Label(found[:work], ?label))
+for {work} in AssignedTo(?work, actor)
+  if let {label} = Label(work, ?label)
+    emit(actor, label)
+  end
 end
 ```
 

@@ -166,7 +166,7 @@ end
 
 verb ui/area_panel_node(actor @ #player, room @ #room)
   let area = room.roomInArea
-  if area == nothing
+  if area == none
     return dom <span></span>
   end
 
@@ -188,7 +188,7 @@ verb ui/build_controls_node(actor @ #player, room @ #room)
 
   let area = room.roomInArea
   let room_options = []
-  if area != nothing
+  if area != none
     room_options = ui/room_option_nodes(area)
   end
 
@@ -237,7 +237,7 @@ verb ui/passage_editor_node(actor @ #player, passage)
   end
 
   let room = ui/passage_room_for(actor, passage)
-  if room == nothing
+  if room == none
     return dom <span></span>
   end
 
@@ -275,7 +275,7 @@ verb ui/entity_extra_editor_nodes(actor @ #player, entity)
   end
 
   let portable = Portable(entity)
-  let visible_here = entity.locatedIn == actor.locatedIn
+  let visible_here = LocatedIn(entity, actor.locatedIn)
   let fields = [ui/entity_edit_checkbox_node("portable", "Portable", portable)]
   fields = [@fields, ui/entity_edit_checkbox_node("visible_here", "Visible here", visible_here)]
   return fields
@@ -284,7 +284,7 @@ end
 verb ui/room_editor_tools_node(actor @ #player, room @ #room)
   let area = room.roomInArea
   let room_options = []
-  if area != nothing
+  if area != none
     room_options = ui/room_option_nodes(area)
   end
 
@@ -310,15 +310,17 @@ verb ui/room_editor_tools_node(actor @ #player, room @ #room)
 end
 
 verb ui/entity_editor_node(actor @ #player, entity)
-  if ui/can_build(actor) == false || frob_delegate(entity) == #passage
+  if ui/can_build(actor) == false || is_frob(entity) && frob_delegate(entity) == #passage
     return dom <span></span>
   end
 
   let name = ui/actor_name(entity)
   let aliases = ui/entity_alias_text(entity)
-  let description = entity.description
-  if description == nothing
-    description = ""
+  let description = ""
+  let descriptions = Description(entity, ?description)
+  if descriptions
+    let exactly {:description -> configured_description} = descriptions
+    description = configured_description
   end
   let window_key = string_concat("edit-", to_literal(entity))
   let title = string_concat("Edit ", name)
@@ -352,10 +354,11 @@ verb ui/entity_editor_node(actor @ #player, entity)
 end
 
 verb ui/object_browser_description(entity)
-  let description = entity.description
-  if description == nothing
+  let descriptions = Description(entity, ?description)
+  if not descriptions
     return ""
   end
+  let exactly {:description -> description} = descriptions
   if string_len(description) > 120
     return string_concat(string_slice(description, 0, 117), "...")
   end
@@ -363,13 +366,13 @@ verb ui/object_browser_description(entity)
 end
 
 verb ui/object_browser_matches(actor @ #player, entity, needle @ #string)
-  if entity == nothing || frob_delegate(entity) == #passage || Delegates(entity, #player, 0)
+  if entity == none || is_frob(entity) && frob_delegate(entity) == #passage || Delegates(entity, #player, 0)
     return false
   end
 
   if Delegates(entity, #room, 0)
     let area = builder/current_area(actor)
-    if area == nothing || entity.roomInArea != area
+    if area == none || RoomInArea(entity, area) == false
       return false
     end
   elseif command/TrustedForName(actor, entity) == false
@@ -380,9 +383,12 @@ verb ui/object_browser_matches(actor @ #player, entity, needle @ #string)
     return true
   end
 
-  let description = entity.description
-  if description != nothing && string_contains(lower(description), needle)
-    return true
+  let descriptions = Description(entity, ?description)
+  if descriptions
+    let exactly {:description -> description} = descriptions
+    if string_contains(lower(description), needle)
+      return true
+    end
   end
 
   for found in command/Name(entity, ?parser_name)
@@ -455,9 +461,11 @@ verb ui/object_browser_panel_node(actor @ #player)
     return dom <span></span>
   end
 
-  let query = endpoint().session/objectBrowserQuery
-  if query == nothing
-    query = ""
+  let query = ""
+  let queries = session/ObjectBrowserQuery(endpoint(), ?query)
+  if queries
+    let exactly {:query -> configured_query} = queries
+    query = configured_query
   end
 
   return dom <details class="object-browser-panel tool-sheet" aria-label="Object browser">
@@ -695,7 +703,7 @@ verb ui/entity_initial(name @ #string)
 end
 
 verb ui/entity_kind(entity)
-  if frob_delegate(entity) == #passage
+  if is_frob(entity) && frob_delegate(entity) == #passage
     return "passage"
   elseif Delegates(entity, #player, 0)
     return "player"
@@ -715,18 +723,20 @@ verb ui/entity_location_text(actor @ #player, entity)
     return "you"
   end
 
-  if frob_delegate(entity) == #passage
+  if is_frob(entity) && frob_delegate(entity) == #passage
     let room = ui/passage_room_for(actor, entity)
-    if room != nothing
+    if room != none
       return string_concat("from ", ui/actor_name(room))
     end
     return "unplaced"
   end
 
-  let location = entity.locatedIn
-  if location == nothing
+  let locations = LocatedIn(entity, ?location)
+  if not locations
     return "unplaced"
-  elseif location == actor
+  end
+  let exactly {:location -> location} = locations
+  if location == actor
     return "carried by you"
   elseif Delegates(location, #player, 0)
     return string_concat("carried by ", ui/actor_name(location))
@@ -750,16 +760,16 @@ verb ui/entity_facts_node(actor @ #player, entity)
     facts = [@facts, ui/entity_fact_node("identity", to_literal(entity), "entity-id")]
   end
   facts = [@facts, ui/entity_fact_node("location", ui/entity_location_text(actor, entity), "entity-location")]
-  if frob_delegate(entity) == #passage
+  if is_frob(entity) && frob_delegate(entity) == #passage
     let room = ui/passage_room_for(actor, entity)
-    if room != nothing
-      let destination = one PassageSide(entity, room, ?destination)
-      if destination != nothing
+    if room != none
+      let exactly {:destination -> destination} = PassageSide(entity, room, ?destination)
+      if destination != none
         facts = [@facts, ui/entity_fact_node("to", ui/actor_name(destination), "entity-destination")]
       end
       if show_builder_details
-        let ambient = one PassageAmbient(entity, room, ?ambient)
-        if ambient != nothing
+        let exactly {:ambient -> ambient} = PassageAmbient(entity, room, ?ambient)
+        if ambient != none
           facts = [@facts, ui/entity_fact_node("ambient", to_literal(ambient), "entity-ambient")]
         end
       end
@@ -784,17 +794,25 @@ verb ui/entity_facts_node(actor @ #player, entity)
 end
 
 verb ui/inspector_node(actor @ #player)
-  let selected = endpoint().session/inspect
-  let pulse = endpoint().session/inspectPulse
+  let selections = session/Inspect(endpoint(), ?selected)
+  let pulse_values = session/InspectPulse(endpoint(), ?pulse)
   let pulse_class = "inspector panel"
-  if pulse != nothing
+  if pulse_values
+    let exactly {:pulse -> pulse} = pulse_values
     if pulse == "even"
       pulse_class = "inspector panel inspect-flash-even"
     else
       pulse_class = "inspector panel inspect-flash-odd"
     end
   end
-  if selected == nothing || ui/can_inspect_entity(actor, selected) == false
+  if not selections
+    return dom <aside id="inspector" class={pulse_class}>
+      <h2>Examine</h2>
+      <p class="muted">Select a room, exit, object, or player to examine.</p>
+    </aside>
+  end
+  let exactly {:selected -> selected} = selections
+  if ui/can_inspect_entity(actor, selected) == false
     return dom <aside id="inspector" class={pulse_class}>
       <h2>Examine</h2>
       <p class="muted">Select a room, exit, object, or player to examine.</p>
@@ -808,7 +826,7 @@ verb ui/inspector_node(actor @ #player)
     title_meta = [dom <span class="inspector-subtitle">{ui/entity_kind(selected)}</span>]
   end
   let actions = []
-  if frob_delegate(selected) == #passage
+  if is_frob(selected) && frob_delegate(selected) == #passage
     actions = [@actions, ui/inspector_action_node(name, "go", "mini-button exit-go-button")]
     if ui/can_build(actor)
       actions = [@actions, ui/inspector_action_node(string_concat("undig ", name), "remove", "mini-button danger")]
@@ -816,10 +834,10 @@ verb ui/inspector_node(actor @ #player)
   elseif Delegates(selected, #room, 0) == false
     actions = [@actions, ui/inspector_action_node(string_concat("look ", name), "look", "mini-button")]
   end
-  if frob_delegate(selected) != #passage && Portable(selected) && Carrying(actor, selected) == false
+  if (not is_frob(selected) || frob_delegate(selected) != #passage) && Portable(selected) && Carrying(actor, selected) == false
     actions = [@actions, ui/inspector_action_node(string_concat("get ", name), "take", "mini-button")]
   end
-  if frob_delegate(selected) != #passage && Carrying(actor, selected)
+  if (not is_frob(selected) || frob_delegate(selected) != #passage) && Carrying(actor, selected)
     actions = [@actions, ui/inspector_action_node(string_concat("drop ", name), "drop", "mini-button")]
   end
   if selected == #red_button
@@ -837,7 +855,7 @@ verb ui/inspector_node(actor @ #player)
   let builder_panels = []
   if Delegates(selected, #room, 0)
     builder_panels = [@builder_panels, ui/entity_editor_node(actor, selected)]
-  elseif frob_delegate(selected) == #passage
+  elseif is_frob(selected) && frob_delegate(selected) == #passage
     builder_panels = [@builder_panels, ui/passage_editor_node(actor, selected)]
   else
     builder_panels = [@builder_panels, ui/entity_editor_node(actor, selected)]
@@ -861,17 +879,23 @@ verb ui/inspector_node(actor @ #player)
 end
 
 verb ui/command_bar_node(actor @ #player)
-  let draft = endpoint().session/commandDraft
-  if draft == nothing
-    draft = ""
+  let draft = ""
+  let drafts = session/CommandDraft(endpoint(), ?draft)
+  if drafts
+    let exactly {:draft -> configured_draft} = drafts
+    draft = configured_draft
   end
-  let suggest = endpoint().session/commandSuggest
-  if suggest == nothing
-    suggest = false
+  let suggest = false
+  let suggest_values = session/CommandSuggest(endpoint(), ?suggest)
+  if suggest_values
+    let exactly {:suggest -> configured_suggest} = suggest_values
+    suggest = configured_suggest
   end
-  let suggest_index = endpoint().session/commandSuggestIndex
-  if suggest_index == nothing
-    suggest_index = 0
+  let suggest_index = 0
+  let suggest_indexes = session/CommandSuggestIndex(endpoint(), ?suggest_index)
+  if suggest_indexes
+    let exactly {:suggest_index -> configured_index} = suggest_indexes
+    suggest_index = configured_index
   end
   let suggest_value = "false"
   if suggest
@@ -919,8 +943,8 @@ verb ui/suggestion_suffix(draft @ #string, command @ #string)
 end
 
 verb ui/command_summary(selector)
-  let summary = one command/Summary(selector, ?summary)
-  if summary == nothing
+  let exactly {:summary -> summary} = command/Summary(selector, ?summary)
+  if summary == none
     return "command"
   end
   return summary
@@ -937,7 +961,7 @@ end
 verb ui/selected_command_suggestion(suggestions @ #list, index)
   let count = ui/suggestion_count(suggestions)
   if count == 0
-    return nothing
+    return none
   end
   let selected_index = index
   while selected_index >= count
@@ -1003,21 +1027,24 @@ end
 
 verb ui/suggest_prepositions(actor @ #player, command_word @ #string, prefix @ #string)
   let suggestions = []
-  let selector = one command/VerbAlias(command_word, ?selector)
-  if selector == nothing
+  let exactly {:selector -> selector} = command/VerbAlias(command_word, ?selector)
+  if selector == none
     return suggestions
   end
 
   let count = 0
   for found in command/Pattern(selector, ?dispatch_selector, ?pattern)
-    let part = one command/PatternPart(found[:pattern], 0, ?kind, ?argument)
-    if part != nothing && (part[:kind] == :prep || part[:kind] == :optional_prep)
-      for prep in command/Preposition(part[:argument], ?word)
+    let parts = command/PatternPart(found[:pattern], 0, ?kind, ?argument)
+    if parts
+      let exactly {:kind -> kind, :argument -> argument} = parts
+      if kind == :prep || kind == :optional_prep
+        for prep in command/Preposition(argument, ?word)
         let word = prep[:word]
         if count < 6 && ui/suggestion_matches(word, prefix)
           suggestions = ui/add_command_suggestion(suggestions, string_concat(string_concat(command_word, " "), word), word, "preposition", "choose a target relation")
           count = count + 1
         end
+      end
       end
     end
   end
@@ -1026,15 +1053,19 @@ end
 
 verb ui/selector_accepts_direct_target(selector)
   for found in command/Pattern(selector, ?dispatch_selector, ?pattern)
-    let first_part = one command/PatternPart(found[:pattern], 0, ?kind, ?argument)
-    if first_part != nothing
-      if first_part[:kind] == :object_role
+    let first_parts = command/PatternPart(found[:pattern], 0, ?kind, ?argument)
+    if first_parts
+      let exactly {:kind -> kind, :argument -> argument} = first_parts
+      if kind == :object_role
         return true
       end
-      if first_part[:kind] == :optional_prep
-        let second_part = one command/PatternPart(found[:pattern], 1, ?second_kind, ?second_argument)
-        if second_part != nothing && second_part[:kind] == :object_role
+      if kind == :optional_prep
+        let second_parts = command/PatternPart(found[:pattern], 1, ?second_kind, ?second_argument)
+        if second_parts
+          let exactly {:second_kind -> second_kind, :second_argument -> second_argument} = second_parts
+          if second_kind == :object_role
           return true
+          end
         end
       end
     end
@@ -1044,12 +1075,18 @@ end
 
 verb ui/selector_accepts_preposition_target(selector, word @ #string)
   for found in command/Pattern(selector, ?dispatch_selector, ?pattern)
-    let first_part = one command/PatternPart(found[:pattern], 0, ?kind, ?argument)
-    if first_part != nothing && (first_part[:kind] == :prep || first_part[:kind] == :optional_prep)
-      if command/Preposition(first_part[:argument], word)
-        let second_part = one command/PatternPart(found[:pattern], 1, ?second_kind, ?second_argument)
-        if second_part != nothing && second_part[:kind] == :object_role
-          return true
+    let first_parts = command/PatternPart(found[:pattern], 0, ?kind, ?argument)
+    if first_parts
+      let exactly {:kind -> kind, :argument -> argument} = first_parts
+      if kind == :prep || kind == :optional_prep
+        if command/Preposition(argument, word)
+          let second_parts = command/PatternPart(found[:pattern], 1, ?second_kind, ?second_argument)
+          if second_parts
+            let exactly {:second_kind -> second_kind, :second_argument -> second_argument} = second_parts
+            if second_kind == :object_role
+              return true
+            end
+          end
         end
       end
     end
@@ -1060,15 +1097,15 @@ end
 verb ui/command_suggestions(actor @ #player, draft @ #string, show_empty @ #bool)
   let raw = trim(draft)
   let tokens = words(lower(raw))
-  let first = index_or(tokens, 0, nothing)
-  let second = index_or(tokens, 1, nothing)
-  let third = index_or(tokens, 2, nothing)
+  let first = index_or(tokens, 0, none)
+  let second = index_or(tokens, 1, none)
+  let third = index_or(tokens, 2, none)
   let ends_space = false
   if draft != ""
     ends_space = string_slice(draft, string_len(draft) - 1, string_len(draft)) == " "
   end
 
-  if first == nothing
+  if first == none
     if show_empty
       let suggestions = ui/suggest_exit_commands(actor, "")
       return ui/merge_command_suggestions(suggestions, ui/suggest_command_aliases(actor, ""))
@@ -1076,26 +1113,26 @@ verb ui/command_suggestions(actor @ #player, draft @ #string, show_empty @ #bool
     return []
   end
 
-  if second == nothing && ends_space == false
+  if second == none && ends_space == false
     let suggestions = ui/suggest_exit_commands(actor, first)
     return ui/merge_command_suggestions(suggestions, ui/suggest_command_aliases(actor, first))
   end
 
   if first == "go"
     let prefix = ""
-    if ends_space == false && second != nothing
+    if ends_space == false && second != none
       prefix = second
     end
     return ui/suggest_exit_commands(actor, prefix)
   end
 
-  let selector = one command/VerbAlias(first, ?selector)
-  if selector == nothing
+  let exactly {:selector -> selector} = command/VerbAlias(first, ?selector)
+  if selector == none
     return []
   end
 
   let stem = string_concat(first, " ")
-  if second == nothing
+  if second == none
     let suggestions = ui/suggest_prepositions(actor, first, "")
     if ui/selector_accepts_direct_target(selector)
       return ui/merge_command_suggestions(suggestions, ui/suggest_visible_targets(actor, stem, ""))
@@ -1103,13 +1140,13 @@ verb ui/command_suggestions(actor @ #player, draft @ #string, show_empty @ #bool
     return suggestions
   end
 
-  let matched_prep = nothing
+  let matched_prep = none
   for found in command/Preposition(?prep, second)
     matched_prep = second
   end
-  if matched_prep != nothing && ui/selector_accepts_preposition_target(selector, second)
+  if matched_prep != none && ui/selector_accepts_preposition_target(selector, second)
     let prefix = ""
-    if ends_space == false && third != nothing
+    if ends_space == false && third != none
       prefix = third
     end
     return ui/suggest_visible_targets(actor, string_concat(string_concat(first, " "), string_concat(second, " ")), prefix)
@@ -1145,10 +1182,12 @@ end
 
 verb ui/command_chips_node(actor @ #player)
   let chips = [ui/command_form_node("", "look", "look", "chip")]
-  let selected = endpoint().session/inspect
-  if selected != nothing && ui/can_inspect_entity(actor, selected)
+  let selections = session/Inspect(endpoint(), ?selected)
+  if selections
+    let exactly {:selected -> selected} = selections
+    if ui/can_inspect_entity(actor, selected)
     let name = ui/actor_name(selected)
-    if frob_delegate(selected) == #passage
+    if is_frob(selected) && frob_delegate(selected) == #passage
       chips = [@chips, ui/command_form_node("", name, string_concat("go ", name), "chip exit-chip")]
       if ui/can_build(actor)
         chips = [@chips, ui/command_form_node("", string_concat("undig ", name), string_concat("remove ", name), "chip danger")]
@@ -1172,6 +1211,7 @@ verb ui/command_chips_node(actor @ #player)
       chips = [@chips, ui/command_form_node("", string_concat("bonk ", name), string_concat("bonk ", name), "chip")]
     end
     return dom <div class="command-chips" aria-label="Available actions">{@chips}</div>
+    end
   end
 
   let room = actor.locatedIn
@@ -1201,7 +1241,7 @@ end
 verb ui/world_view_node(actor @ #player, revision, limit)
   let room = actor.locatedIn
   let area_title = ""
-  if room != nothing && room.roomInArea != nothing
+  if room != none && room.roomInArea != none
     area_title = ui/actor_name(room.roomInArea)
   end
   let header = dom <header class="topbar">
@@ -1215,7 +1255,7 @@ verb ui/world_view_node(actor @ #player, revision, limit)
   let class = "mud-shell"
   if ui/can_program(actor)
     let mica_selected = ui/mica_inspect_selected()
-    if mica_selected != nothing
+    if mica_selected != none
       if ui/mica_inspect_expanded()
         stage = dom <div class="mud-columns mica-inspect-preview">{ui/narrative_node(actor, revision, 8)}</div>
         children = [header, stage]

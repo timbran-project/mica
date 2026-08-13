@@ -286,7 +286,6 @@ fn keyword_kind(text: &str) -> Option<SyntaxKind> {
         "return" => SyntaxKind::ReturnKw,
         "raise" => SyntaxKind::RaiseKw,
         "recover" => SyntaxKind::RecoverKw,
-        "one" => SyntaxKind::OneKw,
         "spawn" => SyntaxKind::SpawnKw,
         "after" => SyntaxKind::AfterKw,
         "not" => SyntaxKind::NotKw,
@@ -305,7 +304,6 @@ fn keyword_kind(text: &str) -> Option<SyntaxKind> {
         "require" => SyntaxKind::RequireKw,
         "true" => SyntaxKind::TrueKw,
         "false" => SyntaxKind::FalseKw,
-        "nothing" => SyntaxKind::NothingKw,
         _ => return None,
     })
 }

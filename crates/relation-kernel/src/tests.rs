@@ -1883,7 +1883,7 @@ fn kernel_can_replay_catalog_and_fact_commit_log() {
 fn fjall_provider_persists_and_loads_canonical_state() {
     let store = TempStore::new("canonical-state");
     let values_tuple = Tuple::from([
-        Value::nothing(),
+        Value::empty_relation(),
         Value::bool(true),
         int(42),
         Value::float(12.5).unwrap(),
@@ -1912,7 +1912,7 @@ fn fjall_provider_persists_and_loads_canonical_state() {
         kernel
             .create_relation(
                 RelationMetadata::new(rel(10), Symbol::intern("ValueTuple"), 16)
-                    .with_argument_name(0, Symbol::intern("nothing"))
+                    .with_argument_name(0, Symbol::intern("none"))
                     .with_index([2, 0])
                     .with_conflict_policy(ConflictPolicy::Functional {
                         key_positions: vec![2],

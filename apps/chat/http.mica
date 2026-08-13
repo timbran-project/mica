@@ -9,8 +9,8 @@ grant #web
 end
 
 verb http_request(request)
-  let http_method = one RequestMethod(request, ?m)
-  let path = one RequestPath(request, ?path)
+  let exactly {:m -> http_method} = RequestMethod(request, ?m)
+  let exactly {:path -> path} = RequestPath(request, ?path)
 
   if http_method == "GET" && (path == "/" || path == "/chat" || string_starts_with(path, "/chat?"))
     return http_html(200, chat_document(11))

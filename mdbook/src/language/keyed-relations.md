@@ -110,20 +110,28 @@ the declaration says:
 
 > Give Mica a complete key and there will be no more than one current answer.
 
-## Reading One Value
+## Binding One Value
 
-The `one` operator extracts the answer from a query that is expected to produce no more than one:
+Use exact binding when a query must produce one row:
 
 ```mica
-return one Label(#sensor, ?label)
+let exactly {label} = Label(#sensor, ?label)
+return label
 ```
 
-This returns `"temperature sensor"` when that is the matching label. It returns `nothing` when there
-is no matching fact. If a query unexpectedly produces more than one result, it raises `E_AMBIGUOUS`
-instead of silently choosing one.
+This returns `"temperature sensor"` when that is the matching label. Zero or multiple rows raise
+`E_CARDINALITY`. When no label is valid, use optional binding:
 
-Without a declared key, code could still use `one`, but it would only be assuming that nobody had
-added a competing fact. The key makes the assumption an enforced part of the relation.
+```mica
+if let {label} = Label(#sensor, ?label)
+  return some(label)
+else
+  return none
+end
+```
+
+Without a declared key, these bindings can still enforce cardinality dynamically. The key makes the
+at-most-one guarantee an enforced part of the relation and lets the compiler reason about it.
 
 ## Property-Style Access
 
@@ -134,11 +142,13 @@ return #sensor.label
 #sensor.label = "north-line sensor"
 ```
 
-The read is another way to write:
+The read requires the same exactly-one outcome as:
 
 ```mica
-one Label(#sensor, ?label)
+let exactly {label} = Label(#sensor, ?label)
 ```
+
+A missing dot value raises `E_CARDINALITY`; use optional query binding when absence is expected.
 
 The assignment replaces the `Label` fact selected by `#sensor`. After the assignment, the current
 fact is:

@@ -124,11 +124,16 @@ ui/MicaPrototype(obj, ancestor) :-
   ui/MicaPrototype(proto, ancestor)
 
 verb ui/mica_inspect_selected()
-  return endpoint().ui/micaInspect
+  let selections = ui/MicaInspect(endpoint(), ?selected)
+  if not selections
+    return none
+  end
+  let exactly {:selected -> selected} = selections
+  return selected
 end
 
 verb ui/mica_inspect_expanded()
-  return endpoint().ui/micaInspectLayout == "expanded"
+  return ui/MicaInspectLayout(endpoint(), "expanded")
 end
 
 verb ui/mica_inspect_action_node(entity, label, class)
@@ -182,10 +187,11 @@ verb ui/mica_method_limit_node(mode, label)
 end
 
 verb ui/relation_label(relation)
-  let name = one RelationName(relation, ?name)
-  if name == nothing
+  let names = RelationName(relation, ?name)
+  if not names
     return to_literal(relation)
   end
+  let exactly {:name -> name} = names
 
   return to_literal(name)
 end
@@ -206,15 +212,15 @@ verb ui/mica_can_link(value)
     return false
   end
 
-  if value.name != nothing
+  if Name(value, ?name)
     return true
-  elseif one RelationName(value, ?relation_name) != nothing
+  elseif RelationName(value, ?relation_name)
     return true
-  elseif one Delegates(value, ?delegate, ?distance) != nothing
+  elseif Delegates(value, ?delegate, ?distance)
     return true
-  elseif one MethodSelector(value, ?selector) != nothing
+  elseif MethodSelector(value, ?selector)
     return true
-  elseif one RuleSource(value, ?rule_source) != nothing
+  elseif RuleSource(value, ?rule_source)
     return true
   end
 
@@ -227,12 +233,14 @@ end
 
 verb ui/mica_inspect_entity_node(value, class)
   let label = to_literal(value)
-  let name = value.name
-  if name != nothing
+  let names = Name(value, ?name)
+  if names
+    let exactly {:name -> name} = names
     label = name
   else
-    let relation_name = one RelationName(value, ?relation_name)
-    if relation_name != nothing
+    let relation_names = RelationName(value, ?relation_name)
+    if relation_names
+      let exactly {:relation_name -> relation_name} = relation_names
       label = to_literal(relation_name)
     end
   end
@@ -334,8 +342,8 @@ verb ui/mica_delegates_header_node(entity)
 end
 
 verb ui/mica_method_source_excerpt(method_id)
-  let source = one MethodSource(method_id, ?source)
-  if source == nothing
+  let exactly {:source -> source} = MethodSource(method_id, ?source)
+  if source == none
     return ""
   end
   if string_len(source) > 180
@@ -346,8 +354,8 @@ verb ui/mica_method_source_excerpt(method_id)
 end
 
 verb ui/mica_method_source_full(method_id)
-  let source = one MethodSource(method_id, ?source)
-  if source == nothing
+  let exactly {:source -> source} = MethodSource(method_id, ?source)
+  if source == none
     return ""
   end
 
@@ -371,8 +379,8 @@ verb ui/mica_method_row_node(method_id, selector, role, restriction, position)
 end
 
 verb ui/mica_browser_relation_row_node(relation)
-  let arity = one Arity(relation, ?arity)
-  if arity == nothing
+  let exactly {:arity -> arity} = Arity(relation, ?arity)
+  if arity == none
     arity = "?"
   end
   return dom <li class="mica-browser-row">
@@ -429,9 +437,9 @@ verb ui/mica_browser_results_node(query)
   let method_count = 0
   for found in MethodSelector(?method_id, ?selector)
     let selector_text = to_literal(found[:selector])
-    let source = one MethodSource(found[:method_id], ?source)
+    let exactly {:source -> source} = MethodSource(found[:method_id], ?source)
     let source_matches = false
-    if source != nothing
+    if source != none
       source_matches = string_contains(lower(source), needle)
     end
     if string_contains(lower(selector_text), needle) || source_matches
@@ -488,9 +496,11 @@ verb ui/mica_browser_panel_node(actor @ #player)
     return dom <span></span>
   end
 
-  let query = endpoint().ui/micaBrowserQuery
-  if query == nothing
-    query = ""
+  let query = ""
+  let queries = ui/MicaBrowserQuery(endpoint(), ?query)
+  if queries
+    let exactly {:query -> configured_query} = queries
+    query = configured_query
   end
 
   return dom <details class="mica-browser-panel tool-sheet" aria-label="Mica browser">
@@ -516,13 +526,16 @@ verb ui/mica_method_catalog_node(entity)
   let rows = []
   let count = 0
   let row_limit = 8
-  let limit_mode = endpoint().ui/micaMethodLimit
-  if limit_mode == "all"
+  let limit_mode = "direct"
+  if ui/MicaMethodLimit(endpoint(), "all")
+    limit_mode = "all"
     row_limit = 9999
   end
-  let mode = endpoint().ui/micaMethodMode
-  if mode == nothing
-    mode = "all"
+  let mode = "all"
+  let modes = ui/MicaMethodMode(endpoint(), ?mode)
+  if modes
+    let exactly {:mode -> configured_mode} = modes
+    mode = configured_mode
   end
   let controls = dom <div class="method-filters" aria-label="Method catalogue filter">
     {ui/mica_method_mode_node("all", "All", mode)}
@@ -535,7 +548,7 @@ verb ui/mica_method_catalog_node(entity)
       let role = found[:role]
       let position = found[:position]
       if count < row_limit
-        let selector = one MethodSelector(method_id, ?sel)
+        let exactly {:sel -> selector} = MethodSelector(method_id, ?sel)
         rows = [@rows, ui/mica_method_row_node(method_id, selector, role, entity, position)]
       end
       count = count + 1
@@ -549,7 +562,7 @@ verb ui/mica_method_catalog_node(entity)
         let role = found[:role]
         let position = found[:position]
         if count < row_limit
-          let selector = one MethodSelector(method_id, ?sel)
+          let exactly {:sel -> selector} = MethodSelector(method_id, ?sel)
           rows = [@rows, ui/mica_method_row_node(method_id, selector, role, prototype, position)]
         end
         count = count + 1
@@ -584,7 +597,7 @@ end
 
 verb ui/mica_inspect_panel_node(actor @ #player)
   let selected = ui/mica_inspect_selected()
-  if selected == nothing
+  if selected == none
     return dom <section id="mica-inspect" class="panel mica-inspect empty"></section>
   end
 
@@ -594,8 +607,9 @@ verb ui/mica_inspect_panel_node(actor @ #player)
     layout = ui/mica_inspect_layout_node("normal", "Normal")
   end
   let controls = [layout, ui/mica_inspect_close_node()]
-  let previous = endpoint().ui/micaInspectBack
-  if previous != nothing
+  let previous_values = ui/MicaInspectBack(endpoint(), ?previous)
+  if previous_values
+    let exactly {:previous -> previous} = previous_values
     controls = [ui/mica_inspect_back_node(previous), layout, ui/mica_inspect_close_node()]
   end
   return dom <section id="mica-inspect" class="panel mica-inspect" data-entity={to_literal(selected)}>
@@ -616,10 +630,13 @@ verb ui/mica_inspect_panel_node(actor @ #player)
 end
 
 verb ui/mica_inspect_set_selected(endpoint, selected)
-  let previous = endpoint().ui/micaInspect
-  if previous != nothing && previous != selected
-    endpoint().ui/micaInspectBack = previous
-    endpoint.ui/micaInspectBack = previous
+  let previous_values = ui/MicaInspect(endpoint(), ?previous)
+  if previous_values
+    let exactly {:previous -> previous} = previous_values
+    if previous != selected
+      endpoint().ui/micaInspectBack = previous
+      endpoint.ui/micaInspectBack = previous
+    end
   end
   endpoint().ui/micaInspect = selected
   endpoint.ui/micaInspect = selected
@@ -632,7 +649,7 @@ verb ui/try_mica_inspect_command(current @ #player, endpoint, line @ #string)
   end
 
   let selected = command/match_object(current, trim(string_slice(line, 13, string_len(line))))
-  if selected == nothing
+  if selected == none
     return false
   end
 
@@ -646,14 +663,15 @@ verb ui/handle_sync_action(source @ #ui/mica_inspect_action<_>, endpoint, sessio
   end
 
   let current = ui/current_actor()
-  if current == nothing || ui/can_program(current) == false || index_or(fields, :entity, nothing) == nothing
+  if current == none || ui/can_program(current) == false || index_or(fields, :entity, none) == none
     return false
   end
 
-  let selected = ui/entity_from_literal(fields[:entity])
-  if selected == nothing
+  let selected_option = ui/entity_from_literal(fields[:entity])
+  if not selected_option
     return false
   end
+  let exactly {:value -> selected} = selected_option
 
   ui/mica_inspect_set_selected(endpoint, selected)
   return true
@@ -665,7 +683,7 @@ verb ui/handle_sync_action(source @ #ui/mica_inspect_close_action<_>, endpoint, 
   end
 
   let current = ui/current_actor()
-  if current == nothing || ui/can_program(current) == false
+  if current == none || ui/can_program(current) == false
     return false
   end
 
@@ -684,23 +702,27 @@ verb ui/handle_sync_action(source @ #ui/mica_inspect_back_action<_>, endpoint, s
   end
 
   let current = ui/current_actor()
-  if current == nothing || ui/can_program(current) == false
+  if current == none || ui/can_program(current) == false
     return false
   end
 
-  let previous = endpoint().ui/micaInspectBack
-  if previous == nothing
+  let previous_values = ui/MicaInspectBack(endpoint(), ?previous)
+  if not previous_values
     return false
   end
+  let exactly {:previous -> previous} = previous_values
 
-  let selected = endpoint().ui/micaInspect
+  let selected_values = ui/MicaInspect(endpoint(), ?selected)
   endpoint().ui/micaInspect = previous
   endpoint.ui/micaInspect = previous
   retract ui/MicaInspectBack(endpoint(), _)
   retract ui/MicaInspectBack(endpoint, _)
-  if selected != nothing && selected != previous
-    endpoint().ui/micaInspectBack = selected
-    endpoint.ui/micaInspectBack = selected
+  if selected_values
+    let exactly {:selected -> selected} = selected_values
+    if selected != previous
+      endpoint().ui/micaInspectBack = selected
+      endpoint.ui/micaInspectBack = selected
+    end
   end
   return true
 end
@@ -711,7 +733,7 @@ verb ui/handle_sync_action(source @ #ui/mica_inspect_layout_action<_>, endpoint,
   end
 
   let current = ui/current_actor()
-  if current == nothing || ui/can_program(current) == false
+  if current == none || ui/can_program(current) == false
     return false
   end
 
@@ -735,7 +757,7 @@ verb ui/handle_sync_action(source @ #ui/mica_method_mode_action<_>, endpoint, se
   end
 
   let current = ui/current_actor()
-  if current == nothing || ui/can_program(current) == false
+  if current == none || ui/can_program(current) == false
     return false
   end
 
@@ -755,7 +777,7 @@ verb ui/handle_sync_action(source @ #ui/mica_method_limit_action<_>, endpoint, s
   end
 
   let current = ui/current_actor()
-  if current == nothing || ui/can_program(current) == false
+  if current == none || ui/can_program(current) == false
     return false
   end
 
@@ -779,7 +801,7 @@ verb ui/handle_sync_action(source @ #ui/mica_browser_search_action<_>, endpoint,
   end
 
   let current = ui/current_actor()
-  if current == nothing || ui/can_program(current) == false
+  if current == none || ui/can_program(current) == false
     return false
   end
 

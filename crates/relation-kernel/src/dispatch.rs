@@ -12,8 +12,26 @@
 // with this program. If not, see <https://www.gnu.org/licenses/>.
 
 use crate::{KernelError, RelationId, RelationRead, ScanControl, delegates_reaches};
-use mica_var::{FROB_PROTOTYPE, Identity, Value, primitive_prototype_for_value};
-use std::sync::Arc;
+use mica_var::{FROB_PROTOTYPE, Identity, Symbol, Value, primitive_prototype_for_value};
+use std::sync::{Arc, OnceLock};
+
+fn unrestricted_marker() -> &'static Value {
+    static MARKER: OnceLock<Value> = OnceLock::new();
+    MARKER.get_or_init(|| Value::symbol(Symbol::intern("dispatch/unrestricted")))
+}
+
+fn frob_only_marker() -> &'static Value {
+    static MARKER: OnceLock<Value> = OnceLock::new();
+    MARKER.get_or_init(|| Value::symbol(Symbol::intern("dispatch/frob_only")))
+}
+
+pub fn unrestricted_dispatch_restriction() -> Value {
+    unrestricted_marker().clone()
+}
+
+pub fn frob_only_dispatch_restriction(delegate: Identity) -> Value {
+    Value::frob(delegate, frob_only_marker().clone())
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct DispatchRelations {
@@ -395,10 +413,10 @@ fn restriction_implies(
     specific: &Value,
     general: &Value,
 ) -> Result<bool, KernelError> {
-    if specific == general || *general == Value::nothing() {
+    if specific == general || general == unrestricted_marker() {
         return Ok(true);
     }
-    if *specific == Value::nothing() {
+    if specific == unrestricted_marker() {
         return Ok(false);
     }
     matches_restriction(reader, delegates_relation, specific, general)
@@ -517,7 +535,7 @@ fn matches_restriction(
     value: &Value,
     restriction: &Value,
 ) -> Result<bool, KernelError> {
-    if *restriction == Value::nothing() {
+    if restriction == unrestricted_marker() {
         return Ok(true);
     }
     if let Some(required_delegate) = frob_only_restriction(restriction) {
@@ -566,7 +584,7 @@ fn matches_restriction(
 
 fn frob_only_restriction(restriction: &Value) -> Option<Value> {
     restriction.with_frob(|delegate, payload| {
-        (payload == &Value::nothing()).then_some(Value::identity(delegate))
+        (payload == frob_only_marker()).then_some(Value::identity(delegate))
     })?
 }
 
@@ -701,7 +719,12 @@ mod tests {
         .unwrap();
         tx.assert(
             rel(41),
-            Tuple::from([int(100), sym("message"), Value::nothing(), int(1)]),
+            Tuple::from([
+                int(100),
+                sym("message"),
+                unrestricted_dispatch_restriction(),
+                int(1),
+            ]),
         )
         .unwrap();
         tx.assert(rel(42), Tuple::from([int(10), int(11), int(0)]))
@@ -804,7 +827,7 @@ mod tests {
         let event = Value::identity(event_identity);
         let take_event_identity = Identity::new(201).unwrap();
         let take_event = Value::identity(take_event_identity);
-        let frob_only = Value::frob(event_identity, Value::nothing());
+        let frob_only = frob_only_dispatch_restriction(event_identity);
 
         tx.assert(rel(40), Tuple::from([int(100), sym("render")]))
             .unwrap();
@@ -852,7 +875,12 @@ mod tests {
             .unwrap();
         tx.assert(
             rel(41),
-            Tuple::from([int(100), sym("kind"), Value::nothing(), int(0)]),
+            Tuple::from([
+                int(100),
+                sym("kind"),
+                unrestricted_dispatch_restriction(),
+                int(0),
+            ]),
         )
         .unwrap();
         tx.assert(rel(40), Tuple::from([int(101), sym("label")]))
@@ -905,14 +933,24 @@ mod tests {
         .unwrap();
         tx.assert(
             rel(41),
-            Tuple::from([int(100), sym("item"), Value::nothing(), int(1)]),
+            Tuple::from([
+                int(100),
+                sym("item"),
+                unrestricted_dispatch_restriction(),
+                int(1),
+            ]),
         )
         .unwrap();
         tx.assert(rel(40), Tuple::from([int(101), sym("act")]))
             .unwrap();
         tx.assert(
             rel(41),
-            Tuple::from([int(101), sym("actor"), Value::nothing(), int(0)]),
+            Tuple::from([
+                int(101),
+                sym("actor"),
+                unrestricted_dispatch_restriction(),
+                int(0),
+            ]),
         )
         .unwrap();
         tx.assert(
@@ -984,7 +1022,12 @@ mod tests {
             .unwrap();
         tx.assert(
             rel(41),
-            Tuple::from([int(100), sym("value"), Value::nothing(), int(0)]),
+            Tuple::from([
+                int(100),
+                sym("value"),
+                unrestricted_dispatch_restriction(),
+                int(0),
+            ]),
         )
         .unwrap();
         tx.assert(rel(40), Tuple::from([int(101), sym("describe")]))
@@ -1245,8 +1288,18 @@ mod tests {
     #[test]
     fn named_method_args_follow_param_positions() {
         let params = vec![
-            Tuple::from([int(100), sym("item"), Value::nothing(), int(1)]),
-            Tuple::from([int(100), sym("actor"), Value::nothing(), int(0)]),
+            Tuple::from([
+                int(100),
+                sym("item"),
+                unrestricted_dispatch_restriction(),
+                int(1),
+            ]),
+            Tuple::from([
+                int(100),
+                sym("actor"),
+                unrestricted_dispatch_restriction(),
+                int(0),
+            ]),
         ];
 
         assert_eq!(

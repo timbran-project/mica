@@ -72,7 +72,7 @@ fn compile_vm_smoke() -> Option<i64> {
         .with_identity("lamp", lamp)
         .with_runtime_function("client_note");
     let compiled = compile_source(
-        "client_note(#lamp, \"brass lamp\")\nreturn one Name(#lamp, ?name)",
+        "client_note(#lamp, \"brass lamp\")\nlet exactly {:name -> name} = Name(#lamp, ?name)\nreturn name",
         &context,
     )
     .ok()?;
@@ -105,7 +105,7 @@ fn compile_vm_smoke() -> Option<i64> {
                 Tuple::from([args[0].clone(), args[1].clone()]),
             )?;
             context.emit(target, args[1].clone())?;
-            Ok(Value::nothing())
+            Ok(Value::unit())
         },
     );
     let mut pending_effects = Vec::new();

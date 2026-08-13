@@ -38,12 +38,13 @@ make_identity(:workspace/default)
 assert Workspace(#workspace/default)
 
 verb workspaces/default_source_root()
-  let roots = os_getenv("MICA_SOURCE_ROOTS")
-  if roots == nothing
-    roots = os_getenv("MICA_SOURCE_ROOT")
-  end
-  if roots == nothing
-    roots = "."
+  let roots = "."
+  if let some(configured) = os_getenv("MICA_SOURCE_ROOTS")
+    roots = configured
+  else
+    if let some(configured) = os_getenv("MICA_SOURCE_ROOT")
+      roots = configured
+    end
   end
 
   let chars = string_chars(roots)

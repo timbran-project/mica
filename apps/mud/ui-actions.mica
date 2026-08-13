@@ -1,10 +1,10 @@
 // Browser-originated UI action routing for the server-owned MUD view.
 
 verb ui/sync_selected_entity(actor @ #player, line, fields)
-  let entity = index_or(fields, :entity, nothing)
-  if entity != nothing
+  let entity = index_or(fields, :entity, none)
+  if entity != none
     let selected = command/match_object(actor, lower(trim(entity)))
-    if selected != nothing
+    if selected != none
       return selected
     end
   end
@@ -15,21 +15,21 @@ verb ui/sync_selected_entity(actor @ #player, line, fields)
     return command/match_object(actor, trim(string_slice(trimmed, 5, string_len(trimmed))))
   end
 
-  return nothing
+  return none
 end
 
 verb ui/sync_action_source(action)
-  let delegate = action.ui/syncAction
-  if delegate == nothing
-    return nothing
+  let delegates = ui/SyncAction(action, ?delegate)
+  if not delegates
+    return none
   end
-
-  return frob(delegate, action)
+  let exactly {:delegate -> found_delegate} = delegates
+  return some(frob(found_delegate, action))
 end
 
 verb ui/form_text(fields, key)
-  let value = index_or(fields, key, nothing)
-  if value == nothing
+  let value = index_or(fields, key, none)
+  if value == none
     return ""
   end
 
@@ -37,8 +37,8 @@ verb ui/form_text(fields, key)
 end
 
 verb ui/form_raw_text(fields, key)
-  let value = index_or(fields, key, nothing)
-  if value == nothing
+  let value = index_or(fields, key, none)
+  if value == none
     return ""
   end
 
@@ -46,11 +46,14 @@ verb ui/form_raw_text(fields, key)
 end
 
 verb ui/form_index(fields, key)
-  let value = parse_ordinal(ui/form_text(fields, key))
-  if value == nothing || value < 0
-    return 0
+  return match parse_ordinal(ui/form_text(fields, key))
+  case ok(value) if value >= 0
+    value
+  case ok(ignored)
+    0
+  case err(problem)
+    0
   end
-  return value
 end
 
 verb ui/handle_sync_action(source @ #ui/sync_action<_>, endpoint, session, view, event, target, fields)
@@ -62,9 +65,11 @@ verb ui/handle_sync_action(source @ #ui/load_older_events_action<_>, endpoint, s
     return false
   end
 
-  let current_limit = endpoint.session/narrativeLimit
-  if current_limit == nothing
-    current_limit = 40
+  let current_limit = 40
+  let limits = session/NarrativeLimit(endpoint, ?limit)
+  if limits
+    let exactly {:limit -> configured_limit} = limits
+    current_limit = configured_limit
   end
   let new_limit = current_limit + 40
   endpoint.session/narrativeLimit = new_limit
@@ -77,18 +82,27 @@ verb ui/handle_sync_action(source @ #ui/inspect_action<_>, endpoint, session, vi
   end
 
   let current = ui/current_actor()
-  if current == nothing
+  if current == none
     return false
   end
 
-  let selected = ui/entity_from_literal(fields[:entity])
+  let selected_option = ui/entity_from_literal(fields[:entity])
+  if not selected_option
+    return false
+  end
+  let exactly {:value -> selected} = selected_option
   if ui/can_inspect_entity(current, selected) == false
     return false
   end
 
   endpoint().session/inspect = selected
   endpoint.session/inspect = selected
-  let pulse = endpoint.session/inspectPulse
+  let pulse = ""
+  let pulses = session/InspectPulse(endpoint, ?pulse)
+  if pulses
+    let exactly {:pulse -> configured_pulse} = pulses
+    pulse = configured_pulse
+  end
   if pulse == "odd"
     pulse = "even"
   else
@@ -105,7 +119,7 @@ verb ui/handle_sync_action(source @ #ui/command_action<_>, endpoint, session, vi
   end
 
   let current = ui/current_actor()
-  if current == nothing
+  if current == none
     return false
   end
 
@@ -137,10 +151,15 @@ verb ui/handle_sync_action(source @ #ui/command_action<_>, endpoint, session, vi
   end
 
   let selected = ui/sync_selected_entity(current, line, fields)
-  if selected != nothing
+  if selected != none
     endpoint().session/inspect = selected
     endpoint.session/inspect = selected
-    let pulse = endpoint.session/inspectPulse
+    let pulse = ""
+    let pulses = session/InspectPulse(endpoint, ?pulse)
+    if pulses
+      let exactly {:pulse -> configured_pulse} = pulses
+      pulse = configured_pulse
+    end
     if pulse == "odd"
       pulse = "even"
     else
@@ -165,7 +184,7 @@ verb ui/handle_sync_action(source @ #ui/build_room_action<_>, endpoint, session,
   end
 
   let current = ui/current_actor()
-  if current == nothing || ui/can_build(current) == false
+  if current == none || ui/can_build(current) == false
     return false
   end
 
@@ -179,16 +198,18 @@ verb ui/handle_sync_action(source @ #ui/build_room_action<_>, endpoint, session,
     let direction = ui/form_text(fields, :direction)
     if direction != ""
       let source_room = current.locatedIn
-      let source_literal = index_or(fields, :source, nothing)
-      if source_literal != nothing && ui/form_text(fields, :source) != ""
+      let source_literal = index_or(fields, :source, none)
+      if source_literal != none && ui/form_text(fields, :source) != ""
         let parsed_source = ui/entity_from_literal(source_literal)
-        if Delegates(parsed_source, #room, 0)
-          source_room = parsed_source
+        if let some(room) = parsed_source
+          if Delegates(room, #room, 0)
+            source_room = room
+          end
         end
       end
       let return_direction = ui/form_text(fields, :return_direction)
       if fields[:one_way] == "true"
-        return_direction = nothing
+        return_direction = none
       end
       create_passage(current, source_room, built, direction, return_direction)
     end
@@ -202,7 +223,7 @@ verb ui/handle_sync_action(source @ #ui/create_passage_action<_>, endpoint, sess
   end
 
   let current = ui/current_actor()
-  if current == nothing || ui/can_build(current) == false
+  if current == none || ui/can_build(current) == false
     return false
   end
 
@@ -214,28 +235,28 @@ verb ui/handle_sync_action(source @ #ui/create_passage_action<_>, endpoint, sess
   end
 
   let area = builder/current_area(current)
-  if area == nothing
+  if area == none
     return false
   end
 
   let source_room = current.locatedIn
   if source_name != ""
     source_room = builder/room_named_in_area(area, source_name)
-    if source_room == nothing
+    if source_room == none
       event/notify(current, "No source room by that name exists in this area.")
       return false
     end
   end
 
   let target_room = builder/room_named_in_area(area, target_name)
-  if target_room == nothing
+  if target_room == none
     event/notify(current, "No room by that name exists in this area.")
     return false
   end
 
   let return_direction = ui/form_text(fields, :return_direction)
   if fields[:one_way] == "true"
-    return_direction = nothing
+    return_direction = none
   end
 
   let passage = create_passage(current, source_room, target_room, direction, return_direction)
@@ -248,7 +269,7 @@ verb ui/handle_sync_action(source @ #ui/describe_passage_action<_>, endpoint, se
   end
 
   let current = ui/current_actor()
-  if current == nothing || ui/can_build(current) == false
+  if current == none || ui/can_build(current) == false
     return false
   end
 
@@ -259,24 +280,26 @@ verb ui/handle_sync_action(source @ #ui/describe_passage_action<_>, endpoint, se
   end
 
   let room = current.locatedIn
-  let room_literal = index_or(fields, :room, nothing)
-  if room_literal != nothing && ui/form_text(fields, :room) != ""
+  let room_literal = index_or(fields, :room, none)
+  if room_literal != none && ui/form_text(fields, :room) != ""
     let parsed_room = ui/entity_from_literal(room_literal)
-    if Delegates(parsed_room, #room, 0)
-      room = parsed_room
+    if let some(candidate) = parsed_room
+      if Delegates(candidate, #room, 0)
+        room = candidate
+      end
     end
   end
 
-  let passage = ui/entity_from_literal(fields[:passage])
-  if passage == nothing
-    passage = builder/passage_from(room, direction)
+  let passage = builder/passage_from(room, direction)
+  if let some(selected_passage) = ui/entity_from_literal(fields[:passage])
+    passage = selected_passage
   end
-  if passage == nothing
+  if passage == none
     event/notify(current, "No passage matches that direction.")
     return false
   end
 
-  let ambient = index_or(fields, :ambient, nothing) == "true"
+  let ambient = index_or(fields, :ambient, none) == "true"
   let updated = set_passage_side(current, passage, room, direction, description, ambient)
   return updated
 end
@@ -287,20 +310,24 @@ verb ui/handle_sync_action(source @ #ui/edit_entity_action<_>, endpoint, session
   end
 
   let current = ui/current_actor()
-  if current == nothing || ui/can_build(current) == false
+  if current == none || ui/can_build(current) == false
     return false
   end
 
-  let entity = ui/entity_from_literal(fields[:entity])
-  if entity == nothing || frob_delegate(entity) == #passage
+  let entity_option = ui/entity_from_literal(fields[:entity])
+  if not entity_option
+    return false
+  end
+  let exactly {:value -> entity} = entity_option
+  if is_frob(entity) && frob_delegate(entity) == #passage
     return false
   end
 
   let name = ui/form_text(fields, :name)
   let aliases = ui/form_text(fields, :aliases)
   let description = ui/form_text(fields, :description)
-  let portable = index_or(fields, :portable, nothing) == "true"
-  let visible_here = index_or(fields, :visible_here, nothing) == "true"
+  let portable = index_or(fields, :portable, none) == "true"
+  let visible_here = index_or(fields, :visible_here, none) == "true"
   let updated = set_entity_attributes(current, entity, name, aliases, description, portable, visible_here)
   if updated
     endpoint().session/inspect = entity
@@ -315,7 +342,7 @@ verb ui/handle_sync_action(source @ #ui/object_browser_search_action<_>, endpoin
   end
 
   let current = ui/current_actor()
-  if current == nothing || ui/can_build(current) == false
+  if current == none || ui/can_build(current) == false
     return false
   end
 
@@ -330,10 +357,10 @@ verb ui/handle_sync_action(source @ #ui/object_browser_search_action<_>, endpoin
 end
 
 verb sync_event(endpoint, session, view, event, target, action, fields)
-  let source = ui/sync_action_source(action)
-  if source == nothing
+  let source_option = ui/sync_action_source(action)
+  if not source_option
     return false
   end
-
+  let exactly {:value -> source} = source_option
   return ui/handle_sync_action(source, endpoint, session, view, event, target, fields)
 end

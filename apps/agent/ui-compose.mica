@@ -133,7 +133,7 @@ verb ui/workspace_panel_node(agent @ #agent)
   end
 
   let current_name = "none"
-  if current != nothing
+  if current != none
     current_name = ui/workspace_name(current)
   end
 
@@ -146,7 +146,7 @@ end
 
 verb ui/object_browser_description(entity)
   let description = entity.description
-  if description == nothing
+  if description == none
     return ""
   end
   if string_len(description) > 120
@@ -156,7 +156,7 @@ verb ui/object_browser_description(entity)
 end
 
 verb ui/object_browser_matches(actor @ #agent, entity, needle @ #string)
-  if entity == nothing
+  if entity == none
     return false
   end
 
@@ -170,7 +170,7 @@ verb ui/object_browser_matches(actor @ #agent, entity, needle @ #string)
   end
 
   let description = entity.description
-  if description != nothing && string_contains(lower(description), needle)
+  if description != none && string_contains(lower(description), needle)
     return true
   end
 
@@ -212,10 +212,10 @@ verb ui/object_browser_results_node(actor @ #agent, query @ #string)
   end
 
   let workspace = workspace/active(actor)
-  if workspace != nothing
+  if workspace != none
     let repository = tool/source_repository(workspace)
     let revision = tool/source_revision(workspace)
-    if repository != nothing && revision != nothing
+    if repository != none && revision != none
       for entry in source/RepositoryEntry(repository, revision, "", ?child_path, ?kind, ?entry_name)
         if count < 16 && entry[:kind] == "directory"
           let dir_path = entry[:child_path]
@@ -247,9 +247,11 @@ verb ui/object_browser_results_node(actor @ #agent, query @ #string)
 end
 
 verb ui/object_browser_panel_node(actor @ #agent)
-  let query = endpoint().session/objectBrowserQuery
-  if query == nothing
-    query = ""
+  let query = ""
+  let queries = session/ObjectBrowserQuery(endpoint(), ?query)
+  if queries
+    let exactly {:query -> configured_query} = queries
+    query = configured_query
   end
 
   return dom <details class="object-browser-panel tool-sheet" aria-label="Object browser">
@@ -280,10 +282,17 @@ verb ui/world_tools_node(agent @ #agent)
 end
 
 verb ui/tool_activity_node(agent @ #agent)
-  let streaming = endpoint().session/isStreaming
-  let phase = endpoint().session/loopPhase
-  if phase == nothing
-    phase = "idle"
+  let streaming = false
+  let streaming_rows = session/IsStreaming(endpoint(), ?value)
+  if streaming_rows
+    let exactly {:value -> configured_streaming} = streaming_rows
+    streaming = configured_streaming
+  end
+  let phase = "idle"
+  let phases = session/LoopPhase(endpoint(), ?phase)
+  if phases
+    let exactly {:phase -> configured_phase} = phases
+    phase = configured_phase
   end
 
   // Build a status banner showing what the agent is currently doing.
@@ -397,8 +406,9 @@ verb ui/entity_facts_node(agent @ #agent, entity)
   if Delegates(entity, #workspace, 0)
     let root = ui/workspace_root_text(entity)
     facts = [@facts, ui/entity_fact_node("root", root, "entity-root")]
-    let revision = entity.workspaceRevision
-    if revision != nothing
+    let revisions = WorkspaceRevision(entity, ?revision)
+    if revisions
+      let exactly {:revision -> revision} = revisions
       facts = [@facts, ui/entity_fact_node("revision", revision, "entity-revision")]
     end
   end
@@ -407,17 +417,27 @@ verb ui/entity_facts_node(agent @ #agent, entity)
 end
 
 verb ui/inspector_node(agent @ #agent)
-  let selected = endpoint().session/inspect
-  let pulse = endpoint().session/inspectPulse
+  let selected = none
+  let selections = session/Inspect(endpoint(), ?selected)
+  if selections
+    let exactly {:selected -> configured_selected} = selections
+    selected = configured_selected
+  end
+  let pulse = none
+  let pulses = session/InspectPulse(endpoint(), ?pulse)
+  if pulses
+    let exactly {:pulse -> configured_pulse} = pulses
+    pulse = configured_pulse
+  end
   let pulse_class = "inspector panel"
-  if pulse != nothing
+  if pulse != none
     if pulse == "even"
       pulse_class = "inspector panel inspect-flash-even"
     else
       pulse_class = "inspector panel inspect-flash-odd"
     end
   end
-  if selected == nothing || ui/can_inspect_entity(agent, selected) == false
+  if selected == none || ui/can_inspect_entity(agent, selected) == false
     return dom <aside id="inspector" class={pulse_class}>
       <h2>Inspect</h2>
       <p class="muted">Select a workspace, file, symbol, diff, or task to inspect.</p>
@@ -425,9 +445,11 @@ verb ui/inspector_node(agent @ #agent)
   end
 
   let name = ui/workspace_name(selected)
-  let description = selected.description
-  if description == nothing
-    description = ""
+  let description = ""
+  let descriptions = Description(selected, ?description)
+  if descriptions
+    let exactly {:description -> configured_description} = descriptions
+    description = configured_description
   end
 
   return dom <aside id="inspector" class={pulse_class} data-entity={to_literal(selected)}>
@@ -455,11 +477,18 @@ verb ui/inspector_action_node(command, label, class)
 end
 
 verb ui/command_bar_node(agent @ #agent)
-  let draft = endpoint().session/commandDraft
-  if draft == nothing
-    draft = ""
+  let draft = ""
+  let drafts = session/CommandDraft(endpoint(), ?draft)
+  if drafts
+    let exactly {:draft -> configured_draft} = drafts
+    draft = configured_draft
   end
-  let streaming = endpoint().session/isStreaming
+  let streaming = false
+  let streaming_rows = session/IsStreaming(endpoint(), ?value)
+  if streaming_rows
+    let exactly {:value -> configured_streaming} = streaming_rows
+    streaming = configured_streaming
+  end
   let indicator = dom <span class="command-streaming-indicator"></span>
   if streaming == true
     indicator = dom <span class="command-streaming-indicator active" aria-label="Agent is working">…</span>
@@ -501,10 +530,13 @@ end
 
 verb ui/command_chips_node(agent @ #agent)
   let chips = [ui/command_form_node("", "help", "help", "chip")]
-  let selected = endpoint().session/inspect
-  if selected != nothing && ui/can_inspect_entity(agent, selected)
+  let selections = session/Inspect(endpoint(), ?selected)
+  if selections
+    let exactly {:selected -> selected} = selections
+    if ui/can_inspect_entity(agent, selected)
     let name = ui/workspace_name(selected)
     chips = [@chips, ui/command_form_node("", string_concat("inspect ", name), string_concat("inspect ", name), "chip")]
+    end
   end
   return dom <div class="command-chips" aria-label="Available actions">{@chips}</div>
 end
@@ -512,7 +544,7 @@ end
 verb ui/world_view_node(agent @ #agent, revision, limit)
   let workspace = workspace/active(agent)
   let header_title = "Mica Agent"
-  if workspace != nothing
+  if workspace != none
     header_title = ui/workspace_name(workspace)
   end
   let header = dom <header class="topbar">

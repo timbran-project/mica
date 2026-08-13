@@ -321,7 +321,6 @@ impl<'a> Lower<'a> {
             SyntaxKind::ReturnExpr => self.lower_return(node),
             SyntaxKind::RaiseExpr => self.lower_raise(node),
             SyntaxKind::RecoverExpr => self.lower_recover(node),
-            SyntaxKind::OneExpr => self.lower_one(node),
             SyntaxKind::BreakExpr => Expr::Break {
                 id: self.node_id(),
                 span: node.span.clone(),
@@ -375,8 +374,7 @@ impl<'a> Lower<'a> {
             SyntaxKind::FalseKw => Literal::Bool(false),
             SyntaxKind::ErrorCode => Literal::ErrorCode(self.text(token.span.clone()).to_owned()),
             SyntaxKind::LParen => Literal::Unit,
-            SyntaxKind::NothingKw => Literal::Nothing,
-            _ => Literal::Nothing,
+            _ => Literal::Unit,
         };
         Expr::Literal {
             id: self.node_id(),
@@ -1204,19 +1202,6 @@ impl<'a> Lower<'a> {
         }
     }
 
-    fn lower_one(&mut self, node: &CstNode) -> Expr {
-        let expr = self
-            .node_children(node)
-            .find(|child| is_expr_node(child.kind))
-            .map(|child| self.lower_expr(child))
-            .unwrap_or_else(|| self.error_expr(node));
-        Expr::One {
-            id: self.node_id(),
-            span: node.span.clone(),
-            expr: Box::new(expr),
-        }
-    }
-
     fn lower_recovery_clause(&mut self, node: &CstNode) -> RecoveryClause {
         let name = self.first_text(node, SyntaxKind::Ident);
         let exprs = self
@@ -1890,7 +1875,6 @@ fn is_expr_node(kind: SyntaxKind) -> bool {
             | SyntaxKind::ReturnExpr
             | SyntaxKind::RaiseExpr
             | SyntaxKind::RecoverExpr
-            | SyntaxKind::OneExpr
             | SyntaxKind::BreakExpr
             | SyntaxKind::ContinueExpr
             | SyntaxKind::TryExpr
@@ -2532,7 +2516,7 @@ mod tests {
     #[test]
     fn lowers_literals_and_field_assignment() {
         let ast = parse_ast(
-            "#lamp.name = \"golden lamp\"\nendpoint.session/actor = #alice\ntrue\nE_NOT_PORTABLE\nnothing\n\"Alice says, \\\"hello\\\"\"\nb\"3q2-7w==\"",
+            "#lamp.name = \"golden lamp\"\nendpoint.session/actor = #alice\ntrue\nE_NOT_PORTABLE\n()\n\"Alice says, \\\"hello\\\"\"\nb\"3q2-7w==\"",
         );
         assert_eq!(ast.errors, vec![]);
         assert!(matches!(
@@ -2575,7 +2559,7 @@ mod tests {
             &ast.items[4],
             Item::Expr {
                 expr: Expr::Literal {
-                    value: Literal::Nothing,
+                    value: Literal::Unit,
                     ..
                 },
                 ..
@@ -2875,7 +2859,6 @@ mod tests {
                     collect_expr_ids(&catch.value, ids);
                 }
             }
-            Expr::One { expr, .. } => collect_expr_ids(expr, ids),
             Expr::Try {
                 body,
                 catches,

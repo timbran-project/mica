@@ -27,8 +27,9 @@ about the live catalogue through `CompileContext`: named identities, named relat
 mappings, method relation ids, and program identities.
 
 Current supported surface includes expressions, assignments, collections, loops, functions,
-exceptions, relation assertions/retractions, relation queries, `one`, Horn-style rules, explicit
-`method`, `verb` sugar, and role-based dispatch calls.
+exceptions, relation assertions/retractions, relation queries and row bindings, structural relation
+types and variants, Horn-style rules, explicit `method`, `verb` sugar, and role-based dispatch
+calls.
 
 ## Licence
 

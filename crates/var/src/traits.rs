@@ -356,7 +356,7 @@ impl fmt::Debug for Value {
                 })
                 .unwrap(),
             ValueKind::Relation if self.is_unit() => f.write_str("()"),
-            ValueKind::Relation if self.is_empty_relation() => f.write_str("nothing"),
+            ValueKind::Relation if self.is_empty_relation() => f.write_str("[] {}"),
             ValueKind::Relation => self
                 .with_relation(|relation| {
                     f.debug_struct("Relation")
@@ -424,7 +424,7 @@ impl fmt::Display for Value {
                 })
                 .unwrap(),
             ValueKind::Relation if self.is_unit() => f.write_str("()"),
-            ValueKind::Relation if self.is_empty_relation() => f.write_str("nothing"),
+            ValueKind::Relation if self.is_empty_relation() => f.write_str("[] {}"),
             ValueKind::Relation => self
                 .with_relation(|relation| {
                     write!(f, "<relation {}x{}>", relation.len(), relation.arity())
@@ -472,7 +472,7 @@ fn write_error_value(error: &crate::ErrorValue, f: &mut fmt::Formatter<'_>) -> f
     }
     if let Some(value) = error.value() {
         if error.message().is_none() {
-            f.write_str(", nothing")?;
+            f.write_str(", none")?;
         }
         write!(f, ", {value:?}")?;
     }

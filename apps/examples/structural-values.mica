@@ -1,0 +1,30 @@
+// Structural option and result handling without a universal sentinel.
+
+verb example/describe_optional(value: option<option<string>>)
+  return match value
+  case none
+    "not supplied"
+  case some(inner)
+    match inner
+    case none
+      "supplied without text"
+    case some(text)
+      text
+    end
+  end
+end
+
+verb example/parse_ordinal(text)
+  return match parse_ordinal(text)
+  case ok(value)
+    string_concat("ordinal ", to_literal(value))
+  case err(problem)
+    let message: option<string> = problem.message
+    match message
+    case some(message)
+      message
+    case none
+      "invalid ordinal"
+    end
+  end
+end

@@ -73,7 +73,7 @@ impl<'a> Cursor<'a> {
     fn value(&mut self, depth: usize) -> Option<Value> {
         let tag = self.byte()? % if depth >= 4 { 8 } else { 11 };
         match tag {
-            0 => Some(Value::nothing()),
+            0 => Some(Value::empty_relation()),
             1 => Some(Value::bool(self.byte()? & 1 != 0)),
             2 => {
                 let raw = self.u64()?;

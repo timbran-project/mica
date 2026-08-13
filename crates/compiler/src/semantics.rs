@@ -560,10 +560,9 @@ impl<'a> Analyzer<'a> {
                     );
                 }
             }
-            HirExpr::Require { condition, .. }
-            | HirExpr::One {
-                expr: condition, ..
-            } => self.validate_supported_surface_expr(condition, false),
+            HirExpr::Require { condition, .. } => {
+                self.validate_supported_surface_expr(condition, false)
+            }
             HirExpr::Index {
                 collection, index, ..
             } => {
@@ -1478,10 +1477,6 @@ impl<'a> Analyzer<'a> {
                     .map(|catch| self.lower_recovery(catch, scope))
                     .collect(),
             },
-            Expr::One { id, expr, .. } => HirExpr::One {
-                id: *id,
-                expr: Box::new(self.lower_expr(expr, scope)),
-            },
             Expr::Break { id, .. } => HirExpr::Break { id: *id },
             Expr::Continue { id, .. } => HirExpr::Continue { id: *id },
             Expr::Try {
@@ -2275,7 +2270,6 @@ fn collect_expr_span(expr: &Expr, spans: &mut HashMap<NodeId, Span>) {
                 collect_recovery_span(catch, spans);
             }
         }
-        Expr::One { expr, .. } => collect_expr_span(expr, spans),
         Expr::Try {
             body,
             catches,
@@ -2379,22 +2373,22 @@ mod tests {
     #[test]
     fn enables_every_runtime_value_kind_on_ordinary_bindings() {
         let source = [
-            "let v_bool: bool = nothing",
-            "let v_int: int = nothing",
-            "let v_float: float = nothing",
-            "let v_identity: identity = nothing",
-            "let v_string: string = nothing",
-            "let v_bytes: bytes = nothing",
-            "let v_symbol: symbol = nothing",
-            "let v_error_code: error_code = nothing",
-            "let v_error: error = nothing",
-            "let v_capability: capability = nothing",
-            "let v_frob: frob = nothing",
-            "let v_function: function = nothing",
-            "let v_list: list = nothing",
-            "let v_map: map = nothing",
-            "let v_range: range = nothing",
-            "let v_relation: relation = nothing",
+            "let v_bool: bool = none",
+            "let v_int: int = none",
+            "let v_float: float = none",
+            "let v_identity: identity = none",
+            "let v_string: string = none",
+            "let v_bytes: bytes = none",
+            "let v_symbol: symbol = none",
+            "let v_error_code: error_code = none",
+            "let v_error: error = none",
+            "let v_capability: capability = none",
+            "let v_frob: frob = none",
+            "let v_function: function = none",
+            "let v_list: list = none",
+            "let v_map: map = none",
+            "let v_range: range = none",
+            "let v_relation: relation = none",
         ]
         .join("\n");
         let program = parse_ok(&source);

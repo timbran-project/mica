@@ -327,7 +327,6 @@ impl<'a> Parser<'a> {
             SyntaxKind::ReturnKw => self.parse_return_expr(),
             SyntaxKind::RaiseKw => self.parse_raise_expr(),
             SyntaxKind::RecoverKw => self.parse_recover_expr(),
-            SyntaxKind::OneKw => self.parse_one_expr(),
             SyntaxKind::SpawnKw => self.parse_spawn_expr(),
             SyntaxKind::BreakKw => self.parse_simple_control_expr(SyntaxKind::BreakExpr),
             SyntaxKind::ContinueKw => self.parse_simple_control_expr(SyntaxKind::ContinueExpr),
@@ -361,8 +360,7 @@ impl<'a> Parser<'a> {
             | SyntaxKind::String
             | SyntaxKind::Bytes
             | SyntaxKind::TrueKw
-            | SyntaxKind::FalseKw
-            | SyntaxKind::NothingKw => self.single_token_node(SyntaxKind::LiteralExpr),
+            | SyntaxKind::FalseKw => self.single_token_node(SyntaxKind::LiteralExpr),
             _ => {
                 self.error("expected expression");
                 self.single_token_node(SyntaxKind::AtomExpr)
@@ -602,12 +600,6 @@ impl<'a> Parser<'a> {
         }
         children.push(self.expect_token(SyntaxKind::EndKw, "expected end after recover"));
         CstNode::new(SyntaxKind::RecoverExpr, children)
-    }
-
-    fn parse_one_expr(&mut self) -> CstNode {
-        let mut children = vec![self.bump_element()];
-        children.push(CstElement::Node(self.parse_expr(13)));
-        CstNode::new(SyntaxKind::OneExpr, children)
     }
 
     fn parse_recover_clause(&mut self) -> CstNode {
@@ -1347,7 +1339,6 @@ impl<'a> Parser<'a> {
                 | SyntaxKind::ReturnKw
                 | SyntaxKind::RaiseKw
                 | SyntaxKind::RecoverKw
-                | SyntaxKind::OneKw
                 | SyntaxKind::SpawnKw
                 | SyntaxKind::BreakKw
                 | SyntaxKind::ContinueKw
@@ -1374,7 +1365,6 @@ impl<'a> Parser<'a> {
                 | SyntaxKind::Bytes
                 | SyntaxKind::TrueKw
                 | SyntaxKind::FalseKw
-                | SyntaxKind::NothingKw
         )
     }
 
@@ -1959,14 +1949,6 @@ mod tests {
             parse.errors[0].message,
             "query variables are only valid as relation arguments"
         );
-    }
-
-    #[test]
-    fn parses_one_relation_query_expression() {
-        let parse = parse("one Location(#thing, ?room)");
-        assert_eq!(parse.errors, vec![]);
-        assert!(contains(&parse.root, SyntaxKind::OneExpr));
-        assert!(contains(&parse.root, SyntaxKind::QueryVarExpr));
     }
 
     #[test]

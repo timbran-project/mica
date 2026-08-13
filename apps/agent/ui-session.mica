@@ -398,9 +398,10 @@ grant role #operator
 end
 
 verb ui/current_agent()
-  let current = actor()
-  if current != nothing && Delegates(current, #agent, 0)
-    return current
+  if let some(current) = actor()
+    if Delegates(current, #agent, 0)
+      return current
+    end
   end
   return #agent/default
 end
@@ -422,7 +423,7 @@ end
 
 verb ui/workspace_root_text(workspace)
   let root = workspace.workspaceRoot
-  if root == nothing
+  if root == none
     return ""
   end
   return root
@@ -433,14 +434,19 @@ verb ui/target_kind_label(kind @ #string)
 end
 
 verb ui/entity_from_literal(text)
-  if text == nothing
-    return nothing
+  if text == none
+    return none
   end
-  return from_literal(text)
+  return match from_literal(text)
+  case ok(value)
+    some(value)
+  case err(problem)
+    none
+  end
 end
 
 verb ui/can_inspect_entity(agent @ #agent, entity)
-  if entity == nothing
+  if entity == none
     return false
   end
   return true
@@ -470,61 +476,67 @@ end
 // the sync_event task remains active.
 verb ui/flush(endpoint)
   commit()
-  return nothing
+  return none
 end
 
 verb sync_view_dependencies(view)
   let endpoint = endpoint()
   let current = ui/current_agent()
+  let current_binding = none
+  if current != none
+    current_binding = some(current)
+  end
   let dependencies = []
-  dependencies = [@dependencies, ui/fact_dependency(:ui/View, [view])]
-  dependencies = [@dependencies, ui/fact_dependency(:session/Actor, [endpoint, nothing])]
-  dependencies = [@dependencies, ui/fact_dependency(:session/Inspect, [endpoint, nothing])]
-  dependencies = [@dependencies, ui/fact_dependency(:session/InspectPulse, [endpoint, nothing])]
-  dependencies = [@dependencies, ui/fact_dependency(:session/TranscriptLimit, [endpoint, nothing])]
-  dependencies = [@dependencies, ui/fact_dependency(:session/CommandDraft, [endpoint, nothing])]
-  dependencies = [@dependencies, ui/fact_dependency(:session/ObjectBrowserQuery, [endpoint, nothing])]
-  dependencies = [@dependencies, ui/fact_dependency(:session/IsStreaming, [endpoint, nothing])]
-  dependencies = [@dependencies, ui/fact_dependency(:session/LoopPhase, [endpoint, nothing])]
-  dependencies = [@dependencies, ui/fact_dependency(:session/SteeringQueue, [endpoint, nothing])]
-  dependencies = [@dependencies, ui/fact_dependency(:session/FollowUpQueue, [endpoint, nothing])]
-  dependencies = [@dependencies, ui/fact_dependency(:Delegates, [nothing, nothing, nothing])]
-  dependencies = [@dependencies, ui/fact_dependency(:Name, [nothing, nothing])]
-  dependencies = [@dependencies, ui/fact_dependency(:Description, [nothing, nothing])]
-  dependencies = [@dependencies, ui/fact_dependency(:Agent, [nothing])]
-  dependencies = [@dependencies, ui/fact_dependency(:AgentWorkspace, [nothing, nothing])]
-  dependencies = [@dependencies, ui/fact_dependency(:AgentModel, [nothing, nothing])]
-  dependencies = [@dependencies, ui/fact_dependency(:Workspace, [nothing])]
-  dependencies = [@dependencies, ui/fact_dependency(:WorkspaceRoot, [nothing, nothing])]
-  dependencies = [@dependencies, ui/fact_dependency(:WorkspaceProvider, [nothing, nothing])]
-  dependencies = [@dependencies, ui/fact_dependency(:WorkspaceRevision, [nothing, nothing])]
-  dependencies = [@dependencies, ui/view_dependency(:TranscriptEntry, [current, nothing, nothing, nothing, nothing, nothing])]
-  dependencies = [@dependencies, ui/fact_dependency(:Tool, [nothing])]
-  dependencies = [@dependencies, ui/fact_dependency(:ToolName, [nothing, nothing])]
-  dependencies = [@dependencies, ui/fact_dependency(:ToolDescription, [nothing, nothing])]
-  dependencies = [@dependencies, ui/fact_dependency(:ToolParameters, [nothing, nothing])]
-  dependencies = [@dependencies, ui/fact_dependency(:ToolEnabled, [nothing, nothing])]
-  dependencies = [@dependencies, ui/view_dependency(:TranscriptToolCall, [current, nothing, nothing, nothing, nothing, nothing, nothing])]
-  dependencies = [@dependencies, ui/view_dependency(:TranscriptToolResult, [current, nothing, nothing, nothing, nothing, nothing])]
-  dependencies = [@dependencies, ui/fact_dependency(:source/Repository, [nothing])]
-  dependencies = [@dependencies, ui/fact_dependency(:source/RepositoryName, [nothing, nothing])]
-  dependencies = [@dependencies, ui/fact_dependency(:source/RepositoryRoot, [nothing, nothing])]
-  dependencies = [@dependencies, ui/fact_dependency(:source/RepositoryProvider, [nothing, nothing])]
-  dependencies = [@dependencies, ui/fact_dependency(:source/Revision, [nothing])]
-  dependencies = [@dependencies, ui/fact_dependency(:source/RevisionOf, [nothing, nothing])]
-  dependencies = [@dependencies, ui/fact_dependency(:source/RevisionKind, [nothing, nothing])]
-  dependencies = [@dependencies, ui/fact_dependency(:source/RevisionLabel, [nothing, nothing])]
+  dependencies = [@dependencies, ui/fact_dependency(:ui/View, [some(view)])]
+  dependencies = [@dependencies, ui/fact_dependency(:session/Actor, [some(endpoint), none])]
+  dependencies = [@dependencies, ui/fact_dependency(:session/Inspect, [some(endpoint), none])]
+  dependencies = [@dependencies, ui/fact_dependency(:session/InspectPulse, [some(endpoint), none])]
+  dependencies = [@dependencies, ui/fact_dependency(:session/TranscriptLimit, [some(endpoint), none])]
+  dependencies = [@dependencies, ui/fact_dependency(:session/CommandDraft, [some(endpoint), none])]
+  dependencies = [@dependencies, ui/fact_dependency(:session/ObjectBrowserQuery, [some(endpoint), none])]
+  dependencies = [@dependencies, ui/fact_dependency(:session/IsStreaming, [some(endpoint), none])]
+  dependencies = [@dependencies, ui/fact_dependency(:session/LoopPhase, [some(endpoint), none])]
+  dependencies = [@dependencies, ui/fact_dependency(:session/SteeringQueue, [some(endpoint), none])]
+  dependencies = [@dependencies, ui/fact_dependency(:session/FollowUpQueue, [some(endpoint), none])]
+  dependencies = [@dependencies, ui/fact_dependency(:Delegates, [none, none, none])]
+  dependencies = [@dependencies, ui/fact_dependency(:Name, [none, none])]
+  dependencies = [@dependencies, ui/fact_dependency(:Description, [none, none])]
+  dependencies = [@dependencies, ui/fact_dependency(:Agent, [none])]
+  dependencies = [@dependencies, ui/fact_dependency(:AgentWorkspace, [none, none])]
+  dependencies = [@dependencies, ui/fact_dependency(:AgentModel, [none, none])]
+  dependencies = [@dependencies, ui/fact_dependency(:Workspace, [none])]
+  dependencies = [@dependencies, ui/fact_dependency(:WorkspaceRoot, [none, none])]
+  dependencies = [@dependencies, ui/fact_dependency(:WorkspaceProvider, [none, none])]
+  dependencies = [@dependencies, ui/fact_dependency(:WorkspaceRevision, [none, none])]
+  dependencies = [@dependencies, ui/view_dependency(:TranscriptEntry, [current_binding, none, none, none, none, none])]
+  dependencies = [@dependencies, ui/fact_dependency(:Tool, [none])]
+  dependencies = [@dependencies, ui/fact_dependency(:ToolName, [none, none])]
+  dependencies = [@dependencies, ui/fact_dependency(:ToolDescription, [none, none])]
+  dependencies = [@dependencies, ui/fact_dependency(:ToolParameters, [none, none])]
+  dependencies = [@dependencies, ui/fact_dependency(:ToolEnabled, [none, none])]
+  dependencies = [@dependencies, ui/view_dependency(:TranscriptToolCall, [current_binding, none, none, none, none, none, none])]
+  dependencies = [@dependencies, ui/view_dependency(:TranscriptToolResult, [current_binding, none, none, none, none, none])]
+  dependencies = [@dependencies, ui/fact_dependency(:source/Repository, [none])]
+  dependencies = [@dependencies, ui/fact_dependency(:source/RepositoryName, [none, none])]
+  dependencies = [@dependencies, ui/fact_dependency(:source/RepositoryRoot, [none, none])]
+  dependencies = [@dependencies, ui/fact_dependency(:source/RepositoryProvider, [none, none])]
+  dependencies = [@dependencies, ui/fact_dependency(:source/Revision, [none])]
+  dependencies = [@dependencies, ui/fact_dependency(:source/RevisionOf, [none, none])]
+  dependencies = [@dependencies, ui/fact_dependency(:source/RevisionKind, [none, none])]
+  dependencies = [@dependencies, ui/fact_dependency(:source/RevisionLabel, [none, none])]
   return dependencies
 end
 
 verb sync_view_tree(view)
   let current = ui/current_agent()
-  if ui/View(view) == false || current == nothing
+  if ui/View(view) == false || current == none
     return ui/auth_required_node()
   end
-  let limit = endpoint().session/transcriptLimit
-  if limit == nothing
-    limit = 40
+  let limit = 40
+  let limits = session/TranscriptLimit(endpoint(), ?limit)
+  if limits
+    let exactly {:limit -> configured_limit} = limits
+    limit = configured_limit
   end
   let revision = ui/transcript_cutoff()
   return ui/world_view_node(current, revision, limit)
