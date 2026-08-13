@@ -77,6 +77,17 @@ impl DriverSubscriptionMailbox {
     }
 }
 
+/// An ordered notification from the driver.
+///
+/// Task submission and resumption return their immediate runtime outcome and
+/// also enqueue the corresponding lifecycle event. The return value supports
+/// request/response hosts, while this event stream is the authoritative source
+/// for asynchronous lifecycle changes, effects, and subscription readiness.
+/// Effects committed by a task precede that task's lifecycle event, and
+/// subscription readiness caused by the outcome follows its lifecycle event.
+/// Concurrent producers are ordered by admission to the queue.
+/// Terminal task events and effects are retained until a host drains them;
+/// repeated suspension and subscription-ready notifications may be coalesced.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DriverEvent {
     TaskCompleted {

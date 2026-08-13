@@ -186,7 +186,7 @@ async fn handle_session(
         endpoint,
     ));
     let result = read_datagram_loop(session, &host, endpoint).await;
-    let _ = host.driver.close_endpoint(endpoint);
+    let _ = host.driver.close_endpoint(endpoint).await;
     drop_session_writer(&host, endpoint);
     let _ = match writer.await {
         Ok(result) => result,

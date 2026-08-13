@@ -130,102 +130,92 @@ async fn handle_in_process_connection(
         binding.actor,
         Symbol::intern("http"),
     ) {
-        host.driver.close_endpoint(connection_endpoint);
+        host.driver.close_endpoint(connection_endpoint).await;
         return Err(format_driver_error(&host.driver, error));
     }
-    let _connection_scope = EndpointScope::new(host.clone(), connection_endpoint);
-    let mut codec = HttpCodec::new();
-    loop {
-        let (result, buffer) = stream.read([0u8; 8192]).await.into();
-        let bytes = result.map_err(|error| {
-            crate::metrics::metrics().connection_read_errors.inc();
-            format!("failed to read from connection: {error}")
-        })?;
-        if bytes == 0 {
-            return Ok(());
-        }
-        match codec.decode(&buffer[..bytes]) {
-            Ok(requests) => {
-                for request in requests {
-                    match sync::request_kind(&request) {
-                        Some(SyncRequestKind::EventStream) => {
-                            crate::metrics::metrics()
-                                .requests
-                                .inc(HttpRequestKind::SyncEvents);
-                            return sync::serve_event_stream(stream, host, binding, &request).await;
-                        }
-                        Some(SyncRequestKind::Input) => {
-                            let start = std::time::Instant::now();
-                            let close = request.connection_should_close();
-                            let response =
-                                sync::handle_sync_input_request(&host, &binding, &request, close)
-                                    .await;
-                            record_http_response(
-                                HttpRequestKind::SyncInput,
-                                &request,
-                                &response,
-                                start,
-                            );
-                            write_response(&mut stream, response).await?;
-                            if close {
-                                return Ok(());
-                            }
-                            continue;
-                        }
-                        None => {}
-                    }
-                    let start = std::time::Instant::now();
-                    let close = request.connection_should_close();
-                    let response =
-                        handle_in_process_request(&host, &binding, &request, close).await;
-                    let kind = if request.method == "GET"
-                        && (request.path == "/healthz"
-                            || crate::response::is_sync_client_path(&request.path))
-                    {
-                        HttpRequestKind::Static
-                    } else {
-                        HttpRequestKind::InProcess
-                    };
-                    record_http_response(kind, &request, &response, start);
-                    write_response(&mut stream, response).await?;
-                    if close {
-                        return Ok(());
-                    }
-                }
-            }
-            Err(error) => {
-                let response = error_response(error, true);
-                crate::metrics::metrics()
-                    .requests
-                    .inc(HttpRequestKind::DecodeError);
-                crate::metrics::metrics()
-                    .responses
-                    .inc(crate::metrics::status_class(response.status));
-                crate::metrics::metrics()
-                    .response_body_bytes
-                    .add(response.body.len() as isize);
-                write_response(&mut stream, response).await?;
+    let driver = Arc::clone(&host.driver);
+    let result = async move {
+        let mut codec = HttpCodec::new();
+        loop {
+            let (result, buffer) = stream.read([0u8; 8192]).await.into();
+            let bytes = result.map_err(|error| {
+                crate::metrics::metrics().connection_read_errors.inc();
+                format!("failed to read from connection: {error}")
+            })?;
+            if bytes == 0 {
                 return Ok(());
             }
+            match codec.decode(&buffer[..bytes]) {
+                Ok(requests) => {
+                    for request in requests {
+                        match sync::request_kind(&request) {
+                            Some(SyncRequestKind::EventStream) => {
+                                crate::metrics::metrics()
+                                    .requests
+                                    .inc(HttpRequestKind::SyncEvents);
+                                return sync::serve_event_stream(stream, host, binding, &request)
+                                    .await;
+                            }
+                            Some(SyncRequestKind::Input) => {
+                                let start = std::time::Instant::now();
+                                let close = request.connection_should_close();
+                                let response = sync::handle_sync_input_request(
+                                    &host, &binding, &request, close,
+                                )
+                                .await;
+                                record_http_response(
+                                    HttpRequestKind::SyncInput,
+                                    &request,
+                                    &response,
+                                    start,
+                                );
+                                write_response(&mut stream, response).await?;
+                                if close {
+                                    return Ok(());
+                                }
+                                continue;
+                            }
+                            None => {}
+                        }
+                        let start = std::time::Instant::now();
+                        let close = request.connection_should_close();
+                        let response =
+                            handle_in_process_request(&host, &binding, &request, close).await;
+                        let kind = if request.method == "GET"
+                            && (request.path == "/healthz"
+                                || crate::response::is_sync_client_path(&request.path))
+                        {
+                            HttpRequestKind::Static
+                        } else {
+                            HttpRequestKind::InProcess
+                        };
+                        record_http_response(kind, &request, &response, start);
+                        write_response(&mut stream, response).await?;
+                        if close {
+                            return Ok(());
+                        }
+                    }
+                }
+                Err(error) => {
+                    let response = error_response(error, true);
+                    crate::metrics::metrics()
+                        .requests
+                        .inc(HttpRequestKind::DecodeError);
+                    crate::metrics::metrics()
+                        .responses
+                        .inc(crate::metrics::status_class(response.status));
+                    crate::metrics::metrics()
+                        .response_body_bytes
+                        .add(response.body.len() as isize);
+                    write_response(&mut stream, response).await?;
+                    return Ok(());
+                }
+            }
         }
     }
-}
-
-struct EndpointScope {
-    host: Arc<InProcessWebHost>,
-    endpoint: mica_var::Identity,
-}
-
-impl EndpointScope {
-    fn new(host: Arc<InProcessWebHost>, endpoint: mica_var::Identity) -> Self {
-        Self { host, endpoint }
-    }
-}
-
-impl Drop for EndpointScope {
-    fn drop(&mut self) {
-        self.host.driver.close_endpoint(self.endpoint);
-    }
+    .await;
+    driver.close_endpoint(connection_endpoint).await;
+    result
 }
 
 async fn write_response(stream: &mut TcpStream, response: HttpResponse) -> Result<(), String> {

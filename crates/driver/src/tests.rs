@@ -1935,7 +1935,7 @@ fn driver_stops_routing_after_endpoint_close() {
         driver
             .open_endpoint(endpoint, Some(alice), Symbol::intern("telnet"))
             .unwrap();
-        let report = driver.close_endpoint(endpoint);
+        let report = driver.close_endpoint(endpoint).await;
         assert_eq!(report.relation_changes, 4);
         assert!(report.cancelled_tasks.is_empty());
 
@@ -1998,7 +1998,7 @@ fn driver_routes_actor_effects_to_open_endpoints_after_setup() {
                     && effect.target == endpoint
                     && effect.value == Value::string("hello")
         )));
-        assert_eq!(driver.close_endpoint(endpoint).relation_changes, 4);
+        assert_eq!(driver.close_endpoint(endpoint).await.relation_changes, 4);
     });
 }
 
@@ -2017,7 +2017,7 @@ fn endpoint_close_cancels_suspended_tasks() {
             .unwrap();
         assert!(matches!(submitted.outcome, TaskOutcome::Suspended { .. }));
 
-        let report = driver.close_endpoint(endpoint);
+        let report = driver.close_endpoint(endpoint).await;
 
         assert_eq!(report.relation_changes, 3);
         assert_eq!(report.cancelled_tasks, vec![submitted.task_id]);
@@ -2047,7 +2047,7 @@ fn explicit_cancellation_stops_timed_resume() {
             .unwrap();
         assert!(matches!(submitted.outcome, TaskOutcome::Suspended { .. }));
 
-        driver.cancel_task(submitted.task_id).unwrap();
+        driver.cancel_task(submitted.task_id).await.unwrap();
         compio::time::sleep(Duration::from_millis(20)).await;
 
         let events = driver.drain_events();
@@ -2062,6 +2062,39 @@ fn explicit_cancellation_stops_timed_resume() {
             DriverEvent::TaskCompleted { task_id, .. } | DriverEvent::TaskFailed { task_id, .. }
                 if *task_id == submitted.task_id
         )));
+    });
+}
+
+#[test]
+fn event_queue_backpressures_producers_without_losing_terminal_events() {
+    compio::runtime::Runtime::new().unwrap().block_on(async {
+        let driver =
+            CompioTaskDriver::spawn_with_workers(SourceRunner::new_empty(), TEST_WORKERS).unwrap();
+        driver.set_event_capacity(NonZeroUsize::new(1).unwrap());
+
+        let first = driver
+            .submit_source(endpoint(43), root_source("return 1"))
+            .await
+            .unwrap();
+        let second_driver = driver.clone();
+        let second = compio::runtime::spawn(async move {
+            second_driver
+                .submit_source(endpoint(43), root_source("return 2"))
+                .await
+        });
+        compio::time::sleep(Duration::from_millis(10)).await;
+
+        assert!(!second.is_finished());
+        assert!(matches!(
+            driver.drain_events().as_slice(),
+            [DriverEvent::TaskCompleted { task_id, .. }] if *task_id == first.task_id
+        ));
+
+        let second = second.await.unwrap().unwrap();
+        assert!(matches!(
+            driver.drain_events().as_slice(),
+            [DriverEvent::TaskCompleted { task_id, .. }] if *task_id == second.task_id
+        ));
     });
 }
 

@@ -55,26 +55,30 @@ impl RequestFactScope {
         }
     }
 
-    fn close(mut self) -> Result<usize, DriverError> {
-        self.cleanup()
-    }
-
-    fn cleanup(&mut self) -> Result<usize, DriverError> {
+    async fn close(mut self) -> Result<usize, DriverError> {
         let Some(tuples) = self.tuples.take() else {
             return Ok(0);
         };
         self.driver
             .close_endpoint_and_retract_volatile_tuples_named(self.endpoint, tuples)
+            .await
             .map(|report| report.relation_changes)
     }
 }
 
 impl Drop for RequestFactScope {
     fn drop(&mut self) {
-        if let Err(error) = self.cleanup() {
+        let Some(tuples) = self.tuples.take() else {
+            return;
+        };
+        if let Err(error) = self
+            .driver
+            .inner_runner()
+            .close_endpoint_and_retract_volatile_tuples_named(self.endpoint, tuples)
+        {
             tracing::warn!(
                 endpoint = self.endpoint.raw(),
-                error = %self.driver.format_error(&error),
+                error = %self.driver.inner_runner().render_source_task_error(&error),
                 "failed to clean up volatile request facts"
             );
         }
@@ -239,7 +243,7 @@ pub(crate) async fn handle_in_process_request(
             vec![(Symbol::intern("request"), Value::identity(request_id))],
         )
         .await;
-    if let Err(error) = request_scope.close() {
+    if let Err(error) = request_scope.close().await {
         return internal_error_response(format_driver_error(&host.driver, error), close);
     }
 

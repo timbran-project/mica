@@ -143,7 +143,7 @@ async fn run() -> Result<(), String> {
             let source_name = file.display().to_string();
             let report = submit_cli_source(&session, &cli, source, Some(&source_name)).await?;
             print_report_and_follow(&session.driver, report).await;
-            let _ = session.driver.close_endpoint(session.endpoint);
+            let _ = session.driver.close_endpoint(session.endpoint).await;
             Ok(())
         }
         Command::Filein {
@@ -212,7 +212,7 @@ async fn run() -> Result<(), String> {
             let session = open_cli_session_with_fileins(&cli, Symbol::intern("cli"), filein)?;
             let report = submit_cli_source(&session, &cli, source, Some("<eval>")).await?;
             print_report_and_follow(&session.driver, report).await;
-            let _ = session.driver.close_endpoint(session.endpoint);
+            let _ = session.driver.close_endpoint(session.endpoint).await;
             Ok(())
         }
         Command::SourceIndex { root, output } => {
@@ -374,7 +374,7 @@ async fn repl(cli: &Cli) -> Result<(), String> {
         DefaultEditor::new().map_err(|error| format!("failed to initialize repl: {error}"))?;
     let session = open_cli_session(cli, Symbol::intern("repl"))?;
     let result = repl_loop(cli, &session, &mut editor).await;
-    let _ = session.driver.close_endpoint(session.endpoint);
+    let _ = session.driver.close_endpoint(session.endpoint).await;
     result
 }
 

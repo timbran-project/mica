@@ -392,20 +392,21 @@ pub(crate) async fn handle_sync_input_request(
             let session_id = envelope.session_id;
             let view_id = envelope.view_id;
             let kind = envelope.kind;
-            let session = match ensure_session(host, binding, envelope.session_id, actor_override) {
-                Ok(session) => session,
-                Err(error) => {
-                    tracing::error!(
-                        target: "mica_web_host::sync",
-                        session_id,
-                        view_id,
-                        kind = ?kind,
-                        error = %error,
-                        "sync input failed"
-                    );
-                    return internal_error_response(error, close);
-                }
-            };
+            let session =
+                match ensure_session(host, binding, envelope.session_id, actor_override).await {
+                    Ok(session) => session,
+                    Err(error) => {
+                        tracing::error!(
+                            target: "mica_web_host::sync",
+                            session_id,
+                            view_id,
+                            kind = ?kind,
+                            error = %error,
+                            "sync input failed"
+                        );
+                        return internal_error_response(error, close);
+                    }
+                };
             if let Err(error) = route_sync_envelope(host, &session, envelope).await {
                 tracing::error!(
                     target: "mica_web_host::sync",
@@ -424,22 +425,23 @@ pub(crate) async fn handle_sync_input_request(
             let event_name = event.event.clone();
             let action = event.action.clone();
             let target = event.target.clone();
-            let session = match ensure_session(host, binding, event.session_id, actor_override) {
-                Ok(session) => session,
-                Err(error) => {
-                    tracing::error!(
-                        target: "mica_web_host::sync",
-                        session_id,
-                        view_id,
-                        event = %event_name,
-                        action = %action,
-                        target = %target,
-                        error = %error,
-                        "sync DOM input failed"
-                    );
-                    return internal_error_response(error, close);
-                }
-            };
+            let session =
+                match ensure_session(host, binding, event.session_id, actor_override).await {
+                    Ok(session) => session,
+                    Err(error) => {
+                        tracing::error!(
+                            target: "mica_web_host::sync",
+                            session_id,
+                            view_id,
+                            event = %event_name,
+                            action = %action,
+                            target = %target,
+                            error = %error,
+                            "sync DOM input failed"
+                        );
+                        return internal_error_response(error, close);
+                    }
+                };
             if let Err(error) = route_dom_event(host, &session, event).await {
                 tracing::error!(
                     target: "mica_web_host::sync",
@@ -512,7 +514,7 @@ pub(crate) async fn serve_event_stream(
     };
 
     let session_id = session_id_from_stream_request(request)?;
-    let session = ensure_session(&host, &binding, session_id, actor_override)?;
+    let session = ensure_session(&host, &binding, session_id, actor_override).await?;
     submit_optional_sync_lifecycle(&host, &session, "sync_stream_opened").await?;
     write_event_stream_headers(&mut stream).await?;
     write_event_chunk(&mut stream, b": connected\n\n").await?;
@@ -734,7 +736,7 @@ async fn reinstall_view_subscriptions(
     result
 }
 
-fn ensure_session(
+async fn ensure_session(
     host: &InProcessWebHost,
     binding: &RequestBinding,
     session_id: u64,
@@ -759,15 +761,21 @@ fn ensure_session(
         .map_err(|error| format_driver_error(&host.driver, error))?;
 
     let session = SyncSession::new(session_id, endpoint, effective_actor);
-    let mut sessions = host.sync.sessions.lock().unwrap();
-    if let Some(existing) = sessions.get(&session_id).cloned() {
-        host.driver.close_endpoint(endpoint);
+    let existing = {
+        let mut sessions = host.sync.sessions.lock().unwrap();
+        let existing = sessions.get(&session_id).cloned();
+        if existing.is_none() {
+            sessions.insert(session_id, session.clone());
+        }
+        existing
+    };
+    if let Some(existing) = existing {
+        host.driver.close_endpoint(endpoint).await;
         if effective_actor.is_some() && existing.actor != effective_actor {
             return Err("session belongs to a different actor".to_owned());
         }
         return Ok(existing);
     }
-    sessions.insert(session_id, session.clone());
     Ok(session)
 }
 

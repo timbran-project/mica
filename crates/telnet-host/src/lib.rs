@@ -333,7 +333,7 @@ async fn handle_connection(
     )?;
 
     let result = read_socket_loop(read_half, &host, endpoint, &actor.name).await;
-    let _ = host.driver.close_endpoint(endpoint);
+    let _ = host.driver.close_endpoint(endpoint).await;
     drop_socket_writer(&host, endpoint);
     let _ = match writer.await {
         Ok(result) => result,
@@ -974,7 +974,9 @@ mod tests {
         flush_routed_effects(&host);
 
         assert_eq!(output.try_recv().unwrap(), "hello");
-        let _ = host.driver.close_endpoint(endpoint);
+        compio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(host.driver.close_endpoint(endpoint));
     }
 
     #[test]
@@ -1062,7 +1064,7 @@ mod tests {
 
             let line = output.try_recv().unwrap();
             assert_eq!(line, "I do not understand that.");
-            let _ = host.driver.close_endpoint(endpoint);
+            let _ = host.driver.close_endpoint(endpoint).await;
         });
     }
 
@@ -1089,7 +1091,7 @@ mod tests {
                 outcomes.as_slice(),
                 [TaskOutcome::Complete { value, .. }] if *value == Value::string("look")
             ));
-            let _ = host.driver.close_endpoint(endpoint);
+            let _ = host.driver.close_endpoint(endpoint).await;
         });
     }
 }

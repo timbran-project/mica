@@ -133,7 +133,7 @@ impl RpcHandler {
             HostMessage::CloseEndpoint {
                 request_id,
                 endpoint,
-            } => self.close_endpoint(&peer, request_id, endpoint),
+            } => self.close_endpoint(&peer, request_id, endpoint).await,
             HostMessage::ResolveIdentity { request_id, name } => {
                 self.resolve_identity(request_id, name)
             }
@@ -214,7 +214,7 @@ impl RpcHandler {
         }
     }
 
-    fn close_endpoint(
+    async fn close_endpoint(
         &mut self,
         peer: &PeerId,
         request_id: u64,
@@ -227,7 +227,7 @@ impl RpcHandler {
                 "endpoint is not open",
             )];
         }
-        let closed = self.driver.close_endpoint(endpoint);
+        let closed = self.driver.close_endpoint(endpoint).await;
         self.endpoints.remove(&endpoint);
         vec![
             HostMessage::EndpointClosed {
