@@ -26,8 +26,8 @@ manifest.
 ## Ownership model
 
 A host constructs one process-long `DriverOwner` with an explicit `DriverResources` policy. The
-owner is not cloneable and has sole authority to take the event pump and perform final shutdown.
-It owns:
+owner is not cloneable and has sole authority to take the event pump and perform final shutdown. It
+owns:
 
 - a Compio dispatcher and its configured worker threads for synchronous runtime work;
 - admission budgets for dispatched work, parallel relation execution, and external requests;
@@ -36,30 +36,29 @@ It owns:
 - the selected in-memory or Fjall relation store.
 
 A cloneable `DriverClient` provides process services such as endpoint creation and name lookup, but
-cannot consume events or shut down the process. Driver asynchronous methods and internal workers
-run on the embedding application's Compio executor. The host therefore keeps its Compio runtime
-alive until `DriverOwner::shutdown` completes.
+cannot consume events or shut down the process. Driver asynchronous methods and internal workers run
+on the embedding application's Compio executor. The host therefore keeps its Compio runtime alive
+until `DriverOwner::shutdown` completes.
 
-`DriverClient::allocate_ephemeral_identity` is the single allocator for endpoint, request, and
-other process-local identities in Mica's reserved host range. Identities in that range must be
-allocated by the same driver before they are used to open an endpoint. The allocation count is
-bounded by `DriverResources::ephemeral_identity_capacity` and exposed in the resource snapshot;
-protocol-owned identities outside the reserved range remain valid.
+`DriverClient::allocate_ephemeral_identity` is the single allocator for endpoint, request, and other
+process-local identities in Mica's reserved host range. Identities in that range must be allocated
+by the same driver before they are used to open an endpoint. The allocation count is bounded by
+`DriverResources::ephemeral_identity_capacity` and exposed in the resource snapshot; protocol-owned
+identities outside the reserved range remain valid.
 
 An `EndpointSession` is the lifetime boundary for a session or native client. The driver owns its
 endpoint context, invocations, input, subscriptions, cancellation, and named volatile fact scopes.
-Closing
-it rejects further submissions, waits for admitted endpoint operations to reach a stable outcome,
-cancels its suspended tasks and external work, removes its subscriptions, and retracts its scoped
-volatile relations. `replace_volatile_scope` performs a validated atomic relation transaction,
-allowing a host to reconcile one complete endpoint-owned fact set without exposing an intermediate
-state.
+Closing it rejects further submissions, waits for admitted endpoint operations to reach a stable
+outcome, cancels its suspended tasks and external work, removes its subscriptions, and retracts its
+scoped volatile relations. `replace_volatile_scope` performs a validated atomic relation
+transaction, allowing a host to reconcile one complete endpoint-owned fact set without exposing an
+intermediate state.
 
 An `InvocationHandle` carries the task ID, selector, endpoint context, cancellation, initial report,
 and independently awaitable terminal outcome. A host either awaits it, registers it with
 `DriverEventRouter::watch_invocation`, or explicitly calls `detach` to transfer it to the background
-event stream. There is no second implicit terminal-event path competing with the handle.
-The unique, non-cloneable `DriverEventPump` preserves ordered effects and subscription readiness.
+event stream. There is no second implicit terminal-event path competing with the handle. The unique,
+non-cloneable `DriverEventPump` preserves ordered effects and subscription readiness.
 `drive_invocation`, endpoint close, and owner shutdown drive that same pump while awaiting their
 result, so a saturated bounded event queue cannot deadlock control flow. A multi-host process can
 run the pump through `DriverEventRouter`; each registered handler has an ordered bounded queue and a

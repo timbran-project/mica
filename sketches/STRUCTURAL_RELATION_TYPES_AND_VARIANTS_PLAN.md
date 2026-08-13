@@ -1,7 +1,6 @@
 # Structural Relation Types, Variants, Option, And Result
 
-Date: 2026-07-15
-Revised: 2026-08-13
+Date: 2026-07-15 Revised: 2026-08-13
 
 ## Status
 
@@ -360,13 +359,13 @@ model. No compatibility constraint requires retaining them.
 
 The replacement model is:
 
-| Meaning | Language result | Runtime relation representation |
-| --- | --- | --- |
-| No meaningful result | `()` with static type `unit` | `[] {[]}` |
-| Expected absence | `none` / `some(value)` with type `option<T>` | zero or one `:value` row |
-| Recoverable failure | `ok(value)` / `err(error)` with type `result<T>` | one discriminated row |
-| Violated operation contract | raised structured error | existing error control flow |
-| An actually empty relation | `[] {}` | zero-column, zero-row relation |
+| Meaning                     | Language result                                  | Runtime relation representation |
+| --------------------------- | ------------------------------------------------ | ------------------------------- |
+| No meaningful result        | `()` with static type `unit`                     | `[] {[]}`                       |
+| Expected absence            | `none` / `some(value)` with type `option<T>`     | zero or one `:value` row        |
+| Recoverable failure         | `ok(value)` / `err(error)` with type `result<T>` | one discriminated row           |
+| Violated operation contract | raised structured error                          | existing error control flow     |
+| An actually empty relation  | `[] {}`                                          | zero-column, zero-row relation  |
 
 These meanings must not implicitly convert into one another. In particular, `[] {}` is not unit,
 none, null, false, failure, an omitted argument, or a missing field merely because it is falsey.
@@ -391,8 +390,8 @@ may show the expanded literal when shape detail matters.
 ### Remove `nothing`
 
 Remove `nothing` from source syntax and stop rendering `[] {}` as `nothing`. Rename internal helpers
-such as `Value::nothing` to describe the representation, for example `Value::empty_relation`, so
-new runtime code does not accidentally recreate sentinel semantics.
+such as `Value::nothing` to describe the representation, for example `Value::empty_relation`, so new
+runtime code does not accidentally recreate sentinel semantics.
 
 This is an intentional breaking change. Do not retain `nothing` as an alias for `[] {}`, `none`, or
 `()`. Authors who genuinely need the zero-column empty relation can write `[] {}`. Existing uses
@@ -525,9 +524,9 @@ Option and result values are already serializable by the Mica value codec becaus
 values. They can cross task, RPC, and IPC boundaries and can be persisted when their cells are
 persistable.
 
-Do not automatically map `option<T>` to JSON `null`. Remove the current implicit mapping between
-the zero-column empty relation and JSON `null`; it is another instance of the sentinel problem.
-JSON APIs should use an explicit tagged representation or explicit conversion helpers so `none`,
+Do not automatically map `option<T>` to JSON `null`. Remove the current implicit mapping between the
+zero-column empty relation and JSON `null`; it is another instance of the sentinel problem. JSON
+APIs should use an explicit tagged representation or explicit conversion helpers so `none`,
 `some(())`, an empty relation payload, and nested options remain distinguishable.
 
 ## Matching, Unwrapping, And Propagation
@@ -692,11 +691,11 @@ end
 
 This gives query code three visibly different cardinality contracts:
 
-| Form | Accepted rows | Binding lifetime | Zero rows | Multiple rows |
-| --- | ---: | --- | --- | --- |
-| `let exactly PATTERN = Query(...)` | exactly 1 | enclosing block | raise `E_CARDINALITY` | raise `E_CARDINALITY` |
-| `if let PATTERN = Query(...)` | 0..1 | selected branch | take `else` | raise `E_CARDINALITY` |
-| `for PATTERN in Query(...)` | 0..* | one iteration | no iterations | iterate every row |
+| Form                               | Accepted rows | Binding lifetime | Zero rows             | Multiple rows         |
+| ---------------------------------- | ------------: | ---------------- | --------------------- | --------------------- |
+| `let exactly PATTERN = Query(...)` |     exactly 1 | enclosing block  | raise `E_CARDINALITY` | raise `E_CARDINALITY` |
+| `if let PATTERN = Query(...)`      |          0..1 | selected branch  | take `else`           | raise `E_CARDINALITY` |
+| `for PATTERN in Query(...)`        |          0..* | one iteration    | no iterations         | iterate every row     |
 
 The cardinality error should retain the query result and report expected and actual row counts. A
 more specific diagnostic may distinguish missing and ambiguous results, but the language construct
@@ -740,25 +739,25 @@ as a compatibility surface.
 
 ### Binding harmony has a boundary
 
-Scatter binding and structural relation-row binding should be members of one lexical `Pattern`
-model because both destructure a produced value and introduce scoped locals. Match cases should use
-that model too.
+Scatter binding and structural relation-row binding should be members of one lexical `Pattern` model
+because both destructure a produced value and introduce scoped locals. Match cases should use that
+model too.
 
 Rule variables should not be forced into the lexical pattern model. A rule describes a set of
 logical bindings shared across order-independent atoms; it is not assignment in source order.
-Task-code `?name` and rule variables should nevertheless have one documented logical-variable
-model, even if their contextual spelling differs.
+Task-code `?name` and rule variables should nevertheless have one documented logical-variable model,
+even if their contextual spelling differs.
 
 Verb role restrictions should also remain separate. `actor @ #reviewer` participates in method
 applicability and specificity before the body runs; it does not destructure an argument. Reusing a
 single internal or surface "matcher" for row patterns, rule unification, and verb dispatch would
 hide materially different semantics.
 
-There is still a punctuation audit to perform. `?` currently means both a task query variable and
-an optional parameter or scatter part. `@` means rest/splice in value syntax but prototype
-restriction in a verb parameter. These uses are contextually parseable, but parseability alone is
-not enough: the syntax prototype must test whether readers can predict each meaning without
-remembering which compiler subsystem owns the construct.
+There is still a punctuation audit to perform. `?` currently means both a task query variable and an
+optional parameter or scatter part. `@` means rest/splice in value syntax but prototype restriction
+in a verb parameter. These uses are contextually parseable, but parseability alone is not enough:
+the syntax prototype must test whether readers can predict each meaning without remembering which
+compiler subsystem owns the construct.
 
 ### Functional dot reads are strict
 
@@ -1254,8 +1253,8 @@ feat(compiler): add structural type aliases
 - Add the chosen standard constructors with exact structural result facts.
 - Add literal rendering and codec round-trip tests, relying on existing relation encoding.
 - Add explicit conversion helpers at JSON boundaries rather than implicit `null` coercion.
-- Publish exact structural result facts for the unit-, option-, and result-returning APIs selected by
-  the Stage 0 audit.
+- Publish exact structural result facts for the unit-, option-, and result-returning APIs selected
+  by the Stage 0 audit.
 
 Verification:
 
@@ -1457,8 +1456,8 @@ Proceed to general scalar replacement when:
 ## Provisional Recommendation
 
 Begin with the Stage 0 grammar, absence classification, and representation experiment. Validate
-`()`, the common pattern grammar, and relation cardinality at ordinary binding sites as one
-coherent surface, then implement the compiler-owned structural type core without changing runtime
+`()`, the common pattern grammar, and relation cardinality at ordinary binding sites as one coherent
+surface, then implement the compiler-owned structural type core without changing runtime
 representation. Remove `one` and `nothing` only as part of the typed migration that supplies unit,
 option/result matching, strict operations, and explicit empty relations; do not replace them with a
 differently spelled universal sentinel.

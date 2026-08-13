@@ -29,13 +29,13 @@ preserves them, and replacing their source unit updates the compiler context.
 
 Four superficially similar values have deliberately different meanings:
 
-| Meaning | Source form | Structural shape |
-| --- | --- | --- |
-| completed with no payload | `()` | zero columns, exactly one row |
-| expected absence | `none` | `option<T>` with zero rows |
-| successful optional value | `some(value)` | `option<T>` with one `:value` row |
-| recoverable outcome | `ok(value)` or `err(problem)` | one discriminated `result<T>` row |
-| an actual empty relation | `[] {}` | zero columns, zero rows |
+| Meaning                   | Source form                   | Structural shape                  |
+| ------------------------- | ----------------------------- | --------------------------------- |
+| completed with no payload | `()`                          | zero columns, exactly one row     |
+| expected absence          | `none`                        | `option<T>` with zero rows        |
+| successful optional value | `some(value)`                 | `option<T>` with one `:value` row |
+| recoverable outcome       | `ok(value)` or `err(problem)` | one discriminated `result<T>` row |
+| an actual empty relation  | `[] {}`                       | zero columns, zero rows           |
 
 The standard aliases are equivalent to:
 
@@ -117,12 +117,12 @@ end
 ```
 
 `let exactly` requires exactly one row. `if let` accepts zero or one row and takes its `else` branch
-for zero. Either raises `E_CARDINALITY` for excess rows. `for` accepts any cardinality and binds once
-per row.
+for zero. Either raises `E_CARDINALITY` for excess rows. `for` accepts any cardinality and binds
+once per row.
 
 Functional dot reads are strict: a missing or ambiguous value raises `E_CARDINALITY`. Use an
-optional query binding when absence is expected. List and map indexing is likewise strict and
-raises `E_INDEX`; use `index_or(collection, index, fallback)` when a fallback is part of the API.
+optional query binding when absence is expected. List and map indexing is likewise strict and raises
+`E_INDEX`; use `index_or(collection, index, fallback)` when a fallback is part of the API.
 
 ## JSON Boundaries
 

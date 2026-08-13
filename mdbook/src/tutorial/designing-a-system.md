@@ -63,8 +63,8 @@ make_relation(:InspectionFinding, 3)
 
 An active HTTP request may be volatile; an inspection record should be durable.
 
-Do not declare a functional relation merely to make exact binding or dot syntax convenient. The key should
-express a real invariant.
+Do not declare a functional relation merely to make exact binding or dot syntax convenient. The key
+should express a real invariant.
 
 ## 4. Separate Causes from Conclusions
 

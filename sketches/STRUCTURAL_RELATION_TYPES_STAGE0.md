@@ -5,8 +5,8 @@ Date: 2026-08-13
 ## Outcome
 
 Proceed with structural relation types independently of optimization. The grammar probe found no
-unresolved parser collision, and the representation benchmark found a large enough local cost gap
-to retain scalar replacement as a later measured optimization. Correctness continues to use ordinary
+unresolved parser collision, and the representation benchmark found a large enough local cost gap to
+retain scalar replacement as a later measured optimization. Correctness continues to use ordinary
 relation values at observable boundaries.
 
 This document records the Stage 0 baseline. Stages 1–8 subsequently made structural types, row
@@ -79,18 +79,18 @@ The tool masks filein-only `grant` blocks while preserving byte positions, then 
 file. Its 630 `nothing` literals exactly match the textual token count and it reports no parse
 errors.
 
-| Parsed surface | Count | Migration class |
-| --- | ---: | --- |
-| `nothing` in equality tests | 329 | `option<T>` presence tests |
-| `nothing` stored in lists, maps, or relation cells | 158 | typed option fields, except explicitly relational empty inputs |
-| `nothing` passed as a call argument | 96 | explicit option arguments or an explicit `[] {}` where the API is relational |
-| `return nothing` | 32 | unit, option, or result according to the enclosing API contract |
-| local initialized or assigned to `nothing` | 15 | `none` with a type inferred from later assignments |
-| query-shaped `one` | 76 | 57 optional bindings and 19 exact bindings |
-| functional dot reads | 188 | strict scalar reads; optional code uses `if let` over the relation query |
-| index operations | 339 | strict indexing; callers needing absence use `get` or `get_or` |
-| existing `for` bindings | 135 | structural row bindings for relations; ordinary element patterns otherwise |
-| bare returns | 0 | future bare returns still become unit |
+| Parsed surface                                     | Count | Migration class                                                              |
+| -------------------------------------------------- | ----: | ---------------------------------------------------------------------------- |
+| `nothing` in equality tests                        |   329 | `option<T>` presence tests                                                   |
+| `nothing` stored in lists, maps, or relation cells |   158 | typed option fields, except explicitly relational empty inputs               |
+| `nothing` passed as a call argument                |    96 | explicit option arguments or an explicit `[] {}` where the API is relational |
+| `return nothing`                                   |    32 | unit, option, or result according to the enclosing API contract              |
+| local initialized or assigned to `nothing`         |    15 | `none` with a type inferred from later assignments                           |
+| query-shaped `one`                                 |    76 | 57 optional bindings and 19 exact bindings                                   |
+| functional dot reads                               |   188 | strict scalar reads; optional code uses `if let` over the relation query     |
+| index operations                                   |   339 | strict indexing; callers needing absence use `get` or `get_or`               |
+| existing `for` bindings                            |   135 | structural row bindings for relations; ordinary element patterns otherwise   |
+| bare returns                                       |     0 | future bare returns still become unit                                        |
 
 The `one` split was reviewed by use: 52 expressions or their bindings are compared directly with
 `nothing`, two participate in explicit fallback assignment, and three are returned from
@@ -103,20 +103,20 @@ replacement. No application use remains classified as a universal sentinel.
 
 Every internal empty-relation use falls into one of these migration groups:
 
-| Current use | Locations | Required replacement |
-| --- | --- | --- |
-| Immediate zero word, relation codec, hashing, ordering, and actual empty relations | `mica-var`, program value codec | retain the representation and rename APIs to `empty_relation` |
-| VM register initialization and compiler scratch operands | compiler, VM, Cranelift helpers and tests | internal placeholder; never expose it as absence or unit |
-| Missing functional scan result | `Opcode::ScanValue` | raise `E_CARDINALITY`; optional queries use row binding |
-| `one` extraction and ambiguity | compiler and VM | remove the opcode and use exact/optional row binding |
-| Collection iteration end markers | VM collection key/value helpers | keep internal iteration state out of source value semantics |
-| Missing error message/value | VM error-field access, reports, task maps | typed options |
-| Missing actor, principal, task value, task error, dependency relation, or subscription cursor | runtime, driver, host protocol, auth, source provider | typed options at the boundary |
-| Empty dispatch restriction and frob-only marker | relation-kernel dispatch facts | explicit restriction alternative; preserve durable meaning during migration |
-| Resume-without-value and input metadata omission | task manager and driver | unit for no result, option for omitted metadata |
-| JSON `null` | runtime JSON decoder and HTTP adapters | explicit tagged conversion helpers; no implicit relation conversion |
-| Empty HTTP/browser response | browser and web host | unit or an explicit host-protocol response alternative |
-| Tests, fuzz seeds, and benchmarks | all crates | migrate with the production surface they exercise |
+| Current use                                                                                   | Locations                                             | Required replacement                                                        |
+| --------------------------------------------------------------------------------------------- | ----------------------------------------------------- | --------------------------------------------------------------------------- |
+| Immediate zero word, relation codec, hashing, ordering, and actual empty relations            | `mica-var`, program value codec                       | retain the representation and rename APIs to `empty_relation`               |
+| VM register initialization and compiler scratch operands                                      | compiler, VM, Cranelift helpers and tests             | internal placeholder; never expose it as absence or unit                    |
+| Missing functional scan result                                                                | `Opcode::ScanValue`                                   | raise `E_CARDINALITY`; optional queries use row binding                     |
+| `one` extraction and ambiguity                                                                | compiler and VM                                       | remove the opcode and use exact/optional row binding                        |
+| Collection iteration end markers                                                              | VM collection key/value helpers                       | keep internal iteration state out of source value semantics                 |
+| Missing error message/value                                                                   | VM error-field access, reports, task maps             | typed options                                                               |
+| Missing actor, principal, task value, task error, dependency relation, or subscription cursor | runtime, driver, host protocol, auth, source provider | typed options at the boundary                                               |
+| Empty dispatch restriction and frob-only marker                                               | relation-kernel dispatch facts                        | explicit restriction alternative; preserve durable meaning during migration |
+| Resume-without-value and input metadata omission                                              | task manager and driver                               | unit for no result, option for omitted metadata                             |
+| JSON `null`                                                                                   | runtime JSON decoder and HTTP adapters                | explicit tagged conversion helpers; no implicit relation conversion         |
+| Empty HTTP/browser response                                                                   | browser and web host                                  | unit or an explicit host-protocol response alternative                      |
+| Tests, fuzz seeds, and benchmarks                                                             | all crates                                            | migrate with the production surface they exercise                           |
 
 The relation codec continues to decode the zero-column empty relation as a real relation value. The
 program artefact codec changes in place when structural descriptors land; no compatibility decoder
@@ -124,18 +124,18 @@ is retained.
 
 ### Builtin contracts
 
-| Builtin/API | Current absence behaviour | Migration |
-| --- | --- | --- |
-| `log`, `mailbox_close`, `cancel_subscription`, `disable_rule` | return empty relation after an effect | return unit |
-| `frob_delegate` | empty relation for a non-frob | raise `E_TYPE` |
-| `from_literal` | empty relation for syntax or unsupported literal | `result<Value>` with a structured parse/type error |
-| `parse_ordinal` | empty relation for invalid text | `result<int>` |
-| `os_getenv` | empty relation for a missing variable | `option<string>` |
-| `actor`, `principal`, and internal context identity lookup | empty relation when unavailable | `option<identity>` where absence is valid |
-| `index_or` | caller-supplied fallback | retain as explicit `get_or`; ordinary indexing stays strict |
-| `subscribe_changes` relation, bindings, and cursor sentinels | empty relation marks omitted fields | typed options or an explicit catalogue subject alternative |
-| error fields and read-only query report fields | empty relation marks omission | typed options |
-| JSON decode | `null` becomes empty relation | reject implicit conversion; use explicit JSON conversion helpers |
+| Builtin/API                                                   | Current absence behaviour                        | Migration                                                        |
+| ------------------------------------------------------------- | ------------------------------------------------ | ---------------------------------------------------------------- |
+| `log`, `mailbox_close`, `cancel_subscription`, `disable_rule` | return empty relation after an effect            | return unit                                                      |
+| `frob_delegate`                                               | empty relation for a non-frob                    | raise `E_TYPE`                                                   |
+| `from_literal`                                                | empty relation for syntax or unsupported literal | `result<Value>` with a structured parse/type error               |
+| `parse_ordinal`                                               | empty relation for invalid text                  | `result<int>`                                                    |
+| `os_getenv`                                                   | empty relation for a missing variable            | `option<string>`                                                 |
+| `actor`, `principal`, and internal context identity lookup    | empty relation when unavailable                  | `option<identity>` where absence is valid                        |
+| `index_or`                                                    | caller-supplied fallback                         | retain as explicit `get_or`; ordinary indexing stays strict      |
+| `subscribe_changes` relation, bindings, and cursor sentinels  | empty relation marks omitted fields              | typed options or an explicit catalogue subject alternative       |
+| error fields and read-only query report fields                | empty relation marks omission                    | typed options                                                    |
+| JSON decode                                                   | `null` becomes empty relation                    | reject implicit conversion; use explicit JSON conversion helpers |
 
 `emit` and `mailbox_send` already return the emitted/sent value and are not unit operations. Parsing
 APIs use result when they can explain failure; absence-only lookup APIs use option.
@@ -154,12 +154,12 @@ and a presence/tag-plus-payload prototype, both serially and with one/four coord
 
 Representative medians:
 
-| Operation | Boxed relation | Components | Relative throughput |
-| --- | ---: | ---: | ---: |
-| construct `some` serial | 140.04 ns | 8.82 ns | 15.9x |
-| construct `ok` serial | 185.65 ns | 8.72 ns | 21.3x |
-| construct `some`, one concurrent worker | 163.44 ns | 31.75 ns | 5.1x |
-| construct `some`, four workers combined | 40.95 ns | 7.93 ns | 5.2x |
+| Operation                               | Boxed relation | Components | Relative throughput |
+| --------------------------------------- | -------------: | ---------: | ------------------: |
+| construct `some` serial                 |      140.04 ns |    8.82 ns |               15.9x |
+| construct `ok` serial                   |      185.65 ns |    8.72 ns |               21.3x |
+| construct `some`, one concurrent worker |      163.44 ns |   31.75 ns |                5.1x |
+| construct `some`, four workers combined |       40.95 ns |    7.93 ns |                5.2x |
 
 The prototype proves that general relation construction dominates this isolated workload. It does
 not prove an end-to-end win or justify a general escape-analysis system by itself. Stage 7 may add
@@ -200,9 +200,9 @@ eliminated paths return the same observable value.
 These results justify retaining canonical construction and local elimination. They do not yet
 justify general JIT escape analysis, side-exit materialization, hidden interpreter registers, or a
 specialized call convention: the benchmark intentionally concentrates constructor-and-match work,
-while no migrated application profile yet identifies a bounded region where those broader
-mechanisms win end to end. Those mechanisms remain deferred until Stage 8 application usage supplies
-that evidence.
+while no migrated application profile yet identifies a bounded region where those broader mechanisms
+win end to end. Those mechanisms remain deferred until Stage 8 application usage supplies that
+evidence.
 
 ## Stage 8 Migration Outcome
 

@@ -65,19 +65,19 @@ rule-disabling operations require administrative authority.
 
 ## Runtime Context, Effects, and Coordination
 
-| Function                                | Result                                   |
-| --------------------------------------- | ---------------------------------------- |
-| `actor()`                               | `option<identity>`                       |
-| `principal()`                           | `option<identity>`                       |
-| `endpoint()`                            | current endpoint identity                |
-| `assume_actor(#actor)`                  | newly bound actor identity               |
-| `emit(target, value)`                   | emitted value                            |
-| `log(message)` / `log(:level, message)` | `()`                                     |
-| `mailbox()`                             | `[receiver, sender]` capabilities        |
-| `mailbox_send(sender, value)`           | sent value                               |
-| `mailbox_close(receiver)`               | `()`                                     |
-| `subscribe_changes(...)`                | subscription capability                  |
-| `cancel_subscription(subscription)`     | `()`                                     |
+| Function                                | Result                            |
+| --------------------------------------- | --------------------------------- |
+| `actor()`                               | `option<identity>`                |
+| `principal()`                           | `option<identity>`                |
+| `endpoint()`                            | current endpoint identity         |
+| `assume_actor(#actor)`                  | newly bound actor identity        |
+| `emit(target, value)`                   | emitted value                     |
+| `log(message)` / `log(:level, message)` | `()`                              |
+| `mailbox()`                             | `[receiver, sender]` capabilities |
+| `mailbox_send(sender, value)`           | sent value                        |
+| `mailbox_close(receiver)`               | `()`                              |
+| `subscribe_changes(...)`                | subscription capability           |
+| `cancel_subscription(subscription)`     | `()`                              |
 
 Log levels are `:trace`, `:debug`, `:info`, `:warn`, and `:error`. Effects and mailbox sends are
 published at commit. Subscriptions are specified in [Subscriptions](../runtime/subscriptions.md).

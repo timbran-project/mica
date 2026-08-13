@@ -115,9 +115,9 @@ The runtime checks read authority from the task's current runtime context. It do
 ordinary argument that merely happens to identify an actor. Authority is refreshed at boundaries;
 loss of permission produces a revocation marker.
 
-Bind every stable column you can. A subscription with `[none, none]` observes the entire
-binary relation and consumes queue capacity for unrelated rows. Bounded delivery prevents a slow
-consumer from growing memory without limit; resynchronization is the explicit recovery path.
+Bind every stable column you can. A subscription with `[none, none]` observes the entire binary
+relation and consumes queue capacity for unrelated rows. Bounded delivery prevents a slow consumer
+from growing memory without limit; resynchronization is the explicit recovery path.
 
 ## Synchronized DOM Views
 
