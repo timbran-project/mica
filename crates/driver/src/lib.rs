@@ -11,11 +11,7 @@
 // You should have received a copy of the GNU Affero General Public License along
 // with this program. If not, see <https://www.gnu.org/licenses/>.
 
-//! Compio-driven task driver for Mica.
-//!
-//! `mica-runtime` exposes a synchronous task manager. This crate schedules that
-//! task-manager work on compio tasks and owns the wake policy for timed
-//! suspensions and endpoint input.
+#![doc = include_str!("../README.md")]
 
 mod affinity;
 mod builder;
@@ -36,6 +32,8 @@ pub use config::{
     DEFAULT_EVENT_QUEUE_CAPACITY, DEFAULT_EXTERNAL_REQUEST_CAPACITY,
     DEFAULT_SUBSCRIPTION_QUEUE_BUDGET, DriverResources, RelationAcceleration,
 };
+#[cfg(feature = "wgpu")]
+pub use mica_relation_wgpu::{WgpuAccelerator, WgpuAcceleratorOptions};
 pub use mica_runtime::{
     AuthorityContext, EPHEMERAL_HOST_IDENTITY_END, EPHEMERAL_HOST_IDENTITY_START, FileinMode,
     FileinReport, ReadOnlySourceQueryOptions, ReadOnlySourceQueryReport, ReadOnlySourceQueryStatus,
@@ -47,6 +45,6 @@ pub use pool::CompioTaskDriver;
 pub use types::{
     DriverError, DriverEvent, DriverSubscriptionMailbox, DriverSubscriptionRequest,
     EndpointCloseReport, ExternalRequestCancellation, ExternalRequestContext,
-    ExternalRequestHandler, ExternalStreamEmitter, ExternalStreamRequestHandler,
-    FileinIncludeLoader, TaskCancellationReason, TaskContext,
+    ExternalRequestFuture, ExternalRequestHandler, ExternalStreamEmitFuture, ExternalStreamEmitter,
+    ExternalStreamRequestHandler, FileinIncludeLoader, TaskCancellationReason, TaskContext,
 };
