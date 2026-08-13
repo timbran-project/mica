@@ -1,3 +1,5 @@
+#![cfg(feature = "source-provider")]
+
 #[cfg(test)]
 mod tests {
     use mica_runtime::{SourceRunner, TaskOutcome};

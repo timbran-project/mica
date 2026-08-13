@@ -22,6 +22,7 @@ use crate::{
 };
 use compio::dispatcher::Dispatcher;
 use compio::runtime::JoinHandle;
+#[cfg(feature = "wgpu")]
 use mica_relation_wgpu::{WgpuAccelerator, WgpuAcceleratorOptions};
 use mica_runtime::{
     AuthorityContext, EPHEMERAL_HOST_IDENTITY_END, EPHEMERAL_HOST_IDENTITY_START, ExecutionContext,
@@ -36,18 +37,23 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::future::Future;
 use std::num::NonZeroUsize;
 use std::pin::Pin;
+#[cfg(feature = "wgpu")]
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
 use std::time::{Duration, Instant};
 
+#[cfg(feature = "wgpu")]
 static RELATION_ACCELERATOR: OnceLock<AutomaticRelationAccelerator> = OnceLock::new();
 
+#[cfg(feature = "wgpu")]
 enum AutomaticRelationAccelerator {
     Enabled(Arc<WgpuAccelerator>),
     Unavailable(String),
 }
 
+#[cfg(feature = "wgpu")]
 fn relation_accelerator() -> &'static AutomaticRelationAccelerator {
     RELATION_ACCELERATOR.get_or_init(|| {
         match WgpuAccelerator::new(WgpuAcceleratorOptions::default()) {
@@ -344,32 +350,45 @@ impl CompioTaskDriver {
                     "relation acceleration configured"
                 );
             }
-            RelationAcceleration::Automatic => match relation_accelerator() {
-                AutomaticRelationAccelerator::Enabled(accelerator) => {
-                    tracing::info!(
-                        enabled = true,
-                        backend = "wgpu",
-                        graphics_api = "Vulkan",
-                        adapter = accelerator.adapter_name(),
-                        buffer_mode = if accelerator.uses_shared_mappable_buffers() {
-                            "shared-mappable"
-                        } else {
-                            "staged-readback"
-                        },
-                        "relation GPU backend configured"
-                    );
-                    execution_context = execution_context.with_accelerator(accelerator.clone());
+            RelationAcceleration::Automatic => {
+                #[cfg(feature = "wgpu")]
+                match relation_accelerator() {
+                    AutomaticRelationAccelerator::Enabled(accelerator) => {
+                        tracing::info!(
+                            enabled = true,
+                            backend = "wgpu",
+                            graphics_api = "Vulkan",
+                            adapter = accelerator.adapter_name(),
+                            buffer_mode = if accelerator.uses_shared_mappable_buffers() {
+                                "shared-mappable"
+                            } else {
+                                "staged-readback"
+                            },
+                            "relation GPU backend configured"
+                        );
+                        execution_context = execution_context.with_accelerator(accelerator.clone());
+                    }
+                    AutomaticRelationAccelerator::Unavailable(reason) => {
+                        tracing::info!(
+                            enabled = false,
+                            backend = "wgpu",
+                            fallback = "CPU",
+                            reason,
+                            "relation GPU backend configured"
+                        );
+                    }
                 }
-                AutomaticRelationAccelerator::Unavailable(reason) => {
+                #[cfg(not(feature = "wgpu"))]
+                {
                     tracing::info!(
                         enabled = false,
-                        backend = "wgpu",
+                        backend = "CPU",
                         fallback = "CPU",
-                        reason,
-                        "relation GPU backend configured"
+                        reason = "mica-driver built without the `wgpu` feature",
+                        "relation acceleration configured"
                     );
                 }
-            },
+            }
             RelationAcceleration::HostProvided(accelerator) => {
                 tracing::info!(
                     enabled = true,

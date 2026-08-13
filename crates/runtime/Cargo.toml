@@ -6,15 +6,21 @@ license.workspace = true
 rust-version.workspace = true
 description = "Live Mica runtime environment"
 
+[features]
+default = ["cranelift", "fjall", "source-provider"]
+cranelift = ["mica-vm/cranelift"]
+fjall = ["mica-relation-kernel/fjall-provider"]
+source-provider = ["dep:mica-source-provider"]
+
 [dependencies]
 base64.workspace = true
 fast-telemetry.workspace = true
 mica-compiler.workspace = true
 mica-host-protocol.workspace = true
-mica-relation-kernel = { workspace = true, features = ["fjall-provider"] }
-mica-source-provider.workspace = true
+mica-relation-kernel.workspace = true
+mica-source-provider = { workspace = true, optional = true }
 mica-var.workspace = true
-mica-vm = { workspace = true, features = ["cranelift"] }
+mica-vm.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
 xml.workspace = true

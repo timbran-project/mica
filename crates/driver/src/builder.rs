@@ -25,6 +25,7 @@ pub enum DriverDurability {
     Relaxed,
 }
 
+#[cfg(feature = "fjall")]
 impl From<DriverDurability> for mica_runtime::FjallDurabilityMode {
     fn from(value: DriverDurability) -> Self {
         match value {
@@ -127,7 +128,18 @@ impl CompioTaskDriverBuilder {
         let mut runner = match self.storage {
             DriverStorage::Memory => SourceRunner::new_empty(),
             DriverStorage::Fjall { path, durability } => {
-                SourceRunner::open_fjall(path, durability.into()).map_err(DriverError::Storage)?
+                #[cfg(feature = "fjall")]
+                {
+                    SourceRunner::open_fjall(path, durability.into())
+                        .map_err(DriverError::Storage)?
+                }
+                #[cfg(not(feature = "fjall"))]
+                {
+                    let _ = (path, durability);
+                    return Err(DriverError::Configuration(
+                        "Fjall storage requires the mica-driver `fjall` feature".to_owned(),
+                    ));
+                }
             }
         };
         for filein in self.initial_fileins {
@@ -202,5 +214,22 @@ mod tests {
             assert!(source.contains("embedded"));
             driver.shutdown().await.unwrap();
         });
+    }
+
+    #[cfg(not(feature = "fjall"))]
+    #[test]
+    fn reports_unavailable_fjall_provider_without_changing_the_api() {
+        let resources = DriverResources::new(NonZeroUsize::new(1).unwrap());
+        let result = CompioTaskDriver::builder(resources)
+            .storage(DriverStorage::Fjall {
+                path: PathBuf::from("unused"),
+                durability: DriverDurability::Strict,
+            })
+            .build();
+
+        assert!(matches!(
+            result,
+            Err(DriverError::Configuration(message)) if message.contains("`fjall` feature")
+        ));
     }
 }

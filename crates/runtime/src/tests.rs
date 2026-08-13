@@ -5191,6 +5191,7 @@ fn runner_failed_filein_include_preserves_source_unit() {
 }
 
 #[test]
+#[cfg(feature = "fjall")]
 fn runner_fjall_filein_replacement_reopens_atomic_state() {
     let path = std::env::temp_dir().join(format!(
         "mica-runtime-fjall-{}-{}",
@@ -5326,6 +5327,7 @@ fn shared_runner_installs_replaces_checks_and_files_out_units() {
 }
 
 #[test]
+#[cfg(feature = "fjall")]
 fn runner_fjall_failed_filein_replacement_reopens_original_state() {
     let path = std::env::temp_dir().join(format!(
         "mica-runtime-fjall-{}-{}",
@@ -5380,6 +5382,7 @@ fn runner_fjall_failed_filein_replacement_reopens_original_state() {
 }
 
 #[test]
+#[cfg(feature = "fjall")]
 fn runner_fjall_store_reopens_state() {
     let path = std::env::temp_dir().join(format!(
         "mica-runtime-fjall-{}-{}",

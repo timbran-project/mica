@@ -40,7 +40,7 @@ mica-host-zmq = { path = "crates/host-zmq" }
 mica-micac = { path = "crates/micac" }
 mica-relation-kernel = { path = "crates/relation-kernel", default-features = false }
 mica-relation-wgpu = { path = "crates/relation-wgpu" }
-mica-runtime = { path = "crates/runtime" }
+mica-runtime = { path = "crates/runtime", default-features = false }
 mica-source-provider = { path = "crates/source-provider" }
 mica-telnet-host = { path = "crates/telnet-host" }
 mica-var = { path = "crates/var" }

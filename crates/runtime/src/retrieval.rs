@@ -25,6 +25,7 @@ const REQUIRED_BOUND_POSITIONS: &[u16] = &[0, 1, 2];
 pub(crate) fn default_computed_relations() -> Vec<Arc<dyn ComputedRelation>> {
     let mut relations = system_computed_relations();
     relations.push(Arc::new(ExactEmbeddingSearchRelation));
+    #[cfg(feature = "source-provider")]
     relations.extend(mica_source_provider::default_computed_relations());
     relations
 }

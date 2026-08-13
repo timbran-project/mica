@@ -27,8 +27,10 @@ mod vm_tests;
 
 pub use embedding::{EmbeddingProvider, EmbeddingProviderKind};
 pub use json::{JsonValueError, float_to_literal, value_from_json_text};
+#[cfg(feature = "fjall")]
+pub use mica_relation_kernel::FjallDurabilityMode;
 pub use mica_relation_kernel::{
-    ExecutionAdmission, ExecutionContext, FjallDurabilityMode, RelationAccelerator, Tuple,
+    ExecutionAdmission, ExecutionContext, RelationAccelerator, Tuple,
     metrics as relation_kernel_metrics,
 };
 pub use mica_vm::metrics as vm_metrics;
@@ -65,13 +67,16 @@ use mica_host_protocol::{
     DomNode, diff_dom_nodes, is_supported_dom_attribute, is_supported_dom_tag,
     snapshot_payload_json, sync_payload_signature,
 };
+#[cfg(feature = "fjall")]
+use mica_relation_kernel::FjallStateProvider;
 use mica_relation_kernel::{
-    ConflictPolicy, DispatchRelations, FjallStateProvider, KernelError, RelationDurability,
-    RelationId, RelationKernel, RelationMetadata, RelationRead, RelationSource, relation_algebra,
+    ConflictPolicy, DispatchRelations, KernelError, RelationDurability, RelationId, RelationKernel,
+    RelationMetadata, RelationRead, RelationSource, relation_algebra,
 };
 use mica_var::{Identity, PRIMITIVE_PROTOTYPES, RelationValue, Symbol, Value, ValueKind};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::BufReader;
+#[cfg(feature = "fjall")]
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -128,6 +133,7 @@ impl SourceRunner {
         )
     }
 
+    #[cfg(feature = "fjall")]
     pub fn open_fjall(
         path: impl AsRef<Path>,
         durability: FjallDurabilityMode,
@@ -139,6 +145,7 @@ impl SourceRunner {
         )
     }
 
+    #[cfg(feature = "fjall")]
     pub fn open_fjall_with_embedding_provider(
         path: impl AsRef<Path>,
         durability: FjallDurabilityMode,
