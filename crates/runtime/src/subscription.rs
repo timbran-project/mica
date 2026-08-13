@@ -152,6 +152,38 @@ impl SubscriptionRuntimeHandle {
         Ok(delivered)
     }
 
+    pub(crate) fn cancel_for_endpoint(&self, endpoint: mica_var::Identity) -> usize {
+        let mut state = self.state.lock().unwrap();
+        let capabilities = state
+            .subscriptions
+            .iter()
+            .filter_map(|(capability, subscription)| {
+                (subscription.runtime_context.endpoint() == endpoint).then_some(*capability)
+            })
+            .collect::<Vec<_>>();
+        for capability in &capabilities {
+            let Some(active) = state.subscriptions.remove(capability) else {
+                continue;
+            };
+            state.remove_subscription_index(*capability, &active.request.subject);
+            self.mailboxes.release_subscription(&active.capability);
+        }
+        capabilities.len()
+    }
+
+    pub(crate) fn cancel_all(&self) -> usize {
+        let mut state = self.state.lock().unwrap();
+        let subscriptions = std::mem::take(&mut state.subscriptions);
+        let count = subscriptions.len();
+        state.subscriptions_by_relation.clear();
+        state.catalogue_subscriptions.clear();
+        for subscription in subscriptions.into_values() {
+            self.mailboxes
+                .release_subscription(&subscription.capability);
+        }
+        count
+    }
+
     fn dispatch_through(
         &self,
         kernel: &RelationKernel,

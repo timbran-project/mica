@@ -804,6 +804,7 @@ impl CompioTaskDriver {
         for (task_id, _) in self.inner.runner.cancel_all_tasks() {
             self.record_cancelled_task(task_id, TaskCancellationReason::DriverShutdown);
         }
+        self.inner.runner.cancel_all_subscriptions();
 
         let endpoints = {
             let mut state = self.inner.state.lock().unwrap();

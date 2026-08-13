@@ -717,6 +717,14 @@ impl TaskManager {
         Ok(())
     }
 
+    pub fn cancel_subscriptions_for_endpoint(&self, endpoint: Identity) -> usize {
+        self.subscriptions.cancel_for_endpoint(endpoint)
+    }
+
+    pub fn cancel_all_subscriptions(&self) -> usize {
+        self.subscriptions.cancel_all()
+    }
+
     pub fn drain_emissions(&mut self) -> Vec<Effect> {
         let effects = self.effects.drain();
         crate::metrics::metrics().queued_effects.set(0);
@@ -796,6 +804,7 @@ impl TaskManager {
         crate::metrics::metrics()
             .endpoint_operations
             .inc(crate::metrics::EndpointOperation::Close);
+        self.cancel_subscriptions_for_endpoint(endpoint);
         let removed = close_endpoint_in(&self.kernel, endpoint);
         if removed > 0 {
             crate::metrics::endpoint_closed();
@@ -811,6 +820,7 @@ impl TaskManager {
         crate::metrics::metrics()
             .endpoint_operations
             .inc(crate::metrics::EndpointOperation::Close);
+        self.cancel_subscriptions_for_endpoint(endpoint);
         let (changes, endpoint_rows) = close_endpoint_with_rows_in(&self.kernel, endpoint, &rows)?;
         if endpoint_rows > 0 {
             crate::metrics::endpoint_closed();
@@ -1317,6 +1327,14 @@ impl SharedTaskManager {
         Ok(())
     }
 
+    pub fn cancel_subscriptions_for_endpoint(&self, endpoint: Identity) -> usize {
+        self.subscriptions.cancel_for_endpoint(endpoint)
+    }
+
+    pub fn cancel_all_subscriptions(&self) -> usize {
+        self.subscriptions.cancel_all()
+    }
+
     pub fn drain_routed_emissions(&self) -> Vec<Effect> {
         let effects = self.state.lock().unwrap().effects.drain();
         crate::metrics::metrics().queued_effects.set(0);
@@ -1390,6 +1408,7 @@ impl SharedTaskManager {
         crate::metrics::metrics()
             .endpoint_operations
             .inc(crate::metrics::EndpointOperation::Close);
+        self.cancel_subscriptions_for_endpoint(endpoint);
         let removed = close_endpoint_in(&self.kernel, endpoint);
         if removed > 0 {
             crate::metrics::endpoint_closed();
@@ -1405,6 +1424,7 @@ impl SharedTaskManager {
         crate::metrics::metrics()
             .endpoint_operations
             .inc(crate::metrics::EndpointOperation::Close);
+        self.cancel_subscriptions_for_endpoint(endpoint);
         let (changes, endpoint_rows) = close_endpoint_with_rows_in(&self.kernel, endpoint, &rows)?;
         if endpoint_rows > 0 {
             crate::metrics::endpoint_closed();

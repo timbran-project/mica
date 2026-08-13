@@ -610,6 +610,10 @@ impl SourceRunner {
         self.task_manager.cancel_subscription(subscription)
     }
 
+    pub fn cancel_all_subscriptions(&self) -> usize {
+        self.task_manager.cancel_all_subscriptions()
+    }
+
     pub fn cancel_task(&mut self, task_id: TaskId) -> Result<SuspendKind, SourceTaskError> {
         self.task_manager
             .cancel_task(task_id)
@@ -1749,6 +1753,10 @@ impl SharedSourceRunner {
 
     pub fn cancel_subscription(&self, subscription: Value) -> Result<(), RuntimeError> {
         self.task_manager.cancel_subscription(subscription)
+    }
+
+    pub fn cancel_all_subscriptions(&self) -> usize {
+        self.task_manager.cancel_all_subscriptions()
     }
 
     pub fn cancel_task(&self, task_id: TaskId) -> Result<SuspendKind, SourceTaskError> {

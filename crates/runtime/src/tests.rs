@@ -6128,6 +6128,54 @@ fn runner_host_subscription_replays_retained_fact_changes_from_cursor() {
     );
 }
 
+#[test]
+fn runner_endpoint_close_cancels_owned_subscriptions() {
+    let mut runner = SourceRunner::new_empty();
+    runner.run_source("make_relation(:Observed, 1)").unwrap();
+    let relation = runner
+        .task_manager
+        .kernel()
+        .snapshot()
+        .relation_metadata()
+        .find(|metadata| metadata.name().name() == Some("Observed"))
+        .unwrap()
+        .id();
+    let first_endpoint = Identity::new(0x00ee_0000_0000_0020).unwrap();
+    let second_endpoint = Identity::new(0x00ee_0000_0000_0021).unwrap();
+    runner
+        .open_endpoint(first_endpoint, None, Symbol::intern("test"))
+        .unwrap();
+    runner
+        .open_endpoint(second_endpoint, None, Symbol::intern("test"))
+        .unwrap();
+    for endpoint in [first_endpoint, second_endpoint] {
+        let (_, sender) = runner.create_mailbox().unwrap();
+        runner
+            .register_subscription(
+                SubscriptionRequest {
+                    sender,
+                    subject: SubscriptionSubject::Facts {
+                        relation,
+                        bindings: vec![None],
+                    },
+                    initial_delivery: SubscriptionInitialDelivery::ChangesOnly,
+                    cursor: None,
+                    queue_budget: 8,
+                },
+                super::RuntimeContext::new(None, None, endpoint),
+                &AuthorityContext::root(),
+            )
+            .unwrap();
+    }
+    assert_eq!(runner.task_manager.subscription_count(), 2);
+
+    runner.close_endpoint(first_endpoint);
+
+    assert_eq!(runner.task_manager.subscription_count(), 1);
+    assert_eq!(runner.cancel_all_subscriptions(), 1);
+    assert_eq!(runner.task_manager.subscription_count(), 0);
+}
+
 fn subscription_message_value(message: &Value, key: &str) -> Value {
     message
         .map_get(&Value::symbol(Symbol::intern(key)))
