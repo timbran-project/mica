@@ -1017,6 +1017,23 @@ impl TaskManager {
         Ok(suspended.kind)
     }
 
+    pub fn cancel_all_tasks(&mut self) -> Vec<(TaskId, SuspendKind)> {
+        let mut cancelled = self
+            .suspended
+            .drain()
+            .map(|(task_id, suspended)| {
+                self.cancelled.insert(task_id);
+                (task_id, suspended.kind)
+            })
+            .collect::<Vec<_>>();
+        cancelled.sort_by_key(|(task_id, _)| *task_id);
+        crate::metrics::metrics().suspended_tasks.set(0);
+        crate::metrics::metrics()
+            .cancelled_tasks
+            .set(self.cancelled.len() as i64);
+        cancelled
+    }
+
     pub fn completed(&self, task_id: TaskId) -> Option<&TaskOutcome> {
         self.completed.get(&task_id)
     }
@@ -1424,6 +1441,24 @@ impl SharedTaskManager {
             .cancelled_tasks
             .set(state.cancelled.len() as i64);
         Ok(suspended.kind)
+    }
+
+    pub fn cancel_all_tasks(&self) -> Vec<(TaskId, SuspendKind)> {
+        let mut state = self.state.lock().unwrap();
+        let suspended = std::mem::take(&mut state.suspended);
+        let mut cancelled = suspended
+            .into_iter()
+            .map(|(task_id, suspended)| {
+                state.cancelled.insert(task_id);
+                (task_id, suspended.kind)
+            })
+            .collect::<Vec<_>>();
+        cancelled.sort_by_key(|(task_id, _)| *task_id);
+        crate::metrics::metrics().suspended_tasks.set(0);
+        crate::metrics::metrics()
+            .cancelled_tasks
+            .set(state.cancelled.len() as i64);
+        cancelled
     }
 
     pub fn suspended_len(&self) -> usize {

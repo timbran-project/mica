@@ -616,6 +616,10 @@ impl SourceRunner {
             .map_err(SourceTaskError::from)
     }
 
+    pub fn cancel_all_tasks(&mut self) -> Vec<(TaskId, SuspendKind)> {
+        self.task_manager.cancel_all_tasks()
+    }
+
     pub fn open_endpoint(
         &mut self,
         endpoint: Identity,
@@ -1751,6 +1755,10 @@ impl SharedSourceRunner {
         self.task_manager
             .cancel_task(task_id)
             .map_err(SourceTaskError::from)
+    }
+
+    pub fn cancel_all_tasks(&self) -> Vec<(TaskId, SuspendKind)> {
+        self.task_manager.cancel_all_tasks()
     }
 
     pub fn drain_routed_emissions(&self) -> Vec<Effect> {

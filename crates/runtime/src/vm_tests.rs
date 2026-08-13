@@ -2259,6 +2259,44 @@ fn shared_task_manager_cancels_suspended_task() {
 }
 
 #[test]
+fn shared_task_manager_cancels_all_suspended_tasks() {
+    let kernel = kernel_with_world_relations();
+    let program = Arc::new(
+        Program::new(
+            0,
+            [
+                Instruction::Suspend {
+                    kind: SuspendKind::Never,
+                },
+                Instruction::Return {
+                    value: v(Value::nothing()),
+                },
+            ],
+        )
+        .unwrap(),
+    );
+    let task_manager = TaskManager::new(kernel).into_shared();
+    let (first, _) = task_manager
+        .submit_with_context(
+            program.clone(),
+            AuthorityContext::root(),
+            RuntimeContext::default(),
+        )
+        .unwrap();
+    let (second, _) = task_manager
+        .submit_with_context(program, AuthorityContext::root(), RuntimeContext::default())
+        .unwrap();
+
+    assert_eq!(
+        task_manager.cancel_all_tasks(),
+        vec![(first, SuspendKind::Never), (second, SuspendKind::Never)]
+    );
+    assert_eq!(task_manager.suspended_len(), 0);
+    assert_eq!(task_manager.cancelled_len(), 2);
+    assert!(task_manager.cancel_all_tasks().is_empty());
+}
+
+#[test]
 fn direct_program_call_returns_into_caller_register() {
     let kernel = kernel_with_world_relations();
     let callee = Arc::new(Program::new(2, [Instruction::Return { value: r(0) }]).unwrap());
