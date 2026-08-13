@@ -38,10 +38,11 @@ pub use mica_vm::{
     AuthorityContext, Builtin, BuiltinContext, BuiltinRegistry, BuiltinResultKind, CapabilityGrant,
     CapabilityOp, CapabilityScope, CatchHandler, Emission, ErrorField, ExternalRequest, Frame,
     Instruction, KindCheckSite, ListItem, MailboxRecvRequest, MailboxSend, MapItem, Operand,
-    Program, ProgramResolver, QueryBinding, Register, RegisterVm, RelationArg, RuntimeBinaryOp,
-    RuntimeContext, RuntimeError, RuntimeUnaryOp, SYSTEM_ENDPOINT, SpawnRequest, SpawnTarget,
-    SubscriptionInitialDelivery, SubscriptionOperation, SubscriptionRequest, SubscriptionSubject,
-    SuspendKind, VmHostContext, VmHostResponse, VmState,
+    Program, ProgramResolver, QueryBinding, Register, RegisterVm, RelationArg, RelationRowContract,
+    RelationTypeContract, RuntimeBinaryOp, RuntimeContext, RuntimeError, RuntimeUnaryOp,
+    SYSTEM_ENDPOINT, SpawnRequest, SpawnTarget, SubscriptionInitialDelivery, SubscriptionOperation,
+    SubscriptionRequest, SubscriptionSubject, SuspendKind, TypeContract, TypeLiteralContract,
+    VmHostContext, VmHostResponse, VmState,
 };
 pub use task::{Task, TaskError, TaskId, TaskLimits, TaskOutcome};
 pub use task_manager::{Effect, EffectLog, SuspendedTask, TaskManager, TaskManagerError};
@@ -2521,6 +2522,19 @@ fn shift_compile_error(error: CompileError, offset: usize) -> CompileError {
             expected,
             inferred,
         } => CompileError::ValueKindMismatch {
+            node,
+            span: span.map(|span| shift_span(span, offset)),
+            subject,
+            expected,
+            inferred,
+        },
+        CompileError::StaticTypeMismatch {
+            node,
+            span,
+            subject,
+            expected,
+            inferred,
+        } => CompileError::StaticTypeMismatch {
             node,
             span: span.map(|span| shift_span(span, offset)),
             subject,

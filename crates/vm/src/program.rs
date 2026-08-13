@@ -16,6 +16,7 @@ use arc_swap::ArcSwap;
 use mica_relation_kernel::{DispatchRelations, RelationId, RelationRead};
 use mica_var::{Identity, Symbol, Value, ValueKind};
 use std::collections::BTreeMap;
+use std::fmt;
 use std::sync::Arc;
 
 #[cfg(feature = "cranelift")]
@@ -124,6 +125,126 @@ pub enum KindCheckSite {
     Parameter,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub enum TypeContract {
+    Dynamic,
+    Never,
+    Kind(ValueKind),
+    Literal(TypeLiteralContract),
+    Union(Vec<TypeContract>),
+    Relation(RelationTypeContract),
+}
+
+impl TypeContract {
+    pub fn exact_outer_kind(&self) -> Option<ValueKind> {
+        match self {
+            Self::Dynamic | Self::Never => None,
+            Self::Kind(kind) => Some(*kind),
+            Self::Literal(literal) => Some(literal.outer_kind()),
+            Self::Union(types) => {
+                let mut kinds = types.iter().filter_map(Self::exact_outer_kind);
+                let first = kinds.next()?;
+                kinds.all(|kind| kind == first).then_some(first)
+            }
+            Self::Relation(_) => Some(ValueKind::Relation),
+        }
+    }
+}
+
+impl fmt::Display for TypeContract {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Dynamic => formatter.write_str("dynamic"),
+            Self::Never => formatter.write_str("never"),
+            Self::Kind(kind) => formatter.write_str(kind.name()),
+            Self::Literal(literal) => write!(formatter, "{literal}"),
+            Self::Union(types) => {
+                for (index, ty) in types.iter().enumerate() {
+                    if index != 0 {
+                        formatter.write_str(" | ")?;
+                    }
+                    write!(formatter, "{ty}")?;
+                }
+                Ok(())
+            }
+            Self::Relation(relation) => write!(formatter, "{relation}"),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub enum TypeLiteralContract {
+    Bool(bool),
+    Symbol(Symbol),
+    ErrorCode(Symbol),
+    Unit,
+    EmptyRelation,
+}
+
+impl TypeLiteralContract {
+    pub const fn outer_kind(&self) -> ValueKind {
+        match self {
+            Self::Bool(_) => ValueKind::Bool,
+            Self::Symbol(_) => ValueKind::Symbol,
+            Self::ErrorCode(_) => ValueKind::ErrorCode,
+            Self::Unit | Self::EmptyRelation => ValueKind::Relation,
+        }
+    }
+}
+
+impl fmt::Display for TypeLiteralContract {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Bool(value) => write!(formatter, "{value}"),
+            Self::Symbol(value) => write!(formatter, ":{}", symbol_text(*value)),
+            Self::ErrorCode(value) => formatter.write_str(symbol_text(*value)),
+            Self::Unit => formatter.write_str("()"),
+            Self::EmptyRelation => formatter.write_str("[] {}"),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub struct RelationRowContract {
+    pub columns: Vec<(Symbol, TypeContract)>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub struct RelationTypeContract {
+    pub alternatives: Vec<RelationRowContract>,
+    pub minimum_rows: usize,
+    pub maximum_rows: Option<usize>,
+}
+
+impl fmt::Display for RelationTypeContract {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("relation<")?;
+        for (alternative_index, alternative) in self.alternatives.iter().enumerate() {
+            if alternative_index != 0 {
+                formatter.write_str(" | ")?;
+            }
+            formatter.write_str("{")?;
+            for (column_index, (name, ty)) in alternative.columns.iter().enumerate() {
+                if column_index != 0 {
+                    formatter.write_str(", ")?;
+                }
+                write!(formatter, ":{} -> {ty}", symbol_text(*name))?;
+            }
+            formatter.write_str("}")?;
+        }
+        formatter.write_str("> where rows in ")?;
+        match self.maximum_rows {
+            Some(maximum) if maximum == self.minimum_rows => write!(formatter, "{maximum}"),
+            Some(maximum) => write!(formatter, "{}..{maximum}", self.minimum_rows),
+            None => write!(formatter, "{}..*", self.minimum_rows),
+        }
+    }
+}
+
+fn symbol_text(symbol: Symbol) -> &'static str {
+    symbol.name().unwrap_or("<unnamed>")
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SpawnRequest {
     pub selector: Symbol,
@@ -180,6 +301,12 @@ pub enum Instruction {
     CheckKind {
         value: Register,
         expected: ValueKind,
+        site: KindCheckSite,
+        subject: Symbol,
+    },
+    CheckType {
+        value: Register,
+        expected: TypeContract,
         site: KindCheckSite,
         subject: Symbol,
     },
@@ -525,6 +652,12 @@ pub(crate) enum Opcode {
         site: KindCheckSite,
         subject: Symbol,
     },
+    CheckType {
+        value: Register,
+        expected: TypeContract,
+        site: KindCheckSite,
+        subject: Symbol,
+    },
     Unary {
         dst: Register,
         op: RuntimeUnaryOp,
@@ -822,6 +955,7 @@ impl Opcode {
             | Self::MailboxRecv { dst, .. }
             | Self::ExternalRequest { dst, .. } => Some(*dst),
             Self::CheckKind { .. }
+            | Self::CheckType { .. }
             | Self::Assert { .. }
             | Self::Retract { .. }
             | Self::RetractWhere { .. }
@@ -845,7 +979,7 @@ impl Opcode {
 
     fn kind_fact_register(&self) -> Option<Register> {
         match self {
-            Self::CheckKind { value, .. } => Some(*value),
+            Self::CheckKind { value, .. } | Self::CheckType { value, .. } => Some(*value),
             _ => self.destination(),
         }
     }
@@ -931,6 +1065,7 @@ fn infer_opcode_kind(
         Opcode::Load { value, .. } => constants.get(value.0 as usize).map(Value::kind),
         Opcode::Move { src, .. } => register_kind(*src),
         Opcode::CheckKind { expected, .. } => Some(*expected),
+        Opcode::CheckType { expected, .. } => expected.exact_outer_kind(),
         Opcode::Unary {
             op: RuntimeUnaryOp::Not,
             ..
@@ -2389,7 +2524,7 @@ impl Program {
 
     pub fn to_bytes(&self) -> Result<Vec<u8>, RuntimeError> {
         let mut out = Vec::new();
-        out.extend_from_slice(b"MICAPRG4");
+        out.extend_from_slice(b"MICAPRG5");
         write_u32(&mut out, self.register_count as u32);
         write_u32(&mut out, self.opcodes.len() as u32);
         for instruction in self.instructions() {
@@ -2403,7 +2538,7 @@ impl Program {
 
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, RuntimeError> {
         let mut input = ByteReader::new(bytes);
-        input.expect_magic(b"MICAPRG4")?;
+        input.expect_magic(b"MICAPRG5")?;
         let register_count = input.read_u32()? as usize;
         let instruction_count = input.read_u32()? as usize;
         let mut instructions = Vec::with_capacity(instruction_count);
@@ -2489,6 +2624,17 @@ impl Program {
             } => Instruction::CheckKind {
                 value: *value,
                 expected: *expected,
+                site: *site,
+                subject: *subject,
+            },
+            Opcode::CheckType {
+                value,
+                expected,
+                site,
+                subject,
+            } => Instruction::CheckType {
+                value: *value,
+                expected: expected.clone(),
                 site: *site,
                 subject: *subject,
             },
@@ -3164,6 +3310,17 @@ impl ProgramBuilder {
                 site,
                 subject,
             },
+            Instruction::CheckType {
+                value,
+                expected,
+                site,
+                subject,
+            } => Opcode::CheckType {
+                value,
+                expected,
+                site,
+                subject,
+            },
             Instruction::Unary { dst, op, src } => Opcode::Unary { dst, op, src },
             Instruction::Binary {
                 dst,
@@ -3821,6 +3978,18 @@ fn validate_instruction(
             }
             Ok(())
         }
+        Instruction::CheckType {
+            value,
+            expected,
+            subject,
+            ..
+        } => {
+            validate_register(register_count, *value)?;
+            if subject.name().is_none() {
+                return Err(artifact_error("type check subject must be a named symbol"));
+            }
+            validate_type_contract(expected)
+        }
         Instruction::Unary { dst, src, .. } => {
             validate_register(register_count, *dst)?;
             validate_register(register_count, *src)
@@ -4138,6 +4307,71 @@ fn validate_instruction(
     }
 }
 
+fn validate_type_contract(contract: &TypeContract) -> Result<(), RuntimeError> {
+    match contract {
+        TypeContract::Dynamic | TypeContract::Never | TypeContract::Kind(_) => Ok(()),
+        TypeContract::Literal(TypeLiteralContract::Symbol(symbol))
+        | TypeContract::Literal(TypeLiteralContract::ErrorCode(symbol)) => {
+            if symbol.name().is_none() {
+                return Err(artifact_error("type literal must be a named symbol"));
+            }
+            Ok(())
+        }
+        TypeContract::Literal(_) => Ok(()),
+        TypeContract::Union(types) => {
+            if types.is_empty() {
+                return Err(artifact_error("type contract union has no members"));
+            }
+            for ty in types {
+                validate_type_contract(ty)?;
+            }
+            Ok(())
+        }
+        TypeContract::Relation(relation) => {
+            if relation.alternatives.is_empty() {
+                return Err(artifact_error("relation type has no row alternatives"));
+            }
+            if relation
+                .maximum_rows
+                .is_some_and(|maximum| relation.minimum_rows > maximum)
+            {
+                return Err(artifact_error("invalid relation type cardinality"));
+            }
+            let heading = relation.alternatives[0]
+                .columns
+                .iter()
+                .map(|(name, _)| *name)
+                .collect::<Vec<_>>();
+            for alternative in &relation.alternatives {
+                if !alternative
+                    .columns
+                    .iter()
+                    .map(|(name, _)| *name)
+                    .eq(heading.iter().copied())
+                {
+                    return Err(artifact_error(
+                        "relation type alternatives have different headings",
+                    ));
+                }
+                let mut previous = None;
+                for (name, ty) in &alternative.columns {
+                    if name.name().is_none() {
+                        return Err(artifact_error("relation type column must be named"));
+                    }
+                    if previous.is_some_and(|previous| previous >= *name) {
+                        return Err(artifact_error(
+                            "relation type columns are not uniquely sorted",
+                        ));
+                    }
+                    previous = Some(*name);
+                    validate_type_contract(ty)?;
+                }
+            }
+            Ok(())
+        }
+    }
+}
+
 fn validate_bindings(
     register_count: usize,
     bindings: &[Option<Operand>],
@@ -4250,6 +4484,7 @@ const INST_SPAWN_DISPATCH_DYNAMIC: u8 = 54;
 const INST_EXTERNAL_REQUEST: u8 = 55;
 const INST_BUILD_RELATION: u8 = 56;
 const INST_CHECK_KIND: u8 = 57;
+const INST_CHECK_TYPE: u8 = 58;
 
 const UNARY_NOT: u8 = 0;
 const UNARY_NEG: u8 = 1;
@@ -4310,6 +4545,89 @@ const VALUE_STRING: u8 = 7;
 const VALUE_BYTES: u8 = 8;
 const VALUE_ERROR: u8 = 9;
 
+const TYPE_KIND: u8 = 0;
+const TYPE_LITERAL: u8 = 1;
+const TYPE_RELATION: u8 = 2;
+const TYPE_DYNAMIC: u8 = 3;
+const TYPE_NEVER: u8 = 4;
+const TYPE_UNION: u8 = 5;
+const TYPE_LITERAL_BOOL: u8 = 0;
+const TYPE_LITERAL_SYMBOL: u8 = 1;
+const TYPE_LITERAL_ERROR_CODE: u8 = 2;
+const TYPE_LITERAL_UNIT: u8 = 3;
+const TYPE_LITERAL_EMPTY_RELATION: u8 = 4;
+
+fn write_type_contract(out: &mut Vec<u8>, contract: &TypeContract) -> Result<(), RuntimeError> {
+    match contract {
+        TypeContract::Dynamic => out.push(TYPE_DYNAMIC),
+        TypeContract::Never => out.push(TYPE_NEVER),
+        TypeContract::Kind(kind) => {
+            out.push(TYPE_KIND);
+            write_value_kind(out, *kind);
+        }
+        TypeContract::Literal(literal) => {
+            out.push(TYPE_LITERAL);
+            match literal {
+                TypeLiteralContract::Bool(value) => {
+                    out.push(TYPE_LITERAL_BOOL);
+                    out.push(u8::from(*value));
+                }
+                TypeLiteralContract::Symbol(symbol) => {
+                    out.push(TYPE_LITERAL_SYMBOL);
+                    write_named_symbol(out, *symbol, "type literal symbol")?;
+                }
+                TypeLiteralContract::ErrorCode(symbol) => {
+                    out.push(TYPE_LITERAL_ERROR_CODE);
+                    write_named_symbol(out, *symbol, "type literal error code")?;
+                }
+                TypeLiteralContract::Unit => out.push(TYPE_LITERAL_UNIT),
+                TypeLiteralContract::EmptyRelation => out.push(TYPE_LITERAL_EMPTY_RELATION),
+            }
+        }
+        TypeContract::Union(types) => {
+            out.push(TYPE_UNION);
+            write_u32(out, types.len() as u32);
+            for ty in types {
+                write_type_contract(out, ty)?;
+            }
+        }
+        TypeContract::Relation(relation) => {
+            out.push(TYPE_RELATION);
+            write_u64(out, relation.minimum_rows as u64);
+            match relation.maximum_rows {
+                Some(maximum) => {
+                    out.push(1);
+                    write_u64(out, maximum as u64);
+                }
+                None => out.push(0),
+            }
+            write_u32(out, relation.alternatives.len() as u32);
+            for alternative in &relation.alternatives {
+                write_u32(out, alternative.columns.len() as u32);
+                for (name, cell) in &alternative.columns {
+                    write_named_symbol(out, *name, "relation type column")?;
+                    write_type_contract(out, cell)?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn write_named_symbol(
+    out: &mut Vec<u8>,
+    symbol: Symbol,
+    context: &str,
+) -> Result<(), RuntimeError> {
+    let Some(name) = symbol.name() else {
+        return Err(artifact_error(format!(
+            "cannot serialize unnamed {context}"
+        )));
+    };
+    write_str(out, name);
+    Ok(())
+}
+
 fn write_instruction(out: &mut Vec<u8>, instruction: &Instruction) -> Result<(), RuntimeError> {
     match instruction {
         Instruction::Load { dst, value } => {
@@ -4337,6 +4655,24 @@ fn write_instruction(out: &mut Vec<u8>, instruction: &Instruction) -> Result<(),
             out.push(INST_CHECK_KIND);
             write_register(out, *value);
             write_value_kind(out, *expected);
+            write_kind_check_site(out, *site);
+            write_str(out, subject);
+            Ok(())
+        }
+        Instruction::CheckType {
+            value,
+            expected,
+            site,
+            subject,
+        } => {
+            let Some(subject) = subject.name() else {
+                return Err(artifact_error(
+                    "cannot serialize unnamed type check subject",
+                ));
+            };
+            out.push(INST_CHECK_TYPE);
+            write_register(out, *value);
+            write_type_contract(out, expected)?;
             write_kind_check_site(out, *site);
             write_str(out, subject);
             Ok(())
@@ -5223,6 +5559,12 @@ impl<'a> ByteReader<'a> {
                 site: self.read_kind_check_site()?,
                 subject: Symbol::intern(&self.read_string()?),
             },
+            INST_CHECK_TYPE => Instruction::CheckType {
+                value: self.read_register()?,
+                expected: self.read_type_contract()?,
+                site: self.read_kind_check_site()?,
+                subject: Symbol::intern(&self.read_string()?),
+            },
             INST_UNARY => Instruction::Unary {
                 dst: self.read_register()?,
                 op: self.read_unary_op()?,
@@ -5518,6 +5860,73 @@ impl<'a> ByteReader<'a> {
             },
             _ => return Err(artifact_error("unknown program artifact instruction tag")),
         })
+    }
+
+    fn read_type_contract(&mut self) -> Result<TypeContract, RuntimeError> {
+        match self.read_u8()? {
+            TYPE_DYNAMIC => Ok(TypeContract::Dynamic),
+            TYPE_NEVER => Ok(TypeContract::Never),
+            TYPE_KIND => Ok(TypeContract::Kind(self.read_value_kind()?)),
+            TYPE_LITERAL => Ok(TypeContract::Literal(match self.read_u8()? {
+                TYPE_LITERAL_BOOL => TypeLiteralContract::Bool(self.read_u8()? != 0),
+                TYPE_LITERAL_SYMBOL => {
+                    TypeLiteralContract::Symbol(Symbol::intern(&self.read_string()?))
+                }
+                TYPE_LITERAL_ERROR_CODE => {
+                    TypeLiteralContract::ErrorCode(Symbol::intern(&self.read_string()?))
+                }
+                TYPE_LITERAL_UNIT => TypeLiteralContract::Unit,
+                TYPE_LITERAL_EMPTY_RELATION => TypeLiteralContract::EmptyRelation,
+                _ => return Err(artifact_error("invalid type literal contract tag")),
+            })),
+            TYPE_RELATION => {
+                let minimum_rows = usize::try_from(self.read_u64()?)
+                    .map_err(|_| artifact_error("relation type minimum exceeds platform size"))?;
+                let maximum_rows = match self.read_u8()? {
+                    0 => None,
+                    1 => Some(usize::try_from(self.read_u64()?).map_err(|_| {
+                        artifact_error("relation type maximum exceeds platform size")
+                    })?),
+                    _ => return Err(artifact_error("invalid optional cardinality tag")),
+                };
+                if maximum_rows.is_some_and(|maximum| minimum_rows > maximum) {
+                    return Err(artifact_error("invalid relation type cardinality"));
+                }
+                let alternative_count = self.read_u32()? as usize;
+                if alternative_count == 0 {
+                    return Err(artifact_error("relation type has no row alternatives"));
+                }
+                let mut alternatives = Vec::with_capacity(alternative_count);
+                for _ in 0..alternative_count {
+                    let column_count = self.read_u32()? as usize;
+                    let mut columns = Vec::with_capacity(column_count);
+                    for _ in 0..column_count {
+                        columns.push((
+                            Symbol::intern(&self.read_string()?),
+                            self.read_type_contract()?,
+                        ));
+                    }
+                    alternatives.push(RelationRowContract { columns });
+                }
+                Ok(TypeContract::Relation(RelationTypeContract {
+                    alternatives,
+                    minimum_rows,
+                    maximum_rows,
+                }))
+            }
+            TYPE_UNION => {
+                let count = self.read_u32()? as usize;
+                if count == 0 {
+                    return Err(artifact_error("type contract union has no members"));
+                }
+                let mut types = Vec::with_capacity(count);
+                for _ in 0..count {
+                    types.push(self.read_type_contract()?);
+                }
+                Ok(TypeContract::Union(types))
+            }
+            _ => Err(artifact_error("invalid type contract tag")),
+        }
     }
 
     fn read_operands(&mut self) -> Result<Vec<Operand>, RuntimeError> {

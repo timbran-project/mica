@@ -17,8 +17,8 @@ use crate::{
     BinaryOp, BindingId, Diagnostic, DispatchRestriction, EffectKind, HirArg, HirCatch,
     HirCollectionItem, HirExpr, HirFunctionBody, HirItem, HirLoopBinding, HirMethodParam, HirPlace,
     HirProgram, HirRecovery, HirRelationAtom, HirRuleBodyItem, HirRuleGuard, HirScatterBinding,
-    Literal, LocalKind, NodeId, ParamMode, ParseError, SemanticProgram, Span, UnaryOp,
-    parse_semantic,
+    Literal, LocalKind, NodeId, ParamMode, ParseError, RelationType, RowShape, SemanticProgram,
+    Span, StaticLiteral, StaticType, UnaryOp, parse_semantic,
 };
 use mica_relation_kernel::{
     Atom, ConflictPolicy, DispatchRelations, RelationId, RelationKernel, RelationMetadata, Rule,
@@ -27,8 +27,9 @@ use mica_relation_kernel::{
 use mica_var::{Identity, Symbol, Value, ValueError, ValueKind};
 use mica_vm::{
     BuiltinResultKind, CatchHandler, ErrorField, Instruction, KindCheckSite, ListItem, MapItem,
-    Operand, Program, ProgramBuilder, QueryBinding, Register, RelationArg, RuntimeBinaryOp,
-    RuntimeError, RuntimeUnaryOp,
+    Operand, Program, ProgramBuilder, QueryBinding, Register, RelationArg, RelationRowContract,
+    RelationTypeContract, RuntimeBinaryOp, RuntimeError, RuntimeUnaryOp, TypeContract,
+    TypeLiteralContract,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -449,6 +450,13 @@ pub enum CompileError {
         span: Option<Span>,
         subject: String,
         expected: ValueKind,
+        inferred: String,
+    },
+    StaticTypeMismatch {
+        node: NodeId,
+        span: Option<Span>,
+        subject: String,
+        expected: String,
         inferred: String,
     },
     FunctionResultKindMismatch {
@@ -1089,6 +1097,7 @@ fn compile_installed_method(
         identity,
         selector,
         params: hir_params,
+        result_type,
         result_kind,
         body,
         ..
@@ -1147,6 +1156,21 @@ fn compile_installed_method(
                 selector: selector.clone(),
                 expected: *expected,
                 inferred: inferred_result.names(),
+            });
+        }
+    }
+    if let Some(expected_type) = result_type
+        && !matches!(expected_type, StaticType::Kind(_))
+    {
+        let inferred_type = ProgramCompiler::new(semantic, context)
+            .infer_simple_function_result_type(&HirFunctionBody::Block(body.clone()));
+        if !inferred_type.is_subtype_of(expected_type) {
+            return Err(CompileError::StaticTypeMismatch {
+                node: *id,
+                span: semantic.span(*id).cloned(),
+                subject: format!("result of verb `{selector}`"),
+                expected: expected_type.to_string(),
+                inferred: inferred_type.to_string(),
             });
         }
     }
@@ -1326,6 +1350,7 @@ struct FunctionParamInfo {
     id: NodeId,
     binding: BindingId,
     kind: LocalKind,
+    declared_type: Option<StaticType>,
     declared_kind: Option<ValueKind>,
     default: Option<HirExpr>,
 }
@@ -1925,23 +1950,33 @@ impl<'a> ProgramCompiler<'a> {
         &self,
         binding: &HirScatterBinding,
     ) -> Result<(), CompileError> {
-        let (Some(default), Some(expected)) = (binding.default.as_ref(), binding.declared_kind)
+        let (Some(default), Some(expected_type)) =
+            (binding.default.as_ref(), binding.declared_type.as_ref())
         else {
             return Ok(());
         };
-        let inferred = self.infer_expr_kinds(default);
-        if !inferred.is_disjoint(KindSet::exact(expected)) {
+        let inferred_type = self.infer_expr_static_type(default);
+        if !inferred_type.is_disjoint(expected_type) {
             return Ok(());
         }
         let subject = self.semantic.bindings[binding.binding.as_u32() as usize]
             .name
             .clone();
-        Err(CompileError::ValueKindMismatch {
+        if let StaticType::Kind(expected) = expected_type {
+            return Err(CompileError::ValueKindMismatch {
+                node: expr_id(default),
+                span: self.span(expr_id(default)),
+                subject,
+                expected: *expected,
+                inferred: inferred_type.outer_kinds().names(),
+            });
+        }
+        Err(CompileError::StaticTypeMismatch {
             node: expr_id(default),
             span: self.span(expr_id(default)),
             subject,
-            expected,
-            inferred: inferred.names(),
+            expected: expected_type.to_string(),
+            inferred: inferred_type.to_string(),
         })
     }
 
@@ -2261,6 +2296,7 @@ impl<'a> ProgramCompiler<'a> {
             id,
             name,
             params,
+            result_type,
             result_kind,
             captures,
             body,
@@ -2328,21 +2364,33 @@ impl<'a> ProgramCompiler<'a> {
             }
 
             if param.kind == LocalKind::OptionalParam
-                && let (Some(expected), Some(default)) =
-                    (param.declared_kind, param.default.as_ref())
+                && let (Some(expected_type), Some(default)) =
+                    (param.declared_type.as_ref(), param.default.as_ref())
             {
                 let no_direct_result = |_| None;
                 let runtime_result = |name: &str| runtime_result_kinds(self.context, name);
-                let inferred =
-                    KindInference::new(&self.semantic.bindings, &no_direct_result, &runtime_result)
-                        .expr(default);
-                if inferred.is_disjoint(KindSet::exact(expected)) {
-                    return Err(CompileError::ParameterDefaultKindMismatch {
+                let inferred_type = StaticTypeInference::new(
+                    &self.semantic.bindings,
+                    &no_direct_result,
+                    &runtime_result,
+                )
+                .expr(default);
+                if inferred_type.is_disjoint(expected_type) {
+                    if let StaticType::Kind(expected) = expected_type {
+                        return Err(CompileError::ParameterDefaultKindMismatch {
+                            node: expr_id(default),
+                            span: self.span(expr_id(default)),
+                            parameter,
+                            expected: *expected,
+                            inferred: inferred_type.outer_kinds().names(),
+                        });
+                    }
+                    return Err(CompileError::StaticTypeMismatch {
                         node: expr_id(default),
                         span: self.span(expr_id(default)),
-                        parameter,
-                        expected,
-                        inferred: inferred.names(),
+                        subject: parameter,
+                        expected: expected_type.to_string(),
+                        inferred: inferred_type.to_string(),
                     });
                 }
             }
@@ -2369,6 +2417,26 @@ impl<'a> ProgramCompiler<'a> {
                 inferred: inferred.names(),
             });
         }
+        if let Some(expected_type) = result_type
+            && !matches!(expected_type, StaticType::Kind(_))
+        {
+            let inferred_type = self.infer_simple_function_result_type(body);
+            if !inferred_type.is_subtype_of(expected_type) {
+                let function = name
+                    .and_then(|binding| self.semantic.bindings.get(binding.0 as usize))
+                    .map_or_else(
+                        || "function result".to_owned(),
+                        |binding| binding.name.clone(),
+                    );
+                return Err(CompileError::StaticTypeMismatch {
+                    node: *id,
+                    span: self.span(*id),
+                    subject: function,
+                    expected: expected_type.to_string(),
+                    inferred: inferred_type.to_string(),
+                });
+            }
+        }
 
         let mut compiler = ProgramCompiler::new(self.semantic, self.context);
         compiler.next_register = (captures.len() + params.len()) as u16;
@@ -2390,6 +2458,7 @@ impl<'a> ProgramCompiler<'a> {
                 id: param.id,
                 binding: param.binding,
                 kind: param.kind.clone(),
+                declared_type: param.declared_type.clone(),
                 declared_kind: param.declared_kind,
                 default: param.default.clone(),
             })
@@ -3296,8 +3365,9 @@ impl<'a> ProgramCompiler<'a> {
             .iter()
             .zip(args)
             .map(|(param, arg)| {
-                let inferred = self.infer_expr_kinds(&arg.value);
-                if !self.parameter_needs_check(param, inferred, arg.id)? {
+                let inferred_type = self.infer_expr_static_type(&arg.value);
+                let inferred = inferred_type.outer_kinds();
+                if !self.parameter_needs_check(param, &inferred_type, inferred, arg.id)? {
                     return self.compile_arg_operand(arg);
                 }
                 let value = self.compile_expr_for_value(&arg.value)?;
@@ -4625,8 +4695,9 @@ impl<'a> ProgramCompiler<'a> {
         source: &HirExpr,
         value: Register,
     ) -> Result<(), CompileError> {
-        let inferred = self.infer_expr_kinds(source);
-        self.enforce_inferred_binding_kind(node, binding, inferred, value)
+        let inferred_type = self.infer_expr_static_type(source);
+        let inferred_kinds = inferred_type.outer_kinds();
+        self.enforce_inferred_binding_type(node, binding, inferred_type, inferred_kinds, value)
     }
 
     fn enforce_inferred_binding_kind(
@@ -4636,32 +4707,52 @@ impl<'a> ProgramCompiler<'a> {
         inferred: KindSet,
         value: Register,
     ) -> Result<(), CompileError> {
+        let inferred_type = static_type_from_kind_set(inferred);
+        self.enforce_inferred_binding_type(node, binding, inferred_type, inferred, value)
+    }
+
+    fn enforce_inferred_binding_type(
+        &mut self,
+        node: NodeId,
+        binding: BindingId,
+        inferred_type: StaticType,
+        inferred_kinds: KindSet,
+        value: Register,
+    ) -> Result<(), CompileError> {
         let binding = &self.semantic.bindings[binding.as_u32() as usize];
-        let Some(expected) = binding.declared_kind else {
+        let Some(expected_type) = binding.declared_type.as_ref() else {
             return Ok(());
         };
-        let declared = KindSet::exact(expected);
-        if inferred.is_subset(declared) {
+        if inferred_type.is_subtype_of(expected_type) {
             return Ok(());
         }
-        if inferred.is_disjoint(declared) {
-            let inferred = inferred
-                .singleton()
-                .map_or_else(|| inferred.names(), |kind| kind.name().to_owned());
-            return Err(CompileError::ValueKindMismatch {
+        if inferred_type.is_disjoint(expected_type) {
+            if let StaticType::Kind(expected) = expected_type {
+                let inferred = inferred_kinds
+                    .singleton()
+                    .map_or_else(|| inferred_kinds.names(), |kind| kind.name().to_owned());
+                return Err(CompileError::ValueKindMismatch {
+                    node,
+                    span: self.span(node),
+                    subject: binding.name.clone(),
+                    expected: *expected,
+                    inferred,
+                });
+            }
+            return Err(CompileError::StaticTypeMismatch {
                 node,
                 span: self.span(node),
                 subject: binding.name.clone(),
-                expected,
-                inferred,
+                expected: expected_type.to_string(),
+                inferred: inferred_type.to_string(),
             });
         }
-        self.emit(Instruction::CheckKind {
+        self.emit_type_check(
             value,
-            expected,
-            site: KindCheckSite::Binding,
-            subject: Symbol::intern(&binding.name),
-        });
+            expected_type,
+            KindCheckSite::Binding,
+            Symbol::intern(&binding.name),
+        );
         Ok(())
     }
 
@@ -4671,9 +4762,12 @@ impl<'a> ProgramCompiler<'a> {
         source: Option<&HirExpr>,
         value: Register,
     ) -> Result<(), CompileError> {
-        let inferred = source.map_or(KindSet::ALL, |source| self.infer_expr_kinds(source));
+        let inferred_type = source.map_or(StaticType::Dynamic, |source| {
+            self.infer_expr_static_type(source)
+        });
+        let inferred = inferred_type.outer_kinds();
         let node = source.map_or(param.id, expr_id);
-        if self.parameter_needs_check(param, inferred, node)? {
+        if self.parameter_needs_check(param, &inferred_type, inferred, node)? {
             self.emit_parameter_check(param, value);
         }
         Ok(())
@@ -4682,54 +4776,87 @@ impl<'a> ProgramCompiler<'a> {
     fn parameter_needs_check(
         &self,
         param: &FunctionParamInfo,
+        inferred_type: &StaticType,
         inferred: KindSet,
         node: NodeId,
     ) -> Result<bool, CompileError> {
-        let Some(expected) = param.declared_kind else {
+        let Some(expected_type) = param.declared_type.as_ref() else {
             return Ok(false);
         };
-        let declared = KindSet::exact(expected);
-        if inferred.is_subset(declared) {
+        if inferred_type.is_subtype_of(expected_type) {
             return Ok(false);
         }
-        if inferred.is_disjoint(declared) {
+        if inferred_type.is_disjoint(expected_type) {
             let parameter = self.semantic.bindings[param.binding.as_u32() as usize]
                 .name
                 .clone();
-            return Err(CompileError::ParameterKindMismatch {
+            if let StaticType::Kind(expected) = expected_type {
+                return Err(CompileError::ParameterKindMismatch {
+                    node,
+                    span: self.span(node),
+                    parameter,
+                    expected: *expected,
+                    inferred: inferred.names(),
+                });
+            }
+            return Err(CompileError::StaticTypeMismatch {
                 node,
                 span: self.span(node),
-                parameter,
-                expected,
-                inferred: inferred.names(),
+                subject: parameter,
+                expected: expected_type.to_string(),
+                inferred: inferred_type.to_string(),
             });
         }
         Ok(true)
     }
 
     fn emit_parameter_check(&mut self, param: &FunctionParamInfo, value: Register) {
-        self.emit_declared_parameter_check(param.binding, param.declared_kind, value);
+        self.emit_declared_parameter_check(param.binding, param.declared_type.as_ref(), value);
     }
 
     fn emit_method_parameter_check(&mut self, param: &HirMethodParam, value: Register) {
-        self.emit_declared_parameter_check(param.binding, param.declared_kind, value);
+        self.emit_declared_parameter_check(param.binding, param.declared_type.as_ref(), value);
     }
 
     fn emit_declared_parameter_check(
         &mut self,
         binding: BindingId,
-        expected: Option<ValueKind>,
+        expected: Option<&StaticType>,
         value: Register,
     ) {
         let Some(expected) = expected else {
             return;
         };
         let subject = &self.semantic.bindings[binding.as_u32() as usize].name;
-        self.emit(Instruction::CheckKind {
+        self.emit_type_check(
             value,
             expected,
-            site: KindCheckSite::Parameter,
-            subject: Symbol::intern(subject),
+            KindCheckSite::Parameter,
+            Symbol::intern(subject),
+        );
+    }
+
+    fn emit_type_check(
+        &mut self,
+        value: Register,
+        expected: &StaticType,
+        site: KindCheckSite,
+        subject: Symbol,
+    ) {
+        if let StaticType::Kind(expected) = expected {
+            self.emit(Instruction::CheckKind {
+                value,
+                expected: *expected,
+                site,
+                subject,
+            });
+            return;
+        }
+        self.emit(Instruction::CheckType {
+            value,
+            expected: type_contract(expected),
+            site,
+            subject,
         });
     }
 
@@ -4758,6 +4885,42 @@ impl<'a> ProgramCompiler<'a> {
             .relation(heading, rows)
     }
 
+    fn infer_expr_static_type(&self, source: &HirExpr) -> StaticType {
+        let direct_result = |binding| {
+            self.functions
+                .get(&binding)
+                .map(|function| function.result_kinds)
+        };
+        let runtime_result = |name: &str| runtime_result_kinds(self.context, name);
+        StaticTypeInference::new(&self.semantic.bindings, &direct_result, &runtime_result)
+            .expr(source)
+    }
+
+    fn infer_simple_function_result_type(&self, body: &HirFunctionBody) -> StaticType {
+        match body {
+            HirFunctionBody::Expr(expr) => self.infer_expr_static_type(expr),
+            HirFunctionBody::Block(items) => {
+                let mut returns = Vec::new();
+                collect_return_values(items, &mut returns);
+                let has_terminal_return = matches!(
+                    items.last(),
+                    Some(HirItem::Expr {
+                        expr: HirExpr::Return { .. },
+                        ..
+                    })
+                );
+                if !has_terminal_return {
+                    returns.push(None);
+                }
+                StaticType::union(returns.into_iter().map(|value| {
+                    value.map_or(StaticType::Literal(StaticLiteral::EmptyRelation), |value| {
+                        self.infer_expr_static_type(value)
+                    })
+                }))
+            }
+        }
+    }
+
     fn unsupported(&self, node: NodeId, message: impl Into<String>) -> CompileError {
         CompileError::Unsupported {
             node,
@@ -4775,6 +4938,99 @@ fn runtime_result_kinds(context: &CompileContext, name: &str) -> Option<KindSet>
     match context.runtime_function_result(name)? {
         BuiltinResultKind::Dynamic => None,
         BuiltinResultKind::Exact(kind) => Some(KindSet::exact(kind)),
+    }
+}
+
+fn static_type_from_kind_set(kinds: KindSet) -> StaticType {
+    if kinds == KindSet::ALL {
+        return StaticType::Dynamic;
+    }
+    StaticType::union(kinds.iter().map(StaticType::Kind))
+}
+
+fn type_contract(ty: &StaticType) -> TypeContract {
+    match ty {
+        StaticType::Dynamic | StaticType::Parameter(_) | StaticType::Alias(_, _) => {
+            TypeContract::Dynamic
+        }
+        StaticType::Never => TypeContract::Never,
+        StaticType::Kind(kind) => TypeContract::Kind(*kind),
+        StaticType::Literal(literal) => TypeContract::Literal(match literal {
+            StaticLiteral::Bool(value) => TypeLiteralContract::Bool(*value),
+            StaticLiteral::Symbol(value) => TypeLiteralContract::Symbol(Symbol::intern(value)),
+            StaticLiteral::ErrorCode(value) => {
+                TypeLiteralContract::ErrorCode(Symbol::intern(value))
+            }
+            StaticLiteral::Unit => TypeLiteralContract::Unit,
+            StaticLiteral::EmptyRelation => TypeLiteralContract::EmptyRelation,
+        }),
+        StaticType::Union(types) => TypeContract::Union(types.iter().map(type_contract).collect()),
+        StaticType::Relation(relation) => TypeContract::Relation(relation_type_contract(relation)),
+    }
+}
+
+fn relation_type_contract(relation: &RelationType) -> RelationTypeContract {
+    RelationTypeContract {
+        alternatives: relation
+            .alternatives()
+            .iter()
+            .map(row_type_contract)
+            .collect(),
+        minimum_rows: relation.cardinality().min,
+        maximum_rows: relation.cardinality().max,
+    }
+}
+
+fn row_type_contract(row: &RowShape) -> RelationRowContract {
+    let mut columns = row
+        .columns()
+        .iter()
+        .map(|(name, ty)| (Symbol::intern(name), type_contract(ty)))
+        .collect::<Vec<_>>();
+    columns.sort_by_key(|(name, _)| *name);
+    RelationRowContract { columns }
+}
+
+fn collect_return_values<'a>(items: &'a [HirItem], returns: &mut Vec<Option<&'a HirExpr>>) {
+    for item in items {
+        if let HirItem::Expr { expr, .. } = item {
+            collect_expr_return_values(expr, returns);
+        }
+    }
+}
+
+fn collect_expr_return_values<'a>(expr: &'a HirExpr, returns: &mut Vec<Option<&'a HirExpr>>) {
+    match expr {
+        HirExpr::Return { value, .. } => returns.push(value.as_deref()),
+        HirExpr::If {
+            then_items,
+            elseif,
+            else_items,
+            ..
+        } => {
+            collect_return_values(then_items, returns);
+            for (_, items) in elseif {
+                collect_return_values(items, returns);
+            }
+            collect_return_values(else_items, returns);
+        }
+        HirExpr::Block { items, .. }
+        | HirExpr::For { body: items, .. }
+        | HirExpr::While { body: items, .. } => collect_return_values(items, returns),
+        HirExpr::Try {
+            body,
+            catches,
+            finally,
+            ..
+        } => {
+            collect_return_values(body, returns);
+            for catch in catches {
+                collect_return_values(&catch.body, returns);
+            }
+            collect_return_values(finally, returns);
+        }
+        HirExpr::Function { .. } => {}
+        _ => {}
     }
 }
 
@@ -4897,6 +5153,20 @@ mod tests {
         let value = args[1].clone();
         context.emit(target, value.clone())?;
         Ok(value)
+    }
+
+    fn invalid_result(
+        _context: &mut BuiltinContext<'_, '_>,
+        _args: &[Value],
+    ) -> Result<Value, RuntimeError> {
+        Ok(Value::relation(
+            [Symbol::intern("case"), Symbol::intern("value")],
+            [Tuple::from([
+                Value::symbol(Symbol::intern("ok")),
+                Value::string("wrong"),
+            ])],
+        )
+        .expect("test relation is valid"))
     }
 
     fn dispatch_relations() -> MethodRelations {
@@ -6013,6 +6283,80 @@ mod tests {
             compiled.program.kind_fact_after(instruction),
             Some((dst, ValueKind::Relation))
         );
+    }
+
+    #[test]
+    fn structural_annotations_prove_literals_reject_mismatches_and_check_dynamic_values() {
+        let contract = "relation<{:case -> :ok, :value -> int} | {:case -> :error, :value -> error}> where rows in 1";
+        let proven = compile_source(
+            &format!("let outcome: {contract} = [:case, :value] {{ [:ok, 42] }}\nreturn outcome"),
+            &CompileContext::new(),
+        )
+        .unwrap();
+        assert!(
+            !proven
+                .program
+                .instructions()
+                .iter()
+                .any(|instruction| matches!(instruction, Instruction::CheckType { .. }))
+        );
+
+        assert!(matches!(
+            compile_source(
+                &format!(
+                    "let outcome: {contract} = [:case, :value] {{ [:ok, \"wrong\"] }}"
+                ),
+                &CompileContext::new(),
+            ),
+            Err(CompileError::StaticTypeMismatch { subject, .. }) if subject == "outcome"
+        ));
+
+        let dynamic = compile_source(
+            &format!("let outcome: {contract} = load_result()\nreturn outcome"),
+            &CompileContext::new().with_runtime_function("load_result"),
+        )
+        .unwrap();
+        assert_eq!(
+            dynamic
+                .program
+                .instructions()
+                .iter()
+                .filter(|instruction| matches!(instruction, Instruction::CheckType { .. }))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn structural_check_raises_catchable_type_error_with_unchanged_relation() {
+        let contract = "relation<{:case -> :ok, :value -> int} | {:case -> :error, :value -> error}> where rows in 1";
+        let context = CompileContext::new().with_runtime_function("load_result");
+        let builtins = BuiltinRegistry::new().with_builtin(
+            "load_result",
+            BuiltinResultKind::Dynamic,
+            invalid_result,
+        );
+        let mut task_manager =
+            TaskManager::new(RelationKernel::new()).with_builtins(Arc::new(builtins));
+        let submitted = submit_source_task(
+            &format!(
+                "let offending = load_result()\n\
+                 let caught = try\n\
+                   let outcome: {contract} = offending\n\
+                   false\n\
+                 catch E_TYPE as problem\n\
+                   problem.value == offending\n\
+                 end\n\
+                 return caught"
+            ),
+            &context,
+            &mut task_manager,
+        )
+        .unwrap();
+        assert!(matches!(
+            submitted.outcome,
+            TaskOutcome::Complete { value, .. } if value == Value::bool(true)
+        ));
     }
 
     #[test]

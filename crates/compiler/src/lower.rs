@@ -12,10 +12,11 @@
 // with this program. If not, see <https://www.gnu.org/licenses/>.
 
 use crate::{
-    Arg, Ast, BinaryOp, BindingKind, BindingPattern, CatchClause, CollectionItem, CstElement,
-    CstNode, CstToken, DispatchRestriction, EffectKind, Expr, FunctionBody, Item, Literal,
-    LoopBinding, MethodKind, MethodParam, NodeId, Param, ParamMode, ParseError, RecoveryClause,
-    ScatterBinding, Span, SyntaxKind, UnaryOp, ValueKindRef, parse,
+    Arg, Ast, BinaryOp, BindingKind, BindingPattern, CardinalityRef, CatchClause, CollectionItem,
+    CstElement, CstNode, CstToken, DispatchRestriction, EffectKind, Expr, FunctionBody, Item,
+    Literal, LoopBinding, MethodKind, MethodParam, NodeId, Param, ParamMode, ParseError,
+    RecoveryClause, ScatterBinding, Span, SyntaxKind, TypeLiteralRef, TypeRef, TypeRefKind,
+    TypeRowRef, UnaryOp, parse,
 };
 use base64::{Engine, engine::general_purpose};
 
@@ -122,7 +123,7 @@ impl<'a> Lower<'a> {
                 "value-kind annotations are only supported on verb parameters; method dispatch restrictions use `name @ #prototype`",
             );
         }
-        let (identity, selector, params, result_kind) = match kind {
+        let (identity, selector, params, result_type) = match kind {
             MethodKind::Method => {
                 let (identity, selector) = header
                     .map(|header| self.lower_method_header(header))
@@ -150,7 +151,7 @@ impl<'a> Lower<'a> {
             selector,
             clauses,
             params,
-            result_kind,
+            result_type,
             body,
         }
     }
@@ -172,7 +173,7 @@ impl<'a> Lower<'a> {
         Option<String>,
         Option<String>,
         Vec<MethodParam>,
-        Option<ValueKindRef>,
+        Option<TypeRef>,
     ) {
         let selector = qualified_name_from_tokens(
             self.source,
@@ -189,11 +190,11 @@ impl<'a> Lower<'a> {
                     .collect()
             })
             .unwrap_or_default();
-        let result_kind = self
+        let result_type = self
             .node_children(node)
-            .find(|child| child.kind == SyntaxKind::ValueKindRef)
-            .map(|kind| self.lower_kind_ref(kind));
-        (None, selector, params, result_kind)
+            .find(|child| child.kind == SyntaxKind::TypeRef)
+            .map(|kind| self.lower_type_ref(kind));
+        (None, selector, params, result_type)
     }
 
     fn lower_verb_param(&mut self, node: &CstNode) -> MethodParam {
@@ -206,8 +207,8 @@ impl<'a> Lower<'a> {
                 .map(|restriction| self.lower_dispatch_restriction(restriction)),
             annotation: self
                 .node_children(node)
-                .find(|child| child.kind == SyntaxKind::ValueKindRef)
-                .map(|kind| self.lower_kind_ref(kind)),
+                .find(|child| child.kind == SyntaxKind::TypeRef)
+                .map(|kind| self.lower_type_ref(kind)),
             span: node.span.clone(),
         }
     }
@@ -833,16 +834,11 @@ impl<'a> Lower<'a> {
             });
         let annotation = self
             .node_children(node)
-            .find(|child| child.kind == SyntaxKind::ValueKindRef)
-            .map(|child| self.lower_kind_ref(child));
+            .find(|child| child.kind == SyntaxKind::TypeRef)
+            .map(|child| self.lower_type_ref(child));
         let value = self
             .node_children(node)
-            .find(|child| {
-                !matches!(
-                    child.kind,
-                    SyntaxKind::ScatterPattern | SyntaxKind::ValueKindRef
-                )
-            })
+            .find(|child| !matches!(child.kind, SyntaxKind::ScatterPattern | SyntaxKind::TypeRef))
             .map(|child| Box::new(self.lower_expr(child)));
         Expr::Binding {
             id: self.node_id(),
@@ -1105,10 +1101,10 @@ impl<'a> Lower<'a> {
             .find(|child| child.kind == SyntaxKind::ParamList)
             .map(|params| self.lower_params(params))
             .unwrap_or_default();
-        let result_kind = self
+        let result_type = self
             .node_children(node)
-            .find(|child| child.kind == SyntaxKind::ValueKindRef)
-            .map(|child| self.lower_kind_ref(child));
+            .find(|child| child.kind == SyntaxKind::TypeRef)
+            .map(|child| self.lower_type_ref(child));
         let body = if let Some(block) = self
             .node_children(node)
             .find(|child| child.kind == SyntaxKind::Block)
@@ -1128,7 +1124,7 @@ impl<'a> Lower<'a> {
             span: node.span.clone(),
             name,
             params,
-            result_kind,
+            result_type,
             body,
         }
     }
@@ -1149,7 +1145,7 @@ impl<'a> Lower<'a> {
             span: node.span.clone(),
             name: None,
             params,
-            result_kind: None,
+            result_type: None,
             body: FunctionBody::Expr(Box::new(body)),
         }
     }
@@ -1241,8 +1237,8 @@ impl<'a> Lower<'a> {
             name: self.first_text(node, SyntaxKind::Ident).unwrap_or_default(),
             annotation: self
                 .node_children(node)
-                .find(|child| child.kind == SyntaxKind::ValueKindRef)
-                .map(|child| self.lower_kind_ref(child)),
+                .find(|child| child.kind == SyntaxKind::TypeRef)
+                .map(|child| self.lower_type_ref(child)),
             span: node.span.clone(),
         }
     }
@@ -1274,8 +1270,8 @@ impl<'a> Lower<'a> {
             mode,
             annotation: self
                 .node_children(node)
-                .find(|child| child.kind == SyntaxKind::ValueKindRef)
-                .map(|child| self.lower_kind_ref(child)),
+                .find(|child| child.kind == SyntaxKind::TypeRef)
+                .map(|child| self.lower_type_ref(child)),
             default: self
                 .node_children(node)
                 .find(|child| is_expr_node(child.kind))
@@ -1301,8 +1297,8 @@ impl<'a> Lower<'a> {
         let name = self.first_text(node, SyntaxKind::Ident).unwrap_or_default();
         let annotation = self
             .node_children(node)
-            .find(|child| child.kind == SyntaxKind::ValueKindRef)
-            .map(|child| self.lower_kind_ref(child));
+            .find(|child| child.kind == SyntaxKind::TypeRef)
+            .map(|child| self.lower_type_ref(child));
         let default = self
             .node_children(node)
             .find(|child| is_expr_node(child.kind))
@@ -1316,19 +1312,126 @@ impl<'a> Lower<'a> {
         }
     }
 
-    fn lower_kind_ref(&self, node: &CstNode) -> ValueKindRef {
-        let token = self
-            .token_children(node)
-            .find(|token| token.kind == SyntaxKind::Ident);
-        let Some(token) = token else {
-            return ValueKindRef {
+    fn lower_type_ref(&self, node: &CstNode) -> TypeRef {
+        if let Some(relation) = self
+            .node_children(node)
+            .find(|child| child.kind == SyntaxKind::RelationType)
+        {
+            return self.lower_relation_type(relation);
+        }
+
+        let tokens = self.token_children(node).collect::<Vec<_>>();
+        let kind = match tokens.first().map(|token| token.kind) {
+            Some(SyntaxKind::Ident) => {
+                let arguments = self
+                    .node_children(node)
+                    .find(|child| child.kind == SyntaxKind::TypeArguments)
+                    .map(|arguments| {
+                        self.node_children(arguments)
+                            .filter(|child| child.kind == SyntaxKind::TypeRef)
+                            .map(|argument| self.lower_type_ref(argument))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                TypeRefKind::Named {
+                    name: self.text(tokens[0].span.clone()).to_owned(),
+                    arguments,
+                }
+            }
+            Some(SyntaxKind::Colon) => TypeRefKind::Literal(TypeLiteralRef::Symbol(
+                qualified_name_from_tokens(self.source, &tokens, 1).unwrap_or_default(),
+            )),
+            Some(SyntaxKind::TrueKw) => TypeRefKind::Literal(TypeLiteralRef::Bool(true)),
+            Some(SyntaxKind::FalseKw) => TypeRefKind::Literal(TypeLiteralRef::Bool(false)),
+            Some(SyntaxKind::ErrorCode) => TypeRefKind::Literal(TypeLiteralRef::ErrorCode(
+                self.text(tokens[0].span.clone()).to_owned(),
+            )),
+            Some(SyntaxKind::LParen) => TypeRefKind::Literal(TypeLiteralRef::Unit),
+            Some(SyntaxKind::LBracket) => TypeRefKind::Literal(TypeLiteralRef::EmptyRelation),
+            _ => TypeRefKind::Named {
                 name: String::new(),
-                span: node.span.clone(),
-            };
+                arguments: Vec::new(),
+            },
         };
-        ValueKindRef {
-            name: self.text(token.span.clone()).to_owned(),
-            span: token.span.clone(),
+        TypeRef {
+            kind,
+            span: node.span.clone(),
+        }
+    }
+
+    fn lower_relation_type(&self, node: &CstNode) -> TypeRef {
+        let alternatives = self
+            .node_children(node)
+            .filter(|child| child.kind == SyntaxKind::TypeRow)
+            .map(|row| self.lower_type_row(row))
+            .collect();
+        let cardinality = self
+            .node_children(node)
+            .find(|child| child.kind == SyntaxKind::Cardinality)
+            .map(|cardinality| self.lower_cardinality(cardinality))
+            .unwrap_or(CardinalityRef { min: 0, max: None });
+        TypeRef {
+            kind: TypeRefKind::Relation {
+                alternatives,
+                cardinality,
+            },
+            span: node.span.clone(),
+        }
+    }
+
+    fn lower_type_row(&self, node: &CstNode) -> TypeRowRef {
+        let columns = self
+            .node_children(node)
+            .filter(|child| child.kind == SyntaxKind::TypeColumn)
+            .map(|column| {
+                let tokens = self.token_children(column).collect::<Vec<_>>();
+                let name = tokens
+                    .iter()
+                    .position(|token| token.kind == SyntaxKind::Colon)
+                    .and_then(|colon| qualified_name_from_tokens(self.source, &tokens, colon + 1))
+                    .unwrap_or_default();
+                let ty = self
+                    .node_children(column)
+                    .find(|child| child.kind == SyntaxKind::TypeRef)
+                    .map(|ty| self.lower_type_ref(ty))
+                    .unwrap_or(TypeRef {
+                        kind: TypeRefKind::Named {
+                            name: String::new(),
+                            arguments: Vec::new(),
+                        },
+                        span: column.span.clone(),
+                    });
+                (name, ty)
+            })
+            .collect();
+        TypeRowRef {
+            columns,
+            span: node.span.clone(),
+        }
+    }
+
+    fn lower_cardinality(&self, node: &CstNode) -> CardinalityRef {
+        let tokens = self.token_children(node).collect::<Vec<_>>();
+        let minimum = tokens
+            .iter()
+            .find(|token| token.kind == SyntaxKind::Int)
+            .and_then(|token| self.text(token.span.clone()).parse().ok())
+            .unwrap_or(0);
+        let has_range = tokens.iter().any(|token| token.kind == SyntaxKind::DotDot);
+        let maximum = if !has_range {
+            Some(minimum)
+        } else if tokens.iter().any(|token| token.kind == SyntaxKind::Star) {
+            None
+        } else {
+            tokens
+                .iter()
+                .filter(|token| token.kind == SyntaxKind::Int)
+                .nth(1)
+                .and_then(|token| self.text(token.span.clone()).parse().ok())
+        };
+        CardinalityRef {
+            min: minimum,
+            max: maximum,
         }
     }
 
@@ -1627,10 +1730,18 @@ fn is_expr_node(kind: SyntaxKind) -> bool {
 mod tests {
     use super::parse_ast;
     use crate::{
-        BinaryOp, BindingKind, BindingPattern, CollectionItem, EffectKind, Expr, FunctionBody,
-        Item, Literal, MethodKind, NodeId, Param, ParamMode,
+        BinaryOp, BindingKind, BindingPattern, CardinalityRef, CollectionItem, EffectKind, Expr,
+        FunctionBody, Item, Literal, MethodKind, NodeId, Param, ParamMode, TypeLiteralRef, TypeRef,
+        TypeRefKind,
     };
     use std::collections::BTreeSet;
+
+    fn named_type(ty: &TypeRef) -> &str {
+        let TypeRefKind::Named { name, .. } = &ty.kind else {
+            panic!("expected named type, got {ty:?}");
+        };
+        name
+    }
 
     #[test]
     fn lowers_value_kind_references_with_exact_spans() {
@@ -1649,7 +1760,7 @@ mod tests {
         else {
             panic!("expected annotated binding");
         };
-        assert_eq!(annotation.name, "int");
+        assert_eq!(named_type(annotation), "int");
         let annotation_start = source.find("int").unwrap();
         assert_eq!(annotation.span, annotation_start..annotation_start + 3);
 
@@ -1657,7 +1768,7 @@ mod tests {
             expr:
                 Expr::Function {
                     params,
-                    result_kind,
+                    result_type,
                     ..
                 },
             ..
@@ -1665,13 +1776,52 @@ mod tests {
         else {
             panic!("expected annotated function");
         };
-        assert_eq!(params[0].annotation.as_ref().unwrap().name, "float");
-        assert_eq!(result_kind.as_ref().unwrap().name, "string");
+        assert_eq!(named_type(params[0].annotation.as_ref().unwrap()), "float");
+        assert_eq!(named_type(result_type.as_ref().unwrap()), "string");
         let result_start = source.rfind("string").unwrap();
         assert_eq!(
-            result_kind.as_ref().unwrap().span,
+            result_type.as_ref().unwrap().span,
             result_start..result_start + 6
         );
+    }
+
+    #[test]
+    fn lowers_structural_relation_type_rows_and_literals() {
+        let ast = parse_ast(
+            "let outcome: relation<{:case -> :ok, :value -> int} | {:case -> :error, :value -> error}> where rows in 1 = value",
+        );
+        assert_eq!(ast.errors, vec![]);
+        let Item::Expr {
+            expr:
+                Expr::Binding {
+                    annotation: Some(annotation),
+                    ..
+                },
+            ..
+        } = &ast.items[0]
+        else {
+            panic!("expected annotated binding");
+        };
+        let TypeRefKind::Relation {
+            alternatives,
+            cardinality,
+        } = &annotation.kind
+        else {
+            panic!("expected relation type");
+        };
+        assert_eq!(
+            *cardinality,
+            CardinalityRef {
+                min: 1,
+                max: Some(1)
+            }
+        );
+        assert_eq!(alternatives.len(), 2);
+        assert_eq!(alternatives[0].columns[0].0, "case");
+        assert!(matches!(
+            alternatives[0].columns[0].1.kind,
+            TypeRefKind::Literal(TypeLiteralRef::Symbol(ref value)) if value == "ok"
+        ));
     }
 
     #[test]
@@ -1694,11 +1844,14 @@ mod tests {
         };
         assert_eq!(bindings.len(), 3);
         assert_eq!(bindings[0].name, "head");
-        assert_eq!(bindings[0].annotation.as_ref().unwrap().name, "int");
+        assert_eq!(named_type(bindings[0].annotation.as_ref().unwrap()), "int");
         assert_eq!(bindings[1].mode, ParamMode::Optional);
-        assert_eq!(bindings[1].annotation.as_ref().unwrap().name, "string");
+        assert_eq!(
+            named_type(bindings[1].annotation.as_ref().unwrap()),
+            "string"
+        );
         assert_eq!(bindings[2].mode, ParamMode::Rest);
-        assert_eq!(bindings[2].annotation.as_ref().unwrap().name, "list");
+        assert_eq!(named_type(bindings[2].annotation.as_ref().unwrap()), "list");
 
         let Item::Expr {
             expr:
@@ -1713,9 +1866,9 @@ mod tests {
             panic!("expected two-binding loop");
         };
         assert_eq!(key.name, "index");
-        assert_eq!(key.annotation.as_ref().unwrap().name, "int");
+        assert_eq!(named_type(key.annotation.as_ref().unwrap()), "int");
         assert_eq!(value.name, "row");
-        assert_eq!(value.annotation.as_ref().unwrap().name, "map");
+        assert_eq!(named_type(value.annotation.as_ref().unwrap()), "map");
         for annotation in bindings
             .iter()
             .filter_map(|binding| binding.annotation.as_ref())
@@ -1725,7 +1878,7 @@ mod tests {
                     .filter_map(|binding| binding.annotation.as_ref()),
             )
         {
-            assert_eq!(&source[annotation.span.clone()], annotation.name);
+            assert_eq!(&source[annotation.span.clone()], named_type(annotation));
         }
     }
 
@@ -2028,7 +2181,7 @@ mod tests {
             identity,
             selector,
             params,
-            result_kind,
+            result_type,
             body,
             ..
         } = &ast.items[0]
@@ -2048,7 +2201,7 @@ mod tests {
             Some("player")
         );
         assert_eq!(
-            params[0].annotation.as_ref().map(|kind| kind.name.as_str()),
+            params[0].annotation.as_ref().map(named_type),
             Some("identity")
         );
         assert_eq!(params[1].name, "item");
@@ -2060,15 +2213,12 @@ mod tests {
             Some("thing")
         );
         assert!(params[1].restriction.as_ref().unwrap().frob_only);
-        assert_eq!(
-            result_kind.as_ref().map(|kind| kind.name.as_str()),
-            Some("bool")
-        );
-        for kind in [params[0].annotation.as_ref(), result_kind.as_ref()]
+        assert_eq!(result_type.as_ref().map(named_type), Some("bool"));
+        for kind in [params[0].annotation.as_ref(), result_type.as_ref()]
             .into_iter()
             .flatten()
         {
-            assert_eq!(&source[kind.span.clone()], kind.name);
+            assert_eq!(&source[kind.span.clone()], named_type(kind));
         }
         assert_eq!(body.len(), 1);
     }
@@ -2097,7 +2247,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_identity_literals_as_value_kind_annotations() {
+    fn rejects_identity_literals_as_type_annotations() {
         let verb = parse_ast(
             "verb say(actor: #player, message)\n\
                emit(actor, message)\n\
@@ -2106,7 +2256,7 @@ mod tests {
         assert!(
             verb.errors
                 .iter()
-                .any(|error| error.message.contains("expected value kind"))
+                .any(|error| error.message.contains("expected type"))
         );
 
         let method = parse_ast(

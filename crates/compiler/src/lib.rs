@@ -33,10 +33,10 @@ mod structural_syntax_prototype;
 mod syntax;
 
 pub use ast::{
-    Arg, Ast, BinaryOp, BindingKind, BindingPattern, CatchClause, CollectionItem,
+    Arg, Ast, BinaryOp, BindingKind, BindingPattern, CardinalityRef, CatchClause, CollectionItem,
     DispatchRestriction, EffectKind, Expr, FunctionBody, Item, Literal, LoopBinding, MethodKind,
-    MethodParam, NodeId, Param, ParamMode, RecoveryClause, ScatterBinding, Span, UnaryOp,
-    ValueKindRef,
+    MethodParam, NodeId, Param, ParamMode, RecoveryClause, ScatterBinding, Span, TypeLiteralRef,
+    TypeRef, TypeRefKind, TypeRowRef, UnaryOp,
 };
 pub use backend::{
     CompileContext, CompileError, CompiledProgram, HostRequestFunction, InstalledMethod,

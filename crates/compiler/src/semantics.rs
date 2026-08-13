@@ -12,11 +12,12 @@
 // with this program. If not, see <https://www.gnu.org/licenses/>.
 
 use crate::{
-    Arg, Ast, BindingKind, BindingPattern, CatchClause, CollectionItem, EffectKind, Expr,
-    FunctionBody, HirArg, HirCatch, HirCollectionItem, HirExpr, HirFunctionBody, HirItem,
+    Arg, Ast, BindingKind, BindingPattern, Cardinality, CatchClause, CollectionItem, EffectKind,
+    Expr, FunctionBody, HirArg, HirCatch, HirCollectionItem, HirExpr, HirFunctionBody, HirItem,
     HirLoopBinding, HirMethodParam, HirParam, HirPlace, HirProgram, HirRecovery, HirRelationAtom,
     HirRuleBodyItem, HirRuleGuard, HirScatterBinding, Item, NodeId, Param, ParamMode, ParseError,
-    RecoveryClause, Span, ValueKindRef, parse_ast,
+    RecoveryClause, RelationType, RowShape, Span, StaticLiteral, StaticType, TypeLiteralRef,
+    TypeRef, TypeRefKind, parse_ast,
 };
 use mica_var::ValueKind;
 use std::collections::{BTreeSet, HashMap};
@@ -80,6 +81,7 @@ pub struct Binding {
     pub name: String,
     pub kind: LocalKind,
     pub mutable: bool,
+    pub declared_type: Option<StaticType>,
     pub declared_kind: Option<ValueKind>,
     pub scope: ScopeId,
     pub declared_at: NodeId,
@@ -143,6 +145,7 @@ pub enum DiagnosticCode {
     InvalidRelationRule,
     MissingValueKindInitializer,
     UnknownValueKind,
+    InvalidStaticType,
     UnsupportedSyntax,
 }
 
@@ -156,6 +159,7 @@ impl DiagnosticCode {
             Self::InvalidRelationRule => "invalid relation rule",
             Self::MissingValueKindInitializer => "missing value-kind initializer",
             Self::UnknownValueKind => "unknown value kind",
+            Self::InvalidStaticType => "invalid static type",
             Self::UnsupportedSyntax => "unsupported syntax",
         }
     }
@@ -230,7 +234,7 @@ impl<'a> Analyzer<'a> {
         scope: ScopeId,
         name: impl Into<String>,
         kind: LocalKind,
-        declared_kind: Option<ValueKind>,
+        declared_type: Option<StaticType>,
         declared_at: NodeId,
         span: &Span,
     ) -> BindingId {
@@ -244,11 +248,15 @@ impl<'a> Analyzer<'a> {
             );
         }
         let id = BindingId(self.bindings.len() as u32);
+        let declared_kind = declared_type
+            .as_ref()
+            .and_then(StaticType::exact_outer_kind);
         let binding = Binding {
             id,
             name,
             mutable: kind.mutable_by_default(),
             kind,
+            declared_type,
             declared_kind,
             scope,
             declared_at,
@@ -738,7 +746,7 @@ impl<'a> Analyzer<'a> {
                 selector,
                 clauses,
                 params,
-                result_kind,
+                result_type,
                 body,
                 ..
             } => {
@@ -746,24 +754,29 @@ impl<'a> Analyzer<'a> {
                 let params = params
                     .iter()
                     .map(|param| {
-                        let declared_kind =
-                            self.resolve_kind_ref(param.annotation.as_ref(), param.id);
+                        let declared_type =
+                            self.resolve_type_ref(param.annotation.as_ref(), param.id);
+                        let declared_kind = declared_type
+                            .as_ref()
+                            .and_then(StaticType::exact_outer_kind);
                         HirMethodParam {
                             id: param.id,
                             binding: self.declare(
                                 method_scope,
                                 param.name.clone(),
                                 LocalKind::InstalledParam,
-                                declared_kind,
+                                declared_type.clone(),
                                 param.id,
                                 &param.span,
                             ),
                             restriction: param.restriction.clone(),
+                            declared_type,
                             declared_kind,
                         }
                     })
                     .collect();
-                let result_kind = self.resolve_kind_ref(result_kind.as_ref(), *id);
+                let result_type = self.resolve_type_ref(result_type.as_ref(), *id);
+                let result_kind = result_type.as_ref().and_then(StaticType::exact_outer_kind);
                 self.function_stack.push(FunctionContext {
                     owner: *id,
                     scope: method_scope,
@@ -777,6 +790,7 @@ impl<'a> Analyzer<'a> {
                     selector: selector.clone(),
                     clauses: clauses.clone(),
                     params,
+                    result_type,
                     result_kind,
                     scope: method_scope,
                     body,
@@ -790,6 +804,7 @@ impl<'a> Analyzer<'a> {
             return Some(HirRuleBodyItem::Atom(atom));
         }
         self.lower_rule_guard(expr, scope)
+            .map(Box::new)
             .map(HirRuleBodyItem::Guard)
     }
 
@@ -996,8 +1011,8 @@ impl<'a> Analyzer<'a> {
                 annotation,
                 value,
             } => {
-                let declared_kind = self.resolve_kind_ref(annotation.as_ref(), *id);
-                if declared_kind.is_some() && value.is_none() {
+                let declared_type = self.resolve_type_ref(annotation.as_ref(), *id);
+                if declared_type.is_some() && value.is_none() {
                     self.diagnostic(
                         DiagnosticCode::MissingValueKindInitializer,
                         *id,
@@ -1019,7 +1034,7 @@ impl<'a> Analyzer<'a> {
                                 BindingKind::Let => LocalKind::Let,
                                 BindingKind::Const => LocalKind::Const,
                             },
-                            declared_kind,
+                            declared_type,
                             *id,
                             span,
                         )),
@@ -1030,8 +1045,11 @@ impl<'a> Analyzer<'a> {
                         bindings
                             .iter()
                             .map(|param| {
-                                let declared_kind =
-                                    self.resolve_kind_ref(param.annotation.as_ref(), param.id);
+                                let declared_type =
+                                    self.resolve_type_ref(param.annotation.as_ref(), param.id);
+                                let declared_kind = declared_type
+                                    .as_ref()
+                                    .and_then(StaticType::exact_outer_kind);
                                 let local_kind = match kind {
                                     BindingKind::Let => LocalKind::Let,
                                     BindingKind::Const => LocalKind::Const,
@@ -1040,7 +1058,7 @@ impl<'a> Analyzer<'a> {
                                     scope,
                                     param.name.clone(),
                                     local_kind,
-                                    declared_kind,
+                                    declared_type.clone(),
                                     param.id,
                                     &param.span,
                                 );
@@ -1052,6 +1070,7 @@ impl<'a> Analyzer<'a> {
                                     id: param.id,
                                     binding,
                                     mode: param.mode.clone(),
+                                    declared_type,
                                     declared_kind,
                                     default,
                                 }
@@ -1107,31 +1126,37 @@ impl<'a> Analyzer<'a> {
             } => {
                 let iter = self.lower_expr(iter, scope);
                 let loop_scope = self.alloc_scope(Some(scope), Some(*id));
-                let key_kind = self.resolve_kind_ref(key.annotation.as_ref(), key.id);
+                let key_type = self.resolve_type_ref(key.annotation.as_ref(), key.id);
+                let key_kind = key_type.as_ref().and_then(StaticType::exact_outer_kind);
                 let key = HirLoopBinding {
                     id: key.id,
                     binding: self.declare(
                         loop_scope,
                         key.name.clone(),
                         LocalKind::Loop,
-                        key_kind,
+                        key_type.clone(),
                         key.id,
                         &key.span,
                     ),
+                    declared_type: key_type,
                     declared_kind: key_kind,
                 };
                 let value = value.as_ref().map(|value| {
-                    let declared_kind = self.resolve_kind_ref(value.annotation.as_ref(), value.id);
+                    let declared_type = self.resolve_type_ref(value.annotation.as_ref(), value.id);
+                    let declared_kind = declared_type
+                        .as_ref()
+                        .and_then(StaticType::exact_outer_kind);
                     HirLoopBinding {
                         id: value.id,
                         binding: self.declare(
                             loop_scope,
                             value.name.clone(),
                             LocalKind::Loop,
-                            declared_kind,
+                            declared_type.clone(),
                             value.id,
                             &value.span,
                         ),
+                        declared_type,
                         declared_kind,
                     }
                 });
@@ -1212,10 +1237,11 @@ impl<'a> Analyzer<'a> {
                 span,
                 name,
                 params,
-                result_kind,
+                result_type,
                 body,
             } => {
-                let result_kind = self.resolve_kind_ref(result_kind.as_ref(), *id);
+                let result_type = self.resolve_type_ref(result_type.as_ref(), *id);
+                let result_kind = result_type.as_ref().and_then(StaticType::exact_outer_kind);
                 let name = name.as_ref().map(|name| {
                     self.declare(scope, name.clone(), LocalKind::Function, None, *id, span)
                 });
@@ -1244,6 +1270,7 @@ impl<'a> Analyzer<'a> {
                     name,
                     scope: function_scope,
                     params: hir_params,
+                    result_type,
                     result_kind,
                     captures,
                     body,
@@ -1295,12 +1322,15 @@ impl<'a> Analyzer<'a> {
                     ParamMode::Optional => LocalKind::OptionalParam,
                     ParamMode::Rest => LocalKind::RestParam,
                 };
-                let declared_kind = self.resolve_kind_ref(param.annotation.as_ref(), param.id);
+                let declared_type = self.resolve_type_ref(param.annotation.as_ref(), param.id);
+                let declared_kind = declared_type
+                    .as_ref()
+                    .and_then(StaticType::exact_outer_kind);
                 let binding = self.declare(
                     scope,
                     param.name.clone(),
                     kind.clone(),
-                    declared_kind,
+                    declared_type.clone(),
                     param.id,
                     span,
                 );
@@ -1312,6 +1342,7 @@ impl<'a> Analyzer<'a> {
                     id: param.id,
                     binding,
                     kind,
+                    declared_type,
                     declared_kind,
                     default,
                 }
@@ -1501,22 +1532,98 @@ impl<'a> Analyzer<'a> {
         }
     }
 
-    fn resolve_kind_ref(
+    fn resolve_type_ref(
         &mut self,
-        annotation: Option<&ValueKindRef>,
+        annotation: Option<&TypeRef>,
         node: NodeId,
-    ) -> Option<ValueKind> {
+    ) -> Option<StaticType> {
         let annotation = annotation?;
-        let Some(kind) = value_kind_from_name(&annotation.name) else {
-            self.diagnostic(
-                DiagnosticCode::UnknownValueKind,
-                node,
-                annotation.span.clone(),
-                format!("unknown value kind `{}`", annotation.name),
-            );
-            return None;
-        };
-        Some(kind)
+        self.resolve_type(annotation, node)
+    }
+
+    fn resolve_type(&mut self, annotation: &TypeRef, node: NodeId) -> Option<StaticType> {
+        match &annotation.kind {
+            TypeRefKind::Named { name, arguments } => {
+                if name == "dynamic" && arguments.is_empty() {
+                    return Some(StaticType::Dynamic);
+                }
+                let Some(kind) = value_kind_from_name(name) else {
+                    self.diagnostic(
+                        DiagnosticCode::UnknownValueKind,
+                        node,
+                        annotation.span.clone(),
+                        format!("unknown type `{name}`"),
+                    );
+                    return None;
+                };
+                if !arguments.is_empty() {
+                    self.diagnostic(
+                        DiagnosticCode::InvalidStaticType,
+                        node,
+                        annotation.span.clone(),
+                        format!("value kind `{name}` does not accept type arguments"),
+                    );
+                    return None;
+                }
+                Some(StaticType::Kind(kind))
+            }
+            TypeRefKind::Literal(literal) => Some(StaticType::Literal(match literal {
+                TypeLiteralRef::Bool(value) => StaticLiteral::Bool(*value),
+                TypeLiteralRef::Symbol(value) => StaticLiteral::Symbol(value.clone()),
+                TypeLiteralRef::ErrorCode(value) => StaticLiteral::ErrorCode(value.clone()),
+                TypeLiteralRef::Unit => StaticLiteral::Unit,
+                TypeLiteralRef::EmptyRelation => StaticLiteral::EmptyRelation,
+            })),
+            TypeRefKind::Relation {
+                alternatives,
+                cardinality,
+            } => {
+                let cardinality = match Cardinality::new(cardinality.min, cardinality.max) {
+                    Ok(cardinality) => cardinality,
+                    Err(error) => {
+                        self.diagnostic(
+                            DiagnosticCode::InvalidStaticType,
+                            node,
+                            annotation.span.clone(),
+                            error.to_string(),
+                        );
+                        return None;
+                    }
+                };
+                let mut rows = Vec::with_capacity(alternatives.len());
+                for alternative in alternatives {
+                    let mut columns = Vec::with_capacity(alternative.columns.len());
+                    for (name, cell) in &alternative.columns {
+                        let cell = self.resolve_type(cell, node)?;
+                        columns.push((name.clone(), cell));
+                    }
+                    match RowShape::new(columns) {
+                        Ok(row) => rows.push(row),
+                        Err(error) => {
+                            self.diagnostic(
+                                DiagnosticCode::InvalidStaticType,
+                                node,
+                                alternative.span.clone(),
+                                error.to_string(),
+                            );
+                            return None;
+                        }
+                    }
+                }
+                match RelationType::new(rows, cardinality) {
+                    Ok(relation) => Some(StaticType::Relation(relation)),
+                    Err(error) => {
+                        self.diagnostic(
+                            DiagnosticCode::InvalidStaticType,
+                            node,
+                            annotation.span.clone(),
+                            error.to_string(),
+                        );
+                        None
+                    }
+                }
+            }
+        }
     }
 
     fn diagnostic(
@@ -1843,6 +1950,20 @@ mod tests {
         let program = parse_semantic(source);
         assert_eq!(program.parse_errors, vec![]);
         program
+    }
+
+    #[test]
+    fn resolves_structural_relation_annotations_canonically() {
+        let program = parse_ok(
+            "let outcome: relation<{:value -> int, :case -> :ok} | {:value -> error, :case -> :error}> where rows in 1 = source()",
+        );
+        assert_eq!(program.diagnostics, vec![]);
+        let binding = &program.bindings[0];
+        assert_eq!(binding.declared_kind, Some(ValueKind::Relation));
+        assert_eq!(
+            binding.declared_type.as_ref().unwrap().to_string(),
+            "relation<{:case -> :error, :value -> error} | {:case -> :ok, :value -> int}> where rows in 1"
+        );
     }
 
     #[test]

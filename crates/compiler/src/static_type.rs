@@ -399,6 +399,10 @@ impl StaticType {
         }
     }
 
+    pub fn exact_outer_kind(&self) -> Option<ValueKind> {
+        self.outer_kinds().singleton()
+    }
+
     pub fn is_subtype_of(&self, other: &Self) -> bool {
         if self == other || matches!(self, Self::Never) || matches!(other, Self::Dynamic) {
             return true;
@@ -597,6 +601,7 @@ impl fmt::Display for StaticTypeError {
 impl std::error::Error for StaticTypeError {}
 
 pub(crate) struct StaticTypeInference<'a> {
+    bindings: &'a [Binding],
     kinds: KindInference<'a>,
 }
 
@@ -607,6 +612,7 @@ impl<'a> StaticTypeInference<'a> {
         runtime_result: &'a dyn Fn(&str) -> Option<KindSet>,
     ) -> Self {
         Self {
+            bindings,
             kinds: KindInference::new(bindings, direct_result, runtime_result),
         }
     }
@@ -618,6 +624,11 @@ impl<'a> StaticTypeInference<'a> {
                 StaticType::Literal(StaticLiteral::Symbol(name.clone()))
             }
             HirExpr::Relation { heading, rows, .. } => self.relation(heading, rows),
+            HirExpr::LocalRef { binding, .. } => self
+                .bindings
+                .get(binding.0 as usize)
+                .and_then(|binding| binding.declared_type.clone())
+                .unwrap_or_else(|| static_type_from_kinds(self.kinds.expr(expr))),
             _ => static_type_from_kinds(self.kinds.expr(expr)),
         }
     }

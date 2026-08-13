@@ -14,9 +14,10 @@
 use crate::{
     AuthorityContext, BuiltinContext, BuiltinRegistry, BuiltinResultKind, CapabilityGrant,
     CapabilityOp, Effect, ErrorField, Instruction, KindCheckSite, ListItem, MapItem, Operand,
-    Program, ProgramResolver, QueryBinding, Register, RelationArg, RuntimeBinaryOp, RuntimeContext,
-    RuntimeError, SpawnTarget, SuspendKind, Task, TaskError, TaskLimits, TaskManager,
-    TaskManagerError, TaskOutcome,
+    Program, ProgramResolver, QueryBinding, Register, RelationArg, RelationRowContract,
+    RelationTypeContract, RuntimeBinaryOp, RuntimeContext, RuntimeError, SpawnTarget, SuspendKind,
+    Task, TaskError, TaskLimits, TaskManager, TaskManagerError, TaskOutcome, TypeContract,
+    TypeLiteralContract,
 };
 use mica_compiler::{CompileContext, compile_source};
 use mica_relation_kernel::{
@@ -497,6 +498,124 @@ fn kind_check_failures_are_catchable_for_every_expected_kind() {
             ),
             "{}",
             expected.name()
+        );
+    }
+}
+
+fn result_contract() -> TypeContract {
+    let case = Symbol::intern("case");
+    let value = Symbol::intern("value");
+    let row = |mut columns: Vec<(Symbol, TypeContract)>| {
+        columns.sort_by_key(|(name, _)| *name);
+        RelationRowContract { columns }
+    };
+    TypeContract::Relation(RelationTypeContract {
+        alternatives: vec![
+            row(vec![
+                (
+                    case,
+                    TypeContract::Literal(TypeLiteralContract::Symbol(Symbol::intern("error"))),
+                ),
+                (value, TypeContract::Kind(ValueKind::Error)),
+            ]),
+            row(vec![
+                (
+                    case,
+                    TypeContract::Literal(TypeLiteralContract::Symbol(Symbol::intern("ok"))),
+                ),
+                (value, TypeContract::Kind(ValueKind::Int)),
+            ]),
+        ],
+        minimum_rows: 1,
+        maximum_rows: Some(1),
+    })
+}
+
+#[test]
+fn structural_type_checks_enforce_heading_discriminator_cells_and_cardinality() {
+    let kernel = RelationKernel::new();
+    let valid = Value::relation(
+        [Symbol::intern("case"), Symbol::intern("value")],
+        [Tuple::from([sym("ok"), int(42)])],
+    )
+    .unwrap();
+    let program = Program::new(
+        1,
+        [
+            Instruction::Load {
+                dst: reg(0),
+                value: valid.clone(),
+            },
+            Instruction::CheckType {
+                value: reg(0),
+                expected: result_contract(),
+                site: KindCheckSite::Binding,
+                subject: Symbol::intern("result"),
+            },
+            Instruction::Return { value: r(0) },
+        ],
+    )
+    .unwrap();
+    assert!(matches!(
+        run_program(&kernel, program, 3).unwrap(),
+        TaskOutcome::Complete { value, .. } if value == valid
+    ));
+
+    for invalid in [
+        Value::relation([Symbol::intern("value")], [Tuple::from([int(42)])]).unwrap(),
+        Value::relation(
+            [Symbol::intern("case"), Symbol::intern("value")],
+            [Tuple::from([sym("other"), int(42)])],
+        )
+        .unwrap(),
+        Value::relation(
+            [Symbol::intern("case"), Symbol::intern("value")],
+            [Tuple::from([sym("ok"), strv("wrong")])],
+        )
+        .unwrap(),
+        Value::relation([Symbol::intern("case"), Symbol::intern("value")], []).unwrap(),
+    ] {
+        let bits = borrowed_value_bits(&invalid);
+        let program = Program::new(
+            2,
+            [
+                Instruction::Load {
+                    dst: reg(0),
+                    value: invalid,
+                },
+                Instruction::EnterTry {
+                    catches: vec![crate::CatchHandler {
+                        code: Some(err("E_TYPE")),
+                        binding: Some(reg(1)),
+                        target: 4,
+                    }],
+                    finally: None,
+                    end: 5,
+                },
+                Instruction::CheckType {
+                    value: reg(0),
+                    expected: result_contract(),
+                    site: KindCheckSite::Binding,
+                    subject: Symbol::intern("result"),
+                },
+                Instruction::ExitTry,
+                Instruction::Return { value: r(1) },
+                Instruction::Return {
+                    value: v(Value::nothing()),
+                },
+            ],
+        )
+        .unwrap();
+        let TaskOutcome::Complete { value: raised, .. } = run_program(&kernel, program, 4).unwrap()
+        else {
+            panic!("structural type check did not raise");
+        };
+        assert_eq!(raised.error_code_symbol(), Some(Symbol::intern("E_TYPE")));
+        assert_eq!(
+            raised
+                .with_error(|error| error.value().map(borrowed_value_bits))
+                .flatten(),
+            Some(bits)
         );
     }
 }
@@ -1143,7 +1262,7 @@ fn program_artifact_round_trips_kind_checks_and_rejects_stale_magic() {
     .unwrap();
     let bytes = program.to_bytes().unwrap();
 
-    assert_eq!(&bytes[..8], b"MICAPRG4");
+    assert_eq!(&bytes[..8], b"MICAPRG5");
     assert_eq!(
         program.kind_fact_after(0),
         Some((reg(0), ValueKind::Relation)),
@@ -1166,6 +1285,31 @@ fn program_artifact_round_trips_kind_checks_and_rejects_stale_magic() {
         Err(RuntimeError::ProgramArtifact(message))
             if message == "invalid program artifact magic"
     ));
+}
+
+#[test]
+fn program_artifact_round_trips_structural_type_contracts() {
+    let program = Program::new(
+        1,
+        [
+            Instruction::CheckType {
+                value: reg(0),
+                expected: result_contract(),
+                site: KindCheckSite::Parameter,
+                subject: Symbol::intern("outcome"),
+            },
+            Instruction::Return { value: r(0) },
+        ],
+    )
+    .unwrap();
+    let bytes = program.to_bytes().unwrap();
+
+    assert_eq!(&bytes[..8], b"MICAPRG5");
+    assert_eq!(
+        program.kind_fact_after(0),
+        Some((reg(0), ValueKind::Relation))
+    );
+    assert_eq!(Program::from_bytes(&bytes).unwrap(), program);
 }
 
 #[test]

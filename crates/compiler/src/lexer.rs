@@ -125,6 +125,8 @@ impl<'a> Lexer<'a> {
                     self.bump();
                     SyntaxKind::PipePipe
                 }
+                '|' => self.one(SyntaxKind::Pipe),
+                '∈' => self.one(SyntaxKind::Membership),
                 '-' if self.peek_next() == Some('>') => {
                     self.bump();
                     self.bump();
@@ -332,6 +334,16 @@ mod tests {
             .map(|t| t.kind)
             .collect::<Vec<_>>();
         assert!(kinds.contains(&SyntaxKind::ColonDash));
+    }
+
+    #[test]
+    fn lexes_type_alternative_and_membership_tokens() {
+        let kinds = lex("relation<{} | {}> where rows ∈ 0..1")
+            .into_iter()
+            .map(|token| token.kind)
+            .collect::<Vec<_>>();
+        assert!(kinds.contains(&SyntaxKind::Pipe));
+        assert!(kinds.contains(&SyntaxKind::Membership));
     }
 
     #[test]

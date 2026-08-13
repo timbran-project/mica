@@ -51,7 +51,7 @@ pub enum Item {
         selector: Option<String>,
         clauses: Vec<String>,
         params: Vec<MethodParam>,
-        result_kind: Option<ValueKindRef>,
+        result_type: Option<TypeRef>,
         body: Vec<Item>,
     },
 }
@@ -75,7 +75,7 @@ pub struct MethodParam {
     pub id: NodeId,
     pub name: String,
     pub restriction: Option<DispatchRestriction>,
-    pub annotation: Option<ValueKindRef>,
+    pub annotation: Option<TypeRef>,
     pub span: Span,
 }
 
@@ -200,7 +200,7 @@ pub enum Expr {
         span: Span,
         kind: BindingKind,
         pattern: BindingPattern,
-        annotation: Option<ValueKindRef>,
+        annotation: Option<TypeRef>,
         value: Option<Box<Expr>>,
     },
     If {
@@ -273,7 +273,7 @@ pub enum Expr {
         span: Span,
         name: Option<String>,
         params: Vec<Param>,
-        result_kind: Option<ValueKindRef>,
+        result_type: Option<TypeRef>,
         body: FunctionBody,
     },
     Effect {
@@ -409,7 +409,7 @@ pub enum BindingPattern {
 pub struct LoopBinding {
     pub id: NodeId,
     pub name: String,
-    pub annotation: Option<ValueKindRef>,
+    pub annotation: Option<TypeRef>,
     pub span: Span,
 }
 
@@ -418,15 +418,49 @@ pub struct ScatterBinding {
     pub id: NodeId,
     pub name: String,
     pub mode: ParamMode,
-    pub annotation: Option<ValueKindRef>,
+    pub annotation: Option<TypeRef>,
     pub default: Option<Expr>,
     pub span: Span,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ValueKindRef {
-    pub name: String,
+pub struct TypeRef {
+    pub kind: TypeRefKind,
     pub span: Span,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum TypeRefKind {
+    Named {
+        name: String,
+        arguments: Vec<TypeRef>,
+    },
+    Literal(TypeLiteralRef),
+    Relation {
+        alternatives: Vec<TypeRowRef>,
+        cardinality: CardinalityRef,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum TypeLiteralRef {
+    Bool(bool),
+    Symbol(String),
+    ErrorCode(String),
+    Unit,
+    EmptyRelation,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TypeRowRef {
+    pub columns: Vec<(String, TypeRef)>,
+    pub span: Span,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CardinalityRef {
+    pub min: usize,
+    pub max: Option<usize>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -434,7 +468,7 @@ pub struct Param {
     pub id: NodeId,
     pub name: String,
     pub mode: ParamMode,
-    pub annotation: Option<ValueKindRef>,
+    pub annotation: Option<TypeRef>,
     pub default: Option<Expr>,
 }
 

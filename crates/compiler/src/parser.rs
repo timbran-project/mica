@@ -106,7 +106,7 @@ impl<'a> Parser<'a> {
         children.push(CstElement::Node(self.parse_verb_param_list()));
         if self.current_kind() == SyntaxKind::Arrow {
             children.push(self.bump_element());
-            children.push(CstElement::Node(self.parse_kind_ref()));
+            children.push(CstElement::Node(self.parse_type_ref()));
         }
         CstNode::new(SyntaxKind::VerbHeader, children)
     }
@@ -132,7 +132,7 @@ impl<'a> Parser<'a> {
         }
         if self.current_kind() == SyntaxKind::Colon {
             children.push(self.bump_element());
-            children.push(CstElement::Node(self.parse_kind_ref()));
+            children.push(CstElement::Node(self.parse_type_ref()));
         }
         CstNode::new(SyntaxKind::VerbParam, children)
     }
@@ -339,7 +339,7 @@ impl<'a> Parser<'a> {
             );
             if self.current_kind() == SyntaxKind::Colon {
                 children.push(self.bump_element());
-                children.push(CstElement::Node(self.parse_kind_ref()));
+                children.push(CstElement::Node(self.parse_type_ref()));
             }
         }
         if self.current_kind() == SyntaxKind::Eq {
@@ -429,7 +429,7 @@ impl<'a> Parser<'a> {
         let mut children = vec![self.expect_token(SyntaxKind::Ident, "expected loop binding")];
         if self.current_kind() == SyntaxKind::Colon {
             children.push(self.bump_element());
-            children.push(CstElement::Node(self.parse_kind_ref()));
+            children.push(CstElement::Node(self.parse_type_ref()));
         }
         CstNode::new(SyntaxKind::LoopBinding, children)
     }
@@ -566,7 +566,7 @@ impl<'a> Parser<'a> {
         children.push(CstElement::Node(self.parse_param_list()));
         if self.current_kind() == SyntaxKind::Arrow {
             children.push(self.bump_element());
-            children.push(CstElement::Node(self.parse_kind_ref()));
+            children.push(CstElement::Node(self.parse_type_ref()));
         }
         if self.current_kind() == SyntaxKind::FatArrow {
             children.push(self.bump_element());
@@ -690,10 +690,10 @@ impl<'a> Parser<'a> {
             param.push(self.expect_token(SyntaxKind::Ident, "expected parameter name"));
             if self.current_kind() == SyntaxKind::Colon {
                 self.error(
-                    "value-kind annotations are not supported in brace lambdas; use `fn(...)` for annotated parameters",
+                    "type annotations are not supported in brace lambdas; use `fn(...)` for annotated parameters",
                 );
                 param.push(self.bump_element());
-                param.push(self.expect_token(SyntaxKind::Ident, "expected value kind"));
+                param.push(self.expect_token(SyntaxKind::Ident, "expected type"));
             }
             if self.current_kind() == SyntaxKind::Eq {
                 param.push(self.bump_element());
@@ -720,7 +720,7 @@ impl<'a> Parser<'a> {
             binding.push(self.expect_token(SyntaxKind::Ident, "expected scatter binding name"));
             if self.current_kind() == SyntaxKind::Colon {
                 binding.push(self.bump_element());
-                binding.push(CstElement::Node(self.parse_kind_ref()));
+                binding.push(CstElement::Node(self.parse_type_ref()));
             }
             if self.current_kind() == SyntaxKind::Eq {
                 binding.push(self.bump_element());
@@ -999,7 +999,7 @@ impl<'a> Parser<'a> {
             param.push(self.expect_token(SyntaxKind::Ident, "expected parameter name"));
             if self.current_kind() == SyntaxKind::Colon {
                 param.push(self.bump_element());
-                param.push(CstElement::Node(self.parse_kind_ref()));
+                param.push(CstElement::Node(self.parse_type_ref()));
             }
             if self.current_kind() == SyntaxKind::Eq {
                 param.push(self.bump_element());
@@ -1015,11 +1015,138 @@ impl<'a> Parser<'a> {
         CstNode::new(SyntaxKind::ParamList, children)
     }
 
-    fn parse_kind_ref(&mut self) -> CstNode {
-        CstNode::new(
-            SyntaxKind::ValueKindRef,
-            vec![self.expect_token(SyntaxKind::Ident, "expected value kind")],
-        )
+    fn parse_type_ref(&mut self) -> CstNode {
+        self.skip_type_trivia();
+        let mut children = Vec::new();
+        match self.current_kind() {
+            SyntaxKind::Ident
+                if self.current_text_is("relation") && self.nth_kind(1) == SyntaxKind::Lt =>
+            {
+                children.push(CstElement::Node(self.parse_relation_type()));
+            }
+            SyntaxKind::Ident => {
+                children.push(self.bump_element());
+                if self.type_current_kind() == SyntaxKind::Lt {
+                    children.push(CstElement::Node(self.parse_type_arguments()));
+                }
+            }
+            SyntaxKind::Colon => {
+                children.push(self.bump_element());
+                children
+                    .extend(self.parse_qualified_ident_or_missing("expected symbol type literal"));
+            }
+            SyntaxKind::TrueKw | SyntaxKind::FalseKw | SyntaxKind::ErrorCode => {
+                children.push(self.bump_element());
+            }
+            SyntaxKind::LParen => {
+                children.push(self.bump_element());
+                children
+                    .push(self.type_expect_token(SyntaxKind::RParen, "expected ')' in unit type"));
+            }
+            SyntaxKind::LBracket => {
+                children.push(self.bump_element());
+                children.push(self.type_expect_token(
+                    SyntaxKind::RBracket,
+                    "expected ']' in empty relation type literal",
+                ));
+                children.push(self.type_expect_token(
+                    SyntaxKind::LBrace,
+                    "expected '{' in empty relation type literal",
+                ));
+                children.push(self.type_expect_token(
+                    SyntaxKind::RBrace,
+                    "expected '}' in empty relation type literal",
+                ));
+            }
+            _ => children.push(self.missing("expected type")),
+        }
+        CstNode::new(SyntaxKind::TypeRef, children)
+    }
+
+    fn parse_type_arguments(&mut self) -> CstNode {
+        let mut children = vec![self.type_expect_token(SyntaxKind::Lt, "expected '<'")];
+        loop {
+            children.push(CstElement::Node(self.parse_type_ref()));
+            if self.type_current_kind() != SyntaxKind::Comma {
+                break;
+            }
+            children.push(self.type_bump_element());
+        }
+        children.push(self.type_expect_token(SyntaxKind::Gt, "expected '>' after type arguments"));
+        CstNode::new(SyntaxKind::TypeArguments, children)
+    }
+
+    fn parse_relation_type(&mut self) -> CstNode {
+        let mut children = vec![self.bump_element()];
+        children.push(self.type_expect_token(SyntaxKind::Lt, "expected '<' after relation"));
+        children.push(CstElement::Node(self.parse_type_row()));
+        while self.type_current_kind() == SyntaxKind::Pipe {
+            children.push(self.type_bump_element());
+            children.push(CstElement::Node(self.parse_type_row()));
+        }
+        children.push(self.type_expect_token(SyntaxKind::Gt, "expected '>' after relation type"));
+        if self.type_current_text_is("where") {
+            children.push(self.type_bump_element());
+            if self.type_current_text_is("rows") {
+                children.push(self.type_bump_element());
+            } else {
+                children.push(self.missing("expected 'rows' after 'where'"));
+            }
+            if matches!(
+                self.type_current_kind(),
+                SyntaxKind::InKw | SyntaxKind::Membership
+            ) {
+                children.push(self.type_bump_element());
+            } else {
+                children.push(self.missing("expected 'in' or '∈' after 'where rows'"));
+            }
+            children.push(CstElement::Node(self.parse_cardinality()));
+        }
+        CstNode::new(SyntaxKind::RelationType, children)
+    }
+
+    fn parse_type_row(&mut self) -> CstNode {
+        let mut children = vec![self.type_expect_token(SyntaxKind::LBrace, "expected '{'")];
+        while !matches!(
+            self.type_current_kind(),
+            SyntaxKind::RBrace | SyntaxKind::Eof
+        ) {
+            let mut column = vec![
+                self.type_expect_token(SyntaxKind::Colon, "expected relation type column symbol"),
+            ];
+            column.extend(
+                self.parse_qualified_ident_or_missing("expected relation type column name"),
+            );
+            column.push(self.type_expect_token(
+                SyntaxKind::Arrow,
+                "expected '->' after relation type column",
+            ));
+            column.push(CstElement::Node(self.parse_type_ref()));
+            children.push(CstElement::Node(CstNode::new(
+                SyntaxKind::TypeColumn,
+                column,
+            )));
+            if self.type_current_kind() != SyntaxKind::Comma {
+                break;
+            }
+            children.push(self.type_bump_element());
+        }
+        children.push(self.type_expect_token(SyntaxKind::RBrace, "expected '}'"));
+        CstNode::new(SyntaxKind::TypeRow, children)
+    }
+
+    fn parse_cardinality(&mut self) -> CstNode {
+        let mut children =
+            vec![self.type_expect_token(SyntaxKind::Int, "expected cardinality lower bound")];
+        if self.type_current_kind() == SyntaxKind::DotDot {
+            children.push(self.type_bump_element());
+            if matches!(self.type_current_kind(), SyntaxKind::Int | SyntaxKind::Star) {
+                children.push(self.type_bump_element());
+            } else {
+                children.push(self.missing("expected cardinality upper bound or '*'"));
+            }
+        }
+        CstNode::new(SyntaxKind::Cardinality, children)
     }
 
     fn parse_arg_list(&mut self, allow_named_args: bool) -> CstNode {
@@ -1294,6 +1421,54 @@ impl<'a> Parser<'a> {
             .kind
     }
 
+    fn current_text_is(&mut self, expected: &str) -> bool {
+        self.skip_ws_comments();
+        let token = self
+            .tokens
+            .get(self.pos)
+            .or_else(|| self.tokens.last())
+            .expect("lexer always emits EOF");
+        self.source[token.span.clone()] == *expected
+    }
+
+    fn skip_type_trivia(&mut self) {
+        while matches!(
+            self.tokens
+                .get(self.pos)
+                .or_else(|| self.tokens.last())
+                .expect("lexer always emits EOF")
+                .kind,
+            SyntaxKind::Whitespace | SyntaxKind::Newline | SyntaxKind::LineComment
+        ) {
+            self.pos += 1;
+        }
+    }
+
+    fn type_current_kind(&mut self) -> SyntaxKind {
+        self.skip_type_trivia();
+        self.raw_current_kind()
+    }
+
+    fn type_current_text_is(&mut self, expected: &str) -> bool {
+        self.skip_type_trivia();
+        let span = self.raw_current_span();
+        self.source[span] == *expected
+    }
+
+    fn type_bump_element(&mut self) -> CstElement {
+        self.skip_type_trivia();
+        self.raw_bump_element()
+    }
+
+    fn type_expect_token(&mut self, kind: SyntaxKind, message: &str) -> CstElement {
+        self.skip_type_trivia();
+        if self.raw_current_kind() == kind {
+            self.raw_bump_element()
+        } else {
+            self.missing(message)
+        }
+    }
+
     fn nth_kind(&self, n: usize) -> SyntaxKind {
         self.nth_non_ws_token_from(self.pos, n).kind
     }
@@ -1507,7 +1682,23 @@ mod tests {
         );
 
         assert_eq!(parsed.errors, vec![]);
-        assert_eq!(count(&parsed.root, SyntaxKind::ValueKindRef), 8);
+        assert_eq!(count(&parsed.root, SyntaxKind::TypeRef), 8);
+    }
+
+    #[test]
+    fn parses_structural_relation_types_with_alternatives_and_cardinality() {
+        let parsed = parse(
+            "let outcome: relation<\n\
+               {:case -> :ok, :value -> int}\n\
+               | {:case -> :error, :value -> error}\n\
+             > where rows ∈ 1 = value",
+        );
+
+        assert_eq!(parsed.errors, vec![]);
+        assert_eq!(count(&parsed.root, SyntaxKind::RelationType), 1);
+        assert_eq!(count(&parsed.root, SyntaxKind::TypeRow), 2);
+        assert_eq!(count(&parsed.root, SyntaxKind::TypeColumn), 4);
+        assert_eq!(count(&parsed.root, SyntaxKind::Cardinality), 1);
     }
 
     #[test]
@@ -1515,7 +1706,7 @@ mod tests {
         let parsed = parse("let int = 1\nlet relation = int\nreturn relation");
 
         assert_eq!(parsed.errors, vec![]);
-        assert_eq!(count(&parsed.root, SyntaxKind::ValueKindRef), 0);
+        assert_eq!(count(&parsed.root, SyntaxKind::TypeRef), 0);
     }
 
     #[test]
@@ -1532,7 +1723,7 @@ mod tests {
         assert!(contains(&parsed.root, SyntaxKind::LambdaExpr));
         assert!(contains(&parsed.root, SyntaxKind::RoleCallExpr));
         assert!(contains(&parsed.root, SyntaxKind::ReceiverCallExpr));
-        assert_eq!(count(&parsed.root, SyntaxKind::ValueKindRef), 3);
+        assert_eq!(count(&parsed.root, SyntaxKind::TypeRef), 3);
     }
 
     #[test]
@@ -1545,7 +1736,7 @@ mod tests {
         assert_eq!(parsed.errors, vec![]);
         assert_eq!(count(&parsed.root, SyntaxKind::LoopBinding), 2);
         assert_eq!(count(&parsed.root, SyntaxKind::ScatterBinding), 3);
-        assert_eq!(count(&parsed.root, SyntaxKind::ValueKindRef), 5);
+        assert_eq!(count(&parsed.root, SyntaxKind::TypeRef), 5);
     }
 
     #[test]
@@ -1553,12 +1744,13 @@ mod tests {
         let parsed = parse("{value: int} => value");
 
         assert!(!parsed.errors.is_empty());
-        assert!(parsed.errors.iter().any(|error| {
-            error
-                .message
-                .contains("value-kind annotations are not supported")
-        }));
-        assert_eq!(count(&parsed.root, SyntaxKind::ValueKindRef), 0);
+        assert!(
+            parsed
+                .errors
+                .iter()
+                .any(|error| { error.message.contains("type annotations are not supported") })
+        );
+        assert_eq!(count(&parsed.root, SyntaxKind::TypeRef), 0);
     }
 
     #[test]
@@ -1794,7 +1986,7 @@ mod tests {
         assert_eq!(count(&parse.root, SyntaxKind::VerbHeader), 1);
         assert_eq!(count(&parse.root, SyntaxKind::VerbParam), 2);
         assert_eq!(count(&parse.root, SyntaxKind::DispatchRestriction), 1);
-        assert_eq!(count(&parse.root, SyntaxKind::ValueKindRef), 3);
+        assert_eq!(count(&parse.root, SyntaxKind::TypeRef), 3);
         assert_eq!(count(&parse.root, SyntaxKind::MethodHeader), 0);
     }
 

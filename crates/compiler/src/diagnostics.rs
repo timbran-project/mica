@@ -142,6 +142,19 @@ pub fn compile_error_diagnostics(error: &CompileError) -> Vec<CompileDiagnostic>
             ),
             span.clone(),
         )],
+        CompileError::StaticTypeMismatch {
+            subject,
+            expected,
+            inferred,
+            span,
+            ..
+        } => vec![span_report(
+            "static type mismatch",
+            &format!(
+                "binding `{subject}` requires {expected}, but this expression produces {inferred}"
+            ),
+            span.clone(),
+        )],
         CompileError::FunctionResultKindMismatch {
             function,
             expected,

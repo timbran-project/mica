@@ -13,7 +13,7 @@
 
 use crate::{
     BinaryOp, BindingId, BindingKind, DispatchRestriction, EffectKind, Literal, LocalKind,
-    MethodKind, NodeId, ParamMode, ResolvedName, ScopeId, Span, UnaryOp,
+    MethodKind, NodeId, ParamMode, ResolvedName, ScopeId, Span, StaticType, UnaryOp,
 };
 use mica_var::ValueKind;
 
@@ -40,6 +40,7 @@ pub enum HirItem {
         selector: Option<String>,
         clauses: Vec<String>,
         params: Vec<HirMethodParam>,
+        result_type: Option<StaticType>,
         result_kind: Option<ValueKind>,
         scope: ScopeId,
         body: Vec<HirItem>,
@@ -218,6 +219,7 @@ pub enum HirExpr {
         name: Option<BindingId>,
         scope: ScopeId,
         params: Vec<HirParam>,
+        result_type: Option<StaticType>,
         result_kind: Option<ValueKind>,
         captures: Vec<BindingId>,
         body: HirFunctionBody,
@@ -244,7 +246,7 @@ pub struct HirRelationAtom {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum HirRuleBodyItem {
     Atom(HirRelationAtom),
-    Guard(HirRuleGuard),
+    Guard(Box<HirRuleGuard>),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -268,6 +270,7 @@ pub struct HirParam {
     pub id: NodeId,
     pub binding: BindingId,
     pub kind: LocalKind,
+    pub declared_type: Option<StaticType>,
     pub declared_kind: Option<ValueKind>,
     pub default: Option<HirExpr>,
 }
@@ -277,6 +280,7 @@ pub struct HirMethodParam {
     pub id: NodeId,
     pub binding: BindingId,
     pub restriction: Option<DispatchRestriction>,
+    pub declared_type: Option<StaticType>,
     pub declared_kind: Option<ValueKind>,
 }
 
@@ -285,6 +289,7 @@ pub struct HirScatterBinding {
     pub id: NodeId,
     pub binding: BindingId,
     pub mode: ParamMode,
+    pub declared_type: Option<StaticType>,
     pub declared_kind: Option<ValueKind>,
     pub default: Option<HirExpr>,
 }
@@ -293,6 +298,7 @@ pub struct HirScatterBinding {
 pub struct HirLoopBinding {
     pub id: NodeId,
     pub binding: BindingId,
+    pub declared_type: Option<StaticType>,
     pub declared_kind: Option<ValueKind>,
 }
 

@@ -41,8 +41,9 @@ pub use error::RuntimeError;
 pub use program::{
     CatchHandler, ErrorField, ExternalRequest, Instruction, KindCheckSite, ListItem,
     MailboxRecvRequest, MailboxSend, MapItem, Operand, Program, ProgramBuilder, ProgramResolver,
-    QueryBinding, Register, RelationArg, RuntimeBinaryOp, RuntimeUnaryOp, SpawnRequest,
-    SpawnTarget, SuspendKind,
+    QueryBinding, Register, RelationArg, RelationRowContract, RelationTypeContract,
+    RuntimeBinaryOp, RuntimeUnaryOp, SpawnRequest, SpawnTarget, SuspendKind, TypeContract,
+    TypeLiteralContract,
 };
 pub use vm::{
     Frame, ProjectedVmHostContext, RegisterVm, VmHost, VmHostContext, VmHostResponse, VmState,

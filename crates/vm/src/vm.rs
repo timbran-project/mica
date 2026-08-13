@@ -20,7 +20,7 @@ use crate::{
     AuthorityContext, BuiltinRegistry, CatchHandler, ClientBuiltinContext, ClientBuiltinRegistry,
     Emission, ErrorField, ExternalRequest, KindCheckSite, MailboxRecvRequest, Program,
     ProgramResolver, QueryBinding, Register, RuntimeBinaryOp, RuntimeContext, RuntimeError,
-    RuntimeUnaryOp, SpawnRequest, SpawnTarget, SuspendKind,
+    RuntimeUnaryOp, SpawnRequest, SpawnTarget, SuspendKind, TypeContract, TypeLiteralContract,
 };
 use mica_relation_kernel::{
     ApplicableMethodCall, DispatchRead, DispatchRelations, RelationId, RelationMetadata,
@@ -36,7 +36,7 @@ use mica_var::abi::{
 };
 use mica_var::{FunctionId, Identity, RelationValue, Symbol, Value, ValueKind};
 use std::cell::RefCell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -932,6 +932,7 @@ fn opcode_name(opcode: &Opcode) -> &'static str {
         Opcode::Load { .. } => "Load",
         Opcode::Move { .. } => "Move",
         Opcode::CheckKind { .. } => "CheckKind",
+        Opcode::CheckType { .. } => "CheckType",
         Opcode::Unary { .. } => "Unary",
         Opcode::Binary { .. } => "Binary",
         Opcode::BuildList { .. } => "BuildList",
@@ -993,6 +994,7 @@ fn opcode_name(opcode: &Opcode) -> &'static str {
 #[derive(Clone, Debug)]
 pub struct RegisterVm {
     state: VmState,
+    type_check_cache: BTreeMap<usize, (Value, BTreeSet<TypeContract>)>,
     #[cfg(feature = "cranelift")]
     native_execution: bool,
     #[cfg(feature = "cranelift")]
@@ -1033,6 +1035,7 @@ impl RegisterVm {
                 frames: vec![Frame::root(0, register_count)],
                 pending_resume: None,
             },
+            type_check_cache: BTreeMap::new(),
             #[cfg(feature = "cranelift")]
             native_execution: true,
             #[cfg(feature = "cranelift")]
@@ -1066,6 +1069,7 @@ impl RegisterVm {
     pub fn from_state(state: VmState) -> Self {
         Self {
             state,
+            type_check_cache: BTreeMap::new(),
             #[cfg(feature = "cranelift")]
             native_execution: true,
             #[cfg(feature = "cranelift")]
@@ -1079,6 +1083,7 @@ impl RegisterVm {
 
     pub fn restore_state(&mut self, state: &VmState) {
         self.state = state.clone();
+        self.type_check_cache.clear();
         #[cfg(feature = "cranelift")]
         self.native_side_exits.clear();
     }
@@ -1216,6 +1221,20 @@ impl RegisterVm {
                 let actual = value.kind();
                 if actual != *expected {
                     let error = kind_check_error(*site, *subject, *expected, actual, value.clone());
+                    return self.begin_raise(error).map(VmStep::single);
+                }
+                self.advance_ip_unchecked();
+                Ok(VmStep::single(VmHostResponse::Continue))
+            }
+            Opcode::CheckType {
+                value,
+                expected,
+                site,
+                subject,
+            } => {
+                let value = self.read_register_unchecked(*value).clone();
+                if !value_matches_type(&value, expected, &mut self.type_check_cache) {
+                    let error = type_check_error(*site, *subject, expected, value);
                     return self.begin_raise(error).map(VmStep::single);
                 }
                 self.advance_ip_unchecked();
@@ -1558,6 +1577,7 @@ impl RegisterVm {
         match opcode {
             Opcode::Load { .. }
             | Opcode::CheckKind { .. }
+            | Opcode::CheckType { .. }
             | Opcode::Binary { .. }
             | Opcode::Branch { .. }
             | Opcode::Call { .. }
@@ -3560,6 +3580,94 @@ fn kind_check_error(
     )
 }
 
+fn type_check_error(
+    site: KindCheckSite,
+    subject: Symbol,
+    expected: &TypeContract,
+    value: Value,
+) -> Value {
+    let boundary = match site {
+        KindCheckSite::Binding => "binding",
+        KindCheckSite::Parameter => "parameter",
+    };
+    let subject = subject
+        .name()
+        .expect("validated type check subjects are named");
+    Value::error(
+        Symbol::intern("E_TYPE"),
+        Some(format!(
+            "{boundary} `{subject}` requires {expected}, got {}",
+            value.kind().name()
+        )),
+        Some(value),
+    )
+}
+
+fn value_matches_type(
+    value: &Value,
+    expected: &TypeContract,
+    cache: &mut BTreeMap<usize, (Value, BTreeSet<TypeContract>)>,
+) -> bool {
+    match expected {
+        TypeContract::Dynamic => true,
+        TypeContract::Never => false,
+        TypeContract::Kind(kind) => value.kind() == *kind,
+        TypeContract::Literal(literal) => match literal {
+            TypeLiteralContract::Bool(expected) => value.as_bool() == Some(*expected),
+            TypeLiteralContract::Symbol(expected) => value.as_symbol() == Some(*expected),
+            TypeLiteralContract::ErrorCode(expected) => value.as_error_code() == Some(*expected),
+            TypeLiteralContract::Unit => value
+                .with_relation(|relation| relation.arity() == 0 && relation.len() == 1)
+                .unwrap_or(false),
+            TypeLiteralContract::EmptyRelation => value.is_empty_relation(),
+        },
+        TypeContract::Union(types) => types
+            .iter()
+            .any(|expected| value_matches_type(value, expected, cache)),
+        TypeContract::Relation(expected) => value
+            .with_relation(|relation| {
+                let identity = std::ptr::from_ref(relation).addr();
+                if cache.get(&identity).is_some_and(|(_, checks)| {
+                    checks.contains(&TypeContract::Relation(expected.clone()))
+                }) {
+                    return true;
+                }
+                let Some(first) = expected.alternatives.first() else {
+                    return false;
+                };
+                if relation.len() < expected.minimum_rows
+                    || expected
+                        .maximum_rows
+                        .is_some_and(|maximum| relation.len() > maximum)
+                    || !relation
+                        .heading()
+                        .iter()
+                        .copied()
+                        .eq(first.columns.iter().map(|(name, _)| *name))
+                {
+                    return false;
+                }
+                let matches = relation.rows().iter().all(|row| {
+                    expected.alternatives.iter().any(|alternative| {
+                        row.values()
+                            .iter()
+                            .zip(&alternative.columns)
+                            .all(|(cell, (_, contract))| value_matches_type(cell, contract, cache))
+                    })
+                });
+                if matches {
+                    cache
+                        .entry(identity)
+                        .or_insert_with(|| (value.clone(), BTreeSet::new()))
+                        .1
+                        .insert(TypeContract::Relation(expected.clone()));
+                }
+                matches
+            })
+            .unwrap_or(false),
+    }
+}
+
 fn validate_builtin_result(
     name: Symbol,
     expected: Option<ValueKind>,
@@ -3610,4 +3718,35 @@ fn error_message_text(value: Value) -> Result<String, RuntimeError> {
     value
         .with_str(str::to_owned)
         .ok_or(RuntimeError::InvalidErrorMessage(value))
+}
+
+#[cfg(test)]
+mod structural_type_cache_tests {
+    use super::*;
+    use crate::{RelationRowContract, RelationTypeContract};
+
+    #[test]
+    fn repeated_checks_memoize_an_immutable_large_relation() {
+        let value_column = Symbol::intern("value");
+        let relation = Value::relation(
+            [value_column],
+            (0..4096).map(|value| Tuple::from([Value::int(value).unwrap()])),
+        )
+        .unwrap();
+        let contract = TypeContract::Relation(RelationTypeContract {
+            alternatives: vec![RelationRowContract {
+                columns: vec![(value_column, TypeContract::Kind(ValueKind::Int))],
+            }],
+            minimum_rows: 0,
+            maximum_rows: None,
+        });
+        let mut cache = BTreeMap::new();
+
+        assert!(value_matches_type(&relation, &contract, &mut cache));
+        assert_eq!(cache.len(), 1);
+        let cached_contracts = cache.values().next().unwrap().1.len();
+        assert!(value_matches_type(&relation, &contract, &mut cache));
+        assert_eq!(cache.len(), 1);
+        assert_eq!(cache.values().next().unwrap().1.len(), cached_contracts);
+    }
 }

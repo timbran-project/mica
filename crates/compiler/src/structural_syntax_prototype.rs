@@ -505,9 +505,13 @@ mod tests {
     }
 
     #[test]
-    fn current_parser_still_rejects_every_proposed_executable_surface() {
+    fn current_parser_accepts_types_but_rejects_later_stage_surface() {
+        assert!(
+            parse("let value: relation<{:value -> string}> where rows in 0..1 = [] {}")
+                .errors
+                .is_empty()
+        );
         for source in [
-            "let value: relation<{:value -> string}> where rows in 0..1 = [] {}",
             "let exactly {label} = Label(#sensor, ?label)",
             "if let {next} = NextView(current, ?next)\nend",
             "for {work} in AssignedTo(?work, assignee)\nend",
