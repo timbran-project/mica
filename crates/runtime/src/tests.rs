@@ -43,6 +43,15 @@ fn assert_completed_value(report: &super::RunReport, expected: Value) {
     );
 }
 
+fn program_contains(program: &Program, predicate: fn(&Instruction) -> bool) -> bool {
+    program.instructions().iter().any(|instruction| {
+        predicate(instruction)
+            || matches!(instruction,
+                Instruction::LoadFunction { program, .. } | Instruction::Call { program, .. }
+                if program_contains(program, predicate))
+    })
+}
+
 fn query_relation<const COLUMNS: usize, const ROWS: usize>(
     heading: [&str; COLUMNS],
     rows: [[Value; COLUMNS]; ROWS],
@@ -1256,6 +1265,119 @@ fn standard_relational_values_distinguish_unit_option_and_result_cases() {
         round_trip.outcome,
         TaskOutcome::Complete { value, .. } if value == values[4]
     ));
+}
+
+#[test]
+fn structural_match_is_expression_valued_guarded_and_allocation_free() {
+    let mut runner = SourceRunner::new_empty();
+    let source = "fn option_value(value: option<int>) -> int\n\
+                    match value\n\
+                    case some(number) if number > 10\n\
+                      10\n\
+                    case some(number)\n\
+                      number\n\
+                    case none\n\
+                      0\n\
+                    end\n\
+                  end\n\
+                  fn result_value(value: result<int>) -> int\n\
+                    match value\n\
+                    case ok(number)\n\
+                      number\n\
+                    case err(problem)\n\
+                      recover raise problem.code, problem.message, problem.value\n\
+                      catch E_SAMPLE => -1\n\
+                      end\n\
+                    end\n\
+                  end\n\
+                  let failure = recover raise E_SAMPLE, \"sample\"\n\
+                  catch E_SAMPLE as problem => err(problem)\n\
+                  end\n\
+                  return [option_value(some(7)), option_value(some(12)), option_value(none), result_value(ok(9)), result_value(failure)]";
+    let compiled = mica_compiler::compile_source(source, &runner.context).unwrap();
+    assert!(program_contains(&compiled.program, |instruction| matches!(
+        instruction,
+        Instruction::RelationPattern { .. }
+    )));
+    assert!(program_contains(&compiled.program, |instruction| matches!(
+        instruction,
+        Instruction::RelationCell { .. }
+    )));
+    assert!(!program_contains(&compiled.program, |instruction| {
+        matches!(
+            instruction,
+            Instruction::BuildMap { .. } | Instruction::BuildMapDynamic { .. }
+        )
+    }));
+
+    let report = runner.run_source(source).unwrap();
+    assert!(matches!(
+        report.outcome,
+        TaskOutcome::Complete { value, .. }
+            if value == Value::list([
+                Value::int(7).unwrap(),
+                Value::int(10).unwrap(),
+                Value::int(0).unwrap(),
+                Value::int(9).unwrap(),
+                Value::int(-1).unwrap(),
+            ])
+    ));
+}
+
+#[test]
+fn structural_patterns_bind_exact_rows_if_let_and_relation_loops() {
+    let mut runner = SourceRunner::new_empty();
+    let report = runner
+        .run_source(
+            "let pair = [:left, :right] { [2, \"two\"] }\n\
+             let exactly {:left -> left, :right -> right} = pair\n\
+             let maybe = some(7)\n\
+             let chosen = if let some(value) = maybe\n\
+               value\n\
+             else\n\
+               0\n\
+             end\n\
+             let total = 0\n\
+             for {:left -> number, :right -> label} in [:left, :right] { [3, \"three\"], [4, \"four\"] }\n\
+               total = total + number\n\
+             end\n\
+             return [left, right, chosen, total]",
+        )
+        .unwrap();
+    assert!(matches!(
+        report.outcome,
+        TaskOutcome::Complete { value, .. }
+            if value == Value::list([
+                Value::int(2).unwrap(),
+                Value::string("two"),
+                Value::int(7).unwrap(),
+                Value::int(7).unwrap(),
+            ])
+    ));
+}
+
+#[test]
+fn structural_match_requires_exhaustive_closed_cases_and_dynamic_wildcards() {
+    let runner = SourceRunner::new_empty();
+    let option_error = mica_compiler::compile_source(
+        "let value: option<int> = some(1)\nmatch value\ncase some(number)\n  number\nend",
+        &runner.context,
+    )
+    .unwrap_err();
+    assert!(format!("{option_error:?}").contains("non-exhaustive structural relation match"));
+
+    let dynamic_error = mica_compiler::compile_source(
+        "fn choose(value)\nmatch value\ncase some(number)\n  number\ncase none\n  0\nend\nend",
+        &runner.context,
+    )
+    .unwrap_err();
+    assert!(format!("{dynamic_error:?}").contains("requires an unguarded wildcard case"));
+
+    mica_compiler::compile_source(
+        "fn choose(value)\nmatch value\ncase some(number)\n  number\ncase _\n  0\nend\nend",
+        &runner.context,
+    )
+    .unwrap();
 }
 
 #[test]
@@ -4548,6 +4670,18 @@ fn runner_one_and_dot_read_project_functional_relations() {
 
     assert_eq!(one.render(), "task 5 complete: #room (retries: 0)");
     assert_eq!(dot.render(), "task 6 complete: #room (retries: 0)");
+
+    runner.run_source("make_identity(:missing)").unwrap();
+    let missing = runner
+        .run_source(
+            "try\n  return #missing.location\ncatch E_CARDINALITY as err\n  return err.code\nend",
+        )
+        .unwrap();
+    assert!(matches!(
+        missing.outcome,
+        TaskOutcome::Complete { value, .. }
+            if value == Value::error_code(Symbol::intern("E_CARDINALITY"))
+    ));
 }
 
 #[test]

@@ -660,6 +660,17 @@ impl<'a> StaticTypeInference<'a> {
                         .and_then(|binding| binding.declared_type.clone())
                 })
                 .unwrap_or_else(|| static_type_from_kinds(self.kinds.expr(expr))),
+            HirExpr::Match { cases, .. } => StaticType::union(cases.iter().map(|case| {
+                case.body
+                    .last()
+                    .map_or(
+                        StaticType::Literal(StaticLiteral::Unit),
+                        |item| match item {
+                            crate::HirItem::Expr { expr, .. } => self.expr(expr),
+                            _ => StaticType::Literal(StaticLiteral::Unit),
+                        },
+                    )
+            })),
             _ => static_type_from_kinds(self.kinds.expr(expr)),
         }
     }

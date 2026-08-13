@@ -505,7 +505,7 @@ mod tests {
     }
 
     #[test]
-    fn current_parser_accepts_types_aliases_and_unit_but_rejects_later_stage_surface() {
+    fn current_parser_accepts_structural_types_unit_and_row_bindings() {
         assert!(
             parse("let value: relation<{:value -> string}> where rows in 0..1 = [] {}")
                 .errors
@@ -523,8 +523,8 @@ mod tests {
             "for {work} in AssignedTo(?work, assignee)\nend",
         ] {
             assert!(
-                !parse(source).errors.is_empty(),
-                "proposed syntax unexpectedly accepted: {source}"
+                parse(source).errors.is_empty(),
+                "structural syntax was rejected: {source}"
             );
         }
     }

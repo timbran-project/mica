@@ -7095,6 +7095,16 @@ fn validate_read_only_expr(
             }
             validate_read_only_items(semantic, else_items)
         }
+        HirExpr::Match { value, cases, .. } => {
+            validate_read_only_expr(semantic, value)?;
+            for case in cases {
+                if let Some(guard) = &case.guard {
+                    validate_read_only_expr(semantic, guard)?;
+                }
+                validate_read_only_items(semantic, &case.body)?;
+            }
+            Ok(())
+        }
         HirExpr::Block { items, .. } => validate_read_only_items(semantic, items),
         HirExpr::For { iter, body, .. } => {
             validate_read_only_expr(semantic, iter)?;

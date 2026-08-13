@@ -230,6 +230,12 @@ pub enum Expr {
         elseif: Vec<(Expr, Vec<Item>)>,
         else_items: Vec<Item>,
     },
+    Match {
+        id: NodeId,
+        span: Span,
+        value: Box<Expr>,
+        cases: Vec<MatchCase>,
+    },
     Block {
         id: NodeId,
         span: Span,
@@ -240,6 +246,7 @@ pub enum Expr {
         span: Span,
         key: LoopBinding,
         value: Option<LoopBinding>,
+        row: Option<Vec<RowBinding>>,
         iter: Box<Expr>,
         body: Vec<Item>,
     },
@@ -331,6 +338,7 @@ impl Expr {
             | Self::Field { id, .. }
             | Self::Binding { id, .. }
             | Self::If { id, .. }
+            | Self::Match { id, .. }
             | Self::Block { id, .. }
             | Self::For { id, .. }
             | Self::While { id, .. }
@@ -370,6 +378,7 @@ impl Expr {
             | Self::Field { span, .. }
             | Self::Binding { span, .. }
             | Self::If { span, .. }
+            | Self::Match { span, .. }
             | Self::Block { span, .. }
             | Self::For { span, .. }
             | Self::While { span, .. }
@@ -423,6 +432,40 @@ pub enum BindingKind {
 pub enum BindingPattern {
     Name(String),
     Scatter(Vec<ScatterBinding>),
+    Row(Vec<RowBinding>),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RowBinding {
+    pub id: NodeId,
+    pub column: String,
+    pub name: String,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MatchCase {
+    pub id: NodeId,
+    pub span: Span,
+    pub pattern: MatchPattern,
+    pub guard: Option<Expr>,
+    pub body: Vec<Item>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum MatchPattern {
+    Wildcard,
+    Row(Vec<MatchField>),
+    None,
+    Some(String),
+    Ok(String),
+    Err(String),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MatchField {
+    pub column: String,
+    pub binding: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

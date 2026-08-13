@@ -15,11 +15,11 @@ use crate::kinds::{KindInference, KindSet, iteration_binding_kinds};
 use crate::static_type::StaticTypeInference;
 use crate::{
     BinaryOp, BindingId, Cardinality, Diagnostic, DispatchRestriction, EffectKind, HirArg,
-    HirCatch, HirCollectionItem, HirExpr, HirFunctionBody, HirItem, HirLoopBinding, HirMethodParam,
-    HirPlace, HirProgram, HirRecovery, HirRelationAtom, HirRuleBodyItem, HirRuleGuard,
-    HirScatterBinding, Literal, LocalKind, NodeId, ParamMode, ParseError, RelationType, RowShape,
-    SemanticProgram, Span, StaticLiteral, StaticType, TypeAliasDefinition, UnaryOp,
-    analyze_ast_with_aliases, parse_ast,
+    HirCatch, HirCollectionItem, HirExpr, HirFunctionBody, HirItem, HirLoopBinding, HirMatchCase,
+    HirMatchPattern, HirMethodParam, HirPlace, HirProgram, HirRecovery, HirRelationAtom,
+    HirRuleBodyItem, HirRuleGuard, HirScatterBinding, Literal, LocalKind, NodeId, ParamMode,
+    ParseError, RelationType, RowShape, SemanticProgram, Span, StaticLiteral, StaticType,
+    TypeAliasDefinition, UnaryOp, analyze_ast_with_aliases, parse_ast,
 };
 use mica_relation_kernel::{
     Atom, ConflictPolicy, DispatchRelations, RelationId, RelationKernel, RelationMetadata, Rule,
@@ -32,7 +32,7 @@ use mica_vm::{
     RelationTypeContract, RuntimeBinaryOp, RuntimeError, RuntimeUnaryOp, TypeContract,
     TypeLiteralContract,
 };
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
 pub fn compile_source(
@@ -745,6 +745,15 @@ impl<'a> ContextValidator<'a> {
                 }
                 self.validate_items(else_items);
             }
+            HirExpr::Match { value, cases, .. } => {
+                self.validate_expr(value, ExprUse::Value);
+                for case in cases {
+                    if let Some(guard) = &case.guard {
+                        self.validate_expr(guard, ExprUse::Value);
+                    }
+                    self.validate_items(&case.body);
+                }
+            }
             HirExpr::Block { items, .. } => self.validate_items(items),
             HirExpr::For { iter, body, .. } => {
                 self.validate_expr(iter, ExprUse::Value);
@@ -1393,6 +1402,13 @@ struct LoopContext {
     continue_jumps: Vec<usize>,
 }
 
+struct RelationPatternSpec {
+    heading: Vec<Symbol>,
+    row_count: u16,
+    equalities: Vec<(Symbol, Value)>,
+    bindings: Vec<(Symbol, BindingId)>,
+}
+
 impl<'a> ProgramCompiler<'a> {
     fn new(semantic: &'a SemanticProgram, context: &'a CompileContext) -> Self {
         Self {
@@ -1503,10 +1519,14 @@ impl<'a> ProgramCompiler<'a> {
             HirExpr::Binding {
                 binding,
                 scatter,
+                row,
                 value,
                 id,
                 ..
             } => {
+                if let Some(row) = row {
+                    return self.compile_exact_row_binding(*id, row, value.as_deref());
+                }
                 if !scatter.is_empty() {
                     return self.compile_scatter_binding(*id, scatter, value.as_deref());
                 }
@@ -1668,6 +1688,7 @@ impl<'a> ProgramCompiler<'a> {
                 elseif,
                 else_items,
             } => self.compile_if(*id, condition, then_items, elseif, else_items),
+            HirExpr::Match { id, value, cases } => self.compile_match(*id, value, cases),
             HirExpr::Call { id, callee, args } => self.compile_call(*id, callee, args),
             HirExpr::While {
                 id,
@@ -1678,10 +1699,11 @@ impl<'a> ProgramCompiler<'a> {
                 id,
                 key,
                 value,
+                row,
                 iter,
                 body,
                 ..
-            } => self.compile_for(*id, key, value.as_ref(), iter, body),
+            } => self.compile_for(*id, key, value.as_ref(), row.as_deref(), iter, body),
             HirExpr::Break { id } => self.compile_break(*id),
             HirExpr::Continue { id } => self.compile_continue(*id),
             HirExpr::Try {
@@ -2249,8 +2271,33 @@ impl<'a> ProgramCompiler<'a> {
                 position: 1,
             }],
         });
+        let matched = self.alloc_register();
+        self.emit(Instruction::RelationPattern {
+            dst: matched,
+            relation: query,
+            heading: vec![Symbol::intern(name)],
+            row_count: 1,
+            equalities: Vec::new(),
+        });
+        let branch = self.instructions.len();
+        self.emit(Instruction::Branch {
+            condition: matched,
+            if_true: branch + 2,
+            if_false: branch + 1,
+        });
+        self.emit(Instruction::Raise {
+            error: Operand::Value(Value::error_code(Symbol::intern("E_CARDINALITY"))),
+            message: Some(Operand::Value(Value::string(
+                "functional dot read requires exactly one fact",
+            ))),
+            value: Some(Operand::Register(query)),
+        });
         let dst = self.alloc_register();
-        self.emit(Instruction::One { dst, src: query });
+        self.emit(Instruction::RelationCell {
+            dst,
+            relation: query,
+            column: Symbol::intern(name),
+        });
         Ok(dst)
     }
 
@@ -3678,6 +3725,135 @@ impl<'a> ProgramCompiler<'a> {
         Ok(dst)
     }
 
+    fn compile_match(
+        &mut self,
+        id: NodeId,
+        value: &HirExpr,
+        cases: &[HirMatchCase],
+    ) -> Result<Register, CompileError> {
+        let scrutinee_type = self.infer_expr_static_type(value);
+        self.validate_match_exhaustiveness(id, &scrutinee_type, cases)?;
+
+        let scrutinee = self.compile_expr_for_value(value)?;
+        let dst = self.alloc_register();
+        self.emit(Instruction::Load {
+            dst,
+            value: Value::unit(),
+        });
+        let saved_locals = self.locals.clone();
+        let saved_types = self.local_types.clone();
+        let saved_returned = self.returned;
+        self.returned = false;
+        let mut end_jumps = Vec::new();
+        let mut branch_returns = Vec::new();
+
+        for case in cases {
+            self.locals = saved_locals.clone();
+            self.local_types = saved_types.clone();
+            let mut failed_branches = Vec::new();
+            if let Some(spec) = relation_pattern_spec(&case.pattern) {
+                if spec
+                    .heading
+                    .windows(2)
+                    .any(|columns| columns[0] == columns[1])
+                {
+                    return Err(
+                        self.unsupported(case.id, "relation patterns cannot repeat a column")
+                    );
+                }
+                let matched = self.alloc_register();
+                self.emit(Instruction::RelationPattern {
+                    dst: matched,
+                    relation: scrutinee,
+                    heading: spec.heading,
+                    row_count: spec.row_count,
+                    equalities: spec.equalities,
+                });
+                let branch = self.emit_branch(matched, self.instructions.len() + 1, 0);
+                failed_branches.push(branch);
+                for (column, binding) in spec.bindings {
+                    let register = self.alloc_register();
+                    self.emit(Instruction::RelationCell {
+                        dst: register,
+                        relation: scrutinee,
+                        column,
+                    });
+                    self.locals.insert(binding, register);
+                    self.local_types.insert(
+                        binding,
+                        match_binding_type(&scrutinee_type, &case.pattern, column),
+                    );
+                }
+            }
+            if let Some(guard) = &case.guard {
+                let guard = self.compile_expr_for_value(guard)?;
+                let branch = self.emit_branch(guard, self.instructions.len() + 1, 0);
+                failed_branches.push(branch);
+            }
+
+            let (value, returned) = self.compile_branch_items(&case.body)?;
+            branch_returns.push(returned);
+            if let Some(value) = value {
+                self.emit(Instruction::Move { dst, src: value });
+            }
+            if !returned {
+                end_jumps.push(self.emit_jump(0));
+            }
+            let next_case = self.instructions.len();
+            for branch in failed_branches {
+                self.patch_false_target(branch, next_case)?;
+            }
+        }
+
+        let exhaustive = match_is_exhaustive(&scrutinee_type, cases);
+        if !exhaustive {
+            self.emit(Instruction::Raise {
+                error: Operand::Value(Value::error_code(Symbol::intern("E_MATCH"))),
+                message: Some(Operand::Value(Value::string(
+                    "non-exhaustive relation match",
+                ))),
+                value: Some(Operand::Register(scrutinee)),
+            });
+        }
+        let end = self.instructions.len();
+        for jump in end_jumps {
+            self.patch_jump(jump, end)?;
+        }
+        self.locals = saved_locals;
+        self.local_types = saved_types;
+        self.returned = saved_returned
+            || (exhaustive
+                && !branch_returns.is_empty()
+                && branch_returns.iter().all(|returned| *returned));
+        Ok(dst)
+    }
+
+    fn validate_match_exhaustiveness(
+        &self,
+        id: NodeId,
+        scrutinee: &StaticType,
+        cases: &[HirMatchCase],
+    ) -> Result<(), CompileError> {
+        if cases.is_empty() {
+            return Err(self.unsupported(id, "match requires at least one case"));
+        }
+        if let Some(position) = cases.iter().position(|case| {
+            matches!(case.pattern, HirMatchPattern::Wildcard) && case.guard.is_none()
+        }) && position + 1 != cases.len()
+        {
+            return Err(self.unsupported(cases[position].id, "wildcard match case must be last"));
+        }
+        if match_is_exhaustive(scrutinee, cases) {
+            return Ok(());
+        }
+        let message = if matches!(scrutinee, StaticType::Dynamic | StaticType::Kind(_)) {
+            "a match on a dynamic value requires an unguarded wildcard case"
+        } else {
+            "non-exhaustive structural relation match"
+        };
+        Err(self.unsupported(id, message))
+    }
+
     fn compile_while(
         &mut self,
         _id: NodeId,
@@ -3721,11 +3897,69 @@ impl<'a> ProgramCompiler<'a> {
         Ok(dst)
     }
 
+    fn compile_exact_row_binding(
+        &mut self,
+        id: NodeId,
+        row: &[(String, BindingId)],
+        value: Option<&HirExpr>,
+    ) -> Result<Register, CompileError> {
+        let Some(value) = value else {
+            return Err(self.unsupported(id, "exact row bindings require an initializer"));
+        };
+        let source_type = self.infer_expr_static_type(value);
+        let source = self.compile_expr_for_value(value)?;
+        let mut heading = row
+            .iter()
+            .map(|(column, _)| Symbol::intern(column))
+            .collect::<Vec<_>>();
+        heading.sort_unstable();
+        if heading.windows(2).any(|columns| columns[0] == columns[1]) {
+            return Err(self.unsupported(id, "exact row patterns cannot repeat a column"));
+        }
+        let matched = self.alloc_register();
+        self.emit(Instruction::RelationPattern {
+            dst: matched,
+            relation: source,
+            heading,
+            row_count: 1,
+            equalities: Vec::new(),
+        });
+        let branch = self.instructions.len();
+        self.emit(Instruction::Branch {
+            condition: matched,
+            if_true: branch + 2,
+            if_false: branch + 1,
+        });
+        self.emit(Instruction::Raise {
+            error: Operand::Value(Value::error_code(Symbol::intern("E_CARDINALITY"))),
+            message: Some(Operand::Value(Value::string(
+                "exact row binding requires one row with the stated heading",
+            ))),
+            value: Some(Operand::Register(source)),
+        });
+        for (column, binding) in row {
+            let column = Symbol::intern(column);
+            let register = self.alloc_register();
+            self.emit(Instruction::RelationCell {
+                dst: register,
+                relation: source,
+                column,
+            });
+            self.locals.insert(*binding, register);
+            self.local_types.insert(
+                *binding,
+                match_binding_type(&source_type, &HirMatchPattern::Row(row.to_vec()), column),
+            );
+        }
+        Ok(source)
+    }
+
     fn compile_for(
         &mut self,
         _id: NodeId,
         key: &HirLoopBinding,
         value: Option<&HirLoopBinding>,
+        row: Option<&[(String, BindingId)]>,
         iter: &HirExpr,
         body: &[HirItem],
     ) -> Result<Register, CompileError> {
@@ -3754,17 +3988,22 @@ impl<'a> ProgramCompiler<'a> {
             value: Value::int(1).unwrap(),
         });
 
-        let key_register = self.alloc_register();
-        self.emit(Instruction::Load {
-            dst: key_register,
-            value: Value::nothing(),
-        });
-        self.locals.insert(key.binding, key_register);
-        let value_register = if let Some(value) = value {
+        let key_register = (!row.is_some()).then(|| {
             let register = self.alloc_register();
             self.emit(Instruction::Load {
                 dst: register,
-                value: Value::nothing(),
+                value: Value::unit(),
+            });
+            self.locals.insert(key.binding, register);
+            register
+        });
+        let value_register = if row.is_none()
+            && let Some(value) = value
+        {
+            let register = self.alloc_register();
+            self.emit(Instruction::Load {
+                dst: register,
+                value: Value::unit(),
             });
             self.locals.insert(value.binding, register);
             Some(register)
@@ -3783,7 +4022,25 @@ impl<'a> ProgramCompiler<'a> {
         let branch = self.emit_branch(condition, 0, 0);
         let body_target = self.instructions.len();
 
-        if let Some(value_register) = value_register {
+        if let Some(row) = row {
+            let mut heading = row
+                .iter()
+                .map(|(column, _)| Symbol::intern(column))
+                .collect::<Vec<_>>();
+            heading.sort_unstable();
+            for (column, binding) in row {
+                let register = self.alloc_register();
+                self.emit(Instruction::RelationCellAt {
+                    dst: register,
+                    relation: collection,
+                    index,
+                    heading: heading.clone(),
+                    column: Symbol::intern(column),
+                });
+                self.locals.insert(*binding, register);
+            }
+        } else if let Some(value_register) = value_register {
+            let key_register = key_register.expect("ordinary loop has a key register");
             self.emit(Instruction::CollectionKeyAt {
                 dst: key_register,
                 collection,
@@ -3805,6 +4062,7 @@ impl<'a> ProgramCompiler<'a> {
                 value_register,
             )?;
         } else {
+            let key_register = key_register.expect("ordinary loop has a value register");
             self.emit(Instruction::CollectionValueAt {
                 dst: key_register,
                 collection,
@@ -5062,15 +5320,12 @@ impl<'a> ProgramCompiler<'a> {
             HirFunctionBody::Block(items) => {
                 let mut returns = Vec::new();
                 collect_return_values(items, &mut returns);
-                let has_terminal_return = matches!(
-                    items.last(),
-                    Some(HirItem::Expr {
-                        expr: HirExpr::Return { .. },
-                        ..
-                    })
-                );
-                if !has_terminal_return {
-                    returns.push(None);
+                match items.last() {
+                    Some(HirItem::Expr { expr, .. }) if !self.infer_expr_kinds(expr).is_empty() => {
+                        returns.push(Some(expr));
+                    }
+                    None => returns.push(None),
+                    _ => {}
                 }
                 StaticType::union(returns.into_iter().map(|value| {
                     value.map_or(StaticType::Literal(StaticLiteral::Unit), |value| {
@@ -5100,6 +5355,121 @@ fn runtime_result_kinds(context: &CompileContext, name: &str) -> Option<KindSet>
         BuiltinResultKind::Exact(kind) => Some(KindSet::exact(kind)),
         BuiltinResultKind::Structural(contract) => contract.exact_outer_kind().map(KindSet::exact),
     }
+}
+
+fn relation_pattern_spec(pattern: &HirMatchPattern) -> Option<RelationPatternSpec> {
+    let (columns, row_count, equalities, bindings) = match pattern {
+        HirMatchPattern::Wildcard => return None,
+        HirMatchPattern::None => (vec!["value"], 0, Vec::new(), Vec::new()),
+        HirMatchPattern::Some(binding) => (vec!["value"], 1, Vec::new(), vec![("value", *binding)]),
+        HirMatchPattern::Ok(binding) => (
+            vec!["case", "value"],
+            1,
+            vec![("case", Value::symbol(Symbol::intern("ok")))],
+            vec![("value", *binding)],
+        ),
+        HirMatchPattern::Err(binding) => (
+            vec!["case", "value"],
+            1,
+            vec![("case", Value::symbol(Symbol::intern("error")))],
+            vec![("value", *binding)],
+        ),
+        HirMatchPattern::Row(fields) => (
+            fields.iter().map(|(column, _)| column.as_str()).collect(),
+            1,
+            Vec::new(),
+            fields
+                .iter()
+                .map(|(column, binding)| (column.as_str(), *binding))
+                .collect(),
+        ),
+    };
+    let mut heading = columns.into_iter().map(Symbol::intern).collect::<Vec<_>>();
+    heading.sort_unstable();
+    Some(RelationPatternSpec {
+        heading,
+        row_count,
+        equalities: equalities
+            .into_iter()
+            .map(|(column, value)| (Symbol::intern(column), value))
+            .collect(),
+        bindings: bindings
+            .into_iter()
+            .map(|(column, binding)| (Symbol::intern(column), binding))
+            .collect(),
+    })
+}
+
+fn match_is_exhaustive(scrutinee: &StaticType, cases: &[HirMatchCase]) -> bool {
+    let unguarded = |pattern: fn(&HirMatchPattern) -> bool| {
+        cases
+            .iter()
+            .any(|case| case.guard.is_none() && pattern(&case.pattern))
+    };
+    if unguarded(|pattern| matches!(pattern, HirMatchPattern::Wildcard)) {
+        return true;
+    }
+    let StaticType::Relation(relation) = scrutinee else {
+        return false;
+    };
+    let heading = relation.heading().collect::<Vec<_>>();
+    if heading == ["value"] && relation.cardinality().max == Some(1) {
+        let none = relation.cardinality().min == 0;
+        return (!none || unguarded(|pattern| matches!(pattern, HirMatchPattern::None)))
+            && unguarded(|pattern| matches!(pattern, HirMatchPattern::Some(_)));
+    }
+    if heading == ["case", "value"] && relation.cardinality().min == 1 {
+        let has_case = |name: &str| {
+            relation.alternatives().iter().any(|row| {
+                row.columns().iter().any(|(column, ty)| {
+                    column == "case"
+                        && *ty == StaticType::Literal(StaticLiteral::Symbol(name.to_owned()))
+                })
+            })
+        };
+        return (!has_case("ok") || unguarded(|pattern| matches!(pattern, HirMatchPattern::Ok(_))))
+            && (!has_case("error")
+                || unguarded(|pattern| matches!(pattern, HirMatchPattern::Err(_))));
+    }
+    relation.cardinality().min == 1
+        && relation.cardinality().max == Some(1)
+        && cases.iter().any(|case| {
+            case.guard.is_none()
+                && matches!(&case.pattern, HirMatchPattern::Row(fields)
+                    if fields.iter().map(|(column, _)| column.as_str()).collect::<BTreeSet<_>>()
+                        == heading.iter().copied().collect())
+        })
+}
+
+fn match_binding_type(
+    scrutinee: &StaticType,
+    pattern: &HirMatchPattern,
+    column: Symbol,
+) -> StaticType {
+    let StaticType::Relation(relation) = scrutinee else {
+        return StaticType::Dynamic;
+    };
+    let Some(column) = column.name() else {
+        return StaticType::Dynamic;
+    };
+    let discriminator = match pattern {
+        HirMatchPattern::Ok(_) => Some("ok"),
+        HirMatchPattern::Err(_) => Some("error"),
+        _ => None,
+    };
+    StaticType::union(relation.alternatives().iter().filter_map(|row| {
+        if let Some(discriminator) = discriminator
+            && !row.columns().iter().any(|(name, ty)| {
+                name == "case"
+                    && *ty == StaticType::Literal(StaticLiteral::Symbol(discriminator.to_owned()))
+            })
+        {
+            return None;
+        }
+        row.columns()
+            .iter()
+            .find_map(|(name, ty)| (name == column).then(|| ty.clone()))
+    }))
 }
 
 fn static_type_from_kind_set(kinds: KindSet) -> StaticType {
@@ -5242,6 +5612,11 @@ fn collect_expr_return_values<'a>(expr: &'a HirExpr, returns: &mut Vec<Option<&'
             }
             collect_return_values(finally, returns);
         }
+        HirExpr::Match { cases, .. } => {
+            for case in cases {
+                collect_return_values(&case.body, returns);
+            }
+        }
         HirExpr::Function { .. } => {}
         _ => {}
     }
@@ -5273,6 +5648,7 @@ fn expr_id(expr: &HirExpr) -> NodeId {
         | HirExpr::Field { id, .. }
         | HirExpr::Binding { id, .. }
         | HirExpr::If { id, .. }
+        | HirExpr::Match { id, .. }
         | HirExpr::Block { id, .. }
         | HirExpr::For { id, .. }
         | HirExpr::While { id, .. }

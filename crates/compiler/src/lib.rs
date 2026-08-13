@@ -34,9 +34,10 @@ mod syntax;
 
 pub use ast::{
     Arg, Ast, BinaryOp, BindingKind, BindingPattern, CardinalityRef, CatchClause, CollectionItem,
-    DispatchRestriction, EffectKind, Expr, FunctionBody, Item, Literal, LoopBinding, MethodKind,
-    MethodParam, NodeId, Param, ParamMode, RecoveryClause, ScatterBinding, Span,
-    TypeAliasDefinition, TypeLiteralRef, TypeRef, TypeRefKind, TypeRowRef, UnaryOp,
+    DispatchRestriction, EffectKind, Expr, FunctionBody, Item, Literal, LoopBinding, MatchCase,
+    MatchField, MatchPattern, MethodKind, MethodParam, NodeId, Param, ParamMode, RecoveryClause,
+    RowBinding, ScatterBinding, Span, TypeAliasDefinition, TypeLiteralRef, TypeRef, TypeRefKind,
+    TypeRowRef, UnaryOp,
 };
 pub use backend::{
     CompileContext, CompileError, CompiledProgram, HostRequestFunction, InstalledMethod,
@@ -50,8 +51,8 @@ pub use diagnostics::{
 };
 pub use hir::{
     HirArg, HirCatch, HirCollectionItem, HirExpr, HirFunctionBody, HirItem, HirLoopBinding,
-    HirMethodParam, HirParam, HirPlace, HirProgram, HirRecovery, HirRelationAtom, HirRuleBodyItem,
-    HirRuleGuard, HirScatterBinding,
+    HirMatchCase, HirMatchPattern, HirMethodParam, HirParam, HirPlace, HirProgram, HirRecovery,
+    HirRelationAtom, HirRuleBodyItem, HirRuleGuard, HirScatterBinding,
 };
 pub use lexer::lex;
 pub use lower::parse_ast;

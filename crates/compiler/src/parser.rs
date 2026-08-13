@@ -251,11 +251,16 @@ impl<'a> Parser<'a> {
     fn parse_block(&mut self, stops: &[SyntaxKind]) -> CstNode {
         let mut children = Vec::new();
         self.consume_separators();
-        while !stops.contains(&self.current_kind()) && self.current_kind() != SyntaxKind::Eof {
+        while !self.at_block_stop(stops) && self.current_kind() != SyntaxKind::Eof {
             children.push(CstElement::Node(self.parse_item()));
             self.consume_separators();
         }
         CstNode::new(SyntaxKind::Block, children)
+    }
+
+    fn at_block_stop(&mut self, stops: &[SyntaxKind]) -> bool {
+        stops.contains(&self.current_kind())
+            || (stops.contains(&SyntaxKind::CaseKw) && self.current_text_is("case"))
     }
 
     fn parse_expr(&mut self, min_bp: u8) -> CstNode {
@@ -303,6 +308,15 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_prefix(&mut self) -> CstNode {
+        if self.current_kind() == SyntaxKind::Ident
+            && self.current_text_is("match")
+            && !matches!(
+                self.nth_kind(1),
+                SyntaxKind::LParen | SyntaxKind::LBracket | SyntaxKind::Dot
+            )
+        {
+            return self.parse_match_expr();
+        }
         match self.current_kind() {
             SyntaxKind::LetKw => self.parse_binding_expr(SyntaxKind::LetExpr),
             SyntaxKind::ConstKw => self.parse_binding_expr(SyntaxKind::ConstExpr),
@@ -358,7 +372,10 @@ impl<'a> Parser<'a> {
 
     fn parse_binding_expr(&mut self, kind: SyntaxKind) -> CstNode {
         let mut children = vec![self.bump_element()];
-        if self.current_kind() == SyntaxKind::LBracket {
+        if self.current_text_is("exactly") {
+            children.push(self.bump_element());
+            children.push(CstElement::Node(self.parse_pattern()));
+        } else if self.current_kind() == SyntaxKind::LBracket {
             children.push(CstElement::Node(self.parse_pattern_brackets()));
         } else {
             children.push(
@@ -395,7 +412,14 @@ impl<'a> Parser<'a> {
 
     fn parse_if_expr(&mut self) -> CstNode {
         let mut children = vec![self.bump_element()];
-        children.push(CstElement::Node(self.parse_expr(0)));
+        if self.current_kind() == SyntaxKind::LetKw {
+            children.push(self.bump_element());
+            children.push(CstElement::Node(self.parse_pattern()));
+            children.push(self.expect_token(SyntaxKind::Eq, "expected = after if let pattern"));
+            children.push(CstElement::Node(self.parse_expr(0)));
+        } else {
+            children.push(CstElement::Node(self.parse_expr(0)));
+        }
         children.push(CstElement::Node(self.parse_block(&[
             SyntaxKind::ElseIfKw,
             SyntaxKind::ElseKw,
@@ -421,6 +445,75 @@ impl<'a> Parser<'a> {
         CstNode::new(SyntaxKind::IfExpr, children)
     }
 
+    fn parse_match_expr(&mut self) -> CstNode {
+        let mut children = vec![self.bump_element()];
+        children.push(CstElement::Node(self.parse_expr(0)));
+        self.consume_separators();
+        while self.current_text_is("case") {
+            children.push(CstElement::Node(self.parse_match_case()));
+            self.consume_separators();
+        }
+        children.push(self.expect_token(SyntaxKind::EndKw, "expected end after match"));
+        CstNode::new(SyntaxKind::MatchExpr, children)
+    }
+
+    fn parse_match_case(&mut self) -> CstNode {
+        let mut children = vec![self.bump_element(), CstElement::Node(self.parse_pattern())];
+        if self.current_kind() == SyntaxKind::IfKw {
+            children.push(self.bump_element());
+            children.push(CstElement::Node(self.parse_expr(0)));
+        }
+        children.push(CstElement::Node(
+            self.parse_block(&[SyntaxKind::CaseKw, SyntaxKind::EndKw]),
+        ));
+        CstNode::new(SyntaxKind::MatchCase, children)
+    }
+
+    fn parse_pattern(&mut self) -> CstNode {
+        let mut children = Vec::new();
+        match self.current_kind() {
+            SyntaxKind::Underscore => children.push(self.bump_element()),
+            SyntaxKind::LBrace => return self.parse_row_pattern(),
+            SyntaxKind::Ident => {
+                children.push(self.bump_element());
+                if self.current_kind() == SyntaxKind::LParen {
+                    children.push(self.bump_element());
+                    children.push(
+                        self.expect_token(SyntaxKind::Ident, "expected variant payload binding"),
+                    );
+                    children.push(
+                        self.expect_token(SyntaxKind::RParen, "expected ')' after variant pattern"),
+                    );
+                }
+            }
+            _ => children.push(self.missing("expected match pattern")),
+        }
+        CstNode::new(SyntaxKind::Pattern, children)
+    }
+
+    fn parse_row_pattern(&mut self) -> CstNode {
+        let mut children = vec![self.bump_element()];
+        while !matches!(self.current_kind(), SyntaxKind::RBrace | SyntaxKind::Eof) {
+            let mut field = Vec::new();
+            if self.current_kind() == SyntaxKind::Colon {
+                field.push(self.bump_element());
+                field.extend(self.parse_qualified_ident_or_missing("expected relation column"));
+                field.push(self.expect_token(SyntaxKind::Arrow, "expected -> in row pattern"));
+            }
+            field.push(self.expect_token(SyntaxKind::Ident, "expected row binding"));
+            children.push(CstElement::Node(CstNode::new(
+                SyntaxKind::PatternField,
+                field,
+            )));
+            if self.current_kind() != SyntaxKind::Comma {
+                break;
+            }
+            children.push(self.bump_element());
+        }
+        children.push(self.expect_token(SyntaxKind::RBrace, "expected '}' after row pattern"));
+        CstNode::new(SyntaxKind::Pattern, children)
+    }
+
     fn parse_else_clause(&mut self) -> CstNode {
         let children = vec![
             self.bump_element(),
@@ -440,10 +533,14 @@ impl<'a> Parser<'a> {
 
     fn parse_for_expr(&mut self) -> CstNode {
         let mut children = vec![self.bump_element()];
-        children.push(CstElement::Node(self.parse_loop_binding()));
-        if self.current_kind() == SyntaxKind::Comma {
-            children.push(self.bump_element());
+        if self.current_kind() == SyntaxKind::LBrace {
+            children.push(CstElement::Node(self.parse_row_pattern()));
+        } else {
             children.push(CstElement::Node(self.parse_loop_binding()));
+            if self.current_kind() == SyntaxKind::Comma {
+                children.push(self.bump_element());
+                children.push(CstElement::Node(self.parse_loop_binding()));
+            }
         }
         children.push(self.expect_token(SyntaxKind::InKw, "expected in in for loop"));
         children.push(CstElement::Node(self.parse_expr(0)));
@@ -1243,6 +1340,7 @@ impl<'a> Parser<'a> {
             SyntaxKind::LetKw
                 | SyntaxKind::ConstKw
                 | SyntaxKind::IfKw
+                | SyntaxKind::MatchKw
                 | SyntaxKind::BeginKw
                 | SyntaxKind::ForKw
                 | SyntaxKind::WhileKw
@@ -1398,6 +1496,7 @@ impl<'a> Parser<'a> {
                 | SyntaxKind::Newline
                 | SyntaxKind::ElseIfKw
                 | SyntaxKind::ElseKw
+                | SyntaxKind::CaseKw
                 | SyntaxKind::CatchKw
                 | SyntaxKind::FinallyKw
                 | SyntaxKind::EndKw

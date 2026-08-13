@@ -379,6 +379,25 @@ pub enum Instruction {
         collection: Register,
         index: Register,
     },
+    RelationPattern {
+        dst: Register,
+        relation: Register,
+        heading: Vec<Symbol>,
+        row_count: u16,
+        equalities: Vec<(Symbol, Value)>,
+    },
+    RelationCell {
+        dst: Register,
+        relation: Register,
+        column: Symbol,
+    },
+    RelationCellAt {
+        dst: Register,
+        relation: Register,
+        index: Register,
+        heading: Vec<Symbol>,
+        column: Symbol,
+    },
     ScanExists {
         dst: Register,
         relation: RelationId,
@@ -727,6 +746,25 @@ pub(crate) enum Opcode {
         collection: Register,
         index: Register,
     },
+    RelationPattern {
+        dst: Register,
+        relation: Register,
+        heading: TableRange,
+        row_count: u16,
+        equalities: TableRange,
+    },
+    RelationCell {
+        dst: Register,
+        relation: Register,
+        column: Symbol,
+    },
+    RelationCellAt {
+        dst: Register,
+        relation: Register,
+        index: Register,
+        heading: TableRange,
+        column: Symbol,
+    },
     ScanExists {
         dst: Register,
         relation: RelationRef,
@@ -932,6 +970,9 @@ impl Opcode {
             | Self::CollectionLen { dst, .. }
             | Self::CollectionKeyAt { dst, .. }
             | Self::CollectionValueAt { dst, .. }
+            | Self::RelationPattern { dst, .. }
+            | Self::RelationCell { dst, .. }
+            | Self::RelationCellAt { dst, .. }
             | Self::ScanExists { dst, .. }
             | Self::ScanBindings { dst, .. }
             | Self::ScanValue { dst, .. }
@@ -2778,7 +2819,7 @@ impl Program {
 
     pub fn to_bytes(&self) -> Result<Vec<u8>, RuntimeError> {
         let mut out = Vec::new();
-        out.extend_from_slice(b"MICAPRG6");
+        out.extend_from_slice(b"MICAPRG8");
         write_u32(&mut out, self.register_count as u32);
         write_u32(&mut out, self.opcodes.len() as u32);
         for instruction in self.instructions() {
@@ -2792,7 +2833,7 @@ impl Program {
 
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, RuntimeError> {
         let mut input = ByteReader::new(bytes);
-        input.expect_magic(b"MICAPRG6")?;
+        input.expect_magic(b"MICAPRG8")?;
         let register_count = input.read_u32()? as usize;
         let instruction_count = input.read_u32()? as usize;
         let mut instructions = Vec::with_capacity(instruction_count);
@@ -3005,6 +3046,84 @@ impl Program {
                 dst: *dst,
                 collection: *collection,
                 index: *index,
+            },
+            Opcode::RelationPattern {
+                dst,
+                relation,
+                heading,
+                row_count,
+                equalities,
+            } => Instruction::RelationPattern {
+                dst: *dst,
+                relation: *relation,
+                heading: self
+                    .operands(*heading)
+                    .iter()
+                    .map(|operand| {
+                        let Operand::Value(value) = self.decode_operand(*operand) else {
+                            unreachable!("validated relation-pattern heading is constant")
+                        };
+                        value
+                            .as_symbol()
+                            .expect("validated relation-pattern heading is symbolic")
+                    })
+                    .collect(),
+                row_count: *row_count,
+                equalities: self
+                    .map_entries(*equalities)
+                    .iter()
+                    .map(|(column, value)| {
+                        (
+                            match self.decode_operand(*column) {
+                                Operand::Value(value) => value
+                                    .as_symbol()
+                                    .expect("validated relation-pattern column is symbolic"),
+                                Operand::Register(_) => {
+                                    unreachable!("validated relation-pattern column is constant")
+                                }
+                            },
+                            match self.decode_operand(*value) {
+                                Operand::Value(value) => value,
+                                Operand::Register(_) => {
+                                    unreachable!("validated relation-pattern equality is constant")
+                                }
+                            },
+                        )
+                    })
+                    .collect(),
+            },
+            Opcode::RelationCell {
+                dst,
+                relation,
+                column,
+            } => Instruction::RelationCell {
+                dst: *dst,
+                relation: *relation,
+                column: *column,
+            },
+            Opcode::RelationCellAt {
+                dst,
+                relation,
+                index,
+                heading,
+                column,
+            } => Instruction::RelationCellAt {
+                dst: *dst,
+                relation: *relation,
+                index: *index,
+                heading: self
+                    .operands(*heading)
+                    .iter()
+                    .map(|column| match self.decode_operand(*column) {
+                        Operand::Value(value) => value
+                            .as_symbol()
+                            .expect("validated row-pattern column is symbolic"),
+                        Operand::Register(_) => {
+                            unreachable!("validated row-pattern column is constant")
+                        }
+                    })
+                    .collect(),
+                column: *column,
             },
             Opcode::ScanExists {
                 dst,
@@ -3674,6 +3793,58 @@ impl ProgramBuilder {
                 dst,
                 collection,
                 index,
+            },
+            Instruction::RelationPattern {
+                dst,
+                relation,
+                heading,
+                row_count,
+                equalities,
+            } => Opcode::RelationPattern {
+                dst,
+                relation,
+                heading: self.operands(
+                    heading
+                        .into_iter()
+                        .map(|column| Operand::Value(Value::symbol(column)))
+                        .collect(),
+                )?,
+                row_count,
+                equalities: self.map_entries(
+                    equalities
+                        .into_iter()
+                        .map(|(column, value)| {
+                            (Operand::Value(Value::symbol(column)), Operand::Value(value))
+                        })
+                        .collect(),
+                )?,
+            },
+            Instruction::RelationCell {
+                dst,
+                relation,
+                column,
+            } => Opcode::RelationCell {
+                dst,
+                relation,
+                column,
+            },
+            Instruction::RelationCellAt {
+                dst,
+                relation,
+                index,
+                heading,
+                column,
+            } => Opcode::RelationCellAt {
+                dst,
+                relation,
+                index,
+                heading: self.operands(
+                    heading
+                        .into_iter()
+                        .map(|column| Operand::Value(Value::symbol(column)))
+                        .collect(),
+                )?,
+                column,
             },
             Instruction::ScanExists {
                 dst,
@@ -4547,6 +4718,21 @@ fn validate_instruction(
             validate_register(register_count, *dst)?;
             validate_operands(register_count, duration.iter())
         }
+        Instruction::RelationPattern { dst, relation, .. }
+        | Instruction::RelationCell { dst, relation, .. } => {
+            validate_register(register_count, *dst)?;
+            validate_register(register_count, *relation)
+        }
+        Instruction::RelationCellAt {
+            dst,
+            relation,
+            index,
+            ..
+        } => {
+            validate_register(register_count, *dst)?;
+            validate_register(register_count, *relation)?;
+            validate_register(register_count, *index)
+        }
         Instruction::MailboxRecv {
             dst,
             receivers,
@@ -4749,6 +4935,9 @@ const INST_EXTERNAL_REQUEST: u8 = 55;
 const INST_BUILD_RELATION: u8 = 56;
 const INST_CHECK_KIND: u8 = 57;
 const INST_CHECK_TYPE: u8 = 58;
+const INST_RELATION_PATTERN: u8 = 59;
+const INST_RELATION_CELL: u8 = 60;
+const INST_RELATION_CELL_AT: u8 = 61;
 
 const UNARY_NOT: u8 = 0;
 const UNARY_NEG: u8 = 1;
@@ -5070,6 +5259,55 @@ fn write_instruction(out: &mut Vec<u8>, instruction: &Instruction) -> Result<(),
             write_register(out, *collection);
             write_register(out, *index);
             Ok(())
+        }
+        Instruction::RelationPattern {
+            dst,
+            relation,
+            heading,
+            row_count,
+            equalities,
+        } => {
+            out.push(INST_RELATION_PATTERN);
+            write_register(out, *dst);
+            write_register(out, *relation);
+            write_u16(out, *row_count);
+            write_u16(out, heading.len() as u16);
+            for column in heading {
+                write_named_symbol(out, *column, "relation pattern column")?;
+            }
+            write_u16(out, equalities.len() as u16);
+            for (column, value) in equalities {
+                write_named_symbol(out, *column, "relation pattern equality column")?;
+                write_value(out, value)?;
+            }
+            Ok(())
+        }
+        Instruction::RelationCell {
+            dst,
+            relation,
+            column,
+        } => {
+            out.push(INST_RELATION_CELL);
+            write_register(out, *dst);
+            write_register(out, *relation);
+            write_named_symbol(out, *column, "relation cell column")
+        }
+        Instruction::RelationCellAt {
+            dst,
+            relation,
+            index,
+            heading,
+            column,
+        } => {
+            out.push(INST_RELATION_CELL_AT);
+            write_register(out, *dst);
+            write_register(out, *relation);
+            write_register(out, *index);
+            write_u16(out, heading.len() as u16);
+            for heading_column in heading {
+                write_named_symbol(out, *heading_column, "row pattern column")?;
+            }
+            write_named_symbol(out, *column, "row pattern binding column")
         }
         Instruction::ScanExists {
             dst,
@@ -5935,6 +6173,50 @@ impl<'a> ByteReader<'a> {
                 collection: self.read_register()?,
                 index: self.read_register()?,
             },
+            INST_RELATION_PATTERN => {
+                let dst = self.read_register()?;
+                let relation = self.read_register()?;
+                let row_count = self.read_u16()?;
+                let heading_count = self.read_u16()? as usize;
+                let mut heading = Vec::with_capacity(heading_count);
+                for _ in 0..heading_count {
+                    heading.push(Symbol::intern(&self.read_string()?));
+                }
+                let equality_count = self.read_u16()? as usize;
+                let mut equalities = Vec::with_capacity(equality_count);
+                for _ in 0..equality_count {
+                    equalities.push((Symbol::intern(&self.read_string()?), self.read_value()?));
+                }
+                Instruction::RelationPattern {
+                    dst,
+                    relation,
+                    heading,
+                    row_count,
+                    equalities,
+                }
+            }
+            INST_RELATION_CELL => Instruction::RelationCell {
+                dst: self.read_register()?,
+                relation: self.read_register()?,
+                column: Symbol::intern(&self.read_string()?),
+            },
+            INST_RELATION_CELL_AT => {
+                let dst = self.read_register()?;
+                let relation = self.read_register()?;
+                let index = self.read_register()?;
+                let heading_count = self.read_u16()? as usize;
+                let mut heading = Vec::with_capacity(heading_count);
+                for _ in 0..heading_count {
+                    heading.push(Symbol::intern(&self.read_string()?));
+                }
+                Instruction::RelationCellAt {
+                    dst,
+                    relation,
+                    index,
+                    heading,
+                    column: Symbol::intern(&self.read_string()?),
+                }
+            }
             INST_SCAN_EXISTS => Instruction::ScanExists {
                 dst: self.read_register()?,
                 relation: self.read_identity()?,

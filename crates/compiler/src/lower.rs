@@ -14,9 +14,9 @@
 use crate::{
     Arg, Ast, BinaryOp, BindingKind, BindingPattern, CardinalityRef, CatchClause, CollectionItem,
     CstElement, CstNode, CstToken, DispatchRestriction, EffectKind, Expr, FunctionBody, Item,
-    Literal, LoopBinding, MethodKind, MethodParam, NodeId, Param, ParamMode, ParseError,
-    RecoveryClause, ScatterBinding, Span, SyntaxKind, TypeLiteralRef, TypeRef, TypeRefKind,
-    TypeRowRef, UnaryOp, parse,
+    Literal, LoopBinding, MatchCase, MatchField, MatchPattern, MethodKind, MethodParam, NodeId,
+    Param, ParamMode, ParseError, RecoveryClause, RowBinding, ScatterBinding, Span, SyntaxKind,
+    TypeLiteralRef, TypeRef, TypeRefKind, TypeRowRef, UnaryOp, parse,
 };
 use base64::{Engine, engine::general_purpose};
 
@@ -306,6 +306,7 @@ impl<'a> Lower<'a> {
             SyntaxKind::LetExpr => self.lower_binding(node, BindingKind::Let),
             SyntaxKind::ConstExpr => self.lower_binding(node, BindingKind::Const),
             SyntaxKind::IfExpr => self.lower_if(node),
+            SyntaxKind::MatchExpr => self.lower_match(node),
             SyntaxKind::BeginExpr => Expr::Block {
                 id: self.node_id(),
                 span: node.span.clone(),
@@ -861,8 +862,14 @@ impl<'a> Lower<'a> {
     fn lower_binding(&mut self, node: &CstNode, kind: BindingKind) -> Expr {
         let pattern = self
             .node_children(node)
-            .find(|child| child.kind == SyntaxKind::ScatterPattern)
-            .map(|child| BindingPattern::Scatter(self.lower_scatter_bindings(child)))
+            .find(|child| matches!(child.kind, SyntaxKind::ScatterPattern | SyntaxKind::Pattern))
+            .map(|child| match child.kind {
+                SyntaxKind::ScatterPattern => {
+                    BindingPattern::Scatter(self.lower_scatter_bindings(child))
+                }
+                SyntaxKind::Pattern => BindingPattern::Row(self.lower_row_bindings(child)),
+                _ => unreachable!(),
+            })
             .unwrap_or_else(|| {
                 BindingPattern::Name(self.first_text(node, SyntaxKind::Ident).unwrap_or_default())
             });
@@ -872,7 +879,12 @@ impl<'a> Lower<'a> {
             .map(|child| self.lower_type_ref(child));
         let value = self
             .node_children(node)
-            .find(|child| !matches!(child.kind, SyntaxKind::ScatterPattern | SyntaxKind::TypeRef))
+            .find(|child| {
+                !matches!(
+                    child.kind,
+                    SyntaxKind::ScatterPattern | SyntaxKind::Pattern | SyntaxKind::TypeRef
+                )
+            })
             .map(|child| Box::new(self.lower_expr(child)));
         Expr::Binding {
             id: self.node_id(),
@@ -897,7 +909,7 @@ impl<'a> Lower<'a> {
             .find(|child| child.kind == SyntaxKind::Block)
             .map(|block| self.lower_items(block))
             .unwrap_or_default();
-        let elseif = self
+        let elseif: Vec<_> = self
             .node_children(node)
             .filter(|child| child.kind == SyntaxKind::ElseIfClause)
             .map(|clause| {
@@ -923,6 +935,36 @@ impl<'a> Lower<'a> {
             })
             .map(|block| self.lower_items(block))
             .unwrap_or_default();
+        if let Some(pattern) = self
+            .node_children(node)
+            .find(|child| child.kind == SyntaxKind::Pattern)
+        {
+            if !elseif.is_empty() {
+                self.error(node, "if let does not support elseif clauses");
+            }
+            let pattern = self.lower_match_pattern(pattern);
+            return Expr::Match {
+                id: self.node_id(),
+                span: node.span.clone(),
+                value: Box::new(condition),
+                cases: vec![
+                    MatchCase {
+                        id: self.node_id(),
+                        span: node.span.clone(),
+                        pattern,
+                        guard: None,
+                        body: then_items,
+                    },
+                    MatchCase {
+                        id: self.node_id(),
+                        span: node.span.clone(),
+                        pattern: MatchPattern::Wildcard,
+                        guard: None,
+                        body: else_items,
+                    },
+                ],
+            };
+        }
         Expr::If {
             id: self.node_id(),
             span: node.span.clone(),
@@ -933,7 +975,127 @@ impl<'a> Lower<'a> {
         }
     }
 
+    fn lower_match(&mut self, node: &CstNode) -> Expr {
+        let value = self
+            .node_children(node)
+            .find(|child| is_expr_node(child.kind))
+            .map(|child| self.lower_expr(child))
+            .unwrap_or_else(|| self.error_expr(node));
+        let cases = self
+            .node_children(node)
+            .filter(|child| child.kind == SyntaxKind::MatchCase)
+            .map(|case| self.lower_match_case(case))
+            .collect();
+        Expr::Match {
+            id: self.node_id(),
+            span: node.span.clone(),
+            value: Box::new(value),
+            cases,
+        }
+    }
+
+    fn lower_match_case(&mut self, node: &CstNode) -> MatchCase {
+        let pattern = self
+            .node_children(node)
+            .find(|child| child.kind == SyntaxKind::Pattern)
+            .map(|pattern| self.lower_match_pattern(pattern))
+            .unwrap_or(MatchPattern::Wildcard);
+        let guard = self
+            .node_children(node)
+            .find(|child| is_expr_node(child.kind))
+            .map(|guard| self.lower_expr(guard));
+        let body = self
+            .node_children(node)
+            .find(|child| child.kind == SyntaxKind::Block)
+            .map(|body| self.lower_items(body))
+            .unwrap_or_default();
+        MatchCase {
+            id: self.node_id(),
+            span: node.span.clone(),
+            pattern,
+            guard,
+            body,
+        }
+    }
+
+    fn lower_match_pattern(&mut self, node: &CstNode) -> MatchPattern {
+        let fields = self
+            .lower_row_bindings(node)
+            .into_iter()
+            .map(|field| MatchField {
+                column: field.column,
+                binding: field.name,
+            })
+            .collect::<Vec<_>>();
+        if !fields.is_empty()
+            || self
+                .token_children(node)
+                .any(|token| token.kind == SyntaxKind::LBrace)
+        {
+            return MatchPattern::Row(fields);
+        }
+        let tokens = self.token_children(node).collect::<Vec<_>>();
+        if tokens
+            .first()
+            .is_some_and(|token| token.kind == SyntaxKind::Underscore)
+        {
+            return MatchPattern::Wildcard;
+        }
+        let names = tokens
+            .iter()
+            .filter(|token| token.kind == SyntaxKind::Ident)
+            .map(|token| self.text(token.span.clone()).to_owned())
+            .collect::<Vec<_>>();
+        match names.as_slice() {
+            [name] if name == "none" => MatchPattern::None,
+            [name, binding] if name == "some" => MatchPattern::Some(binding.clone()),
+            [name, binding] if name == "ok" => MatchPattern::Ok(binding.clone()),
+            [name, binding] if name == "err" => MatchPattern::Err(binding.clone()),
+            _ => {
+                self.error(
+                    node,
+                    "expected none, some(binding), ok(binding), err(binding), row pattern, or _",
+                );
+                MatchPattern::Wildcard
+            }
+        }
+    }
+
+    fn lower_row_bindings(&mut self, node: &CstNode) -> Vec<RowBinding> {
+        self.node_children(node)
+            .filter(|child| child.kind == SyntaxKind::PatternField)
+            .map(|field| {
+                let tokens = self.token_children(field).collect::<Vec<_>>();
+                let name = tokens
+                    .iter()
+                    .rev()
+                    .find(|token| token.kind == SyntaxKind::Ident)
+                    .map(|token| self.text(token.span.clone()).to_owned())
+                    .unwrap_or_default();
+                let column = if tokens
+                    .first()
+                    .is_some_and(|token| token.kind == SyntaxKind::Colon)
+                {
+                    qualified_name_from_tokens(self.source, &tokens, 1)
+                        .unwrap_or_else(|| name.clone())
+                } else {
+                    name.clone()
+                };
+                RowBinding {
+                    id: self.node_id(),
+                    column,
+                    name,
+                    span: field.span.clone(),
+                }
+            })
+            .collect()
+    }
+
     fn lower_for(&mut self, node: &CstNode) -> Expr {
+        let row = self
+            .node_children(node)
+            .find(|child| child.kind == SyntaxKind::Pattern)
+            .map(|pattern| self.lower_row_bindings(pattern));
         let mut bindings = self
             .node_children(node)
             .filter(|child| child.kind == SyntaxKind::LoopBinding)
@@ -962,6 +1124,7 @@ impl<'a> Lower<'a> {
             span: node.span.clone(),
             key,
             value,
+            row,
             iter: Box::new(iter),
             body,
         }
@@ -2598,13 +2761,19 @@ mod tests {
             }
             Expr::Field { base, .. } => collect_expr_ids(base, ids),
             Expr::Binding { pattern, value, .. } => {
-                if let BindingPattern::Scatter(bindings) = pattern {
-                    for binding in bindings {
-                        ids.push(binding.id);
-                        if let Some(default) = &binding.default {
-                            collect_expr_ids(default, ids);
+                match pattern {
+                    BindingPattern::Scatter(bindings) => {
+                        for binding in bindings {
+                            ids.push(binding.id);
+                            if let Some(default) = &binding.default {
+                                collect_expr_ids(default, ids);
+                            }
                         }
                     }
+                    BindingPattern::Row(bindings) => {
+                        ids.extend(bindings.iter().map(|binding| binding.id));
+                    }
+                    BindingPattern::Name(_) => {}
                 }
                 if let Some(value) = value {
                     collect_expr_ids(value, ids);
@@ -2636,9 +2805,22 @@ mod tests {
                     collect_item_ids(item, ids);
                 }
             }
+            Expr::Match { value, cases, .. } => {
+                collect_expr_ids(value, ids);
+                for case in cases {
+                    ids.push(case.id);
+                    if let Some(guard) = &case.guard {
+                        collect_expr_ids(guard, ids);
+                    }
+                    for item in &case.body {
+                        collect_item_ids(item, ids);
+                    }
+                }
+            }
             Expr::For {
                 key,
                 value,
+                row,
                 iter,
                 body,
                 ..
@@ -2646,6 +2828,9 @@ mod tests {
                 ids.push(key.id);
                 if let Some(value) = value {
                     ids.push(value.id);
+                }
+                if let Some(row) = row {
+                    ids.extend(row.iter().map(|binding| binding.id));
                 }
                 collect_expr_ids(iter, ids);
                 for item in body {

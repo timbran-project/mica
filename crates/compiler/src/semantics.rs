@@ -14,10 +14,11 @@
 use crate::{
     Arg, Ast, BindingKind, BindingPattern, Cardinality, CatchClause, CollectionItem, EffectKind,
     Expr, FunctionBody, HirArg, HirCatch, HirCollectionItem, HirExpr, HirFunctionBody, HirItem,
-    HirLoopBinding, HirMethodParam, HirParam, HirPlace, HirProgram, HirRecovery, HirRelationAtom,
-    HirRuleBodyItem, HirRuleGuard, HirScatterBinding, Item, NodeId, Param, ParamMode, ParseError,
-    RecoveryClause, RelationType, RowShape, Span, StaticLiteral, StaticType, TypeAliasDefinition,
-    TypeLiteralRef, TypeRef, TypeRefKind, parse_ast,
+    HirLoopBinding, HirMatchCase, HirMatchPattern, HirMethodParam, HirParam, HirPlace, HirProgram,
+    HirRecovery, HirRelationAtom, HirRuleBodyItem, HirRuleGuard, HirScatterBinding, Item,
+    MatchPattern, NodeId, Param, ParamMode, ParseError, RecoveryClause, RelationType, RowShape,
+    Span, StaticLiteral, StaticType, TypeAliasDefinition, TypeLiteralRef, TypeRef, TypeRefKind,
+    parse_ast,
 };
 use mica_var::ValueKind;
 use std::collections::{BTreeSet, HashMap};
@@ -406,7 +407,7 @@ impl<'a> Analyzer<'a> {
     fn record_capture(&mut self, binding: BindingId, use_scope: ScopeId) {
         let binding_scope = self.bindings[binding.0 as usize].scope;
         for context in self.function_stack.iter().rev() {
-            if context.scope == binding_scope {
+            if self.scope_contains(context.scope, binding_scope) {
                 break;
             }
             if self.scope_contains(context.scope, use_scope) {
@@ -593,6 +594,15 @@ impl<'a> Analyzer<'a> {
                     self.validate_supported_surface_items(items);
                 }
                 self.validate_supported_surface_items(else_items);
+            }
+            HirExpr::Match { value, cases, .. } => {
+                self.validate_supported_surface_expr(value, false);
+                for case in cases {
+                    if let Some(guard) = &case.guard {
+                        self.validate_supported_surface_expr(guard, false);
+                    }
+                    self.validate_supported_surface_items(&case.body);
+                }
             }
             HirExpr::Block { items, .. } => self.validate_supported_surface_items(items),
             HirExpr::For { iter, body, .. } => {
@@ -1137,7 +1147,13 @@ impl<'a> Analyzer<'a> {
                 let hir_value = value
                     .as_ref()
                     .map(|value| Box::new(self.lower_expr(value, scope)));
-                let (binding, scatter) = match pattern {
+                let source_type = hir_value.as_deref().and_then(|value| match value {
+                    HirExpr::LocalRef { binding, .. } => {
+                        self.bindings[binding.0 as usize].declared_type.clone()
+                    }
+                    _ => None,
+                });
+                let (binding, scatter, row) = match pattern {
                     BindingPattern::Name(name) => (
                         Some(self.declare(
                             scope,
@@ -1151,6 +1167,7 @@ impl<'a> Analyzer<'a> {
                             span,
                         )),
                         Vec::new(),
+                        None,
                     ),
                     BindingPattern::Scatter(bindings) => (
                         None,
@@ -1188,12 +1205,42 @@ impl<'a> Analyzer<'a> {
                                 }
                             })
                             .collect(),
+                        None,
+                    ),
+                    BindingPattern::Row(fields) => (
+                        None,
+                        Vec::new(),
+                        Some(
+                            fields
+                                .iter()
+                                .map(|field| {
+                                    let declared_type = source_type.as_ref().map(|source| {
+                                        match_pattern_binding_type(source, &field.column, None)
+                                    });
+                                    (
+                                        field.column.clone(),
+                                        self.declare(
+                                            scope,
+                                            field.name.clone(),
+                                            match kind {
+                                                BindingKind::Let => LocalKind::Let,
+                                                BindingKind::Const => LocalKind::Const,
+                                            },
+                                            declared_type,
+                                            field.id,
+                                            &field.span,
+                                        ),
+                                    )
+                                })
+                                .collect(),
+                        ),
                     ),
                 };
                 HirExpr::Binding {
                     id: *id,
                     binding,
                     scatter,
+                    row,
                     kind: kind.clone(),
                     value: hir_value,
                 }
@@ -1220,6 +1267,79 @@ impl<'a> Analyzer<'a> {
                     .collect(),
                 else_items: self.lower_items_in_child_scope(else_items, scope, Some(*id)),
             },
+            Expr::Match {
+                id, value, cases, ..
+            } => {
+                let value = Box::new(self.lower_expr(value, scope));
+                let scrutinee_type = match value.as_ref() {
+                    HirExpr::LocalRef { binding, .. } => self.bindings[binding.0 as usize]
+                        .declared_type
+                        .as_ref()
+                        .cloned(),
+                    _ => None,
+                };
+                let cases = cases
+                    .iter()
+                    .map(|case| {
+                        let case_scope = self.alloc_scope(Some(scope), Some(case.id));
+                        let declare =
+                            |analyzer: &mut Self,
+                             name: &str,
+                             column: &str,
+                             discriminator: Option<&str>| {
+                                analyzer.declare(
+                                    case_scope,
+                                    name.to_owned(),
+                                    LocalKind::Let,
+                                    scrutinee_type.as_ref().map(|scrutinee| {
+                                        match_pattern_binding_type(scrutinee, column, discriminator)
+                                    }),
+                                    case.id,
+                                    &case.span,
+                                )
+                            };
+                        let pattern = match &case.pattern {
+                            MatchPattern::Wildcard => HirMatchPattern::Wildcard,
+                            MatchPattern::None => HirMatchPattern::None,
+                            MatchPattern::Some(name) => {
+                                HirMatchPattern::Some(declare(self, name, "value", None))
+                            }
+                            MatchPattern::Ok(name) => {
+                                HirMatchPattern::Ok(declare(self, name, "value", Some("ok")))
+                            }
+                            MatchPattern::Err(name) => {
+                                HirMatchPattern::Err(declare(self, name, "value", Some("error")))
+                            }
+                            MatchPattern::Row(fields) => HirMatchPattern::Row(
+                                fields
+                                    .iter()
+                                    .map(|field| {
+                                        (
+                                            field.column.clone(),
+                                            declare(self, &field.binding, &field.column, None),
+                                        )
+                                    })
+                                    .collect(),
+                            ),
+                        };
+                        HirMatchCase {
+                            id: case.id,
+                            scope: case_scope,
+                            pattern,
+                            guard: case
+                                .guard
+                                .as_ref()
+                                .map(|guard| self.lower_expr(guard, case_scope)),
+                            body: self.lower_items(&case.body, case_scope),
+                        }
+                    })
+                    .collect();
+                HirExpr::Match {
+                    id: *id,
+                    value,
+                    cases,
+                }
+            }
             Expr::Block { id, items, .. } => {
                 let block_scope = self.alloc_scope(Some(scope), Some(*id));
                 HirExpr::Block {
@@ -1232,12 +1352,46 @@ impl<'a> Analyzer<'a> {
                 id,
                 key,
                 value,
+                row,
                 iter,
                 body,
                 ..
             } => {
                 let iter = self.lower_expr(iter, scope);
                 let loop_scope = self.alloc_scope(Some(scope), Some(*id));
+                let row = row.as_ref().map(|fields| {
+                    let row_type = match &iter {
+                        HirExpr::LocalRef { binding, .. } => self.bindings[binding.0 as usize]
+                            .declared_type
+                            .as_ref()
+                            .and_then(|ty| match ty {
+                                StaticType::Relation(relation) => Some(relation.iteration_row()),
+                                _ => None,
+                            }),
+                        _ => None,
+                    };
+                    fields
+                        .iter()
+                        .map(|field| {
+                            let declared_type = row_type.as_ref().and_then(|row| {
+                                row.columns().iter().find_map(|(name, ty)| {
+                                    (name == &field.column).then(|| ty.clone())
+                                })
+                            });
+                            (
+                                field.column.clone(),
+                                self.declare(
+                                    loop_scope,
+                                    field.name.clone(),
+                                    LocalKind::Loop,
+                                    declared_type,
+                                    field.id,
+                                    &field.span,
+                                ),
+                            )
+                        })
+                        .collect()
+                });
                 let key_type = self.resolve_type_ref(key.annotation.as_ref(), key.id);
                 let key_kind = key_type.as_ref().and_then(StaticType::exact_outer_kind);
                 let key = HirLoopBinding {
@@ -1277,6 +1431,7 @@ impl<'a> Analyzer<'a> {
                     scope: loop_scope,
                     key,
                     value,
+                    row,
                     iter: Box::new(iter),
                     body: self.lower_items(body, loop_scope),
                 }
@@ -1829,6 +1984,29 @@ impl<'a> Analyzer<'a> {
     }
 }
 
+fn match_pattern_binding_type(
+    scrutinee: &StaticType,
+    column: &str,
+    discriminator: Option<&str>,
+) -> StaticType {
+    let StaticType::Relation(relation) = scrutinee else {
+        return StaticType::Dynamic;
+    };
+    StaticType::union(relation.alternatives().iter().filter_map(|row| {
+        if let Some(discriminator) = discriminator
+            && !row.columns().iter().any(|(name, ty)| {
+                name == "case"
+                    && *ty == StaticType::Literal(StaticLiteral::Symbol(discriminator.to_owned()))
+            })
+        {
+            return None;
+        }
+        row.columns()
+            .iter()
+            .find_map(|(name, ty)| (name == column).then(|| ty.clone()))
+    }))
+}
+
 fn standard_type_aliases() -> &'static [TypeAliasDefinition] {
     static ALIASES: LazyLock<Vec<TypeAliasDefinition>> = LazyLock::new(|| {
         parse_ast(
@@ -2045,6 +2223,16 @@ fn collect_expr_span(expr: &Expr, spans: &mut HashMap<NodeId, Span>) {
                 collect_item_spans(items, spans);
             }
             collect_item_spans(else_items, spans);
+        }
+        Expr::Match { value, cases, .. } => {
+            collect_expr_span(value, spans);
+            for case in cases {
+                spans.insert(case.id, case.span.clone());
+                if let Some(guard) = &case.guard {
+                    collect_expr_span(guard, spans);
+                }
+                collect_item_spans(&case.body, spans);
+            }
         }
         Expr::Block { items, .. } => collect_item_spans(items, spans),
         Expr::For {

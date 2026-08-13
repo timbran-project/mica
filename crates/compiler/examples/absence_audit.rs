@@ -224,6 +224,15 @@ impl Audit {
                 self.visit_items(file, else_items);
             }
             Expr::Block { items, .. } => self.visit_items(file, items),
+            Expr::Match { value, cases, .. } => {
+                self.visit_expr(file, value, Parent::Condition);
+                for case in cases {
+                    if let Some(guard) = &case.guard {
+                        self.visit_expr(file, guard, Parent::Condition);
+                    }
+                    self.visit_items(file, &case.body);
+                }
+            }
             Expr::For {
                 iter, body, value, ..
             } => {

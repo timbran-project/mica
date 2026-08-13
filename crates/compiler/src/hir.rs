@@ -162,6 +162,7 @@ pub enum HirExpr {
         id: NodeId,
         binding: Option<BindingId>,
         scatter: Vec<HirScatterBinding>,
+        row: Option<Vec<(String, BindingId)>>,
         kind: BindingKind,
         value: Option<Box<HirExpr>>,
     },
@@ -171,6 +172,11 @@ pub enum HirExpr {
         then_items: Vec<HirItem>,
         elseif: Vec<(HirExpr, Vec<HirItem>)>,
         else_items: Vec<HirItem>,
+    },
+    Match {
+        id: NodeId,
+        value: Box<HirExpr>,
+        cases: Vec<HirMatchCase>,
     },
     Block {
         id: NodeId,
@@ -182,6 +188,7 @@ pub enum HirExpr {
         scope: ScopeId,
         key: HirLoopBinding,
         value: Option<HirLoopBinding>,
+        row: Option<Vec<(String, BindingId)>>,
         iter: Box<HirExpr>,
         body: Vec<HirItem>,
     },
@@ -307,6 +314,25 @@ pub struct HirLoopBinding {
     pub binding: BindingId,
     pub declared_type: Option<StaticType>,
     pub declared_kind: Option<ValueKind>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HirMatchCase {
+    pub id: NodeId,
+    pub scope: ScopeId,
+    pub pattern: HirMatchPattern,
+    pub guard: Option<HirExpr>,
+    pub body: Vec<HirItem>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum HirMatchPattern {
+    Wildcard,
+    Row(Vec<(String, BindingId)>),
+    None,
+    Some(BindingId),
+    Ok(BindingId),
+    Err(BindingId),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

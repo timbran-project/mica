@@ -29,6 +29,9 @@ pub enum SyntaxKind {
     LetKw,
     ConstKw,
     IfKw,
+    MatchKw,
+    CaseKw,
+    ExactlyKw,
     ElseIfKw,
     ElseKw,
     EndKw,
@@ -109,6 +112,10 @@ pub enum SyntaxKind {
     LetExpr,
     ConstExpr,
     IfExpr,
+    MatchExpr,
+    MatchCase,
+    Pattern,
+    PatternField,
     ElseIfClause,
     ElseClause,
     BeginExpr,
@@ -189,6 +196,9 @@ impl SyntaxKind {
                 | Self::LetKw
                 | Self::ConstKw
                 | Self::IfKw
+                | Self::MatchKw
+                | Self::CaseKw
+                | Self::ExactlyKw
                 | Self::ElseIfKw
                 | Self::ElseKw
                 | Self::EndKw

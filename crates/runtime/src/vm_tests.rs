@@ -1292,7 +1292,7 @@ fn program_artifact_round_trips_kind_checks_and_rejects_stale_magic() {
     .unwrap();
     let bytes = program.to_bytes().unwrap();
 
-    assert_eq!(&bytes[..8], b"MICAPRG6");
+    assert_eq!(&bytes[..8], b"MICAPRG8");
     assert_eq!(
         program.kind_fact_after(0),
         Some((reg(0), ValueKind::Relation)),
@@ -1334,12 +1334,58 @@ fn program_artifact_round_trips_structural_type_contracts() {
     .unwrap();
     let bytes = program.to_bytes().unwrap();
 
-    assert_eq!(&bytes[..8], b"MICAPRG6");
+    assert_eq!(&bytes[..8], b"MICAPRG8");
     assert_eq!(
         program.kind_fact_after(0),
         Some((reg(0), ValueKind::Relation))
     );
     assert_eq!(Program::from_bytes(&bytes).unwrap(), program);
+}
+
+#[test]
+fn program_artifact_round_trips_direct_relation_pattern_operations() {
+    let value = Value::relation(
+        [Symbol::intern("left"), Symbol::intern("right")],
+        [Tuple::from([Value::int(1).unwrap(), Value::string("one")])],
+    )
+    .unwrap();
+    let heading = vec![Symbol::intern("left"), Symbol::intern("right")];
+    let program = Program::new(
+        5,
+        [
+            Instruction::Load { dst: reg(0), value },
+            Instruction::RelationPattern {
+                dst: reg(1),
+                relation: reg(0),
+                heading: heading.clone(),
+                row_count: 1,
+                equalities: Vec::new(),
+            },
+            Instruction::RelationCell {
+                dst: reg(2),
+                relation: reg(0),
+                column: Symbol::intern("left"),
+            },
+            Instruction::Load {
+                dst: reg(3),
+                value: Value::int(0).unwrap(),
+            },
+            Instruction::RelationCellAt {
+                dst: reg(4),
+                relation: reg(0),
+                index: reg(3),
+                heading,
+                column: Symbol::intern("right"),
+            },
+            Instruction::Return { value: r(4) },
+        ],
+    )
+    .unwrap();
+
+    assert_eq!(
+        Program::from_bytes(&program.to_bytes().unwrap()).unwrap(),
+        program
+    );
 }
 
 #[test]

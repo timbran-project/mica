@@ -947,6 +947,9 @@ fn opcode_name(opcode: &Opcode) -> &'static str {
         Opcode::CollectionLen { .. } => "CollectionLen",
         Opcode::CollectionKeyAt { .. } => "CollectionKeyAt",
         Opcode::CollectionValueAt { .. } => "CollectionValueAt",
+        Opcode::RelationPattern { .. } => "RelationPattern",
+        Opcode::RelationCell { .. } => "RelationCell",
+        Opcode::RelationCellAt { .. } => "RelationCellAt",
         Opcode::ScanExists { .. } => "ScanExists",
         Opcode::ScanBindings { .. } => "ScanBindings",
         Opcode::ScanValue { .. } => "ScanValue",
@@ -1752,6 +1755,119 @@ impl RegisterVm {
                 self.advance_ip_unchecked();
                 Ok(VmHostResponse::Continue)
             }
+            Opcode::RelationPattern {
+                dst,
+                relation,
+                heading,
+                row_count,
+                equalities,
+            } => {
+                let matched =
+                    self.read_register_unchecked(*relation)
+                        .with_relation(|value| {
+                            value.len() == usize::from(*row_count)
+                                && value.heading().len() == program.operands(*heading).len()
+                                && value.heading().iter().zip(program.operands(*heading)).all(
+                                    |(actual, expected)| {
+                                        *actual
+                                            == self
+                                                .resolve_operand_ref(program, *expected)
+                                                .as_symbol()
+                                                .expect("validated match heading is symbolic")
+                                    },
+                                )
+                                && program.map_entries(*equalities).iter().all(
+                                    |(column, expected)| {
+                                        let column = self
+                                            .resolve_operand_ref(program, *column)
+                                            .as_symbol()
+                                            .expect("validated match column is symbolic");
+                                        let Some(position) = value.column_position(column) else {
+                                            return false;
+                                        };
+                                        value.rows().first().is_some_and(|row| {
+                                            row.values()[position]
+                                                == self.resolve_operand_ref(program, *expected)
+                                        })
+                                    },
+                                )
+                        })
+                        .unwrap_or(false);
+                self.write_register_unchecked(*dst, Value::bool(matched));
+                self.advance_ip_unchecked();
+                Ok(VmHostResponse::Continue)
+            }
+            Opcode::RelationCell {
+                dst,
+                relation,
+                column,
+            } => {
+                let relation_value = self.read_register_unchecked(*relation).clone();
+                let Some(value) = relation_value
+                    .with_relation(|value| {
+                        let position = value.column_position(*column)?;
+                        value.rows().first()?.values().get(position).cloned()
+                    })
+                    .flatten()
+                else {
+                    return self.begin_raise(Value::error(
+                        Symbol::intern("E_MATCH"),
+                        Some("relation cell load requires a matched row"),
+                        Some(relation_value),
+                    ));
+                };
+                self.write_register_unchecked(*dst, value);
+                self.advance_ip_unchecked();
+                Ok(VmHostResponse::Continue)
+            }
+            Opcode::RelationCellAt {
+                dst,
+                relation,
+                index,
+                heading,
+                column,
+            } => {
+                let relation_value = self.read_register_unchecked(*relation).clone();
+                let row_index = self
+                    .read_register_unchecked(*index)
+                    .as_int()
+                    .and_then(|index| usize::try_from(index).ok());
+                let expected_heading = program.operands(*heading);
+                let value = relation_value
+                    .with_relation(|value| {
+                        if value.heading().len() != expected_heading.len()
+                            || !value.heading().iter().zip(expected_heading).all(
+                                |(actual, expected)| {
+                                    *actual
+                                        == self
+                                            .resolve_operand_ref(program, *expected)
+                                            .as_symbol()
+                                            .expect("validated row heading is symbolic")
+                                },
+                            )
+                        {
+                            return None;
+                        }
+                        let position = value.column_position(*column)?;
+                        value
+                            .rows()
+                            .get(row_index?)?
+                            .values()
+                            .get(position)
+                            .cloned()
+                    })
+                    .flatten();
+                let Some(value) = value else {
+                    return self.begin_raise(Value::error(
+                        Symbol::intern("E_MATCH"),
+                        Some("relation row does not match the loop pattern"),
+                        Some(relation_value),
+                    ));
+                };
+                self.write_register_unchecked(*dst, value);
+                self.advance_ip_unchecked();
+                Ok(VmHostResponse::Continue)
+            }
             Opcode::ScanExists {
                 dst,
                 relation,
@@ -1795,10 +1911,14 @@ impl RegisterVm {
                     Ok(rows) => rows,
                     Err(error) => return self.raise_kernel_error(error),
                 };
-                let value = rows
-                    .first()
-                    .map(|row| row.values()[1].clone())
-                    .unwrap_or_else(Value::nothing);
+                if rows.len() != 1 {
+                    return self.begin_raise(Value::error(
+                        Symbol::intern("E_CARDINALITY"),
+                        Some("functional dot read requires exactly one fact"),
+                        Some(Value::int(i64::try_from(rows.len()).unwrap_or(i64::MAX)).unwrap()),
+                    ));
+                }
+                let value = rows[0].values()[1].clone();
                 self.write_register_unchecked(*dst, value);
                 self.advance_ip_unchecked();
                 Ok(VmHostResponse::Continue)

@@ -263,6 +263,23 @@ impl<'a> KindInference<'a> {
                 }
                 self.conditional(condition, then_items, fallback)
             }
+            HirExpr::Match { value, cases, .. } => {
+                let value = self.flow(value);
+                if value.normal.is_empty() {
+                    return value;
+                }
+                let branches = cases.iter().fold(KindFlow::unreachable(), |result, case| {
+                    let mut branch = KindFlow::reachable();
+                    if let Some(guard) = &case.guard {
+                        branch = branch.then(self.flow(guard));
+                    }
+                    result.union(branch.then(self.items(&case.body)))
+                });
+                KindFlow {
+                    normal: branches.normal,
+                    returns: value.returns.union(branches.returns),
+                }
+            }
             HirExpr::Block { items, .. } => self.items(items),
             HirExpr::For { iter, body, .. } => {
                 let iter = self.flow(iter);
