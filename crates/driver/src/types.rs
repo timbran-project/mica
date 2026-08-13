@@ -46,6 +46,7 @@ impl ExternalStreamEmitter {
 
 pub type ExternalStreamRequestHandler =
     Arc<dyn Fn(ExternalRequest, ExternalStreamEmitter) -> ExternalRequestFuture + Send + Sync>;
+pub type FileinIncludeLoader = Arc<dyn Fn(&str) -> Result<String, String> + Send + Sync>;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TaskContext {

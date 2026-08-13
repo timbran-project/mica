@@ -15,18 +15,19 @@ use crate::execution::CpuAdmission;
 use crate::{
     DispatcherConfig, DriverError, DriverEvent, DriverSubscriptionMailbox,
     DriverSubscriptionRequest, EndpointCloseReport, ExternalRequestHandler, ExternalStreamEmitter,
-    ExternalStreamRequestHandler, TaskCancellationReason, TaskContext, configure_dispatcher,
+    ExternalStreamRequestHandler, FileinIncludeLoader, TaskCancellationReason, TaskContext,
+    configure_dispatcher,
     metrics::{self, AsyncWorkerKind, DispatchOperation, WorkerOutcome},
 };
 use compio::dispatcher::Dispatcher;
 use compio::runtime::JoinHandle;
 use mica_relation_wgpu::{WgpuAccelerator, WgpuAcceleratorOptions};
 use mica_runtime::{
-    AuthorityContext, ExecutionContext, MailboxRecvRequest, ReadOnlySourceQueryOptions,
-    ReadOnlySourceQueryReport, ReadOnlySourceQueryStatus, RunReport, RuntimeError, SYSTEM_ENDPOINT,
-    SharedSourceRunner, SourceRunner, SourceTaskError, SpawnRequest, SubmittedTask,
-    SubscriptionRequest, SuspendKind, TaskError, TaskId, TaskInput, TaskManagerError, TaskOutcome,
-    TaskRequest, Tuple,
+    AuthorityContext, ExecutionContext, FileinMode, FileinReport, MailboxRecvRequest,
+    ReadOnlySourceQueryOptions, ReadOnlySourceQueryReport, ReadOnlySourceQueryStatus, RunReport,
+    RuntimeError, SYSTEM_ENDPOINT, SharedSourceRunner, SourceRunner, SourceTaskError, SpawnRequest,
+    SubmittedTask, SubscriptionRequest, SuspendKind, TaskError, TaskId, TaskInput,
+    TaskManagerError, TaskOutcome, TaskRequest, Tuple,
 };
 use mica_var::{Identity, Symbol, Value};
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
@@ -424,6 +425,52 @@ impl CompioTaskDriver {
             .inner
             .runner
             .report_outcome(submitted.task_id, submitted.outcome))
+    }
+
+    pub async fn check_filein(
+        &self,
+        source: String,
+        include_loader: Option<FileinIncludeLoader>,
+    ) -> Result<Vec<RunReport>, DriverError> {
+        let runner = Arc::clone(&self.inner.runner);
+        self.dispatch(DispatchOperation::Filein, move || async move {
+            match include_loader {
+                Some(loader) => {
+                    runner.check_filein_with_include_loader(&source, |path| loader(path))
+                }
+                None => runner.check_filein(&source),
+            }
+        })
+        .await
+    }
+
+    pub async fn filein_unit(
+        &self,
+        unit: Symbol,
+        source: String,
+        mode: FileinMode,
+        include_loader: Option<FileinIncludeLoader>,
+    ) -> Result<FileinReport, DriverError> {
+        let runner = Arc::clone(&self.inner.runner);
+        self.dispatch(DispatchOperation::Filein, move || async move {
+            match include_loader {
+                Some(loader) => {
+                    runner.run_filein_with_unit_and_include_loader(unit, &source, mode, |path| {
+                        loader(path)
+                    })
+                }
+                None => runner.run_filein_with_unit(unit, &source, mode),
+            }
+        })
+        .await
+    }
+
+    pub async fn fileout_unit(&self, unit: Symbol) -> Result<String, DriverError> {
+        let runner = Arc::clone(&self.inner.runner);
+        self.dispatch(DispatchOperation::Fileout, move || async move {
+            runner.fileout_unit(unit)
+        })
+        .await
     }
 
     pub async fn submit_source_as_actor(

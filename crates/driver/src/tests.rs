@@ -15,9 +15,9 @@ use crate::{
     CompioTaskDriver, DriverError, DriverEvent, DriverSubscriptionRequest, TaskCancellationReason,
 };
 use mica_runtime::{
-    AuthorityContext, EmbeddingProviderKind, ReadOnlySourceQueryOptions, ReadOnlySourceQueryStatus,
-    RuntimeError, SourceTaskError, SubscriptionInitialDelivery, SubscriptionSubject, TaskError,
-    TaskInput, TaskManagerError, TaskRequest,
+    AuthorityContext, EmbeddingProviderKind, FileinMode, ReadOnlySourceQueryOptions,
+    ReadOnlySourceQueryStatus, RuntimeError, SourceTaskError, SubscriptionInitialDelivery,
+    SubscriptionSubject, TaskError, TaskInput, TaskManagerError, TaskRequest,
 };
 use mica_runtime::{SourceRunner, SuspendKind, TaskOutcome};
 use mica_var::{Identity, Symbol, Value};
@@ -2120,5 +2120,58 @@ fn driver_can_be_constructed_and_shutdown_repeatedly() {
             driver.shutdown().await.unwrap();
             assert!(driver.is_shutdown());
         }
+    });
+}
+
+#[test]
+fn driver_checks_installs_replaces_and_files_out_units() {
+    compio::runtime::Runtime::new().unwrap().block_on(async {
+        let driver =
+            CompioTaskDriver::spawn_with_workers(SourceRunner::new_empty(), TEST_WORKERS).unwrap();
+        let unit = Symbol::intern("equipment");
+        let include_loader = Arc::new(|path: &str| match path {
+            "label.txt" => Ok("original".to_owned()),
+            _ => Err(format!("unknown include {path}")),
+        });
+
+        driver
+            .filein_unit(
+                unit,
+                "make_identity(:sensor)\n\
+                 make_relation(:Label, 2)\n\
+                 assert Label(#sensor, include_text(\"label.txt\"))\n"
+                    .to_owned(),
+                FileinMode::Add,
+                Some(include_loader),
+            )
+            .await
+            .unwrap();
+        driver
+            .check_filein("make_identity(:checked_only)".to_owned(), None)
+            .await
+            .unwrap();
+        assert!(
+            driver
+                .named_identity(Symbol::intern("checked_only"))
+                .is_err()
+        );
+
+        driver
+            .filein_unit(
+                unit,
+                "make_identity(:sensor)\n\
+                 make_relation(:Label, 2)\n\
+                 assert Label(#sensor, \"replacement\")\n"
+                    .to_owned(),
+                FileinMode::Replace,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let source = driver.fileout_unit(unit).await.unwrap();
+        assert!(source.contains("replacement"));
+        assert!(!source.contains("original"));
+        driver.shutdown().await.unwrap();
     });
 }

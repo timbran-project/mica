@@ -33,5 +33,5 @@ pub use pool::CompioTaskDriver;
 pub use types::{
     DriverError, DriverEvent, DriverSubscriptionMailbox, DriverSubscriptionRequest,
     EndpointCloseReport, ExternalRequestHandler, ExternalStreamEmitter,
-    ExternalStreamRequestHandler, TaskCancellationReason, TaskContext,
+    ExternalStreamRequestHandler, FileinIncludeLoader, TaskCancellationReason, TaskContext,
 };
