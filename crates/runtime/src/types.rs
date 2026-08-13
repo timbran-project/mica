@@ -11,7 +11,7 @@
 // You should have received a copy of the GNU Affero General Public License along
 // with this program. If not, see <https://www.gnu.org/licenses/>.
 
-use mica_compiler::{CompileContext, CompileError, HostRequestFunction};
+use mica_compiler::{CompileContext, CompileError, HostRequestFunction, TypeAliasDefinition};
 use mica_relation_kernel::{ConflictPolicy, RelationDurability, RelationMetadata, Tuple};
 use mica_var::{Identity, Symbol, Value};
 use mica_vm::AuthorityContext;
@@ -34,6 +34,7 @@ pub struct FileinReport {
     pub owned_facts: usize,
     pub owned_rules: usize,
     pub owned_relations: usize,
+    pub owned_type_aliases: usize,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -47,6 +48,7 @@ pub(crate) struct SourceProjection {
 pub(crate) struct SourceDeclarations {
     pub(crate) identities: BTreeSet<String>,
     pub(crate) relations: Vec<SourceRelationDeclaration>,
+    pub(crate) type_aliases: Vec<TypeAliasDefinition>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

@@ -16,8 +16,8 @@ use crate::{
     Expr, FunctionBody, HirArg, HirCatch, HirCollectionItem, HirExpr, HirFunctionBody, HirItem,
     HirLoopBinding, HirMethodParam, HirParam, HirPlace, HirProgram, HirRecovery, HirRelationAtom,
     HirRuleBodyItem, HirRuleGuard, HirScatterBinding, Item, NodeId, Param, ParamMode, ParseError,
-    RecoveryClause, RelationType, RowShape, Span, StaticLiteral, StaticType, TypeLiteralRef,
-    TypeRef, TypeRefKind, parse_ast,
+    RecoveryClause, RelationType, RowShape, Span, StaticLiteral, StaticType, TypeAliasDefinition,
+    TypeLiteralRef, TypeRef, TypeRefKind, parse_ast,
 };
 use mica_var::ValueKind;
 use std::collections::{BTreeSet, HashMap};
@@ -28,7 +28,14 @@ pub fn parse_semantic(source: &str) -> SemanticProgram {
 }
 
 pub fn analyze_ast(ast: &Ast) -> SemanticProgram {
-    Analyzer::new(ast).analyze()
+    analyze_ast_with_aliases(ast, &[])
+}
+
+pub fn analyze_ast_with_aliases(
+    ast: &Ast,
+    installed_aliases: &[TypeAliasDefinition],
+) -> SemanticProgram {
+    Analyzer::new(ast, installed_aliases).analyze()
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
@@ -59,6 +66,8 @@ pub struct SemanticProgram {
     pub captures: HashMap<NodeId, Vec<BindingId>>,
     pub diagnostics: Vec<Diagnostic>,
     pub parse_errors: Vec<ParseError>,
+    pub type_aliases: Vec<TypeAliasDefinition>,
+    pub type_alias_dependencies: BTreeSet<String>,
 }
 
 impl SemanticProgram {
@@ -175,6 +184,9 @@ struct Analyzer<'a> {
     captures: HashMap<NodeId, BTreeSet<BindingId>>,
     diagnostics: Vec<Diagnostic>,
     function_stack: Vec<FunctionContext>,
+    aliases: HashMap<String, TypeAliasDefinition>,
+    local_aliases: Vec<TypeAliasDefinition>,
+    type_alias_dependencies: BTreeSet<String>,
 }
 
 #[derive(Clone, Copy)]
@@ -184,9 +196,14 @@ struct FunctionContext {
 }
 
 impl<'a> Analyzer<'a> {
-    fn new(ast: &'a Ast) -> Self {
+    fn new(ast: &'a Ast, installed_aliases: &[TypeAliasDefinition]) -> Self {
         let mut spans = HashMap::new();
         collect_item_spans(&ast.items, &mut spans);
+        let aliases = installed_aliases
+            .iter()
+            .cloned()
+            .map(|alias| (alias.name.clone(), alias))
+            .collect();
         Self {
             ast,
             spans,
@@ -196,10 +213,14 @@ impl<'a> Analyzer<'a> {
             captures: HashMap::new(),
             diagnostics: Vec::new(),
             function_stack: Vec::new(),
+            aliases,
+            local_aliases: Vec::new(),
+            type_alias_dependencies: BTreeSet::new(),
         }
     }
 
     fn analyze(mut self) -> SemanticProgram {
+        self.collect_local_aliases();
         let root_scope = self.alloc_scope(None, None);
         let items = self.lower_items(&self.ast.items, root_scope);
         self.validate_supported_surface_items(&items);
@@ -216,6 +237,70 @@ impl<'a> Analyzer<'a> {
                 .collect(),
             diagnostics: self.diagnostics,
             parse_errors: self.ast.errors.clone(),
+            type_aliases: self.local_aliases,
+            type_alias_dependencies: self.type_alias_dependencies,
+        }
+    }
+
+    fn collect_local_aliases(&mut self) {
+        for item in &self.ast.items {
+            let Item::TypeAlias {
+                id,
+                span,
+                name,
+                parameters,
+                body,
+                source,
+            } = item
+            else {
+                continue;
+            };
+            let mut seen = BTreeSet::new();
+            for parameter in parameters {
+                if !seen.insert(parameter.clone()) {
+                    self.diagnostic(
+                        DiagnosticCode::InvalidStaticType,
+                        *id,
+                        span.clone(),
+                        format!("duplicate type parameter `{parameter}` in alias `{name}`"),
+                    );
+                }
+            }
+            if self.local_aliases.iter().any(|alias| alias.name == *name) {
+                self.diagnostic(
+                    DiagnosticCode::InvalidStaticType,
+                    *id,
+                    span.clone(),
+                    format!("duplicate type alias `{name}`"),
+                );
+                continue;
+            }
+            let alias = TypeAliasDefinition {
+                name: name.clone(),
+                parameters: parameters.clone(),
+                body: body.clone(),
+                source: source.clone(),
+            };
+            self.aliases.insert(name.clone(), alias.clone());
+            self.local_aliases.push(alias);
+        }
+        for item in &self.ast.items {
+            let Item::TypeAlias {
+                id,
+                name,
+                parameters,
+                body,
+                ..
+            } = item
+            else {
+                continue;
+            };
+            let parameters = parameters
+                .iter()
+                .cloned()
+                .map(|name| (name, StaticType::Dynamic))
+                .collect();
+            let _ = self.resolve_type_inner(body, *id, &parameters, &mut vec![name.clone()]);
         }
     }
 
@@ -338,6 +423,7 @@ impl<'a> Analyzer<'a> {
     fn validate_supported_surface_items(&mut self, items: &[HirItem]) {
         for item in items {
             match item {
+                HirItem::TypeAlias { .. } => {}
                 HirItem::Expr { expr, .. } => self.validate_supported_surface_expr(expr, false),
                 HirItem::RelationRule { head, body, .. } => {
                     self.validate_relation_atom_support(head, true, false, false);
@@ -701,6 +787,20 @@ impl<'a> Analyzer<'a> {
 
     fn lower_item(&mut self, item: &Item, scope: ScopeId) -> HirItem {
         match item {
+            Item::TypeAlias {
+                id,
+                name,
+                parameters,
+                body,
+                source,
+                ..
+            } => HirItem::TypeAlias {
+                id: *id,
+                name: name.clone(),
+                parameters: parameters.clone(),
+                body: body.clone(),
+                source: source.clone(),
+            },
             Item::Expr { id, expr } => HirItem::Expr {
                 id: *id,
                 expr: self.lower_expr(expr, scope),
@@ -1545,12 +1645,46 @@ impl<'a> Analyzer<'a> {
     }
 
     fn resolve_type(&mut self, annotation: &TypeRef, node: NodeId) -> Option<StaticType> {
+        self.resolve_type_inner(annotation, node, &HashMap::new(), &mut Vec::new())
+    }
+
+    fn resolve_type_inner(
+        &mut self,
+        annotation: &TypeRef,
+        node: NodeId,
+        parameters: &HashMap<String, StaticType>,
+        stack: &mut Vec<String>,
+    ) -> Option<StaticType> {
         match &annotation.kind {
             TypeRefKind::Named { name, arguments } => {
+                if let Some(parameter) = parameters.get(name) {
+                    if !arguments.is_empty() {
+                        self.diagnostic(
+                            DiagnosticCode::InvalidStaticType,
+                            node,
+                            annotation.span.clone(),
+                            format!("type parameter `{name}` does not accept arguments"),
+                        );
+                        return None;
+                    }
+                    return Some(parameter.clone());
+                }
                 if name == "dynamic" && arguments.is_empty() {
                     return Some(StaticType::Dynamic);
                 }
-                let Some(kind) = value_kind_from_name(name) else {
+                if let Some(kind) = value_kind_from_name(name) {
+                    if !arguments.is_empty() {
+                        self.diagnostic(
+                            DiagnosticCode::InvalidStaticType,
+                            node,
+                            annotation.span.clone(),
+                            format!("value kind `{name}` does not accept type arguments"),
+                        );
+                        return None;
+                    }
+                    return Some(StaticType::Kind(kind));
+                }
+                let Some(alias) = self.aliases.get(name).cloned() else {
                     self.diagnostic(
                         DiagnosticCode::UnknownValueKind,
                         node,
@@ -1559,16 +1693,47 @@ impl<'a> Analyzer<'a> {
                     );
                     return None;
                 };
-                if !arguments.is_empty() {
+                if arguments.len() != alias.parameters.len() {
                     self.diagnostic(
                         DiagnosticCode::InvalidStaticType,
                         node,
                         annotation.span.clone(),
-                        format!("value kind `{name}` does not accept type arguments"),
+                        format!(
+                            "type alias `{name}` expects {} argument(s), received {}",
+                            alias.parameters.len(),
+                            arguments.len()
+                        ),
                     );
                     return None;
                 }
-                Some(StaticType::Kind(kind))
+                if stack.iter().any(|active| active == name) {
+                    stack.push(name.clone());
+                    self.diagnostic(
+                        DiagnosticCode::InvalidStaticType,
+                        node,
+                        annotation.span.clone(),
+                        format!("cyclic type alias: {}", stack.join(" -> ")),
+                    );
+                    stack.pop();
+                    return None;
+                }
+                let resolved_arguments = arguments
+                    .iter()
+                    .map(|argument| self.resolve_type_inner(argument, node, parameters, stack))
+                    .collect::<Option<Vec<_>>>()?;
+                let substitutions = alias
+                    .parameters
+                    .iter()
+                    .cloned()
+                    .zip(resolved_arguments)
+                    .collect();
+                if !self.local_aliases.iter().any(|local| local.name == *name) {
+                    self.type_alias_dependencies.insert(name.clone());
+                }
+                stack.push(name.clone());
+                let resolved = self.resolve_type_inner(&alias.body, node, &substitutions, stack);
+                stack.pop();
+                resolved
             }
             TypeRefKind::Literal(literal) => Some(StaticType::Literal(match literal {
                 TypeLiteralRef::Bool(value) => StaticLiteral::Bool(*value),
@@ -1597,7 +1762,7 @@ impl<'a> Analyzer<'a> {
                 for alternative in alternatives {
                     let mut columns = Vec::with_capacity(alternative.columns.len());
                     for (name, cell) in &alternative.columns {
-                        let cell = self.resolve_type(cell, node)?;
+                        let cell = self.resolve_type_inner(cell, node, parameters, stack)?;
                         columns.push((name.clone(), cell));
                     }
                     match RowShape::new(columns) {
@@ -1684,6 +1849,9 @@ fn looks_like_relation_name(name: &str) -> bool {
 fn collect_item_spans(items: &[Item], spans: &mut HashMap<NodeId, Span>) {
     for item in items {
         match item {
+            Item::TypeAlias { id, span, .. } => {
+                spans.insert(*id, span.clone());
+            }
             Item::Expr { id, expr } => {
                 spans.insert(*id, expr.span().clone());
                 collect_expr_span(expr, spans);
@@ -1941,7 +2109,9 @@ fn collect_recovery_span(catch: &RecoveryClause, spans: &mut HashMap<NodeId, Spa
 fn first_item_span(items: &[Item]) -> Option<Span> {
     items.first().map(|item| match item {
         Item::Expr { expr, .. } => expr.span().clone(),
-        Item::RelationRule { span, .. } | Item::Method { span, .. } => span.clone(),
+        Item::RelationRule { span, .. }
+        | Item::Method { span, .. }
+        | Item::TypeAlias { span, .. } => span.clone(),
     })
 }
 
@@ -2476,5 +2646,57 @@ mod tests {
             diagnostic.code == DiagnosticCode::UnsupportedSyntax
                 && diagnostic.message == "query variables are only valid as relation arguments"
         }));
+    }
+
+    #[test]
+    fn resolves_parameterized_nested_and_installed_type_aliases() {
+        let program = parse_ok(
+            "type Cell<T> = relation<{:value -> T}> where rows in 1\n\
+             type IntCell = Cell<int>\n\
+             let value: IntCell = [:value] { [1] }",
+        );
+        assert_eq!(program.diagnostics, vec![]);
+        let declared = program
+            .bindings
+            .iter()
+            .find(|binding| binding.name == "value")
+            .and_then(|binding| binding.declared_type.as_ref());
+        assert!(matches!(declared, Some(StaticType::Relation(_))));
+        assert_eq!(program.type_aliases.len(), 2);
+
+        let aliases = program.type_aliases[..1].to_vec();
+        let installed = analyze_ast_with_aliases(
+            &parse_ast("let value: Cell<string> = [:value] { [\"ok\"] }"),
+            &aliases,
+        );
+        assert_eq!(installed.diagnostics, vec![]);
+        assert_eq!(
+            installed.type_alias_dependencies,
+            BTreeSet::from(["Cell".to_owned()])
+        );
+    }
+
+    #[test]
+    fn diagnoses_alias_arity_parameters_unknown_names_and_cycles() {
+        for (source, expected) in [
+            ("type Pair<T, T> = T", "duplicate type parameter `T`"),
+            (
+                "type Box<T> = T\nlet value: Box = 1",
+                "expects 1 argument(s), received 0",
+            ),
+            ("type Bad<T> = Missing<T>", "unknown type `Missing`"),
+            ("type Loop = Loop", "cyclic type alias: Loop -> Loop"),
+            ("type Left = Right\ntype Right = Left", "cyclic type alias"),
+        ] {
+            let program = parse_semantic(source);
+            assert!(
+                program
+                    .diagnostics
+                    .iter()
+                    .any(|diagnostic| diagnostic.message.contains(expected)),
+                "missing `{expected}` in {:?}",
+                program.diagnostics
+            );
+        }
     }
 }

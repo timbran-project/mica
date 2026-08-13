@@ -98,6 +98,7 @@ pub enum SyntaxKind {
     ItemList,
     MethodItem,
     VerbItem,
+    TypeAliasItem,
     MethodHeader,
     VerbHeader,
     VerbParamList,

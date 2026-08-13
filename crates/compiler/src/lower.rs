@@ -79,10 +79,40 @@ impl<'a> Lower<'a> {
                 }),
             SyntaxKind::MethodItem => Some(self.lower_method_item(node, MethodKind::Method)),
             SyntaxKind::VerbItem => Some(self.lower_method_item(node, MethodKind::Verb)),
+            SyntaxKind::TypeAliasItem => Some(self.lower_type_alias_item(node)),
             _ => {
                 self.error(node, "expected item");
                 None
             }
+        }
+    }
+
+    fn lower_type_alias_item(&mut self, node: &CstNode) -> Item {
+        let mut identifiers = self
+            .token_children(node)
+            .filter(|token| token.kind == SyntaxKind::Ident)
+            .map(|token| self.text(token.span.clone()).to_owned())
+            .skip(1);
+        let name = identifiers.next().unwrap_or_default();
+        let parameters = identifiers.collect();
+        let body = self
+            .node_children(node)
+            .find(|child| child.kind == SyntaxKind::TypeRef)
+            .map(|child| self.lower_type_ref(child))
+            .unwrap_or(TypeRef {
+                kind: TypeRefKind::Named {
+                    name: "dynamic".to_owned(),
+                    arguments: Vec::new(),
+                },
+                span: node.span.clone(),
+            });
+        Item::TypeAlias {
+            id: self.node_id(),
+            span: node.span.clone(),
+            name,
+            parameters,
+            body,
+            source: self.source[node.span.clone()].trim().to_owned(),
         }
     }
 
@@ -2481,6 +2511,7 @@ mod tests {
     fn collect_item_ids(item: &Item, ids: &mut Vec<NodeId>) {
         ids.push(item.id());
         match item {
+            Item::TypeAlias { .. } => {}
             Item::Expr { expr, .. } => collect_expr_ids(expr, ids),
             Item::RelationRule { head, body, .. } => {
                 collect_expr_ids(head, ids);

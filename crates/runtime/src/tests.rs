@@ -4911,6 +4911,57 @@ fn runner_fileout_round_trips_value_kind_annotations() {
 }
 
 #[test]
+fn runner_installs_replaces_and_files_out_structural_type_aliases() {
+    let mut runner = SourceRunner::new_empty();
+    let unit = Symbol::intern("types");
+    runner
+        .run_filein_with_unit(
+            unit,
+            "type IntCell = Cell<int>\n\
+             type Cell<T> = relation<{:value -> T}> where rows in 1\n",
+            FileinMode::Add,
+        )
+        .unwrap();
+
+    let report = runner
+        .run_source("let value: IntCell = [:value] { [42] }\nreturn value")
+        .unwrap();
+    assert!(matches!(report.outcome, TaskOutcome::Complete { .. }));
+    let filed_out = runner.fileout_unit(unit).unwrap();
+    assert!(filed_out.contains("type Cell<T> = relation<{:value -> T}> where rows in 1"));
+    assert!(filed_out.contains("type IntCell = Cell<int>"));
+
+    runner
+        .run_filein_with_unit(
+            unit,
+            "type Cell<T> = relation<{:item -> T}> where rows in 1\n\
+             type IntCell = Cell<int>\n",
+            FileinMode::Replace,
+        )
+        .unwrap();
+    assert!(
+        runner
+            .run_source("let value: IntCell = [:value] { [42] }")
+            .is_err()
+    );
+    assert!(
+        runner
+            .run_source("let value: IntCell = [:item] { [42] }")
+            .is_ok()
+    );
+
+    let mut imported = SourceRunner::new_empty();
+    imported
+        .run_filein_with_unit(unit, &runner.fileout_unit(unit).unwrap(), FileinMode::Add)
+        .unwrap();
+    assert!(
+        imported
+            .run_source("let value: IntCell = [:item] { [7] }")
+            .is_ok()
+    );
+}
+
+#[test]
 fn runner_fileout_preserves_frob_fact_literals() {
     let mut runner = SourceRunner::new_empty();
     let unit = Symbol::intern("events");

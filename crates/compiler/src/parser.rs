@@ -62,11 +62,38 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_item(&mut self) -> CstNode {
+        if self.current_text_is("type")
+            && self.nth_kind(1) == SyntaxKind::Ident
+            && matches!(self.nth_kind(2), SyntaxKind::Lt | SyntaxKind::Eq)
+        {
+            return self.parse_type_alias_item();
+        }
         match self.current_kind() {
             SyntaxKind::MethodKw => self.parse_method_like(SyntaxKind::MethodItem),
             SyntaxKind::VerbKw => self.parse_verb_item(),
             _ => self.parse_expr_stmt(),
         }
+    }
+
+    fn parse_type_alias_item(&mut self) -> CstNode {
+        let mut children = vec![
+            self.bump_element(),
+            self.expect_token(SyntaxKind::Ident, "expected type alias name"),
+        ];
+        if self.current_kind() == SyntaxKind::Lt {
+            children.push(self.bump_element());
+            while !matches!(self.current_kind(), SyntaxKind::Gt | SyntaxKind::Eof) {
+                children.push(self.expect_token(SyntaxKind::Ident, "expected type parameter"));
+                if self.current_kind() != SyntaxKind::Comma {
+                    break;
+                }
+                children.push(self.bump_element());
+            }
+            children.push(self.expect_token(SyntaxKind::Gt, "expected '>' after type parameters"));
+        }
+        children.push(self.expect_token(SyntaxKind::Eq, "expected '=' in type alias"));
+        children.push(CstElement::Node(self.parse_type_ref()));
+        CstNode::new(SyntaxKind::TypeAliasItem, children)
     }
 
     fn parse_method_like(&mut self, kind: SyntaxKind) -> CstNode {

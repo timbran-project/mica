@@ -24,6 +24,13 @@ pub struct HirProgram {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum HirItem {
+    TypeAlias {
+        id: NodeId,
+        name: String,
+        parameters: Vec<String>,
+        body: crate::TypeRef,
+        source: String,
+    },
     Expr {
         id: NodeId,
         expr: HirExpr,

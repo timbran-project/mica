@@ -60,7 +60,7 @@ use mica_compiler::{
     DiagnosticSource, Expr, HirArg, HirCatch, HirCollectionItem, HirExpr, HirFunctionBody, HirItem,
     HirPlace, HirRecovery, HirRelationAtom, HostRequestFunction, Item, Literal, MethodInstallation,
     MethodKind, MethodRelations, NodeId, Span, UnaryOp, compile_semantic, format_compile_error,
-    install_methods, install_rules_from_source, parse, parse_ast, parse_semantic,
+    install_methods, install_rules_from_source, parse, parse_ast, parse_semantic_with_context,
 };
 use mica_host_protocol::{
     DomNode, diff_dom_nodes, is_supported_dom_attribute, is_supported_dom_tag,
@@ -96,6 +96,8 @@ const METHOD_SOURCE_RELATION_ID: u64 = 0x00df_ffff_ffff_fff9;
 const SOURCE_OWNS_FACT_RELATION_ID: u64 = 0x00df_ffff_ffff_fff8;
 const SOURCE_OWNS_RULE_RELATION_ID: u64 = 0x00df_ffff_ffff_fff7;
 const SOURCE_OWNS_RELATION_RELATION_ID: u64 = 0x00df_ffff_ffff_fff6;
+const TYPE_ALIAS_RELATION_ID: u64 = 0x00df_ffff_ffff_ffdf;
+const SOURCE_OWNS_TYPE_ALIAS_RELATION_ID: u64 = 0x00df_ffff_ffff_ffde;
 const ENDPOINT_RELATION_ID: u64 = 0x00df_ffff_ffff_fff5;
 const ENDPOINT_ACTOR_RELATION_ID: u64 = 0x00df_ffff_ffff_fff4;
 const ENDPOINT_PRINCIPAL_RELATION_ID: u64 = 0x00df_ffff_ffff_fff3;
@@ -380,16 +382,19 @@ impl SourceRunner {
         };
         let contextual = principal.is_some() || actor.is_some();
         if contextual {
-            let semantic = parse_semantic(&source);
-            if let Some(item) =
-                semantic.hir.items.iter().find(|item| {
-                    matches!(item, HirItem::Method { .. } | HirItem::RelationRule { .. })
-                })
-            {
+            let semantic = parse_semantic_with_context(&source, &self.context);
+            if let Some(item) = semantic.hir.items.iter().find(|item| {
+                matches!(
+                    item,
+                    HirItem::Method { .. }
+                        | HirItem::RelationRule { .. }
+                        | HirItem::TypeAlias { .. }
+                )
+            }) {
                 return Err(unsupported_runner_error(
                     item_id(item),
                     semantic.span(item_id(item)).cloned(),
-                    "contextual source submission cannot install methods or rules",
+                    "contextual source submission cannot install methods, rules, or type aliases",
                 ));
             }
             let context = self.context_for_execution(principal, actor, endpoint);
@@ -404,7 +409,7 @@ impl SourceRunner {
             return Ok(SubmittedTask { task_id, outcome });
         }
 
-        if root_source_needs_install_chunking(&source) {
+        if root_source_needs_install_chunking(&source, &self.context) {
             let chunks = source_chunks(&source);
             return self.submit_root_source_chunks(chunks, endpoint, authority);
         }
@@ -443,10 +448,12 @@ impl SourceRunner {
         endpoint: Identity,
         authority: AuthorityContext,
     ) -> Result<SubmittedTask, SourceTaskError> {
-        let semantic = parse_semantic(source);
+        let semantic = parse_semantic_with_context(source, &self.context);
         if semantic.parse_errors.is_empty() && semantic.diagnostics.is_empty() {
             self.predeclare_source_names(&semantic)?;
         }
+
+        self.install_type_aliases(&semantic)?;
 
         if let Some(installation) = self.install_methods_from_source(source, stored_source)? {
             let value = installed_method_value(&installation);
@@ -867,7 +874,7 @@ impl SourceRunner {
         source: String,
         options: ReadOnlySourceQueryOptions,
     ) -> Result<ReadOnlySourceQueryReport, SourceTaskError> {
-        let semantic = parse_semantic(&source);
+        let semantic = parse_semantic_with_context(&source, context);
         if let Err(error) = reject_semantic_parse_or_diagnostic(&semantic) {
             return Ok(self.rejected_read_only_query_report(error, options));
         }
@@ -956,6 +963,8 @@ impl SourceRunner {
 
     pub fn run_filein(&mut self, source: &str) -> Result<Vec<RunReport>, SourceTaskError> {
         let source = expand_filein_grant_blocks(source)?;
+        let semantic = parse_semantic_with_context(&source, &self.context);
+        self.install_type_aliases(&semantic)?;
         let mut reports = Vec::new();
         for chunk in source_chunks_with_offsets(&source) {
             reports.push(
@@ -972,6 +981,8 @@ impl SourceRunner {
         mut load_include: impl FnMut(&str) -> Result<String, String>,
     ) -> Result<Vec<RunReport>, SourceTaskError> {
         let source = expand_filein_grant_blocks(source)?;
+        let semantic = parse_semantic_with_context(&source, &self.context);
+        self.install_type_aliases(&semantic)?;
         let mut reports = Vec::new();
         for chunk in source_chunks_with_offsets(&source) {
             let expanded = expand_filein_text_includes(&chunk.text, &mut load_include)?;
@@ -1086,7 +1097,8 @@ impl SourceRunner {
             self.retract_source_unit(unit)?;
         }
 
-        let declarations = collect_source_declarations(source)?;
+        let declarations = collect_source_declarations(source, &self.context)?;
+        self.validate_type_alias_ownership(unit, &declarations.type_aliases)?;
         let before = self.source_projection()?;
         let reports = if let Some(load_include) = include_loader {
             self.run_filein_with_include_loader(source, load_include)?
@@ -1150,6 +1162,16 @@ impl SourceRunner {
             )
             .map_err(CompileError::from)?;
         }
+        for alias in &declarations.type_aliases {
+            tx.assert(
+                source_owns_type_alias_relation(),
+                Tuple::from([
+                    Value::symbol(unit),
+                    Value::symbol(Symbol::intern(&alias.name)),
+                ]),
+            )
+            .map_err(CompileError::from)?;
+        }
         for (relation, tuple) in &owned_facts {
             tx.assert(
                 source_owns_fact_relation(),
@@ -1172,6 +1194,7 @@ impl SourceRunner {
             owned_facts: owned_facts.len(),
             owned_rules: owned_rules.len(),
             owned_relations: owned_relations.len(),
+            owned_type_aliases: declarations.type_aliases.len(),
         })
     }
 
@@ -1193,7 +1216,7 @@ impl SourceRunner {
         source: &str,
         stored_source: &str,
     ) -> Result<Option<MethodInstallation>, SourceTaskError> {
-        let mut semantic = parse_semantic(source);
+        let mut semantic = parse_semantic_with_context(source, &self.context);
         if !semantic
             .hir
             .items
@@ -1220,7 +1243,7 @@ impl SourceRunner {
             .hir
             .items
             .iter()
-            .find(|item| !matches!(item, HirItem::Method { .. }))
+            .find(|item| !matches!(item, HirItem::Method { .. } | HirItem::TypeAlias { .. }))
         {
             return Err(CompileError::Unsupported {
                 node: item_id(item),
@@ -1273,6 +1296,73 @@ impl SourceRunner {
         self.context = install_context;
         self.next_method_identity_id = next_method_identity_id;
         Ok(Some(installation))
+    }
+
+    fn install_type_aliases(
+        &mut self,
+        semantic: &mica_compiler::SemanticProgram,
+    ) -> Result<(), SourceTaskError> {
+        reject_semantic_parse_or_diagnostic(semantic)?;
+        if semantic.type_aliases.is_empty() {
+            return Ok(());
+        }
+        self.install_type_alias_definitions(&semantic.type_aliases)
+    }
+
+    fn install_type_alias_definitions(
+        &mut self,
+        aliases: &[mica_compiler::TypeAliasDefinition],
+    ) -> Result<(), SourceTaskError> {
+        let snapshot = self.task_manager.kernel().snapshot();
+        let mut tx = self.task_manager.kernel().begin();
+        for alias in aliases {
+            let name = Value::symbol(Symbol::intern(&alias.name));
+            for existing in snapshot
+                .scan(type_alias_relation(), &[Some(name.clone()), None])
+                .map_err(CompileError::from)?
+            {
+                tx.retract(type_alias_relation(), existing)
+                    .map_err(CompileError::from)?;
+            }
+            tx.assert(
+                type_alias_relation(),
+                Tuple::from([name, Value::string(alias.source.clone())]),
+            )
+            .map_err(CompileError::from)?;
+        }
+        tx.commit().map_err(CompileError::from)?;
+        self.refresh_context_from_catalog();
+        Ok(())
+    }
+
+    fn validate_type_alias_ownership(
+        &self,
+        unit: Symbol,
+        aliases: &[mica_compiler::TypeAliasDefinition],
+    ) -> Result<(), SourceTaskError> {
+        let snapshot = self.task_manager.kernel().snapshot();
+        for alias in aliases {
+            let name = Value::symbol(Symbol::intern(&alias.name));
+            for ownership in snapshot
+                .scan(
+                    source_owns_type_alias_relation(),
+                    &[None, Some(name.clone())],
+                )
+                .map_err(CompileError::from)?
+            {
+                if ownership.values().first().and_then(Value::as_symbol) != Some(unit) {
+                    return Err(unsupported_runner_error(
+                        NodeId(0),
+                        None,
+                        format!(
+                            "type alias `{}` is owned by another source unit",
+                            alias.name
+                        ),
+                    ));
+                }
+            }
+        }
+        Ok(())
     }
 
     fn predeclare_source_names(
@@ -1342,6 +1432,25 @@ impl SourceRunner {
             .map_err(CompileError::from)?
         {
             tx.retract(source_owns_relation_relation(), ownership)
+                .map_err(CompileError::from)?;
+        }
+        for ownership in snapshot
+            .scan(
+                source_owns_type_alias_relation(),
+                &[Some(Value::symbol(unit)), None],
+            )
+            .map_err(CompileError::from)?
+        {
+            if let Some(name) = ownership.values().get(1).cloned() {
+                for alias in snapshot
+                    .scan(type_alias_relation(), &[Some(name), None])
+                    .map_err(CompileError::from)?
+                {
+                    tx.retract(type_alias_relation(), alias)
+                        .map_err(CompileError::from)?;
+                }
+            }
+            tx.retract(source_owns_type_alias_relation(), ownership)
                 .map_err(CompileError::from)?;
         }
         tx.commit().map_err(CompileError::from)?;
@@ -1622,17 +1731,18 @@ impl SharedSourceRunner {
                 "shared source submission requires endpoint, actor, or principal context",
             ));
         }
-        let semantic = parse_semantic(&source);
-        if let Some(item) = semantic
-            .hir
-            .items
-            .iter()
-            .find(|item| matches!(item, HirItem::Method { .. } | HirItem::RelationRule { .. }))
-        {
+        let context = self.context_for_execution(principal, actor, endpoint);
+        let semantic = parse_semantic_with_context(&source, &context);
+        if let Some(item) = semantic.hir.items.iter().find(|item| {
+            matches!(
+                item,
+                HirItem::Method { .. } | HirItem::RelationRule { .. } | HirItem::TypeAlias { .. }
+            )
+        }) {
             return Err(unsupported_runner_error(
                 item_id(item),
                 semantic.span(item_id(item)).cloned(),
-                "contextual source submission cannot install methods or rules",
+                "contextual source submission cannot install methods, rules, or type aliases",
             ));
         }
         if authority.can_grant()
@@ -1641,7 +1751,6 @@ impl SharedSourceRunner {
         {
             predeclare_source_names_in_kernel(self.task_manager.kernel(), &semantic)?;
         }
-        let context = self.context_for_execution(principal, actor, endpoint);
         let compiled = compile_semantic(semantic, &context)?;
         let runtime_context = runtime_context(principal, actor, endpoint);
         let (task_id, outcome) = self.task_manager.submit_with_context(
@@ -1657,14 +1766,14 @@ impl SharedSourceRunner {
         source: impl Into<String>,
     ) -> Result<SubmittedTask, SourceTaskError> {
         let source = source.into();
-        let semantic = parse_semantic(&source);
+        let context = self.context_for_execution(None, None, SYSTEM_ENDPOINT);
+        let semantic = parse_semantic_with_context(&source, &context);
         if AuthorityContext::root().can_grant()
             && semantic.parse_errors.is_empty()
             && semantic.diagnostics.is_empty()
         {
             predeclare_source_names_in_kernel(self.task_manager.kernel(), &semantic)?;
         }
-        let context = self.context_for_execution(None, None, SYSTEM_ENDPOINT);
         let compiled = compile_semantic(semantic, &context)?;
         let (task_id, outcome) = self.task_manager.submit_with_context(
             Arc::new(compiled.program),
@@ -2075,7 +2184,7 @@ impl SharedSourceRunner {
         source: String,
         options: ReadOnlySourceQueryOptions,
     ) -> Result<ReadOnlySourceQueryReport, SourceTaskError> {
-        let semantic = parse_semantic(&source);
+        let semantic = parse_semantic_with_context(&source, context);
         if let Err(error) = reject_semantic_parse_or_diagnostic(&semantic) {
             return Ok(self.rejected_read_only_query_report(error, options));
         }
@@ -2767,11 +2876,11 @@ fn format_filein_string_literal(text: &str) -> String {
 }
 
 fn source_has_items(source: &str) -> bool {
-    !parse_semantic(source).hir.items.is_empty()
+    !parse_ast(source).items.is_empty()
 }
 
-fn root_source_needs_install_chunking(source: &str) -> bool {
-    let semantic = parse_semantic(source);
+fn root_source_needs_install_chunking(source: &str, context: &CompileContext) -> bool {
+    let semantic = parse_semantic_with_context(source, context);
     if !semantic.parse_errors.is_empty() || !semantic.diagnostics.is_empty() {
         return false;
     }
@@ -2808,6 +2917,41 @@ fn compile_context_from_catalog(
     }
     for metadata in snapshot.relation_metadata() {
         context.define_relation_metadata(metadata.clone());
+    }
+    for tuple in snapshot
+        .scan(type_alias_relation(), &[None, None])
+        .unwrap_or_default()
+    {
+        let [name, source] = tuple.values() else {
+            continue;
+        };
+        let (Some(name), Some(source)) = (
+            name.as_symbol().and_then(Symbol::name),
+            source.with_str(str::to_owned),
+        ) else {
+            continue;
+        };
+        if let Some(alias) = parse_ast(&source).items.into_iter().find_map(|item| {
+            let Item::TypeAlias {
+                name,
+                parameters,
+                body,
+                source,
+                ..
+            } = item
+            else {
+                return None;
+            };
+            Some(mica_compiler::TypeAliasDefinition {
+                name,
+                parameters,
+                body,
+                source,
+            })
+        }) && alias.name == name
+        {
+            context.define_type_alias(alias);
+        }
     }
     for tuple in snapshot
         .scan(named_identity_relation(), &[None, None])
@@ -2883,7 +3027,10 @@ fn predeclare_source_names_in_kernel(
     Ok(())
 }
 
-fn collect_source_declarations(source: &str) -> Result<SourceDeclarations, SourceTaskError> {
+fn collect_source_declarations(
+    source: &str,
+    context: &CompileContext,
+) -> Result<SourceDeclarations, SourceTaskError> {
     let source = expand_filein_grant_blocks(source)?;
     let parsed = parse(&source);
     if !parsed.errors.is_empty() {
@@ -2892,27 +3039,32 @@ fn collect_source_declarations(source: &str) -> Result<SourceDeclarations, Sourc
         }
         .into());
     }
+    let semantic = parse_semantic_with_context(&source, context);
+    reject_semantic_parse_or_diagnostic(&semantic)?;
     let mut declarations = SourceDeclarations::default();
-    for chunk in source_chunks(&source) {
-        let semantic = parse_semantic(&chunk);
-        if !semantic.parse_errors.is_empty() {
-            return Err(CompileError::ParseErrors {
-                errors: semantic.parse_errors.clone(),
-            }
-            .into());
+    for item in semantic.hir.items {
+        if let HirItem::TypeAlias {
+            name,
+            parameters,
+            body,
+            source,
+            ..
+        } = item
+        {
+            declarations
+                .type_aliases
+                .push(mica_compiler::TypeAliasDefinition {
+                    name,
+                    parameters,
+                    body,
+                    source,
+                });
+            continue;
         }
-        if let Some(diagnostic) = semantic.diagnostics.first() {
-            return Err(CompileError::SemanticDiagnostic {
-                diagnostic: diagnostic.clone(),
-            }
-            .into());
-        }
-        for item in semantic.hir.items {
-            let HirItem::Expr { expr, .. } = item else {
-                continue;
-            };
-            collect_declaration_expr(&expr, &mut declarations);
-        }
+        let HirItem::Expr { expr, .. } = item else {
+            continue;
+        };
+        collect_declaration_expr(&expr, &mut declarations);
     }
     Ok(declarations)
 }
@@ -3034,6 +3186,8 @@ fn is_exported_fact_relation(relation: Identity) -> bool {
             | SOURCE_OWNS_FACT_RELATION_ID
             | SOURCE_OWNS_RULE_RELATION_ID
             | SOURCE_OWNS_RELATION_RELATION_ID
+            | TYPE_ALIAS_RELATION_ID
+            | SOURCE_OWNS_TYPE_ALIAS_RELATION_ID
     )
 }
 
@@ -3043,6 +3197,8 @@ fn is_ownable_fact_relation(relation: Identity) -> bool {
         SOURCE_OWNS_FACT_RELATION_ID
             | SOURCE_OWNS_RULE_RELATION_ID
             | SOURCE_OWNS_RELATION_RELATION_ID
+            | TYPE_ALIAS_RELATION_ID
+            | SOURCE_OWNS_TYPE_ALIAS_RELATION_ID
     )
 }
 
@@ -3176,6 +3332,25 @@ fn fileout_unit_source(kernel: &RelationKernel, unit: Symbol) -> Result<String, 
     let mut grants: GrantBlocks = BTreeMap::new();
     let mut rule_sources = BTreeSet::new();
     let mut method_sources = BTreeSet::new();
+    let mut type_alias_sources = BTreeSet::new();
+
+    for row in snapshot.scan(
+        source_owns_type_alias_relation(),
+        &[Some(Value::symbol(unit)), None],
+    )? {
+        let Some(name) = row.values().get(1).cloned() else {
+            continue;
+        };
+        for alias in snapshot.scan(type_alias_relation(), &[Some(name), None])? {
+            if let Some(source) = alias
+                .values()
+                .get(1)
+                .and_then(|value| value.with_str(str::to_owned))
+            {
+                type_alias_sources.insert(source);
+            }
+        }
+    }
 
     for row in snapshot.scan(
         source_owns_relation_relation(),
@@ -3251,6 +3426,14 @@ fn fileout_unit_source(kernel: &RelationKernel, unit: Symbol) -> Result<String, 
     }
 
     let mut sections = Vec::new();
+    if !type_alias_sources.is_empty() {
+        sections.push(
+            type_alias_sources
+                .into_iter()
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+    }
     if !identity_declarations.is_empty() {
         sections.push(
             identity_declarations
@@ -3983,6 +4166,15 @@ fn method_relation_metadata() -> Vec<RelationMetadata> {
         RelationMetadata::new(
             source_owns_relation_relation(),
             Symbol::intern("SourceOwnsRelation"),
+            2,
+        ),
+        RelationMetadata::new(type_alias_relation(), Symbol::intern("TypeAlias"), 2)
+            .with_conflict_policy(ConflictPolicy::Functional {
+                key_positions: vec![0],
+            }),
+        RelationMetadata::new(
+            source_owns_type_alias_relation(),
+            Symbol::intern("SourceOwnsTypeAlias"),
             2,
         ),
     ]
@@ -6608,6 +6800,14 @@ fn source_owns_relation_relation() -> Identity {
     Identity::new(SOURCE_OWNS_RELATION_RELATION_ID).unwrap()
 }
 
+fn type_alias_relation() -> Identity {
+    Identity::new(TYPE_ALIAS_RELATION_ID).unwrap()
+}
+
+fn source_owns_type_alias_relation() -> Identity {
+    Identity::new(SOURCE_OWNS_TYPE_ALIAS_RELATION_ID).unwrap()
+}
+
 fn endpoint_relation() -> Identity {
     Identity::new(ENDPOINT_RELATION_ID).unwrap()
 }
@@ -6700,7 +6900,8 @@ fn item_id(item: &HirItem) -> mica_compiler::NodeId {
     match item {
         HirItem::Expr { id, .. }
         | HirItem::RelationRule { id, .. }
-        | HirItem::Method { id, .. } => *id,
+        | HirItem::Method { id, .. }
+        | HirItem::TypeAlias { id, .. } => *id,
     }
 }
 
@@ -6734,6 +6935,11 @@ fn validate_read_only_item(
     item: &HirItem,
 ) -> Result<(), CompileError> {
     match item {
+        HirItem::TypeAlias { .. } => Err(read_only_query_rejection(
+            semantic,
+            item_id(item),
+            "read-only query cannot install type aliases",
+        )),
         HirItem::Expr { expr, .. } => validate_read_only_expr(semantic, expr),
         HirItem::RelationRule { .. } => Err(read_only_query_rejection(
             semantic,

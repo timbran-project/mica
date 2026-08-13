@@ -81,6 +81,7 @@ impl Audit {
 
     fn visit_item(&mut self, file: &Path, item: &Item) {
         match item {
+            Item::TypeAlias { .. } => {}
             Item::Expr { expr, .. } => self.visit_expr(file, expr, Parent::Other),
             Item::RelationRule { head, body, .. } => {
                 self.visit_expr(file, head, Parent::Other);

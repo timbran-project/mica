@@ -18,7 +18,8 @@ use crate::{
     HirCatch, HirCollectionItem, HirExpr, HirFunctionBody, HirItem, HirLoopBinding, HirMethodParam,
     HirPlace, HirProgram, HirRecovery, HirRelationAtom, HirRuleBodyItem, HirRuleGuard,
     HirScatterBinding, Literal, LocalKind, NodeId, ParamMode, ParseError, RelationType, RowShape,
-    SemanticProgram, Span, StaticLiteral, StaticType, UnaryOp, parse_semantic,
+    SemanticProgram, Span, StaticLiteral, StaticType, TypeAliasDefinition, UnaryOp,
+    analyze_ast_with_aliases, parse_ast,
 };
 use mica_relation_kernel::{
     Atom, ConflictPolicy, DispatchRelations, RelationId, RelationKernel, RelationMetadata, Rule,
@@ -38,8 +39,14 @@ pub fn compile_source(
     source: &str,
     context: &CompileContext,
 ) -> Result<CompiledProgram, CompileError> {
-    let semantic = parse_semantic(source);
+    let semantic = parse_semantic_with_context(source, context);
     compile_semantic(semantic, context)
+}
+
+pub fn parse_semantic_with_context(source: &str, context: &CompileContext) -> SemanticProgram {
+    let ast = parse_ast(source);
+    let aliases = context.type_aliases.values().cloned().collect::<Vec<_>>();
+    analyze_ast_with_aliases(&ast, &aliases)
 }
 
 pub fn compile_semantic(
@@ -68,7 +75,7 @@ pub fn install_rules_from_source(
     context: &CompileContext,
     kernel: &RelationKernel,
 ) -> Result<Option<RuleInstallation>, CompileError> {
-    let semantic = parse_semantic(source);
+    let semantic = parse_semantic_with_context(source, context);
     install_rules(semantic, context, kernel, source)
 }
 
@@ -99,12 +106,12 @@ pub fn install_rules(
         return Ok(None);
     }
 
-    if let Some(item) = semantic
-        .hir
-        .items
-        .iter()
-        .find(|item| !matches!(item, HirItem::RelationRule { .. }))
-    {
+    if let Some(item) = semantic.hir.items.iter().find(|item| {
+        !matches!(
+            item,
+            HirItem::RelationRule { .. } | HirItem::TypeAlias { .. }
+        )
+    }) {
         return Err(CompileError::Unsupported {
             node: item_id(item),
             span: semantic.span(item_id(item)).cloned(),
@@ -117,6 +124,7 @@ pub fn install_rules(
         .hir
         .items
         .iter()
+        .filter(|item| matches!(item, HirItem::RelationRule { .. }))
         .map(|item| compile_rule_item(&semantic, context, item))
         .collect::<Result<Vec<_>, _>>()?;
     let definitions = rules
@@ -138,7 +146,7 @@ pub fn install_methods_from_source(
     context: &CompileContext,
     tx: &mut Transaction<'_>,
 ) -> Result<MethodInstallation, CompileError> {
-    let semantic = parse_semantic(source);
+    let semantic = parse_semantic_with_context(source, context);
     install_methods(semantic, context, tx)
 }
 
@@ -268,6 +276,7 @@ pub struct CompileContext {
     runtime_functions: HashMap<String, BuiltinResultKind>,
     host_request_functions: HashMap<String, HostRequestFunction>,
     method_relations: Option<MethodRelations>,
+    type_aliases: HashMap<String, TypeAliasDefinition>,
 }
 
 impl CompileContext {
@@ -354,6 +363,14 @@ impl CompileContext {
 
     pub fn define_runtime_function(&mut self, name: impl Into<String>, result: BuiltinResultKind) {
         self.runtime_functions.insert(name.into(), result);
+    }
+
+    pub fn define_type_alias(&mut self, alias: TypeAliasDefinition) {
+        self.type_aliases.insert(alias.name.clone(), alias);
+    }
+
+    pub fn type_alias(&self, name: &str) -> Option<&TypeAliasDefinition> {
+        self.type_aliases.get(name)
     }
 
     pub fn define_host_request_function(
@@ -561,6 +578,7 @@ impl<'a> ContextValidator<'a> {
 
     fn validate_item(&mut self, item: &HirItem) {
         match item {
+            HirItem::TypeAlias { .. } => {}
             HirItem::Expr { expr, .. } => self.validate_expr(expr, ExprUse::Value),
             HirItem::RelationRule { head, body, .. } => {
                 self.validate_rule_atom(head);
@@ -1248,7 +1266,8 @@ fn item_id(item: &HirItem) -> NodeId {
     match item {
         HirItem::Expr { id, .. }
         | HirItem::RelationRule { id, .. }
-        | HirItem::Method { id, .. } => *id,
+        | HirItem::Method { id, .. }
+        | HirItem::TypeAlias { id, .. } => *id,
     }
 }
 
@@ -1405,6 +1424,7 @@ impl<'a> ProgramCompiler<'a> {
         }
 
         match item {
+            HirItem::TypeAlias { .. } => Ok(None),
             HirItem::Expr { expr, .. } => self.compile_expr_for_value(expr).map(Some),
             HirItem::RelationRule { id, .. } => Err(self.unsupported(
                 *id,
@@ -5180,6 +5200,7 @@ fn expr_id(expr: &HirExpr) -> NodeId {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::parse_semantic;
     use mica_relation_kernel::{ConflictPolicy, RelationKernel, RelationMetadata, Tuple};
     use mica_runtime::{
         BuiltinContext, BuiltinRegistry, Emission, RuntimeError, SuspendKind, TaskManager,
@@ -6425,6 +6446,27 @@ mod tests {
                 .filter(|instruction| matches!(instruction, Instruction::CheckType { .. }))
                 .count(),
             1
+        );
+    }
+
+    #[test]
+    fn structurally_equal_aliases_interoperate_without_runtime_checks() {
+        let compiled = compile_source(
+            "type First = relation<{:value -> int}> where rows in 1\n\
+             type Second = relation<{:value -> int}> where rows in 1\n\
+             let first: First = [:value] { [1] }\n\
+             let second: Second = first\n\
+             return second",
+            &CompileContext::new(),
+        )
+        .unwrap();
+
+        assert!(
+            !compiled
+                .program
+                .instructions()
+                .iter()
+                .any(|instruction| matches!(instruction, Instruction::CheckType { .. }))
         );
     }
 

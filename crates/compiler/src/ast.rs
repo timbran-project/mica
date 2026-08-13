@@ -15,6 +15,14 @@ use std::ops::Range;
 
 pub type Span = Range<usize>;
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TypeAliasDefinition {
+    pub name: String,
+    pub parameters: Vec<String>,
+    pub body: TypeRef,
+    pub source: String,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct NodeId(pub u32);
 
@@ -33,6 +41,14 @@ pub struct Ast {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Item {
+    TypeAlias {
+        id: NodeId,
+        span: Span,
+        name: String,
+        parameters: Vec<String>,
+        body: TypeRef,
+        source: String,
+    },
     Expr {
         id: NodeId,
         expr: Expr,
@@ -59,7 +75,10 @@ pub enum Item {
 impl Item {
     pub fn id(&self) -> NodeId {
         match self {
-            Self::Expr { id, .. } | Self::RelationRule { id, .. } | Self::Method { id, .. } => *id,
+            Self::Expr { id, .. }
+            | Self::RelationRule { id, .. }
+            | Self::Method { id, .. }
+            | Self::TypeAlias { id, .. } => *id,
         }
     }
 }

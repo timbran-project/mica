@@ -505,9 +505,14 @@ mod tests {
     }
 
     #[test]
-    fn current_parser_accepts_types_but_rejects_later_stage_surface() {
+    fn current_parser_accepts_types_and_aliases_but_rejects_later_stage_surface() {
         assert!(
             parse("let value: relation<{:value -> string}> where rows in 0..1 = [] {}")
+                .errors
+                .is_empty()
+        );
+        assert!(
+            parse("type option<T> = relation<{:value -> T}> where rows in 0..1")
                 .errors
                 .is_empty()
         );
@@ -516,7 +521,6 @@ mod tests {
             "if let {next} = NextView(current, ?next)\nend",
             "for {work} in AssignedTo(?work, assignee)\nend",
             "return ()",
-            "type option<T> = relation<{:value -> T}> where rows in 0..1",
         ] {
             assert!(
                 !parse(source).errors.is_empty(),
