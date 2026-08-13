@@ -21,6 +21,7 @@ use mica_runtime::{
 use mica_var::{Identity, Value};
 use std::fmt::{Display, Formatter};
 use std::future::Future;
+use std::num::NonZeroUsize;
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -61,7 +62,8 @@ pub struct DriverSubscriptionRequest {
     pub subject: SubscriptionSubject,
     pub initial_delivery: SubscriptionInitialDelivery,
     pub cursor: Option<u64>,
-    pub queue_budget: usize,
+    /// Overrides the driver's default subscription queue budget.
+    pub queue_budget: Option<NonZeroUsize>,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -132,6 +134,7 @@ pub struct EndpointCloseReport {
 #[derive(Debug)]
 pub enum DriverError {
     Source(SourceTaskError),
+    Configuration(String),
     Join(String),
     MissingTaskContext(TaskId),
     TaskCancelled(TaskId),
@@ -154,7 +157,8 @@ impl DriverError {
     pub fn source(&self) -> Option<&SourceTaskError> {
         match self {
             Self::Source(error) => Some(error),
-            Self::Join(_)
+            Self::Configuration(_)
+            | Self::Join(_)
             | Self::MissingTaskContext(_)
             | Self::TaskCancelled(_)
             | Self::EndpointClosed(_)
@@ -167,6 +171,7 @@ impl Display for DriverError {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Source(error) => write!(f, "{}", format_source_task_error(error)),
+            Self::Configuration(error) => write!(f, "invalid driver configuration: {error}"),
             Self::Join(error) => write!(f, "driver task failed: {error}"),
             Self::MissingTaskContext(task_id) => {
                 write!(f, "missing task context for task {task_id}")

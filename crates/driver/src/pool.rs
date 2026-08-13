@@ -13,8 +13,9 @@
 
 use crate::execution::CpuAdmission;
 use crate::{
-    DispatcherConfig, DriverError, DriverEvent, DriverSubscriptionMailbox,
-    DriverSubscriptionRequest, EndpointCloseReport, ExternalRequestHandler, ExternalStreamEmitter,
+    DEFAULT_EVENT_QUEUE_CAPACITY, DEFAULT_SUBSCRIPTION_QUEUE_BUDGET, DispatcherConfig, DriverError,
+    DriverEvent, DriverResources, DriverSubscriptionMailbox, DriverSubscriptionRequest,
+    EndpointCloseReport, ExternalRequestHandler, ExternalStreamEmitter,
     ExternalStreamRequestHandler, FileinIncludeLoader, TaskCancellationReason, TaskContext,
     configure_dispatcher,
     metrics::{self, AsyncWorkerKind, DispatchOperation, WorkerOutcome},
@@ -26,7 +27,7 @@ use mica_runtime::{
     AuthorityContext, ExecutionContext, FileinMode, FileinReport, MailboxRecvRequest,
     ReadOnlySourceQueryOptions, ReadOnlySourceQueryReport, ReadOnlySourceQueryStatus, RunReport,
     RuntimeError, SYSTEM_ENDPOINT, SharedSourceRunner, SourceRunner, SourceTaskError, SpawnRequest,
-    SubmittedTask, SubscriptionRequest, SuspendKind, TaskError, TaskId, TaskInput,
+    SubmittedTask, SubscriptionRequest, SuspendKind, TaskError, TaskId, TaskInput, TaskLimits,
     TaskManagerError, TaskOutcome, TaskRequest, Tuple,
 };
 use mica_var::{Identity, Symbol, Value};
@@ -40,7 +41,6 @@ use std::task::{Context, Poll, Waker};
 use std::time::{Duration, Instant};
 
 static RELATION_ACCELERATOR: OnceLock<RelationAccelerator> = OnceLock::new();
-const DEFAULT_EVENT_CAPACITY: usize = 1024;
 
 enum RelationAccelerator {
     Enabled(Arc<WgpuAccelerator>),
@@ -76,6 +76,7 @@ struct PoolInner {
     cpu_admission: Arc<CpuAdmission>,
     external_request_handler: Option<ExternalRequestHandler>,
     external_stream_request_handler: Option<ExternalStreamRequestHandler>,
+    subscription_queue_budget: NonZeroUsize,
     state: Mutex<PoolState>,
 }
 
@@ -147,7 +148,7 @@ impl Default for PoolState {
             events: VecDeque::new(),
             event_wakers: Vec::new(),
             event_space_wakers: Vec::new(),
-            event_capacity: DEFAULT_EVENT_CAPACITY,
+            event_capacity: DEFAULT_EVENT_QUEUE_CAPACITY,
             next_worker_id: 1,
             workers: HashMap::new(),
         }
@@ -250,8 +251,61 @@ impl CompioTaskDriver {
         external_request_handler: Option<ExternalRequestHandler>,
         external_stream_request_handler: Option<ExternalStreamRequestHandler>,
     ) -> Result<Self, DriverError> {
+        Self::spawn_configured(
+            runner,
+            config,
+            None,
+            TaskLimits::default(),
+            NonZeroUsize::new(DEFAULT_EVENT_QUEUE_CAPACITY).unwrap(),
+            NonZeroUsize::new(DEFAULT_SUBSCRIPTION_QUEUE_BUDGET).unwrap(),
+            external_request_handler,
+            external_stream_request_handler,
+        )
+    }
+
+    pub fn spawn_with_resources(
+        runner: SourceRunner,
+        resources: DriverResources,
+    ) -> Result<Self, DriverError> {
+        Self::spawn_with_resources_and_external_handlers(runner, resources, None, None)
+    }
+
+    pub fn spawn_with_resources_and_external_handlers(
+        runner: SourceRunner,
+        resources: DriverResources,
+        external_request_handler: Option<ExternalRequestHandler>,
+        external_stream_request_handler: Option<ExternalStreamRequestHandler>,
+    ) -> Result<Self, DriverError> {
+        let resources = resources.validate()?;
+        Self::spawn_configured(
+            runner,
+            resources.dispatcher_config(),
+            Some(resources.relation_parallelism),
+            resources.task_limits,
+            resources.event_queue_capacity,
+            resources.subscription_queue_budget,
+            external_request_handler,
+            external_stream_request_handler,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn spawn_configured(
+        runner: SourceRunner,
+        config: DispatcherConfig,
+        relation_parallelism: Option<NonZeroUsize>,
+        task_limits: TaskLimits,
+        event_queue_capacity: NonZeroUsize,
+        subscription_queue_budget: NonZeroUsize,
+        external_request_handler: Option<ExternalRequestHandler>,
+        external_stream_request_handler: Option<ExternalStreamRequestHandler>,
+    ) -> Result<Self, DriverError> {
         let (builder, placement) = configure_dispatcher(Dispatcher::builder(), config);
-        let cpu_admission = Arc::new(CpuAdmission::new(placement.worker_count));
+        let relation_parallelism = relation_parallelism.unwrap_or(placement.worker_count);
+        let cpu_admission = Arc::new(CpuAdmission::new(
+            placement.worker_count,
+            relation_parallelism,
+        ));
         let dispatcher = builder
             .thread_names(|index| format!("mica-driver-pool-{index}"))
             .build()
@@ -262,7 +316,7 @@ impl CompioTaskDriver {
             .set(placement.worker_count.get() as i64);
         tracing::info!(
             driver_workers = placement.worker_count.get(),
-            relation_parallel_workers = placement.worker_count.get().saturating_sub(1),
+            relation_parallelism = relation_parallelism.get(),
             affinity = if placement.is_pinned() {
                 "performance cores"
             } else {
@@ -298,7 +352,13 @@ impl CompioTaskDriver {
                 );
             }
         }
-        let runner = runner.with_execution_context(execution_context);
+        let runner = runner
+            .with_task_limits(task_limits)
+            .with_execution_context(execution_context);
+        let state = PoolState {
+            event_capacity: event_queue_capacity.get(),
+            ..PoolState::default()
+        };
         Ok(Self {
             inner: Arc::new(PoolInner {
                 runner: Arc::new(runner.into_shared()),
@@ -306,7 +366,8 @@ impl CompioTaskDriver {
                 cpu_admission,
                 external_request_handler,
                 external_stream_request_handler,
-                state: Mutex::new(PoolState::default()),
+                subscription_queue_budget,
+                state: Mutex::new(state),
             }),
         })
     }
@@ -328,6 +389,9 @@ impl CompioTaskDriver {
     pub fn format_error(&self, error: &DriverError) -> String {
         match error {
             DriverError::Source(error) => self.inner.runner.render_source_task_error(error),
+            DriverError::Configuration(error) => {
+                format!("invalid driver configuration: {error}")
+            }
             DriverError::Join(error) => format!("driver task failed: {error}"),
             DriverError::MissingTaskContext(task_id) => {
                 format!("missing task context for task {task_id}")
@@ -775,7 +839,10 @@ impl CompioTaskDriver {
                     subject: request.subject,
                     initial_delivery: request.initial_delivery,
                     cursor: request.cursor,
-                    queue_budget: request.queue_budget,
+                    queue_budget: request
+                        .queue_budget
+                        .unwrap_or(self.inner.subscription_queue_budget)
+                        .get(),
                 },
             )
             .map_err(DriverError::Source)?;
@@ -830,16 +897,6 @@ impl CompioTaskDriver {
     /// backpressure at the configured queue bound.
     pub fn wait_events(&self) -> DriverEvents<'_> {
         DriverEvents { driver: self }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn set_event_capacity(&self, capacity: NonZeroUsize) {
-        let mut state = self.inner.state.lock().unwrap();
-        assert!(
-            state.events.is_empty(),
-            "event capacity must be set before use"
-        );
-        state.event_capacity = capacity.get();
     }
 
     pub async fn shutdown(&self) -> Result<(), DriverError> {

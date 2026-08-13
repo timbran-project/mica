@@ -25,13 +25,15 @@ const TASK_ADMISSION_HEADROOM: usize = 1;
 
 #[repr(align(128))]
 pub(crate) struct CpuAdmission {
-    capacity: NonZeroUsize,
+    dispatch_capacity: NonZeroUsize,
+    relation_parallelism: NonZeroUsize,
     state: Mutex<AdmissionState>,
 }
 
 #[derive(Default)]
 struct AdmissionState {
     occupied: usize,
+    parallel_occupied: usize,
     next_waiter_id: u64,
     task_waiters: VecDeque<TaskWaiter>,
 }
@@ -42,9 +44,10 @@ struct TaskWaiter {
 }
 
 impl CpuAdmission {
-    pub(crate) fn new(capacity: NonZeroUsize) -> Self {
+    pub(crate) fn new(dispatch_capacity: NonZeroUsize, relation_parallelism: NonZeroUsize) -> Self {
         Self {
-            capacity,
+            dispatch_capacity,
+            relation_parallelism,
             state: Mutex::new(AdmissionState::default()),
         }
     }
@@ -63,7 +66,21 @@ impl CpuAdmission {
             let mut state = self.state.lock().unwrap();
             debug_assert!(state.occupied >= workers.get());
             state.occupied -= workers.get();
-            next_task_waker(&state, self.capacity)
+            next_task_waker(&state, self.dispatch_capacity)
+        };
+        if let Some(waker) = wake {
+            waker.wake();
+        }
+    }
+
+    fn release_parallel_workers(&self, workers: NonZeroUsize) {
+        let wake = {
+            let mut state = self.state.lock().unwrap();
+            debug_assert!(state.occupied >= workers.get());
+            debug_assert!(state.parallel_occupied >= workers.get());
+            state.occupied -= workers.get();
+            state.parallel_occupied -= workers.get();
+            next_task_waker(&state, self.dispatch_capacity)
         };
         if let Some(waker) = wake {
             waker.wake();
@@ -79,7 +96,7 @@ impl CpuAdmission {
 
 impl ExecutionAdmission for CpuAdmission {
     fn capacity(&self) -> NonZeroUsize {
-        self.capacity
+        self.relation_parallelism
     }
 
     fn try_reserve_parallel(&self, additional_workers: NonZeroUsize) -> bool {
@@ -91,17 +108,22 @@ impl ExecutionAdmission for CpuAdmission {
             }
             Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
         };
-        let outcome = if !state.task_waiters.is_empty() {
-            ParallelAdmissionOutcome::TaskWaiting
-        } else if state
+        let relation_capacity_exhausted = state
+            .parallel_occupied
+            .checked_add(additional_workers.get())
+            .is_none_or(|occupied| occupied >= self.relation_parallelism.get());
+        let dispatch_capacity_exhausted = state
             .occupied
             .checked_add(additional_workers.get())
             .and_then(|occupied| occupied.checked_add(TASK_ADMISSION_HEADROOM))
-            .is_none_or(|occupied| occupied > self.capacity.get())
-        {
+            .is_none_or(|occupied| occupied > self.dispatch_capacity.get());
+        let outcome = if !state.task_waiters.is_empty() {
+            ParallelAdmissionOutcome::TaskWaiting
+        } else if relation_capacity_exhausted || dispatch_capacity_exhausted {
             ParallelAdmissionOutcome::Capacity
         } else {
             state.occupied += additional_workers.get();
+            state.parallel_occupied += additional_workers.get();
             ParallelAdmissionOutcome::Admitted
         };
         drop(state);
@@ -110,7 +132,7 @@ impl ExecutionAdmission for CpuAdmission {
     }
 
     fn release_parallel(&self, additional_workers: NonZeroUsize) {
-        self.release_workers(additional_workers);
+        self.release_parallel_workers(additional_workers);
     }
 }
 
@@ -142,7 +164,9 @@ impl Future for DispatchAdmission {
                         .iter()
                         .position(|waiter| waiter.id == waiter_id)
                         .expect("pending admission waiter should remain registered");
-                    if position == 0 && state.occupied < admission_future.admission.capacity.get() {
+                    if position == 0
+                        && state.occupied < admission_future.admission.dispatch_capacity.get()
+                    {
                         state.task_waiters.pop_front();
                         state.occupied += 1;
                         admission_future.waiter_id = None;
@@ -150,7 +174,8 @@ impl Future for DispatchAdmission {
                             .wait_started
                             .take()
                             .map(|start| start.elapsed());
-                        wake_next = next_task_waker(&state, admission_future.admission.capacity);
+                        wake_next =
+                            next_task_waker(&state, admission_future.admission.dispatch_capacity);
                         true
                     } else {
                         let waiter = &mut state.task_waiters[position];
@@ -161,7 +186,7 @@ impl Future for DispatchAdmission {
                     }
                 }
                 None if state.task_waiters.is_empty()
-                    && state.occupied < admission_future.admission.capacity.get() =>
+                    && state.occupied < admission_future.admission.dispatch_capacity.get() =>
                 {
                     state.occupied += 1;
                     true
@@ -220,7 +245,7 @@ impl Drop for DispatchAdmission {
             };
             state.task_waiters.remove(position);
             (position == 0)
-                .then(|| next_task_waker(&state, self.admission.capacity))
+                .then(|| next_task_waker(&state, self.admission.dispatch_capacity))
                 .flatten()
         };
         if let Some(waker) = wake {
@@ -269,7 +294,8 @@ mod tests {
 
     #[test]
     fn dispatch_waits_outside_pool_and_has_priority_over_parallel_work() {
-        let admission = Arc::new(CpuAdmission::new(NonZeroUsize::new(2).unwrap()));
+        let capacity = NonZeroUsize::new(2).unwrap();
+        let admission = Arc::new(CpuAdmission::new(capacity, capacity));
         let mut first = Box::pin(admission.acquire_dispatch());
         let mut second = Box::pin(admission.acquire_dispatch());
         let first = ready(poll(&mut first));
@@ -289,7 +315,8 @@ mod tests {
 
     #[test]
     fn cancelling_front_waiter_allows_next_task_to_run() {
-        let admission = Arc::new(CpuAdmission::new(NonZeroUsize::new(1).unwrap()));
+        let capacity = NonZeroUsize::new(1).unwrap();
+        let admission = Arc::new(CpuAdmission::new(capacity, capacity));
         let mut running = Box::pin(admission.acquire_dispatch());
         let running = ready(poll(&mut running));
         let mut cancelled = Box::pin(admission.acquire_dispatch());
@@ -306,7 +333,8 @@ mod tests {
 
     #[test]
     fn parallel_reservation_uses_only_unoccupied_capacity() {
-        let admission = Arc::new(CpuAdmission::new(NonZeroUsize::new(4).unwrap()));
+        let capacity = NonZeroUsize::new(4).unwrap();
+        let admission = Arc::new(CpuAdmission::new(capacity, capacity));
         let mut running = Box::pin(admission.acquire_dispatch());
         let running = ready(poll(&mut running));
         let parallel_workers = NonZeroUsize::new(2).unwrap();
@@ -318,5 +346,23 @@ mod tests {
         admission.release_parallel(parallel_workers);
         drop(running);
         assert_eq!(admission.state(), (0, 0));
+    }
+
+    #[test]
+    fn relation_parallelism_is_bounded_below_dispatch_capacity() {
+        let admission = Arc::new(CpuAdmission::new(
+            NonZeroUsize::new(4).unwrap(),
+            NonZeroUsize::new(2).unwrap(),
+        ));
+        let mut running = Box::pin(admission.acquire_dispatch());
+        let running = ready(poll(&mut running));
+        let parallel_worker = NonZeroUsize::new(1).unwrap();
+
+        assert_eq!(admission.capacity(), NonZeroUsize::new(2).unwrap());
+        assert!(admission.try_reserve_parallel(parallel_worker));
+        assert!(!admission.try_reserve_parallel(parallel_worker));
+
+        admission.release_parallel(parallel_worker);
+        drop(running);
     }
 }

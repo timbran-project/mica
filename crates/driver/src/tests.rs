@@ -12,7 +12,8 @@
 // with this program. If not, see <https://www.gnu.org/licenses/>.
 
 use crate::{
-    CompioTaskDriver, DriverError, DriverEvent, DriverSubscriptionRequest, TaskCancellationReason,
+    CompioTaskDriver, DriverError, DriverEvent, DriverResources, DriverSubscriptionRequest,
+    TaskCancellationReason,
 };
 use mica_runtime::{
     AuthorityContext, EmbeddingProviderKind, FileinMode, ReadOnlySourceQueryOptions,
@@ -1529,7 +1530,7 @@ fn relation_subscription_delivery_notifies_external_driver_mailbox() {
                     },
                     initial_delivery: SubscriptionInitialDelivery::ChangesOnly,
                     cursor: None,
-                    queue_budget: 64,
+                    queue_budget: None,
                 },
             )
             .await
@@ -2068,9 +2069,10 @@ fn explicit_cancellation_stops_timed_resume() {
 #[test]
 fn event_queue_backpressures_producers_without_losing_terminal_events() {
     compio::runtime::Runtime::new().unwrap().block_on(async {
+        let mut resources = DriverResources::new(TEST_WORKERS.unwrap());
+        resources.event_queue_capacity = NonZeroUsize::new(1).unwrap();
         let driver =
-            CompioTaskDriver::spawn_with_workers(SourceRunner::new_empty(), TEST_WORKERS).unwrap();
-        driver.set_event_capacity(NonZeroUsize::new(1).unwrap());
+            CompioTaskDriver::spawn_with_resources(SourceRunner::new_empty(), resources).unwrap();
 
         let first = driver
             .submit_source(endpoint(43), root_source("return 1"))

@@ -33,6 +33,7 @@ use mica_host_protocol::{
 use mica_runtime::{SubscriptionInitialDelivery, SubscriptionSubject, TaskId, TaskOutcome};
 use mica_var::{CapabilityId, Identity, Symbol, Value};
 use std::collections::{BTreeMap, HashMap};
+use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -728,7 +729,7 @@ async fn register_view_subscriptions(
                     subject,
                     initial_delivery: SubscriptionInitialDelivery::ChangesOnly,
                     cursor: None,
-                    queue_budget: 64,
+                    queue_budget: NonZeroUsize::new(64),
                 },
             )
             .await

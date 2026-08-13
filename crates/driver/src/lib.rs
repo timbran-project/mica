@@ -18,6 +18,7 @@
 //! suspensions and endpoint input.
 
 mod affinity;
+mod config;
 mod execution;
 pub mod metrics;
 mod pool;
@@ -29,6 +30,10 @@ mod tests;
 pub use affinity::{
     DispatcherAffinity, DispatcherConfig, DispatcherPlacement, configure_dispatcher,
 };
+pub use config::{
+    DEFAULT_EVENT_QUEUE_CAPACITY, DEFAULT_SUBSCRIPTION_QUEUE_BUDGET, DriverResources,
+};
+pub use mica_runtime::TaskLimits;
 pub use pool::CompioTaskDriver;
 pub use types::{
     DriverError, DriverEvent, DriverSubscriptionMailbox, DriverSubscriptionRequest,
