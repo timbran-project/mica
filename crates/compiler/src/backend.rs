@@ -12,6 +12,7 @@
 // with this program. If not, see <https://www.gnu.org/licenses/>.
 
 use crate::kinds::{KindInference, KindSet, iteration_binding_kinds};
+use crate::static_type::StaticTypeInference;
 use crate::{
     BinaryOp, BindingId, Diagnostic, DispatchRestriction, EffectKind, HirArg, HirCatch,
     HirCollectionItem, HirExpr, HirFunctionBody, HirItem, HirLoopBinding, HirMethodParam, HirPlace,
@@ -1811,6 +1812,10 @@ impl<'a> ProgramCompiler<'a> {
         heading: &[String],
         rows: &[Vec<HirExpr>],
     ) -> Result<Register, CompileError> {
+        debug_assert_eq!(
+            self.infer_relation_static_type(heading, rows).outer_kinds(),
+            KindSet::exact(ValueKind::Relation)
+        );
         let row_count = u16::try_from(rows.len())
             .map_err(|_| self.unsupported(id, "relation literals support at most 65535 rows"))?;
         let mut cells = Vec::with_capacity(
@@ -4738,6 +4743,21 @@ impl<'a> ProgramCompiler<'a> {
         KindInference::new(&self.semantic.bindings, &direct_result, &runtime_result).expr(source)
     }
 
+    fn infer_relation_static_type(
+        &self,
+        heading: &[String],
+        rows: &[Vec<HirExpr>],
+    ) -> crate::StaticType {
+        let direct_result = |binding| {
+            self.functions
+                .get(&binding)
+                .map(|function| function.result_kinds)
+        };
+        let runtime_result = |name: &str| runtime_result_kinds(self.context, name);
+        StaticTypeInference::new(&self.semantic.bindings, &direct_result, &runtime_result)
+            .relation(heading, rows)
+    }
+
     fn unsupported(&self, node: NodeId, message: impl Into<String>) -> CompileError {
         CompileError::Unsupported {
             node,
@@ -5968,6 +5988,31 @@ mod tests {
             checked.program.kind_fact_after(add),
             Some((_, ValueKind::Int))
         ));
+    }
+
+    #[test]
+    fn structural_literal_inference_preserves_relation_program_facts() {
+        let compiled = compile_source(
+            "let rows = [:value] { [1] }\nreturn rows",
+            &CompileContext::new(),
+        )
+        .unwrap();
+        let (instruction, dst) = compiled
+            .program
+            .instructions()
+            .iter()
+            .enumerate()
+            .find_map(|(instruction, opcode)| match opcode {
+                Instruction::BuildRelation { dst, .. } => Some((instruction, *dst)),
+                _ => None,
+            })
+            .expect("compiled relation literal");
+
+        assert_eq!(count_kind_checks(&compiled.program), 0);
+        assert_eq!(
+            compiled.program.kind_fact_after(instruction),
+            Some((dst, ValueKind::Relation))
+        );
     }
 
     #[test]

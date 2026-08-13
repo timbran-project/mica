@@ -27,6 +27,7 @@ mod lexer;
 mod lower;
 mod parser;
 mod semantics;
+mod static_type;
 #[cfg(test)]
 mod structural_syntax_prototype;
 mod syntax;
@@ -58,5 +59,9 @@ pub use parser::parse;
 pub use semantics::{
     Binding, BindingId, Diagnostic, DiagnosticCode, LocalKind, Reference, ResolvedName, Scope,
     ScopeId, SemanticProgram, analyze_ast, parse_semantic,
+};
+pub use static_type::{
+    Cardinality, RelationType, RowShape, StaticLiteral, StaticType, StaticTypeError, TypeAliasId,
+    TypeParameterId,
 };
 pub use syntax::{CstElement, CstNode, CstToken, Parse, ParseError, SyntaxKind, Token};

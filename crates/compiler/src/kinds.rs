@@ -57,6 +57,12 @@ impl KindSet {
         kind_for_bit(self.0.trailing_zeros())
     }
 
+    pub(crate) fn iter(self) -> impl Iterator<Item = ValueKind> {
+        (0..KIND_COUNT)
+            .filter(move |bit| self.0 & (1 << bit) != 0)
+            .filter_map(kind_for_bit)
+    }
+
     pub(crate) fn names(self) -> String {
         if self == Self::ALL {
             return "any value kind".to_owned();
