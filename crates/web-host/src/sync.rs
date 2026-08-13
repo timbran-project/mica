@@ -1671,6 +1671,7 @@ mod tests {
     use mica_runtime::SourceRunner;
     use std::io::{BufRead, BufReader, Read, Write};
     use std::net::{SocketAddr, TcpStream as StdTcpStream};
+    use std::num::NonZeroUsize;
     use std::sync::mpsc;
     use std::thread;
     use std::time::Duration;
@@ -1721,7 +1722,8 @@ mod tests {
                 let runner = sync_mud_runner();
                 let principal = runner.named_identity(Symbol::intern("web")).unwrap();
                 let actor = runner.named_identity(Symbol::intern("alice")).unwrap();
-                let driver = CompioTaskDriver::spawn(runner).unwrap();
+                let driver =
+                    CompioTaskDriver::spawn_with_workers(runner, NonZeroUsize::new(1)).unwrap();
                 let host = InProcessWebHost::new(driver);
                 let binding = RequestBinding {
                     principal,
@@ -1779,8 +1781,12 @@ mod tests {
                         ])
                     })
                 });
-                let driver =
-                    CompioTaskDriver::spawn_with_external_handler(runner, handler).unwrap();
+                let driver = CompioTaskDriver::spawn_with_workers_and_external_handler(
+                    runner,
+                    NonZeroUsize::new(1),
+                    Some(handler),
+                )
+                .unwrap();
                 let host = InProcessWebHost::new(driver);
                 let binding = RequestBinding {
                     principal,
@@ -1818,7 +1824,8 @@ mod tests {
                 let addr = listener.local_addr().unwrap();
                 let runner = sync_mud_runner();
                 let principal = runner.named_identity(Symbol::intern("web")).unwrap();
-                let driver = CompioTaskDriver::spawn(runner).unwrap();
+                let driver =
+                    CompioTaskDriver::spawn_with_workers(runner, NonZeroUsize::new(1)).unwrap();
                 let host = InProcessWebHost::new(driver);
                 let binding = RequestBinding {
                     principal,

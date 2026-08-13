@@ -50,12 +50,17 @@ mod tests {
     use mica_var::{Identity, Symbol, Value};
     use std::collections::{BTreeMap, HashMap};
     use std::net::SocketAddr;
+    use std::num::NonZeroUsize;
     use std::sync::{Arc, Mutex, mpsc};
     use std::thread;
     use std::time::{Duration, Instant};
     use tokio::io::AsyncReadExt;
 
     type TestChunkMap = HashMap<u32, (u32, u32, Vec<Option<Vec<u8>>>)>;
+
+    fn test_driver(runner: SourceRunner) -> CompioTaskDriver {
+        CompioTaskDriver::spawn_with_workers(runner, NonZeroUsize::new(1)).unwrap()
+    }
 
     #[test]
     fn webtransport_output_snapshot_replaces_queued_updates_for_same_view() {
@@ -240,9 +245,9 @@ mod tests {
     #[test]
     fn drop_session_writer_removes_active_views() {
         let endpoint = Identity::new(DAEMON_ENDPOINT_ID_START).unwrap();
-        let host = InProcessWebTransportHost::new_without_event_pump(
-            CompioTaskDriver::spawn_empty().unwrap(),
-        );
+        let host = InProcessWebTransportHost::new_without_event_pump(test_driver(
+            SourceRunner::new_empty(),
+        ));
         let state = SessionState::new();
         state
             .sync
@@ -267,9 +272,9 @@ mod tests {
 
     #[test]
     fn endpoint_allocation_uses_webtransport_identity_space() {
-        let host = InProcessWebTransportHost::new_without_event_pump(
-            CompioTaskDriver::spawn_empty().unwrap(),
-        );
+        let host = InProcessWebTransportHost::new_without_event_pump(test_driver(
+            SourceRunner::new_empty(),
+        ));
         assert_eq!(
             host.allocate_endpoint().unwrap(),
             Identity::new(DAEMON_ENDPOINT_ID_START).unwrap()
@@ -357,7 +362,7 @@ mod tests {
 
             let runner = sync_chat_runner();
             let principal = runner.named_identity(Symbol::intern("web")).unwrap();
-            let driver = CompioTaskDriver::spawn(runner).unwrap();
+            let driver = test_driver(runner);
             let host = InProcessWebTransportHost::new(driver.clone());
             let binding = SessionBinding {
                 principal,
@@ -435,7 +440,7 @@ mod tests {
 
             let runner = sync_chat_runner();
             let principal = runner.named_identity(Symbol::intern("web")).unwrap();
-            let driver = CompioTaskDriver::spawn(runner).unwrap();
+            let driver = test_driver(runner);
             let host = InProcessWebTransportHost::new(driver.clone());
             let binding = SessionBinding {
                 principal,
@@ -492,7 +497,7 @@ mod tests {
 
             let runner = sync_chat_runner();
             let principal = runner.named_identity(Symbol::intern("web")).unwrap();
-            let driver = CompioTaskDriver::spawn(runner).unwrap();
+            let driver = test_driver(runner);
             let host = InProcessWebTransportHost::new(driver.clone());
             let binding = SessionBinding {
                 principal,
@@ -536,7 +541,7 @@ mod tests {
 
             let runner = sync_chat_runner();
             let principal = runner.named_identity(Symbol::intern("web")).unwrap();
-            let driver = CompioTaskDriver::spawn(runner).unwrap();
+            let driver = test_driver(runner);
             let host = InProcessWebTransportHost::new(driver.clone());
             let binding = SessionBinding {
                 principal,
@@ -578,7 +583,7 @@ mod tests {
 
             let runner = sync_chat_runner();
             let principal = runner.named_identity(Symbol::intern("web")).unwrap();
-            let driver = CompioTaskDriver::spawn(runner).unwrap();
+            let driver = test_driver(runner);
             let host = InProcessWebTransportHost::new(driver.clone());
             let binding = SessionBinding {
                 principal,

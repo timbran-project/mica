@@ -761,6 +761,11 @@ mod tests {
     use super::*;
     use mica_driver::CompioTaskDriver;
     use mica_runtime::SourceRunner;
+    use std::num::NonZeroUsize;
+
+    fn test_driver(runner: SourceRunner) -> CompioTaskDriver {
+        CompioTaskDriver::spawn_with_workers(runner, NonZeroUsize::new(1)).unwrap()
+    }
 
     fn session_schema() -> &'static str {
         r#"
@@ -789,7 +794,7 @@ make_functional_relation(:source/Description, 2, [0])
 
     fn source_store(runner: SourceRunner) -> MicaSessionStore {
         MicaSessionStore::new(
-            Arc::new(CompioTaskDriver::spawn(runner).unwrap()),
+            Arc::new(test_driver(runner)),
             AuthSchema::namespaced("source"),
         )
     }
@@ -1038,10 +1043,8 @@ make_functional_relation(:mud/Description, 2, [0])
 "#,
                 )
                 .unwrap();
-            let store = MicaSessionStore::new(
-                Arc::new(CompioTaskDriver::spawn(runner).unwrap()),
-                AuthSchema::namespaced("mud"),
-            );
+            let store =
+                MicaSessionStore::new(Arc::new(test_driver(runner)), AuthSchema::namespaced("mud"));
 
             let user_id = store
                 .ensure_user_exists("alice", "github", "1001")
@@ -1106,10 +1109,8 @@ make_functional_relation(:mud/Description, 2, [0])
 "#,
                 )
                 .unwrap();
-            let store = MicaSessionStore::new(
-                Arc::new(CompioTaskDriver::spawn(runner).unwrap()),
-                AuthSchema::namespaced("mud"),
-            );
+            let store =
+                MicaSessionStore::new(Arc::new(test_driver(runner)), AuthSchema::namespaced("mud"));
 
             let user_id = store
                 .ensure_user_exists("alice", "local", "alice")

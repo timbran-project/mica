@@ -883,6 +883,11 @@ fn format_zmq_error(error: mica_host_zmq::ZmqTransportError) -> String {
 mod tests {
     use super::*;
     use mica_runtime::SourceRunner;
+    use std::num::NonZeroUsize;
+
+    fn test_driver(runner: SourceRunner) -> CompioTaskDriver {
+        CompioTaskDriver::spawn_with_workers(runner, NonZeroUsize::new(1)).unwrap()
+    }
 
     #[test]
     fn builds_command_invocation_source() {
@@ -949,8 +954,7 @@ mod tests {
             .run_filein(include_str!("../../../apps/mud/core.mica"))
             .unwrap();
         let alice = runner.named_identity(Symbol::intern("alice")).unwrap();
-        let host =
-            InProcessTelnetHost::new_without_event_pump(CompioTaskDriver::spawn(runner).unwrap());
+        let host = InProcessTelnetHost::new_without_event_pump(test_driver(runner));
         let endpoint = host.allocate_endpoint().unwrap();
         let output = EndpointOutput::new();
         host.endpoints
@@ -993,9 +997,7 @@ mod tests {
                 .run_filein(include_str!("../../../apps/mud/command-parser.mica"))
                 .unwrap();
             let alice = runner.named_identity(Symbol::intern("alice")).unwrap();
-            let host = InProcessTelnetHost::new_without_event_pump(
-                CompioTaskDriver::spawn(runner).unwrap(),
-            );
+            let host = InProcessTelnetHost::new_without_event_pump(test_driver(runner));
             let endpoint = host.allocate_endpoint().unwrap();
             let output = EndpointOutput::new();
             host.endpoints
@@ -1068,9 +1070,7 @@ mod tests {
     fn endpoint_read_task_accepts_driver_input() {
         compio::runtime::Runtime::new().unwrap().block_on(async {
             let runner = SourceRunner::new_empty();
-            let host = InProcessTelnetHost::new_without_event_pump(
-                CompioTaskDriver::spawn(runner).unwrap(),
-            );
+            let host = InProcessTelnetHost::new_without_event_pump(test_driver(runner));
             let endpoint = host.allocate_endpoint().unwrap();
             host.endpoints
                 .lock()

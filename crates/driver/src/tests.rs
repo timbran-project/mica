@@ -19,9 +19,12 @@ use mica_runtime::{
 };
 use mica_runtime::{SourceRunner, SuspendKind, TaskOutcome};
 use mica_var::{Identity, Symbol, Value};
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
+
+const TEST_WORKERS: Option<NonZeroUsize> = NonZeroUsize::new(1);
 
 fn endpoint(offset: u64) -> Identity {
     Identity::new(0x00ee_0000_0000_0000 + offset).unwrap()
@@ -34,7 +37,8 @@ fn root_source(source: &str) -> TaskRequest {
 #[test]
 fn driver_runs_source_on_compio_task() {
     compio::runtime::Runtime::new().unwrap().block_on(async {
-        let driver = CompioTaskDriver::spawn_empty().unwrap();
+        let driver =
+            CompioTaskDriver::spawn_with_workers(SourceRunner::new_empty(), TEST_WORKERS).unwrap();
         let submitted = driver
             .submit_source(endpoint(1), root_source("return 1 + 1"))
             .await
@@ -55,7 +59,8 @@ fn driver_runs_source_on_compio_task() {
 #[test]
 fn driver_events_can_be_awaited() {
     compio::runtime::Runtime::new().unwrap().block_on(async {
-        let driver = CompioTaskDriver::spawn_empty().unwrap();
+        let driver =
+            CompioTaskDriver::spawn_with_workers(SourceRunner::new_empty(), TEST_WORKERS).unwrap();
         let submitted = driver
             .submit_source(endpoint(29), root_source("return 3 + 4"))
             .await
@@ -74,7 +79,8 @@ fn driver_events_can_be_awaited() {
 #[test]
 fn timed_suspend_wakes_and_resumes_task() {
     compio::runtime::Runtime::new().unwrap().block_on(async {
-        let driver = CompioTaskDriver::spawn_empty().unwrap();
+        let driver =
+            CompioTaskDriver::spawn_with_workers(SourceRunner::new_empty(), TEST_WORKERS).unwrap();
         let submitted = driver
             .submit_source(endpoint(2), root_source("suspend(0.001)\nreturn \"awake\""))
             .await
@@ -103,9 +109,12 @@ fn external_request_suspends_and_resumes_from_handler() {
                 ])
             }) as crate::types::ExternalRequestFuture
         });
-        let driver =
-            CompioTaskDriver::spawn_with_external_handler(SourceRunner::new_empty(), handler)
-                .unwrap();
+        let driver = CompioTaskDriver::spawn_with_workers_and_external_handler(
+            SourceRunner::new_empty(),
+            TEST_WORKERS,
+            Some(handler),
+        )
+        .unwrap();
         let submitted = driver
             .submit_source(
                 endpoint(30),
@@ -164,7 +173,7 @@ fn external_stream_request_delivers_events_to_mica_mailbox() {
         );
         let driver = CompioTaskDriver::spawn_with_workers_and_external_handlers(
             SourceRunner::new_empty(),
-            None,
+            TEST_WORKERS,
             None,
             Some(stream_handler),
         )
@@ -200,7 +209,8 @@ fn external_stream_request_delivers_events_to_mica_mailbox() {
 #[test]
 fn missing_external_stream_handler_delivers_an_error_event() {
     compio::runtime::Runtime::new().unwrap().block_on(async {
-        let driver = CompioTaskDriver::spawn_empty().unwrap();
+        let driver =
+            CompioTaskDriver::spawn_with_workers(SourceRunner::new_empty(), TEST_WORKERS).unwrap();
         let submitted = driver
             .submit_source(
                 endpoint(31),
@@ -255,7 +265,12 @@ fn vllm_embed_text_suspends_as_embedding_external_request() {
             }) as crate::types::ExternalRequestFuture
         });
         let runner = SourceRunner::new_empty_with_embedding_provider(EmbeddingProviderKind::Vllm);
-        let driver = CompioTaskDriver::spawn_with_external_handler(runner, handler).unwrap();
+        let driver = CompioTaskDriver::spawn_with_workers_and_external_handler(
+            runner,
+            TEST_WORKERS,
+            Some(handler),
+        )
+        .unwrap();
         let submitted = driver
             .submit_source(
                 endpoint(33),
@@ -318,7 +333,12 @@ fn openai_chat_completion_suspends_as_openai_external_request() {
             }) as crate::types::ExternalRequestFuture
         });
         let runner = SourceRunner::new_empty();
-        let driver = CompioTaskDriver::spawn_with_external_handler(runner, handler).unwrap();
+        let driver = CompioTaskDriver::spawn_with_workers_and_external_handler(
+            runner,
+            TEST_WORKERS,
+            Some(handler),
+        )
+        .unwrap();
         let submitted = driver
             .submit_source(
                 endpoint(33),
@@ -480,7 +500,7 @@ fn agent_command_sync_event_appends_user_message_and_suspends_for_llm() {
 
         let driver = CompioTaskDriver::spawn_with_workers_and_external_handlers(
             runner,
-            None,
+            TEST_WORKERS,
             None,
             Some(stream_handler),
         )
@@ -740,7 +760,7 @@ fn agent_responses_tool_call_round_trip_resubmits_full_context() {
             .unwrap();
         let driver = CompioTaskDriver::spawn_with_workers_and_external_handlers(
             runner,
-            None,
+            TEST_WORKERS,
             None,
             Some(stream_handler),
         )
@@ -900,7 +920,7 @@ fn agent_steering_cancels_the_active_stream_and_resubmits_full_context() {
             .unwrap();
         let driver = CompioTaskDriver::spawn_with_workers_and_external_handlers(
             runner,
-            None,
+            TEST_WORKERS,
             None,
             Some(stream_handler),
         )
@@ -995,7 +1015,7 @@ fn mica_query_host_request_runs_read_only_query_and_resumes_task() {
         runner
             .open_endpoint(endpoint, Some(web), Symbol::intern("web"))
             .unwrap();
-        let driver = CompioTaskDriver::spawn(runner).unwrap();
+        let driver = CompioTaskDriver::spawn_with_workers(runner, TEST_WORKERS).unwrap();
         let submitted = driver
             .submit_source(
                 endpoint,
@@ -1055,7 +1075,12 @@ fn root_startup_source_can_resume_vllm_embed_text() {
             }) as crate::types::ExternalRequestFuture
         });
         let runner = SourceRunner::new_empty_with_embedding_provider(EmbeddingProviderKind::Vllm);
-        let driver = CompioTaskDriver::spawn_with_external_handler(runner, handler).unwrap();
+        let driver = CompioTaskDriver::spawn_with_workers_and_external_handler(
+            runner,
+            TEST_WORKERS,
+            Some(handler),
+        )
+        .unwrap();
         let report = driver
             .submit_root_source_report(
                 "return embed_text(\"source-workspace\", \"lamp\")".to_owned(),
@@ -1078,7 +1103,8 @@ fn root_startup_source_can_resume_vllm_embed_text() {
 #[test]
 fn external_request_requires_effect_authority() {
     compio::runtime::Runtime::new().unwrap().block_on(async {
-        let driver = CompioTaskDriver::spawn_empty().unwrap();
+        let driver =
+            CompioTaskDriver::spawn_with_workers(SourceRunner::new_empty(), TEST_WORKERS).unwrap();
         let request = TaskRequest {
             principal: None,
             actor: None,
@@ -1098,7 +1124,8 @@ fn external_request_requires_effect_authority() {
 #[test]
 fn log_requires_effect_authority() {
     compio::runtime::Runtime::new().unwrap().block_on(async {
-        let driver = CompioTaskDriver::spawn_empty().unwrap();
+        let driver =
+            CompioTaskDriver::spawn_with_workers(SourceRunner::new_empty(), TEST_WORKERS).unwrap();
         let request = TaskRequest {
             principal: None,
             actor: None,
@@ -1118,7 +1145,8 @@ fn log_requires_effect_authority() {
 #[test]
 fn log_returns_nothing_with_effect_authority() {
     compio::runtime::Runtime::new().unwrap().block_on(async {
-        let driver = CompioTaskDriver::spawn_empty().unwrap();
+        let driver =
+            CompioTaskDriver::spawn_with_workers(SourceRunner::new_empty(), TEST_WORKERS).unwrap();
         let submitted = driver
             .submit_source(endpoint(34), root_source("return log(:debug, \"hello\")"))
             .await
@@ -1140,9 +1168,12 @@ fn external_request_timeout_resumes_with_error_value() {
                 Value::string("late")
             }) as crate::types::ExternalRequestFuture
         });
-        let driver =
-            CompioTaskDriver::spawn_with_external_handler(SourceRunner::new_empty(), handler)
-                .unwrap();
+        let driver = CompioTaskDriver::spawn_with_workers_and_external_handler(
+            SourceRunner::new_empty(),
+            TEST_WORKERS,
+            Some(handler),
+        )
+        .unwrap();
         let submitted = driver
             .submit_source(
                 endpoint(32),
@@ -1166,7 +1197,8 @@ fn external_request_timeout_resumes_with_error_value() {
 #[test]
 fn commit_yields_and_immediately_resumes_task() {
     compio::runtime::Runtime::new().unwrap().block_on(async {
-        let driver = CompioTaskDriver::spawn_empty().unwrap();
+        let driver =
+            CompioTaskDriver::spawn_with_workers(SourceRunner::new_empty(), TEST_WORKERS).unwrap();
         let submitted = driver
             .submit_source(endpoint(3), root_source("commit()\nreturn \"committed\""))
             .await
@@ -1206,7 +1238,7 @@ fn spawn_commits_parent_and_runs_child_task() {
                  end\n",
             )
             .unwrap();
-        let driver = CompioTaskDriver::spawn(runner).unwrap();
+        let driver = CompioTaskDriver::spawn_with_workers(runner, TEST_WORKERS).unwrap();
         let submitted = driver
             .submit_source(
                 endpoint(31),
@@ -1271,7 +1303,7 @@ fn spawn_runs_receiver_positional_child_task() {
                end\n",
             )
             .unwrap();
-        let driver = CompioTaskDriver::spawn(runner).unwrap();
+        let driver = CompioTaskDriver::spawn_with_workers(runner, TEST_WORKERS).unwrap();
         let submitted = driver
             .submit_source(endpoint(32), root_source("return :parent()"))
             .await
@@ -1298,7 +1330,8 @@ fn spawn_runs_receiver_positional_child_task() {
 #[test]
 fn endpoint_input_resumes_reading_task() {
     compio::runtime::Runtime::new().unwrap().block_on(async {
-        let driver = CompioTaskDriver::spawn_empty().unwrap();
+        let driver =
+            CompioTaskDriver::spawn_with_workers(SourceRunner::new_empty(), TEST_WORKERS).unwrap();
         let endpoint = endpoint(4);
         let submitted = driver
             .submit_source(endpoint, root_source("return read(:line)"))
@@ -1334,7 +1367,7 @@ fn mailbox_recv_drains_messages_sent_before_wait() {
                end\n",
             )
             .unwrap();
-        let driver = CompioTaskDriver::spawn(runner).unwrap();
+        let driver = CompioTaskDriver::spawn_with_workers(runner, TEST_WORKERS).unwrap();
         let submitted = driver
             .submit_source(
                 endpoint(32),
@@ -1384,7 +1417,7 @@ fn mailbox_recv_waits_until_sender_commits() {
                end\n",
             )
             .unwrap();
-        let driver = CompioTaskDriver::spawn(runner).unwrap();
+        let driver = CompioTaskDriver::spawn_with_workers(runner, TEST_WORKERS).unwrap();
         let submitted = driver
             .submit_source(
                 endpoint(33),
@@ -1420,7 +1453,7 @@ fn relation_subscription_delivery_wakes_mailbox_receiver_after_publication() {
     compio::runtime::Runtime::new().unwrap().block_on(async {
         let mut runner = SourceRunner::new_empty();
         runner.run_source("make_relation(:Observed, 1)").unwrap();
-        let driver = CompioTaskDriver::spawn(runner).unwrap();
+        let driver = CompioTaskDriver::spawn_with_workers(runner, TEST_WORKERS).unwrap();
         let subscriber = driver
             .submit_source(
                 endpoint(35),
@@ -1480,7 +1513,7 @@ fn relation_subscription_delivery_notifies_external_driver_mailbox() {
         runner
             .open_endpoint(observer_endpoint, Some(observer), Symbol::intern("test"))
             .unwrap();
-        let driver = CompioTaskDriver::spawn(runner).unwrap();
+        let driver = CompioTaskDriver::spawn_with_workers(runner, TEST_WORKERS).unwrap();
         let mailbox = driver.create_subscription_mailbox().unwrap();
         let subscription = driver
             .register_subscription_for_endpoint(
@@ -1539,7 +1572,8 @@ fn relation_subscription_delivery_notifies_external_driver_mailbox() {
 #[test]
 fn mailbox_recv_zero_timeout_returns_empty_list() {
     compio::runtime::Runtime::new().unwrap().block_on(async {
-        let driver = CompioTaskDriver::spawn_empty().unwrap();
+        let driver =
+            CompioTaskDriver::spawn_with_workers(SourceRunner::new_empty(), TEST_WORKERS).unwrap();
         let submitted = driver
             .submit_source(
                 endpoint(34),
@@ -1572,7 +1606,8 @@ fn mailbox_recv_zero_timeout_returns_empty_list() {
 #[test]
 fn mailbox_recv_reports_which_mailbox_is_ready() {
     compio::runtime::Runtime::new().unwrap().block_on(async {
-        let driver = CompioTaskDriver::spawn_empty().unwrap();
+        let driver =
+            CompioTaskDriver::spawn_with_workers(SourceRunner::new_empty(), TEST_WORKERS).unwrap();
         let submitted = driver
             .submit_source(
                 endpoint(36),
@@ -1608,7 +1643,8 @@ fn mailbox_recv_reports_which_mailbox_is_ready() {
 #[test]
 fn mailbox_caps_are_directional() {
     compio::runtime::Runtime::new().unwrap().block_on(async {
-        let driver = CompioTaskDriver::spawn_empty().unwrap();
+        let driver =
+            CompioTaskDriver::spawn_with_workers(SourceRunner::new_empty(), TEST_WORKERS).unwrap();
         let error = driver
             .submit_source(
                 endpoint(35),
@@ -1635,7 +1671,8 @@ fn mailbox_caps_are_directional() {
 #[test]
 fn driver_submit_source_sets_endpoint_context() {
     compio::runtime::Runtime::new().unwrap().block_on(async {
-        let driver = CompioTaskDriver::spawn_empty().unwrap();
+        let driver =
+            CompioTaskDriver::spawn_with_workers(SourceRunner::new_empty(), TEST_WORKERS).unwrap();
         let endpoint = endpoint(5);
         let submitted = driver
             .submit_source(endpoint, root_source("return endpoint()"))
@@ -1670,7 +1707,7 @@ fn driver_runs_bounded_read_only_source_query_as_endpoint_actor() {
         runner
             .open_endpoint(endpoint, Some(web), Symbol::intern("web"))
             .unwrap();
-        let driver = CompioTaskDriver::spawn(runner).unwrap();
+        let driver = CompioTaskDriver::spawn_with_workers(runner, TEST_WORKERS).unwrap();
 
         let report = driver
             .run_read_only_source_query(
@@ -1715,7 +1752,7 @@ fn driver_read_only_source_query_rejects_mutation_and_effects() {
         runner
             .open_endpoint(endpoint, Some(web), Symbol::intern("web"))
             .unwrap();
-        let driver = CompioTaskDriver::spawn(runner).unwrap();
+        let driver = CompioTaskDriver::spawn_with_workers(runner, TEST_WORKERS).unwrap();
 
         let mutation = driver
             .run_read_only_source_query(
@@ -1796,7 +1833,7 @@ fn driver_read_only_source_query_bounds_rendered_output() {
         runner
             .open_endpoint(endpoint, Some(web), Symbol::intern("web"))
             .unwrap();
-        let driver = CompioTaskDriver::spawn(runner).unwrap();
+        let driver = CompioTaskDriver::spawn_with_workers(runner, TEST_WORKERS).unwrap();
 
         let report = driver
             .run_read_only_source_query(
@@ -1828,7 +1865,7 @@ fn driver_submit_invocation_overrides_request_endpoint_context() {
                  end\n",
             )
             .unwrap();
-        let driver = CompioTaskDriver::spawn(runner).unwrap();
+        let driver = CompioTaskDriver::spawn_with_workers(runner, TEST_WORKERS).unwrap();
         let actual_endpoint = endpoint(6);
         let stale_endpoint = endpoint(7);
 
@@ -1862,7 +1899,7 @@ fn driver_routes_actor_effects_to_open_endpoints() {
         let mut runner = SourceRunner::new_empty();
         runner.run_source("make_identity(:alice)").unwrap();
         let alice = Identity::new(0x00e0_0000_0000_0000).unwrap();
-        let driver = CompioTaskDriver::spawn(runner).unwrap();
+        let driver = CompioTaskDriver::spawn_with_workers(runner, TEST_WORKERS).unwrap();
         let endpoint = endpoint(10);
         driver
             .open_endpoint(endpoint, Some(alice), Symbol::intern("telnet"))
@@ -1890,7 +1927,7 @@ fn driver_stops_routing_after_endpoint_close() {
         let mut runner = SourceRunner::new_empty();
         runner.run_source("make_identity(:alice)").unwrap();
         let alice = Identity::new(0x00e0_0000_0000_0000).unwrap();
-        let driver = CompioTaskDriver::spawn(runner).unwrap();
+        let driver = CompioTaskDriver::spawn_with_workers(runner, TEST_WORKERS).unwrap();
         let endpoint = endpoint(11);
         driver
             .open_endpoint(endpoint, Some(alice), Symbol::intern("telnet"))
@@ -1916,7 +1953,8 @@ fn driver_stops_routing_after_endpoint_close() {
 #[test]
 fn driver_routes_endpoint_input() {
     compio::runtime::Runtime::new().unwrap().block_on(async {
-        let driver = CompioTaskDriver::spawn_empty().unwrap();
+        let driver =
+            CompioTaskDriver::spawn_with_workers(SourceRunner::new_empty(), TEST_WORKERS).unwrap();
         let endpoint = endpoint(27);
         let submitted = driver
             .submit_source(endpoint, root_source("return read(:line)"))
@@ -1943,7 +1981,7 @@ fn driver_routes_actor_effects_to_open_endpoints_after_setup() {
         let mut runner = SourceRunner::new_empty();
         runner.run_source("make_identity(:alice)").unwrap();
         let alice = Identity::new(0x00e0_0000_0000_0000).unwrap();
-        let driver = CompioTaskDriver::spawn(runner).unwrap();
+        let driver = CompioTaskDriver::spawn_with_workers(runner, TEST_WORKERS).unwrap();
         let endpoint = endpoint(28);
         driver
             .open_endpoint(endpoint, Some(alice), Symbol::intern("telnet"))

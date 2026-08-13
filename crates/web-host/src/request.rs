@@ -334,6 +334,7 @@ mod tests {
     use mica_runtime::{SYSTEM_ENDPOINT, SourceRunner, TaskOutcome};
     use std::cell::Cell;
     use std::future::pending;
+    use std::num::NonZeroUsize;
     use std::rc::Rc;
     use std::time::Duration;
 
@@ -341,7 +342,7 @@ mod tests {
         let mut runner = SourceRunner::new_empty();
         runner.run_filein(source).unwrap();
         let web = runner.named_identity(Symbol::intern("web")).unwrap();
-        let driver = CompioTaskDriver::spawn(runner).unwrap();
+        let driver = CompioTaskDriver::spawn_with_workers(runner, NonZeroUsize::new(1)).unwrap();
         (Arc::new(InProcessWebHost::new(driver)), web)
     }
 

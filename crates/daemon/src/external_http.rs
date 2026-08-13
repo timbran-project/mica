@@ -1480,6 +1480,7 @@ mod tests {
     use super::*;
     use compio::io::{AsyncRead, AsyncWriteExt};
     use compio::net::TcpListener;
+    use std::num::NonZeroUsize;
 
     #[test]
     fn http_external_request_returns_status_headers_and_body() {
@@ -1897,9 +1898,10 @@ mod tests {
             let runner = mica_runtime::SourceRunner::new_empty_with_embedding_provider(
                 mica_runtime::EmbeddingProviderKind::Vllm,
             );
-            let driver = mica_driver::CompioTaskDriver::spawn_with_external_handler(
+            let driver = mica_driver::CompioTaskDriver::spawn_with_workers_and_external_handler(
                 runner,
-                handler_with_embedding_base_url(format!("http://{addr}/v1")),
+                NonZeroUsize::new(1),
+                Some(handler_with_embedding_base_url(format!("http://{addr}/v1"))),
             )
             .unwrap();
             let source = "return embed_text(\"source-workspace\", \"red brass lamp\")".to_owned();

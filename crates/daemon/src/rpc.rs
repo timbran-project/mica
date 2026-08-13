@@ -462,6 +462,7 @@ mod tests {
     use super::*;
     use mica_host_zmq::ZmqSocketOptions;
     use mica_runtime::{SourceRunner, TaskOutcome};
+    use std::num::NonZeroUsize;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -477,7 +478,10 @@ mod tests {
         runner.run_source("make_identity(:alice)").unwrap();
         runner.run_source("assert GrantEffect(#alice)").unwrap();
         let alice = runner.named_identity(Symbol::intern("alice")).unwrap();
-        (CompioTaskDriver::spawn(runner).unwrap(), alice)
+        (
+            CompioTaskDriver::spawn_with_workers(runner, NonZeroUsize::new(1)).unwrap(),
+            alice,
+        )
     }
 
     fn peer(id: u8) -> PeerId {
