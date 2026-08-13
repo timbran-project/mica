@@ -1329,7 +1329,7 @@ fn log_requires_effect_authority() {
 }
 
 #[test]
-fn log_returns_nothing_with_effect_authority() {
+fn log_returns_unit_with_effect_authority() {
     crate::test_support::run(async {
         let driver =
             CompioTaskDriver::spawn_with_workers(SourceRunner::new_empty(), TEST_WORKERS).unwrap();
@@ -1340,7 +1340,7 @@ fn log_returns_nothing_with_effect_authority() {
 
         assert!(matches!(
             submitted.outcome,
-            TaskOutcome::Complete { value, .. } if value == Value::nothing()
+            TaskOutcome::Complete { value, .. } if value == Value::unit()
         ));
     });
 }

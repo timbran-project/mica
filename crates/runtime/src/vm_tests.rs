@@ -1246,6 +1246,36 @@ fn program_artifact_round_trips_float_constants() {
 }
 
 #[test]
+fn program_artifact_round_trips_relation_constants() {
+    let unit = Value::unit();
+    let option = Value::relation(
+        [Symbol::intern("value")],
+        [Tuple::from([Value::string("present")])],
+    )
+    .unwrap();
+    let program = Program::new(
+        2,
+        [
+            Instruction::Load {
+                dst: reg(0),
+                value: unit,
+            },
+            Instruction::Load {
+                dst: reg(1),
+                value: option,
+            },
+            Instruction::Return { value: r(1) },
+        ],
+    )
+    .unwrap();
+
+    assert_eq!(
+        Program::from_bytes(&program.to_bytes().unwrap()).unwrap(),
+        program
+    );
+}
+
+#[test]
 fn program_artifact_round_trips_kind_checks_and_rejects_stale_magic() {
     let program = Program::new(
         1,
@@ -1262,7 +1292,7 @@ fn program_artifact_round_trips_kind_checks_and_rejects_stale_magic() {
     .unwrap();
     let bytes = program.to_bytes().unwrap();
 
-    assert_eq!(&bytes[..8], b"MICAPRG5");
+    assert_eq!(&bytes[..8], b"MICAPRG6");
     assert_eq!(
         program.kind_fact_after(0),
         Some((reg(0), ValueKind::Relation)),
@@ -1304,7 +1334,7 @@ fn program_artifact_round_trips_structural_type_contracts() {
     .unwrap();
     let bytes = program.to_bytes().unwrap();
 
-    assert_eq!(&bytes[..8], b"MICAPRG5");
+    assert_eq!(&bytes[..8], b"MICAPRG6");
     assert_eq!(
         program.kind_fact_after(0),
         Some((reg(0), ValueKind::Relation))
@@ -1925,7 +1955,7 @@ fn suspend_value_returns_supplied_resume_value() {
 }
 
 #[test]
-fn commit_value_commits_and_resumes_with_nothing() {
+fn commit_value_commits_and_resumes_with_unit() {
     let kernel = kernel_with_world_relations();
     let item = int(200);
     let actor = int(100);
@@ -1970,7 +2000,7 @@ fn commit_value_commits_and_resumes_with_nothing() {
     assert_eq!(
         second,
         TaskOutcome::Complete {
-            value: Value::nothing(),
+            value: Value::unit(),
             effects: vec![],
             mailbox_sends: Vec::new(),
             retries: 0,

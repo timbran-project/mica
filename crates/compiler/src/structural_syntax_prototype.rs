@@ -505,7 +505,7 @@ mod tests {
     }
 
     #[test]
-    fn current_parser_accepts_types_and_aliases_but_rejects_later_stage_surface() {
+    fn current_parser_accepts_types_aliases_and_unit_but_rejects_later_stage_surface() {
         assert!(
             parse("let value: relation<{:value -> string}> where rows in 0..1 = [] {}")
                 .errors
@@ -516,11 +516,11 @@ mod tests {
                 .errors
                 .is_empty()
         );
+        assert!(parse("return ()").errors.is_empty());
         for source in [
             "let exactly {label} = Label(#sensor, ?label)",
             "if let {next} = NextView(current, ?next)\nend",
             "for {work} in AssignedTo(?work, assignee)\nend",
-            "return ()",
         ] {
             assert!(
                 !parse(source).errors.is_empty(),

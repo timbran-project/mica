@@ -355,6 +355,7 @@ impl fmt::Debug for Value {
                     map.finish()
                 })
                 .unwrap(),
+            ValueKind::Relation if self.is_unit() => f.write_str("()"),
             ValueKind::Relation if self.is_empty_relation() => f.write_str("nothing"),
             ValueKind::Relation => self
                 .with_relation(|relation| {
@@ -422,6 +423,7 @@ impl fmt::Display for Value {
                     f.write_str("]")
                 })
                 .unwrap(),
+            ValueKind::Relation if self.is_unit() => f.write_str("()"),
             ValueKind::Relation if self.is_empty_relation() => f.write_str("nothing"),
             ValueKind::Relation => self
                 .with_relation(|relation| {

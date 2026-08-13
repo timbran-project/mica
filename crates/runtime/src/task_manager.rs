@@ -950,7 +950,7 @@ impl TaskManager {
         task_id: TaskId,
         authority: AuthorityContext,
     ) -> Result<TaskOutcome, TaskManagerError> {
-        self.resume_with_value(task_id, authority, Value::nothing())
+        self.resume_with_value(task_id, authority, Value::unit())
     }
 
     pub fn resume_with_value(

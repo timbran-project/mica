@@ -195,6 +195,11 @@ fn immediate_constructors_round_trip() {
     assert_eq!(nothing.with_relation(|relation| relation.arity()), Some(0));
     assert_eq!(nothing.with_relation(|relation| relation.len()), Some(0));
     assert_eq!(Value::relation([], []).unwrap(), nothing);
+    let unit = Value::unit();
+    assert!(unit.is_unit());
+    assert!(!unit.is_empty_relation());
+    assert_eq!(unit.with_relation(|relation| relation.arity()), Some(0));
+    assert_eq!(unit.with_relation(|relation| relation.len()), Some(1));
     assert_eq!(Value::bool(true).as_bool(), Some(true));
     assert_eq!(Value::bool(false).as_bool(), Some(false));
     assert_eq!(Value::int(INT_MIN).unwrap().as_int(), Some(INT_MIN));
@@ -260,6 +265,41 @@ fn immediate_constructors_round_trip() {
     assert_eq!(
         format!("{error:?}"),
         "error(E_NOT_PORTABLE, \"That cannot be taken.\", :lamp)"
+    );
+}
+
+#[test]
+fn structural_unit_option_and_result_values_round_trip_through_the_codec() {
+    let unit = Value::unit();
+    let none = Value::relation([Symbol::intern("value")], []).unwrap();
+    let some_unit =
+        Value::relation([Symbol::intern("value")], [Tuple::from([unit.clone()])]).unwrap();
+    let result = Value::relation(
+        [Symbol::intern("case"), Symbol::intern("value")],
+        [Tuple::from([
+            Value::symbol(Symbol::intern("ok")),
+            Value::int(7).unwrap(),
+        ])],
+    )
+    .unwrap();
+
+    for value in [unit, none, some_unit, result] {
+        let mut encoded = Vec::new();
+        encode_value(&value, &mut encoded).unwrap();
+        assert_eq!(decode_value_exact(&encoded).unwrap(), value);
+    }
+
+    let non_persistable = Value::relation(
+        [Symbol::intern("value")],
+        [Tuple::from([Value::capability(
+            CapabilityId::new(9).unwrap(),
+        )])],
+    )
+    .unwrap();
+    assert!(!non_persistable.is_persistable());
+    assert_eq!(
+        encode_value(&non_persistable, &mut Vec::new()),
+        Err(ValueCodecError::CapabilityNotEncodable)
     );
 }
 

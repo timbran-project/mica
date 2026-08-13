@@ -955,7 +955,7 @@ impl SourceRunner {
             authority,
             input: TaskInput::Continuation {
                 task_id,
-                value: Value::nothing(),
+                value: Value::unit(),
             },
         })?;
         Ok(self.report(task_id, outcome))
@@ -3537,6 +3537,9 @@ fn source_literal(
     identity_names: &BTreeMap<Identity, String>,
     relation_names: &BTreeMap<Identity, String>,
 ) -> String {
+    if value.is_unit() {
+        return "()".to_owned();
+    }
     if value.is_empty_relation() {
         return "nothing".to_owned();
     }
@@ -4279,11 +4282,7 @@ fn system_relation_metadata() -> Vec<RelationMetadata> {
 fn default_builtins(embedding_provider: Arc<dyn embedding::EmbeddingProvider>) -> BuiltinRegistry {
     let registry = BuiltinRegistry::new()
         .with_builtin("emit", BuiltinResultKind::Dynamic, emit_builtin)
-        .with_builtin(
-            "log",
-            BuiltinResultKind::Exact(ValueKind::Relation),
-            log_builtin,
-        )
+        .with_builtin("log", unit_builtin_result(), log_builtin)
         .with_builtin(
             "mailbox",
             BuiltinResultKind::Exact(ValueKind::List),
@@ -4296,7 +4295,7 @@ fn default_builtins(embedding_provider: Arc<dyn embedding::EmbeddingProvider>) -
         )
         .with_builtin(
             "mailbox_close",
-            BuiltinResultKind::Exact(ValueKind::Relation),
+            unit_builtin_result(),
             mailbox_close_builtin,
         )
         .with_builtin(
@@ -4306,7 +4305,7 @@ fn default_builtins(embedding_provider: Arc<dyn embedding::EmbeddingProvider>) -
         )
         .with_builtin(
             "cancel_subscription",
-            BuiltinResultKind::Exact(ValueKind::Relation),
+            unit_builtin_result(),
             cancel_subscription_builtin,
         )
         .with_builtin(
@@ -4334,11 +4333,7 @@ fn default_builtins(embedding_provider: Arc<dyn embedding::EmbeddingProvider>) -
             BuiltinResultKind::Exact(ValueKind::String),
             describe_rule_builtin,
         )
-        .with_builtin(
-            "disable_rule",
-            BuiltinResultKind::Exact(ValueKind::Relation),
-            disable_rule_builtin,
-        )
+        .with_builtin("disable_rule", unit_builtin_result(), disable_rule_builtin)
         .with_builtin(
             "fileout",
             BuiltinResultKind::Exact(ValueKind::String),
@@ -4439,6 +4434,16 @@ fn default_builtins(embedding_provider: Arc<dyn embedding::EmbeddingProvider>) -
             json_decode_builtin,
         )
         .with_builtin(
+            "json_null",
+            BuiltinResultKind::Exact(ValueKind::Map),
+            json_null_builtin,
+        )
+        .with_builtin(
+            "json_is_null",
+            BuiltinResultKind::Exact(ValueKind::Bool),
+            json_is_null_builtin,
+        )
+        .with_builtin(
             "dom_text",
             BuiltinResultKind::Exact(ValueKind::Map),
             dom_text_builtin,
@@ -4484,6 +4489,10 @@ fn default_builtins(embedding_provider: Arc<dyn embedding::EmbeddingProvider>) -
         BuiltinResultKind::Exact(ValueKind::List),
         embedding::EmbedTextBuiltin::new(embedding_provider),
     )
+}
+
+fn unit_builtin_result() -> BuiltinResultKind {
+    BuiltinResultKind::Structural(TypeContract::Literal(TypeLiteralContract::Unit))
 }
 
 fn emit_builtin(
@@ -4581,7 +4590,7 @@ fn log_builtin(
         }
     }
 
-    Ok(Value::nothing())
+    Ok(Value::unit())
 }
 
 fn mailbox_builtin(
@@ -4622,7 +4631,7 @@ fn mailbox_close_builtin(
         ));
     }
     context.close_mailbox(&args[0])?;
-    Ok(Value::nothing())
+    Ok(Value::unit())
 }
 
 fn subscribe_changes_builtin(
@@ -4763,7 +4772,7 @@ fn cancel_subscription_builtin(
         ));
     }
     context.cancel_subscription(args[0].clone())?;
-    Ok(Value::nothing())
+    Ok(Value::unit())
 }
 
 fn tasks_builtin(
@@ -5181,6 +5190,7 @@ fn literal_value(literal: &Literal) -> Result<Option<Value>, RuntimeError> {
         Literal::Bool(value) => Ok(Some(Value::bool(*value))),
         Literal::ErrorCode(value) => Ok(Some(Value::error_code(Symbol::intern(value)))),
         Literal::Nothing => Ok(Some(Value::nothing())),
+        Literal::Unit => Ok(Some(Value::unit())),
     }
 }
 
@@ -5256,6 +5266,29 @@ fn json_decode_builtin(
     let text = builtin_string_arg("json_decode", args, 0)?;
     value_from_json_text(&text)
         .map_err(|error| invalid_builtin_call("json_decode", error.to_string()))
+}
+
+fn json_null_builtin(
+    _context: &mut BuiltinContext<'_, '_>,
+    args: &[Value],
+) -> Result<Value, RuntimeError> {
+    if !args.is_empty() {
+        return Err(invalid_builtin_call("json_null", "expected json_null()"));
+    }
+    Ok(json::json_null_value())
+}
+
+fn json_is_null_builtin(
+    _context: &mut BuiltinContext<'_, '_>,
+    args: &[Value],
+) -> Result<Value, RuntimeError> {
+    if args.len() != 1 {
+        return Err(invalid_builtin_call(
+            "json_is_null",
+            "expected json_is_null(value)",
+        ));
+    }
+    Ok(Value::bool(json::is_json_null(&args[0])))
 }
 
 fn dom_text_builtin(
@@ -6003,7 +6036,7 @@ fn disable_rule_builtin(
     let rule_id = builtin_identity_arg("disable_rule", args, 0)?;
     require_admin_builtin(context, "disable_rule")?;
     context.kernel().disable_rule(rule_id)?;
-    Ok(Value::nothing())
+    Ok(Value::unit())
 }
 
 fn require_admin_builtin(
@@ -7225,6 +7258,8 @@ fn is_safe_read_only_builtin(name: &str) -> bool {
             | "natural_join"
             | "json_encode"
             | "json_decode"
+            | "json_null"
+            | "json_is_null"
             | "dom_text"
             | "dom_raw"
             | "dom_element"
@@ -7806,6 +7841,9 @@ fn render_value(
     identity_names: &BTreeMap<Identity, String>,
     relation_names: &BTreeMap<Identity, String>,
 ) -> String {
+    if value.is_unit() {
+        return "()".to_owned();
+    }
     if value.is_empty_relation() {
         return "nothing".to_owned();
     }

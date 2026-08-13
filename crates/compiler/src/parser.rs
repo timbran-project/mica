@@ -630,9 +630,7 @@ impl<'a> Parser<'a> {
 
     fn parse_group_expr(&mut self) -> CstNode {
         let mut children = vec![self.bump_element()];
-        if self.current_kind() == SyntaxKind::RParen {
-            self.error("empty parentheses are not yet a value");
-        } else {
+        if self.current_kind() != SyntaxKind::RParen {
             children.push(CstElement::Node(self.parse_expr(0)));
         }
         children.push(self.expect_token(SyntaxKind::RParen, "expected ')'"));

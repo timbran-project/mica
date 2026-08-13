@@ -21,6 +21,7 @@ use crate::{
 };
 use mica_var::ValueKind;
 use std::collections::{BTreeSet, HashMap};
+use std::sync::LazyLock;
 
 pub fn parse_semantic(source: &str) -> SemanticProgram {
     let ast = parse_ast(source);
@@ -199,11 +200,16 @@ impl<'a> Analyzer<'a> {
     fn new(ast: &'a Ast, installed_aliases: &[TypeAliasDefinition]) -> Self {
         let mut spans = HashMap::new();
         collect_item_spans(&ast.items, &mut spans);
-        let aliases = installed_aliases
+        let mut aliases = standard_type_aliases()
             .iter()
             .cloned()
             .map(|alias| (alias.name.clone(), alias))
-            .collect();
+            .collect::<HashMap<_, _>>();
+        for alias in installed_aliases {
+            aliases
+                .entry(alias.name.clone())
+                .or_insert_with(|| alias.clone());
+        }
         Self {
             ast,
             spans,
@@ -266,12 +272,16 @@ impl<'a> Analyzer<'a> {
                     );
                 }
             }
-            if self.local_aliases.iter().any(|alias| alias.name == *name) {
+            if self.local_aliases.iter().any(|alias| alias.name == *name)
+                || standard_type_aliases()
+                    .iter()
+                    .any(|standard| standard.name == *name)
+            {
                 self.diagnostic(
                     DiagnosticCode::InvalidStaticType,
                     *id,
                     span.clone(),
-                    format!("duplicate type alias `{name}`"),
+                    format!("type alias `{name}` is already defined"),
                 );
                 continue;
             }
@@ -1727,7 +1737,11 @@ impl<'a> Analyzer<'a> {
                     .cloned()
                     .zip(resolved_arguments)
                     .collect();
-                if !self.local_aliases.iter().any(|local| local.name == *name) {
+                if !self.local_aliases.iter().any(|local| local.name == *name)
+                    && !standard_type_aliases()
+                        .iter()
+                        .any(|standard| standard.name == *name)
+                {
                     self.type_alias_dependencies.insert(name.clone());
                 }
                 stack.push(name.clone());
@@ -1813,6 +1827,41 @@ impl<'a> Analyzer<'a> {
         let span = self.spans.get(&node).cloned().unwrap_or(0..0);
         self.diagnostic(DiagnosticCode::UnsupportedSyntax, node, span, message);
     }
+}
+
+fn standard_type_aliases() -> &'static [TypeAliasDefinition] {
+    static ALIASES: LazyLock<Vec<TypeAliasDefinition>> = LazyLock::new(|| {
+        parse_ast(
+            "type unit = relation<{}> where rows in 1\n\
+             type option<T> = relation<{:value -> T}> where rows in 0..1\n\
+             type result<T> = relation<\
+               {:case -> :ok, :value -> T}\
+               | {:case -> :error, :value -> error}\
+             > where rows in 1",
+        )
+        .items
+        .into_iter()
+        .filter_map(|item| {
+            let Item::TypeAlias {
+                name,
+                parameters,
+                body,
+                source,
+                ..
+            } = item
+            else {
+                return None;
+            };
+            Some(TypeAliasDefinition {
+                name,
+                parameters,
+                body,
+                source,
+            })
+        })
+        .collect()
+    });
+    &ALIASES
 }
 
 fn value_kind_from_name(name: &str) -> Option<ValueKind> {

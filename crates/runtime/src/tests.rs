@@ -2,7 +2,8 @@ use super::{
     AuthorityContext, BuiltinResultKind, CompileError, Emission, Instruction, Operand, Program,
     RuntimeError, SYSTEM_ENDPOINT, SourceTaskError, SpawnRequest, SpawnTarget,
     SubscriptionInitialDelivery, SubscriptionRequest, SubscriptionSubject, SuspendKind, TaskError,
-    TaskManagerError, TaskOutcome, endpoint_open_relation, param_relation,
+    TaskManagerError, TaskOutcome, TypeContract, TypeLiteralContract, endpoint_open_relation,
+    param_relation,
 };
 use super::{FileinMode, SourceRunner, TaskInput, TaskRequest};
 use super::{relation_name_relation, subject_fact_relation};
@@ -339,6 +340,21 @@ fn default_builtin_result_contracts_classify_exact_and_dynamic_calls() {
     }
 
     for name in [
+        "log",
+        "mailbox_close",
+        "cancel_subscription",
+        "disable_rule",
+    ] {
+        assert_eq!(
+            runner.context.runtime_function_result(name),
+            Some(BuiltinResultKind::Structural(TypeContract::Literal(
+                TypeLiteralContract::Unit,
+            ))),
+            "unexpected result contract for {name}"
+        );
+    }
+
+    for name in [
         "json_decode",
         "from_literal",
         "frob_value",
@@ -387,7 +403,7 @@ fn runner_json_and_dom_primitives_build_wire_values() {
     assert!(matches!(
         runner
             .run_source(
-                "return json_encode({:message -> \"hello\", :values -> [1, true, nothing]})"
+                "return json_encode({:message -> \"hello\", :values -> [1, true, json_null()]})"
             )
             .unwrap()
             .outcome,
@@ -406,7 +422,11 @@ fn runner_json_and_dom_primitives_build_wire_values() {
                 (Value::symbol(Symbol::intern("message")), Value::string("hello")),
                 (
                     Value::symbol(Symbol::intern("values")),
-                    Value::list([Value::int(1).unwrap(), Value::bool(true), Value::nothing()])
+                    Value::list([
+                        Value::int(1).unwrap(),
+                        Value::bool(true),
+                        crate::json::json_null_value(),
+                    ])
                 ),
             ])
     ));
@@ -1173,6 +1193,68 @@ fn relation_literals_construct_dynamic_empty_and_unit_relations() {
                 Value::bool(false),
                 Value::bool(true),
             ])
+    ));
+}
+
+#[test]
+fn standard_relational_values_distinguish_unit_option_and_result_cases() {
+    let mut runner = SourceRunner::new_empty();
+    let report = runner
+        .run_source(
+            "fn bare() -> unit\n\
+               return\n\
+             end\n\
+             fn fallthrough() -> unit\n\
+             end\n\
+             let absent: option<int> = none\n\
+             let present: option<int> = some(42)\n\
+             let nested: option<option<int>> = some(none)\n\
+             let returned_error = recover raise E_SAMPLE, \"sample\"\n\
+             catch E_SAMPLE as problem => err(problem)\n\
+             end\n\
+             return [bare(), fallthrough(), absent, present, some(()), some([] {}), nested, ok(42), returned_error]",
+        )
+        .unwrap();
+    let TaskOutcome::Complete { value, .. } = report.outcome else {
+        panic!("expected relational values to return normally");
+    };
+    let values = value.with_list(|values| values.to_vec()).unwrap();
+    assert!(values[0].is_unit());
+    assert!(values[1].is_unit());
+    assert_eq!(values[2].with_relation(|relation| relation.len()), Some(0));
+    assert_eq!(values[3].with_relation(|relation| relation.len()), Some(1));
+    assert_ne!(values[2], values[3]);
+    assert_ne!(values[4], values[2]);
+    assert_ne!(values[4], values[5]);
+    assert_ne!(values[6], values[2]);
+    assert_eq!(values[7].with_relation(|relation| relation.len()), Some(1));
+    assert_eq!(
+        values[8].with_relation(|relation| {
+            let value = relation.column_position(Symbol::intern("value")).unwrap();
+            relation.rows()[0].values()[value].kind()
+        }),
+        Some(ValueKind::Error)
+    );
+
+    assert!(matches!(
+        runner
+            .run_source("raise E_SAMPLE, \"raised\"")
+            .unwrap()
+            .outcome,
+        TaskOutcome::Aborted { .. }
+    ));
+    let literal = runner.run_source("return to_literal(some(()))").unwrap();
+    assert!(matches!(
+        literal.outcome,
+        TaskOutcome::Complete { value, .. }
+            if value == Value::string("[:value] {[()]}")
+    ));
+    let round_trip = runner
+        .run_source("return from_literal(to_literal(some(())))")
+        .unwrap();
+    assert!(matches!(
+        round_trip.outcome,
+        TaskOutcome::Complete { value, .. } if value == values[4]
     ));
 }
 
@@ -4633,7 +4715,7 @@ fn runner_inspects_and_disables_rules() {
         source.render(),
         "task 10 complete: \"VisibleTo(actor, obj) :-\\n  LocatedIn(actor, room),\\n  LocatedIn(obj, room)\" (retries: 0)"
     );
-    assert_eq!(disabled.render(), "task 11 complete: nothing (retries: 0)");
+    assert_eq!(disabled.render(), "task 11 complete: () (retries: 0)");
     assert_eq!(query.render(), "task 12 complete: [:obj] {} (retries: 0)");
 
     let unknown_relation = runner

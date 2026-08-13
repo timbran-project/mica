@@ -1896,6 +1896,13 @@ fn fjall_provider_persists_and_loads_canonical_state() {
         Value::map([(Value::symbol(Symbol::intern("k")), Value::string("v"))]),
         Value::range(int(1), Some(int(4))),
         Value::error(Symbol::intern("E_RICH"), Some("rich error"), Some(int(7))),
+        Value::unit(),
+        Value::relation([Symbol::intern("value")], []).unwrap(),
+        Value::relation(
+            [Symbol::intern("case"), Symbol::intern("value")],
+            [Tuple::from([Value::symbol(Symbol::intern("ok")), int(9)])],
+        )
+        .unwrap(),
     ]);
 
     {
@@ -1904,7 +1911,7 @@ fn fjall_provider_persists_and_loads_canonical_state() {
         let kernel = RelationKernel::with_provider(provider.clone());
         kernel
             .create_relation(
-                RelationMetadata::new(rel(10), Symbol::intern("ValueTuple"), 13)
+                RelationMetadata::new(rel(10), Symbol::intern("ValueTuple"), 16)
                     .with_argument_name(0, Symbol::intern("nothing"))
                     .with_index([2, 0])
                     .with_conflict_policy(ConflictPolicy::Functional {
@@ -1975,7 +1982,7 @@ fn fjall_provider_persists_and_loads_canonical_state() {
         RelationDurability::Volatile
     );
     assert_eq!(
-        loaded.snapshot().scan(rel(10), &vec![None; 13]).unwrap(),
+        loaded.snapshot().scan(rel(10), &vec![None; 16]).unwrap(),
         vec![values_tuple]
     );
     assert_eq!(

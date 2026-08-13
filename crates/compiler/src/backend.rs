@@ -927,7 +927,16 @@ enum ExprUse {
 fn is_compiler_builtin(name: &str) -> bool {
     matches!(
         name,
-        "commit" | "suspend" | "read" | "mailbox_recv" | "external_request" | "invoke"
+        "commit"
+            | "suspend"
+            | "read"
+            | "mailbox_recv"
+            | "external_request"
+            | "invoke"
+            | "none"
+            | "some"
+            | "ok"
+            | "err"
     )
 }
 
@@ -1102,6 +1111,7 @@ fn literal_value_for_rule(
         Literal::Bool(value) => Ok(Value::bool(*value)),
         Literal::ErrorCode(value) => Ok(Value::error_code(Symbol::intern(value))),
         Literal::Nothing => Ok(Value::nothing()),
+        Literal::Unit => Ok(Value::unit()),
     }
 }
 
@@ -1410,7 +1420,7 @@ impl<'a> ProgramCompiler<'a> {
         if !self.returned {
             let value = last_value
                 .map(Operand::Register)
-                .unwrap_or_else(|| Operand::Value(Value::nothing()));
+                .unwrap_or_else(|| Operand::Value(Value::unit()));
             self.emit(Instruction::Return { value });
         }
         self.instructions
@@ -1588,7 +1598,7 @@ impl<'a> ProgramCompiler<'a> {
                 let dst = self.alloc_register();
                 self.emit(Instruction::Load {
                     dst,
-                    value: Value::nothing(),
+                    value: Value::unit(),
                 });
                 Ok(dst)
             }
@@ -1616,14 +1626,14 @@ impl<'a> ProgramCompiler<'a> {
             HirExpr::Return { value, .. } => {
                 let value = match value {
                     Some(value) => Operand::Register(self.compile_expr_for_value(value)?),
-                    None => Operand::Value(Value::nothing()),
+                    None => Operand::Value(Value::unit()),
                 };
                 self.emit(Instruction::Return { value });
                 self.returned = true;
                 let dst = self.alloc_register();
                 self.emit(Instruction::Load {
                     dst,
-                    value: Value::nothing(),
+                    value: Value::unit(),
                 });
                 Ok(dst)
             }
@@ -1646,7 +1656,7 @@ impl<'a> ProgramCompiler<'a> {
                     let dst = self.alloc_register();
                     self.emit(Instruction::Load {
                         dst,
-                        value: Value::nothing(),
+                        value: Value::unit(),
                     });
                     dst
                 }))
@@ -1691,7 +1701,7 @@ impl<'a> ProgramCompiler<'a> {
                         let dst = self.alloc_register();
                         self.emit(Instruction::Load {
                             dst,
-                            value: Value::nothing(),
+                            value: Value::unit(),
                         });
                         Ok(dst)
                     } else {
@@ -1722,6 +1732,9 @@ impl<'a> ProgramCompiler<'a> {
                 self.compile_spawn(*id, target, delay.as_deref())
             }
             HirExpr::ExternalRef { id, name } => {
+                if name == "none" {
+                    return self.compile_none();
+                }
                 if is_compiler_builtin(name) || self.context.is_runtime_function(name) {
                     Err(CompileError::Unsupported {
                         node: *id,
@@ -2741,6 +2754,10 @@ impl<'a> ProgramCompiler<'a> {
             return self.compile_host_request_function_call(id, name, &function, args);
         }
         match name {
+            "none" => return Err(self.unsupported(id, "none is a value, not a function")),
+            "some" | "ok" | "err" => {
+                return self.compile_standard_constructor(id, name, args);
+            }
             "commit" => return self.compile_commit_call(id, args),
             "suspend" => return self.compile_suspend_call(id, args),
             "read" => return self.compile_read_call(id, args),
@@ -2790,6 +2807,80 @@ impl<'a> ProgramCompiler<'a> {
                 subject: name,
             });
         }
+        Ok(dst)
+    }
+
+    fn compile_none(&mut self) -> Result<Register, CompileError> {
+        let dst = self.alloc_register();
+        self.emit(Instruction::BuildRelation {
+            dst,
+            heading: vec![Symbol::intern("value")],
+            cells: Vec::new(),
+            row_count: 0,
+        });
+        Ok(dst)
+    }
+
+    fn compile_standard_constructor(
+        &mut self,
+        id: NodeId,
+        name: &str,
+        args: &[HirArg],
+    ) -> Result<Register, CompileError> {
+        if args.iter().any(|arg| arg.role.is_some() || arg.splice) || args.len() != 1 {
+            return Err(self.unsupported(id, format!("{name} expects one positional argument")));
+        }
+        let source = &args[0].value;
+        let value = self.compile_expr_for_value(source)?;
+        if name == "err" {
+            let inferred = self.infer_expr_static_type(source);
+            let expected = StaticType::Kind(ValueKind::Error);
+            if inferred.is_disjoint(&expected) {
+                return Err(CompileError::ValueKindMismatch {
+                    node: expr_id(source),
+                    span: self.span(expr_id(source)),
+                    subject: "err argument".to_owned(),
+                    expected: ValueKind::Error,
+                    inferred: inferred.to_string(),
+                });
+            }
+            if !inferred.is_subtype_of(&expected) {
+                self.emit(Instruction::CheckKind {
+                    value,
+                    expected: ValueKind::Error,
+                    site: KindCheckSite::Builtin,
+                    subject: Symbol::intern("err"),
+                });
+            }
+        }
+        let (heading, cells) = match name {
+            "some" => (
+                vec![Symbol::intern("value")],
+                vec![Operand::Register(value)],
+            ),
+            "ok" => (
+                vec![Symbol::intern("case"), Symbol::intern("value")],
+                vec![
+                    Operand::Value(Value::symbol(Symbol::intern("ok"))),
+                    Operand::Register(value),
+                ],
+            ),
+            "err" => (
+                vec![Symbol::intern("case"), Symbol::intern("value")],
+                vec![
+                    Operand::Value(Value::symbol(Symbol::intern("error"))),
+                    Operand::Register(value),
+                ],
+            ),
+            _ => unreachable!("caller selected a standard constructor"),
+        };
+        let dst = self.alloc_register();
+        self.emit(Instruction::BuildRelation {
+            dst,
+            heading,
+            cells,
+            row_count: 1,
+        });
         Ok(dst)
     }
 
@@ -3527,7 +3618,7 @@ impl<'a> ProgramCompiler<'a> {
         self.returned = false;
         self.emit(Instruction::Load {
             dst,
-            value: Value::nothing(),
+            value: Value::unit(),
         });
         let condition = self.compile_expr_for_value(condition)?;
         let first_branch = self.emit_branch(condition, 0, 0);
@@ -3596,7 +3687,7 @@ impl<'a> ProgramCompiler<'a> {
         let dst = self.alloc_register();
         self.emit(Instruction::Load {
             dst,
-            value: Value::nothing(),
+            value: Value::unit(),
         });
 
         let loop_start = self.instructions.len();
@@ -3643,7 +3734,7 @@ impl<'a> ProgramCompiler<'a> {
         let result = self.alloc_register();
         self.emit(Instruction::Load {
             dst: result,
-            value: Value::nothing(),
+            value: Value::unit(),
         });
 
         let collection = self.compile_expr_for_value(iter)?;
@@ -3795,7 +3886,7 @@ impl<'a> ProgramCompiler<'a> {
         let dst = self.alloc_register();
         self.emit(Instruction::Load {
             dst,
-            value: Value::nothing(),
+            value: Value::unit(),
         });
         Ok(dst)
     }
@@ -3821,7 +3912,7 @@ impl<'a> ProgramCompiler<'a> {
         let dst = self.alloc_register();
         self.emit(Instruction::Load {
             dst,
-            value: Value::nothing(),
+            value: Value::unit(),
         });
 
         let has_dynamic_catch = catches
@@ -4652,6 +4743,7 @@ impl<'a> ProgramCompiler<'a> {
             Literal::Bool(value) => Ok(Value::bool(*value)),
             Literal::ErrorCode(value) => Ok(Value::error_code(Symbol::intern(value))),
             Literal::Nothing => Ok(Value::nothing()),
+            Literal::Unit => Ok(Value::unit()),
         }
     }
 
@@ -4981,7 +5073,7 @@ impl<'a> ProgramCompiler<'a> {
                     returns.push(None);
                 }
                 StaticType::union(returns.into_iter().map(|value| {
-                    value.map_or(StaticType::Literal(StaticLiteral::EmptyRelation), |value| {
+                    value.map_or(StaticType::Literal(StaticLiteral::Unit), |value| {
                         self.infer_expr_static_type(value)
                     })
                 }))
@@ -5366,7 +5458,7 @@ mod tests {
                 },
                 Instruction::Load {
                     dst: Register(1),
-                    value: Value::nothing(),
+                    value: Value::unit(),
                 },
             ]
         );
@@ -6468,6 +6560,41 @@ mod tests {
                 .iter()
                 .any(|instruction| matches!(instruction, Instruction::CheckType { .. }))
         );
+    }
+
+    #[test]
+    fn standard_unit_option_and_result_forms_publish_exact_structural_facts() {
+        let context = CompileContext::new();
+        let compiled = compile_source(
+            "fn bare() -> unit\n\
+               return\n\
+             end\n\
+             fn absent() -> option<int> => none\n\
+             fn present() -> option<int> => some(42)\n\
+             fn success() -> result<int> => ok(42)\n\
+             let direct_none: option<int> = none\n\
+             return [bare(), absent(), present(), success(), direct_none]",
+            &context,
+        )
+        .unwrap();
+
+        assert!(
+            !compiled
+                .program
+                .instructions()
+                .iter()
+                .any(|instruction| matches!(instruction, Instruction::CheckType { .. }))
+        );
+        assert!(compiled.program.instructions().iter().any(|instruction| {
+            matches!(
+                instruction,
+                Instruction::BuildRelation {
+                    row_count: 0,
+                    heading,
+                    ..
+                } if heading == &[Symbol::intern("value")]
+            )
+        }));
     }
 
     #[test]

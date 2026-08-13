@@ -40,7 +40,7 @@ impl std::error::Error for JsonValueError {}
 /// Float values are widened to `f64` at this boundary because JSON has no
 /// binary32 type. This is a permanent boundary conversion, not an adapter.
 pub fn json_from_value(value: &Value) -> Result<serde_json::Value, JsonValueError> {
-    if value.is_empty_relation() {
+    if is_json_null(value) {
         return Ok(serde_json::Value::Null);
     }
     match value.kind() {
@@ -154,7 +154,7 @@ impl<'a> JsonParser<'a> {
         match self.peek() {
             Some(b'n') => {
                 self.expect_bytes(b"null")?;
-                Ok(Value::nothing())
+                Ok(json_null_value())
             }
             Some(b't') => {
                 self.expect_bytes(b"true")?;
@@ -350,6 +350,25 @@ impl<'a> JsonParser<'a> {
     }
 }
 
+pub fn json_null_value() -> Value {
+    Value::map([(
+        Value::symbol(Symbol::intern("json")),
+        Value::symbol(Symbol::intern("null")),
+    )])
+}
+
+pub fn is_json_null(value: &Value) -> bool {
+    value
+        .with_map(|entries| {
+            entries
+                == [(
+                    Value::symbol(Symbol::intern("json")),
+                    Value::symbol(Symbol::intern("null")),
+                )]
+        })
+        .unwrap_or(false)
+}
+
 /// Renders a finite binary32 float as a source literal that round-trips to the
 /// same binary32 bits.
 pub fn float_to_literal(value: f32) -> String {
@@ -366,7 +385,7 @@ pub fn float_to_literal(value: f32) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::value_from_json_text;
+    use super::{json_null_value, value_from_json_text};
     use mica_var::{Symbol, Value};
 
     #[test]
@@ -408,7 +427,7 @@ mod tests {
                     Value::int(1).unwrap(),
                     Value::float(1.0).unwrap(),
                     Value::bool(true),
-                    Value::nothing(),
+                    json_null_value(),
                 ]),
             )])
         );

@@ -125,7 +125,7 @@ device and queue values, allowing a renderer and Mica to share one WGPU device.
 Mica does not yet promise forward or backward compatibility for stores or compiled program
 artifacts. Fjall stores carry an exact format and shape marker. Opening a mismatched store fails
 with a migration-required error; it is never silently interpreted or rewritten. Program bytes carry
-the `MICAPRG4` magic and stale artifact versions are rejected.
+the current program-artifact magic and stale artifact versions are rejected.
 
 Before upgrading a persisted deployment, back up the store and retain the exact Mica revision that
 created it. Use that revision to file out named programmable units before an explicit migration,

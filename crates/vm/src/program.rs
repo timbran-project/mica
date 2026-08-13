@@ -14,7 +14,7 @@
 use crate::RuntimeError;
 use arc_swap::ArcSwap;
 use mica_relation_kernel::{DispatchRelations, RelationId, RelationRead};
-use mica_var::{Identity, Symbol, Value, ValueKind};
+use mica_var::{Identity, Symbol, Tuple, Value, ValueKind};
 use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Arc;
@@ -2778,7 +2778,7 @@ impl Program {
 
     pub fn to_bytes(&self) -> Result<Vec<u8>, RuntimeError> {
         let mut out = Vec::new();
-        out.extend_from_slice(b"MICAPRG5");
+        out.extend_from_slice(b"MICAPRG6");
         write_u32(&mut out, self.register_count as u32);
         write_u32(&mut out, self.opcodes.len() as u32);
         for instruction in self.instructions() {
@@ -2792,7 +2792,7 @@ impl Program {
 
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, RuntimeError> {
         let mut input = ByteReader::new(bytes);
-        input.expect_magic(b"MICAPRG5")?;
+        input.expect_magic(b"MICAPRG6")?;
         let register_count = input.read_u32()? as usize;
         let instruction_count = input.read_u32()? as usize;
         let mut instructions = Vec::with_capacity(instruction_count);
@@ -4809,6 +4809,7 @@ const VALUE_ERROR_CODE: u8 = 6;
 const VALUE_STRING: u8 = 7;
 const VALUE_BYTES: u8 = 8;
 const VALUE_ERROR: u8 = 9;
+const VALUE_RELATION: u8 = 10;
 
 const TYPE_KIND: u8 = 0;
 const TYPE_LITERAL: u8 = 1;
@@ -5736,6 +5737,24 @@ fn write_value(out: &mut Vec<u8>, value: &Value) -> Result<(), RuntimeError> {
         result?;
     } else if value.is_empty_relation() {
         out.push(VALUE_EMPTY_RELATION);
+    } else if let Some(result) = value.with_relation(|relation| {
+        out.push(VALUE_RELATION);
+        write_u16(out, relation.arity() as u16);
+        for column in relation.heading() {
+            let Some(name) = column.name() else {
+                return Err(artifact_error("cannot serialize unnamed relation column"));
+            };
+            write_str(out, name);
+        }
+        write_u32(out, relation.len() as u32);
+        for row in relation.rows() {
+            for cell in row.values() {
+                write_value(out, cell)?;
+            }
+        }
+        Ok(())
+    }) {
+        result?;
     } else if let Some(()) = value.with_str(|text| {
         out.push(VALUE_STRING);
         write_str(out, text);
@@ -6329,6 +6348,25 @@ impl<'a> ByteReader<'a> {
                 let message = self.read_optional_string()?;
                 let value = self.read_optional_value()?;
                 Value::error(code, message, value)
+            }
+            VALUE_RELATION => {
+                let arity = self.read_u16()? as usize;
+                let mut heading = Vec::with_capacity(arity);
+                for _ in 0..arity {
+                    heading.push(Symbol::intern(&self.read_string()?));
+                }
+                let row_count = self.read_u32()? as usize;
+                let mut rows = Vec::with_capacity(row_count);
+                for _ in 0..row_count {
+                    let mut cells = Vec::with_capacity(arity);
+                    for _ in 0..arity {
+                        cells.push(self.read_value()?);
+                    }
+                    rows.push(Tuple::new(cells));
+                }
+                Value::relation(heading, rows).map_err(|error| {
+                    artifact_error(format!("invalid serialized relation value: {error}"))
+                })?
             }
             _ => return Err(artifact_error("unknown value tag")),
         })

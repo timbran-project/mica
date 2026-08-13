@@ -402,6 +402,9 @@ impl<'a> KindInference<'a> {
                 flow.with_normal(KindSet::ALL)
             }
             HirExpr::Field { base, .. } => self.flow(base).with_normal(KindSet::ALL),
+            HirExpr::ExternalRef { name, .. } if name == "none" => {
+                KindFlow::value(KindSet::exact(ValueKind::Relation))
+            }
             HirExpr::ExternalRef { .. }
             | HirExpr::QueryVar { .. }
             | HirExpr::Hole { .. }
@@ -471,7 +474,11 @@ impl<'a> KindInference<'a> {
                 })
                 .unwrap_or(KindSet::ALL),
             HirExpr::ExternalRef { name, .. } => {
-                (self.runtime_result)(name).unwrap_or(KindSet::ALL)
+                if matches!(name.as_str(), "some" | "ok" | "err") {
+                    KindSet::exact(ValueKind::Relation)
+                } else {
+                    (self.runtime_result)(name).unwrap_or(KindSet::ALL)
+                }
             }
             _ => KindSet::ALL,
         }
@@ -570,7 +577,7 @@ const fn literal_kind(literal: &Literal) -> ValueKind {
         Literal::Bytes(_) => ValueKind::Bytes,
         Literal::Bool(_) => ValueKind::Bool,
         Literal::ErrorCode(_) => ValueKind::ErrorCode,
-        Literal::Nothing => ValueKind::Relation,
+        Literal::Unit | Literal::Nothing => ValueKind::Relation,
     }
 }
 

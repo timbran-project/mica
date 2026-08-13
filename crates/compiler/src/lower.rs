@@ -335,11 +335,14 @@ impl<'a> Lower<'a> {
             SyntaxKind::AssertExpr => self.lower_effect(node, EffectKind::Assert),
             SyntaxKind::RetractExpr => self.lower_effect(node, EffectKind::Retract),
             SyntaxKind::RequireExpr => self.lower_effect(node, EffectKind::Require),
-            SyntaxKind::GroupExpr => self
-                .node_children(node)
-                .next()
-                .map(|child| self.lower_expr(child))
-                .unwrap_or_else(|| self.error_expr(node)),
+            SyntaxKind::GroupExpr => match self.node_children(node).next() {
+                Some(child) => self.lower_expr(child),
+                None => Expr::Literal {
+                    id: self.node_id(),
+                    span: node.span.clone(),
+                    value: Literal::Unit,
+                },
+            },
             SyntaxKind::AtomExpr => self.error_expr(node),
             _ => {
                 self.error(node, "expected expression node");
@@ -370,6 +373,7 @@ impl<'a> Lower<'a> {
             SyntaxKind::TrueKw => Literal::Bool(true),
             SyntaxKind::FalseKw => Literal::Bool(false),
             SyntaxKind::ErrorCode => Literal::ErrorCode(self.text(token.span.clone()).to_owned()),
+            SyntaxKind::LParen => Literal::Unit,
             SyntaxKind::NothingKw => Literal::Nothing,
             _ => Literal::Nothing,
         };

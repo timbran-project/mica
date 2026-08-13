@@ -134,6 +134,33 @@ fn task_completion_segments_round_trip_relation_values() {
 }
 
 #[test]
+fn task_completion_frames_round_trip_standard_relational_values() {
+    let values = [
+        Value::unit(),
+        Value::relation([Symbol::intern("value")], []).unwrap(),
+        Value::relation(
+            [Symbol::intern("case"), Symbol::intern("value")],
+            [Tuple::from([
+                Value::symbol(Symbol::intern("error")),
+                Value::error(Symbol::intern("E_SAMPLE"), Some("sample"), None),
+            ])],
+        )
+        .unwrap(),
+    ];
+
+    for (task_id, value) in values.into_iter().enumerate() {
+        let message = HostMessage::TaskCompleted {
+            task_id: task_id as u64,
+            value,
+        };
+        assert_eq!(
+            decode_frame(&encoded_frame(&message).unwrap()).unwrap(),
+            message
+        );
+    }
+}
+
+#[test]
 fn stream_decoder_waits_for_split_frames() {
     let message = HostMessage::OpenEndpoint {
         request_id: 1,

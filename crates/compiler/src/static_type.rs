@@ -642,6 +642,12 @@ impl<'a> StaticTypeInference<'a> {
             }
             HirExpr::Relation { heading, rows, .. } => self.relation(heading, rows),
             HirExpr::RelationAtom(atom) => self.relation_scan(&atom.args),
+            HirExpr::FactChange { .. } | HirExpr::While { .. } | HirExpr::For { .. } => {
+                StaticType::Literal(StaticLiteral::Unit)
+            }
+            HirExpr::ExternalRef { name, .. } if name == "none" => {
+                option_type(StaticType::Never, Cardinality::EMPTY)
+            }
             HirExpr::Call { callee, args, .. } => self
                 .relation_operation(callee, args)
                 .unwrap_or_else(|| static_type_from_kinds(self.kinds.expr(expr))),
@@ -742,6 +748,13 @@ impl<'a> StaticTypeInference<'a> {
             "union" => self.union_or_difference(args, true),
             "difference" => self.union_or_difference(args, false),
             "natural_join" => self.natural_join(args),
+            "commit" if args.is_empty() => Some(StaticType::Literal(StaticLiteral::Unit)),
+            "some" if args.len() == 1 => Some(option_type(
+                self.expr(&args[0].value),
+                Cardinality::exact(1),
+            )),
+            "ok" if args.len() == 1 => Some(result_type("ok", self.expr(&args[0].value))),
+            "err" if args.len() == 1 => Some(result_type("error", self.expr(&args[0].value))),
             _ => None,
         }
     }
@@ -900,6 +913,27 @@ impl<'a> StaticTypeInference<'a> {
     }
 }
 
+fn option_type(payload: StaticType, cardinality: Cardinality) -> StaticType {
+    relation_type_or_dynamic(
+        [RowShape::new([("value".to_owned(), payload)]).expect("the option heading is unique")],
+        cardinality,
+    )
+}
+
+fn result_type(case: &str, payload: StaticType) -> StaticType {
+    relation_type_or_dynamic(
+        [RowShape::new([
+            (
+                "case".to_owned(),
+                StaticType::Literal(StaticLiteral::Symbol(case.to_owned())),
+            ),
+            ("value".to_owned(), payload),
+        ])
+        .expect("the result heading is unique")],
+        Cardinality::exact(1),
+    )
+}
+
 fn relation_type_or_dynamic(
     alternatives: impl IntoIterator<Item = RowShape>,
     cardinality: Cardinality,
@@ -913,6 +947,7 @@ fn static_literal_type(literal: &Literal) -> StaticType {
     match literal {
         Literal::Bool(value) => StaticType::Literal(StaticLiteral::Bool(*value)),
         Literal::ErrorCode(value) => StaticType::Literal(StaticLiteral::ErrorCode(value.clone())),
+        Literal::Unit => StaticType::Literal(StaticLiteral::Unit),
         Literal::Nothing => StaticType::Literal(StaticLiteral::EmptyRelation),
         Literal::Int(_) => StaticType::Kind(ValueKind::Int),
         Literal::Float(_) => StaticType::Kind(ValueKind::Float),
@@ -936,6 +971,7 @@ enum ConstantValue {
     Bytes(Vec<u8>),
     Bool(bool),
     ErrorCode(String),
+    Unit,
     EmptyRelation,
     Identity(String),
     Symbol(String),
@@ -957,6 +993,7 @@ fn constant_value(expr: &HirExpr) -> Option<ConstantValue> {
             Literal::Bytes(value) => ConstantValue::Bytes(value.clone()),
             Literal::Bool(value) => ConstantValue::Bool(*value),
             Literal::ErrorCode(value) => ConstantValue::ErrorCode(value.clone()),
+            Literal::Unit => ConstantValue::Unit,
             Literal::Nothing => ConstantValue::EmptyRelation,
         }),
         HirExpr::Identity { name, .. } => Some(ConstantValue::Identity(name.clone())),

@@ -395,6 +395,7 @@ pub enum Literal {
     Bytes(Vec<u8>),
     Bool(bool),
     ErrorCode(String),
+    Unit,
     Nothing,
 }
 

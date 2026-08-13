@@ -310,9 +310,18 @@ impl Value {
         Self::pack(TAG_EMPTY_RELATION, 0)
     }
 
+    pub fn unit() -> Self {
+        Self::relation([], [Tuple::new([])]).expect("the unit relation shape is valid")
+    }
+
     #[inline(always)]
     pub const fn is_empty_relation(&self) -> bool {
         self.0 == 0
+    }
+
+    pub fn is_unit(&self) -> bool {
+        self.with_relation(|relation| relation.arity() == 0 && relation.len() == 1)
+            .unwrap_or(false)
     }
 
     #[inline(always)]
