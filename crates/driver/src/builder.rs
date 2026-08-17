@@ -62,6 +62,8 @@ pub struct DriverBuilder {
     resources: DriverResources,
     storage: DriverStorage,
     source_runner: Option<SourceRunner>,
+    #[cfg(feature = "source-provider")]
+    source_config: Option<mica_runtime::SourceConfig>,
     initial_fileins: Vec<InitialFilein>,
     external_request_handler: Option<ExternalRequestHandler>,
     external_stream_request_handler: Option<ExternalStreamRequestHandler>,
@@ -73,6 +75,8 @@ impl DriverBuilder {
             resources,
             storage: DriverStorage::Memory,
             source_runner: None,
+            #[cfg(feature = "source-provider")]
+            source_config: None,
             initial_fileins: Vec::new(),
             external_request_handler: None,
             external_stream_request_handler: None,
@@ -86,6 +90,12 @@ impl DriverBuilder {
 
     pub fn source_runner(mut self, runner: SourceRunner) -> Self {
         self.source_runner = Some(runner);
+        self
+    }
+
+    #[cfg(feature = "source-provider")]
+    pub fn source_config(mut self, config: mica_runtime::SourceConfig) -> Self {
+        self.source_config = Some(config);
         self
     }
 
@@ -141,12 +151,44 @@ impl DriverBuilder {
                 "a source runner and driver storage cannot both be configured".to_owned(),
             ));
         }
+        #[cfg(feature = "source-provider")]
+        if self.source_runner.is_some() && self.source_config.is_some() {
+            return Err(DriverError::Configuration(
+                "a source runner and source-provider configuration cannot both be configured"
+                    .to_owned(),
+            ));
+        }
+        #[cfg(feature = "source-provider")]
+        let source_config = self.source_config;
         let mut runner = match (self.source_runner, self.storage) {
             (Some(runner), DriverStorage::Memory) => runner,
-            (None, DriverStorage::Memory) => SourceRunner::new_empty(),
+            (None, DriverStorage::Memory) => {
+                #[cfg(feature = "source-provider")]
+                if let Some(config) = source_config {
+                    SourceRunner::new_empty_with_source(config)
+                } else {
+                    SourceRunner::new_empty()
+                }
+                #[cfg(not(feature = "source-provider"))]
+                SourceRunner::new_empty()
+            }
             (None, DriverStorage::Fjall { path, durability }) => {
                 #[cfg(feature = "fjall")]
                 {
+                    #[cfg(feature = "source-provider")]
+                    if let Some(config) = source_config {
+                        SourceRunner::open_fjall_with_embedding_provider_and_source(
+                            path,
+                            durability.into(),
+                            mica_runtime::EmbeddingProviderKind::Deterministic,
+                            config,
+                        )
+                        .map_err(DriverError::Storage)?
+                    } else {
+                        SourceRunner::open_fjall(path, durability.into())
+                            .map_err(DriverError::Storage)?
+                    }
+                    #[cfg(not(feature = "source-provider"))]
                     SourceRunner::open_fjall(path, durability.into())
                         .map_err(DriverError::Storage)?
                 }

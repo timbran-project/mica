@@ -75,6 +75,12 @@ struct Cli {
     startup_sources: Vec<String>,
     #[arg(long, value_enum, default_value_t = EmbeddingProviderMode::Deterministic)]
     embedding_provider: EmbeddingProviderMode,
+    #[arg(long = "source-root", value_name = "DIR")]
+    source_roots: Vec<PathBuf>,
+    #[arg(long = "source-index", value_name = "FILE")]
+    source_index: Option<PathBuf>,
+    #[arg(long = "rust-analyzer", value_name = "BINARY")]
+    rust_analyzer: Option<String>,
     #[arg(long, default_value = "alice", value_name = "IDENTITY")]
     actor: String,
     #[arg(long, default_value = "web", value_name = "IDENTITY")]
@@ -480,10 +486,15 @@ async fn run_async(cli: Cli) -> Result<(), String> {
 
 fn open_runner(cli: &Cli) -> Result<SourceRunner, String> {
     let use_fjall = cli.storage == StorageMode::Fjall || cli.store.is_some();
+    let source_config = source_config(cli);
     if !use_fjall {
-        return Ok(SourceRunner::new_empty_with_embedding_provider(
-            cli.embedding_provider.into(),
-        ));
+        return Ok(match source_config {
+            Some(config) => SourceRunner::new_empty_with_embedding_provider_and_source(
+                cli.embedding_provider.into(),
+                config,
+            ),
+            None => SourceRunner::new_empty_with_embedding_provider(cli.embedding_provider.into()),
+        });
     }
     let store = cli
         .store
@@ -494,12 +505,50 @@ fn open_runner(cli: &Cli) -> Result<SourceRunner, String> {
         durability = ?cli.durability,
         "opening fjall relation store"
     );
-    SourceRunner::open_fjall_with_embedding_provider(
-        store,
-        cli.durability.into(),
-        cli.embedding_provider.into(),
-    )
+    match source_config {
+        Some(config) => SourceRunner::open_fjall_with_embedding_provider_and_source(
+            store,
+            cli.durability.into(),
+            cli.embedding_provider.into(),
+            config,
+        ),
+        None => SourceRunner::open_fjall_with_embedding_provider(
+            store,
+            cli.durability.into(),
+            cli.embedding_provider.into(),
+        ),
+    }
     .map_err(|error| format!("failed to open fjall store {}: {error}", store.display()))
+}
+
+fn source_config(cli: &Cli) -> Option<mica_source_provider::SourceConfig> {
+    let roots = if cli.source_roots.is_empty() {
+        env::var_os("MICA_SOURCE_ROOTS")
+            .map(|roots| env::split_paths(&roots).collect::<Vec<_>>())
+            .or_else(|| env::var_os("MICA_SOURCE_ROOT").map(|root| vec![PathBuf::from(root)]))
+            .unwrap_or_default()
+    } else {
+        cli.source_roots.clone()
+    };
+    let index = cli
+        .source_index
+        .clone()
+        .or_else(|| env::var_os("MICA_SOURCE_INDEX").map(PathBuf::from));
+    let rust_analyzer = cli
+        .rust_analyzer
+        .clone()
+        .or_else(|| env::var("MICA_RUST_ANALYZER").ok());
+    if roots.is_empty() && index.is_none() && rust_analyzer.is_none() {
+        return None;
+    }
+    let mut config = mica_source_provider::SourceConfig::new(roots);
+    if let Some(path) = index {
+        config = config.with_semantic_index(path);
+    }
+    if let Some(binary) = rust_analyzer {
+        config = config.with_rust_analyzer(binary);
+    }
+    Some(config)
 }
 
 async fn wait_for_shutdown_signal(signals: &ShutdownSignals) {

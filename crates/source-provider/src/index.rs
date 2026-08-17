@@ -1,10 +1,13 @@
 use crate::navigation::SemanticSymbol;
+use crate::provider::TextSearchHit;
 use crate::syntax::{SourceLanguage, SyntaxDocument};
 use crate::util::invalid_relation;
 use mica_relation_kernel::{KernelError, RelationId};
 use serde_json::{Value as JsonValue, json};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 const SOURCE_INDEX_ID: &str = "source-index:mica-worktree";
 const SOURCE_INDEX_SCHEMA: &str = "mica-source-index-v1";
@@ -13,6 +16,7 @@ const SOURCE_INDEX_VERSION: &str = "4";
 const SOURCE_TEXT_UNIT_MODEL: &str = "source-workspace";
 const SOURCE_TEXT_CHUNK_LINES: usize = 40;
 const SOURCE_TEXT_CHUNK_BYTES: usize = 1_200;
+const SEMANTIC_INDEX_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
 
 #[derive(Clone, Debug)]
 pub struct SourceIndexRoot {
@@ -85,6 +89,20 @@ impl PersistentSemanticIndex {
             version: SOURCE_INDEX_VERSION.to_owned(),
             status: "missing".to_owned(),
             error: format!("semantic index not found at {}", path.display()),
+            repositories: Vec::new(),
+            symbols: Vec::new(),
+            references: Vec::new(),
+            text_units: Vec::new(),
+        }
+    }
+
+    fn unconfigured() -> Self {
+        Self {
+            id: SOURCE_INDEX_ID.to_owned(),
+            provider: SOURCE_INDEX_PROVIDER.to_owned(),
+            version: SOURCE_INDEX_VERSION.to_owned(),
+            status: "missing".to_owned(),
+            error: "no semantic index configured".to_owned(),
             repositories: Vec::new(),
             symbols: Vec::new(),
             references: Vec::new(),
@@ -882,4 +900,331 @@ fn is_index_identifier_segment(name: &str) -> bool {
     };
     (first == '_' || first.is_ascii_alphabetic())
         && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+}
+
+/// The persistent semantic index provider.
+///
+/// Loads and caches the configured index file and answers symbol, reference,
+/// and text-search queries. It is dispatcher-owned in this pass; relational
+/// selection policy is a later stage.
+pub(crate) struct SemanticIndexProvider {
+    index_path: Option<PathBuf>,
+    cache: Mutex<Option<CachedSemanticIndex>>,
+}
+
+impl SemanticIndexProvider {
+    pub(crate) fn new(index_path: Option<PathBuf>) -> Self {
+        Self {
+            index_path,
+            cache: Mutex::new(None),
+        }
+    }
+
+    pub(crate) fn load(
+        &self,
+        relation: RelationId,
+    ) -> Result<Arc<PersistentSemanticIndex>, KernelError> {
+        let mut cache = self.cache.lock().unwrap();
+        if let Some(cached) = cache.as_ref()
+            && cached.last_checked.elapsed() < SEMANTIC_INDEX_REFRESH_INTERVAL
+        {
+            return Ok(cached.index.clone());
+        }
+
+        let key = match &self.index_path {
+            Some(path) => semantic_index_key(relation, path)?,
+            None => None,
+        };
+        if let Some(cached) = cache.as_ref()
+            && cached.key == key
+        {
+            let index = cached.index.clone();
+            *cache = Some(CachedSemanticIndex {
+                key,
+                last_checked: Instant::now(),
+                index: index.clone(),
+            });
+            return Ok(index);
+        }
+        let index = match &self.index_path {
+            Some(path) => Arc::new(PersistentSemanticIndex::load(relation, path)?),
+            None => Arc::new(PersistentSemanticIndex::unconfigured()),
+        };
+        *cache = Some(CachedSemanticIndex {
+            key,
+            last_checked: Instant::now(),
+            index: index.clone(),
+        });
+        Ok(index)
+    }
+
+    pub(crate) fn text_search(
+        &self,
+        relation: RelationId,
+        query: &str,
+        limit: usize,
+        scope: &str,
+    ) -> Result<Vec<TextSearchHit>, KernelError> {
+        let index = self.load(relation)?;
+        if !index.is_complete() || limit == 0 {
+            return Ok(Vec::new());
+        }
+        Ok(text_search(&index, query, limit, scope))
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct SemanticIndexKey {
+    len: u64,
+    modified: Option<std::time::SystemTime>,
+}
+
+#[derive(Clone, Debug)]
+struct CachedSemanticIndex {
+    key: Option<SemanticIndexKey>,
+    last_checked: Instant,
+    index: Arc<PersistentSemanticIndex>,
+}
+
+fn semantic_index_key(
+    relation: RelationId,
+    path: &Path,
+) -> Result<Option<SemanticIndexKey>, KernelError> {
+    match fs::metadata(path) {
+        Ok(metadata) => Ok(Some(SemanticIndexKey {
+            len: metadata.len(),
+            modified: metadata.modified().ok(),
+        })),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(invalid_relation(
+            relation,
+            format!("failed to stat semantic index {}: {error}", path.display()),
+        )),
+    }
+}
+
+fn text_search(
+    index: &PersistentSemanticIndex,
+    query: &str,
+    limit: usize,
+    scope: &str,
+) -> Vec<TextSearchHit> {
+    let terms = search_terms(query);
+    if terms.is_empty() {
+        return Vec::new();
+    }
+    let query_lower = query.to_ascii_lowercase();
+    let symbol_matches = index
+        .symbols
+        .iter()
+        .filter(|symbol| {
+            let name = symbol.name.to_ascii_lowercase();
+            name.contains(&query_lower) || terms.iter().any(|term| name.contains(term))
+        })
+        .collect::<Vec<_>>();
+
+    let mut hits = index
+        .text_units
+        .iter()
+        .filter(|unit| source_text_scope_matches(&unit.path, scope))
+        .filter_map(|unit| {
+            let mut score = score_text_unit(unit, &query_lower, &terms);
+            let mut match_line = text_match_line(unit, &query_lower, &terms);
+            for symbol in &symbol_matches {
+                if symbol.repository == unit.repository
+                    && symbol.path == unit.path
+                    && symbol.start_line <= unit.end_line
+                    && unit.start_line <= symbol.end_line
+                {
+                    if symbol.name.eq_ignore_ascii_case(query) {
+                        score += 320;
+                    } else {
+                        score += 190;
+                    }
+                    if match_line.is_none() {
+                        match_line = Some(symbol.start_line);
+                    }
+                }
+            }
+            if score == 0 {
+                return None;
+            }
+            Some(TextSearchHit {
+                unit: unit.unit.clone(),
+                score,
+                path: unit.path.clone(),
+                match_line: match_line.unwrap_or(unit.start_line),
+                kind: unit.kind.clone(),
+                title: unit.title.clone(),
+                snippet: search_snippet(unit, &query_lower, &terms),
+            })
+        })
+        .collect::<Vec<_>>();
+
+    hits.sort_by(|left, right| {
+        right
+            .score
+            .cmp(&left.score)
+            .then_with(|| left.path.cmp(&right.path))
+            .then_with(|| left.match_line.cmp(&right.match_line))
+            .then_with(|| left.unit.cmp(&right.unit))
+    });
+    hits.truncate(limit);
+    hits
+}
+
+fn search_terms(query: &str) -> Vec<String> {
+    let mut terms = query
+        .split(|character: char| {
+            !(character.is_ascii_alphanumeric() || character == '_' || character == '-')
+        })
+        .map(str::trim)
+        .filter(|term| !term.is_empty())
+        .map(str::to_ascii_lowercase)
+        .collect::<Vec<_>>();
+    terms.sort();
+    terms.dedup();
+    terms
+}
+
+fn score_text_unit(unit: &IndexedTextUnit, query_lower: &str, terms: &[String]) -> i64 {
+    let path = unit.path.to_ascii_lowercase();
+    let title = unit.title.to_ascii_lowercase();
+    let kind = unit.kind.to_ascii_lowercase();
+    let text = unit.text.to_ascii_lowercase();
+    let file_name = Path::new(&unit.path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(&unit.path)
+        .to_ascii_lowercase();
+
+    let mut score = 0;
+    if path.contains(query_lower) {
+        score += 260;
+    }
+    if title.contains(query_lower) {
+        score += 210;
+    }
+    if text.contains(query_lower) {
+        score += 120;
+    }
+
+    for term in terms {
+        if file_name == *term {
+            score += 240;
+        } else if file_name.contains(term) {
+            score += 180;
+        }
+        if path.contains(term) {
+            score += 110;
+        }
+        if title.contains(term) {
+            score += 95;
+        }
+        if text.contains(term) {
+            score += 55;
+        }
+        if kind.contains(term) {
+            score += 20;
+        }
+    }
+    score
+}
+
+fn text_match_line(unit: &IndexedTextUnit, query_lower: &str, terms: &[String]) -> Option<usize> {
+    let lower = unit.text.to_ascii_lowercase();
+    let mut position = if query_lower.is_empty() {
+        None
+    } else {
+        lower.find(query_lower)
+    };
+    if position.is_none() {
+        position = terms.iter().filter_map(|term| lower.find(term)).min();
+    }
+    let position = position?;
+    let mut relative_line = unit.text[..position]
+        .bytes()
+        .filter(|byte| *byte == b'\n')
+        .count();
+    if unit
+        .text
+        .find('\n')
+        .is_some_and(|header_end| position > header_end)
+    {
+        relative_line = relative_line.saturating_sub(1);
+    }
+    Some(unit.start_line + relative_line)
+}
+
+fn source_text_scope_matches(path: &str, scope: &str) -> bool {
+    match scope {
+        "all" => true,
+        "docs" => source_text_scope(path) == "docs",
+        "code" => source_text_scope(path) == "code",
+        "tests" => source_text_scope(path) == "tests",
+        "benches" => source_text_scope(path) == "benches",
+        "sketches" => source_text_scope(path) == "sketches",
+        _ => true,
+    }
+}
+
+fn source_text_scope(path: &str) -> &'static str {
+    if path.starts_with("sketches/") {
+        return "sketches";
+    }
+    if path.contains("/benches/") || path.starts_with("benches/") {
+        return "benches";
+    }
+    if path.contains("/tests/") || path.starts_with("tests/") || path.ends_with("_test.rs") {
+        return "tests";
+    }
+    if path.ends_with(".md") || path.ends_with(".markdown") || path.starts_with("docs/") {
+        return "docs";
+    }
+    "code"
+}
+
+fn search_snippet(unit: &IndexedTextUnit, query_lower: &str, terms: &[String]) -> String {
+    let body = normalize_search_text(&unit.text);
+    if let Some(snippet) = snippet_from_match(&body, query_lower, terms) {
+        return snippet;
+    }
+    let combined = normalize_search_text(&format!("{} {} {}", unit.path, unit.title, unit.text));
+    snippet_from_match(&combined, query_lower, terms)
+        .unwrap_or_else(|| clip_chars(&combined, 0, 260))
+}
+
+fn normalize_search_text(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn snippet_from_match(text: &str, query_lower: &str, terms: &[String]) -> Option<String> {
+    let lower = text.to_ascii_lowercase();
+    let mut position = if query_lower.is_empty() {
+        None
+    } else {
+        lower.find(query_lower)
+    };
+    if position.is_none() {
+        position = terms.iter().filter_map(|term| lower.find(term)).min();
+    }
+    let position = position?;
+    let prefix_chars = text[..position].chars().count();
+    let start = prefix_chars.saturating_sub(70);
+    let end = prefix_chars + 190;
+    let mut snippet = clip_chars(text, start, end);
+    if start > 0 {
+        snippet = format!("...{snippet}");
+    }
+    if text.chars().count() > end {
+        snippet.push_str("...");
+    }
+    Some(snippet)
+}
+
+fn clip_chars(text: &str, start: usize, end: usize) -> String {
+    text.chars()
+        .skip(start)
+        .take(end.saturating_sub(start))
+        .collect()
 }

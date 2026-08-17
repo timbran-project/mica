@@ -15,10 +15,14 @@ code uses for all other data.
   definition and references queries with session reuse and automatic document synchronization.
 - `src/navigation.rs`: semantic location resolution, symbol identity encoding, and
   byte-offset-to-LSP-position conversion.
-- `src/relations.rs`: computed relations that bind together local file system access, syntax
-  parsing, semantic index queries, rust-analyzer LSP results, and VCS history into the Mica relation
-  model. Includes `RepositoryEntry(6)`, `FileText(5)`, `FileLines(7)`, `SyntaxLine(8)`,
-  `SyntaxOutline(10)`, `SyntaxNodeAt(11)`, `DefinitionAt(13)`, `ReferencesOf(10)`,
+- `src/provider.rs`: the public native provider contract, bounded local-worktree provider, provider
+  result types, capabilities, and explicit per-runtime configuration.
+- `src/dispatcher.rs`: relational provider selection, precedence and fallback handling, bounded
+  listing composition, document caching, and repository-root admission.
+- `src/relations.rs`: computed relations that bind source dispatch, syntax parsing, semantic index
+  queries, rust-analyzer LSP results, and VCS history into the Mica relation model. Includes
+  `RepositoryEntry(7)`, `FileText(7)`, `FileLines(9)`, `SyntaxLine(10)`,
+  `SyntaxOutline(12)`, `SyntaxNodeAt(13)`, `DefinitionAt(13)`, `ReferencesOf(10)`,
   `SymbolSearch(11)`, `IndexedTextUnit(9)`, `TextSearch(11)`, index metadata, and VCS relations for
   commits, diffs, logs, blame, and file history.
 - `src/vcs.rs`: `VcsProvider`, a git-backed version control reader using `jj-lib` (GitBackend).
@@ -29,14 +33,19 @@ code uses for all other data.
 
 ## Role In Mica
 
-This crate produces computed relations that are installed into a Mica runtime through
-`default_computed_relations()`. Those relations make source code browsing and repository history
-available to Mica verbs and rules, so Mica applications can query the local file system and git
-history through the same relation interface they use for the rest of the world.
+This crate produces computed relations through `computed_relations(SourceConfig)`. `SourceRunner`
+and `DriverBuilder` provide host-facing constructors for installing them while retaining the
+standard runtime relations and host-request functions.
 
-Access is restricted to files under configured source roots (`MICA_SOURCE_ROOTS` or
-`MICA_SOURCE_ROOT`). A persistent semantic index can be pre-built with `build_source_index_file` and
-loaded from the path given by `MICA_SOURCE_INDEX`.
+Native providers are registered explicitly in `SourceConfig`. Mica facts in
+`source/RepositoryProvider(repository, provider, capability, precedence)` and
+`source/ProviderEnabled(provider, enabled)` select them. Exact reads reject equal precedence,
+continue only after `Absent`, and retain provider, content-hash, and source-version provenance.
+Listings merge by relative path with higher-precedence providers shadowing lower-precedence ones.
+
+Local filesystem and VCS access is restricted to roots in `SourceConfig`. The daemon accepts
+`--source-root`, `--source-index`, and `--rust-analyzer`; it also recognizes `MICA_SOURCE_ROOTS`,
+`MICA_SOURCE_ROOT`, `MICA_SOURCE_INDEX`, and `MICA_RUST_ANALYZER` as convenience defaults.
 
 ## Licence
 

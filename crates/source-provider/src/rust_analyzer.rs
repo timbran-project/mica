@@ -1,6 +1,5 @@
 use serde_json::{Value as JsonValue, json};
 use std::collections::BTreeMap;
-use std::env;
 use std::fmt;
 use std::io::{BufRead, BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
@@ -40,9 +39,9 @@ impl fmt::Debug for RustAnalyzerProvider {
 }
 
 impl RustAnalyzerProvider {
-    pub(crate) fn from_env() -> Self {
+    pub(crate) fn new(binary: String) -> Self {
         Self {
-            binary: env::var("MICA_RUST_ANALYZER").unwrap_or_else(|_| "rust-analyzer".to_owned()),
+            binary,
             sessions: Mutex::new(BTreeMap::new()),
         }
     }

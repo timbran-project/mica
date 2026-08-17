@@ -21,6 +21,7 @@ mica-host-zmq.workspace = true
 mica-relation-kernel.workspace = true
 mica-relation-wgpu.workspace = true
 mica-runtime.workspace = true
+mica-source-provider.workspace = true
 mica-telnet-host.workspace = true
 mica-var.workspace = true
 mica-web-host.workspace = true

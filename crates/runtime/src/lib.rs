@@ -33,6 +33,11 @@ pub use mica_relation_kernel::{
     ExecutionAdmission, ExecutionContext, RelationAccelerator, Tuple,
     metrics as relation_kernel_metrics,
 };
+#[cfg(feature = "source-provider")]
+pub use mica_source_provider::{
+    ListRequest, ProviderResult, ReadRequest, SourceBounds, SourceCapabilities, SourceConfig,
+    SourceDenial, SourceDocument, SourceEntry, SourceFailure, SourceProvider, SourceProviderKey,
+};
 pub use mica_vm::metrics as vm_metrics;
 pub use mica_vm::{
     AuthorityContext, Builtin, BuiltinContext, BuiltinRegistry, BuiltinResultKind, CapabilityGrant,
@@ -134,6 +139,26 @@ impl SourceRunner {
         )
     }
 
+    #[cfg(feature = "source-provider")]
+    pub fn new_empty_with_source(config: mica_source_provider::SourceConfig) -> Self {
+        Self::new_empty_with_embedding_provider_and_source(
+            EmbeddingProviderKind::Deterministic,
+            config,
+        )
+    }
+
+    #[cfg(feature = "source-provider")]
+    pub fn new_empty_with_embedding_provider_and_source(
+        kind: EmbeddingProviderKind,
+        config: mica_source_provider::SourceConfig,
+    ) -> Self {
+        Self::with_kernel_embedding_provider_and_host_requests(
+            bootstrap_kernel_with_source(config),
+            embedding::embedding_provider(kind),
+            default_host_request_functions(kind),
+        )
+    }
+
     #[cfg(feature = "fjall")]
     pub fn open_fjall(
         path: impl AsRef<Path>,
@@ -152,15 +177,42 @@ impl SourceRunner {
         durability: FjallDurabilityMode,
         embedding_provider: EmbeddingProviderKind,
     ) -> Result<Self, String> {
+        Self::open_fjall_with_computed_relations(
+            path,
+            durability,
+            embedding_provider,
+            retrieval::default_computed_relations(),
+        )
+    }
+
+    #[cfg(all(feature = "fjall", feature = "source-provider"))]
+    pub fn open_fjall_with_embedding_provider_and_source(
+        path: impl AsRef<Path>,
+        durability: FjallDurabilityMode,
+        embedding_provider: EmbeddingProviderKind,
+        config: mica_source_provider::SourceConfig,
+    ) -> Result<Self, String> {
+        let mut computed = retrieval::default_computed_relations();
+        computed.extend(mica_source_provider::computed_relations(config));
+        Self::open_fjall_with_computed_relations(path, durability, embedding_provider, computed)
+    }
+
+    #[cfg(feature = "fjall")]
+    fn open_fjall_with_computed_relations(
+        path: impl AsRef<Path>,
+        durability: FjallDurabilityMode,
+        embedding_provider: EmbeddingProviderKind,
+        computed_relations: Vec<Arc<dyn mica_relation_kernel::ComputedRelation>>,
+    ) -> Result<Self, String> {
         let provider = Arc::new(FjallStateProvider::open_with_durability(path, durability)?);
         let persisted = provider.load_state()?;
         let kernel = if persisted.version == 0 && persisted.relations.is_empty() {
-            bootstrap_kernel_with_provider(provider)
+            bootstrap_kernel_with_computed_relations(provider, computed_relations)
         } else {
             RelationKernel::load_from_state_and_computed_relations(
                 persisted,
                 provider,
-                retrieval::default_computed_relations(),
+                computed_relations,
             )
             .map_err(|error| format!("failed to load relation kernel state: {error:?}"))?
         };
@@ -3907,16 +3959,27 @@ fn ensure_declared_relation(
 }
 
 fn bootstrap_kernel() -> RelationKernel {
-    bootstrap_kernel_with_provider(Arc::new(mica_relation_kernel::InMemoryCommitProvider::new()))
+    bootstrap_kernel_with_computed_relations(
+        Arc::new(mica_relation_kernel::InMemoryCommitProvider::new()),
+        retrieval::default_computed_relations(),
+    )
 }
 
-fn bootstrap_kernel_with_provider(
+#[cfg(feature = "source-provider")]
+fn bootstrap_kernel_with_source(config: mica_source_provider::SourceConfig) -> RelationKernel {
+    let mut computed = retrieval::default_computed_relations();
+    computed.extend(mica_source_provider::computed_relations(config));
+    bootstrap_kernel_with_computed_relations(
+        Arc::new(mica_relation_kernel::InMemoryCommitProvider::new()),
+        computed,
+    )
+}
+
+fn bootstrap_kernel_with_computed_relations(
     provider: Arc<dyn mica_relation_kernel::CommitProvider>,
+    computed_relations: Vec<Arc<dyn mica_relation_kernel::ComputedRelation>>,
 ) -> RelationKernel {
-    let kernel = RelationKernel::with_provider_and_computed_relations(
-        provider,
-        retrieval::default_computed_relations(),
-    );
+    let kernel = RelationKernel::with_provider_and_computed_relations(provider, computed_relations);
     kernel
         .create_relation(
             RelationMetadata::new(

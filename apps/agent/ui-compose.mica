@@ -216,7 +216,7 @@ verb ui/object_browser_results_node(actor @ #agent, query @ #string)
     let repository = tool/source_repository(workspace)
     let revision = tool/source_revision(workspace)
     if repository != none && revision != none
-      for entry in source/RepositoryEntry(repository, revision, "", ?child_path, ?kind, ?entry_name)
+      for entry in source/RepositoryEntry(repository, revision, "", ?child_path, ?kind, ?entry_name, ?provider)
         if count < 16 && entry[:kind] == "directory"
           let dir_path = entry[:child_path]
           if string_contains(lower(dir_path), needle)

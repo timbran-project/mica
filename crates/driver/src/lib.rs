@@ -47,6 +47,11 @@ pub use mica_runtime::{
     RelationAccelerator, RunReport, SourceRunner, SubscriptionInitialDelivery, SubscriptionSubject,
     SuspendKind, TaskId, TaskLimits, TaskOutcome, Tuple,
 };
+#[cfg(feature = "source-provider")]
+pub use mica_runtime::{
+    ListRequest, ProviderResult, ReadRequest, SourceBounds, SourceCapabilities, SourceConfig,
+    SourceDenial, SourceDocument, SourceEntry, SourceFailure, SourceProvider, SourceProviderKey,
+};
 pub use mica_var::{Identity, Symbol, Value};
 pub(crate) use pool::CompioTaskDriver;
 pub use types::{

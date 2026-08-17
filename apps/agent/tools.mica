@@ -154,13 +154,13 @@ verb tool/read(agent @ #agent, arguments @ #map)
     return {:status -> "error", :error -> "path must be a file path, not a directory", :value -> none}
   end
 
-  let file_rows = source/FileText(repository, revision, path, ?text, ?hash)
+  let file_rows = source/FileText(repository, revision, path, ?provider, ?text, ?hash, ?source_version)
   if not file_rows
     return {:status -> "error", :error -> string_concat("file not found: ", path), :value -> none}
   end
   let exactly {:text -> text, :hash -> hash} = file_rows
 
-  let exactly {:line_count -> line_count} = source/FileLineCount(repository, revision, path, ?line_count)
+  let exactly {:line_count -> line_count} = source/FileLineCount(repository, revision, path, ?line_count, ?line_provider, ?line_version)
   if line_count == none
     line_count = 0
   end
@@ -316,7 +316,7 @@ verb tool/ls(agent @ #agent, arguments @ #map)
 
   let entries = []
   let count = 0
-  for entry in source/RepositoryEntry(repository, revision, path, ?child_path, ?kind, ?entry_name)
+  for entry in source/RepositoryEntry(repository, revision, path, ?child_path, ?kind, ?entry_name, ?provider)
     if entry[:entry_name] != "." && entry[:entry_name] != ".."
       entries = [@entries, {:path -> entry[:child_path], :kind -> entry[:kind], :name -> entry[:entry_name]}]
       count = count + 1

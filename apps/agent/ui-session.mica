@@ -519,7 +519,7 @@ verb sync_view_dependencies(view)
   dependencies = [@dependencies, ui/fact_dependency(:source/Repository, [none])]
   dependencies = [@dependencies, ui/fact_dependency(:source/RepositoryName, [none, none])]
   dependencies = [@dependencies, ui/fact_dependency(:source/RepositoryRoot, [none, none])]
-  dependencies = [@dependencies, ui/fact_dependency(:source/RepositoryProvider, [none, none])]
+  dependencies = [@dependencies, ui/fact_dependency(:source/RepositoryProvider, [none, none, none, none])]
   dependencies = [@dependencies, ui/fact_dependency(:source/Revision, [none])]
   dependencies = [@dependencies, ui/fact_dependency(:source/RevisionOf, [none, none])]
   dependencies = [@dependencies, ui/fact_dependency(:source/RevisionKind, [none, none])]

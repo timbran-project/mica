@@ -72,7 +72,7 @@ verb agent/completions_payload(path)
     if repo_row != none
       let exactly {:repository -> repository} = source/RevisionOf(repo_row, ?repository)
       if repository != none
-        for entry_row in source/RepositoryEntry(repository, repo_row, "", ?child_path, ?kind, ?entry_name)
+        for entry_row in source/RepositoryEntry(repository, repo_row, "", ?child_path, ?kind, ?entry_name, ?provider)
           if count < limit && entry_row[:kind] == "directory"
             let dir_path = entry_row[:child_path]
             if query == "" || string_contains(lower(dir_path), query)

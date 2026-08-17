@@ -4,7 +4,9 @@
 mod tests {
     use mica_runtime::{SourceRunner, TaskOutcome};
     use mica_source_provider::{
-        SourceIndexRoot, build_source_index_file, build_source_index_file_for_roots,
+        ListRequest, ProviderResult, ReadRequest, SourceCapabilities, SourceConfig, SourceDenial,
+        SourceDocument, SourceEntry, SourceFailure, SourceIndexRoot, SourceProvider,
+        SourceProviderKey, build_source_index_file, build_source_index_file_for_roots,
         receive::{GitReceiveRecorder, ReceiveCommandLine},
         write_failed_source_index_file,
     };
@@ -12,7 +14,8 @@ mod tests {
     use std::env;
     use std::fs;
     use std::path::{Path, PathBuf};
-    use std::sync::{Mutex, OnceLock};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn load_source_relations(runner: &mut SourceRunner) {
         let root = env::current_dir().unwrap().display().to_string();
@@ -26,15 +29,22 @@ mod tests {
                  make_identity(:rev)\n\
                  make_relation(:source/RepositoryName, 2)\n\
                  make_relation(:source/RepositoryRoot, 2)\n\
+                 make_relation(:source/RepositoryProvider, 4)\n\
+                 make_relation(:source/ProviderEnabled, 2)\n\
+                 make_relation(:source/Provider, 1)\n\
+                 make_relation(:source/ProviderName, 2)\n\
+                 make_relation(:source/ProviderCapability, 2)\n\
+                 make_relation(:source/ProviderAvailable, 1)\n\
                  make_relation(:source/RevisionOf, 2)\n\
-                 make_relation(:source/RepositoryEntry, 6)\n\
-                 make_relation(:source/FileText, 5)\n\
-                 make_relation(:source/FileLines, 7)\n\
-                 make_relation(:source/FileLineCount, 4)\n\
-                 make_relation(:source/FileContentHash, 4)\n\
-                 make_relation(:source/SyntaxLine, 8)\n\
-                 make_relation(:source/SyntaxOutline, 10)\n\
-                 make_relation(:source/SyntaxNodeAt, 11)\n\
+                 make_relation(:source/RevisionKind, 2)\n\
+                 make_relation(:source/RepositoryEntry, 7)\n\
+                 make_relation(:source/FileText, 7)\n\
+                 make_relation(:source/FileLines, 9)\n\
+                 make_relation(:source/FileLineCount, 6)\n\
+                 make_relation(:source/FileContentHash, 6)\n\
+                 make_relation(:source/SyntaxLine, 10)\n\
+                 make_relation(:source/SyntaxOutline, 12)\n\
+                 make_relation(:source/SyntaxNodeAt, 13)\n\
                  make_relation(:source/DefinitionAt, 13)\n\
                  make_relation(:source/ReferencesOf, 10)\n\
                  make_relation(:source/SymbolSearch, 11)\n\
@@ -57,22 +67,28 @@ mod tests {
                  assert source/Revision(#rev)\n\
                  assert source/RepositoryName(#repo, \"default\")\n\
                  assert source/RepositoryRoot(#repo, {root:?})\n\
-                 assert source/RevisionOf(#rev, #repo)"
+                 assert source/RevisionOf(#rev, #repo)\n\
+                 assert source/RevisionKind(#rev, \"worktree\")\n\
+                 assert source/ProviderEnabled(\"local-worktree\", true)\n\
+                 assert source/RepositoryProvider(#repo, \"local-worktree\", \"read\", 0)\n\
+                 assert source/RepositoryProvider(#repo, \"local-worktree\", \"list\", 0)"
             ))
             .unwrap();
     }
 
-    fn with_source_provider_env<T>(f: impl FnOnce() -> T) -> T {
-        static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        let _guard = ENV_LOCK
-            .get_or_init(|| Mutex::new(()))
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        f()
+    fn new_source_runner() -> SourceRunner {
+        SourceRunner::new_empty_with_source(SourceConfig::new([env::current_dir().unwrap()]))
     }
 
-    fn new_source_runner() -> SourceRunner {
-        with_source_provider_env(SourceRunner::new_empty)
+    fn new_source_runner_with_rust_analyzer() -> SourceRunner {
+        SourceRunner::new_empty_with_source(
+            SourceConfig::new([env::current_dir().unwrap()])
+                .with_rust_analyzer("rust-analyzer".to_owned()),
+        )
+    }
+
+    fn with_source_provider_env<T>(f: impl FnOnce(SourceRunner) -> T) -> T {
+        f(new_source_runner_with_rust_analyzer())
     }
 
     fn rust_analyzer_available() -> bool {
@@ -90,92 +106,38 @@ mod tests {
             .join("source-provider")
     }
 
-    fn with_source_root_env<T>(source_root: &Path, f: impl FnOnce() -> T) -> T {
-        with_source_provider_env(|| {
-            let old_source_root = env::var_os("MICA_SOURCE_ROOT");
-            unsafe {
-                env::set_var("MICA_SOURCE_ROOT", source_root);
-            }
-            let result = f();
-            unsafe {
-                if let Some(old_source_root) = old_source_root {
-                    env::set_var("MICA_SOURCE_ROOT", old_source_root);
-                } else {
-                    env::remove_var("MICA_SOURCE_ROOT");
-                }
-            }
-            result
-        })
+    fn with_source_root_env<T>(source_root: &Path, f: impl FnOnce(SourceRunner) -> T) -> T {
+        f(SourceRunner::new_empty_with_source(
+            SourceConfig::new([source_root.to_path_buf()])
+                .with_rust_analyzer("rust-analyzer".to_owned()),
+        ))
     }
 
     fn with_source_index_env<T>(
         index_path: &Path,
         rust_analyzer: Option<&Path>,
-        f: impl FnOnce() -> T,
+        f: impl FnOnce(SourceRunner) -> T,
     ) -> T {
-        with_source_provider_env(|| {
-            let old_index = env::var_os("MICA_SOURCE_INDEX");
-            let old_rust_analyzer = env::var_os("MICA_RUST_ANALYZER");
-            unsafe {
-                env::set_var("MICA_SOURCE_INDEX", index_path);
-                if let Some(rust_analyzer) = rust_analyzer {
-                    env::set_var("MICA_RUST_ANALYZER", rust_analyzer);
-                }
-            }
-            let result = f();
-            unsafe {
-                if let Some(old_index) = old_index {
-                    env::set_var("MICA_SOURCE_INDEX", old_index);
-                } else {
-                    env::remove_var("MICA_SOURCE_INDEX");
-                }
-                if let Some(old_rust_analyzer) = old_rust_analyzer {
-                    env::set_var("MICA_RUST_ANALYZER", old_rust_analyzer);
-                } else {
-                    env::remove_var("MICA_RUST_ANALYZER");
-                }
-            }
-            result
-        })
+        let mut config = SourceConfig::new([env::current_dir().unwrap()])
+            .with_semantic_index(index_path.to_path_buf());
+        if let Some(rust_analyzer) = rust_analyzer {
+            config = config.with_rust_analyzer(rust_analyzer.display().to_string());
+        }
+        f(SourceRunner::new_empty_with_source(config))
     }
 
     fn with_source_index_and_root_env<T>(
         index_path: &Path,
         source_root: &Path,
         rust_analyzer: Option<&Path>,
-        f: impl FnOnce() -> T,
+        f: impl FnOnce(SourceRunner) -> T,
     ) -> T {
-        with_source_provider_env(|| {
-            let old_index = env::var_os("MICA_SOURCE_INDEX");
-            let old_rust_analyzer = env::var_os("MICA_RUST_ANALYZER");
-            let old_source_root = env::var_os("MICA_SOURCE_ROOT");
-            unsafe {
-                env::set_var("MICA_SOURCE_INDEX", index_path);
-                env::set_var("MICA_SOURCE_ROOT", source_root);
-                if let Some(rust_analyzer) = rust_analyzer {
-                    env::set_var("MICA_RUST_ANALYZER", rust_analyzer);
-                }
-            }
-            let result = f();
-            unsafe {
-                if let Some(old_index) = old_index {
-                    env::set_var("MICA_SOURCE_INDEX", old_index);
-                } else {
-                    env::remove_var("MICA_SOURCE_INDEX");
-                }
-                if let Some(old_rust_analyzer) = old_rust_analyzer {
-                    env::set_var("MICA_RUST_ANALYZER", old_rust_analyzer);
-                } else {
-                    env::remove_var("MICA_RUST_ANALYZER");
-                }
-                if let Some(old_source_root) = old_source_root {
-                    env::set_var("MICA_SOURCE_ROOT", old_source_root);
-                } else {
-                    env::remove_var("MICA_SOURCE_ROOT");
-                }
-            }
-            result
-        })
+        let mut config = SourceConfig::new([source_root.to_path_buf()])
+            .with_semantic_index(index_path.to_path_buf());
+        if let Some(rust_analyzer) = rust_analyzer {
+            config = config.with_rust_analyzer(rust_analyzer.display().to_string());
+        }
+        f(SourceRunner::new_empty_with_source(config))
     }
 
     fn temp_index_path(name: &str) -> PathBuf {
@@ -186,6 +148,332 @@ mod tests {
         ))
     }
 
+    #[derive(Clone)]
+    struct TestSourceProvider {
+        key: &'static str,
+        revision_kind: &'static str,
+        capabilities: SourceCapabilities,
+        read_result: ProviderResult<SourceDocument>,
+        list_result: ProviderResult<Vec<SourceEntry>>,
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl TestSourceProvider {
+        fn reader(key: &'static str, result: ProviderResult<SourceDocument>) -> Self {
+            Self {
+                key,
+                revision_kind: "worktree",
+                capabilities: SourceCapabilities::READ,
+                read_result: result,
+                list_result: ProviderResult::Absent,
+                calls: Arc::new(AtomicUsize::new(0)),
+            }
+        }
+
+        fn lister(key: &'static str, entries: Vec<SourceEntry>) -> Self {
+            Self {
+                key,
+                revision_kind: "worktree",
+                capabilities: SourceCapabilities::LIST,
+                read_result: ProviderResult::Absent,
+                list_result: ProviderResult::Found(entries),
+                calls: Arc::new(AtomicUsize::new(0)),
+            }
+        }
+    }
+
+    impl SourceProvider for TestSourceProvider {
+        fn key(&self) -> SourceProviderKey {
+            SourceProviderKey::new(self.key)
+        }
+
+        fn name(&self) -> &str {
+            self.key
+        }
+
+        fn capabilities(&self) -> SourceCapabilities {
+            self.capabilities
+        }
+
+        fn supports_revision_kind(&self, kind: &str) -> bool {
+            kind == self.revision_kind
+        }
+
+        fn read(&self, _request: &ReadRequest) -> ProviderResult<SourceDocument> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            self.read_result.clone()
+        }
+
+        fn list(&self, _request: &ListRequest) -> ProviderResult<Vec<SourceEntry>> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            self.list_result.clone()
+        }
+    }
+
+    fn configure_provider(runner: &mut SourceRunner, key: &str, capability: &str, precedence: i64) {
+        runner
+            .run_source(&format!(
+                "assert source/ProviderEnabled({key:?}, true)\n\
+                 assert source/RepositoryProvider(#repo, {key:?}, {capability:?}, {precedence})"
+            ))
+            .unwrap();
+    }
+
+    #[test]
+    fn higher_precedence_provider_shadows_local_document() {
+        let live = TestSourceProvider::reader(
+            "live-buffer",
+            ProviderResult::Found(SourceDocument::from_text("unsaved text", "buffer:7")),
+        );
+        let calls = live.calls.clone();
+        let mut runner = SourceRunner::new_empty_with_source(
+            SourceConfig::new([env::current_dir().unwrap()]).with_provider(live),
+        );
+        load_source_relations(&mut runner);
+        configure_provider(&mut runner, "live-buffer", "read", 100);
+
+        let report = runner
+            .run_source(
+                "let exactly {provider, text, hash, source_version} = source/FileText(#repo, #rev, \"Cargo.toml\", ?provider, ?text, ?hash, ?source_version)\n\
+                 return [provider, text, source_version]",
+            )
+            .unwrap();
+        assert!(matches!(
+            report.outcome,
+            TaskOutcome::Complete { value, .. }
+                if value == Value::list([
+                    Value::string("live-buffer"),
+                    Value::string("unsaved text"),
+                    Value::string("buffer:7"),
+                ])
+        ));
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn absent_provider_falls_back_but_denial_and_failure_stop() {
+        for (name, result, expected) in [
+            ("absent-buffer", ProviderResult::Absent, None),
+            (
+                "denied-buffer",
+                ProviderResult::Denied(SourceDenial::new("private buffer")),
+                Some("private buffer"),
+            ),
+            (
+                "failed-buffer",
+                ProviderResult::Failed(SourceFailure::new("buffer service unavailable")),
+                Some("buffer service unavailable"),
+            ),
+        ] {
+            let provider = TestSourceProvider::reader(name, result);
+            let mut runner = SourceRunner::new_empty_with_source(
+                SourceConfig::new([env::current_dir().unwrap()]).with_provider(provider),
+            );
+            load_source_relations(&mut runner);
+            configure_provider(&mut runner, name, "read", 100);
+            let report = runner
+                .run_source(
+                    "let exactly {provider, text, hash, source_version} = source/FileText(#repo, #rev, \"Cargo.toml\", ?provider, ?text, ?hash, ?source_version)\n\
+                     return provider",
+                )
+                .unwrap();
+            match expected {
+                None => assert!(matches!(
+                    report.outcome,
+                    TaskOutcome::Complete { value, .. } if value == Value::string("local-worktree")
+                )),
+                Some(message) => assert!(matches!(
+                    report.outcome,
+                    TaskOutcome::Aborted { error, .. } if format!("{error}").contains(message)
+                )),
+            }
+        }
+    }
+
+    #[test]
+    fn equal_precedence_exact_providers_fail_before_native_work() {
+        let live = TestSourceProvider::reader(
+            "live-buffer",
+            ProviderResult::Found(SourceDocument::from_text("unsaved", "buffer:1")),
+        );
+        let calls = live.calls.clone();
+        let mut runner = SourceRunner::new_empty_with_source(
+            SourceConfig::new([env::current_dir().unwrap()]).with_provider(live),
+        );
+        load_source_relations(&mut runner);
+        configure_provider(&mut runner, "live-buffer", "read", 0);
+
+        let report = runner
+            .run_source(
+                "return source/FileText(#repo, #rev, \"Cargo.toml\", ?provider, ?text, ?hash, ?source_version)",
+            )
+            .unwrap();
+        assert!(matches!(
+            report.outcome,
+            TaskOutcome::Aborted { error, .. }
+                if format!("{error}").contains("equal precedence")
+        ));
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn directory_merge_shadows_by_path_and_retains_provenance() {
+        let live = TestSourceProvider::lister(
+            "live-buffer",
+            vec![
+                SourceEntry::new("Cargo.toml", "file", "Cargo.toml"),
+                SourceEntry::new("new.rs", "file", "new.rs"),
+            ],
+        );
+        let mut runner = SourceRunner::new_empty_with_source(
+            SourceConfig::new([env::current_dir().unwrap()]).with_provider(live),
+        );
+        load_source_relations(&mut runner);
+        configure_provider(&mut runner, "live-buffer", "list", 100);
+
+        let report = runner
+            .run_source(
+                "let found = []\n\
+                 for entry in source/RepositoryEntry(#repo, #rev, \"\", ?path, ?kind, ?name, ?provider)\n\
+                   if entry[:path] == \"Cargo.toml\" || entry[:path] == \"new.rs\"\n\
+                     found = [@found, [entry[:path], entry[:provider]]]\n\
+                   end\n\
+                 end\n\
+                 return found",
+            )
+            .unwrap();
+        assert!(matches!(
+            report.outcome,
+            TaskOutcome::Complete { value, .. }
+                if value == Value::list([
+                    Value::list([Value::string("Cargo.toml"), Value::string("live-buffer")]),
+                    Value::list([Value::string("new.rs"), Value::string("live-buffer")]),
+                ])
+        ));
+    }
+
+    #[test]
+    fn provider_policy_routes_two_repositories_independently() {
+        let alpha = TestSourceProvider::reader(
+            "alpha-buffer",
+            ProviderResult::Found(SourceDocument::from_text("alpha", "alpha:1")),
+        );
+        let beta = TestSourceProvider::reader(
+            "beta-buffer",
+            ProviderResult::Found(SourceDocument::from_text("beta", "beta:1")),
+        );
+        let mut runner = SourceRunner::new_empty_with_source(
+            SourceConfig::new([env::current_dir().unwrap()])
+                .with_provider(alpha)
+                .with_provider(beta),
+        );
+        load_source_relations(&mut runner);
+        configure_provider(&mut runner, "alpha-buffer", "read", 100);
+        let root = env::current_dir().unwrap().display().to_string();
+        runner
+            .run_source(&format!(
+                "make_identity(:repo_beta)\n\
+                 make_identity(:rev_beta)\n\
+                 assert source/RepositoryRoot(#repo_beta, {root:?})\n\
+                 assert source/RevisionOf(#rev_beta, #repo_beta)\n\
+                 assert source/RevisionKind(#rev_beta, \"worktree\")\n\
+                 assert source/ProviderEnabled(\"beta-buffer\", true)\n\
+                 assert source/RepositoryProvider(#repo_beta, \"beta-buffer\", \"read\", 100)"
+            ))
+            .unwrap();
+
+        let report = runner
+            .run_source(
+                "let exactly {alpha_provider, alpha_text, alpha_hash, alpha_version} = source/FileText(#repo, #rev, \"same.rs\", ?alpha_provider, ?alpha_text, ?alpha_hash, ?alpha_version)\n\
+                 let exactly {beta_provider, beta_text, beta_hash, beta_version} = source/FileText(#repo_beta, #rev_beta, \"same.rs\", ?beta_provider, ?beta_text, ?beta_hash, ?beta_version)\n\
+                 return [alpha_provider, alpha_text, beta_provider, beta_text]",
+            )
+            .unwrap();
+        assert!(matches!(
+            report.outcome,
+            TaskOutcome::Complete { value, .. }
+                if value == Value::list([
+                    Value::string("alpha-buffer"),
+                    Value::string("alpha"),
+                    Value::string("beta-buffer"),
+                    Value::string("beta"),
+                ])
+        ));
+    }
+
+    #[test]
+    fn commit_revision_does_not_invoke_worktree_provider() {
+        let live = TestSourceProvider::reader(
+            "live-buffer",
+            ProviderResult::Found(SourceDocument::from_text("unsaved", "buffer:1")),
+        );
+        let calls = live.calls.clone();
+        let mut runner = SourceRunner::new_empty_with_source(
+            SourceConfig::new([env::current_dir().unwrap()]).with_provider(live),
+        );
+        load_source_relations(&mut runner);
+        configure_provider(&mut runner, "live-buffer", "read", 100);
+        runner
+            .run_source(
+                "retract source/RevisionKind(#rev, _)\n\
+                 assert source/RevisionKind(#rev, \"commit\")",
+            )
+            .unwrap();
+
+        let report = runner
+            .run_source(
+                "let rows = source/FileText(#repo, #rev, \"Cargo.toml\", ?provider, ?text, ?hash, ?source_version)\n\
+                 return not rows",
+            )
+            .unwrap();
+        assert!(matches!(
+            report.outcome,
+            TaskOutcome::Complete { value, .. } if value == Value::bool(true)
+        ));
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn provider_descriptions_come_from_the_native_registry() {
+        let mut runner = new_source_runner();
+        load_source_relations(&mut runner);
+
+        let report = runner
+            .run_source(
+                "let exactly {name} = source/ProviderName(\"local-worktree\", ?name)\n\
+                 if not source/ProviderCapability(\"local-worktree\", \"read\")\n\
+                   return \"missing capability\"\n\
+                 end\n\
+                 if not source/ProviderAvailable(\"local-worktree\")\n\
+                   return \"unavailable\"\n\
+                 end\n\
+                 return name",
+            )
+            .unwrap();
+        assert!(matches!(
+            report.outcome,
+            TaskOutcome::Complete { value, .. } if value == Value::string("local worktree")
+        ));
+    }
+
+    #[test]
+    fn stale_provider_policy_cannot_resolve_to_native_access() {
+        let mut runner = new_source_runner();
+        load_source_relations(&mut runner);
+        configure_provider(&mut runner, "unregistered-provider", "read", 100);
+
+        let report = runner
+            .run_source(
+                "return source/FileText(#repo, #rev, \"Cargo.toml\", ?provider, ?text, ?hash, ?source_version)",
+            )
+            .unwrap();
+        assert!(matches!(
+            report.outcome,
+            TaskOutcome::Aborted { error, .. }
+                if format!("{error}").contains("not registered in this runtime")
+        ));
+    }
+
     #[test]
     fn source_provider_reads_file_text_from_allowed_root() {
         let mut runner = new_source_runner();
@@ -193,13 +481,18 @@ mod tests {
 
         let report = runner
             .run_source(
-                "let exactly {text, hash} = source/FileText(#repo, #rev, \"Cargo.toml\", ?text, ?hash)\n\
-                 return string_contains(text, \"[package]\")",
+                "let exactly {provider, text, hash, source_version} = source/FileText(#repo, #rev, \"Cargo.toml\", ?provider, ?text, ?hash, ?source_version)\n\
+                 return [provider, string_contains(text, \"[package]\"), hash == source_version]",
             )
             .unwrap();
         assert!(matches!(
             report.outcome,
-            TaskOutcome::Complete { value, .. } if value == Value::bool(true)
+            TaskOutcome::Complete { value, .. }
+                if value == Value::list([
+                    Value::string("local-worktree"),
+                    Value::bool(true),
+                    Value::bool(true),
+                ])
         ));
     }
 
@@ -210,7 +503,7 @@ mod tests {
 
         let report = runner
             .run_source(
-                "let exactly {lines, hash} = source/FileLines(#repo, #rev, \"Cargo.toml\", 1, 2, ?lines, ?hash)\n\
+                "let exactly {lines, hash, provider, source_version} = source/FileLines(#repo, #rev, \"Cargo.toml\", 1, 2, ?lines, ?hash, ?provider, ?source_version)\n\
                  return lines",
             )
             .unwrap();
@@ -232,7 +525,7 @@ mod tests {
 
         let report = runner
             .run_source(
-                "let exactly {line_count} = source/FileLineCount(#repo, #rev, \"Cargo.toml\", ?line_count)\n\
+                "let exactly {line_count, provider, source_version} = source/FileLineCount(#repo, #rev, \"Cargo.toml\", ?line_count, ?provider, ?source_version)\n\
                  return line_count",
             )
             .unwrap();
@@ -249,7 +542,7 @@ mod tests {
 
         let report = runner
             .run_source(
-                "for entry in source/RepositoryEntry(#repo, #rev, \"\", ?path, ?kind, ?name)\n\
+                "for entry in source/RepositoryEntry(#repo, #rev, \"\", ?path, ?kind, ?name, ?provider)\n\
                    if entry[:path] == \"Cargo.toml\"\n\
                      return entry[:kind]\n\
                    end\n\
@@ -271,7 +564,9 @@ mod tests {
         // Scan KernelErrors are now raised as Mica error values so
         // try/catch can handle them; the task aborts with an error value.
         let report = runner
-            .run_source("return source/FileContentHash(#repo, #rev, \"../Cargo.toml\", ?hash)")
+            .run_source(
+                "return source/FileContentHash(#repo, #rev, \"../Cargo.toml\", ?hash, ?provider, ?source_version)",
+            )
             .expect("task should abort, not fail");
         let TaskOutcome::Aborted { error, .. } = report.outcome else {
             panic!("expected aborted task, got {:?}", report.outcome);
@@ -285,7 +580,9 @@ mod tests {
         load_source_relations(&mut runner);
 
         let report = runner
-            .run_source("return source/FileText(#repo, #rev, ?path, ?text, ?hash)")
+            .run_source(
+                "return source/FileText(#repo, #rev, ?path, ?provider, ?text, ?hash, ?source_version)",
+            )
             .expect("task should abort, not fail");
         let TaskOutcome::Aborted { error, .. } = report.outcome else {
             panic!("expected aborted task, got {:?}", report.outcome);
@@ -300,7 +597,7 @@ mod tests {
 
         let report = runner
             .run_source(
-                "return source/SyntaxOutline(#repo, #rev, ?path, ?node, ?kind, ?name, ?start_line, ?end_line, ?start_byte, ?end_byte)",
+                "return source/SyntaxOutline(#repo, #rev, ?path, ?node, ?kind, ?name, ?start_line, ?end_line, ?start_byte, ?end_byte, ?provider, ?source_version)",
             )
             .expect("task should abort, not fail");
         let TaskOutcome::Aborted { error, .. } = report.outcome else {
@@ -310,7 +607,7 @@ mod tests {
 
         let report = runner
             .run_source(
-                "return source/SyntaxNodeAt(#repo, #rev, \"src/lib.rs\", ?offset, ?node, ?kind, ?name, ?start_line, ?end_line, ?start_byte, ?end_byte)",
+                "return source/SyntaxNodeAt(#repo, #rev, \"src/lib.rs\", ?offset, ?node, ?kind, ?name, ?start_line, ?end_line, ?start_byte, ?end_byte, ?provider, ?source_version)",
             )
             .expect("task should abort, not fail");
         let TaskOutcome::Aborted { error, .. } = report.outcome else {
@@ -326,7 +623,9 @@ mod tests {
 
         let repo = runner.named_identity(Symbol::intern("repo")).unwrap();
         let error = runner
-            .run_source("assert source/FileContentHash(#repo, #rev, \"Cargo.toml\", \"x\")")
+            .run_source(
+                "assert source/FileContentHash(#repo, #rev, \"Cargo.toml\", \"x\", \"local-worktree\", \"version\")",
+            )
             .unwrap_err();
         assert!(format!("{error:?}").contains("ReadOnlyRelation"));
         assert!(
@@ -369,8 +668,7 @@ mod tests {
             })
             .expect("receive command should be recorded");
 
-        with_source_root_env(&tmp, || {
-            let mut runner = SourceRunner::new_empty();
+        with_source_root_env(&tmp, |mut runner| {
             load_source_relations_at(&mut runner, &tmp.display().to_string());
             let git_dir = remote.canonicalize().unwrap().display().to_string();
             let report = runner
@@ -431,8 +729,7 @@ mod tests {
         git_in(&work, ["push", "origin", "HEAD:refs/heads/main"]);
         let head = git_output_in(&work, ["rev-parse", "HEAD"]);
 
-        with_source_root_env(&tmp, || {
-            let mut runner = SourceRunner::new_empty();
+        with_source_root_env(&tmp, |mut runner| {
             load_source_relations_at(&mut runner, &work.display().to_string());
             let report = runner
                 .run_source("let exactly {commit} = source/RefTarget(#repo, \"refs/heads/main\", ?commit)\nreturn commit")
@@ -469,8 +766,7 @@ mod tests {
     fn source_provider_commit_exists_finds_review_fixture_history() {
         let mica_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
 
-        with_source_root_env(&mica_root, || {
-            let mut runner = SourceRunner::new_empty();
+        with_source_root_env(&mica_root, |mut runner| {
             load_source_relations_at(&mut runner, &mica_root.display().to_string());
             for commit in [
                 "696dbc78cc394c7882c3199d2bac62b38a2ed2bd",
@@ -496,7 +792,7 @@ mod tests {
 
         let report = runner
             .run_source(
-                "for item in source/SyntaxOutline(#repo, #rev, \"src/lib.rs\", ?node, ?kind, ?name, ?start_line, ?end_line, ?start_byte, ?end_byte)\n\
+                "for item in source/SyntaxOutline(#repo, #rev, \"src/lib.rs\", ?node, ?kind, ?name, ?start_line, ?end_line, ?start_byte, ?end_byte, ?provider, ?source_version)\n\
                    return item[:kind] != none\n\
                  end\n\
                  return false",
@@ -574,7 +870,7 @@ mod tests {
 
         let report = runner
             .run_source(
-                "let exactly {segments, hash} = source/SyntaxLine(#repo, #rev, \"src/lib.rs\", 1, 8, 1, ?segments, ?hash)\n\
+                "let exactly {segments, hash, provider, source_version} = source/SyntaxLine(#repo, #rev, \"src/lib.rs\", 1, 8, 1, ?segments, ?hash, ?provider, ?source_version)\n\
                  return segments",
             )
             .unwrap();
@@ -604,7 +900,7 @@ mod tests {
 
         let report = runner
             .run_source(
-                "let exactly {node, kind, name, start_line, end_line, start_byte, end_byte} = source/SyntaxNodeAt(#repo, #rev, \"src/lib.rs\", 2500, ?node, ?kind, ?name, ?start_line, ?end_line, ?start_byte, ?end_byte)\n\
+                "let exactly {node, kind, name, start_line, end_line, start_byte, end_byte, provider, source_version} = source/SyntaxNodeAt(#repo, #rev, \"src/lib.rs\", 2500, ?node, ?kind, ?name, ?start_line, ?end_line, ?start_byte, ?end_byte, ?provider, ?source_version)\n\
                  return node != none",
             )
             .unwrap();
@@ -620,8 +916,7 @@ mod tests {
             return;
         }
 
-        with_source_provider_env(|| {
-            let mut runner = SourceRunner::new_empty();
+        with_source_provider_env(|mut runner| {
             load_source_relations(&mut runner);
             let source = fs::read_to_string("src/retrieval.rs").unwrap();
             let offset = source.find("parse_vector(").unwrap();
@@ -676,75 +971,81 @@ mod tests {
         let index_path = temp_index_path("navigation");
         let root = source_provider_root();
         build_source_index_file(&root, &index_path).unwrap();
-        with_source_index_and_root_env(&index_path, &root, Some(Path::new("/bin/false")), || {
-            let mut runner = SourceRunner::new_empty();
-            load_source_relations_at(&mut runner, &root.display().to_string());
-            let source = fs::read_to_string(root.join("src/relations.rs")).unwrap();
-            let offset = source.find("LocalSourceProvider::from_env").unwrap();
+        with_source_index_and_root_env(
+            &index_path,
+            &root,
+            Some(Path::new("/bin/false")),
+            |mut runner| {
+                load_source_relations_at(&mut runner, &root.display().to_string());
+                let source = fs::read_to_string(root.join("src/relations.rs")).unwrap();
+                let offset = source.find("struct FileTextRelation").unwrap() + "struct ".len();
 
-            let report = runner
+                let report = runner
                 .run_source(&format!(
                     "for def in source/DefinitionAt(#repo, #rev, \"src/relations.rs\", {offset}, ?symbol, ?name, ?kind, ?target_path, ?start_line, ?end_line, ?start_byte, ?end_byte, ?provider)\n\
-                       if def[:name] == \"LocalSourceProvider\"\n\
+                       if def[:name] == \"FileTextRelation\"\n\
                          return [def[:symbol], def[:target_path], def[:start_line], def[:provider]]\n\
                        end\n\
                      end\n\
                      return none"
                 ))
                 .unwrap();
-            let TaskOutcome::Complete { value, .. } = report.outcome else {
-                panic!("expected complete outcome, got {:?}", report.outcome);
-            };
-            let symbol = value
-                .with_list(|values| {
-                    assert!(
-                        values[0]
-                            .with_str(|symbol| symbol.starts_with("idx:default:src/relations.rs:"))
-                            .unwrap_or(false)
-                    );
-                    assert_eq!(values[1], Value::string("src/relations.rs"));
-                    assert!(values[2].as_int().is_some_and(|line| line > 0));
-                    assert!(
-                        values[3]
-                            .with_str(|provider| provider.contains("mica-source-index"))
-                            .unwrap_or(false)
-                    );
-                    values[0].clone()
-                })
-                .expect("expected indexed definition tuple");
+                let TaskOutcome::Complete { value, .. } = report.outcome else {
+                    panic!("expected complete outcome, got {:?}", report.outcome);
+                };
+                let symbol = value
+                    .with_list(|values| {
+                        assert!(
+                            values[0]
+                                .with_str(
+                                    |symbol| symbol.starts_with("idx:default:src/relations.rs:")
+                                )
+                                .unwrap_or(false)
+                        );
+                        assert_eq!(values[1], Value::string("src/relations.rs"));
+                        assert!(values[2].as_int().is_some_and(|line| line > 0));
+                        assert!(
+                            values[3]
+                                .with_str(|provider| provider.contains("mica-source-index"))
+                                .unwrap_or(false)
+                        );
+                        values[0].clone()
+                    })
+                    .expect("expected indexed definition tuple");
 
-            let report = runner
+                let report = runner
                 .run_source(&format!(
                     "let symbol = {symbol:?}\n\
                      let count = 0\n\
                      for reference in source/ReferencesOf(#repo, #rev, symbol, ?path, ?start_line, ?end_line, ?start_byte, ?end_byte, ?provider, ?name)\n\
-                       if reference[:name] == \"LocalSourceProvider\" && reference[:provider] == \"mica-source-index/static-analysis 4\"\n\
+                       if reference[:name] == \"FileTextRelation\" && reference[:provider] == \"mica-source-index/static-analysis 4\"\n\
                          count = count + 1\n\
                        end\n\
                      end\n\
                      return count"
                 ))
                 .unwrap();
-            assert!(matches!(
-                report.outcome,
-                TaskOutcome::Complete { value, .. } if value.as_int().is_some_and(|count| count > 1)
-            ));
+                assert!(matches!(
+                    report.outcome,
+                    TaskOutcome::Complete { value, .. } if value.as_int().is_some_and(|count| count > 1)
+                ));
 
-            let report = runner
+                let report = runner
                 .run_source(
-                    "for result in source/SymbolSearch(#repo, #rev, \"LocalSource\", 5, ?symbol, ?name, ?kind, ?path, ?start_line, ?end_line, ?provider)\n\
-                       if result[:name] == \"LocalSourceProvider\"\n\
+                    "for result in source/SymbolSearch(#repo, #rev, \"FileTextRel\", 5, ?symbol, ?name, ?kind, ?path, ?start_line, ?end_line, ?provider)\n\
+                       if result[:name] == \"FileTextRelation\"\n\
                          return result[:provider]\n\
                        end\n\
                      end\n\
                      return none",
                 )
                 .unwrap();
-            assert!(matches!(
-                report.outcome,
-                TaskOutcome::Complete { value, .. } if value.with_str(|provider| provider.contains("mica-source-index")).unwrap_or(false)
-            ));
-        });
+                assert!(matches!(
+                    report.outcome,
+                    TaskOutcome::Complete { value, .. } if value.with_str(|provider| provider.contains("mica-source-index")).unwrap_or(false)
+                ));
+            },
+        );
         let _ = fs::remove_file(index_path);
     }
 
@@ -778,8 +1079,7 @@ mod tests {
         )
         .unwrap();
 
-        with_source_index_env(&index_path, Some(Path::new("/bin/false")), || {
-            let mut runner = SourceRunner::new_empty();
+        with_source_index_env(&index_path, Some(Path::new("/bin/false")), |mut runner| {
             load_source_relations_at(&mut runner, &alpha_root.display().to_string());
             runner
                 .run_source(&format!(
@@ -850,8 +1150,7 @@ mod tests {
             &index_path,
             &root_path,
             Some(Path::new("/bin/false")),
-            || {
-                let mut runner = SourceRunner::new_empty();
+            |mut runner| {
                 load_source_relations_at(&mut runner, &root_path.display().to_string());
                 let report = runner
                     .run_source(
@@ -908,8 +1207,7 @@ mod tests {
             &index_path,
             &root_path,
             Some(Path::new("/bin/false")),
-            || {
-                let mut runner = SourceRunner::new_empty();
+            |mut runner| {
                 load_source_relations_at(&mut runner, &root_path.display().to_string());
                 let report = runner
                     .run_source(
@@ -979,18 +1277,19 @@ mod tests {
             &index_path,
             &root_path,
             Some(Path::new("/bin/false")),
-            || {
-                let mut runner = SourceRunner::new_empty();
+            |mut runner| {
                 load_source_relations_at(&mut runner, &root_path.display().to_string());
                 let report = runner
                     .run_source(
                         "let first_path = none\n\
+                         let first_score = -1\n\
                          let first_line = 0\n\
                          let first_snippet = none\n\
                          let saw_generated_book = false\n\
                          for result in source/TextSearch(\"btree\", 8, \"all\", ?unit, ?score, ?path, ?start_line, ?end_line, ?kind, ?title, ?snippet)\n\
-                           if first_path == none\n\
+                           if result[:score] > first_score\n\
                              first_path = result[:path]\n\
+                             first_score = result[:score]\n\
                              first_line = result[:start_line]\n\
                              first_snippet = result[:snippet]\n\
                            end\n\
@@ -1046,8 +1345,7 @@ mod tests {
 
         let index_path = temp_index_path("mica-symbol");
         build_source_index_file(&root_path, &index_path).unwrap();
-        with_source_index_env(&index_path, Some(Path::new("/bin/false")), || {
-            let mut runner = SourceRunner::new_empty();
+        with_source_index_env(&index_path, Some(Path::new("/bin/false")), |mut runner| {
             load_source_relations_at(&mut runner, &root_path.display().to_string());
             let offset =
                 source.find("session/CanAssumeActor(#web").unwrap() + "session/CanAssume".len();
@@ -1085,8 +1383,7 @@ mod tests {
     fn persistent_source_index_status_reports_build_failures() {
         let index_path = temp_index_path("failed");
         write_failed_source_index_file(Path::new("."), &index_path, "synthetic failure").unwrap();
-        with_source_index_env(&index_path, None, || {
-            let mut runner = SourceRunner::new_empty();
+        with_source_index_env(&index_path, None, |mut runner| {
             load_source_relations(&mut runner);
             let report = runner
                 .run_source(
@@ -1117,8 +1414,7 @@ mod tests {
             return;
         }
 
-        with_source_provider_env(|| {
-            let mut runner = SourceRunner::new_empty();
+        with_source_provider_env(|mut runner| {
             load_source_relations(&mut runner);
             let source = fs::read_to_string("src/retrieval.rs").unwrap();
             let offset = source.find("fn parse_vector").unwrap() + "fn ".len();
@@ -1153,8 +1449,7 @@ mod tests {
             return;
         }
 
-        with_source_provider_env(|| {
-            let mut runner = SourceRunner::new_empty();
+        with_source_provider_env(|mut runner| {
             load_source_relations(&mut runner);
             let source = fs::read_to_string("src/lib.rs").unwrap();
             let offset = source.find("mod retrieval").unwrap() + "mod ".len();
@@ -1191,9 +1486,8 @@ mod tests {
 
         let current_dir = env::current_dir().unwrap();
         let workspace = current_dir.parent().and_then(Path::parent).unwrap();
-        with_source_root_env(workspace, || {
+        with_source_root_env(workspace, |mut runner| {
             let workspace = workspace.display().to_string();
-            let mut runner = SourceRunner::new_empty();
             load_source_relations_at(&mut runner, &workspace);
             let source = fs::read_to_string("src/lib.rs").unwrap();
             let offset = source.find("mod retrieval").unwrap() + "mod ".len();

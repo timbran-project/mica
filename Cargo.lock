@@ -3505,6 +3505,7 @@ dependencies = [
  "mica-relation-kernel",
  "mica-relation-wgpu",
  "mica-runtime",
+ "mica-source-provider",
  "mica-telnet-host",
  "mica-var",
  "mica-web-host",

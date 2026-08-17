@@ -1,11 +1,12 @@
-use crate::index::{IndexedTextUnit, PersistentSemanticIndex};
+use crate::dispatcher::SourceDispatcher;
+use crate::index::IndexedTextUnit;
 use crate::navigation::{
     SemanticSymbol, SemanticSymbolProvider, byte_offset_to_lsp_position, semantic_location,
     semantic_symbol,
 };
+use crate::provider::SourceConfig;
 use crate::receive::GitReceiveRecorder;
-use crate::rust_analyzer::RustAnalyzerProvider;
-use crate::syntax::{SourceLanguage, SyntaxDocument, syntax_lines};
+use crate::syntax::{SourceLanguage, syntax_lines};
 use crate::util::*;
 use crate::vcs::{BlameRow, VcsProvider};
 use jj_lib::object_id::ObjectId;
@@ -13,12 +14,8 @@ use mica_relation_kernel::{
     ComputedRelation, ComputedRelationRead, KernelError, RelationId, RelationMetadata, Tuple,
 };
 use mica_var::{Symbol, Value};
-use std::collections::{BTreeMap, HashMap};
-use std::env;
-use std::fs;
-use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, OnceLock};
-use std::time::{Duration, Instant, SystemTime};
+use std::collections::BTreeMap;
+use std::sync::Arc;
 
 const REPOSITORY_ENTRY_BOUND: &[u16] = &[0, 1, 2];
 const FILE_TEXT_BOUND: &[u16] = &[0, 1, 2];
@@ -46,480 +43,262 @@ const VCS_COMMIT_PATH_BOUND: &[u16] = &[0, 1];
 const VCS_BLAME_BOUND: &[u16] = &[0, 1, 2];
 const VCS_SEARCH_BOUND: &[u16] = &[0, 1];
 const GIT_RECEIVED_REF_UPDATE_BOUND: &[u16] = &[0];
-const SEMANTIC_INDEX_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
-const SOURCE_DOCUMENT_CACHE_LIMIT: usize = 64;
 
-pub fn default_computed_relations() -> Vec<Arc<dyn ComputedRelation>> {
-    let provider = Arc::new(LocalSourceProvider::from_env());
+/// Builds the source browsing computed relations from explicit configuration.
+///
+/// This is the only construction path; the source provider never reads
+/// process-global environment variables.
+pub fn computed_relations(config: SourceConfig) -> Vec<Arc<dyn ComputedRelation>> {
+    let dispatcher = Arc::new(SourceDispatcher::new(config));
     vec![
+        Arc::new(ProviderRelation {
+            dispatcher: dispatcher.clone(),
+        }),
+        Arc::new(ProviderNameRelation {
+            dispatcher: dispatcher.clone(),
+        }),
+        Arc::new(ProviderCapabilityRelation {
+            dispatcher: dispatcher.clone(),
+        }),
+        Arc::new(ProviderAvailableRelation {
+            dispatcher: dispatcher.clone(),
+        }),
         Arc::new(RepositoryEntryRelation {
-            provider: provider.clone(),
+            dispatcher: dispatcher.clone(),
         }),
         Arc::new(FileTextRelation {
-            provider: provider.clone(),
+            dispatcher: dispatcher.clone(),
         }),
         Arc::new(FileLinesRelation {
-            provider: provider.clone(),
+            dispatcher: dispatcher.clone(),
         }),
         Arc::new(FileLineCountRelation {
-            provider: provider.clone(),
+            dispatcher: dispatcher.clone(),
         }),
         Arc::new(FileContentHashRelation {
-            provider: provider.clone(),
+            dispatcher: dispatcher.clone(),
         }),
         Arc::new(SyntaxLineRelation {
-            provider: provider.clone(),
+            dispatcher: dispatcher.clone(),
         }),
         Arc::new(SyntaxOutlineRelation {
-            provider: provider.clone(),
+            dispatcher: dispatcher.clone(),
         }),
         Arc::new(SyntaxNodeAtRelation {
-            provider: provider.clone(),
+            dispatcher: dispatcher.clone(),
         }),
         Arc::new(DefinitionAtRelation {
-            provider: provider.clone(),
+            dispatcher: dispatcher.clone(),
         }),
         Arc::new(ReferencesOfRelation {
-            provider: provider.clone(),
+            dispatcher: dispatcher.clone(),
         }),
         Arc::new(SymbolSearchRelation {
-            provider: provider.clone(),
+            dispatcher: dispatcher.clone(),
         }),
         Arc::new(IndexedTextUnitRelation {
-            provider: provider.clone(),
+            dispatcher: dispatcher.clone(),
         }),
         Arc::new(IndexedFileRelation {
-            provider: provider.clone(),
+            dispatcher: dispatcher.clone(),
         }),
         Arc::new(TextSearchRelation {
-            provider: provider.clone(),
+            dispatcher: dispatcher.clone(),
         }),
         Arc::new(SourceIndexRelation {
-            provider: provider.clone(),
+            dispatcher: dispatcher.clone(),
         }),
         Arc::new(IndexRepositoryRelation {
-            provider: provider.clone(),
+            dispatcher: dispatcher.clone(),
         }),
         Arc::new(IndexRevisionRelation {
-            provider: provider.clone(),
+            dispatcher: dispatcher.clone(),
         }),
         Arc::new(IndexProviderRelation {
-            provider: provider.clone(),
+            dispatcher: dispatcher.clone(),
         }),
         Arc::new(IndexStatusRelation {
-            provider: provider.clone(),
+            dispatcher: dispatcher.clone(),
         }),
         Arc::new(IndexVersionRelation {
-            provider: provider.clone(),
+            dispatcher: dispatcher.clone(),
         }),
         Arc::new(IndexBuildErrorRelation {
-            provider: provider.clone(),
+            dispatcher: dispatcher.clone(),
         }),
         Arc::new(RepositoryVcsRelation {
-            provider: provider.clone(),
+            dispatcher: dispatcher.clone(),
         }),
         Arc::new(RefTargetRelation {
-            provider: provider.clone(),
+            dispatcher: dispatcher.clone(),
         }),
         Arc::new(GitRefTargetRelation {
-            provider: provider.clone(),
+            dispatcher: dispatcher.clone(),
         }),
         Arc::new(GitReceivedRefUpdateRelation {
-            provider: provider.clone(),
+            dispatcher: dispatcher.clone(),
         }),
         Arc::new(CommitExistsRelation {
-            provider: provider.clone(),
+            dispatcher: dispatcher.clone(),
         }),
         Arc::new(CommitTreeRelation {
-            provider: provider.clone(),
+            dispatcher: dispatcher.clone(),
         }),
         Arc::new(CommitAuthorRelation {
-            provider: provider.clone(),
+            dispatcher: dispatcher.clone(),
         }),
         Arc::new(CommitMessageRelation {
-            provider: provider.clone(),
+            dispatcher: dispatcher.clone(),
         }),
         Arc::new(CommitParentsRelation {
-            provider: provider.clone(),
+            dispatcher: dispatcher.clone(),
         }),
         Arc::new(ChangedFilesRelation {
-            provider: provider.clone(),
+            dispatcher: dispatcher.clone(),
         }),
         Arc::new(FileDiffRelation {
-            provider: provider.clone(),
+            dispatcher: dispatcher.clone(),
         }),
         Arc::new(FileDiffLineRelation {
-            provider: provider.clone(),
+            dispatcher: dispatcher.clone(),
         }),
         Arc::new(FileLineProjectionRelation {
-            provider: provider.clone(),
+            dispatcher: dispatcher.clone(),
         }),
         Arc::new(CommitLogRelation {
-            provider: provider.clone(),
+            dispatcher: dispatcher.clone(),
         }),
         Arc::new(CommitSearchRelation {
-            provider: provider.clone(),
+            dispatcher: dispatcher.clone(),
         }),
         Arc::new(FileHistoryRelation {
-            provider: provider.clone(),
+            dispatcher: dispatcher.clone(),
         }),
         Arc::new(FileBlameRelation {
-            provider: provider.clone(),
+            dispatcher: dispatcher.clone(),
         }),
         Arc::new(FileBlameHunkRelation {
-            provider: provider.clone(),
+            dispatcher: dispatcher.clone(),
         }),
     ]
 }
 
-#[derive(Debug)]
-struct LocalSourceProvider {
-    allowed_roots: Vec<PathBuf>,
-    semantic_index_path: PathBuf,
-    semantic_index_cache: Mutex<Option<CachedSemanticIndex>>,
-    source_document_cache: Mutex<HashMap<PathBuf, Arc<CachedSourceDocument>>>,
-    rust_analyzer: RustAnalyzerProvider,
-    vcs_providers: Mutex<HashMap<PathBuf, Arc<VcsProvider>>>,
+struct ProviderRelation {
+    dispatcher: Arc<SourceDispatcher>,
 }
 
-impl LocalSourceProvider {
-    fn from_env() -> Self {
-        let configured_roots = env::var_os("MICA_SOURCE_ROOTS")
-            .map(|roots| env::split_paths(&roots).collect::<Vec<_>>())
-            .or_else(|| env::var_os("MICA_SOURCE_ROOT").map(|root| vec![PathBuf::from(root)]))
-            .unwrap_or_else(|| vec![env::current_dir().unwrap_or_else(|_| PathBuf::from("."))]);
-        let allowed_roots = configured_roots
-            .into_iter()
-            .filter_map(|root| root.canonicalize().ok())
+impl ComputedRelation for ProviderRelation {
+    fn name(&self) -> &'static str {
+        "source-provider"
+    }
+
+    fn matches(&self, metadata: &RelationMetadata) -> bool {
+        metadata.name().name() == Some("source/Provider") && metadata.arity() == 1
+    }
+
+    fn scan(
+        &self,
+        _reader: &dyn ComputedRelationRead,
+        _metadata: &RelationMetadata,
+        bindings: &[Option<Value>],
+    ) -> Result<Vec<Tuple>, KernelError> {
+        let rows = self
+            .dispatcher
+            .providers()
+            .map(|(key, _)| Tuple::from([Value::string(key.as_str())]))
             .collect();
-        let semantic_index_path = env::var_os("MICA_SOURCE_INDEX")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from(".cache/source-index/mica-worktree.json"));
-        Self {
-            allowed_roots,
-            semantic_index_path,
-            semantic_index_cache: Mutex::new(None),
-            source_document_cache: Mutex::new(HashMap::new()),
-            rust_analyzer: RustAnalyzerProvider::from_env(),
-            vcs_providers: Mutex::new(HashMap::new()),
-        }
+        Ok(filter_bound_rows(rows, bindings))
+    }
+}
+
+struct ProviderNameRelation {
+    dispatcher: Arc<SourceDispatcher>,
+}
+
+impl ComputedRelation for ProviderNameRelation {
+    fn name(&self) -> &'static str {
+        "source-provider-name"
     }
 
-    fn repository_root(
+    fn matches(&self, metadata: &RelationMetadata) -> bool {
+        metadata.name().name() == Some("source/ProviderName") && metadata.arity() == 2
+    }
+
+    fn scan(
         &self,
-        reader: &dyn ComputedRelationRead,
-        relation: RelationId,
-        repository: &Value,
-        revision: &Value,
-    ) -> Result<PathBuf, KernelError> {
-        let root_relation = relation_id(reader, "source/RepositoryRoot", 2).ok_or_else(|| {
-            invalid_relation(relation, "missing relation source/RepositoryRoot/2")
-        })?;
-        let revision_of = relation_id(reader, "source/RevisionOf", 2)
-            .ok_or_else(|| invalid_relation(relation, "missing relation source/RevisionOf/2"))?;
+        _reader: &dyn ComputedRelationRead,
+        _metadata: &RelationMetadata,
+        bindings: &[Option<Value>],
+    ) -> Result<Vec<Tuple>, KernelError> {
+        let rows = self
+            .dispatcher
+            .providers()
+            .map(|(key, provider)| {
+                Tuple::from([Value::string(key.as_str()), Value::string(provider.name())])
+            })
+            .collect();
+        Ok(filter_bound_rows(rows, bindings))
+    }
+}
 
-        if reader
-            .scan_relation(
-                revision_of,
-                &[Some(revision.clone()), Some(repository.clone())],
-            )?
-            .is_empty()
-        {
-            return Err(invalid_relation(
-                relation,
-                "revision does not belong to repository",
-            ));
-        }
+struct ProviderCapabilityRelation {
+    dispatcher: Arc<SourceDispatcher>,
+}
 
-        let root = expect_single_value(
-            reader,
-            root_relation,
-            &[Some(repository.clone()), None],
-            relation,
-            "expected source/RepositoryRoot(repository, root)",
-        )?
-        .with_str(str::to_owned)
-        .ok_or_else(|| invalid_relation(relation, "repository root must be a string"))?;
-        let configured_root = PathBuf::from(root);
-        let root = configured_root.canonicalize().map_err(|error| {
-            invalid_relation(
-                relation,
-                format!(
-                    "invalid repository root {}: {error}",
-                    configured_root.display()
-                ),
-            )
-        })?;
-        if self
-            .allowed_roots
-            .iter()
-            .any(|allowed| root.starts_with(allowed))
-        {
-            Ok(root)
-        } else {
-            Err(invalid_relation(
-                relation,
-                format!(
-                    "repository root {} is not under an allowed source root",
-                    root.display()
-                ),
-            ))
-        }
+impl ComputedRelation for ProviderCapabilityRelation {
+    fn name(&self) -> &'static str {
+        "source-provider-capability"
     }
 
-    fn vcs_provider_for(
+    fn matches(&self, metadata: &RelationMetadata) -> bool {
+        metadata.name().name() == Some("source/ProviderCapability") && metadata.arity() == 2
+    }
+
+    fn scan(
         &self,
-        reader: &dyn ComputedRelationRead,
-        relation: RelationId,
-        repository: &Value,
-    ) -> Result<Arc<VcsProvider>, KernelError> {
-        let root_relation = relation_id(reader, "source/RepositoryRoot", 2).ok_or_else(|| {
-            invalid_relation(relation, "missing relation source/RepositoryRoot/2")
-        })?;
-        let root = expect_single_value(
-            reader,
-            root_relation,
-            &[Some(repository.clone()), None],
-            relation,
-            "expected source/RepositoryRoot(repository, root)",
-        )?
-        .with_str(str::to_owned)
-        .ok_or_else(|| invalid_relation(relation, "repository root must be a string"))?;
-        let root_path = PathBuf::from(root);
-        let allowed_root = root_path.canonicalize().map_err(|error| {
-            invalid_relation(
-                relation,
-                format!("invalid repository root {}: {error}", root_path.display()),
-            )
-        })?;
-        if !self
-            .allowed_roots
-            .iter()
-            .any(|allowed| allowed_root.starts_with(allowed))
-        {
-            return Err(invalid_relation(
-                relation,
-                format!(
-                    "repository root {} is not under an allowed source root",
-                    allowed_root.display()
-                ),
-            ));
-        }
-        let git_file = allowed_root.join(".git");
-        {
-            let cache = self.vcs_providers.lock().unwrap();
-            if let Some(provider) = cache.get(&git_file) {
-                return Ok(provider.clone());
-            }
-        }
-        let provider = VcsProvider::open(&git_file).map_err(|error| {
-            invalid_relation(
-                relation,
-                format!("failed to open vcs for {}: {error}", allowed_root.display()),
-            )
-        })?;
-        let provider = Arc::new(provider);
-        self.vcs_providers
-            .lock()
-            .unwrap()
-            .insert(git_file, provider.clone());
-        Ok(provider)
+        _reader: &dyn ComputedRelationRead,
+        _metadata: &RelationMetadata,
+        bindings: &[Option<Value>],
+    ) -> Result<Vec<Tuple>, KernelError> {
+        let rows = self
+            .dispatcher
+            .providers()
+            .flat_map(|(key, provider)| {
+                provider.capabilities().names().map(|capability| {
+                    Tuple::from([Value::string(key.as_str()), Value::string(capability)])
+                })
+            })
+            .collect();
+        Ok(filter_bound_rows(rows, bindings))
+    }
+}
+
+struct ProviderAvailableRelation {
+    dispatcher: Arc<SourceDispatcher>,
+}
+
+impl ComputedRelation for ProviderAvailableRelation {
+    fn name(&self) -> &'static str {
+        "source-provider-available"
     }
 
-    fn allowed_git_dir(&self, relation: RelationId, git_dir: &str) -> Result<PathBuf, KernelError> {
-        let path = PathBuf::from(git_dir);
-        let canonical = path.canonicalize().map_err(|error| {
-            invalid_relation(
-                relation,
-                format!("invalid git dir {}: {error}", path.display()),
-            )
-        })?;
-        if self
-            .allowed_roots
-            .iter()
-            .any(|allowed| canonical.starts_with(allowed))
-        {
-            Ok(canonical)
-        } else {
-            Err(invalid_relation(
-                relation,
-                format!(
-                    "git dir {} is not under an allowed source root",
-                    canonical.display()
-                ),
-            ))
-        }
+    fn matches(&self, metadata: &RelationMetadata) -> bool {
+        metadata.name().name() == Some("source/ProviderAvailable") && metadata.arity() == 1
     }
 
-    fn resolve_path(
+    fn scan(
         &self,
-        reader: &dyn ComputedRelationRead,
-        relation: RelationId,
-        repository: &Value,
-        revision: &Value,
-        relative_path: &str,
-    ) -> Result<(PathBuf, PathBuf), KernelError> {
-        validate_relative_path(relation, relative_path)?;
-        let root = self.repository_root(reader, relation, repository, revision)?;
-        let safe_path = if relative_path == "." || relative_path == "./" {
-            ""
-        } else {
-            relative_path
-        };
-        let candidate = root.join(safe_path);
-        let absolute = candidate.canonicalize().map_err(|error| {
-            invalid_relation(
-                relation,
-                format!(
-                    "failed to resolve path {} from repository root {} and relative path {}: {error}",
-                    candidate.display(),
-                    root.display(),
-                    relative_path
-                ),
-            )
-        })?;
-        if !absolute.starts_with(&root) {
-            return Err(invalid_relation(
-                relation,
-                "source path escapes repository root",
-            ));
-        }
-        Ok((root, absolute))
-    }
-
-    fn source_document(
-        &self,
-        relation: RelationId,
-        path: &Path,
-    ) -> Result<Arc<CachedSourceDocument>, KernelError> {
-        let key = source_document_key(relation, path)?;
-        if let Some(cached) = self.source_document_cache.lock().unwrap().get(path)
-            && cached.key == key
-        {
-            return Ok(cached.clone());
-        }
-
-        let bytes = read_file_bytes(relation, path)?;
-        let text = String::from_utf8(bytes).map_err(|error| {
-            invalid_relation(relation, format!("source file is not utf-8: {error}"))
-        })?;
-        let document = Arc::new(CachedSourceDocument {
-            key,
-            hash: content_hash(text.as_bytes()),
-            line_count: text.lines().count().max(1),
-            text,
-            syntax: OnceLock::new(),
-        });
-
-        let mut cache = self.source_document_cache.lock().unwrap();
-        if cache.len() >= SOURCE_DOCUMENT_CACHE_LIMIT {
-            cache.clear();
-        }
-        cache.insert(path.to_path_buf(), document.clone());
-        Ok(document)
-    }
-
-    fn semantic_index(
-        &self,
-        relation: RelationId,
-    ) -> Result<Arc<PersistentSemanticIndex>, KernelError> {
-        let mut cache = self.semantic_index_cache.lock().unwrap();
-        if let Some(cached) = cache.as_ref()
-            && cached.last_checked.elapsed() < SEMANTIC_INDEX_REFRESH_INTERVAL
-        {
-            return Ok(cached.index.clone());
-        }
-
-        let key = semantic_index_key(relation, &self.semantic_index_path)?;
-        if let Some(cached) = cache.as_ref()
-            && cached.key == key
-        {
-            let index = cached.index.clone();
-            *cache = Some(CachedSemanticIndex {
-                key,
-                last_checked: Instant::now(),
-                index: index.clone(),
-            });
-            return Ok(index);
-        }
-        let index = Arc::new(PersistentSemanticIndex::load(
-            relation,
-            &self.semantic_index_path,
-        )?);
-        *cache = Some(CachedSemanticIndex {
-            key,
-            last_checked: Instant::now(),
-            index: index.clone(),
-        });
-        Ok(index)
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct SemanticIndexKey {
-    len: u64,
-    modified: Option<SystemTime>,
-}
-
-#[derive(Clone, Debug)]
-struct CachedSemanticIndex {
-    key: Option<SemanticIndexKey>,
-    last_checked: Instant,
-    index: Arc<PersistentSemanticIndex>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct SourceDocumentKey {
-    len: u64,
-    modified: Option<SystemTime>,
-}
-
-#[derive(Debug)]
-struct CachedSourceDocument {
-    key: SourceDocumentKey,
-    text: String,
-    hash: String,
-    line_count: usize,
-    syntax: OnceLock<SyntaxDocument>,
-}
-
-impl CachedSourceDocument {
-    fn syntax(&self, path: &str) -> &SyntaxDocument {
-        self.syntax
-            .get_or_init(|| SyntaxDocument::parse(path, &self.text))
-    }
-}
-
-fn source_document_key(
-    relation: RelationId,
-    path: &Path,
-) -> Result<SourceDocumentKey, KernelError> {
-    let metadata = fs::metadata(path).map_err(|error| {
-        invalid_relation(
-            relation,
-            format!("failed to stat source file {}: {error}", path.display()),
-        )
-    })?;
-    Ok(SourceDocumentKey {
-        len: metadata.len(),
-        modified: metadata.modified().ok(),
-    })
-}
-
-fn semantic_index_key(
-    relation: RelationId,
-    path: &Path,
-) -> Result<Option<SemanticIndexKey>, KernelError> {
-    match fs::metadata(path) {
-        Ok(metadata) => Ok(Some(SemanticIndexKey {
-            len: metadata.len(),
-            modified: metadata.modified().ok(),
-        })),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(invalid_relation(
-            relation,
-            format!("failed to stat semantic index {}: {error}", path.display()),
-        )),
+        _reader: &dyn ComputedRelationRead,
+        _metadata: &RelationMetadata,
+        bindings: &[Option<Value>],
+    ) -> Result<Vec<Tuple>, KernelError> {
+        let rows = self
+            .dispatcher
+            .providers()
+            .filter(|(_, provider)| provider.is_available())
+            .map(|(key, _)| Tuple::from([Value::string(key.as_str())]))
+            .collect();
+        Ok(filter_bound_rows(rows, bindings))
     }
 }
 
@@ -542,16 +321,16 @@ fn repository_index_name(
 }
 
 struct RepositoryEntryRelation {
-    provider: Arc<LocalSourceProvider>,
+    dispatcher: Arc<SourceDispatcher>,
 }
 
 impl ComputedRelation for RepositoryEntryRelation {
     fn name(&self) -> &'static str {
-        "local-source-repository-entry"
+        "source-dispatch-repository-entry"
     }
 
     fn matches(&self, metadata: &RelationMetadata) -> bool {
-        metadata.name().name() == Some("source/RepositoryEntry") && metadata.arity() == 6
+        metadata.name().name() == Some("source/RepositoryEntry") && metadata.arity() == 7
     }
 
     fn required_bound_positions(&self, _metadata: &RelationMetadata) -> &[u16] {
@@ -567,49 +346,30 @@ impl ComputedRelation for RepositoryEntryRelation {
         let repository = bound_value(metadata.id(), bindings, 0, "repository")?;
         let revision = bound_value(metadata.id(), bindings, 1, "revision")?;
         let parent = bound_string(metadata.id(), bindings, 2, "parent path")?;
-        let (root, directory) =
-            self.provider
+        let (root, relative) =
+            self.dispatcher
                 .resolve_path(reader, metadata.id(), &repository, &revision, &parent)?;
-        if !directory.is_dir() {
-            return Err(invalid_relation(
-                metadata.id(),
-                "repository entry parent path must be a directory",
-            ));
-        }
-
-        let mut rows = fs::read_dir(&directory)
-            .map_err(|error| {
-                invalid_relation(metadata.id(), format!("failed to list directory: {error}"))
-            })?
+        let entries = self.dispatcher.list_entries(
+            reader,
+            metadata.id(),
+            &repository,
+            &revision,
+            &root,
+            &relative,
+        )?;
+        let mut rows = entries
+            .into_iter()
             .map(|entry| {
-                let entry = entry.map_err(|error| {
-                    invalid_relation(
-                        metadata.id(),
-                        format!("failed to read directory entry: {error}"),
-                    )
-                })?;
-                let path = entry.path();
-                let kind = if path.is_dir() { "directory" } else { "file" };
-                if kind == "file" && fs::read_to_string(&path).is_err() {
-                    return Ok(None);
-                }
-                let name = entry.file_name().to_string_lossy().into_owned();
-                let relative = path.strip_prefix(&root).map_err(|_| {
-                    invalid_relation(metadata.id(), "directory entry escaped repository root")
-                })?;
-                let relative = path_to_mica_string(metadata.id(), relative)?;
-                Ok(Some(Tuple::from([
+                Tuple::from([
                     repository.clone(),
                     revision.clone(),
                     Value::string(&parent),
-                    Value::string(relative),
-                    Value::string(kind),
-                    Value::string(name),
-                ])))
+                    Value::string(entry.entry.relative_path),
+                    Value::string(entry.entry.kind),
+                    Value::string(entry.entry.name),
+                    Value::string(entry.provider.as_str()),
+                ])
             })
-            .collect::<Result<Vec<_>, KernelError>>()?
-            .into_iter()
-            .flatten()
             .collect::<Vec<_>>();
         rows.sort_by(|left, right| left.values().cmp(right.values()));
         Ok(filter_bound_rows(rows, bindings))
@@ -617,16 +377,16 @@ impl ComputedRelation for RepositoryEntryRelation {
 }
 
 struct FileTextRelation {
-    provider: Arc<LocalSourceProvider>,
+    dispatcher: Arc<SourceDispatcher>,
 }
 
 impl ComputedRelation for FileTextRelation {
     fn name(&self) -> &'static str {
-        "local-source-file-text"
+        "source-dispatch-file-text"
     }
 
     fn matches(&self, metadata: &RelationMetadata) -> bool {
-        metadata.name().name() == Some("source/FileText") && metadata.arity() == 5
+        metadata.name().name() == Some("source/FileText") && metadata.arity() == 7
     }
 
     fn required_bound_positions(&self, _metadata: &RelationMetadata) -> &[u16] {
@@ -642,17 +402,29 @@ impl ComputedRelation for FileTextRelation {
         let repository = bound_value(metadata.id(), bindings, 0, "repository")?;
         let revision = bound_value(metadata.id(), bindings, 1, "revision")?;
         let path = bound_string(metadata.id(), bindings, 2, "path")?;
-        let (_root, file) =
-            self.provider
+        let (root, relative) =
+            self.dispatcher
                 .resolve_path(reader, metadata.id(), &repository, &revision, &path)?;
-        let document = self.provider.source_document(metadata.id(), &file)?;
+        let Some(document) = self.dispatcher.source_document(
+            reader,
+            metadata.id(),
+            &repository,
+            &revision,
+            &root,
+            &relative,
+        )?
+        else {
+            return Ok(Vec::new());
+        };
         Ok(filter_bound_rows(
             vec![Tuple::from([
                 repository,
                 revision,
                 Value::string(path),
+                Value::string(document.provider.as_str()),
                 Value::string(&document.text),
                 Value::string(&document.hash),
+                Value::string(&document.source_version),
             ])],
             bindings,
         ))
@@ -660,16 +432,16 @@ impl ComputedRelation for FileTextRelation {
 }
 
 struct FileLinesRelation {
-    provider: Arc<LocalSourceProvider>,
+    dispatcher: Arc<SourceDispatcher>,
 }
 
 impl ComputedRelation for FileLinesRelation {
     fn name(&self) -> &'static str {
-        "local-source-file-lines"
+        "source-dispatch-file-lines"
     }
 
     fn matches(&self, metadata: &RelationMetadata) -> bool {
-        metadata.name().name() == Some("source/FileLines") && metadata.arity() == 7
+        metadata.name().name() == Some("source/FileLines") && metadata.arity() == 9
     }
 
     fn required_bound_positions(&self, _metadata: &RelationMetadata) -> &[u16] {
@@ -687,10 +459,20 @@ impl ComputedRelation for FileLinesRelation {
         let path = bound_string(metadata.id(), bindings, 2, "path")?;
         let start_line = bound_positive_int(metadata.id(), bindings, 3, "start line")?;
         let line_count = bound_non_negative_int(metadata.id(), bindings, 4, "line count")?;
-        let (_root, file) =
-            self.provider
+        let (root, relative) =
+            self.dispatcher
                 .resolve_path(reader, metadata.id(), &repository, &revision, &path)?;
-        let document = self.provider.source_document(metadata.id(), &file)?;
+        let Some(document) = self.dispatcher.source_document(
+            reader,
+            metadata.id(),
+            &repository,
+            &revision,
+            &root,
+            &relative,
+        )?
+        else {
+            return Ok(Vec::new());
+        };
         let lines = document
             .text
             .lines()
@@ -707,6 +489,8 @@ impl ComputedRelation for FileLinesRelation {
                 int_value(metadata.id(), line_count as i64)?,
                 Value::list(lines),
                 Value::string(&document.hash),
+                Value::string(document.provider.as_str()),
+                Value::string(&document.source_version),
             ])],
             bindings,
         ))
@@ -714,16 +498,16 @@ impl ComputedRelation for FileLinesRelation {
 }
 
 struct FileLineCountRelation {
-    provider: Arc<LocalSourceProvider>,
+    dispatcher: Arc<SourceDispatcher>,
 }
 
 impl ComputedRelation for FileLineCountRelation {
     fn name(&self) -> &'static str {
-        "local-source-file-line-count"
+        "source-dispatch-file-line-count"
     }
 
     fn matches(&self, metadata: &RelationMetadata) -> bool {
-        metadata.name().name() == Some("source/FileLineCount") && metadata.arity() == 4
+        metadata.name().name() == Some("source/FileLineCount") && metadata.arity() == 6
     }
 
     fn required_bound_positions(&self, _metadata: &RelationMetadata) -> &[u16] {
@@ -739,16 +523,28 @@ impl ComputedRelation for FileLineCountRelation {
         let repository = bound_value(metadata.id(), bindings, 0, "repository")?;
         let revision = bound_value(metadata.id(), bindings, 1, "revision")?;
         let path = bound_string(metadata.id(), bindings, 2, "path")?;
-        let (_root, file) =
-            self.provider
+        let (root, relative) =
+            self.dispatcher
                 .resolve_path(reader, metadata.id(), &repository, &revision, &path)?;
-        let document = self.provider.source_document(metadata.id(), &file)?;
+        let Some(document) = self.dispatcher.source_document(
+            reader,
+            metadata.id(),
+            &repository,
+            &revision,
+            &root,
+            &relative,
+        )?
+        else {
+            return Ok(Vec::new());
+        };
         Ok(filter_bound_rows(
             vec![Tuple::from([
                 repository,
                 revision,
                 Value::string(path),
                 int_value(metadata.id(), document.line_count as i64)?,
+                Value::string(document.provider.as_str()),
+                Value::string(&document.source_version),
             ])],
             bindings,
         ))
@@ -756,16 +552,16 @@ impl ComputedRelation for FileLineCountRelation {
 }
 
 struct FileContentHashRelation {
-    provider: Arc<LocalSourceProvider>,
+    dispatcher: Arc<SourceDispatcher>,
 }
 
 impl ComputedRelation for FileContentHashRelation {
     fn name(&self) -> &'static str {
-        "local-source-file-content-hash"
+        "source-dispatch-file-content-hash"
     }
 
     fn matches(&self, metadata: &RelationMetadata) -> bool {
-        metadata.name().name() == Some("source/FileContentHash") && metadata.arity() == 4
+        metadata.name().name() == Some("source/FileContentHash") && metadata.arity() == 6
     }
 
     fn required_bound_positions(&self, _metadata: &RelationMetadata) -> &[u16] {
@@ -781,16 +577,28 @@ impl ComputedRelation for FileContentHashRelation {
         let repository = bound_value(metadata.id(), bindings, 0, "repository")?;
         let revision = bound_value(metadata.id(), bindings, 1, "revision")?;
         let path = bound_string(metadata.id(), bindings, 2, "path")?;
-        let (_root, file) =
-            self.provider
+        let (root, relative) =
+            self.dispatcher
                 .resolve_path(reader, metadata.id(), &repository, &revision, &path)?;
-        let document = self.provider.source_document(metadata.id(), &file)?;
+        let Some(document) = self.dispatcher.source_document(
+            reader,
+            metadata.id(),
+            &repository,
+            &revision,
+            &root,
+            &relative,
+        )?
+        else {
+            return Ok(Vec::new());
+        };
         Ok(filter_bound_rows(
             vec![Tuple::from([
                 repository,
                 revision,
                 Value::string(path),
                 Value::string(&document.hash),
+                Value::string(document.provider.as_str()),
+                Value::string(&document.source_version),
             ])],
             bindings,
         ))
@@ -798,16 +606,16 @@ impl ComputedRelation for FileContentHashRelation {
 }
 
 struct SyntaxLineRelation {
-    provider: Arc<LocalSourceProvider>,
+    dispatcher: Arc<SourceDispatcher>,
 }
 
 impl ComputedRelation for SyntaxLineRelation {
     fn name(&self) -> &'static str {
-        "local-source-syntax-line"
+        "source-dispatch-syntax-line"
     }
 
     fn matches(&self, metadata: &RelationMetadata) -> bool {
-        metadata.name().name() == Some("source/SyntaxLine") && metadata.arity() == 8
+        metadata.name().name() == Some("source/SyntaxLine") && metadata.arity() == 10
     }
 
     fn required_bound_positions(&self, _metadata: &RelationMetadata) -> &[u16] {
@@ -825,10 +633,20 @@ impl ComputedRelation for SyntaxLineRelation {
         let path = bound_string(metadata.id(), bindings, 2, "path")?;
         let start_line = bound_positive_int(metadata.id(), bindings, 3, "start line")?;
         let line_count = bound_non_negative_int(metadata.id(), bindings, 4, "line count")?;
-        let (_root, file) =
-            self.provider
+        let (root, relative) =
+            self.dispatcher
                 .resolve_path(reader, metadata.id(), &repository, &revision, &path)?;
-        let document = self.provider.source_document(metadata.id(), &file)?;
+        let Some(document) = self.dispatcher.source_document(
+            reader,
+            metadata.id(),
+            &repository,
+            &revision,
+            &root,
+            &relative,
+        )?
+        else {
+            return Ok(Vec::new());
+        };
         let syntax = document.syntax(&path);
         let rows = syntax_lines(metadata.id(), syntax, start_line, line_count)?
             .into_iter()
@@ -842,6 +660,8 @@ impl ComputedRelation for SyntaxLineRelation {
                     int_value(metadata.id(), line.number as i64)?,
                     Value::list(line.segments),
                     Value::string(&document.hash),
+                    Value::string(document.provider.as_str()),
+                    Value::string(&document.source_version),
                 ]))
             })
             .collect::<Result<Vec<_>, KernelError>>()?;
@@ -850,16 +670,16 @@ impl ComputedRelation for SyntaxLineRelation {
 }
 
 struct SyntaxOutlineRelation {
-    provider: Arc<LocalSourceProvider>,
+    dispatcher: Arc<SourceDispatcher>,
 }
 
 impl ComputedRelation for SyntaxOutlineRelation {
     fn name(&self) -> &'static str {
-        "local-source-syntax-outline"
+        "source-dispatch-syntax-outline"
     }
 
     fn matches(&self, metadata: &RelationMetadata) -> bool {
-        metadata.name().name() == Some("source/SyntaxOutline") && metadata.arity() == 10
+        metadata.name().name() == Some("source/SyntaxOutline") && metadata.arity() == 12
     }
 
     fn required_bound_positions(&self, _metadata: &RelationMetadata) -> &[u16] {
@@ -875,10 +695,20 @@ impl ComputedRelation for SyntaxOutlineRelation {
         let repository = bound_value(metadata.id(), bindings, 0, "repository")?;
         let revision = bound_value(metadata.id(), bindings, 1, "revision")?;
         let path = bound_string(metadata.id(), bindings, 2, "path")?;
-        let (_root, file) =
-            self.provider
+        let (root, relative) =
+            self.dispatcher
                 .resolve_path(reader, metadata.id(), &repository, &revision, &path)?;
-        let document = self.provider.source_document(metadata.id(), &file)?;
+        let Some(document) = self.dispatcher.source_document(
+            reader,
+            metadata.id(),
+            &repository,
+            &revision,
+            &root,
+            &relative,
+        )?
+        else {
+            return Ok(Vec::new());
+        };
         let syntax = document.syntax(&path);
         let rows = syntax
             .outline
@@ -895,6 +725,8 @@ impl ComputedRelation for SyntaxOutlineRelation {
                     int_value(metadata.id(), item.end_line as i64)?,
                     int_value(metadata.id(), item.start_byte as i64)?,
                     int_value(metadata.id(), item.end_byte as i64)?,
+                    Value::string(document.provider.as_str()),
+                    Value::string(&document.source_version),
                 ]))
             })
             .collect::<Result<Vec<_>, KernelError>>()?;
@@ -903,16 +735,16 @@ impl ComputedRelation for SyntaxOutlineRelation {
 }
 
 struct SyntaxNodeAtRelation {
-    provider: Arc<LocalSourceProvider>,
+    dispatcher: Arc<SourceDispatcher>,
 }
 
 impl ComputedRelation for SyntaxNodeAtRelation {
     fn name(&self) -> &'static str {
-        "local-source-syntax-node-at"
+        "source-dispatch-syntax-node-at"
     }
 
     fn matches(&self, metadata: &RelationMetadata) -> bool {
-        metadata.name().name() == Some("source/SyntaxNodeAt") && metadata.arity() == 11
+        metadata.name().name() == Some("source/SyntaxNodeAt") && metadata.arity() == 13
     }
 
     fn required_bound_positions(&self, _metadata: &RelationMetadata) -> &[u16] {
@@ -929,10 +761,20 @@ impl ComputedRelation for SyntaxNodeAtRelation {
         let revision = bound_value(metadata.id(), bindings, 1, "revision")?;
         let path = bound_string(metadata.id(), bindings, 2, "path")?;
         let byte_offset = bound_non_negative_int(metadata.id(), bindings, 3, "byte offset")?;
-        let (_root, file) =
-            self.provider
+        let (root, relative) =
+            self.dispatcher
                 .resolve_path(reader, metadata.id(), &repository, &revision, &path)?;
-        let document = self.provider.source_document(metadata.id(), &file)?;
+        let Some(document) = self.dispatcher.source_document(
+            reader,
+            metadata.id(),
+            &repository,
+            &revision,
+            &root,
+            &relative,
+        )?
+        else {
+            return Ok(Vec::new());
+        };
         if byte_offset > document.text.len() {
             return Err(invalid_relation(
                 metadata.id(),
@@ -954,6 +796,8 @@ impl ComputedRelation for SyntaxNodeAtRelation {
                 int_value(metadata.id(), item.end_line as i64)?,
                 int_value(metadata.id(), item.start_byte as i64)?,
                 int_value(metadata.id(), item.end_byte as i64)?,
+                Value::string(document.provider.as_str()),
+                Value::string(&document.source_version),
             ])]
         } else {
             Vec::new()
@@ -963,7 +807,7 @@ impl ComputedRelation for SyntaxNodeAtRelation {
 }
 
 struct DefinitionAtRelation {
-    provider: Arc<LocalSourceProvider>,
+    dispatcher: Arc<SourceDispatcher>,
 }
 
 impl ComputedRelation for DefinitionAtRelation {
@@ -989,17 +833,27 @@ impl ComputedRelation for DefinitionAtRelation {
         let revision = bound_value(metadata.id(), bindings, 1, "revision")?;
         let path = bound_string(metadata.id(), bindings, 2, "path")?;
         let byte_offset = bound_non_negative_int(metadata.id(), bindings, 3, "byte offset")?;
-        let (root, file) =
-            self.provider
+        let (root, relative) =
+            self.dispatcher
                 .resolve_path(reader, metadata.id(), &repository, &revision, &path)?;
-        let document = self.provider.source_document(metadata.id(), &file)?;
+        let Some(document) = self.dispatcher.source_document(
+            reader,
+            metadata.id(),
+            &repository,
+            &revision,
+            &root,
+            &relative,
+        )?
+        else {
+            return Ok(Vec::new());
+        };
         if byte_offset > document.text.len() {
             return Err(invalid_relation(
                 metadata.id(),
                 "byte offset is beyond source file length",
             ));
         }
-        let index = self.provider.semantic_index(metadata.id())?;
+        let index = self.dispatcher.semantic_index(metadata.id())?;
         let repository_name = repository_index_name(reader, metadata.id(), &repository)?;
         let indexed_rows = index
             .definition_at(repository_name.as_deref(), &path, byte_offset)
@@ -1028,9 +882,11 @@ impl ComputedRelation for DefinitionAtRelation {
         if SourceLanguage::from_path(&path) != SourceLanguage::Rust {
             return Ok(Vec::new());
         }
-        let mut locations = self
-            .provider
-            .rust_analyzer
+        let Some(rust_analyzer) = self.dispatcher.rust_analyzer() else {
+            return Ok(Vec::new());
+        };
+        let file = root.join(&relative);
+        let mut locations = rust_analyzer
             .definition(
                 &rust_workspace_root(&root),
                 &file,
@@ -1046,9 +902,7 @@ impl ComputedRelation for DefinitionAtRelation {
         {
             let inner_offset = byte_offset + ch.len_utf8();
             if inner_offset <= document.text.len() {
-                locations = self
-                    .provider
-                    .rust_analyzer
+                locations = rust_analyzer
                     .definition(
                         &rust_workspace_root(&root),
                         &file,
@@ -1085,7 +939,7 @@ impl ComputedRelation for DefinitionAtRelation {
 }
 
 struct ReferencesOfRelation {
-    provider: Arc<LocalSourceProvider>,
+    dispatcher: Arc<SourceDispatcher>,
 }
 
 impl ComputedRelation for ReferencesOfRelation {
@@ -1113,7 +967,7 @@ impl ComputedRelation for ReferencesOfRelation {
         let Some(request) = SemanticSymbol::parse(&symbol) else {
             return Ok(Vec::new());
         };
-        let index = self.provider.semantic_index(metadata.id())?;
+        let index = self.dispatcher.semantic_index(metadata.id())?;
         let repository_name = repository_index_name(reader, metadata.id(), &repository)?;
         if request.provider == SemanticSymbolProvider::Index {
             let rows = index
@@ -1136,9 +990,12 @@ impl ComputedRelation for ReferencesOfRelation {
                 .collect::<Result<Vec<_>, KernelError>>()?;
             return Ok(filter_bound_rows(rows, bindings));
         }
-        let root = self
-            .provider
-            .repository_root(reader, metadata.id(), &repository, &revision)?;
+        let Some(rust_analyzer) = self.dispatcher.rust_analyzer() else {
+            return Ok(Vec::new());
+        };
+        let root =
+            self.dispatcher
+                .repository_root(reader, metadata.id(), &repository, &revision)?;
         validate_relative_path(metadata.id(), &request.path)?;
         let file = root.join(&request.path).canonicalize().map_err(|error| {
             invalid_relation(
@@ -1152,12 +1009,20 @@ impl ComputedRelation for ReferencesOfRelation {
                 "symbol path escapes repository root",
             ));
         }
-        let document = self.provider.source_document(metadata.id(), &file)?;
+        let Some(document) = self.dispatcher.source_document(
+            reader,
+            metadata.id(),
+            &repository,
+            &revision,
+            &root,
+            &request.path,
+        )?
+        else {
+            return Ok(Vec::new());
+        };
         let position =
             byte_offset_to_lsp_position(metadata.id(), &document.text, request.start_byte)?;
-        let locations = self
-            .provider
-            .rust_analyzer
+        let locations = rust_analyzer
             .references(&rust_workspace_root(&root), &file, &document.text, position)
             .unwrap_or_default();
         let mut rows = Vec::new();
@@ -1183,7 +1048,7 @@ impl ComputedRelation for ReferencesOfRelation {
 }
 
 struct SymbolSearchRelation {
-    provider: Arc<LocalSourceProvider>,
+    dispatcher: Arc<SourceDispatcher>,
 }
 
 impl ComputedRelation for SymbolSearchRelation {
@@ -1209,7 +1074,7 @@ impl ComputedRelation for SymbolSearchRelation {
         let revision = bound_value(metadata.id(), bindings, 1, "revision")?;
         let query = bound_string(metadata.id(), bindings, 2, "query")?;
         let limit = bound_non_negative_int(metadata.id(), bindings, 3, "limit")?;
-        let index = self.provider.semantic_index(metadata.id())?;
+        let index = self.dispatcher.semantic_index(metadata.id())?;
         let repository_name = repository_index_name(reader, metadata.id(), &repository)?;
         let rows = index
             .search(repository_name.as_deref(), &query, limit)
@@ -1235,7 +1100,7 @@ impl ComputedRelation for SymbolSearchRelation {
 }
 
 struct IndexedTextUnitRelation {
-    provider: Arc<LocalSourceProvider>,
+    dispatcher: Arc<SourceDispatcher>,
 }
 
 impl ComputedRelation for IndexedTextUnitRelation {
@@ -1257,7 +1122,7 @@ impl ComputedRelation for IndexedTextUnitRelation {
         metadata: &RelationMetadata,
         bindings: &[Option<Value>],
     ) -> Result<Vec<Tuple>, KernelError> {
-        let index = self.provider.semantic_index(metadata.id())?;
+        let index = self.dispatcher.semantic_index(metadata.id())?;
         if !index.is_complete() {
             return Ok(Vec::new());
         }
@@ -1289,7 +1154,7 @@ impl ComputedRelation for IndexedTextUnitRelation {
 }
 
 struct IndexedFileRelation {
-    provider: Arc<LocalSourceProvider>,
+    dispatcher: Arc<SourceDispatcher>,
 }
 
 impl ComputedRelation for IndexedFileRelation {
@@ -1311,7 +1176,7 @@ impl ComputedRelation for IndexedFileRelation {
         metadata: &RelationMetadata,
         bindings: &[Option<Value>],
     ) -> Result<Vec<Tuple>, KernelError> {
-        let index = self.provider.semantic_index(metadata.id())?;
+        let index = self.dispatcher.semantic_index(metadata.id())?;
         if !index.is_complete() {
             return Ok(Vec::new());
         }
@@ -1341,7 +1206,7 @@ impl ComputedRelation for IndexedFileRelation {
 }
 
 struct TextSearchRelation {
-    provider: Arc<LocalSourceProvider>,
+    dispatcher: Arc<SourceDispatcher>,
 }
 
 impl ComputedRelation for TextSearchRelation {
@@ -1366,106 +1231,29 @@ impl ComputedRelation for TextSearchRelation {
         let query = bound_string(metadata.id(), bindings, 0, "query")?;
         let limit = bound_non_negative_int(metadata.id(), bindings, 1, "limit")?;
         let scope = bound_string(metadata.id(), bindings, 2, "scope")?;
-        let index = self.provider.semantic_index(metadata.id())?;
-        if !index.is_complete() || limit == 0 {
-            return Ok(Vec::new());
-        }
-
-        let rows = text_search(&index, &query, limit, &scope)
+        let hits =
+            self.dispatcher
+                .semantic_index_text_search(metadata.id(), &query, limit, &scope)?;
+        let rows = hits
             .into_iter()
             .map(|hit| {
                 Ok(Tuple::from([
                     Value::string(&query),
                     int_value(metadata.id(), limit as i64)?,
                     Value::string(&scope),
-                    Value::string(&hit.unit.unit),
+                    Value::string(hit.unit),
                     int_value(metadata.id(), hit.score)?,
-                    Value::string(&hit.unit.path),
+                    Value::string(hit.path),
                     int_value(metadata.id(), hit.match_line as i64)?,
                     int_value(metadata.id(), hit.match_line as i64)?,
-                    Value::string(&hit.unit.kind),
-                    Value::string(&hit.unit.title),
+                    Value::string(hit.kind),
+                    Value::string(hit.title),
                     Value::string(hit.snippet),
                 ]))
             })
             .collect::<Result<Vec<_>, KernelError>>()?;
         Ok(filter_bound_rows(rows, bindings))
     }
-}
-
-#[derive(Debug)]
-struct TextSearchHit<'a> {
-    unit: &'a IndexedTextUnit,
-    score: i64,
-    match_line: usize,
-    snippet: String,
-}
-
-fn text_search<'a>(
-    index: &'a PersistentSemanticIndex,
-    query: &str,
-    limit: usize,
-    scope: &str,
-) -> Vec<TextSearchHit<'a>> {
-    let terms = search_terms(query);
-    if terms.is_empty() {
-        return Vec::new();
-    }
-    let query_lower = query.to_ascii_lowercase();
-    let symbol_matches = index
-        .symbols
-        .iter()
-        .filter(|symbol| {
-            let name = symbol.name.to_ascii_lowercase();
-            name.contains(&query_lower) || terms.iter().any(|term| name.contains(term))
-        })
-        .collect::<Vec<_>>();
-
-    let mut hits = index
-        .text_units
-        .iter()
-        .filter(|unit| source_text_scope_matches(&unit.path, scope))
-        .filter_map(|unit| {
-            let mut score = score_text_unit(unit, &query_lower, &terms);
-            let mut match_line = text_match_line(unit, &query_lower, &terms);
-            for symbol in &symbol_matches {
-                if symbol.repository == unit.repository
-                    && symbol.path == unit.path
-                    && symbol.start_line <= unit.end_line
-                    && unit.start_line <= symbol.end_line
-                {
-                    if symbol.name.eq_ignore_ascii_case(query) {
-                        score += 320;
-                    } else {
-                        score += 190;
-                    }
-                    if match_line.is_none() {
-                        match_line = Some(symbol.start_line);
-                    }
-                }
-            }
-            if score == 0 {
-                return None;
-            }
-            Some(TextSearchHit {
-                unit,
-                score,
-                match_line: match_line.unwrap_or(unit.start_line),
-                snippet: search_snippet(unit, &query_lower, &terms),
-            })
-        })
-        .collect::<Vec<_>>();
-
-    hits.sort_by(|left, right| {
-        right
-            .score
-            .cmp(&left.score)
-            .then_with(|| left.unit.path.cmp(&right.unit.path))
-            .then_with(|| left.unit.start_line.cmp(&right.unit.start_line))
-            .then_with(|| left.unit.unit.cmp(&right.unit.unit))
-    });
-    hits.truncate(limit);
-    hits
 }
 
 fn indexed_file_language(path: &str) -> &'static str {
@@ -1478,166 +1266,10 @@ fn indexed_file_language(path: &str) -> &'static str {
     }
 }
 
-fn search_terms(query: &str) -> Vec<String> {
-    let mut terms = query
-        .split(|character: char| {
-            !(character.is_ascii_alphanumeric() || character == '_' || character == '-')
-        })
-        .map(str::trim)
-        .filter(|term| !term.is_empty())
-        .map(str::to_ascii_lowercase)
-        .collect::<Vec<_>>();
-    terms.sort();
-    terms.dedup();
-    terms
-}
-
-fn score_text_unit(unit: &IndexedTextUnit, query_lower: &str, terms: &[String]) -> i64 {
-    let path = unit.path.to_ascii_lowercase();
-    let title = unit.title.to_ascii_lowercase();
-    let kind = unit.kind.to_ascii_lowercase();
-    let text = unit.text.to_ascii_lowercase();
-    let file_name = Path::new(&unit.path)
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or(&unit.path)
-        .to_ascii_lowercase();
-
-    let mut score = 0;
-    if path.contains(query_lower) {
-        score += 260;
-    }
-    if title.contains(query_lower) {
-        score += 210;
-    }
-    if text.contains(query_lower) {
-        score += 120;
-    }
-
-    for term in terms {
-        if file_name == *term {
-            score += 240;
-        } else if file_name.contains(term) {
-            score += 180;
-        }
-        if path.contains(term) {
-            score += 110;
-        }
-        if title.contains(term) {
-            score += 95;
-        }
-        if text.contains(term) {
-            score += 55;
-        }
-        if kind.contains(term) {
-            score += 20;
-        }
-    }
-    score
-}
-
-fn text_match_line(unit: &IndexedTextUnit, query_lower: &str, terms: &[String]) -> Option<usize> {
-    let lower = unit.text.to_ascii_lowercase();
-    let mut position = if query_lower.is_empty() {
-        None
-    } else {
-        lower.find(query_lower)
-    };
-    if position.is_none() {
-        position = terms.iter().filter_map(|term| lower.find(term)).min();
-    }
-    let position = position?;
-    let mut relative_line = unit.text[..position]
-        .bytes()
-        .filter(|byte| *byte == b'\n')
-        .count();
-    if unit
-        .text
-        .find('\n')
-        .is_some_and(|header_end| position > header_end)
-    {
-        relative_line = relative_line.saturating_sub(1);
-    }
-    Some(unit.start_line + relative_line)
-}
-
-fn source_text_scope_matches(path: &str, scope: &str) -> bool {
-    match scope {
-        "all" => true,
-        "docs" => source_text_scope(path) == "docs",
-        "code" => source_text_scope(path) == "code",
-        "tests" => source_text_scope(path) == "tests",
-        "benches" => source_text_scope(path) == "benches",
-        "sketches" => source_text_scope(path) == "sketches",
-        _ => true,
-    }
-}
-
-fn source_text_scope(path: &str) -> &'static str {
-    if path.starts_with("sketches/") {
-        return "sketches";
-    }
-    if path.contains("/benches/") || path.starts_with("benches/") {
-        return "benches";
-    }
-    if path.contains("/tests/") || path.starts_with("tests/") || path.ends_with("_test.rs") {
-        return "tests";
-    }
-    if path.ends_with(".md") || path.ends_with(".markdown") || path.starts_with("docs/") {
-        return "docs";
-    }
-    "code"
-}
-
-fn search_snippet(unit: &IndexedTextUnit, query_lower: &str, terms: &[String]) -> String {
-    let body = normalize_search_text(&unit.text);
-    if let Some(snippet) = snippet_from_match(&body, query_lower, terms) {
-        return snippet;
-    }
-    let combined = normalize_search_text(&format!("{} {} {}", unit.path, unit.title, unit.text));
-    snippet_from_match(&combined, query_lower, terms)
-        .unwrap_or_else(|| clip_chars(&combined, 0, 260))
-}
-
-fn normalize_search_text(text: &str) -> String {
-    text.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
-fn snippet_from_match(text: &str, query_lower: &str, terms: &[String]) -> Option<String> {
-    let lower = text.to_ascii_lowercase();
-    let mut position = if query_lower.is_empty() {
-        None
-    } else {
-        lower.find(query_lower)
-    };
-    if position.is_none() {
-        position = terms.iter().filter_map(|term| lower.find(term)).min();
-    }
-    let position = position?;
-    let prefix_chars = text[..position].chars().count();
-    let start = prefix_chars.saturating_sub(70);
-    let end = prefix_chars + 190;
-    let mut snippet = clip_chars(text, start, end);
-    if start > 0 {
-        snippet = format!("...{snippet}");
-    }
-    if text.chars().count() > end {
-        snippet.push_str("...");
-    }
-    Some(snippet)
-}
-
-fn clip_chars(text: &str, start: usize, end: usize) -> String {
-    text.chars()
-        .skip(start)
-        .take(end.saturating_sub(start))
-        .collect()
-}
-
 macro_rules! index_value_relation {
     ($name:ident, $relation:literal, $field:ident) => {
         struct $name {
-            provider: Arc<LocalSourceProvider>,
+            dispatcher: Arc<SourceDispatcher>,
         }
 
         impl ComputedRelation for $name {
@@ -1660,7 +1292,7 @@ macro_rules! index_value_relation {
                 metadata: &RelationMetadata,
                 bindings: &[Option<Value>],
             ) -> Result<Vec<Tuple>, KernelError> {
-                let index = self.provider.semantic_index(metadata.id())?;
+                let index = self.dispatcher.semantic_index(metadata.id())?;
                 Ok(filter_bound_rows(
                     vec![Tuple::from([
                         Value::string(&index.id),
@@ -1674,7 +1306,7 @@ macro_rules! index_value_relation {
 }
 
 struct SourceIndexRelation {
-    provider: Arc<LocalSourceProvider>,
+    dispatcher: Arc<SourceDispatcher>,
 }
 
 impl ComputedRelation for SourceIndexRelation {
@@ -1696,7 +1328,7 @@ impl ComputedRelation for SourceIndexRelation {
         metadata: &RelationMetadata,
         bindings: &[Option<Value>],
     ) -> Result<Vec<Tuple>, KernelError> {
-        let index = self.provider.semantic_index(metadata.id())?;
+        let index = self.dispatcher.semantic_index(metadata.id())?;
         Ok(filter_bound_rows(
             vec![Tuple::from([Value::string(&index.id)])],
             bindings,
@@ -1705,7 +1337,7 @@ impl ComputedRelation for SourceIndexRelation {
 }
 
 struct IndexRepositoryRelation {
-    provider: Arc<LocalSourceProvider>,
+    dispatcher: Arc<SourceDispatcher>,
 }
 
 impl ComputedRelation for IndexRepositoryRelation {
@@ -1727,7 +1359,7 @@ impl ComputedRelation for IndexRepositoryRelation {
         metadata: &RelationMetadata,
         bindings: &[Option<Value>],
     ) -> Result<Vec<Tuple>, KernelError> {
-        let index = self.provider.semantic_index(metadata.id())?;
+        let index = self.dispatcher.semantic_index(metadata.id())?;
         let repository_relation = relation_id(reader, "source/Repository", 1).ok_or_else(|| {
             invalid_relation(metadata.id(), "missing relation source/Repository/1")
         })?;
@@ -1747,7 +1379,7 @@ impl ComputedRelation for IndexRepositoryRelation {
 }
 
 struct IndexRevisionRelation {
-    provider: Arc<LocalSourceProvider>,
+    dispatcher: Arc<SourceDispatcher>,
 }
 
 impl ComputedRelation for IndexRevisionRelation {
@@ -1769,7 +1401,7 @@ impl ComputedRelation for IndexRevisionRelation {
         metadata: &RelationMetadata,
         bindings: &[Option<Value>],
     ) -> Result<Vec<Tuple>, KernelError> {
-        let index = self.provider.semantic_index(metadata.id())?;
+        let index = self.dispatcher.semantic_index(metadata.id())?;
         let revision_relation = relation_id(reader, "source/Revision", 1)
             .ok_or_else(|| invalid_relation(metadata.id(), "missing relation source/Revision/1"))?;
         let revision_of_relation =
@@ -1807,7 +1439,7 @@ index_value_relation!(IndexVersionRelation, "IndexVersion", version);
 index_value_relation!(IndexBuildErrorRelation, "IndexBuildError", error);
 
 struct RepositoryVcsRelation {
-    provider: Arc<LocalSourceProvider>,
+    dispatcher: Arc<SourceDispatcher>,
 }
 
 impl ComputedRelation for RepositoryVcsRelation {
@@ -1831,7 +1463,7 @@ impl ComputedRelation for RepositoryVcsRelation {
     ) -> Result<Vec<Tuple>, KernelError> {
         let repository = bound_value(metadata.id(), bindings, 0, "repository")?;
         let _vcs = self
-            .provider
+            .dispatcher
             .vcs_provider_for(reader, metadata.id(), &repository)?;
         Ok(filter_bound_rows(
             vec![Tuple::from([
@@ -1844,7 +1476,7 @@ impl ComputedRelation for RepositoryVcsRelation {
 }
 
 struct GitReceivedRefUpdateRelation {
-    provider: Arc<LocalSourceProvider>,
+    dispatcher: Arc<SourceDispatcher>,
 }
 
 impl ComputedRelation for GitReceivedRefUpdateRelation {
@@ -1867,7 +1499,7 @@ impl ComputedRelation for GitReceivedRefUpdateRelation {
         bindings: &[Option<Value>],
     ) -> Result<Vec<Tuple>, KernelError> {
         let git_dir = bound_string(metadata.id(), bindings, 0, "git dir")?;
-        let git_dir_path = self.provider.allowed_git_dir(metadata.id(), &git_dir)?;
+        let git_dir_path = self.dispatcher.allowed_git_dir(metadata.id(), &git_dir)?;
         let recorder = GitReceiveRecorder::new(&git_dir_path);
         let updates = recorder
             .read_updates()
@@ -1895,15 +1527,15 @@ impl ComputedRelation for GitReceivedRefUpdateRelation {
 }
 
 struct CommitExistsRelation {
-    provider: Arc<LocalSourceProvider>,
+    dispatcher: Arc<SourceDispatcher>,
 }
 
 struct RefTargetRelation {
-    provider: Arc<LocalSourceProvider>,
+    dispatcher: Arc<SourceDispatcher>,
 }
 
 struct GitRefTargetRelation {
-    provider: Arc<LocalSourceProvider>,
+    dispatcher: Arc<SourceDispatcher>,
 }
 
 impl ComputedRelation for RefTargetRelation {
@@ -1928,7 +1560,7 @@ impl ComputedRelation for RefTargetRelation {
         let repository = bound_value(metadata.id(), bindings, 0, "repository")?;
         let ref_name = bound_string(metadata.id(), bindings, 1, "ref name")?;
         let vcs = self
-            .provider
+            .dispatcher
             .vcs_provider_for(reader, metadata.id(), &repository)?;
         let Some(commit_id) = vcs
             .resolve_ref(&ref_name)
@@ -1968,7 +1600,7 @@ impl ComputedRelation for GitRefTargetRelation {
     ) -> Result<Vec<Tuple>, KernelError> {
         let git_dir = bound_string(metadata.id(), bindings, 0, "git dir")?;
         let ref_name = bound_string(metadata.id(), bindings, 1, "ref name")?;
-        let git_dir_path = self.provider.allowed_git_dir(metadata.id(), &git_dir)?;
+        let git_dir_path = self.dispatcher.allowed_git_dir(metadata.id(), &git_dir)?;
         let vcs = VcsProvider::open(&git_dir_path).map_err(|error| {
             invalid_relation(
                 metadata.id(),
@@ -2014,7 +1646,7 @@ impl ComputedRelation for CommitExistsRelation {
         let repository = bound_value(metadata.id(), bindings, 0, "repository")?;
         let commit_hex = bound_string(metadata.id(), bindings, 1, "commit")?;
         let vcs = self
-            .provider
+            .dispatcher
             .vcs_provider_for(reader, metadata.id(), &repository)?;
         let commit_id = vcs
             .resolve_commit(&commit_hex)
@@ -2034,7 +1666,7 @@ impl ComputedRelation for CommitExistsRelation {
 }
 
 struct CommitTreeRelation {
-    provider: Arc<LocalSourceProvider>,
+    dispatcher: Arc<SourceDispatcher>,
 }
 
 impl ComputedRelation for CommitTreeRelation {
@@ -2059,7 +1691,7 @@ impl ComputedRelation for CommitTreeRelation {
         let repository = bound_value(metadata.id(), bindings, 0, "repository")?;
         let commit_hex = bound_string(metadata.id(), bindings, 1, "commit")?;
         let vcs = self
-            .provider
+            .dispatcher
             .vcs_provider_for(reader, metadata.id(), &repository)?;
         let commit_id = vcs
             .resolve_commit(&commit_hex)
@@ -2079,7 +1711,7 @@ impl ComputedRelation for CommitTreeRelation {
 }
 
 struct CommitAuthorRelation {
-    provider: Arc<LocalSourceProvider>,
+    dispatcher: Arc<SourceDispatcher>,
 }
 
 impl ComputedRelation for CommitAuthorRelation {
@@ -2104,7 +1736,7 @@ impl ComputedRelation for CommitAuthorRelation {
         let repository = bound_value(metadata.id(), bindings, 0, "repository")?;
         let commit_hex = bound_string(metadata.id(), bindings, 1, "commit")?;
         let vcs = self
-            .provider
+            .dispatcher
             .vcs_provider_for(reader, metadata.id(), &repository)?;
         let commit_id = vcs
             .resolve_commit(&commit_hex)
@@ -2126,7 +1758,7 @@ impl ComputedRelation for CommitAuthorRelation {
 }
 
 struct CommitMessageRelation {
-    provider: Arc<LocalSourceProvider>,
+    dispatcher: Arc<SourceDispatcher>,
 }
 
 impl ComputedRelation for CommitMessageRelation {
@@ -2151,7 +1783,7 @@ impl ComputedRelation for CommitMessageRelation {
         let repository = bound_value(metadata.id(), bindings, 0, "repository")?;
         let commit_hex = bound_string(metadata.id(), bindings, 1, "commit")?;
         let vcs = self
-            .provider
+            .dispatcher
             .vcs_provider_for(reader, metadata.id(), &repository)?;
         let commit_id = vcs
             .resolve_commit(&commit_hex)
@@ -2171,7 +1803,7 @@ impl ComputedRelation for CommitMessageRelation {
 }
 
 struct CommitParentsRelation {
-    provider: Arc<LocalSourceProvider>,
+    dispatcher: Arc<SourceDispatcher>,
 }
 
 impl ComputedRelation for CommitParentsRelation {
@@ -2196,7 +1828,7 @@ impl ComputedRelation for CommitParentsRelation {
         let repository = bound_value(metadata.id(), bindings, 0, "repository")?;
         let commit_hex = bound_string(metadata.id(), bindings, 1, "commit")?;
         let vcs = self
-            .provider
+            .dispatcher
             .vcs_provider_for(reader, metadata.id(), &repository)?;
         let commit_id = vcs
             .resolve_commit(&commit_hex)
@@ -2221,7 +1853,7 @@ impl ComputedRelation for CommitParentsRelation {
 }
 
 struct ChangedFilesRelation {
-    provider: Arc<LocalSourceProvider>,
+    dispatcher: Arc<SourceDispatcher>,
 }
 
 impl ComputedRelation for ChangedFilesRelation {
@@ -2247,7 +1879,7 @@ impl ComputedRelation for ChangedFilesRelation {
         let from_hex = bound_string(metadata.id(), bindings, 1, "from_commit")?;
         let to_hex = bound_string(metadata.id(), bindings, 2, "to_commit")?;
         let vcs = self
-            .provider
+            .dispatcher
             .vcs_provider_for(reader, metadata.id(), &repository)?;
         let from_id = vcs
             .resolve_commit(&from_hex)
@@ -2275,7 +1907,7 @@ impl ComputedRelation for ChangedFilesRelation {
 }
 
 struct FileDiffRelation {
-    provider: Arc<LocalSourceProvider>,
+    dispatcher: Arc<SourceDispatcher>,
 }
 
 impl ComputedRelation for FileDiffRelation {
@@ -2302,7 +1934,7 @@ impl ComputedRelation for FileDiffRelation {
         let to_hex = bound_string(metadata.id(), bindings, 2, "to_commit")?;
         let path = bound_string(metadata.id(), bindings, 3, "path")?;
         let vcs = self
-            .provider
+            .dispatcher
             .vcs_provider_for(reader, metadata.id(), &repository)?;
         let from_id = vcs
             .resolve_commit(&from_hex)
@@ -2508,7 +2140,7 @@ fn project_line_range(
 }
 
 struct FileDiffLineRelation {
-    provider: Arc<LocalSourceProvider>,
+    dispatcher: Arc<SourceDispatcher>,
 }
 
 impl ComputedRelation for FileDiffLineRelation {
@@ -2535,7 +2167,7 @@ impl ComputedRelation for FileDiffLineRelation {
         let to_hex = bound_string(metadata.id(), bindings, 2, "to_commit")?;
         let path = bound_string(metadata.id(), bindings, 3, "path")?;
         let vcs = self
-            .provider
+            .dispatcher
             .vcs_provider_for(reader, metadata.id(), &repository)?;
         let from_id = vcs
             .resolve_commit(&from_hex)
@@ -2578,7 +2210,7 @@ impl ComputedRelation for FileDiffLineRelation {
 }
 
 struct FileLineProjectionRelation {
-    provider: Arc<LocalSourceProvider>,
+    dispatcher: Arc<SourceDispatcher>,
 }
 
 impl ComputedRelation for FileLineProjectionRelation {
@@ -2614,7 +2246,7 @@ impl ComputedRelation for FileLineProjectionRelation {
         }
 
         let vcs = self
-            .provider
+            .dispatcher
             .vcs_provider_for(reader, metadata.id(), &repository)?;
         let from_id = vcs
             .resolve_commit(&from_hex)
@@ -2651,7 +2283,7 @@ impl ComputedRelation for FileLineProjectionRelation {
 }
 
 struct CommitLogRelation {
-    provider: Arc<LocalSourceProvider>,
+    dispatcher: Arc<SourceDispatcher>,
 }
 
 impl ComputedRelation for CommitLogRelation {
@@ -2679,7 +2311,7 @@ impl ComputedRelation for CommitLogRelation {
             _ => 20,
         };
         let vcs = self
-            .provider
+            .dispatcher
             .vcs_provider_for(reader, metadata.id(), &repository)?;
         let commits = vcs
             .commit_log(limit)
@@ -2707,7 +2339,7 @@ impl ComputedRelation for CommitLogRelation {
 }
 
 struct CommitSearchRelation {
-    provider: Arc<LocalSourceProvider>,
+    dispatcher: Arc<SourceDispatcher>,
 }
 
 impl ComputedRelation for CommitSearchRelation {
@@ -2736,7 +2368,7 @@ impl ComputedRelation for CommitSearchRelation {
             _ => 20,
         };
         let vcs = self
-            .provider
+            .dispatcher
             .vcs_provider_for(reader, metadata.id(), &repository)?;
         let commits = vcs
             .commit_search(&query, limit)
@@ -2764,7 +2396,7 @@ impl ComputedRelation for CommitSearchRelation {
 }
 
 struct FileHistoryRelation {
-    provider: Arc<LocalSourceProvider>,
+    dispatcher: Arc<SourceDispatcher>,
 }
 
 impl ComputedRelation for FileHistoryRelation {
@@ -2793,7 +2425,7 @@ impl ComputedRelation for FileHistoryRelation {
             _ => 20,
         };
         let vcs = self
-            .provider
+            .dispatcher
             .vcs_provider_for(reader, metadata.id(), &repository)?;
         let commits = vcs
             .file_history(&path, limit)
@@ -2822,7 +2454,7 @@ impl ComputedRelation for FileHistoryRelation {
 }
 
 struct FileBlameRelation {
-    provider: Arc<LocalSourceProvider>,
+    dispatcher: Arc<SourceDispatcher>,
 }
 
 impl ComputedRelation for FileBlameRelation {
@@ -2848,7 +2480,7 @@ impl ComputedRelation for FileBlameRelation {
         let commit_hex = bound_string(metadata.id(), bindings, 1, "commit")?;
         let path = bound_string(metadata.id(), bindings, 2, "path")?;
         let vcs = self
-            .provider
+            .dispatcher
             .vcs_provider_for(reader, metadata.id(), &repository)?;
         let commit_id = vcs
             .resolve_commit(&commit_hex)
@@ -2877,7 +2509,7 @@ impl ComputedRelation for FileBlameRelation {
 }
 
 struct FileBlameHunkRelation {
-    provider: Arc<LocalSourceProvider>,
+    dispatcher: Arc<SourceDispatcher>,
 }
 
 impl ComputedRelation for FileBlameHunkRelation {
@@ -2903,7 +2535,7 @@ impl ComputedRelation for FileBlameHunkRelation {
         let commit_hex = bound_string(metadata.id(), bindings, 1, "commit")?;
         let path = bound_string(metadata.id(), bindings, 2, "path")?;
         let vcs = self
-            .provider
+            .dispatcher
             .vcs_provider_for(reader, metadata.id(), &repository)?;
         let commit_id = vcs
             .resolve_commit(&commit_hex)

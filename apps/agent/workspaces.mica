@@ -1,7 +1,7 @@
 // Agent workspace bootstrap.
 //
-// MICA_SOURCE_ROOTS is managed by scripts/agent.sh. The source-provider crate
-// reads it to scope file access; here we mirror the first root as the default
+// MICA_SOURCE_ROOTS is managed by scripts/agent.sh. The daemon uses it to
+// configure bounded source access; here we mirror the first root as the default
 // agent workspace so chat transcripts have a workspace context. Facts asserted
 // in this filein run with implicit filein authority.
 //
@@ -17,7 +17,12 @@ make_identity(:source/rev_worktree)
 make_relation(:source/Repository, 1)
 make_functional_relation(:source/RepositoryName, 2, [0])
 make_functional_relation(:source/RepositoryRoot, 2, [0])
-make_functional_relation(:source/RepositoryProvider, 2, [0])
+make_relation(:source/RepositoryProvider, 4)
+make_functional_relation(:source/ProviderEnabled, 2, [0])
+make_relation(:source/Provider, 1)
+make_relation(:source/ProviderName, 2)
+make_relation(:source/ProviderCapability, 2)
+make_relation(:source/ProviderAvailable, 1)
 
 make_relation(:source/Revision, 1)
 make_functional_relation(:source/RevisionOf, 2, [0])
@@ -27,10 +32,10 @@ make_functional_relation(:source/RevisionLabel, 2, [0])
 make_relation(:source/SourceFile, 1)
 make_functional_relation(:source/FileRevision, 2, [0])
 make_functional_relation(:source/FilePath, 2, [0])
-make_relation(:source/FileText, 5)
-make_relation(:source/FileLines, 7)
-make_relation(:source/FileLineCount, 4)
-make_relation(:source/RepositoryEntry, 6)
+make_relation(:source/FileText, 7)
+make_relation(:source/FileLines, 9)
+make_relation(:source/FileLineCount, 6)
+make_relation(:source/RepositoryEntry, 7)
 make_relation(:source/TextSearch, 11)
 make_relation(:source/IndexedFile, 6)
 
@@ -70,7 +75,9 @@ end
 assert source/Repository(#source/repo_default)
 assert source/RepositoryName(#source/repo_default, "default")
 assert source/RepositoryRoot(#source/repo_default, workspaces/default_source_root())
-assert source/RepositoryProvider(#source/repo_default, "local-source")
+assert source/ProviderEnabled("local-worktree", true)
+assert source/RepositoryProvider(#source/repo_default, "local-worktree", "read", 0)
+assert source/RepositoryProvider(#source/repo_default, "local-worktree", "list", 0)
 
 assert source/Revision(#source/rev_worktree)
 assert source/RevisionOf(#source/rev_worktree, #source/repo_default)
@@ -78,6 +85,6 @@ assert source/RevisionKind(#source/rev_worktree, "worktree")
 assert source/RevisionLabel(#source/rev_worktree, "local worktree")
 
 assert WorkspaceRoot(#workspace/default, workspaces/default_source_root())
-assert WorkspaceProvider(#workspace/default, "local-source")
+assert WorkspaceProvider(#workspace/default, "local-worktree")
 assert WorkspaceRevision(#workspace/default, #source/rev_worktree)
 assert AgentWorkspace(#agent/default, #workspace/default)
