@@ -12,6 +12,7 @@ use crate::util::{
 use crate::vcs::VcsProvider;
 use mica_relation_kernel::{ComputedRelationRead, KernelError, RelationId};
 use mica_var::Value;
+use std::collections::VecDeque;
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -342,6 +343,71 @@ impl SourceDispatcher {
         Ok(merged.into_values().collect())
     }
 
+    pub(crate) fn text_search(
+        &self,
+        reader: &dyn ComputedRelationRead,
+        relation: RelationId,
+        repository: &Value,
+        revision: &Value,
+        search: ComposedTextSearchQuery<'_>,
+    ) -> Result<Vec<ComposedTextSearchHit>, KernelError> {
+        let (root, _) = self.resolve_path(reader, relation, repository, revision, "")?;
+        let limit = search.limit.min(self.bounds.max_search_rows);
+        if search.query.is_empty() || limit == 0 {
+            return Ok(Vec::new());
+        }
+
+        let mut directories = VecDeque::from([String::new()]);
+        let mut examined = 0usize;
+        let mut hits = Vec::new();
+        while let Some(directory) = directories.pop_front() {
+            let entries =
+                self.list_entries(reader, relation, repository, revision, &root, &directory)?;
+            for provided in entries {
+                if examined >= self.bounds.max_directory_entries || hits.len() >= limit {
+                    return Ok(hits);
+                }
+                examined += 1;
+                let path = provided.entry.relative_path;
+                if provided.entry.kind == "directory" {
+                    if !excluded_search_directory(&provided.entry.name) {
+                        directories.push_back(path);
+                    }
+                    continue;
+                }
+                if provided.entry.kind != "file" || !path_matches_scope(&path, search.scope) {
+                    continue;
+                }
+                let Some(document) =
+                    self.source_document(reader, relation, repository, revision, &root, &path)?
+                else {
+                    continue;
+                };
+                for (line_index, line) in document.text.lines().enumerate() {
+                    if !line.contains(search.query) {
+                        continue;
+                    }
+                    let snippet = line.chars().take(512).collect();
+                    hits.push(ComposedTextSearchHit {
+                        subject: path.clone(),
+                        score: line.matches(search.query).count().max(1),
+                        path: path.clone(),
+                        line: line_index + 1,
+                        kind: "text".to_owned(),
+                        title: provided.entry.name.clone(),
+                        snippet,
+                        provider: document.provider.clone(),
+                        source_version: document.source_version.clone(),
+                    });
+                    if hits.len() >= limit {
+                        return Ok(hits);
+                    }
+                }
+            }
+        }
+        Ok(hits)
+    }
+
     fn revision_kind(
         &self,
         reader: &dyn ComputedRelationRead,
@@ -554,6 +620,39 @@ struct SelectedProvider {
 pub(crate) struct ProvidedSourceEntry {
     pub(crate) provider: SourceProviderKey,
     pub(crate) entry: SourceEntry,
+}
+
+pub(crate) struct ComposedTextSearchHit {
+    pub(crate) subject: String,
+    pub(crate) score: usize,
+    pub(crate) path: String,
+    pub(crate) line: usize,
+    pub(crate) kind: String,
+    pub(crate) title: String,
+    pub(crate) snippet: String,
+    pub(crate) provider: SourceProviderKey,
+    pub(crate) source_version: String,
+}
+
+pub(crate) struct ComposedTextSearchQuery<'a> {
+    pub(crate) query: &'a str,
+    pub(crate) limit: usize,
+    pub(crate) scope: &'a str,
+}
+
+fn excluded_search_directory(name: &str) -> bool {
+    matches!(
+        name,
+        ".git" | ".cache" | "target" | "node_modules" | ".playwright-mcp" | "book"
+    )
+}
+
+fn path_matches_scope(path: &str, scope: &str) -> bool {
+    match scope {
+        "" | "all" => true,
+        "tests" => path.starts_with("tests/") || path.contains("/tests/"),
+        prefix => path.starts_with(prefix),
+    }
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]

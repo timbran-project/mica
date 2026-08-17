@@ -133,14 +133,13 @@ pub struct SourceCapabilities(u32);
 impl SourceCapabilities {
     pub const READ: Self = Self(1 << 0);
     pub const LIST: Self = Self(1 << 1);
-    pub const TEXT_SEARCH: Self = Self(1 << 2);
-    pub const SYNTAX: Self = Self(1 << 3);
-    pub const SYMBOLS: Self = Self(1 << 4);
-    pub const DEFINITION: Self = Self(1 << 5);
-    pub const REFERENCES: Self = Self(1 << 6);
-    pub const HISTORY: Self = Self(1 << 7);
-    pub const DIFF: Self = Self(1 << 8);
-    pub const BLAME: Self = Self(1 << 9);
+    pub const SYNTAX: Self = Self(1 << 2);
+    pub const SYMBOLS: Self = Self(1 << 3);
+    pub const DEFINITION: Self = Self(1 << 4);
+    pub const REFERENCES: Self = Self(1 << 5);
+    pub const HISTORY: Self = Self(1 << 6);
+    pub const DIFF: Self = Self(1 << 7);
+    pub const BLAME: Self = Self(1 << 8);
 
     pub const fn empty() -> Self {
         Self(0)
@@ -158,7 +157,6 @@ impl SourceCapabilities {
         [
             (Self::READ, "read"),
             (Self::LIST, "list"),
-            (Self::TEXT_SEARCH, "text_search"),
             (Self::SYNTAX, "syntax"),
             (Self::SYMBOLS, "symbols"),
             (Self::DEFINITION, "definition"),

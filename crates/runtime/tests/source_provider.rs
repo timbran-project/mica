@@ -49,7 +49,8 @@ mod tests {
                  make_relation(:source/ReferencesOf, 10)\n\
                  make_relation(:source/SymbolSearch, 11)\n\
                  make_relation(:source/IndexedTextUnit, 9)\n\
-                 make_relation(:source/TextSearch, 11)\n\
+                 make_relation(:source/TextSearch, 15)\n\
+                 make_relation(:source/IndexedTextSearch, 11)\n\
                  make_relation(:source/GitReceivedRefUpdate, 12)\n\
                  make_relation(:source/RefTarget, 3)\n\
                  make_relation(:source/GitRefTarget, 3)\n\
@@ -350,6 +351,51 @@ mod tests {
                     Value::list([Value::string("new.rs"), Value::string("live-buffer")]),
                 ])
         ));
+    }
+
+    #[test]
+    fn composed_text_search_reads_the_highest_precedence_document() {
+        let live = TestSourceProvider {
+            key: "live-buffer",
+            revision_kind: "worktree",
+            capabilities: SourceCapabilities::READ.union(SourceCapabilities::LIST),
+            read_result: ProviderResult::Found(SourceDocument::from_text(
+                "name = \"unsaved-agent-text\"\n",
+                "buffer:9",
+            )),
+            list_result: ProviderResult::Found(vec![SourceEntry::new(
+                "Cargo.toml",
+                "file",
+                "Cargo.toml",
+            )]),
+            calls: Arc::new(AtomicUsize::new(0)),
+        };
+        let mut runner = SourceRunner::new_empty_with_source(
+            SourceConfig::new([env::current_dir().unwrap()]).with_provider(live),
+        );
+        load_source_relations(&mut runner);
+        configure_provider(&mut runner, "live-buffer", "read", 100);
+        configure_provider(&mut runner, "live-buffer", "list", 100);
+
+        let report = runner
+            .run_source(
+                "let exactly {subject, score, path, line, end_line, kind, title, snippet, provider, source_version} = source/TextSearch(#repo, #rev, \"unsaved-agent-text\", 8, \"Cargo.toml\", ?subject, ?score, ?path, ?line, ?end_line, ?kind, ?title, ?snippet, ?provider, ?source_version)\n\
+                 return [path, line, snippet, provider, source_version]",
+            )
+            .unwrap();
+        match report.outcome {
+            TaskOutcome::Complete { value, .. } => assert_eq!(
+                value,
+                Value::list([
+                    Value::string("Cargo.toml"),
+                    Value::int(1).unwrap(),
+                    Value::string("name = \"unsaved-agent-text\""),
+                    Value::string("live-buffer"),
+                    Value::string("buffer:9"),
+                ])
+            ),
+            outcome => panic!("unexpected search outcome: {outcome:?}"),
+        }
     }
 
     #[test]
@@ -1286,7 +1332,7 @@ mod tests {
                          let first_line = 0\n\
                          let first_snippet = none\n\
                          let saw_generated_book = false\n\
-                         for result in source/TextSearch(\"btree\", 8, \"all\", ?unit, ?score, ?path, ?start_line, ?end_line, ?kind, ?title, ?snippet)\n\
+                         for result in source/IndexedTextSearch(\"btree\", 8, \"all\", ?unit, ?score, ?path, ?start_line, ?end_line, ?kind, ?title, ?snippet)\n\
                            if result[:score] > first_score\n\
                              first_path = result[:path]\n\
                              first_score = result[:score]\n\
@@ -1299,7 +1345,7 @@ mod tests {
                          end\n\
                          let tests_only = true\n\
                          let tests_count = 0\n\
-                         for result in source/TextSearch(\"btree\", 8, \"tests\", ?unit, ?score, ?path, ?start_line, ?end_line, ?kind, ?title, ?snippet)\n\
+                         for result in source/IndexedTextSearch(\"btree\", 8, \"tests\", ?unit, ?score, ?path, ?start_line, ?end_line, ?kind, ?title, ?snippet)\n\
                            tests_count = tests_count + 1\n\
                            if string_contains(result[:path], \"/tests/\") == false\n\
                              tests_only = false\n\

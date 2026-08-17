@@ -9,13 +9,11 @@ description = "Mica daemon with an in-process telnet host"
 [dependencies]
 clap.workspace = true
 compio.workspace = true
-cyper.workspace = true
 fast-telemetry.workspace = true
 fast-telemetry-export.workspace = true
-futures-util.workspace = true
-http.workspace = true
 mica-auth.workspace = true
 mica-driver.workspace = true
+mica-external-http.workspace = true
 mica-host-protocol.workspace = true
 mica-host-zmq.workspace = true
 mica-relation-kernel.workspace = true

@@ -3493,13 +3493,11 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "compio",
- "cyper",
  "fast-telemetry",
  "fast-telemetry-export",
- "futures-util",
- "http",
  "mica-auth",
  "mica-driver",
+ "mica-external-http",
  "mica-host-protocol",
  "mica-host-zmq",
  "mica-relation-kernel",
@@ -3529,6 +3527,21 @@ dependencies = [
  "mica-relation-wgpu",
  "mica-runtime",
  "mica-var",
+ "tracing",
+]
+
+[[package]]
+name = "mica-external-http"
+version = "0.1.0"
+dependencies = [
+ "compio",
+ "cyper",
+ "futures-util",
+ "http",
+ "mica-driver",
+ "mica-runtime",
+ "mica-var",
+ "serde_json",
  "tracing",
 ]
 

@@ -6,6 +6,7 @@ members = [
     "crates/compiler",
     "crates/daemon",
     "crates/driver",
+    "crates/external-http",
     "crates/host-console",
     "crates/host-protocol",
     "crates/host-zmq",
@@ -34,6 +35,7 @@ rust-version = "1.96"
 mica-auth = { path = "crates/auth" }
 mica-compiler = { path = "crates/compiler" }
 mica-driver = { path = "crates/driver" }
+mica-external-http = { path = "crates/external-http" }
 mica-host-console = { path = "crates/host-console" }
 mica-host-protocol = { path = "crates/host-protocol" }
 mica-host-zmq = { path = "crates/host-zmq" }

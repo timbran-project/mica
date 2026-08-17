@@ -173,6 +173,8 @@ verb tool/grep(agent @ #agent, arguments @ #map)
   if workspace == none || tool/workspace_bound(workspace) == false
     return {:status -> "error", :error -> "workspace not bound to a source repository", :value -> none}
   end
+  let repository = tool/source_repository(workspace)
+  let revision = tool/source_revision(workspace)
 
   let pattern = tool/args_string(arguments, :pattern)
   if pattern == ""
@@ -186,7 +188,7 @@ verb tool/grep(agent @ #agent, arguments @ #map)
 
   let matches = []
   let count = 0
-  for found in source/TextSearch(pattern, limit, "all", ?subject, ?score, ?path, ?start_line, ?end_line, ?kind, ?title, ?snippet)
+  for found in source/TextSearch(repository, revision, pattern, limit, "all", ?subject, ?score, ?path, ?start_line, ?end_line, ?kind, ?title, ?snippet, ?provider, ?source_version)
     matches = [@matches, {:path -> found[:path], :start_line -> found[:start_line], :end_line -> found[:end_line], :snippet -> found[:snippet]}]
     count = count + 1
   end

@@ -422,6 +422,8 @@ from Mica policy facts rather than running `:http_request(...)` as root.
 - [`crates/auth`](crates/auth/README.md): authentication and session management with PASETO tokens,
   OAuth (GitHub), and local password auth.
 - [`crates/driver`](crates/driver/README.md): compio task driver, wakeups, input, and emissions.
+- [`crates/external-http`](crates/external-http/README.md): reusable HTTP, embedding, and streaming
+  LLM host handlers.
 - [`crates/runner`](crates/runner/README.md): CLI and REPL binary.
 - [`crates/micac`](crates/micac/README.md): filein compiler CLI for compiling Mica source into a
   fresh database or check-only validation.

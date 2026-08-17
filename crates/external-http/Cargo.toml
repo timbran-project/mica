@@ -1,0 +1,18 @@
+[package]
+name = "mica-external-http"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Reusable Compio HTTP and streaming LLM handlers for Mica hosts"
+
+[dependencies]
+compio.workspace = true
+cyper.workspace = true
+futures-util.workspace = true
+http.workspace = true
+mica-driver.workspace = true
+mica-runtime.workspace = true
+mica-var.workspace = true
+serde_json.workspace = true
+tracing.workspace = true

@@ -1,4 +1,4 @@
-use crate::dispatcher::SourceDispatcher;
+use crate::dispatcher::{ComposedTextSearchQuery, SourceDispatcher};
 use crate::index::IndexedTextUnit;
 use crate::navigation::{
     SemanticSymbol, SemanticSymbolProvider, byte_offset_to_lsp_position, semantic_location,
@@ -30,7 +30,8 @@ const REFERENCES_OF_BOUND: &[u16] = &[0, 1, 2];
 const SYMBOL_SEARCH_BOUND: &[u16] = &[0, 1, 2, 3];
 const INDEXED_TEXT_UNIT_BOUND: &[u16] = &[];
 const INDEXED_FILE_BOUND: &[u16] = &[];
-const TEXT_SEARCH_BOUND: &[u16] = &[0, 1, 2];
+const TEXT_SEARCH_BOUND: &[u16] = &[0, 1, 2, 3, 4];
+const INDEXED_TEXT_SEARCH_BOUND: &[u16] = &[0, 1, 2];
 const INDEX_VALUE_BOUND: &[u16] = &[];
 const VCS_COMMIT_KEY_BOUND: &[u16] = &[0, 1];
 const VCS_REF_TARGET_BOUND: &[u16] = &[0, 1];
@@ -103,6 +104,9 @@ pub fn computed_relations(config: SourceConfig) -> Vec<Arc<dyn ComputedRelation>
             dispatcher: dispatcher.clone(),
         }),
         Arc::new(TextSearchRelation {
+            dispatcher: dispatcher.clone(),
+        }),
+        Arc::new(IndexedTextSearchRelation {
             dispatcher: dispatcher.clone(),
         }),
         Arc::new(SourceIndexRelation {
@@ -1211,15 +1215,80 @@ struct TextSearchRelation {
 
 impl ComputedRelation for TextSearchRelation {
     fn name(&self) -> &'static str {
-        "persistent-source-text-search"
+        "source-dispatch-text-search"
     }
 
     fn matches(&self, metadata: &RelationMetadata) -> bool {
-        metadata.name().name() == Some("source/TextSearch") && metadata.arity() == 11
+        metadata.name().name() == Some("source/TextSearch") && metadata.arity() == 15
     }
 
     fn required_bound_positions(&self, _metadata: &RelationMetadata) -> &[u16] {
         TEXT_SEARCH_BOUND
+    }
+
+    fn scan(
+        &self,
+        reader: &dyn ComputedRelationRead,
+        metadata: &RelationMetadata,
+        bindings: &[Option<Value>],
+    ) -> Result<Vec<Tuple>, KernelError> {
+        let repository = bound_value(metadata.id(), bindings, 0, "repository")?;
+        let revision = bound_value(metadata.id(), bindings, 1, "revision")?;
+        let query = bound_string(metadata.id(), bindings, 2, "query")?;
+        let limit = bound_non_negative_int(metadata.id(), bindings, 3, "limit")?;
+        let scope = bound_string(metadata.id(), bindings, 4, "scope")?;
+        let hits = self.dispatcher.text_search(
+            reader,
+            metadata.id(),
+            &repository,
+            &revision,
+            ComposedTextSearchQuery {
+                query: &query,
+                limit,
+                scope: &scope,
+            },
+        )?;
+        let rows = hits
+            .into_iter()
+            .map(|hit| {
+                Ok(Tuple::from([
+                    repository.clone(),
+                    revision.clone(),
+                    Value::string(&query),
+                    int_value(metadata.id(), limit as i64)?,
+                    Value::string(&scope),
+                    Value::string(hit.subject),
+                    int_value(metadata.id(), hit.score as i64)?,
+                    Value::string(hit.path),
+                    int_value(metadata.id(), hit.line as i64)?,
+                    int_value(metadata.id(), hit.line as i64)?,
+                    Value::string(hit.kind),
+                    Value::string(hit.title),
+                    Value::string(hit.snippet),
+                    Value::string(hit.provider.as_str()),
+                    Value::string(hit.source_version),
+                ]))
+            })
+            .collect::<Result<Vec<_>, KernelError>>()?;
+        Ok(filter_bound_rows(rows, bindings))
+    }
+}
+
+struct IndexedTextSearchRelation {
+    dispatcher: Arc<SourceDispatcher>,
+}
+
+impl ComputedRelation for IndexedTextSearchRelation {
+    fn name(&self) -> &'static str {
+        "persistent-source-indexed-text-search"
+    }
+
+    fn matches(&self, metadata: &RelationMetadata) -> bool {
+        metadata.name().name() == Some("source/IndexedTextSearch") && metadata.arity() == 11
+    }
+
+    fn required_bound_positions(&self, _metadata: &RelationMetadata) -> &[u16] {
+        INDEXED_TEXT_SEARCH_BOUND
     }
 
     fn scan(

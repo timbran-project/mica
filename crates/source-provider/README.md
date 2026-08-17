@@ -23,7 +23,8 @@ code uses for all other data.
   queries, rust-analyzer LSP results, and VCS history into the Mica relation model. Includes
   `RepositoryEntry(7)`, `FileText(7)`, `FileLines(9)`, `SyntaxLine(10)`,
   `SyntaxOutline(12)`, `SyntaxNodeAt(13)`, `DefinitionAt(13)`, `ReferencesOf(10)`,
-  `SymbolSearch(11)`, `IndexedTextUnit(9)`, `TextSearch(11)`, index metadata, and VCS relations for
+  `SymbolSearch(11)`, `IndexedTextUnit(9)`, repository-scoped `TextSearch(15)`,
+  `IndexedTextSearch(11)`, index metadata, and VCS relations for
   commits, diffs, logs, blame, and file history.
 - `src/vcs.rs`: `VcsProvider`, a git-backed version control reader using `jj-lib` (GitBackend).
   Supports commit metadata, tree traversal, file content, diffs with unified diff output, blame,
