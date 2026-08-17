@@ -11,7 +11,7 @@ compio.workspace = true
 cyper.workspace = true
 futures-util.workspace = true
 http.workspace = true
-mica-driver.workspace = true
+mica-driver = { path = "../driver", default-features = false }
 mica-runtime.workspace = true
 mica-var.workspace = true
 serde_json.workspace = true
