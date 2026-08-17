@@ -21,7 +21,7 @@ env:
 
 jobs:
   rust:
-    name: Rust 1.95
+    name: Rust 1.96
     runs-on: ubuntu-24.04
     timeout-minutes: 30
 
@@ -42,10 +42,10 @@ jobs:
           sudo apt-get update
           sudo apt-get install --no-install-recommends --yes libssl-dev pkg-config
 
-      - name: Install Rust 1.95
+      - name: Install Rust 1.96
         run: |
-          rustup toolchain install 1.95.0 --profile minimal --component clippy,rustfmt
-          rustup default 1.95.0
+          rustup toolchain install 1.96.0 --profile minimal --component clippy,rustfmt
+          rustup default 1.96.0
           rustc --version
           cargo --version
 
@@ -57,9 +57,9 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: ${{ runner.os }}-rust-1.95-${{ hashFiles('Cargo.lock') }}
+          key: ${{ runner.os }}-rust-1.96-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-rust-1.95-
+            ${{ runner.os }}-rust-1.96-
 
       - name: Check formatting
         run: cargo fmt --all -- --check

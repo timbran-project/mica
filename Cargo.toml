@@ -28,7 +28,7 @@ exclude = ["crates/compiler/fuzz", "crates/var/fuzz"]
 [workspace.package]
 edition = "2024"
 license = "AGPL-3.0-only"
-rust-version = "1.95"
+rust-version = "1.96"
 
 [workspace.dependencies]
 mica-auth = { path = "crates/auth" }

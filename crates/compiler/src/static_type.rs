@@ -129,10 +129,12 @@ impl Cardinality {
             (Some(maximum), None) | (None, Some(maximum)) => Some(maximum),
             (None, None) => None,
         };
-        (!maximum.is_some_and(|maximum| minimum > maximum)).then_some(Self {
-            min: minimum,
-            max: maximum,
-        })
+        maximum
+            .is_none_or(|maximum| minimum <= maximum)
+            .then_some(Self {
+                min: minimum,
+                max: maximum,
+            })
     }
 
     const fn includes_zero(self) -> bool {

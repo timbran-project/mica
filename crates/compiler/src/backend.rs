@@ -4097,7 +4097,7 @@ impl<'a> ProgramCompiler<'a> {
             value: Value::int(1).unwrap(),
         });
 
-        let key_register = (!row.is_some()).then(|| {
+        let key_register = row.is_none().then(|| {
             let register = self.alloc_register();
             self.emit(Instruction::Load {
                 dst: register,

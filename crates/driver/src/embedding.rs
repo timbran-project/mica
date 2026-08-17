@@ -894,7 +894,8 @@ mod tests {
                      assert CanInvoke(#test_actor, :read_current)\n\
                      assert CanRead(#test_actor, :CurrentValue)\n\
                      verb read_current(subject)\n\
-                       return one CurrentValue(subject, ?value)\n\
+                       let exactly {value} = CurrentValue(subject, ?value)\n\
+                       return value\n\
                      end",
                     FileinMode::Add,
                     None,
