@@ -12,13 +12,26 @@
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 use compio::dispatcher::DispatcherBuilder;
-use std::collections::{HashMap, HashSet};
-use std::fs;
+use std::collections::HashSet;
 use std::num::NonZeroUsize;
+
+#[cfg(target_os = "linux")]
+use std::collections::HashMap;
+#[cfg(target_os = "linux")]
+use std::fs;
+#[cfg(target_os = "linux")]
 use std::path::Path;
 
+// Topology is read from Linux sysfs; every other platform reports "no
+// preference" and lets the OS schedule.
+#[cfg(target_os = "linux")]
 const CPU_SYSFS_ROOT: &str = "/sys/devices/system/cpu";
+
+// Scoring thresholds. The logic below is platform-independent and unit-tested
+// everywhere, but only sysfs feeds it real data, so it reads as dead off Linux.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 const MIN_HETEROGENEITY_RATIO: f64 = 0.10;
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 const PERFORMANCE_THRESHOLD_RATIO: f64 = 0.90;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -102,6 +115,7 @@ pub fn configure_dispatcher(
 }
 
 #[derive(Debug)]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 struct PhysicalCoreMetric {
     logical_processor_ids: Vec<usize>,
     capacity: Option<u32>,
@@ -125,6 +139,7 @@ fn detect_performance_logical_processors() -> Result<Option<Vec<usize>>, String>
     }
 }
 
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn select_performance_core_ids(
     cores: &[PhysicalCoreMetric],
     metric: impl Fn(&PhysicalCoreMetric) -> Option<u32>,
@@ -164,6 +179,7 @@ fn select_performance_core_ids(
     Some(logical_processor_ids)
 }
 
+#[cfg(target_os = "linux")]
 fn read_physical_core_metrics(root: &Path) -> Result<Vec<PhysicalCoreMetric>, String> {
     let mut physical_cores: HashMap<(usize, usize), PhysicalCoreMetric> = HashMap::new();
     for entry in
@@ -206,15 +222,18 @@ fn read_physical_core_metrics(root: &Path) -> Result<Vec<PhysicalCoreMetric>, St
     Ok(cores)
 }
 
+#[cfg(target_os = "linux")]
 fn parse_cpu_dir(name: &str) -> Option<usize> {
     let id = name.strip_prefix("cpu")?;
     id.parse().ok()
 }
 
+#[cfg(target_os = "linux")]
 fn read_usize(path: impl AsRef<Path>) -> Option<usize> {
     fs::read_to_string(path).ok()?.trim().parse().ok()
 }
 
+#[cfg(target_os = "linux")]
 fn read_u32(path: impl AsRef<Path>) -> Option<u32> {
     fs::read_to_string(path).ok()?.trim().parse().ok()
 }
