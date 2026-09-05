@@ -13,7 +13,7 @@
 
 use std::ops::Range;
 
-use ariadne::{CharSet, Config, Label, Report, ReportKind, sources};
+use ariadne::{CharSet, Config, IndexType, Label, Report, ReportKind, sources};
 
 use crate::{CompileError, Diagnostic, ParseError, Span};
 
@@ -295,6 +295,7 @@ fn render_graphical_report(
         .with_config(
             Config::default()
                 .with_color(options.use_color)
+                .with_index_type(IndexType::Byte)
                 .with_char_set(CharSet::Ascii),
         )
         .with_message(format!("{}: {}", report.title, report.message))
@@ -406,6 +407,23 @@ mod tests {
             format_compile_error(&error, None, DiagnosticRenderOptions::default()),
             "compile error: parse error: expected end at bytes 12..12"
         );
+    }
+
+    #[test]
+    fn graphical_source_locations_use_byte_offsets_after_unicode_text() {
+        let source = "let note = \"é🪨\"\nmissing()\n";
+        let start = source.find("missing").unwrap();
+        let error = CompileError::UnknownValue {
+            node: NodeId(0),
+            span: Some(start..start + "missing".len()),
+            name: "missing".to_owned(),
+        };
+        let rendered = format_compile_error(
+            &error,
+            Some(DiagnosticSource::new(Some("unicode.mica"), source)),
+            DiagnosticRenderOptions::source_context(),
+        );
+        assert!(rendered.contains("unicode.mica:2:1"), "{rendered}");
     }
 
     #[test]
