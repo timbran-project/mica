@@ -792,8 +792,8 @@ fn map_for_read(
 
 fn materialize_matches(left: &[Tuple], bytes: &[u8]) -> Vec<Tuple> {
     left.iter()
-        .zip(bytes.chunks_exact(size_of::<u32>()))
-        .filter(|(_, flag)| read_u32(flag) != 0)
+        .zip(bytes.as_chunks::<{ size_of::<u32>() }>().0)
+        .filter(|(_, flag)| read_u32(*flag) != 0)
         .map(|(tuple, _)| tuple.clone())
         .collect()
 }
