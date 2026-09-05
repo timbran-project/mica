@@ -1141,7 +1141,9 @@ impl WgpuAccelerator {
             .get_mapped_range()
             .map_err(|error| format!("failed to access mapped membership output: {error}"))?;
         let selected = output_view
-            .chunks_exact(size_of::<u32>())
+            .as_chunks::<{ size_of::<u32>() }>()
+            .0
+            .iter()
             .enumerate()
             .filter_map(|(row, flag)| ((read_u32(flag) != 0) == keep_matches).then_some(row))
             .collect();
@@ -1263,7 +1265,7 @@ impl WgpuAccelerator {
         let mut offsets = Vec::with_capacity(join.left_len + 1);
         offsets.push(0u32);
         let mut output_supported = true;
-        for count in count_view.chunks_exact(size_of::<u32>()) {
+        for count in count_view.as_chunks::<{ size_of::<u32>() }>().0 {
             let Some(next) =
                 (*offsets.last().unwrap() as usize).checked_add(read_u32(count) as usize)
             else {
@@ -1396,7 +1398,9 @@ impl WgpuAccelerator {
             ))
         })?;
         let matches = pair_view
-            .chunks_exact(2 * size_of::<u32>())
+            .as_chunks::<{ 2 * size_of::<u32>() }>()
+            .0
+            .iter()
             .map(|pair| EqualityJoinMatch {
                 left_row: read_u32(&pair[..size_of::<u32>()]) as usize,
                 right_row: read_u32(&pair[size_of::<u32>()..]) as usize,
