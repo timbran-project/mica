@@ -57,8 +57,8 @@ A text unit is a retrievable piece of text. It might be a paragraph, a manual se
 comment, a chat excerpt, a code-review note, or a summary of a domain object.
 
 ```mica
-TextUnit(#sensor_manual)
-TextUnitText(#sensor_manual, "Calibrate the temperature sensor every 90 days.")
+assert TextUnit(#sensor_manual)
+assert TextUnitText(#sensor_manual, "Calibrate the temperature sensor every 90 days.")
 ```
 
 The text unit is the thing retrieval returns. In a document-heavy system, a text unit will usually
@@ -69,8 +69,8 @@ Small demos can collapse those identities when the object and its description ar
 same retrieval subject:
 
 ```mica
-TextUnit(#maintenance_notice)
-TextUnitText(#maintenance_notice, "The north-line sensor is due for calibration.")
+assert TextUnit(#maintenance_notice)
+assert TextUnitText(#maintenance_notice, "The north-line sensor is due for calibration.")
 ```
 
 Larger applications should keep the described subject and the text span separate when they need
@@ -81,18 +81,18 @@ provenance, multiple descriptions, document revisions, or citation precision.
 An embedding attaches a vector to a subject:
 
 ```mica
-Embedding(#emb_sensor_manual)
-EmbeddingOf(#emb_sensor_manual, #sensor_manual)
-EmbeddingModel(#emb_sensor_manual, "maintenance-docs")
-EmbeddingVector(#emb_sensor_manual, [0.12, 0.70, 0.03])
+assert Embedding(#emb_sensor_manual)
+assert EmbeddingOf(#emb_sensor_manual, #sensor_manual)
+assert EmbeddingModel(#emb_sensor_manual, "maintenance-docs")
+assert EmbeddingVector(#emb_sensor_manual, [0.12, 0.70, 0.03])
 ```
 
 An index decides which embeddings participate in a search surface:
 
 ```mica
-VectorIndex(#manual_index)
-VectorIndexMetric(#manual_index, "cosine")
-VectorIndexContains(#manual_index, #emb_sensor_manual)
+assert VectorIndex(#manual_index)
+assert VectorIndexMetric(#manual_index, "cosine")
+assert VectorIndexContains(#manual_index, #emb_sensor_manual)
 ```
 
 The shared filein provides helper verbs for maintaining these facts:
@@ -126,6 +126,21 @@ freely; nearest-neighbour results only make sense for a specific query vector an
 
 The result rows are candidates. A high score means "similar according to this embedding model and
 metric", not "visible", "correct", "trusted", or "the best answer".
+
+The exact search computes cosine similarity across the embeddings included by `VectorIndexContains`.
+Each embedding supplies one subject through `EmbeddingOf` and a numeric list through
+`EmbeddingVector`. Query and candidate vectors must have the same dimension and non-zero magnitude.
+The calculation uses host double precision and returns a Mica binary32 score.
+
+Several embeddings may describe one subject. Search keeps that subject's highest score and applies
+the limit to distinct subjects. Equal scores are resolved by subject value order. The resulting
+relation remains a set: sort its score column explicitly when constructing a ranked display.
+Binding an output column filters the already selected candidate set, as shown in
+[Computed Relations](../language/computed-relations.md).
+
+Use the same embedding model and vector representation when indexing subjects and forming queries.
+The search relation reads the vectors supplied to it; the application records the model name and
+index membership that make those comparisons meaningful.
 
 ## Snapshot Version
 
@@ -175,20 +190,20 @@ let result = retrieve_context(
 The verb records a question, a retrieval plan, and one `RetrievedContext` per authorized candidate:
 
 ```mica
-Question(question)
-QuestionText(question, "sensor calibration interval")
+assert Question(question)
+assert QuestionText(question, "sensor calibration interval")
 
-RetrievalPlan(plan)
-PlanForQuestion(plan, question)
-PlanKind(plan, "nearest_embedding")
-PlanModel(plan, "maintenance-docs")
+assert RetrievalPlan(plan)
+assert PlanForQuestion(plan, question)
+assert PlanKind(plan, "nearest_embedding")
+assert PlanModel(plan, "maintenance-docs")
 
-RetrievedContext(context)
-ContextForPlan(context, plan)
-ContextSubject(context, #sensor_manual)
-ContextScore(context, 0.92)
-ContextReason(context, "nearest_embedding")
-ContextSnapshotVersion(context, 123)
+assert RetrievedContext(context)
+assert ContextForPlan(context, plan)
+assert ContextSubject(context, #sensor_manual)
+assert ContextScore(context, 0.92)
+assert ContextReason(context, "nearest_embedding")
+assert ContextSnapshotVersion(context, 123)
 ```
 
 Because this is ordinary relation state, later code can ask:
@@ -205,14 +220,14 @@ Because this is ordinary relation state, later code can ask:
 the answer text, and citations:
 
 ```mica
-Answer(answer)
-AnswerForQuestion(answer, question)
-AnswerPromptText(answer, "sensor calibration interval")
-AnswerContextText(answer, "\n- Calibrate the temperature sensor every 90 days.")
-AnswerText(answer, "Relevant context for: sensor calibration interval\n- ...")
-AnswerCitation(answer, #sensor_manual)
-AnswerCitationText(answer, #sensor_manual, "Calibrate the temperature sensor every 90 days.")
-AnswerStatus(answer, "fresh")
+assert Answer(answer)
+assert AnswerForQuestion(answer, question)
+assert AnswerPromptText(answer, "sensor calibration interval")
+assert AnswerContextText(answer, "\n- Calibrate the temperature sensor every 90 days.")
+assert AnswerText(answer, "Relevant context for: sensor calibration interval\n- ...")
+assert AnswerCitation(answer, #sensor_manual)
+assert AnswerCitationText(answer, #sensor_manual, "Calibrate the temperature sensor every 90 days.")
+assert AnswerStatus(answer, "fresh")
 ```
 
 `answer_question` produces an extractive summary. It is not an LLM-backed answer generator. The
@@ -230,10 +245,10 @@ Retrieval state is only useful if it can become stale in visible ways.
 The shared vocabulary tracks embedding status and answer freshness:
 
 ```mica
-EmbeddingStatus(embedding, "ready")
+assert EmbeddingStatus(embedding, "ready")
 EmbeddingRefreshNeeded(index, subject, model)
 
-AnswerStatus(answer, "stale")
+assert AnswerStatus(answer, "stale")
 AnswerNeedsReview(answer)
 AnswerRefreshNeeded(answer)
 ```
@@ -242,12 +257,7 @@ If a text unit changes after an answer cites it, `answer_refresh_status` compare
 with the cited text and marks the answer stale. That lets Mica treat retrieval as live workspace
 memory rather than as a throwaway prompt-building step.
 
-## What This Is Not
-
-The retrieval layer is not a vector database bolted onto Mica. It is not a promise that semantic
-similarity is truth. It is not a replacement for relations, rules, authority, or provenance.
-
-The intended shape is:
+The retrieval workflow keeps these responsibilities explicit:
 
 ```text
 embeddings/search -> candidate subjects
@@ -255,5 +265,5 @@ ordinary relations -> authority, freshness, provenance, explanation
 retrieval artefacts -> auditable context and citations
 ```
 
-That is why retrieval results are recorded back into the world. Humans and agents should be able to
-inspect not only an answer, but the path by which Mica found and authorized the context behind it.
+Recording the retrieved context and citations lets later tasks inspect how an answer was assembled
+and determine which source changes require review.

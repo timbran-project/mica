@@ -142,6 +142,7 @@ impl ComputedRelation for ExactEmbeddingSearchRelation {
             .into_iter()
             .take(limit)
             .map(|(_, _, tuple)| tuple)
+            .filter(|tuple| tuple.matches_bindings(bindings))
             .collect())
     }
 }
@@ -251,7 +252,7 @@ fn cosine_similarity(
 #[cfg(test)]
 mod tests {
     use crate::{SourceRunner, TaskOutcome};
-    use mica_var::{Symbol, Value};
+    use mica_var::{Symbol, Tuple, Value};
     use std::sync::Arc;
 
     struct ConstantEmbeddingProvider;
@@ -259,6 +260,39 @@ mod tests {
     impl crate::embedding::EmbeddingProvider for ConstantEmbeddingProvider {
         fn embed_text(&self, model: &str, text: &str) -> Result<Vec<f64>, String> {
             Ok(vec![model.len() as f64, text.len() as f64])
+        }
+    }
+
+    #[test]
+    fn nearest_embedding_filters_bound_outputs_after_selecting_top_candidates() {
+        let mut runner = SourceRunner::new_empty();
+        runner
+            .run_filein(
+                "make_relation(:NearestEmbedding, 6)
+             make_relation(:VectorIndexContains, 2)
+             make_functional_relation(:EmbeddingOf, 2, [0])
+             make_functional_relation(:EmbeddingVector, 2, [0])
+             assert VectorIndexContains(:manuals, :first)
+             assert VectorIndexContains(:manuals, :second)
+             assert EmbeddingOf(:first, :calibration)
+             assert EmbeddingOf(:second, :cleaning)
+             assert EmbeddingVector(:first, [1.0, 0.0])
+             assert EmbeddingVector(:second, [0.0, 1.0])",
+            )
+            .unwrap();
+        for source in [
+            "return !NearestEmbedding(:manuals, [1.0, 0.0], 1, :cleaning, _, _)",
+            "return !NearestEmbedding(:manuals, [1.0, 0.0], 2, :missing, _, _)",
+            "return !NearestEmbedding(:manuals, [1.0, 0.0], 2, _, 0.5, _)",
+            "return !NearestEmbedding(:manuals, [1.0, 0.0], 2, _, _, -1)",
+            "return NearestEmbedding(:manuals, [1.0, 0.0], 2, :cleaning, 0.0, _)",
+            "return NearestEmbedding(:manuals, [1.0, 0.0], 2, :cleaning, ?score, _) == [:score] { [0.0] }",
+        ] {
+            let report = runner.run_source(source).unwrap();
+            assert!(
+                matches!(report.outcome, TaskOutcome::Complete { value, .. } if value == Value::bool(true)),
+                "{source}"
+            );
         }
     }
 
@@ -288,28 +322,29 @@ mod tests {
             .unwrap();
 
         let report = runner
-            .run_source(
-                "let rows = NearestEmbedding(#main_index, [1.0, 0.0], 2, ?subject, ?score, ?snapshot_version)\n\
-                 return [rows[0][:subject], rows[1][:subject]]",
-            )
+            .run_source("return NearestEmbedding(#main_index, [1.0, 0.0], 2, ?subject, ?score, _)")
             .unwrap();
 
         let TaskOutcome::Complete { value, .. } = report.outcome else {
             panic!("expected complete outcome, got {:?}", report.outcome);
         };
-        value
-            .with_list(|values| {
-                assert_eq!(values.len(), 2);
-                assert_eq!(
-                    values[0],
-                    Value::identity(runner.named_identity(Symbol::intern("doc_one")).unwrap())
-                );
-                assert_eq!(
-                    values[1],
-                    Value::identity(runner.named_identity(Symbol::intern("doc_two")).unwrap())
-                );
-            })
-            .expect("expected list result");
+        assert_eq!(
+            value,
+            Value::relation(
+                [Symbol::intern("subject"), Symbol::intern("score")],
+                [
+                    Tuple::from([
+                        Value::identity(runner.named_identity(Symbol::intern("doc_one")).unwrap()),
+                        Value::float(1.0).unwrap(),
+                    ]),
+                    Tuple::from([
+                        Value::identity(runner.named_identity(Symbol::intern("doc_two")).unwrap()),
+                        Value::float(0.0).unwrap(),
+                    ]),
+                ],
+            )
+            .unwrap()
+        );
     }
 
     #[test]
