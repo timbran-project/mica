@@ -21,17 +21,17 @@ permissions. The task has only the authority context it was given when it starte
 Durable relations describe policy:
 
 ```mica
-GrantInvoke(#alice, #polish_verb)
-GrantEffect(#alice)
+assert GrantInvoke(#alice, #polish_verb)
+assert GrantEffect(#alice)
 ```
 
 Those low-level grant facts are useful for bootstrap, but most worlds should not stop at one grant
 fact per operation. Coarser policy relations are usually easier to author and review:
 
 ```mica
-HasRole(#alice, #builder)
-RelationInSurface(:inspection, :Name)
-RoleCanRead(#builder, :inspection)
+assert HasRole(#alice, #builder)
+assert RelationInSurface(:inspection, :Name)
+assert RoleCanRead(#builder, :inspection)
 ```
 
 Rules can then derive effective authority:
@@ -88,3 +88,21 @@ boundaries keeps both properties visible.
 Authority is also separate from identity. `#alice` is a durable identity. A task running "as Alice"
 receives authority derived for Alice at that boundary. Code cannot gain authority merely by
 mentioning `#alice` in a role map or fact.
+
+## Administrative Source and Ordinary Tasks
+
+Creating identities, declaring relations, and changing the catalogue are administrative operations.
+The declaration builtins check grant authority. Method, rule, and type-alias installation runs
+through the runner's administrative source path; source submitted with an actor or principal runs
+as task code instead.
+
+A host that submits an anonymous `TaskRequest` must still supply the intended `AuthorityContext`.
+Omitting actor and principal identities does not confer administrative permission. A request with
+empty authority can calculate `1 + 2`, but it cannot create an identity, declare a relation, or
+install a method. Requests without that authority are rejected before declaration names are reserved
+or catalogue changes are published.
+
+Keep bootstrap and filein entry points with the part of the host that administers the world. For
+user input, construct a request for the authenticated endpoint or actor so the runtime can derive
+its policy. The choice of entry point controls installation; the authority context controls the
+operations performed by the executing task.

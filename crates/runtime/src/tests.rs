@@ -480,6 +480,45 @@ fn runner_executes_source_against_empty_kernel() {
 }
 
 #[test]
+fn anonymous_source_requests_require_admin_authority_to_install_catalogue_entries() {
+    for source in [
+        "make_identity(:unapproved)",
+        "make_relation(:Unapproved, 1)",
+        "make_functional_relation(:Unapproved, 2, [0])",
+        "type Unapproved = int",
+        "verb unapproved()\nreturn 1\nend",
+        "Known(value) :- Seed(value)",
+    ] {
+        let mut runner = SourceRunner::new_empty();
+        runner
+            .run_filein("make_relation(:Known, 1)\nmake_relation(:Seed, 1)")
+            .unwrap();
+        let snapshot = runner.task_manager.kernel().snapshot();
+        let result = runner.submit_source(TaskRequest {
+            authority: AuthorityContext::empty(),
+            ..SourceRunner::root_source_request(source)
+        });
+        assert!(result.is_err(), "unauthorized source succeeded: {source}");
+        assert_eq!(
+            runner.task_manager.kernel().snapshot().version(),
+            snapshot.version(),
+            "{source}"
+        );
+    }
+
+    let mut runner = SourceRunner::new_empty();
+    let result = runner
+        .submit_source(TaskRequest {
+            authority: AuthorityContext::empty(),
+            ..SourceRunner::root_source_request("return 42")
+        })
+        .unwrap();
+    assert!(
+        matches!(result.outcome, TaskOutcome::Complete { value, .. } if value == Value::int(42).unwrap())
+    );
+}
+
+#[test]
 fn runner_installs_default_emit_builtin() {
     let mut runner = SourceRunner::new_empty();
     runner.run_source("make_identity(:target)").unwrap();

@@ -432,8 +432,8 @@ impl SourceRunner {
                 "submit_source requires source input",
             ));
         };
-        let contextual = principal.is_some() || actor.is_some();
-        if contextual {
+        let restricted = principal.is_some() || actor.is_some() || !authority.can_grant();
+        if restricted {
             let semantic = parse_semantic_with_context(&source, &self.context);
             if let Some(item) = semantic.hir.items.iter().find(|item| {
                 matches!(
@@ -446,7 +446,7 @@ impl SourceRunner {
                 return Err(unsupported_runner_error(
                     item_id(item),
                     semantic.span(item_id(item)).cloned(),
-                    "contextual source submission cannot install methods, rules, or type aliases",
+                    "this source request cannot install methods, rules, or type aliases",
                 ));
             }
             let context = self.context_for_execution(principal, actor, endpoint);
