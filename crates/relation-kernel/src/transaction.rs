@@ -1366,6 +1366,10 @@ impl ComputedRelationRead for Transaction<'_> {
         self.base.rules().to_vec()
     }
 
+    fn index_storage_kind(&self, relation: RelationId, ordinal: usize) -> Option<Symbol> {
+        self.base.index_storage_kind(relation, ordinal)
+    }
+
     fn extensional_facts(&self) -> Result<Vec<(RelationId, Tuple)>, KernelError> {
         self.extensional_facts_with_local_writes()
     }

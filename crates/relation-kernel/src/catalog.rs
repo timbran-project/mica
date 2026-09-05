@@ -114,10 +114,12 @@ pub(crate) fn catalog_facts(reader: &dyn ComputedRelationRead) -> Vec<CatalogFac
                 CatalogPredicate::Index,
                 [Value::identity(relation_id), index_value.clone()],
             ));
-            facts.push(catalog_fact(
-                CatalogPredicate::IndexStorageKind,
-                [index_value.clone(), Value::symbol(Symbol::intern("btree"))],
-            ));
+            if let Some(kind) = reader.index_storage_kind(relation_id, ordinal) {
+                facts.push(catalog_fact(
+                    CatalogPredicate::IndexStorageKind,
+                    [index_value.clone(), Value::symbol(kind)],
+                ));
+            }
             for (slot, position) in index.positions().iter().enumerate() {
                 facts.push(catalog_fact(
                     CatalogPredicate::IndexPosition,

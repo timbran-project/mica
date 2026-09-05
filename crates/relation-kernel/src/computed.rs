@@ -32,6 +32,9 @@ pub trait ComputedRelationRead: RelationRead {
 
     fn rules_vec(&self) -> Vec<RuleDefinition>;
 
+    /// Physical index representation in the committed snapshot, when stored by the kernel.
+    fn index_storage_kind(&self, relation: RelationId, ordinal: usize) -> Option<Symbol>;
+
     fn extensional_facts(&self) -> Result<Vec<(RelationId, Tuple)>, KernelError>;
 }
 

@@ -841,6 +841,17 @@ impl ComputedRelationRead for Snapshot {
         Snapshot::rules(self).to_vec()
     }
 
+    fn index_storage_kind(&self, relation: RelationId, ordinal: usize) -> Option<Symbol> {
+        let state = self.relations.get(&relation)?;
+        if self
+            .computed_relations
+            .is_computed_relation(state.metadata())
+        {
+            return None;
+        }
+        state.index_storage_kind(ordinal).map(Symbol::intern)
+    }
+
     fn extensional_facts(&self) -> Result<Vec<(RelationId, Tuple)>, KernelError> {
         Snapshot::extensional_facts(self)
     }

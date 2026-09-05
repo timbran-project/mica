@@ -62,6 +62,17 @@ impl RelationState {
         &self.metadata
     }
 
+    pub(crate) fn index_storage_kind(&self, ordinal: usize) -> Option<&'static str> {
+        let index = self.metadata.indexes().get(ordinal)?;
+        Some(
+            if is_natural_full_tuple_index(index.positions(), self.metadata.arity()) {
+                self.tuples.storage_kind()
+            } else {
+                "radix"
+            },
+        )
+    }
+
     pub(crate) fn cardinality(&self) -> usize {
         self.tuples.len()
     }

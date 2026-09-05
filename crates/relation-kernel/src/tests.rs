@@ -16,8 +16,8 @@ use crate::{
     Conflict, ConflictKind, ConflictPolicy, DispatchRelations, Fact, FactChange, FactChangeKind,
     InMemoryCommitProvider, KernelError, MentionedFact, ProjectedStore, RelationDurability,
     RelationId, RelationKernel, RelationMetadata, RelationRead, RelationSource, RelationWorkspace,
-    Rule, RuleBodyItem, RuleComparisonOp, RuleGuard, SubjectFact, Term, Tuple, ValueDomain,
-    applicable_positional_methods_cached, method_program_id,
+    Rule, RuleBodyItem, RuleComparisonOp, RuleGuard, Snapshot, SubjectFact, Term, Tuple,
+    ValueDomain, applicable_positional_methods_cached, method_program_id,
 };
 #[cfg(feature = "fjall-provider")]
 use crate::{FjallDurabilityMode, FjallFormatStatus, FjallStateProvider};
@@ -356,6 +356,45 @@ fn catalog_facts_expose_relation_metadata_as_relations() {
         fact.predicate == CatalogPredicate::IndexStorageKind
             && fact.tuple.values()[1] == Value::symbol(Symbol::intern("btree"))
     }));
+}
+
+#[test]
+fn catalog_index_storage_kinds_follow_snapshot_storage() {
+    let kernel = RelationKernel::new();
+    kernel
+        .create_relation(
+            RelationMetadata::new(rel(1), Symbol::intern("Pair"), 2).with_index([1, 0]),
+        )
+        .unwrap();
+    let storage_kinds = |snapshot: &Snapshot| {
+        let mut kinds = snapshot
+            .catalog_facts()
+            .into_iter()
+            .filter(|fact| fact.predicate == CatalogPredicate::IndexStorageKind)
+            .map(|fact| fact.tuple.values()[1].clone())
+            .collect::<Vec<_>>();
+        kinds.sort();
+        kinds
+    };
+    let before = kernel.snapshot();
+    let mut initial = vec![
+        Value::symbol(Symbol::intern("btree")),
+        Value::symbol(Symbol::intern("radix")),
+    ];
+    initial.sort();
+    assert_eq!(storage_kinds(&before), initial);
+
+    let mut tx = kernel.begin();
+    for value in 0..5_000 {
+        tx.assert(rel(1), Tuple::from([int(value), int(value)]))
+            .unwrap();
+    }
+    tx.commit().unwrap();
+    assert_eq!(
+        storage_kinds(&kernel.snapshot()),
+        vec![Value::symbol(Symbol::intern("radix")); 2]
+    );
+    assert_eq!(storage_kinds(&before), initial);
 }
 
 #[test]

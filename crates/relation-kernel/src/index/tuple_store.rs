@@ -69,6 +69,13 @@ impl TupleStore {
         self.len() == 0
     }
 
+    pub(super) fn storage_kind(&self) -> &'static str {
+        match self {
+            Self::Small(_) => "btree",
+            Self::Radix { .. } => "radix",
+        }
+    }
+
     pub(super) fn contains(&self, tuple: &Tuple) -> bool {
         match self {
             Self::Small(tuples) => tuples.contains(tuple),
