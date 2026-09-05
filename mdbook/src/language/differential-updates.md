@@ -64,14 +64,14 @@ unsuitable, Mica can evaluate the complete result and produce the same answers.
 
 The first query for a derived relation computes a complete answer and can prepare maintained state
 for that relation and its dependencies. Later commits advance that state through the affected rule
-components. Installing or disabling rules changes the definition itself, so the runtime rebuilds
-the corresponding execution state against the resulting rule set.
+components. Installing or disabling rules changes the definition itself, so the runtime rebuilds the
+corresponding execution state against the resulting rule set.
 
 An in-progress task can also query derived relations after making draft writes. Its private
 evaluation incorporates those writes without publishing them or changing another task's snapshot.
-Aborting the task discards that draft; completing it commits the settled changes. An immutable
-query result saved in a local binding remains the answer from the moment of that query, even when
-the same task subsequently changes its inputs.
+Aborting the task discards that draft; completing it commits the settled changes. An immutable query
+result saved in a local binding remains the answer from the moment of that query, even when the same
+task subsequently changes its inputs.
 
 Differential maintenance is most useful when relations are large, commits change a small fraction of
 their rows, rules remain stable, and derived results are read repeatedly. A small input change can

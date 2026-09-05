@@ -133,8 +133,8 @@ code should use `verb`.
 ## Selecting a Branch
 
 Dispatch first finds applicable branches, then compares their restrictions. A branch is more
-specific when it accepts a subset of another branch's role values and narrows at least one role.
-For named calls, requiring an additional supplied role can also make a branch more specific.
+specific when it accepts a subset of another branch's role values and narrows at least one role. For
+named calls, requiring an additional supplied role can also make a branch more specific.
 
 ```mica,eval
 make_identity(:instrument)
@@ -164,10 +164,10 @@ The unrestricted `item` parameter still requires an `item` argument. It accepts 
 role. The instrument branch narrows the role to matching identities and values, and the thermometer
 branch narrows it further through delegation. Method definition order does not establish priority.
 
-Named calls supply roles by name, so argument order at the call site does not affect matching.
-Every declared parameter must be supplied; additional call roles can be present. A branch receives
-its own declared parameters in their declaration order. Positional calls instead require the same
-number of arguments as the branch and associate them with parameter positions.
+Named calls supply roles by name, so argument order at the call site does not affect matching. Every
+declared parameter must be supplied; additional call roles can be present. A branch receives its own
+declared parameters in their declaration order. Positional calls instead require the same number of
+arguments as the branch and associate them with parameter positions.
 
 ## Ambiguity Across Roles
 
@@ -202,9 +202,9 @@ preference between otherwise matching branches either.
 
 ## Restrictions and Live Context
 
-A role restriction matches the supplied value itself or a reachable prototype. Primitive values
-also match their primitive prototype, and a frob matches through its delegate as well as `#frob`.
-All reachable prototypes participate. Delegation rank records an ordering of prototype facts;
+A role restriction matches the supplied value itself or a reachable prototype. Primitive values also
+match their primitive prototype, and a frob matches through its delegate as well as `#frob`. All
+reachable prototypes participate. Delegation rank records an ordering of prototype facts;
 applicability follows reachability across those facts.
 
 Dispatch reads the task's world view. An assertion or retraction affecting `Delegates` can therefore

@@ -12,8 +12,8 @@ Names for identities, relations, dot access, and installed methods are resolved 
 compiler's view of the world before a task starts. An already running task uses its compiled
 references; creating a name does not retroactively change that task's bytecode.
 
-The administrative source runner coordinates installation and compilation. It recognizes root
-calls such as `make_identity(:sensor)` and `make_functional_relation(:Label, 2, [0])`, installs their
+The administrative source runner coordinates installation and compilation. It recognizes root calls
+such as `make_identity(:sensor)` and `make_functional_relation(:Label, 2, [0])`, installs their
 literal names, and refreshes the compiler context before compiling dependent expressions. This
 allows a complete administrative submission to declare names and then use them:
 
@@ -25,10 +25,10 @@ let exactly {label} = Label(#sensor, ?label)
 require label == "temperature sensor"
 ```
 
-The declaration pass recognizes these direct root calls with literal names and schema arguments.
-A name computed while executing ordinary task code becomes available to later compilations after
-it is committed. For example, constructing an identity name from text does not make a matching
-`#name` reference available earlier in the compilation of that same task.
+The declaration pass recognizes these direct root calls with literal names and schema arguments. A
+name computed while executing ordinary task code becomes available to later compilations after it is
+committed. For example, constructing an identity name from text does not make a matching `#name`
+reference available earlier in the compilation of that same task.
 
 When a submission mixes executable code with verb or rule installation, the runner separates the
 installation stages and refreshes its context between them. Filein uses this coordination while

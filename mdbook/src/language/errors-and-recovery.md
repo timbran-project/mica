@@ -10,22 +10,22 @@ E_NOT_FOUND
 
 Three related forms serve different purposes:
 
-| Form | Meaning |
-| --- | --- |
-| `E_NOT_FOUND` | an error-code value, suitable for comparison or raising |
+| Form                                  | Meaning                                                         |
+| ------------------------------------- | --------------------------------------------------------------- |
+| `E_NOT_FOUND`                         | an error-code value, suitable for comparison or raising         |
 | `error(E_NOT_FOUND, "Missing label")` | an error value containing a code, message, and optional payload |
-| `err(problem)` | an ordinary returned result containing an error value |
+| `err(problem)`                        | an ordinary returned result containing an error value           |
 
 Evaluating an error code or returning `err(problem)` does not unwind anything. `raise` transfers
 control to a matching handler, or aborts the current transaction when no handler accepts it. Use
-results for expected outcomes that callers should inspect and raised errors for failures that
-should interrupt the current computation.
+results for expected outcomes that callers should inspect and raised errors for failures that should
+interrupt the current computation.
 
 ## Constructing Error Values
 
-`error(code[, message[, payload]])` constructs an error without raising it. Omit the message or
-pass `none` to leave it absent; an empty string is a present, empty message. Supplying a third
-argument records a present payload, including when that argument is `()` or `none`.
+`error(code[, message[, payload]])` constructs an error without raising it. Omit the message or pass
+`none` to leave it absent; an empty string is a present, empty message. Supplying a third argument
+records a present payload, including when that argument is `()` or `none`.
 
 ```mica,eval
 let problem = error(E_NOT_FOUND, "Missing label", :label)
@@ -42,9 +42,9 @@ An integration can create an error code from any symbol with `error_code(symbol)
 convention. Error codes remain distinct from the symbols with the same names.
 
 `to_literal` writes structured errors using these constructors. `from_literal` recognizes the
-constructors and recursively decodes their literal arguments. It does not evaluate source code,
-look up arbitrary functions, or call verbs while decoding. This permits errors nested in lists,
-maps, relations, and other persistable values to cross the text boundary with their fields intact.
+constructors and recursively decodes their literal arguments. It does not evaluate source code, look
+up arbitrary functions, or call verbs while decoding. This permits errors nested in lists, maps,
+relations, and other persistable values to cross the text boundary with their fields intact.
 
 ## Raising and Inspecting an Error
 
@@ -60,9 +60,9 @@ The optional second value is the message. The optional third value is a payload 
 program. The message is text for a person; use the code and structured payload when a caller needs
 to make a decision. A caller should not need to parse an English message to recognize a failure.
 
-An existing error can be raised directly with `raise problem`. This preserves its code, message,
-and payload. `raise problem.code` constructs a fresh error from just the code, so use the former
-when forwarding a caught error or converting an `err` result into a raised failure.
+An existing error can be raised directly with `raise problem`. This preserves its code, message, and
+payload. `raise problem.code` constructs a fresh error from just the code, so use the former when
+forwarding a caught error or converting an `err` result into a raised failure.
 
 ## Handling a Block
 
@@ -172,10 +172,10 @@ boundaries together: a handler can turn an error into a successful task whose pr
 changes will commit.
 
 `require condition` is a task assertion. A falsey condition aborts the task directly with
-`"require failed"`; it does not raise a catchable application error or unwind through `finally`.
-Use `if ... raise E_...` when the failure belongs in the language's recovery protocol. Runtime
-failures such as an exceeded instruction budget or a denied authority check also reach the host
-through its runtime error path, separately from raised language errors.
+`"require failed"`; it does not raise a catchable application error or unwind through `finally`. Use
+`if ... raise E_...` when the failure belongs in the language's recovery protocol. Runtime failures
+such as an exceeded instruction budget or a denied authority check also reach the host through its
+runtime error path, separately from raised language errors.
 
 Errors are not limited to a fixed built-in list. The compiler recognizes any identifier beginning
 with `E_` as an error-code literal.

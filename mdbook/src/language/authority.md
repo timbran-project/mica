@@ -93,8 +93,8 @@ mentioning `#alice` in a role map or fact.
 
 Creating identities, declaring relations, and changing the catalogue are administrative operations.
 The declaration builtins check grant authority. Method, rule, and type-alias installation runs
-through the runner's administrative source path; source submitted with an actor or principal runs
-as task code instead.
+through the runner's administrative source path; source submitted with an actor or principal runs as
+task code instead.
 
 A host that submits an anonymous `TaskRequest` must still supply the intended `AuthorityContext`.
 Omitting actor and principal identities does not confer administrative permission. A request with

@@ -97,8 +97,8 @@ require Label(#sensor, ?label) == [:label] { ["north-line sensor"] }
 ```
 
 For a composite key, retract the current matching fact and assert its replacement in the same
-transaction. The key also coordinates competing writers: if another task changes a touched key
-after this task's snapshot was taken, commit reports a conflict and the runtime retries the segment
+transaction. The key also coordinates competing writers: if another task changes a touched key after
+this task's snapshot was taken, commit reports a conflict and the runtime retries the segment
 against a fresh snapshot. The retried code reads the current value before making its decision.
 
 ## Why Is It Called a Functional Relation?

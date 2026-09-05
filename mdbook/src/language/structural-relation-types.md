@@ -14,8 +14,8 @@ type TextResult = relation<{:case -> :ok, :value -> string}
 The heading is exact: a value with extra or missing columns does not satisfy the type. Leaving out
 the cardinality clause means any number of rows. Use `rows in n` for an exact count, `rows in m..n`
 for inclusive bounds, and `rows in m..*` for a minimum without an upper bound. Common contracts are
-`0` for an empty relation, `0..1` for an optional row, `1` for a required row, and `1..*` for a nonempty
-set.
+`0` for an empty relation, `0..1` for an optional row, `1` for a required row, and `1..*` for a
+nonempty set.
 
 Cardinality counts distinct rows after the relation removes duplicates. It does not count how many
 rows were written in the source. Literal spelling does not distinguish equal values:
@@ -28,8 +28,8 @@ let units: relation<{:value -> unit}> where rows in 1 = [:value] { [()], [[] { [
 require units == [:value] { [()] }
 ```
 
-This also applies inside lists, maps, and nested relation cells. Floats use their binary32 value,
-so two decimal spellings that round to the same float contribute one row. Integer and float cells
+This also applies inside lists, maps, and nested relation cells. Floats use their binary32 value, so
+two decimal spellings that round to the same float contribute one row. Integer and float cells
 retain distinct kinds when relations compare rows.
 
 Type aliases can name structural types and accept parameters:
@@ -135,8 +135,8 @@ end
 ```
 
 `let exactly` requires exactly one row. A row-form `if let` accepts zero or one row and takes its
-`else` branch for zero. Both require the heading stated by the pattern and raise `E_CARDINALITY`
-for excess rows or a mismatched heading. `for` accepts any cardinality and binds once per row.
+`else` branch for zero. Both require the heading stated by the pattern and raise `E_CARDINALITY` for
+excess rows or a mismatched heading. `for` accepts any cardinality and binds once per row.
 
 The row-form conditional is useful for an optional property: absence is expected, while two values
 would violate the caller's assumption. An ordinary `match` row case instead tests for exactly one

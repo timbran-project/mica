@@ -42,8 +42,8 @@ For `:catalogue`, pass `none` as the relation and `[]` as the bindings.
 `initial` is `:snapshot` to receive current matching rows followed by changes, or `:changes` to
 receive only changes after registration. A non-negative cursor may resume change delivery from
 retained commit history. Pass `none` when no cursor is available. The queue budget defaults to 64
-messages and must be a positive integer. A cursor goes with `:changes`; `:snapshot` requests a
-fresh starting point and must not also specify a cursor.
+messages and must be a positive integer. A cursor goes with `:changes`; `:snapshot` requests a fresh
+starting point and must not also specify a cursor.
 
 Registration becomes active when the surrounding task commits.
 

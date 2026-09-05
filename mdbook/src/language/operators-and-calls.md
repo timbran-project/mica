@@ -18,11 +18,11 @@ the same row associate to the left, except assignment, which associates to the r
 | `<`, `<=`, `>`, `>=`                                         | ordering comparison                   |
 | `==`, `!=`                                                   | equality comparison                   |
 | `&&`                                                         | logical and                           |
-| `\|\|`                                                      | logical or                            |
+| `\|\|`                                                       | logical or                            |
 | `=`                                                          | assignment                            |
 
-Calls, indexing, and field access bind before unary operators, which bind before arithmetic.
-For example, `-values[0] + 3` adds three to the negated first element, and `scale * measure(item)`
+Calls, indexing, and field access bind before unary operators, which bind before arithmetic. For
+example, `-values[0] + 3` adds three to the negated first element, and `scale * measure(item)`
 multiplies by the function's result. Parentheses can override that grouping:
 
 ```mica,eval
@@ -50,13 +50,14 @@ require ("left" || "right") == true
 require (none || "fallback") == "fallback"
 ```
 
-An option match or `if` is clearer when selecting between two data values: a short-circuiting
-`||` returns `true` for a truthy left operand, rather than returning that operand's payload.
+An option match or `if` is clearer when selecting between two data values: a short-circuiting `||`
+returns `true` for a truthy left operand, rather than returning that operand's payload.
 
 ## Ranges and Indexing
 
 `start..end` constructs an inclusive range. Integer ranges can be iterated directly; they do not
-first expand into a list. An open-ended range uses `_` as its endpoint and is useful for list slices:
+first expand into a list. An open-ended range uses `_` as its endpoint and is useful for list
+slices:
 
 ```mica
 items[1]
@@ -64,9 +65,9 @@ items[1..3]
 items[2.._]
 ```
 
-Lists and relations accept **zero-based** integer indexes. A relation row is returned as a map keyed by its heading
-symbols. Maps accept any Mica value as a key. Lists also accept inclusive range indexes; an
-open-ended range extends through the final item. An invalid index raises `E_INDEX`; use
+Lists and relations accept **zero-based** integer indexes. A relation row is returned as a map keyed
+by its heading symbols. Maps accept any Mica value as a key. Lists also accept inclusive range
+indexes; an open-ended range extends through the final item. An invalid index raises `E_INDEX`; use
 `index_or(collection, index, default)` for a non-raising lookup on lists, maps, or relations.
 
 ```mica,eval
@@ -83,9 +84,9 @@ Slice endpoints are bounds, not requests to clamp or wrap. A negative index, a r
 slice, or a slice extending past the list raises `E_INDEX`. The open-ended slice at the list's
 length is valid and returns an empty list. Strings and bytes do not support this index syntax.
 
-An indexed assignment requires a mutable local list or map as its immediate target. For nested
-data, extract the inner collection, construct its replacement, then assign that replacement into
-the outer collection. For example:
+An indexed assignment requires a mutable local list or map as its immediate target. For nested data,
+extract the inner collection, construct its replacement, then assign that replacement into the outer
+collection. For example:
 
 ```mica,eval
 let settings = {:display -> {:colour -> "amber"}}
@@ -116,10 +117,10 @@ such as `process(value)` are resolved in this order:
 3. a registered runtime or host function; then
 4. positional verb dispatch using selector `:process`.
 
-There is one deliberate exception for installed verb parameters: a role called `actor` does not
-hide the runtime call `actor()`. The bare name `actor` still refers to the supplied role value;
-`actor()` reads the runtime context. The same exception applies to other role names that coincide
-with registered runtime functions. Ordinary local bindings still take lexical precedence.
+There is one deliberate exception for installed verb parameters: a role called `actor` does not hide
+the runtime call `actor()`. The bare name `actor` still refers to the supplied role value; `actor()`
+reads the runtime context. The same exception applies to other role names that coincide with
+registered runtime functions. Ordinary local bindings still take lexical precedence.
 
 The final segment of a relation name therefore begins with an ASCII uppercase letter, as in
 `AssignedTo` or `workflow/AssignedTo`. Functions, built-ins, and verb selectors conventionally begin
@@ -149,8 +150,8 @@ transform = fn(value) => value + 2
 require transform(3) == 5
 ```
 
-Assigning another function to a mutable binding changes subsequent calls through that binding.
-The function value for a call is selected before its arguments are evaluated.
+Assigning another function to a mutable binding changes subsequent calls through that binding. The
+function value for a call is selected before its arguments are evaluated.
 
 Named-role dispatch starts with a symbol and names every role explicitly:
 
@@ -180,16 +181,16 @@ role such as `request` or `item`. For a verb declared as `approve(actor, request
 `:approve(actor: person, request: change)`; for `approve(actor, receiver)`, the equivalent receiver
 call is `change:approve(actor: person)`.
 
-Positional dispatch obtains argument-to-role mapping from the installed parameter order. Named
-roles are usually clearer for calls involving several identities with different meanings. The
-selector can also be computed with `:(selector)(actor: person, request: change)`, or with
+Positional dispatch obtains argument-to-role mapping from the installed parameter order. Named roles
+are usually clearer for calls involving several identities with different meanings. The selector can
+also be computed with `:(selector)(actor: person, request: change)`, or with
 `change:(selector)(actor: person)` for a receiver call.
 
 Evaluation follows source order: a receiver expression runs first, then a computed selector, then
-the arguments from left to right. Parentheses group the receiver without changing that order.
-Named roles are arranged for method selection after their values have been evaluated; their names
-do not change the order of side effects. Spliced lists and role maps are also evaluated where they
-appear in the call.
+the arguments from left to right. Parentheses group the receiver without changing that order. Named
+roles are arranged for method selection after their values have been evaluated; their names do not
+change the order of side effects. Spliced lists and role maps are also evaluated where they appear
+in the call.
 
 See [Verbs, Roles, and Dispatch](./verbs-roles-dispatch.md) for method selection and prototype
 delegation.

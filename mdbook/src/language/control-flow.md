@@ -91,12 +91,12 @@ end
 `for` evaluates its iterable expression once. The number and shape of the bindings determine what
 each iteration receives:
 
-| Iterable | One binding | Two bindings |
-| --- | --- | --- |
-| list | element | zero-based index, element |
-| map | value | key, value |
-| relation value | row map | zero-based row index, row map |
-| closed integer range | integer | zero-based offset, integer |
+| Iterable             | One binding | Two bindings                  |
+| -------------------- | ----------- | ----------------------------- |
+| list                 | element     | zero-based index, element     |
+| map                  | value       | key, value                    |
+| relation value       | row map     | zero-based row index, row map |
+| closed integer range | integer     | zero-based offset, integer    |
 
 Maps and relation values use canonical order. Lists and ranges have their natural sequence order.
 Use a list when iteration order carries application meaning.
@@ -109,9 +109,9 @@ end
 require numbered == [[0, "inspect"], [1, "repair"]]
 ```
 
-Loop bindings are local to the loop. Bind a mutable accumulator before the loop when the result
-must be used afterward. The value of the `for` or `while` expression itself is `()`; it does not
-collect the values of its body automatically.
+Loop bindings are local to the loop. Bind a mutable accumulator before the loop when the result must
+be used afterward. The value of the `for` or `while` expression itself is `()`; it does not collect
+the values of its body automatically.
 
 The loop keeps its evaluated collection value. Replacing the original local binding does not change
 which elements the loop visits:

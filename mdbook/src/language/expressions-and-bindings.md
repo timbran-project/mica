@@ -85,9 +85,9 @@ let [head, ?middle = none, @tail] = values
 
 Required names bind by zero-based position; a missing required list position raises `E_INDEX`.
 Optional names use their explicit default when the source list is too short. An optional name still
-consumes its position when present. A rest binding receives the remaining values as a list, including
-an empty list when nothing remains. The compiler supports at most one rest binding. Put it last to
-make the shape easy to read.
+consumes its position when present. A rest binding receives the remaining values as a list,
+including an empty list when nothing remains. The compiler supports at most one rest binding. Put it
+last to make the shape easy to read.
 
 ```mica,eval
 let [first, ?second = "unspecified", @rest] = ["inspect"]
@@ -138,9 +138,9 @@ fn describe(item, ?style = :brief, @rest)
 end
 ```
 
-Named and anonymous local functions are callable values. Both can be passed, returned, assigned,
-and called through aliases. A named declaration also binds its name in the enclosing scope. They
-capture local values when the function value is created:
+Named and anonymous local functions are callable values. Both can be passed, returned, assigned, and
+called through aliases. A named declaration also binds its name in the enclosing scope. They capture
+local values when the function value is created:
 
 ```mica
 let make_adder = fn(base) => fn(value) => base + value
@@ -149,8 +149,8 @@ return add10(32)
 ```
 
 The arrow body is a single result expression. A block body permits multiple expressions and uses
-`return` to make its result explicit. A local function is useful for calculations and repeated
-steps within a task. An installed verb is useful when later tasks need to discover and invoke that
+`return` to make its result explicit. A local function is useful for calculations and repeated steps
+within a task. An installed verb is useful when later tasks need to discover and invoke that
 behaviour through the live world's dispatch rules.
 
 A closure captures values at creation time. Reassigning an outer binding later does not change the
@@ -175,11 +175,11 @@ require saved(3) == 4
 require increment(3) == 13
 ```
 
-Use an anonymous function when the surrounding code already supplies a useful name or when passing
-a short calculation directly to another function. The unannotated brace form
-`{value} => value + 1` is also a function expression.
-Use `fn(value: int) -> int => value + 1` when annotations are needed. These local function values
-cannot be persisted in relation tuples; their lifetime is tied to the VM that created them.
+Use an anonymous function when the surrounding code already supplies a useful name or when passing a
+short calculation directly to another function. The unannotated brace form `{value} => value + 1` is
+also a function expression. Use `fn(value: int) -> int => value + 1` when annotations are needed.
+These local function values cannot be persisted in relation tuples; their lifetime is tied to the VM
+that created them.
 
 Required, optional, and rest parameters use the same positional vocabulary as scatter bindings.
 Optional parameters need an explicit default, and rest parameters receive a list. Neither omission
@@ -230,9 +230,10 @@ local variable is the loop binding, and the named query result is read out of th
 
 ## Bindings Hold Independent Values
 
-`let saved = value` initializes a separate binding with the current value. Later assignment to either
-name does not change the other binding. This also applies to lists and maps: indexed assignment
-replaces the collection in its target binding, while a saved value retains its previous contents.
+`let saved = value` initializes a separate binding with the current value. Later assignment to
+either name does not change the other binding. This also applies to lists and maps: indexed
+assignment replaces the collection in its target binding, while a saved value retains its previous
+contents.
 
 ```mica,eval
 let readings = [10, 20]

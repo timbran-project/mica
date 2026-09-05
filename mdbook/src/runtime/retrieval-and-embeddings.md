@@ -134,8 +134,8 @@ The calculation uses host double precision and returns a Mica binary32 score.
 
 Several embeddings may describe one subject. Search keeps that subject's highest score and applies
 the limit to distinct subjects. Equal scores are resolved by subject value order. The resulting
-relation remains a set: sort its score column explicitly when constructing a ranked display.
-Binding an output column filters the already selected candidate set, as shown in
+relation remains a set: sort its score column explicitly when constructing a ranked display. Binding
+an output column filters the already selected candidate set, as shown in
 [Computed Relations](../language/computed-relations.md).
 
 Use the same embedding model and vector representation when indexing subjects and forming queries.

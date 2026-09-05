@@ -146,8 +146,8 @@ A rule is not merely a local function in the file that mentions it. Installing t
 the live world's catalogue. The definition can be inspected, filed out, replaced through filein unit
 ownership, and used by later tasks.
 
-Because rules are live definitions, changes deserve the same review and testing discipline as
-schema and application code. Replacing a rule can change many visible conclusions at once.
+Because rules are live definitions, changes deserve the same review and testing discipline as schema
+and application code. Replacing a rule can change many visible conclusions at once.
 
 ## Continue
 

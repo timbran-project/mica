@@ -1,8 +1,8 @@
 # Task Control
 
 Task-control forms let a computation publish its work and cooperate with the runtime driver. Each
-suspending form commits the current transaction before waiting. The driver determines when to
-resume the continuation and supplies its result value. See
+suspending form commits the current transaction before waiting. The driver determines when to resume
+the continuation and supplies its result value. See
 [Tasks and Transactions](./tasks-and-transactions.md) for commit, replay, and authority rules.
 
 ## Publishing and Waiting
@@ -23,9 +23,9 @@ suspend(1.5)
 ```
 
 A zero-duration suspension still crosses a transaction boundary. `suspend()` without a duration
-keeps the continuation available for an explicit host resumption; it does not arrange a timer.
-These forms cooperate with the scheduler. They do not block the worker thread for the duration of
-the wait.
+keeps the continuation available for an explicit host resumption; it does not arrange a timer. These
+forms cooperate with the scheduler. They do not block the worker thread for the duration of the
+wait.
 
 `read(metadata)` waits for input addressed to the task's endpoint:
 
@@ -34,9 +34,9 @@ let line = read(:line)
 ```
 
 The metadata describes the request to the host. `:line` is a value passed to that host protocol; the
-VM itself does not read a terminal or assume every input is a string. The value supplied by the
-host becomes the value of the `read` expression. Multiple suspended readers on an endpoint can
-receive the same input, so use one reader when a protocol requires a single consumer.
+VM itself does not read a terminal or assume every input is a string. The value supplied by the host
+becomes the value of the `read` expression. Multiple suspended readers on an endpoint can receive
+the same input, so use one reader when a protocol requires a single consumer.
 
 ## Starting a Child
 
@@ -66,8 +66,8 @@ child starts and when a delayed child resumes. A child has its own transactions,
 completion. Use explicit facts or messages when its parent needs to observe its progress.
 
 Named spawn calls also receive the parent's `principal`, `actor`, and `endpoint` roles when those
-roles are available and the call does not supply them explicitly. The `tick` call above can therefore
-receive the parent's actor without unpacking the `option<identity>` returned by `actor()`.
+roles are available and the call does not supply them explicitly. The `tick` call above can
+therefore receive the parent's actor without unpacking the `option<identity>` returned by `actor()`.
 
 ## Mailboxes
 
@@ -136,10 +136,11 @@ one queue carries replies for several requests.
 
 ## Resource Lifetimes
 
-`mailbox_close(rx)` immediately closes the live queue, revokes both capabilities, and discards queued
-messages. Cancel change subscriptions attached to a language-created mailbox before closing it.
-An external producer attempting delivery through a closed mailbox observes failure. A send already
-buffered by another task is discarded if the mailbox has closed by the time that task commits.
+`mailbox_close(rx)` immediately closes the live queue, revokes both capabilities, and discards
+queued messages. Cancel change subscriptions attached to a language-created mailbox before closing
+it. An external producer attempting delivery through a closed mailbox observes failure. A send
+already buffered by another task is discarded if the mailbox has closed by the time that task
+commits.
 
 Creation and closure manage ephemeral resources; they are not relation writes that an aborted
 transaction restores. Close a mailbox when its consumer is finished. Its capabilities can travel

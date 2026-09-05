@@ -2,9 +2,9 @@
 
 Mica installs the following core functions in a normal runtime. Calls are positional unless a
 signature says otherwise. Operations that require authority check the task's authority context.
-Argument and permission failures reach
-the host as runtime errors unless the operation explicitly raises a language error. Builtins that
-return an `option` or `result` represent absence or an expected failure as ordinary values.
+Argument and permission failures reach the host as runtime errors unless the operation explicitly
+raises a language error. Builtins that return an `option` or `result` represent absence or an
+expected failure as ordinary values.
 
 ## Scalar and Collection Functions
 
@@ -18,7 +18,7 @@ return an `option` or `result` represent absence or an expected failure as ordin
 | `string_join(parts, separator)`            | joined list of strings                               |
 | `string_starts_with(text, prefix)`         | boolean prefix test                                  |
 | `string_contains(text, subject)`           | boolean substring test                               |
-| `string_equal_fold(left, right)`           | equality after Unicode lowercasing                    |
+| `string_equal_fold(left, right)`           | equality after Unicode lowercasing                   |
 | `lower(text)`                              | lowercase string                                     |
 | `words(text)`                              | parsed word list                                     |
 | `edit_distance(left, right)`               | character edit distance                              |
@@ -34,7 +34,7 @@ return an `option` or `result` represent absence or an expected failure as ordin
 | `map_pairs(map)`                           | list of two-item key/value lists                     |
 | `index_or(collection, index, default)`     | list, map, or relation lookup with a default         |
 | `json_encode(value)` / `json_decode(text)` | JSON conversion                                      |
-| `json_null()`                            | explicit JSON null value                             |
+| `json_null()`                              | explicit JSON null value                             |
 | `os_getenv(name)`                          | `option<string>`                                     |
 
 `os_getenv` requires root authority or an invoke grant for `:os_getenv`, such as
@@ -84,8 +84,8 @@ character. It is useful for a command protocol whose arguments are words and quo
 require words("take \"red key\" now") == ["take", "red key", "now"]
 ```
 
-`parse_ordinal` accepts positive numeric ordinals such as `"2"` and `"21st"`, and English forms
-such as `"first"` and `"twenty-first"`. Inspect its result before using the number:
+`parse_ordinal` accepts positive numeric ordinals such as `"2"` and `"21st"`, and English forms such
+as `"first"` and `"twenty-first"`. Inspect its result before using the number:
 
 ```mica,eval
 let selected = match parse_ordinal("twenty-first")
@@ -97,9 +97,9 @@ end
 require selected == 21
 ```
 
-URL component encoding percent-encodes UTF-8 bytes outside the unreserved alphabet. Decoding
-accepts percent escapes and interprets `+` as a space. Encode individual component values before
-assembling a URL; separators such as `/`, `?`, and `&` have meaning in the assembled URL.
+URL component encoding percent-encodes UTF-8 bytes outside the unreserved alphabet. Decoding accepts
+percent escapes and interprets `+` as a space. Encode individual component values before assembling
+a URL; separators such as `/`, `?`, and `&` have meaning in the assembled URL.
 
 `sort` returns a sorted list and retains duplicates. It uses canonical value order, the same order
 used to organize map keys and relation rows. Use values of a consistent kind when the order should
@@ -110,15 +110,15 @@ represent a numeric ranking or an alphabetical list.
 `json_decode` returns a Mica value directly. `json_encode` returns JSON text. The conversions use
 the following shapes recursively:
 
-| JSON value | Mica value |
-| ---------- | ---------- |
-| `true` or `false` | boolean |
-| integer token such as `12` | integer |
-| token with a decimal point or exponent, such as `12.0` or `12e0` | float |
-| string | string |
-| array | list |
-| object | map with symbol keys |
-| `null` | `json_null()`, equivalent to `{:json -> :null}` |
+| JSON value                                                       | Mica value                                      |
+| ---------------------------------------------------------------- | ----------------------------------------------- |
+| `true` or `false`                                                | boolean                                         |
+| integer token such as `12`                                       | integer                                         |
+| token with a decimal point or exponent, such as `12.0` or `12e0` | float                                           |
+| string                                                           | string                                          |
+| array                                                            | list                                            |
+| object                                                           | map with symbol keys                            |
+| `null`                                                           | `json_null()`, equivalent to `{:json -> :null}` |
 
 Object keys become symbols so that a decoded field can be read with a symbolic map key:
 
@@ -148,8 +148,8 @@ string. Decoded object keys are always symbols, even when the original Mica map 
 Project identities, relations, errors, and other application values to a deliberate wire shape
 before encoding them. For example, encode a query as a list of maps with fields your protocol
 defines. JSON conversion does not choose whether an empty relation means an empty collection,
-absence, or a failed operation. Malformed JSON and values outside the supported JSON shapes fail
-the builtin call.
+absence, or a failed operation. Malformed JSON and values outside the supported JSON shapes fail the
+builtin call.
 
 ## Relation Algebra
 

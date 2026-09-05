@@ -30,10 +30,10 @@ result with ordinary facts.
 
 ## Read-Only Results
 
-Computed rows are produced from the current reader by a registered implementation. System
-reflection reports the catalogue or stored facts visible to that reader; nearest-neighbour search
-reports a selection calculated from embedding facts. Neither requires storing the answer rows in
-the queried relation.
+Computed rows are produced from the current reader by a registered implementation. System reflection
+reports the catalogue or stored facts visible to that reader; nearest-neighbour search reports a
+selection calculated from embedding facts. Neither requires storing the answer rows in the queried
+relation.
 
 You cannot assert into a computed relation:
 
@@ -86,8 +86,8 @@ require rejected
 
 Other positions can still be bound to filter the answer. For nearest-neighbour search, Mica first
 selects the best `limit` subjects for the given index and vector, then applies bindings on subject,
-score, and snapshot version. Binding a subject therefore asks whether it occurs among those
-selected candidates. It does not start a separate search restricted to that subject.
+score, and snapshot version. Binding a subject therefore asks whether it occurs among those selected
+candidates. It does not start a separate search restricted to that subject.
 
 ## Results Are Ordinary Values
 
@@ -95,8 +95,7 @@ A query with named output variables produces an immutable relation value. Its he
 those variable names, and duplicate rows collapse just as they do in a stored-relation query. A
 fully bound query, or one containing only wildcards, produces a boolean existence result.
 
-This example supplies vectors directly so the search can be reproduced without an embedding
-service:
+This example supplies vectors directly so the search can be reproduced without an embedding service:
 
 ```mica,eval
 make_relation(:NearestEmbedding, 6)

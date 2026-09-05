@@ -45,8 +45,8 @@ let source = describe_rule(active[0])
 
 ### Following Identities Through the Catalogue
 
-A relation name is a symbol used to find a relation identity. The other catalogue relations refer
-to that identity. Resolve it once, then use the same value to inspect its arity, key, and indexes:
+A relation name is a symbol used to find a relation identity. The other catalogue relations refer to
+that identity. Resolve it once, then use the same value to inspect its arity, key, and indexes:
 
 ```mica,eval
 make_functional_relation(:TeamLabel, 3, [0, 1])
@@ -59,21 +59,21 @@ require FunctionalKey(relation, ?ordinal, ?position) == [:ordinal, :position] {
 }
 ```
 
-Positions are zero-based tuple positions. An ordinal describes where that position occurs in the
-key or index definition. For example, an index declared as `[2, 0]` has position 2 at ordinal 0 and
-position 0 at ordinal 1. Bindings for position 2 can use its leading prefix; a binding for position 0
-alone cannot use that prefix. An index controls access to rows; a functional key also constrains
+Positions are zero-based tuple positions. An ordinal describes where that position occurs in the key
+or index definition. For example, an index declared as `[2, 0]` has position 2 at ordinal 0 and
+position 0 at ordinal 1. Bindings for position 2 can use its leading prefix; a binding for position
+0 alone cannot use that prefix. An index controls access to rows; a functional key also constrains
 stored facts and coordinates concurrent writes.
 
-`ArgumentName` contains optional schema metadata. Query variables supply the heading of each
-query result independently. Writing `TeamLabel(?team, ?locale, ?label)` chooses those three answer
-column names; it does not update the relation's argument metadata.
+`ArgumentName` contains optional schema metadata. Query variables supply the heading of each query
+result independently. Writing `TeamLabel(?team, ?locale, ?label)` chooses those three answer column
+names; it does not update the relation's argument metadata.
 
 `Index` and `IndexPosition` describe declared indexes. `IndexStorageKind` reports the physical
 representation in the task's committed snapshot: `:btree` or `:radix`. A small tuple store uses a
-B-tree, and larger stores use a radix tree; secondary indexes use radix trees. The reported kind
-can therefore change as facts are committed. Computed relations have no kernel-managed physical
-index representation, so their declared indexes have no `IndexStorageKind` row.
+B-tree, and larger stores use a radix tree; secondary indexes use radix trees. The reported kind can
+therefore change as facts are committed. Computed relations have no kernel-managed physical index
+representation, so their declared indexes have no `IndexStorageKind` row.
 
 ```mica,eval
 let exactly {relation} = RelationName(?relation, :RelationName)
@@ -84,9 +84,9 @@ require project(natural_join(declared, IndexStorageKind(?index, ?kind))) == [] {
 
 ### Rule Definitions and Activation
 
-Disabling a rule retains its definition and source in the catalogue. Its `ActiveRule` row changes
-to `false`; the presence of a `Rule` row alone does not mean that rule contributes answers. Join
-the activation predicate when listing rules that currently derive a relation:
+Disabling a rule retains its definition and source in the catalogue. Its `ActiveRule` row changes to
+`false`; the presence of a `Rule` row alone does not mean that rule contributes answers. Join the
+activation predicate when listing rules that currently derive a relation:
 
 ```mica
 let enabled = ActiveRule(?rule, true)
@@ -127,10 +127,10 @@ require MentionedFact(:alice, relation, ?position, ?tuple) == [:position, :tuple
 }
 ```
 
-A value repeated in two positions produces two mention rows, one for each position. Mention
-queries compare whole tuple cells. A list containing `:alice` is a different cell from `:alice`,
-so these queries do not recursively search inside lists, maps, or nested relation values. Use an
-explicit relation for references that inspectors need to follow directly.
+A value repeated in two positions produces two mention rows, one for each position. Mention queries
+compare whole tuple cells. A list containing `:alice` is a different cell from `:alice`, so these
+queries do not recursively search inside lists, maps, or nested relation values. Use an explicit
+relation for references that inspectors need to follow directly.
 
 ## Installed Behaviour and Source Ownership
 

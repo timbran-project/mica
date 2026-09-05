@@ -40,19 +40,19 @@ relation. This distinction also matters when a local value survives a suspension
 
 Normal task completion commits automatically. These forms also end the current transaction:
 
-| Form | What happens after the commit |
-| --- | --- |
-| `commit()` | the driver schedules continuation |
-| `suspend(seconds)` | continuation waits for the timer |
-| `suspend()` | continuation waits for an explicit host resumption |
-| `read(metadata)` | continuation waits for endpoint input |
-| `mailbox_recv(receivers, timeout)` | continuation receives queued messages or a timeout |
-| `spawn :work(...)` | the driver submits a child and resumes the parent with its task id |
-| `external_request(kind, payload)` | the host performs the request and supplies its result |
+| Form                               | What happens after the commit                                      |
+| ---------------------------------- | ------------------------------------------------------------------ |
+| `commit()`                         | the driver schedules continuation                                  |
+| `suspend(seconds)`                 | continuation waits for the timer                                   |
+| `suspend()`                        | continuation waits for an explicit host resumption                 |
+| `read(metadata)`                   | continuation waits for endpoint input                              |
+| `mailbox_recv(receivers, timeout)` | continuation receives queued messages or a timeout                 |
+| `spawn :work(...)`                 | the driver submits a child and resumes the parent with its task id |
+| `external_request(kind, payload)`  | the host performs the request and supplies its result              |
 
 A boundary publishes relation writes before exposing the task's buffered effects and mailbox sends.
-Subscription registrations and cancellations requested by the task are also applied at the
-boundary. A conflict causes a retry before the host receives the suspension or spawn request.
+Subscription registrations and cancellations requested by the task are also applied at the boundary.
+A conflict causes a retry before the host receives the suspension or spawn request.
 
 ```mica
 assert AssignedTo(#inspection, #alice)
@@ -64,10 +64,10 @@ commit, both are discarded. If it commits successfully, the host can deliver the
 that the assignment was published. `emit` queues a value for the host; calling it does not itself
 flush the transaction.
 
-Publishing an effect and completing its external delivery are separate events. A host may still
-need to write to a socket or invoke a service after receiving committed output. When an external
-operation needs an acknowledgement, use the host request or mailbox protocol for that operation
-and record the acknowledged result in a subsequent transaction.
+Publishing an effect and completing its external delivery are separate events. A host may still need
+to write to a socket or invoke a service after receiving committed output. When an external
+operation needs an acknowledgement, use the host request or mailbox protocol for that operation and
+record the acknowledged result in a subsequent transaction.
 
 ## Publication and Persistence
 
@@ -82,15 +82,15 @@ With Fjall, the host chooses a durability mode. The runner exposes it through `-
 cargo run --bin mica -- --storage fjall --store world-db --durability strict eval 'return ()'
 ```
 
-| Mode | When a durable commit returns |
-| --- | --- |
+| Mode      | When a durable commit returns                                         |
+| --------- | --------------------------------------------------------------------- |
 | `relaxed` | after the ordered background writer accepts the commit into its queue |
-| `strict` | after the writer applies the commit and syncs the journal |
+| `strict`  | after the writer applies the commit and syncs the journal             |
 
 The default is `relaxed`. In that mode, another task can observe published facts while their write
 is still queued. Strict mode puts the journal sync before publication and release of buffered
-effects. An embedding host can call `flush_persistence()` to wait for earlier queued writes and
-sync the journal in either mode. A task's `commit()` ends its transaction; it uses the configured
+effects. An embedding host can call `flush_persistence()` to wait for earlier queued writes and sync
+the journal in either mode. A task's `commit()` ends its transaction; it uses the configured
 provider mode rather than changing that mode.
 
 Relation durability is a separate choice. A `:volatile` relation retains its definition across a
@@ -152,14 +152,14 @@ while a transaction is still speculative.
 
 An unhandled language error aborts the current transaction. A handled error allows the task to
 continue with the same draft: `try`, `catch`, `recover`, and `finally` do not create nested
-transactions or savepoints. Validate input before changing facts when the recovery path should
-leave those facts alone, or explicitly restore the intended state in that path.
+transactions or savepoints. Validate input before changing facts when the recovery path should leave
+those facts alone, or explicitly restore the intended state in that path.
 
 The host configures execution budgets. The defaults allow 1,000,000 VM instructions between host
 responses, a call depth of 50, and up to 10 conflict retries for the task. Retry counts carry across
 suspensions. Exceeding a runtime budget terminates execution through the host error path; it is not
 an application error that a `catch` clause can extend indefinitely.
 
-Task ids, suspended continuations, and mailbox capabilities identify live runtime resources.
-Durable progress belongs in relations. After a restart, a host can use those facts to decide which
-work to submit again.
+Task ids, suspended continuations, and mailbox capabilities identify live runtime resources. Durable
+progress belongs in relations. After a restart, a host can use those facts to decide which work to
+submit again.

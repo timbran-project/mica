@@ -193,8 +193,8 @@ have the outer kind `relation`. `int | string` does not establish either kind, a
 admits values of every kind. A check against such a union must accept any of its alternatives.
 
 Row counts also describe the resulting value. A relation literal containing two expressions may
-produce one row when both expressions yield equal values. Known constant rows let the compiler
-count distinct values; dynamic rows require bounds that allow duplicates to collapse:
+produce one row when both expressions yield equal values. Known constant rows let the compiler count
+distinct values; dynamic rows require bounds that allow duplicates to collapse:
 
 ```mica,eval
 fn pair(left, right) -> relation<{:value -> dynamic}> where rows in 1..2

@@ -24,9 +24,9 @@ relation with both asserted facts and rule heads reads as the union of stored an
 
 ## Reading a Rule as a Query
 
-Each positive body predicate supplies candidate values. A name shared between predicates joins
-their matching cells. A name used only in the body helps establish the conclusion without appearing
-in the answer:
+Each positive body predicate supplies candidate values. A name shared between predicates joins their
+matching cells. A name used only in the body helps establish the conclusion without appearing in the
+answer:
 
 ```mica,eval
 make_relation(:WorksAt, 2)
@@ -46,8 +46,8 @@ require CanCollect(?person, ?instrument) == [:person, :instrument] {
 ```
 
 Here `site` connects the two sources. It is not a returned column because the head contains only
-`person` and `instrument`. The head can reorder variables or include literal values. A literal
-in a body predicate selects matching facts, just as a bound argument does in a task query.
+`person` and `instrument`. The head can reorder variables or include literal values. A literal in a
+body predicate selects matching facts, just as a bound argument does in a task query.
 
 Repeated occurrences of one variable must refer to the same value. `Link(item, item)` selects
 self-links; `Link(from, to)` permits different endpoints. The evaluator may reorder body predicates
@@ -74,8 +74,8 @@ A guard tests a candidate binding; it does not assign a variable. In particular,
 does not supply values for an otherwise unbound `temperature`. Give that variable a positive source
 such as `Reading(site, temperature)`.
 
-Predicate matching uses canonical value identity, while comparison guards use the language's
-numeric comparisons. This distinction matters when integer and float facts coexist:
+Predicate matching uses canonical value identity, while comparison guards use the language's numeric
+comparisons. This distinction matters when integer and float facts coexist:
 
 ```mica,eval
 make_relation(:Measurement, 2)
@@ -118,14 +118,14 @@ ReadyForReview(reviewer, change) :-
 able to compute positive dependencies before the relations that negate them. Mutual negative cycles
 are rejected because neither side has a stable evaluation order.
 
-The positive source also makes absence meaningful. A rule that derives an available instrument
-from `Instrument(instrument), not Reserved(instrument)` considers known instruments. It says nothing
+The positive source also makes absence meaningful. A rule that derives an available instrument from
+`Instrument(instrument), not Reserved(instrument)` considers known instruments. It says nothing
 about values that never appear in `Instrument`.
 
 Negation can refer to another derived relation. Mica completes that relation's dependencies before
 checking for absence. Adding a fact can therefore remove a conclusion: asserting a reservation
-removes that instrument from the available result. Retracting the reservation lets it qualify
-again. No explicit negative fact is stored by `not`.
+removes that instrument from the available result. Retracting the reservation lets it qualify again.
+No explicit negative fact is stored by `not`.
 
 ## Recursion
 
@@ -144,8 +144,8 @@ Mica computes the finite, set-based least fixpoint: it starts with direct depend
 adds newly implied dependencies, and stops when another pass adds nothing. Cycles do not produce
 duplicate facts.
 
-A path can have more than one reason to exist. Removing one edge removes a derived path only when
-no remaining path supports it. A query in the writing task sees the effect of its draft changes:
+A path can have more than one reason to exist. Removing one edge removes a derived path only when no
+remaining path supports it. A query in the writing task sees the effect of its draft changes:
 
 ```mica,eval
 make_relation(:DependsOn, 2)
@@ -166,10 +166,10 @@ retract DependsOn(:library, :core)
 require !Requires(:app, :core)
 ```
 
-The recursive rule describes paths with at least one edge. It does not automatically make every
-item require itself. A cycle such as `a -> b -> a` does supply a path back to its starting point,
-so self-pairs can follow from actual cycles. Define a separate reflexive rule over an explicit
-domain relation if every known item should relate to itself even without an edge.
+The recursive rule describes paths with at least one edge. It does not automatically make every item
+require itself. A cycle such as `a -> b -> a` does supply a path back to its starting point, so
+self-pairs can follow from actual cycles. Define a separate reflexive rule over an explicit domain
+relation if every known item should relate to itself even without an edge.
 
 ## Stored Facts and Derived Support
 
@@ -180,8 +180,8 @@ disappears, until that assertion is retracted too.
 
 Several rules for one head express alternative reasons. Body predicates within one rule express
 conditions that must hold together. Duplicate conclusions from different bindings, paths, or rules
-still appear as one row. Query results describe which facts hold; their row count does not count
-how many proofs support each fact.
+still appear as one row. Query results describe which facts hold; their row count does not count how
+many proofs support each fact.
 
 Rules are installed world state. They can be inspected, disabled, subscribed to through their head
 relations, and filed out. See [Changing Worlds and Differential Updates](./differential-updates.md)
