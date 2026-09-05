@@ -1309,8 +1309,8 @@ impl<'a> Analyzer<'a> {
                             MatchPattern::Err(name) => {
                                 HirMatchPattern::Err(declare(self, name, "value", Some("error")))
                             }
-                            MatchPattern::Row(fields) => HirMatchPattern::Row(
-                                fields
+                            MatchPattern::Row(fields) | MatchPattern::OptionalRow(fields) => {
+                                let fields = fields
                                     .iter()
                                     .map(|field| {
                                         (
@@ -1318,8 +1318,13 @@ impl<'a> Analyzer<'a> {
                                             declare(self, &field.binding, &field.column, None),
                                         )
                                     })
-                                    .collect(),
-                            ),
+                                    .collect();
+                                if matches!(case.pattern, MatchPattern::OptionalRow(_)) {
+                                    HirMatchPattern::OptionalRow(fields)
+                                } else {
+                                    HirMatchPattern::Row(fields)
+                                }
+                            }
                         };
                         HirMatchCase {
                             id: case.id,

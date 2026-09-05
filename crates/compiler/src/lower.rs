@@ -941,6 +941,10 @@ impl<'a> Lower<'a> {
                 self.error(node, "if let does not support elseif clauses");
             }
             let pattern = self.lower_match_pattern(pattern);
+            let pattern = match pattern {
+                MatchPattern::Row(fields) => MatchPattern::OptionalRow(fields),
+                pattern => pattern,
+            };
             return Expr::Match {
                 id: self.node_id(),
                 span: node.span.clone(),

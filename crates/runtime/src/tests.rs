@@ -4729,6 +4729,73 @@ fn exact_binding_returns_a_map_for_multi_column_relation_rows() {
 }
 
 #[test]
+fn conditional_row_bindings_distinguish_absence_from_invalid_cardinality() {
+    for (source, expected) in [
+        ("[:number] {}", Some(0)),
+        ("[:number] { [7] }", Some(7)),
+        ("[:number] { [7], [8] }", None),
+        ("[:other] {}", None),
+        ("[:other] { [7] }", None),
+        ("7", None),
+    ] {
+        let mut runner = SourceRunner::new_empty();
+        let report = runner
+            .run_source(&format!(
+                "let rows = {source}\n\
+                 return if let {{:number -> number}} = rows\n\
+                   number\n\
+                 else\n\
+                   0\n\
+                 end"
+            ))
+            .unwrap();
+        if let Some(expected) = expected {
+            assert_completed_value(&report, Value::int(expected).unwrap());
+        } else {
+            assert!(
+                matches!(&report.outcome,
+                    TaskOutcome::Aborted { error, .. }
+                        if error.error_code_symbol() == Some(Symbol::intern("E_CARDINALITY"))),
+                "{source}: {}",
+                report.render()
+            );
+        }
+    }
+}
+
+#[test]
+fn conditional_row_bindings_evaluate_queries_once_and_keep_match_cases_refutable() {
+    let mut runner = SourceRunner::new_empty();
+    let report = runner
+        .run_source(
+            "make_relation(:Number, 1)\n\
+             assert Number(7)\n\
+             let calls = 0\n\
+             let chosen = if let {number} = begin\n\
+               calls = calls + 1\n\
+               Number(?number)\n\
+             end\n\
+               number\n\
+             else\n\
+               0\n\
+             end\n\
+             assert Number(8)\n\
+             let matched = match Number(?number)\n\
+             case {number}\n\
+               number\n\
+             case _\n\
+               -1\n\
+             end\n\
+             return [chosen, calls, matched]",
+        )
+        .unwrap();
+    assert_completed_value(
+        &report,
+        Value::list([7, 1, -1].map(|number| Value::int(number).unwrap())),
+    );
+}
+
+#[test]
 fn exact_binding_rejects_ambiguous_relation_values() {
     let mut runner = SourceRunner::new_empty();
     runner.run_source("make_relation(:Number, 1)").unwrap();

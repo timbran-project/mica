@@ -448,6 +448,7 @@ pub struct MatchCase {
 pub enum MatchPattern {
     Wildcard,
     Row(Vec<MatchField>),
+    OptionalRow(Vec<MatchField>),
     None,
     Some(String),
     Ok(String),

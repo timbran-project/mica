@@ -3785,6 +3785,7 @@ impl<'a> ProgramCompiler<'a> {
             self.locals = saved_locals.clone();
             self.local_types = saved_types.clone();
             let mut failed_branches = Vec::new();
+            let mut empty_row_branch = None;
             if let Some(spec) = relation_pattern_spec(&case.pattern) {
                 if spec
                     .heading
@@ -3799,12 +3800,34 @@ impl<'a> ProgramCompiler<'a> {
                 self.emit(Instruction::RelationPattern {
                     dst: matched,
                     relation: scrutinee,
-                    heading: spec.heading,
+                    heading: spec.heading.clone(),
                     row_count: spec.row_count,
                     equalities: spec.equalities,
                 });
                 let branch = self.emit_branch(matched, self.instructions.len() + 1, 0);
-                failed_branches.push(branch);
+                if matches!(case.pattern, HirMatchPattern::OptionalRow(_)) {
+                    self.patch_false_target(branch, self.instructions.len())?;
+                    let empty = self.alloc_register();
+                    self.emit(Instruction::RelationPattern {
+                        dst: empty,
+                        relation: scrutinee,
+                        heading: spec.heading,
+                        row_count: 0,
+                        equalities: Vec::new(),
+                    });
+                    empty_row_branch =
+                        Some(self.emit_branch(empty, 0, self.instructions.len() + 1));
+                    self.emit(Instruction::Raise {
+                        error: Operand::Value(Value::error_code(Symbol::intern("E_CARDINALITY"))),
+                        message: Some(Operand::Value(Value::string(
+                            "optional row binding requires zero or one row with the stated heading",
+                        ))),
+                        value: Some(Operand::Register(scrutinee)),
+                    });
+                    self.patch_true_target(branch, self.instructions.len())?;
+                } else {
+                    failed_branches.push(branch);
+                }
                 for (column, binding) in spec.bindings {
                     let register = self.alloc_register();
                     self.emit(Instruction::RelationCell {
@@ -3834,6 +3857,9 @@ impl<'a> ProgramCompiler<'a> {
                 end_jumps.push(self.emit_jump(0));
             }
             let next_case = self.instructions.len();
+            if let Some(branch) = empty_row_branch {
+                self.patch_true_target(branch, next_case)?;
+            }
             for branch in failed_branches {
                 self.patch_false_target(branch, next_case)?;
             }
@@ -5483,7 +5509,7 @@ fn relation_pattern_spec(pattern: &HirMatchPattern) -> Option<RelationPatternSpe
             vec![("case", Value::symbol(Symbol::intern("error")))],
             vec![("value", *binding)],
         ),
-        HirMatchPattern::Row(fields) => (
+        HirMatchPattern::Row(fields) | HirMatchPattern::OptionalRow(fields) => (
             fields.iter().map(|(column, _)| column.as_str()).collect(),
             1,
             Vec::new(),

@@ -325,6 +325,7 @@ pub struct HirMatchCase {
 pub enum HirMatchPattern {
     Wildcard,
     Row(Vec<(String, BindingId)>),
+    OptionalRow(Vec<(String, BindingId)>),
     None,
     Some(BindingId),
     Ok(BindingId),
