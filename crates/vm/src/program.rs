@@ -143,9 +143,12 @@ impl TypeContract {
             Self::Kind(kind) => Some(*kind),
             Self::Literal(literal) => Some(literal.outer_kind()),
             Self::Union(types) => {
-                let mut kinds = types.iter().filter_map(Self::exact_outer_kind);
-                let first = kinds.next()?;
-                kinds.all(|kind| kind == first).then_some(first)
+                let mut kinds = types
+                    .iter()
+                    .filter(|ty| !matches!(ty, Self::Never))
+                    .map(Self::exact_outer_kind);
+                let first = kinds.next()??;
+                kinds.all(|kind| kind == Some(first)).then_some(first)
             }
             Self::Relation(_) => Some(ValueKind::Relation),
         }
@@ -1283,10 +1286,30 @@ fn infer_opcode_type(
             };
             alternatives.sort();
             alternatives.dedup();
+            // Construction removes equal rows. Constants establish distinct
+            // values, but cell kinds alone cannot prove rows differ.
+            let (minimum_rows, maximum_rows) = if arity == 0 || *row_count == 0 {
+                let count = usize::from(*row_count != 0);
+                (count, count)
+            } else if let Some(values) = cells
+                .iter()
+                .map(|operand| match operand {
+                    OperandRef::Constant(id) => constants.get(id.0 as usize),
+                    OperandRef::Register(_) => None,
+                })
+                .collect::<Option<Vec<_>>>()
+            {
+                let mut rows = values.chunks_exact(arity).collect::<Vec<_>>();
+                rows.sort_unstable();
+                rows.dedup();
+                (rows.len(), rows.len())
+            } else {
+                (1, usize::from(*row_count))
+            };
             Some(TypeContract::Relation(RelationTypeContract {
                 alternatives,
-                minimum_rows: usize::from(*row_count),
-                maximum_rows: Some(usize::from(*row_count)),
+                minimum_rows,
+                maximum_rows: Some(maximum_rows),
             }))
         }
         Opcode::ScanBindings { outputs, .. } => {
@@ -4526,9 +4549,13 @@ fn validate_instruction(
             validate_operands(register_count, values.iter())
         }
         Instruction::RetractWhere { bindings, .. } => validate_bindings(register_count, bindings),
-        Instruction::ScanDynamic { args, .. }
-        | Instruction::AssertDynamic { args, .. }
-        | Instruction::RetractDynamic { args, .. } => validate_relation_args(register_count, args),
+        Instruction::ScanDynamic { dst, args, .. } => {
+            validate_register(register_count, *dst)?;
+            validate_relation_args(register_count, args)
+        }
+        Instruction::AssertDynamic { args, .. } | Instruction::RetractDynamic { args, .. } => {
+            validate_relation_args(register_count, args)
+        }
         Instruction::Branch {
             condition,
             if_true,
@@ -6786,4 +6813,101 @@ fn decode_value_kind(tag: u8) -> Result<ValueKind, RuntimeError> {
 
 fn artifact_error(message: impl Into<String>) -> RuntimeError {
     RuntimeError::ProgramArtifact(message.into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dynamic_scans_validate_the_destination_register() {
+        let result = Program::new(
+            1,
+            [Instruction::ScanDynamic {
+                dst: Register(1),
+                relation: Identity::new(1).unwrap(),
+                args: vec![RelationArg::Hole],
+            }],
+        );
+        assert!(matches!(
+            result,
+            Err(RuntimeError::RegisterOutOfBounds {
+                register: 1,
+                register_count: 1,
+            })
+        ));
+    }
+
+    #[test]
+    fn union_outer_kinds_account_for_every_inhabited_alternative() {
+        let int = TypeContract::Kind(ValueKind::Int);
+        let string = TypeContract::Kind(ValueKind::String);
+        for contract in [
+            TypeContract::Union(vec![int.clone(), TypeContract::Dynamic]),
+            TypeContract::Union(vec![TypeContract::Dynamic, int.clone()]),
+            TypeContract::Union(vec![
+                int.clone(),
+                TypeContract::Union(vec![int.clone(), string]),
+            ]),
+        ] {
+            assert_eq!(contract.exact_outer_kind(), None, "{contract}");
+        }
+        assert_eq!(
+            TypeContract::Union(vec![TypeContract::Never, int.clone(), int]).exact_outer_kind(),
+            Some(ValueKind::Int)
+        );
+    }
+
+    #[test]
+    fn relation_type_facts_allow_duplicate_rows_to_collapse() {
+        for (heading, cells, row_count, expected_bounds) in [
+            (vec![Symbol::intern("value")], vec![], 0, (0, Some(0))),
+            (
+                vec![Symbol::intern("value")],
+                vec![Value::int(1).unwrap().into(); 2],
+                2,
+                (1, Some(1)),
+            ),
+            (
+                vec![Symbol::intern("value")],
+                vec![
+                    Value::int(1).unwrap().into(),
+                    Value::float(1.0).unwrap().into(),
+                ],
+                2,
+                (2, Some(2)),
+            ),
+            (
+                vec![Symbol::intern("value")],
+                vec![Register(0).into(); 2],
+                2,
+                (1, Some(2)),
+            ),
+            (vec![], vec![], 2, (1, Some(1))),
+        ] {
+            let program = Program::new(
+                2,
+                [
+                    Instruction::Load {
+                        dst: Register(0),
+                        value: Value::int(1).unwrap(),
+                    },
+                    Instruction::BuildRelation {
+                        dst: Register(1),
+                        heading,
+                        cells,
+                        row_count,
+                    },
+                ],
+            )
+            .unwrap();
+            let Some((_, TypeContract::Relation(contract))) = program.type_fact_after(1) else {
+                panic!("relation construction must establish a relation contract");
+            };
+            assert_eq!(
+                (contract.minimum_rows, contract.maximum_rows),
+                expected_bounds
+            );
+        }
+    }
 }

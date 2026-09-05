@@ -7416,6 +7416,45 @@ mod tests {
     }
 
     #[test]
+    fn structural_builtin_unions_accept_results_from_dynamic_and_nested_alternatives() {
+        for contract in [
+            TypeContract::Union(vec![
+                TypeContract::Kind(ValueKind::Int),
+                TypeContract::Dynamic,
+            ]),
+            TypeContract::Union(vec![
+                TypeContract::Kind(ValueKind::Int),
+                TypeContract::Union(vec![
+                    TypeContract::Kind(ValueKind::String),
+                    TypeContract::Kind(ValueKind::Relation),
+                ]),
+            ]),
+        ] {
+            let context = CompileContext::new().with_runtime_function_result(
+                "load_union",
+                BuiltinResultKind::Structural(contract.clone()),
+            );
+            let builtins = BuiltinRegistry::new().with_builtin(
+                "load_union",
+                BuiltinResultKind::Structural(contract),
+                invalid_result,
+            );
+            let mut tasks =
+                TaskManager::new(RelationKernel::new()).with_builtins(Arc::new(builtins));
+            let submitted = submit_source_task(
+                "return load_union() == [:case, :value] { [:ok, \"wrong\"] }",
+                &context,
+                &mut tasks,
+            )
+            .unwrap();
+            assert!(matches!(
+                submitted.outcome,
+                TaskOutcome::Complete { value, .. } if value == Value::bool(true)
+            ));
+        }
+    }
+
+    #[test]
     fn structural_builtin_metadata_checks_once_and_feeds_following_inference() {
         let contract = TypeContract::Relation(RelationTypeContract {
             alternatives: vec![RelationRowContract {

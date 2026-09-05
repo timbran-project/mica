@@ -723,7 +723,7 @@ impl<'a> StaticTypeInference<'a> {
             Cardinality::exact(constants.len())
         } else {
             Cardinality {
-                min: 0,
+                min: 1,
                 max: Some(rows.len()),
             }
         };
@@ -1264,7 +1264,7 @@ mod tests {
         assert_eq!(
             dynamic.cardinality(),
             Cardinality {
-                min: 0,
+                min: 1,
                 max: Some(1)
             }
         );

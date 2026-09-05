@@ -187,6 +187,24 @@ differing only in value-kind annotations.
 Declared and inferred exact kinds feed the same compiler facts. Adding an annotation where the
 compiler already proves the kind does not request a different representation and emits no check.
 
+A union establishes an exact outer kind only when all its possible values have that kind. For
+example, `:ready | :waiting` contains only symbols, and two structural relation alternatives both
+have the outer kind `relation`. `int | string` does not establish either kind, and adding `dynamic`
+admits values of every kind. A check against such a union must accept any of its alternatives.
+
+Row counts also describe the resulting value. A relation literal containing two expressions may
+produce one row when both expressions yield equal values. Known constant rows let the compiler
+count distinct values; dynamic rows require bounds that allow duplicates to collapse:
+
+```mica,eval
+fn pair(left, right) -> relation<{:value -> dynamic}> where rows in 1..2
+  return [:value] { [left], [right] }
+end
+
+require pair(7, 7) == [:value] { [7] }
+require pair(7, 8) == [:value] { [7], [8] }
+```
+
 Dynamic boundaries have real cost. An assignment from a dynamic call checks each time it executes,
 and an annotated binding over dynamically typed collection cells checks every yielded element:
 
