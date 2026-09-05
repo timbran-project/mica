@@ -13,9 +13,9 @@ sensor.calibrated = true
 Mica usually writes facts:
 
 ```mica
-InstalledAt(#sensor, #lab)
-Label(#sensor, "temperature sensor")
-Calibrated(#sensor)
+assert InstalledAt(#sensor, #lab)
+assert Label(#sensor, "temperature sensor")
+assert Calibrated(#sensor)
 ```
 
 This is the core shift. State is not packed into one hidden record behind `#sensor`. State is a
@@ -100,7 +100,7 @@ for row in InstalledAt(?instrument, ?site)
 end
 ```
 
-A relation call with no free variables is a predicate test:
+A relation call with no named query variables is a boolean predicate test:
 
 ```mica
 if InstalledAt(#sensor, #lab)
@@ -151,8 +151,8 @@ rather than adding another competing fact.
 
 `let exactly` binds the named cells of exactly one result row. Zero or multiple rows raise
 `E_CARDINALITY`. When absence is expected, `if let {label} = Label(#sensor, ?label)` takes its
-`else` branch for zero rows and still raises for multiple rows. A query expression itself always
-remains a relation value.
+`else` branch for zero rows and still raises for multiple rows. The query in that binding remains a
+relation value; the binding determines which cardinalities the caller accepts.
 
 See [Keys and Single-Valued Relations](./keyed-relations.md) for a fuller explanation of keys,
 replacement, property-style access, and composite keys.

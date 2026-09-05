@@ -1,77 +1,147 @@
 # Task Control
 
-Task-control forms are how Mica code cooperates with the runtime driver. They are used when a task
-needs to publish a transaction, wait for time to pass, wait for input, start another task, or
-coordinate with another task.
+Task-control forms let a computation publish its work and cooperate with the runtime driver. Each
+suspending form commits the current transaction before waiting. The driver determines when to
+resume the continuation and supplies its result value. See
+[Tasks and Transactions](./tasks-and-transactions.md) for commit, replay, and authority rules.
 
-`commit()` commits the current transaction and resumes the task immediately:
+## Publishing and Waiting
+
+`commit()` publishes the current transaction and yields to the driver. Execution continues in a
+fresh transaction when scheduled:
 
 ```mica
+assert Ready(#job)
 commit()
 ```
 
-`suspend(seconds)` commits and resumes later:
+`suspend(seconds)` waits for a duration measured in seconds. Both integers and floats can express a
+duration:
 
 ```mica
 suspend(1.5)
 ```
 
-`read(metadata)` commits and waits for endpoint input:
+A zero-duration suspension still crosses a transaction boundary. `suspend()` without a duration
+keeps the continuation available for an explicit host resumption; it does not arrange a timer.
+These forms cooperate with the scheduler. They do not block the worker thread for the duration of
+the wait.
+
+`read(metadata)` waits for input addressed to the task's endpoint:
 
 ```mica
 let line = read(:line)
 ```
 
-`spawn` creates a child task from a dispatch expression:
+The metadata describes the request to the host. `:line` is a value passed to that host protocol; the
+VM itself does not read a terminal or assume every input is a string. The value supplied by the
+host becomes the value of the `read` expression. Multiple suspended readers on an endpoint can
+receive the same input, so use one reader when a protocol requires a single consumer.
+
+## Starting a Child
+
+`spawn` takes a dispatch expression and returns the child task's integer id:
 
 ```mica
 let child = spawn :tick(actor: actor(), clock: #clock) after 5
 ```
 
-Creating the child is a transaction boundary. The parent commits, the child is submitted against the
-committed world, and the parent resumes with the child task id.
-
-For agent-style workflows, this lets a planner publish enough state for a worker task to see a
-coherent assignment:
+The optional `after` duration delays the child's invocation. The parent commits first, so the child
+can observe the parent's published facts. The parent resumes once the child is submitted; it does
+not wait for the child to finish and does not receive the child's return value.
 
 ```mica
 assert AssignedTo(#task17, #worker)
 let child = spawn :work(agent: #worker, task: #task17)
 ```
 
-`mailbox()` creates a fresh ephemeral mailbox:
+The child's execution context comes from its parent. Naming `agent: #worker` supplies a dispatch
+role; it does not switch the child to that identity's authority. Current policy is used when the
+child starts and when a delayed child resumes. A child has its own transactions, errors, and
+completion. Use explicit facts or messages when its parent needs to observe its progress.
+
+## Mailboxes
+
+`mailbox()` returns two capabilities for one fresh queue:
 
 ```mica
 let [rx, tx] = mailbox()
 ```
 
-`mailbox_send(tx, value)` buffers a message for delivery at the sender's next commit boundary.
+Keep `rx` with the consumer and give `tx` to producers. The send capability permits delivery; it
+does not permit receiving or closing the mailbox. `mailbox_send(tx, value)` buffers a message for
+delivery at the sender's next successful commit and returns the sent value.
 
-`mailbox_recv(receivers, timeout?)` commits and waits on a list of receive caps:
+`mailbox_recv(receivers, timeout?)` waits on a list of receive capabilities:
 
 ```mica
 let ready = mailbox_recv([rx1, rx2], 1)
 ```
 
-The result is a list of ready groups. Each group is `[rx, messages]`.
+The optional timeout is measured in seconds. With no timeout, the task waits for a ready mailbox.
+With `0`, it polls. A positive timeout waits up to that duration. A poll or timeout with no messages
+returns `[]`.
 
-The timeout is optional. With no timeout, the task waits until at least one mailbox is ready. With
-timeout `0`, the task polls and resumes immediately. With a positive timeout, the task waits up to
-that many seconds.
+A successful receive returns a list of groups, each shaped as `[receiver, messages]`. It drains all
+currently queued messages for each ready receiver. Empty mailboxes contribute no group. Receivers
+are considered in the order supplied, and repeating a receiver does not drain it twice.
 
-A common pattern is to give a worker a send cap and keep the receive cap in the planner:
+```mica
+let ready = mailbox_recv([rx1, rx2], 1)
+for group in ready
+  let [receiver, messages] = group
+  for message in messages
+    handle_message(receiver, message)
+  end
+end
+```
+
+Receiving commits even when a message is already queued. Code after the receive runs against a new
+snapshot. The delivered messages become local values in the continuation, so a later transaction
+retry does not drain the queues again.
+
+A worker can report its result through a send capability passed as a role:
 
 ```mica
 let [rx, tx] = mailbox()
 spawn :fetch(agent: #worker, reply_to: tx)
 
-let ready = mailbox_recv([rx], 10)
+try
+  let ready = mailbox_recv([rx], 10)
+  if ready == []
+    raise E_TIMEOUT, "The worker did not reply."
+  end
+  for group in ready
+    for message in group[1]
+      record_reply(message)
+    end
+  end
+finally
+  mailbox_close(rx)
+end
 ```
 
-Mailbox values are capabilities, not durable relation facts. They are used to coordinate live tasks,
-while durable progress should still be written as facts such as `ToolResult`, `Observation`, or
-`Completed`.
+The worker must call `mailbox_send` and reach a commit boundary for a reply to arrive. Its ordinary
+return value is separate from the mailbox protocol. Include an operation identity in messages when
+one queue carries replies for several requests.
 
-Relation subscriptions deliver their settled changes through the same mailbox mechanism. See
-[Subscriptions](./subscriptions.md) for `subscribe_changes`, bounded delivery, and
-resynchronization.
+## Resource Lifetimes
+
+`mailbox_close(rx)` immediately closes the live queue, revokes both capabilities, and discards queued
+messages. Cancel change subscriptions attached to a language-created mailbox before closing it.
+An external producer attempting delivery through a closed mailbox observes failure. A send already
+buffered by another task is discarded if the mailbox has closed by the time that task commits.
+
+Creation and closure manage ephemeral resources; they are not relation writes that an aborted
+transaction restores. Close a mailbox when its consumer is finished. Its capabilities can travel
+through local values, call arguments, and other mailboxes, while durable facts store progress such
+as `ToolResult`, `Observation`, or `Completed`.
+
+A host may cancel a suspended task or close the endpoint that owns it. Cancellation discards the
+continuation; it does not resume the VM to run a `finally` block. Hosts should therefore close the
+resources they own as part of cancellation, and application protocols should make abandoned work
+recognizable in durable state. A task that reaches its own `finally` block through ordinary return,
+break, or error unwinding can perform language-level cleanup there.
+
+Relation subscriptions deliver committed changes through the same mailbox mechanism. See
+[Subscriptions](./subscriptions.md) for registration, bounded delivery, and resynchronization.

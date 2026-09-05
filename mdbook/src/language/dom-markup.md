@@ -12,7 +12,7 @@ The `dom <...>` form is syntax sugar for the existing DOM constructors. The exam
 if it had been written:
 
 ```mica
-return dom_element("button", {:type -> "submit", :class -> class}, [
+return dom_element("button", {"type" -> "submit", "class" -> class}, [
   dom_text("Save")
 ])
 ```

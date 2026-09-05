@@ -48,7 +48,18 @@ Filein also has a grant block surface for durable authorization policy facts. It
 over the ordinary policy relations, so the stored world still contains `CanRead`, `CanWrite`,
 `CanInvoke`, `CanEffect`, and their `RoleCan*` counterparts:
 
-```mica
+The following complete filein creates its subjects and policy relations before granting authority:
+
+```mica,filein
+make_identity(:web)
+make_identity(:reviewer)
+make_relation(:CanRead, 2)
+make_relation(:CanWrite, 2)
+make_relation(:CanInvoke, 2)
+make_relation(:CanEffect, 1)
+make_relation(:RoleCanRead, 2)
+make_relation(:RoleCanInvoke, 2)
+
 grant #web
   read:
     :HttpRequest

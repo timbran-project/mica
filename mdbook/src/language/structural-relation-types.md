@@ -5,10 +5,10 @@ cardinality. They refine the ordinary `relation` value kind without introducing 
 container.
 
 ```mica
-relation<{:person -> identity, :name -> string}>
-relation<{:value -> string}> where rows in 0..1
-relation<{:case -> :ok, :value -> string}
-       | {:case -> :error, :value -> error}> where rows in 1
+type Person = relation<{:person -> identity, :name -> string}>
+type OptionalText = relation<{:value -> string}> where rows in 0..1
+type TextResult = relation<{:case -> :ok, :value -> string}
+                        | {:case -> :error, :value -> error}> where rows in 1
 ```
 
 The heading is exact: a value with extra or missing columns does not satisfy the type. Leaving out
@@ -27,7 +27,7 @@ preserves them, and replacing their source unit updates the compiler context.
 
 ## Unit, Option, Result, and Empty Relations
 
-Four superficially similar values have deliberately different meanings:
+These superficially similar values have different meanings:
 
 | Meaning                   | Source form                   | Structural shape                  |
 | ------------------------- | ----------------------------- | --------------------------------- |
@@ -48,8 +48,9 @@ type result<T> = relation<
 > where rows in 1
 ```
 
-Bare `return`, fallthrough, and side-effect-only builtins produce `()`. Unit is truthy. `[] {}` is
-an ordinary falsey relation; it is not absence, failure, JSON null, or an omitted argument.
+Bare `return`, an empty body, and side-effect-only builtins produce `()`. A nonempty body returns
+its last expression when execution reaches its end. Unit is truthy. `[] {}` is an ordinary falsey
+relation; it is not absence, failure, JSON null, or an omitted argument.
 
 Options nest without collapsing:
 
@@ -101,8 +102,8 @@ options because either may be absent; its `code` is always an error code.
 
 ## Query Cardinality
 
-Query expressions always produce relation values. Binding syntax states how many rows are allowed
-and extracts named cells:
+Queries with named variables produce relation values. Binding syntax states how many rows are
+allowed and extracts named cells:
 
 ```mica
 let exactly {label} = Label(#sensor, ?label)
@@ -116,9 +117,17 @@ for {item, location} in LocatedAt(?item, ?location)
 end
 ```
 
-`let exactly` requires exactly one row. `if let` accepts zero or one row and takes its `else` branch
-for zero. Either raises `E_CARDINALITY` for excess rows. `for` accepts any cardinality and binds
-once per row.
+`let exactly` requires exactly one row. A row-form `if let` accepts zero or one row and takes its
+`else` branch for zero. Both require the heading stated by the pattern and raise `E_CARDINALITY`
+for excess rows or a mismatched heading. `for` accepts any cardinality and binds once per row.
+
+The row-form conditional is useful for an optional property: absence is expected, while two values
+would violate the caller's assumption. An ordinary `match` row case instead tests for exactly one
+row with that heading and proceeds to the next case on any mismatch. Variant conditionals such as
+`if let some(value) = result` also use pattern matching, with the unmatched value taking `else`.
+
+Queries with no named variables are boolean predicate tests. Use `if Label(#sensor, "ready")` to
+test a specific fact, and `Label(#sensor, ?label)` to obtain a relation of possible labels.
 
 Functional dot reads are strict: a missing or ambiguous value raises `E_CARDINALITY`. Use an
 optional query binding when absence is expected. List and map indexing is likewise strict and raises

@@ -106,12 +106,19 @@ A failed dynamic check raises the catchable error code `E_TYPE`. The error ident
 parameter, names the expected and actual kinds, and retains the unchanged offending value in
 `err.value`:
 
-```mica
+```mica,eval
 try
-  let count: int = from_literal("\"not an integer\"")
+  match from_literal("\"not an integer\"")
+  case ok(value)
+    let count: int = value
+  case err(problem)
+    raise problem
+  end
 catch E_TYPE as err
+  require err.value == some("not an integer")
   return [err.message, err.value]
 end
+raise E_TEST, "The annotation should have rejected the string."
 ```
 
 Checks occur when a value enters an annotated binding or parameter and before an assignment changes
@@ -121,15 +128,28 @@ Function and verb result annotations are different: they are proof-only. Every r
 must have the declared kind, and the compiler emits no check or conversion at `return`. A dynamic
 result must first cross an annotated local boundary:
 
-```mica
+```mica,eval
 fn decode_count(source: string) -> int
-  let count: int = from_literal(source)
-  return count
+  return match from_literal(source)
+  case ok(value)
+    let count: int = value
+    count
+  case err(problem)
+    raise problem
+  end
 end
+
+require decode_count("12") == 12
 ```
 
-Bare returns and fallthrough results produce `()`, whose structural type is `unit` and whose outer
-kind is `relation`. A scalar result annotation therefore rejects those paths.
+`from_literal` reports parsing success as `ok(value)` and failure as `err(problem)`. The `int`
+annotation checks the successful payload. Unwrapping the result and checking the payload are
+separate boundaries: a well-formed literal can still have the wrong kind for the application.
+
+A body that reaches its end returns its last expression. An empty body and a bare `return` produce
+`()`, whose structural type is `unit` and whose outer kind is `relation`. A scalar result annotation
+rejects those unit-producing paths. The compiler considers each branch, so every normally returning
+branch of `decode_count` must prove an integer; its raising branch has no normal result to check.
 
 ## Outer Kinds
 

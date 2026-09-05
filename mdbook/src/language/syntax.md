@@ -9,6 +9,11 @@ chapters.
 // line comment
 ```
 
+Newlines or semicolons separate expressions. Use `//` for comments; `--` is not comment syntax.
+Calls, collections, parameter lists, and binding patterns may span lines inside their delimiters.
+Commas still separate arguments, elements, entries, and parameters; a newline does not replace a
+comma. Trailing commas are allowed.
+
 ## Qualified Names
 
 Names may use `/`-separated namespaces:
@@ -37,13 +42,14 @@ fn describe(item)
 end
 ```
 
-Bindings and `fn` parameters and results may name one exact runtime value kind:
+Bindings and `fn` parameters and results may name one exact runtime value kind or a structural type:
 
 ```mica
 let count: int = 0
 let [head: string, @tail: list] = values
 
 fn add(left: int, right: int) -> int => left + right
+let label: option<string> = none
 ```
 
 Annotations check kinds without converting values. See
@@ -57,6 +63,7 @@ Annotations check kinds without converting values. See
 {:name -> "sensor", :calibrated -> true}
 items[2]
 items[2.._]
+b"aGk="
 ```
 
 `[@prefix, last]` splices the list in `prefix` into a new list before `last`. `2.._` is an
@@ -155,6 +162,24 @@ for key, value in map
 end
 ```
 
+Structural matching states how to handle optional or alternative results:
+
+```mica
+let result = match from_literal("42")
+case ok(value)
+  some(value)
+case err(problem)
+  none
+end
+
+if let some(value) = result
+  return value
+end
+```
+
+`match` must cover every alternative the compiler can infer. For a dynamic value, provide a final
+unguarded `case _`. See [Structural Relation Types](./structural-relation-types.md).
+
 ## Errors
 
 ```mica
@@ -179,7 +204,7 @@ end
 ## Verbs and Dispatch
 
 ```mica
-verb approve(actor @ #reviewer, request @ #change_request)
+verb approve(actor @ #reviewer, receiver @ #change_request)
   return true
 end
 
@@ -187,7 +212,7 @@ verb echo(value @ #string: string) -> string
   return value
 end
 
-:approve(actor: #alice, request: #release_change)
+:approve(actor: #alice, receiver: #release_change)
 #release_change:approve(actor: #alice)
 ```
 

@@ -18,6 +18,9 @@ Current value families include:
 - immutable relation values, including structural options and results;
 - frobs such as `#event<{:actor -> #alice}>`;
 - bytes;
+- ranges such as `1..5`;
+- structured errors;
+- local function values;
 - ephemeral capability values.
 
 The value layer is intentionally small and regular. Named relations can store any persistable value,
@@ -25,9 +28,20 @@ and verbs can accept ordinary values, identities, frobs, or relation values thro
 role-binding mechanism. The language should not force authors to turn every structured value into a
 durable object just so it can be passed around.
 
-Bytes and relation values have source literals and can cross task, storage, RPC, and IPC value
-boundaries. A relation value is persistable when every cell it contains is persistable. Capability
-values are deliberately neither serializable nor persistable.
+Bytes and relation values have source literals and can cross storage and host value boundaries.
+A relation value is persistable when every cell it contains is persistable. Capability and local
+function values are ephemeral; neither can be serialized as durable world data.
+
+## Choosing a Value Shape
+
+Use a list when position matters, a map when local keys matter, and a relation value when named
+columns and a set of rows matter. Use an identity when other facts need to refer to the same entity
+over time. These choices can be combined: a relation tuple can contain a list, and an option can
+contain an identity. Choose the outer shape to express what the caller should do with the value.
+
+There is no implicit conversion between these shapes. In particular, a list containing one value
+is not `some(value)`, and a map containing `:value` is not a one-row relation. Their indexing,
+matching, and persistence behaviour follow their actual kinds.
 
 Primitive values behave like values in most dynamic languages:
 
@@ -59,7 +73,43 @@ Relation literals have a symbol heading followed by a set of rows:
 ```
 
 Each row must match the heading arity. Heading names must be unique. Relations have set semantics,
-so duplicate rows are removed and row order is not observable.
+so duplicate rows are removed. Heading columns and rows are canonicalized together: changing the
+written column order does not change the value if each cell still has the same column name.
+Iteration and integer indexing expose the canonical row order, which is not insertion order.
+Do not interpret the first row as the most recent or most important result.
+
+```mica,eval
+let first = [:name, :count] { ["lamps", 2], ["lamps", 2] }
+let second = [:count, :name] { [2, "lamps"] }
+require first == second
+return first
+```
+
+This returns one row. Equality includes the heading, so the same cells under different column names
+would describe a different relation value.
+
+## Truthiness
+
+Conditions accept values of any kind. The complete falsey set is `false`, an empty list, and an
+empty relation of any heading. Every other value is truthy. In particular, `0`, `0.0`, `""`,
+`b""`, and `{}` are truthy. The option `none` is falsey because it is an empty relation;
+`some(false)` is truthy because it has a row.
+
+```mica,eval
+require !false
+require ![]
+require !none
+require some(false)
+require 0
+require ""
+require {}
+require ()
+return true
+```
+
+Test the property you mean. To distinguish an empty string from a nonempty string, compare it with
+`""`; `if text` does not make that distinction. To inspect an option's payload, use `match` or
+`if let` rather than treating the option itself as the payload's boolean value.
 
 At the JSON boundary, JSON `null` maps to the explicit tagged map `{:json -> :null}` and that tag
 maps back to `null`. Relation values, including options, have no implicit JSON representation and
@@ -69,6 +119,25 @@ Indexing is strict. Reading an absent list position, relation row, or map key ra
 invalid index types and out-of-range indexed assignments raise the same error. Optional bindings
 handle absent arguments explicitly and do not rely on a missing index producing a sentinel value.
 Use `index_or(collection, index, default)` when absence is expected and should produce a default.
+
+## Strings, Bytes, and Names
+
+Strings use double quotes and contain Unicode text. Supported escapes are `\"`, `\\`, `\n`, `\r`,
+and `\t`. Other backslash sequences are preserved literally; they do not introduce numeric or
+Unicode escapes. Write Unicode characters directly in the source.
+
+```mica,eval
+let label = "Montréal"
+let message = "First line\nSecond line"
+let quoted = "She said \"ready\"."
+require label != "Montreal"
+return [label, message, quoted]
+```
+
+Byte literals contain **URL-safe, padded base64**, not text to encode as bytes. For example,
+`b"aGk="` contains the two bytes for `hi`, and `b""` is an empty byte string. The base64 alphabet
+uses `-` and `_` where standard base64 uses `+` and `/`. Invalid encoding is a compile error.
+Use bytes for opaque binary content and strings for text whose character encoding is already known.
 
 Symbols are interned names used for selectors, relation names, policy surfaces, message tags, and
 other program-facing labels:
@@ -89,6 +158,8 @@ E_NOT_FOUND
 Errors can be raised and recovered by the error-handling surface, but the code itself is still a
 value. Mica does not require a closed universe of built-in error names.
 
+## Collections Are Values
+
 Lists are ordered sequences:
 
 ```mica
@@ -102,9 +173,35 @@ Maps are associative values:
 ```
 
 Maps remain useful even in a relation-first language. Relations are for world state and queryable
-facts. Maps are for local structured values: role maps, options, decoded messages, frob payloads,
+facts. Maps are for local structured values: role maps, configuration, decoded messages, frob payloads,
 and temporary results. A map can be stored in a relation tuple, but doing so usually means the
 relation cannot query inside that map without additional derived facts or host support.
+
+Map keys are unique under canonical value equality. If a map literal repeats a key, the last value
+wins. Maps are stored in canonical key order, not insertion order. Use an explicit list of keys if
+your presentation requires a particular order.
+
+Lists, maps, and relation values are immutable. An indexed assignment builds a replacement collection
+and stores it in the named local binding. Another binding holding the previous value retains it:
+
+```mica,eval
+let readings = [10, 20]
+const saved = readings
+readings[0] = 15
+require saved == [10, 20]
+require readings == [15, 20]
+
+let labels = {:status -> "queued", :status -> "ready"}
+labels[:colour] = "amber"
+require labels[:status] == "ready"
+return [saved, readings, labels]
+```
+
+List replacement requires an existing zero-based position. Map replacement can insert a new key.
+Relation values cannot be changed with indexed assignment: build another relation value instead.
+To change a named relation in the world, use `assert`, `retract`, or declared functional dot syntax.
+
+## Identities and Delegated Values
 
 Identity values are different. `#alice` is not the contents of Alice, and it is not a pointer to a
 hidden Alice structure. It is a stable key-like value that can appear in relations:
@@ -126,7 +223,7 @@ into the value representation.
 For example:
 
 ```mica
-EquivalentAgent(#planner_v1, #planner_v2)
+EquivalentAgent(#planner, #backup_planner)
 SamePerson(#alice_account, #alice_profile)
 ```
 
@@ -138,8 +235,17 @@ dispatch without becoming durable world objects.
 Frob delegation is value-level interpretation. It is separate from prototype delegation between
 durable identities, which is used by role matching and dispatch.
 
+## Persistence Is Recursive
+
 Capability values are runtime authority tokens. They may appear while a task is running, but they
-are not persistable source literals and should not be treated as durable policy.
+are not persistable source literals and should not be treated as durable policy. Local functions
+also belong to a running VM. Install a verb when behaviour needs to remain available in the world;
+storing a local closure in a fact is not a way to install behaviour.
+
+Containers do not hide ephemeral values from persistence checks. A list containing a capability,
+a map with a function as a key, a frob containing either, or a relation with an ephemeral cell is
+also non-persistable. Errors and ranges follow the same rule for their payloads and endpoints.
+Ordinary strings, numbers, symbols, identities, and bytes are durable values.
 
 ## Numeric Values
 
@@ -166,10 +272,24 @@ Mica has two distinct comparison concepts:
    indexes, hashing, and persistence. An integer and a float remain distinct stored values even when
    numerically equal, and may be distinct keys.
 
-```mica
-1 == 1.0          -- true: language numeric equality
-{:1 -> "int", 1.0 -> "float"}  -- two entries: canonical key identity
+```mica,eval
+require 1 == 1.0                         // numeric equality
+let labels = {1 -> "int", 1.0 -> "float"} // distinct map keys
+require labels[1] == "int"
+require labels[1.0] == "float"
+require [1] != [1.0]                     // structural equality
+return labels
 ```
+
+Numeric equality applies when the two operands themselves are numbers. It does not recursively
+coerce cells inside lists, maps, frobs, or relation values. This is why the list comparison above is
+false even though its individual numeric elements compare equal.
+
+Arithmetic on two integers stays integer where the operation permits it. Mixing an integer and a
+float converts the arithmetic operands to binary32, which can lose precision. Mixed *comparison*
+does not round the integer to binary32 first: a large integer and a nearby rounded float can compare
+unequal. Integer overflow and non-finite arithmetic results raise `E_ARITH`; division or remainder
+by zero raises `E_DIV`. The arithmetic operators do not concatenate strings or collections.
 
 ### Division Result Kinds
 

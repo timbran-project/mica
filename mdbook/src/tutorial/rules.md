@@ -31,7 +31,7 @@ No prior Datalog knowledge is required. The rule is a maintained definition of a
 
 The first line is the rule _head_:
 
-```mica
+```text
 CanCollect(person, instrument) :-
 ```
 

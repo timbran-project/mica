@@ -54,7 +54,7 @@ than a separate object lookup mechanism.
 
 The restrictions after `@` describe which values a verb branch accepts:
 
-```mica
+```text
 actor @ #staff
 instrument @ #instrument
 destination @ #site

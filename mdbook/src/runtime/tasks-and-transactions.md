@@ -1,54 +1,135 @@
 # Tasks and Transactions
 
-Every submitted source form or invocation runs as a task. A task is the unit of execution,
-isolation, and retry. It owns a VM activation stack, a transaction, pending effects, and pending
-mailbox sends.
+A task is one running computation: a submitted source body or a verb invocation, including the
+functions and verbs it calls. It owns the VM stack, local values, a relation transaction, and
+buffered output. Calling another verb stays in the same task. `spawn` starts a separate task.
 
-The important rule is that Mica code can look direct while still being transactional. A verb can
-assert facts and emit output in ordinary source order, but the outside world does not see those
-changes until the task reaches a commit boundary.
+A task and a transaction have different lifetimes. A task may wait for input or another computation
+and then continue. Each wait commits the work done so far; continuation starts another transaction.
+This lets a long conversation or workflow proceed without keeping a database transaction open
+throughout the wait.
 
-The mental model is a private draft. Reads start from a snapshot of the world, and writes go into
-the task's draft transaction. The task can read its own drafted writes before commit, but other
-tasks cannot see them until the commit publishes successfully.
+## Reading and Drafting Changes
 
-State changes are buffered in the task transaction:
+Reads start from a snapshot of the world. Assertions, retractions, and functional replacements
+modify the task's private draft. Later queries in the same transaction see those changes, including
+their consequences for derived relations. Other tasks see them after a successful commit.
+
+For example, this whole body completes in one transaction:
+
+```mica,eval
+make_relation(:Reading, 2)
+assert Reading(:sensor_a, 20)
+require Reading(:sensor_a, 20)
+
+retract Reading(:sensor_a, 20)
+assert Reading(:sensor_a, 21)
+let exactly {temperature} = Reading(:sensor_a, ?temperature)
+require temperature == 21
+```
+
+The same rule applies inside a verb. A helper that updates a relation and a helper that reads it
+share their caller's transaction. The source does not need to pass a transaction object between
+helpers.
+
+Query results are immutable values. Saving `let rows = Reading(?sensor, ?temperature)` saves those
+answers; changing `Reading` later does not change `rows`. Run the query again to observe the updated
+relation. This distinction also matters when a local value survives a suspension.
+
+## Commit and Publication
+
+Normal task completion commits automatically. These forms also end the current transaction:
+
+| Form | What happens after the commit |
+| --- | --- |
+| `commit()` | the driver schedules continuation |
+| `suspend(seconds)` | continuation waits for the timer |
+| `suspend()` | continuation waits for an explicit host resumption |
+| `read(metadata)` | continuation waits for endpoint input |
+| `mailbox_recv(receivers, timeout)` | continuation receives queued messages or a timeout |
+| `spawn :work(...)` | the driver submits a child and resumes the parent with its task id |
+| `external_request(kind, payload)` | the host performs the request and supplies its result |
+
+A boundary publishes relation writes before exposing the task's buffered effects and mailbox sends.
+Subscription registrations and cancellations requested by the task are also applied at the
+boundary. A conflict causes a retry before the host receives the suspension or spawn request.
 
 ```mica
 assert AssignedTo(#inspection, #alice)
 emit(#alice, "Assignment recorded.")
 ```
 
-On commit, relation writes become visible, effects are published, and mailbox sends are delivered.
-On abort or retry, pending writes, effects, and mailbox sends are discarded.
+The message is buffered with the assignment. If the task raises an unhandled error before its next
+commit, both are discarded. If it commits successfully, the host can deliver the message knowing
+that the assignment was published. `emit` queues a value for the host; calling it does not itself
+flush the transaction.
 
-This matters for effects. If a task prints "Assignment recorded." and then fails, the host should
-not report that the assignment happened. Mica therefore treats effects like transactional output:
-they are published only after a successful commit.
+Publishing an effect and completing its external delivery are separate events. A host may still
+need to write to a socket or invoke a service after receiving committed output. When an external
+operation needs an acknowledgement, use the host request or mailbox protocol for that operation
+and record the acknowledged result in a subsequent transaction.
 
-Suspension is also a commit boundary. A task that calls `suspend`, `read`, `commit`, `spawn`, or
-`mailbox_recv` commits its current transaction before control returns to the driver. When it
-resumes, it continues with a fresh transaction and fresh authority supplied by the caller.
+## Continuing After a Boundary
 
-Call `mailbox_close(receiver)` when a task abandons a mailbox-backed operation. Closing through the
-receiver revokes both mailbox capabilities, discards queued messages, and causes external producers
-to observe that delivery has stopped. Cancel any change subscriptions using the mailbox before
-closing it.
-
-That means one logical task may span several transactions:
+Local bindings and the call stack survive suspension. The resumed task receives a fresh relation
+transaction. The driver also rebuilds the actor's authority from current policy, or the principal's
+policy when there is no actor. A permission change committed during a wait therefore takes effect
+when the task continues.
 
 ```mica
 assert WorkingOn(actor(), #ticket)
-commit()
-
 let line = read(:line)
+
+let exactly {status} = TicketStatus(#ticket, ?status)
+if status != :open
+  raise E_CLOSED, "The ticket is no longer open."
+end
 assert Observation(#ticket, line)
 ```
 
-The `WorkingOn` fact is committed before the task waits for input. When input arrives, the task
-resumes in a new transaction and can assert the observation.
+`read` commits `WorkingOn` before waiting. Once input arrives, the task checks `TicketStatus` in its
+new transaction. Checking it before the wait would describe the earlier snapshot; it would not
+reserve the ticket for the entire conversation.
 
-Conflicting commits retry from the last clean boundary until the task reaches its retry limit. Local
-VM state after that boundary is replayed. Pending writes, effects, and mailbox sends from the failed
-attempt are discarded and rebuilt by the retry, so effectful host integrations should still treat
-commit as the publication point.
+An explicit `commit()` is useful when the next stage should begin against a newly published world
+even though no input is needed. It also divides failure handling: an error in a later transaction
+does not undo facts or output from earlier committed transactions. Place boundaries where that
+partial progress has a clear meaning in the application.
+
+## Conflicts and Replay
+
+At commit, the kernel checks the task's writes against changes published since its snapshot.
+Competing functional replacements for the same key can conflict. Changes to independent keys can
+commit independently. An earlier predicate query alone does not reserve the facts it inspected;
+model competing updates through a shared functional key when they must exclude one another.
+
+For example, a relation `TicketStatus(ticket, status)` keyed by `ticket` makes a ticket's state one
+contended value. Two tasks that both try to replace its initial status cannot silently publish
+incompatible replacements based on that same initial state. The task that retries reads the updated
+status and can decide whether its transition still applies.
+
+On a conflict, the runtime restores the VM checkpoint at the last successful boundary, opens a new
+transaction, and re-executes that segment. It discards the failed attempt's writes, effects, mailbox
+sends, and pending subscription operations. Locals changed during the failed attempt are restored
+with the checkpoint. A value delivered when the task resumed is included in that checkpoint, so a
+retry processes the same input rather than requesting it again.
+
+Keep externally visible work behind the runtime's publication boundary. Host builtins should use
+buffered effects or suspend for external requests so replay does not perform an external action
+while a transaction is still speculative.
+
+## Errors and Execution Budgets
+
+An unhandled language error aborts the current transaction. A handled error allows the task to
+continue with the same draft: `try`, `catch`, `recover`, and `finally` do not create nested
+transactions or savepoints. Validate input before changing facts when the recovery path should
+leave those facts alone, or explicitly restore the intended state in that path.
+
+The host configures execution budgets. The defaults allow 1,000,000 VM instructions between host
+responses, a call depth of 50, and up to 10 conflict retries for the task. Retry counts carry across
+suspensions. Exceeding a runtime budget terminates execution through the host error path; it is not
+an application error that a `catch` clause can extend indefinitely.
+
+Task ids, suspended continuations, and mailbox capabilities identify live runtime resources.
+Durable progress belongs in relations. After a restart, a host can use those facts to decide which
+work to submit again.
