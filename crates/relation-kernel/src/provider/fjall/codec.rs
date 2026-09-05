@@ -337,27 +337,22 @@ impl<'a> Reader<'a> {
             1 => RelationDurability::Volatile,
             tag => return Err(format!("unknown relation durability tag {tag}")),
         };
-        let mut metadata = RelationMetadata::new(id, name, arity).with_durability(durability);
+        let mut metadata = RelationMetadata::new(id, name, arity)
+            .without_indexes()
+            .with_durability(durability);
         for position in 0..arity {
             if let Some(name) = self.read_optional_symbol()? {
                 metadata = metadata.with_argument_name(position, name);
             }
         }
         let index_count = self.read_len()?;
-        for index in 0..index_count {
+        for _ in 0..index_count {
             let position_count = self.read_len()?;
             let mut positions = Vec::with_capacity(position_count);
             for _ in 0..position_count {
                 positions.push(self.read_u16()?);
             }
-            if index == 0 {
-                let expected = (0..arity).collect::<Vec<_>>();
-                if positions != expected {
-                    return Err("first persisted relation index is not all positions".to_owned());
-                }
-            } else {
-                metadata = metadata.with_index(positions);
-            }
+            metadata = metadata.with_index(positions);
         }
         metadata = match self.read_u8()? {
             0 => metadata.with_conflict_policy(ConflictPolicy::Set),
@@ -547,5 +542,27 @@ impl<'a> Reader<'a> {
         let bytes = &self.bytes[self.offset..end];
         self.offset = end;
         Ok(bytes)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn relation_metadata_round_trip_preserves_declared_indexes() {
+        let metadata =
+            RelationMetadata::new(Identity::new(1).unwrap(), Symbol::intern("Reading"), 2);
+        for metadata in [
+            metadata.clone(),
+            metadata.clone().without_indexes(),
+            metadata
+                .without_indexes()
+                .with_index([1])
+                .with_index([1, 0]),
+        ] {
+            let encoded = encode_relation_metadata_record(&metadata).unwrap();
+            assert_eq!(decode_relation_metadata(&encoded).unwrap(), metadata);
+        }
     }
 }
