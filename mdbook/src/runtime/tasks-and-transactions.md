@@ -77,7 +77,7 @@ policy when there is no actor. A permission change committed during a wait there
 when the task continues.
 
 ```mica
-assert WorkingOn(actor(), #ticket)
+assert WorkingOn(#alice, #ticket)
 let line = read(:line)
 
 let exactly {status} = TicketStatus(#ticket, ?status)

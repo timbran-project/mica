@@ -132,6 +132,16 @@ InstalledAt(_, #lab)
 
 It matches any first-position value but does not include that value in the result.
 
+When every open position is `_`, the call returns a boolean because there are no names to project:
+
+```mica,eval
+make_relation(:Reading, 2)
+assert Reading(:sensor, 20)
+require Reading(_, 20) == true
+require Reading(_, 21) == false
+require Reading(_, _) == true
+```
+
 Functional relations declare key positions and support single-value projection:
 
 ```mica

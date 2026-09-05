@@ -36,13 +36,22 @@ return true
 Comparisons are ordinary binary operations, so express a bounded test as
 `low <= value && value <= high`, rather than chaining it as `low <= value <= high`.
 
-`&&` and `||` short-circuit and return booleans. `!` and `not` are equivalent. See
+`&&` and `||` short-circuit. `!` and `not` are equivalent boolean negations. See
 [Values](./values.md) for truthiness, numeric comparison, and exact integer division.
 
-Short-circuiting controls evaluation, not just the result. In `condition && action()`, the call
-runs only when `condition` is truthy. Neither logical operator selects a non-boolean operand as a
-fallback value: `none || "fallback"` is `true`. Use `if`, an option match, or `index_or` to select
-an actual value.
+In `condition && action()`, the call runs only when `condition` is truthy; otherwise the result is
+`false`. In `condition || action()`, a truthy condition produces `true` without making the call.
+When either operator evaluates its right operand, that operand supplies the result unchanged:
+
+```mica,eval
+require (false && "skipped") == false
+require (true && "kept") == "kept"
+require ("left" || "right") == true
+require (none || "fallback") == "fallback"
+```
+
+An option match or `if` is clearer when selecting between two data values: a short-circuiting
+`||` returns `true` for a truthy left operand, rather than returning that operand's payload.
 
 ## Ranges and Indexing
 

@@ -226,7 +226,7 @@ lookup.
 commit()
 suspend(1)
 read(:line)
-let child = spawn :tick(actor: actor()) after 5
+let child = spawn :tick(clock: #clock) after 5
 
 let [rx, tx] = mailbox()
 mailbox_send(tx, "ready")

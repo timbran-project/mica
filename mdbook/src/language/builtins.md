@@ -1,8 +1,10 @@
 # Built-in Functions
 
 Mica installs the following core functions in a normal runtime. Calls are positional unless a
-signature says otherwise. Incorrect arity or argument kinds raise an error; operations that require
-authority may raise `E_PERM`.
+signature says otherwise. Operations that require authority check the task's authority context.
+Argument and permission failures reach
+the host as runtime errors unless the operation explicitly raises a language error. Builtins that
+return an `option` or `result` represent absence or an expected failure as ordinary values.
 
 ## Scalar and Collection Functions
 
@@ -16,7 +18,7 @@ authority may raise `E_PERM`.
 | `string_join(parts, separator)`            | joined list of strings                               |
 | `string_starts_with(text, prefix)`         | boolean prefix test                                  |
 | `string_contains(text, subject)`           | boolean substring test                               |
-| `string_equal_fold(left, right)`           | case-insensitive string equality                     |
+| `string_equal_fold(left, right)`           | equality after Unicode lowercasing                    |
 | `lower(text)`                              | lowercase string                                     |
 | `words(text)`                              | parsed word list                                     |
 | `edit_distance(left, right)`               | character edit distance                              |
@@ -32,7 +34,73 @@ authority may raise `E_PERM`.
 | `json_encode(value)` / `json_decode(text)` | JSON conversion                                      |
 | `os_getenv(name)`                          | `option<string>`                                     |
 
-`os_getenv` exposes host process state and should not be treated as durable world state.
+`os_getenv` requires root authority or an invoke grant for `:os_getenv`, such as
+`CanInvoke(#reader, :os_getenv)` or a matching `RoleCanInvoke` grant. This grants access to the host
+process environment, including values that may contain credentials; give it only to trusted code.
+Environment values are configuration for that process, not durable world state.
+
+### Text Positions and Construction
+
+String positions count Unicode scalar values. An accented character such as `é` occupies one
+position regardless of its UTF-8 byte length. A letter followed by a combining accent occupies two
+positions. Use these operations for character-based text processing; a host that lays out text may
+group several scalars into one displayed character.
+
+`string_slice` uses an exclusive end position and accepts an empty interval. A list range such as
+`items[1..3]` includes position 3. Write the bounds for the operation being called:
+
+```mica,eval
+require string_len("AéB") == 3
+require string_slice("AéB", 1, 2) == "é"
+require string_slice("AéB", 3, 3) == ""
+require string_chars("AéB") == ["A", "é", "B"]
+require string_from_chars(["A", "é", "B"]) == "AéB"
+```
+
+Bounds must satisfy `0 <= start <= end <= string_len(text)`. A slice outside the string raises
+`E_INDEX`. `string_from_chars` accepts strings containing exactly one scalar each.
+
+Use `string_concat` for a fixed set of pieces and `string_join` for a list separated by punctuation:
+
+```mica,eval
+let labels = ["inspect", "repair", "calibrate"]
+require string_join(labels, ", ") == "inspect, repair, calibrate"
+require string_concat("Task: ", "inspect") == "Task: inspect"
+require string_concat() == ""
+```
+
+Both operations require string pieces. Use `to_literal` explicitly when the text should contain a
+Mica representation of another value.
+
+### Parsing Small Inputs
+
+`words` splits on whitespace, groups text inside double quotes, and lets a backslash quote the next
+character. It is useful for a command protocol whose arguments are words and quoted phrases:
+
+```mica,eval
+require words("take \"red key\" now") == ["take", "red key", "now"]
+```
+
+`parse_ordinal` accepts positive numeric ordinals such as `"2"` and `"21st"`, and English forms
+such as `"first"` and `"twenty-first"`. Inspect its result before using the number:
+
+```mica,eval
+let selected = match parse_ordinal("twenty-first")
+case ok(number)
+  number
+case err(problem)
+  raise problem
+end
+require selected == 21
+```
+
+URL component encoding percent-encodes UTF-8 bytes outside the unreserved alphabet. Decoding
+accepts percent escapes and interprets `+` as a space. Encode individual component values before
+assembling a URL; separators such as `/`, `?`, and `&` have meaning in the assembled URL.
+
+`sort` returns a sorted list and retains duplicates. It uses canonical value order, the same order
+used to organize map keys and relation rows. Use values of a consistent kind when the order should
+represent a numeric ranking or an alphabetical list.
 
 ## Relation Algebra
 

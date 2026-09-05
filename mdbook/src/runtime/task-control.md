@@ -43,7 +43,7 @@ receive the same input, so use one reader when a protocol requires a single cons
 `spawn` takes a dispatch expression and returns the child task's integer id:
 
 ```mica
-let child = spawn :tick(actor: actor(), clock: #clock) after 5
+let child = spawn :tick(clock: #clock) after 5
 ```
 
 The optional `after` duration delays the child's invocation. The parent commits first, so the child
@@ -59,6 +59,10 @@ The child's execution context comes from its parent. Naming `agent: #worker` sup
 role; it does not switch the child to that identity's authority. Current policy is used when the
 child starts and when a delayed child resumes. A child has its own transactions, errors, and
 completion. Use explicit facts or messages when its parent needs to observe its progress.
+
+Named spawn calls also receive the parent's `principal`, `actor`, and `endpoint` roles when those
+roles are available and the call does not supply them explicitly. The `tick` call above can therefore
+receive the parent's actor without unpacking the `option<identity>` returned by `actor()`.
 
 ## Mailboxes
 
