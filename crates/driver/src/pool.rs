@@ -860,7 +860,7 @@ impl CompioTaskDriver {
             )
         };
         let runner = Arc::clone(&self.inner.runner);
-        let request = TaskRequest {
+        let mut request = TaskRequest {
             principal: context.principal,
             actor: context.actor,
             endpoint: context.endpoint,
@@ -869,6 +869,9 @@ impl CompioTaskDriver {
         };
         let outcome = self
             .dispatch(DispatchOperation::Resume, move || async move {
+                if let Some(subject) = request.actor.or(request.principal) {
+                    request.authority = runner.authority_for_identity(subject)?;
+                }
                 runner.resume_task(request)
             })
             .await?;
@@ -2508,7 +2511,7 @@ impl CompioTaskDriver {
             value = ?value,
             "driver task resume requested"
         );
-        let request = TaskRequest {
+        let mut request = TaskRequest {
             principal: context.principal,
             actor: context.actor,
             endpoint: context.endpoint,
@@ -2518,6 +2521,9 @@ impl CompioTaskDriver {
         let runner = Arc::clone(&self.inner.runner);
         let submitted = self
             .dispatch(DispatchOperation::Resume, move || async move {
+                if let Some(subject) = request.actor.or(request.principal) {
+                    request.authority = runner.authority_for_identity(subject)?;
+                }
                 runner.resume_task(request)
             })
             .await

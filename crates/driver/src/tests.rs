@@ -1571,6 +1571,137 @@ fn spawn_runs_receiver_positional_child_task() {
 }
 
 #[test]
+fn input_resume_refreshes_actor_and_principal_policy() {
+    crate::test_support::run(async {
+        for principal_only in [false, true] {
+            for revoke in [true, false] {
+                let mut runner = SourceRunner::new_empty();
+                runner
+                    .run_source(
+                        "make_identity(:reader)\n\
+                         make_relation(:Secret, 1)\n\
+                         make_relation(:CanRead, 2)\n\
+                         assert Secret(7)",
+                    )
+                    .unwrap();
+                if revoke {
+                    runner
+                        .run_source("assert CanRead(#reader, :Secret)")
+                        .unwrap();
+                }
+                let mut request = runner
+                    .source_request_as(
+                        Symbol::intern("reader"),
+                        "read(:line)\nreturn Secret(?value)",
+                    )
+                    .unwrap();
+                if principal_only {
+                    request.principal = request.actor.take();
+                }
+                let driver = CompioTaskDriver::spawn_with_workers(runner, TEST_WORKERS).unwrap();
+                driver.submit_source(endpoint(4), request).await.unwrap();
+                let change = if revoke { "retract" } else { "assert" };
+                driver
+                    .submit_source(
+                        endpoint(5),
+                        root_source(&format!("{change} CanRead(#reader, :Secret)")),
+                    )
+                    .await
+                    .unwrap();
+
+                let result = driver.input(endpoint(4), Value::unit()).await;
+                if revoke {
+                    let error = result.unwrap_err();
+                    assert!(driver.format_error(&error).contains("permission denied"));
+                } else {
+                    let outcomes = result.unwrap();
+                    assert!(
+                        matches!(&outcomes[..], [TaskOutcome::Complete { value, .. }]
+                        if value.with_relation(|relation| relation.len()) == Some(1))
+                    );
+                }
+                driver.shutdown().await.unwrap();
+            }
+        }
+    });
+}
+
+#[test]
+fn mailbox_poll_refreshes_authority_after_committing_policy_changes() {
+    crate::test_support::run(async {
+        let mut runner = SourceRunner::new_empty();
+        runner
+            .run_source(
+                "make_identity(:reader)\n\
+                 make_relation(:Secret, 1)\n\
+                 make_relation(:CanRead, 2)\n\
+                 make_relation(:CanWrite, 2)\n\
+                 assert CanRead(#reader, :Secret)\n\
+                 assert CanWrite(#reader, :CanRead)\n\
+                 assert Secret(7)",
+            )
+            .unwrap();
+        let request = runner
+            .source_request_as(
+                Symbol::intern("reader"),
+                "retract CanRead(#reader, :Secret)\n\
+                 let [rx, tx] = mailbox()\n\
+                 mailbox_recv([rx], 0)\n\
+                 return Secret(?value)",
+            )
+            .unwrap();
+        let driver = CompioTaskDriver::spawn_with_workers(runner, TEST_WORKERS).unwrap();
+        let error = driver
+            .submit_source(endpoint(4), request)
+            .await
+            .unwrap_err();
+        assert!(driver.format_error(&error).contains("permission denied"));
+        driver.shutdown().await.unwrap();
+    });
+}
+
+#[test]
+fn spawn_refreshes_principal_policy_after_parent_commit() {
+    crate::test_support::run(async {
+        for revoke in [false, true] {
+            let mut runner = SourceRunner::new_empty();
+            runner
+                .run_filein(
+                    "make_identity(:worker)\n\
+                     make_relation(:CanInvoke, 2)\n\
+                     make_relation(:CanWrite, 2)\n\
+                     assert CanInvoke(#worker, :work)\n\
+                     assert CanWrite(#worker, :CanInvoke)\n\
+                     verb work()\n\
+                       return 7\n\
+                     end",
+                )
+                .unwrap();
+            let source = if revoke {
+                "retract CanInvoke(#worker, :work)\nspawn :work()"
+            } else {
+                "spawn :work()"
+            };
+            let mut request = runner
+                .source_request_as(Symbol::intern("worker"), source)
+                .unwrap();
+            request.principal = request.actor.take();
+            let driver = CompioTaskDriver::spawn_with_workers(runner, TEST_WORKERS).unwrap();
+            let result = driver.submit_source(endpoint(4), request).await;
+            if revoke {
+                assert!(matches!(result,
+                    Err(DriverError::Source(SourceTaskError::TaskManager(TaskManagerError::Task(
+                        TaskError::Runtime(RuntimeError::NoApplicableMethod { selector })
+                    )))) if selector == Value::symbol(Symbol::intern("work"))));
+            } else {
+                result.unwrap();
+            }
+            driver.shutdown().await.unwrap();
+        }
+    });
+}
+
+#[test]
 fn endpoint_input_resumes_reading_task() {
     crate::test_support::run(async {
         let driver =

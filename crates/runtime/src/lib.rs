@@ -75,7 +75,7 @@ use mica_host_protocol::{
 use mica_relation_kernel::FjallStateProvider;
 use mica_relation_kernel::{
     ConflictPolicy, DispatchRelations, KernelError, RelationDurability, RelationId, RelationKernel,
-    RelationMetadata, RelationRead, RelationSource, relation_algebra,
+    RelationMetadata, RelationRead, RelationSource, Snapshot, relation_algebra,
 };
 use mica_var::{Identity, PRIMITIVE_PROTOTYPES, RelationValue, Symbol, Value, ValueKind};
 use std::collections::{BTreeMap, BTreeSet};
@@ -1919,8 +1919,8 @@ impl SharedSourceRunner {
             delay_millis,
         } = spawn;
         let runtime_context = runtime_context(principal, actor, endpoint);
-        let authority = match actor {
-            Some(actor) => authority_for_actor(self.task_manager.kernel(), actor)?,
+        let authority = match actor.or(principal) {
+            Some(subject) => self.authority_for_identity(subject)?,
             None => parent_authority,
         };
         let program =
@@ -1930,6 +1930,14 @@ impl SharedSourceRunner {
             self.task_manager
                 .submit_with_context(Arc::new(program), authority, runtime_context)?;
         Ok(SubmittedTask { task_id, outcome })
+    }
+
+    /// Derives authority from one current policy snapshot for an actor or principal.
+    pub fn authority_for_identity(
+        &self,
+        identity: Identity,
+    ) -> Result<AuthorityContext, SourceTaskError> {
+        authority_for_actor(self.task_manager.kernel(), identity)
     }
 
     pub fn resume_task(&self, request: TaskRequest) -> Result<TaskOutcome, SourceTaskError> {
@@ -6416,8 +6424,7 @@ fn relation_named(kernel: &RelationKernel, name: Symbol) -> Option<(Identity, u1
         .map(|metadata| (metadata.id(), metadata.arity()))
 }
 
-fn relation_name_index(kernel: &RelationKernel) -> BTreeMap<Symbol, (Identity, u16)> {
-    let snapshot = kernel.snapshot();
+fn relation_name_index(snapshot: &Snapshot) -> BTreeMap<Symbol, (Identity, u16)> {
     snapshot
         .relation_metadata()
         .map(|metadata| (metadata.name(), (metadata.id(), metadata.arity())))
@@ -6549,10 +6556,11 @@ fn authority_for_actor(
     actor: Identity,
 ) -> Result<AuthorityContext, SourceTaskError> {
     let mut authority = AuthorityContext::empty();
-    let relation_names = relation_name_index(kernel);
+    let snapshot = kernel.snapshot();
+    let relation_names = relation_name_index(&snapshot);
     for policy_name in ["CanRead", "GrantRead"] {
         mint_relation_grants(
-            kernel,
+            &snapshot,
             actor,
             policy_name,
             CapabilityOp::Read,
@@ -6561,7 +6569,7 @@ fn authority_for_actor(
         )?;
     }
     mint_role_relation_grants(
-        kernel,
+        &snapshot,
         actor,
         "RoleCanRead",
         CapabilityOp::Read,
@@ -6570,7 +6578,7 @@ fn authority_for_actor(
     )?;
     for policy_name in ["CanWrite", "GrantWrite"] {
         mint_relation_grants(
-            kernel,
+            &snapshot,
             actor,
             policy_name,
             CapabilityOp::Write,
@@ -6579,7 +6587,7 @@ fn authority_for_actor(
         )?;
     }
     mint_role_relation_grants(
-        kernel,
+        &snapshot,
         actor,
         "RoleCanWrite",
         CapabilityOp::Write,
@@ -6587,20 +6595,32 @@ fn authority_for_actor(
         &mut authority,
     )?;
     for policy_name in ["CanInvoke", "GrantInvoke"] {
-        mint_invoke_grants(kernel, actor, policy_name, &relation_names, &mut authority)?;
+        mint_invoke_grants(
+            &snapshot,
+            actor,
+            policy_name,
+            &relation_names,
+            &mut authority,
+        )?;
     }
     mint_role_invoke_grants(
-        kernel,
+        &snapshot,
         actor,
         "RoleCanInvoke",
         &relation_names,
         &mut authority,
     )?;
     for policy_name in ["CanEffect", "GrantEffect"] {
-        mint_effect_grants(kernel, actor, policy_name, &relation_names, &mut authority)?;
+        mint_effect_grants(
+            &snapshot,
+            actor,
+            policy_name,
+            &relation_names,
+            &mut authority,
+        )?;
     }
     mint_role_effect_grants(
-        kernel,
+        &snapshot,
         actor,
         "RoleCanEffect",
         &relation_names,
@@ -6625,10 +6645,11 @@ fn read_only_authority_for_actor(
     actor: Identity,
 ) -> Result<AuthorityContext, SourceTaskError> {
     let mut authority = AuthorityContext::empty();
-    let relation_names = relation_name_index(kernel);
+    let snapshot = kernel.snapshot();
+    let relation_names = relation_name_index(&snapshot);
     for policy_name in ["CanRead", "GrantRead"] {
         mint_relation_grants(
-            kernel,
+            &snapshot,
             actor,
             policy_name,
             CapabilityOp::Read,
@@ -6637,7 +6658,7 @@ fn read_only_authority_for_actor(
         )?;
     }
     mint_role_relation_grants(
-        kernel,
+        &snapshot,
         actor,
         "RoleCanRead",
         CapabilityOp::Read,
@@ -6659,7 +6680,7 @@ fn read_only_authority_for_runtime_context(
 }
 
 fn mint_relation_grants(
-    kernel: &RelationKernel,
+    snapshot: &Snapshot,
     actor: Identity,
     policy_name: &str,
     op: CapabilityOp,
@@ -6669,7 +6690,6 @@ fn mint_relation_grants(
     let Some(policy_relation) = policy_relation_from_index(relation_names, policy_name, 2)? else {
         return Ok(());
     };
-    let snapshot = kernel.snapshot();
     let tuples = snapshot
         .scan(policy_relation, &[Some(Value::identity(actor)), None])
         .map_err(CompileError::from)?;
@@ -6688,7 +6708,7 @@ fn mint_relation_grants(
 }
 
 fn role_identities(
-    kernel: &RelationKernel,
+    snapshot: &Snapshot,
     actor: Identity,
     relation_names: &BTreeMap<Symbol, (Identity, u16)>,
 ) -> Result<Vec<Identity>, SourceTaskError> {
@@ -6696,7 +6716,6 @@ fn role_identities(
     let Some(delegates) = policy_relation_from_index(relation_names, "Delegates", 3)? else {
         return Ok(roles.into_iter().collect());
     };
-    let snapshot = kernel.snapshot();
     for tuple in snapshot
         .scan(delegates, &[Some(Value::identity(actor)), None, None])
         .map_err(CompileError::from)?
@@ -6709,7 +6728,7 @@ fn role_identities(
 }
 
 fn mint_role_relation_grants(
-    kernel: &RelationKernel,
+    snapshot: &Snapshot,
     actor: Identity,
     policy_name: &str,
     op: CapabilityOp,
@@ -6719,8 +6738,7 @@ fn mint_role_relation_grants(
     let Some(policy_relation) = policy_relation_from_index(relation_names, policy_name, 2)? else {
         return Ok(());
     };
-    let roles = role_identities(kernel, actor, relation_names)?;
-    let snapshot = kernel.snapshot();
+    let roles = role_identities(snapshot, actor, relation_names)?;
     for role in roles {
         let tuples = snapshot
             .scan(policy_relation, &[Some(Value::identity(role)), None])
@@ -6741,7 +6759,7 @@ fn mint_role_relation_grants(
 }
 
 fn mint_invoke_grants(
-    kernel: &RelationKernel,
+    snapshot: &Snapshot,
     actor: Identity,
     policy_name: &str,
     relation_names: &BTreeMap<Symbol, (Identity, u16)>,
@@ -6750,7 +6768,6 @@ fn mint_invoke_grants(
     let Some(policy_relation) = policy_relation_from_index(relation_names, policy_name, 2)? else {
         return Ok(());
     };
-    let snapshot = kernel.snapshot();
     let tuples = snapshot
         .scan(policy_relation, &[Some(Value::identity(actor)), None])
         .map_err(CompileError::from)?;
@@ -6777,7 +6794,7 @@ fn mint_invoke_grants(
 }
 
 fn mint_role_invoke_grants(
-    kernel: &RelationKernel,
+    snapshot: &Snapshot,
     actor: Identity,
     policy_name: &str,
     relation_names: &BTreeMap<Symbol, (Identity, u16)>,
@@ -6786,8 +6803,7 @@ fn mint_role_invoke_grants(
     let Some(policy_relation) = policy_relation_from_index(relation_names, policy_name, 2)? else {
         return Ok(());
     };
-    let roles = role_identities(kernel, actor, relation_names)?;
-    let snapshot = kernel.snapshot();
+    let roles = role_identities(snapshot, actor, relation_names)?;
     for role in roles {
         let tuples = snapshot
             .scan(policy_relation, &[Some(Value::identity(role)), None])
@@ -6816,7 +6832,7 @@ fn mint_role_invoke_grants(
 }
 
 fn mint_effect_grants(
-    kernel: &RelationKernel,
+    snapshot: &Snapshot,
     actor: Identity,
     policy_name: &str,
     relation_names: &BTreeMap<Symbol, (Identity, u16)>,
@@ -6825,7 +6841,6 @@ fn mint_effect_grants(
     let Some(policy_relation) = policy_relation_from_index(relation_names, policy_name, 1)? else {
         return Ok(());
     };
-    let snapshot = kernel.snapshot();
     if !snapshot
         .scan(policy_relation, &[Some(Value::identity(actor))])
         .map_err(CompileError::from)?
@@ -6840,7 +6855,7 @@ fn mint_effect_grants(
 }
 
 fn mint_role_effect_grants(
-    kernel: &RelationKernel,
+    snapshot: &Snapshot,
     actor: Identity,
     policy_name: &str,
     relation_names: &BTreeMap<Symbol, (Identity, u16)>,
@@ -6849,8 +6864,7 @@ fn mint_role_effect_grants(
     let Some(policy_relation) = policy_relation_from_index(relation_names, policy_name, 1)? else {
         return Ok(());
     };
-    let roles = role_identities(kernel, actor, relation_names)?;
-    let snapshot = kernel.snapshot();
+    let roles = role_identities(snapshot, actor, relation_names)?;
     for role in roles {
         if !snapshot
             .scan(policy_relation, &[Some(Value::identity(role))])
