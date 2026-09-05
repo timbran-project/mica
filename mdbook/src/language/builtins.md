@@ -32,6 +32,7 @@ return an `option` or `result` represent absence or an expected failure as ordin
 | `map_pairs(map)`                           | list of two-item key/value lists                     |
 | `index_or(collection, index, default)`     | list, map, or relation lookup with a default         |
 | `json_encode(value)` / `json_decode(text)` | JSON conversion                                      |
+| `json_null()`                            | explicit JSON null value                             |
 | `os_getenv(name)`                          | `option<string>`                                     |
 
 `os_getenv` requires root authority or an invoke grant for `:os_getenv`, such as
@@ -101,6 +102,52 @@ assembling a URL; separators such as `/`, `?`, and `&` have meaning in the assem
 `sort` returns a sorted list and retains duplicates. It uses canonical value order, the same order
 used to organize map keys and relation rows. Use values of a consistent kind when the order should
 represent a numeric ranking or an alphabetical list.
+
+### JSON at a Host Boundary
+
+`json_decode` returns a Mica value directly. `json_encode` returns JSON text. The conversions use
+the following shapes recursively:
+
+| JSON value | Mica value |
+| ---------- | ---------- |
+| `true` or `false` | boolean |
+| integer token such as `12` | integer |
+| token with a decimal point or exponent, such as `12.0` or `12e0` | float |
+| string | string |
+| array | list |
+| object | map with symbol keys |
+| `null` | `json_null()`, equivalent to `{:json -> :null}` |
+
+Object keys become symbols so that a decoded field can be read with a symbolic map key:
+
+```mica,eval
+let request = json_decode("{\"title\":\"Repair\",\"count\":2,\"owner\":null}")
+require request[:title] == "Repair"
+require request[:count] == 2
+require request[:owner] == json_null()
+require json_decode(json_encode(request)) == request
+```
+
+Number spelling determines its kind. Integer tokens must fit Mica's integer range; decimal and
+exponent tokens must convert to a finite binary32 float. No conversion from an oversized integer
+token to a float happens implicitly:
+
+```mica,eval
+let count: int = json_decode("12")
+let amount: float = json_decode("12.0")
+let scale: float = json_decode("12e0")
+require amount == scale
+```
+
+Encoding accepts booleans, numbers, strings, symbols, lists, maps, and the null marker. Map keys
+must be strings or symbols. Symbols become JSON strings, so decoding an encoded symbol returns a
+string. Decoded object keys are always symbols, even when the original Mica map used string keys.
+
+Project identities, relations, errors, and other application values to a deliberate wire shape
+before encoding them. For example, encode a query as a list of maps with fields your protocol
+defines. JSON conversion does not choose whether an empty relation means an empty collection,
+absence, or a failed operation. Malformed JSON and values outside the supported JSON shapes fail
+the builtin call.
 
 ## Relation Algebra
 

@@ -169,7 +169,7 @@ replacement, property-style access, and composite keys.
 
 ## Relation Value Algebra
 
-Query results compose through four initial relational operations:
+Query results compose through four relational operations:
 
 ```mica
 let people = Person(?person, ?name)
@@ -186,6 +186,69 @@ zero-column unit relation when the input is non-empty. `union` and `difference` 
 headings. `natural_join` matches every shared column name; with no shared columns it produces a
 Cartesian product. Join keys use canonical value identity, so an integer and float do not join
 merely because language numeric equality considers them equal.
+
+### Choosing the Answer's Heading
+
+Projection changes what one answer means. A relation containing people and teams can contain several
+people on one team. Projecting only the team column asks which teams occur, so repeated team values
+become one row:
+
+```mica,eval
+let members = [:person, :team] {
+  [:alice, :operations],
+  [:bob, :operations],
+  [:chandra, :research]
+}
+require project(members, :team) == [:team] { [:operations], [:research] }
+require project(members) == ()
+require project([:person, :team] {}) == [] {}
+```
+
+Keeping no columns is an existence test expressed as a relation: a nonempty input becomes one empty
+row, while an empty input remains empty. The result is a relation value in both cases. A predicate
+call such as `Member(_, :operations)` instead returns a boolean.
+
+### Joining Through Shared Names
+
+Natural joins use the result headings. The stored relation names do not decide which columns join.
+Choose query-variable names so that shared names denote the same concept:
+
+```mica,eval
+let members = [:person, :team] { [:alice, :operations], [:bob, :research] }
+let rooms = [:team, :room] { [:operations, :north], [:research, :south] }
+let located = natural_join(members, rooms)
+require located == [:person, :team, :room] {
+  [:alice, :operations, :north],
+  [:bob, :research, :south]
+}
+require project(located, :person, :room) == [:person, :room] {
+  [:alice, :north],
+  [:bob, :south]
+}
+```
+
+In a stored-world query, `Member(?person, ?team)` and `TeamRoom(?team, ?room)` establish the same
+join through `?team`. Calling the second query `TeamRoom(?group, ?room)` would give it a different
+heading; with no shared column names, every member row would pair with every room row. Conversely,
+if two results share several names, every shared cell must match.
+
+### Combining and Subtracting Answers
+
+Union and difference compare complete rows. Both inputs must have the same set of heading names,
+though their written order can differ. Project first when the operation concerns only part of each
+row:
+
+```mica,eval
+let requested = [:person] { [:alice], [:bob] }
+let waiting = [:person] { [:bob], [:chandra] }
+let finished = [:person] { [:alice] }
+require union(requested, waiting) == [:person] { [:alice], [:bob], [:chandra] }
+require difference(requested, finished) == [:person] { [:bob] }
+```
+
+These operations produce immutable values. Changing `requested` later does not change an already
+computed result, and combining query results does not assert their rows into a stored relation.
+Install a rule when an answer should be derived again from the live world for later queries.
 
 Relation values can be returned from tasks, carried across RPC or IPC value boundaries, and stored
 as cells in durable named relations when all nested cells are persistable. Literal syntax uses a

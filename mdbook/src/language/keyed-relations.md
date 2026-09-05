@@ -80,6 +80,27 @@ to coexist because both use the same key, `#sensor`.
 The key is therefore more than a note for readers. It restricts which facts can exist together and
 makes a single-answer query reliable.
 
+An assertion supplies a fact; it does not replace a different fact with the same key. If that key
+already has another stored value, the assertion fails with a functional-key error. The failed task
+discards its uncommitted changes. Repeating the identical assertion remains harmless.
+
+Use dot assignment for replacement in a binary relation keyed by position 0:
+
+```mica,eval
+make_identity(:sensor)
+make_functional_relation(:Label, 2, [0])
+assert Label(#sensor, "temperature sensor")
+assert Label(#sensor, "temperature sensor")
+require #sensor.label == "temperature sensor"
+#sensor.label = "north-line sensor"
+require Label(#sensor, ?label) == [:label] { ["north-line sensor"] }
+```
+
+For a composite key, retract the current matching fact and assert its replacement in the same
+transaction. The key also coordinates competing writers: if another task changes a touched key
+after this task's snapshot was taken, commit reports a conflict and the runtime retries the segment
+against a fresh snapshot. The retried code reads the current value before making its decision.
+
 ## Why Is It Called a Functional Relation?
 
 The name comes from the mathematical relationship between functions and relations. A function
@@ -130,8 +151,9 @@ else
 end
 ```
 
-Without a declared key, these bindings can still enforce cardinality dynamically. The key makes the
-at-most-one guarantee an enforced part of the relation and lets the compiler reason about it.
+Without a declared key, these bindings can still enforce cardinality dynamically. The key enforces
+the at-most-one rule for stored facts. Exact and optional bindings state what the caller requires
+from the actual query result, including any rows derived by rules.
 
 ## Property-Style Access
 
