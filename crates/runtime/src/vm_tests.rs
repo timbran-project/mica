@@ -931,20 +931,20 @@ fn authority_context_rejects_unminted_capability_values() {
 
 #[test]
 fn program_artifacts_reject_capability_constants() {
-    let program = Program::new(
-        1,
-        [Instruction::Load {
-            dst: reg(0),
-            value: Value::capability_raw(1).unwrap(),
-        }],
-    )
-    .unwrap();
+    let capability = Value::capability_raw(1).unwrap();
+    for value in [
+        capability.clone(),
+        Value::list([capability.clone()]),
+        Value::error(Symbol::intern("E_TEST"), None::<String>, Some(capability)),
+    ] {
+        let program = Program::new(1, [Instruction::Load { dst: reg(0), value }]).unwrap();
 
-    assert!(matches!(
-        program.to_bytes(),
-        Err(RuntimeError::ProgramArtifact(message))
-            if message == "capability values are not serializable"
-    ));
+        assert!(matches!(
+            program.to_bytes(),
+            Err(RuntimeError::ProgramArtifact(message))
+                if message == "cannot serialize program constant: capability values cannot be encoded"
+        ));
+    }
 }
 
 #[test]
@@ -1246,6 +1246,41 @@ fn program_artifact_round_trips_float_constants() {
 }
 
 #[test]
+fn program_artifacts_round_trip_nested_persistable_constants() {
+    let value = Value::list([
+        Value::list([int(1), Value::bytes([0, 255])]),
+        Value::map([(sym("key"), Value::string("value"))]),
+        Value::range(int(-2), Some(int(3))),
+        Value::range(int(5), None),
+        Value::frob(rel(42), Value::list([Value::bool(true)])),
+        Value::error(
+            Symbol::intern("E_TEST"),
+            Some("nested payload"),
+            Some(Value::map([(sym("detail"), Value::list([int(7)]))])),
+        ),
+        Value::option_some(Value::map([(sym("values"), Value::list([int(8)]))])),
+    ]);
+    let program = Program::new(
+        1,
+        [
+            Instruction::Load {
+                dst: reg(0),
+                value: value.clone(),
+            },
+            Instruction::Return { value: r(0) },
+        ],
+    )
+    .unwrap();
+    let restored = Program::from_bytes(&program.to_bytes().unwrap()).unwrap();
+    assert_eq!(restored, program);
+    let mut tasks = TaskManager::new(RelationKernel::new());
+    assert!(matches!(
+        tasks.submit(Arc::new(restored)).unwrap().1,
+        TaskOutcome::Complete { value: actual, .. } if actual == value
+    ));
+}
+
+#[test]
 fn program_artifact_round_trips_relation_constants() {
     let unit = Value::unit();
     let option = Value::relation(
@@ -1292,7 +1327,7 @@ fn program_artifact_round_trips_kind_checks_and_rejects_stale_magic() {
     .unwrap();
     let bytes = program.to_bytes().unwrap();
 
-    assert_eq!(&bytes[..8], b"MICAPRG9");
+    assert_eq!(&bytes[..9], b"MICAPRG10");
     assert_eq!(
         program.kind_fact_after(0),
         Some((reg(0), ValueKind::Relation)),
@@ -1334,7 +1369,7 @@ fn program_artifact_round_trips_structural_type_contracts() {
     .unwrap();
     let bytes = program.to_bytes().unwrap();
 
-    assert_eq!(&bytes[..8], b"MICAPRG9");
+    assert_eq!(&bytes[..9], b"MICAPRG10");
     assert_eq!(
         program.kind_fact_after(0),
         Some((reg(0), ValueKind::Relation))
@@ -1561,13 +1596,13 @@ fn program_artifact_rejects_invalid_kind_check_fields() {
     .unwrap();
     let bytes = program.to_bytes().unwrap();
 
-    // Header (16 bytes), opcode (1), register (2), then kind and site bytes.
+    // Header (17 bytes), opcode (1), register (2), then kind and site bytes.
     let mut invalid_kind = bytes.clone();
-    invalid_kind[19] = u8::MAX;
+    invalid_kind[20] = u8::MAX;
     assert!(Program::from_bytes(&invalid_kind).is_err());
 
     let mut invalid_site = bytes;
-    invalid_site[20] = u8::MAX;
+    invalid_site[21] = u8::MAX;
     assert!(Program::from_bytes(&invalid_site).is_err());
 }
 
@@ -1602,12 +1637,12 @@ fn program_artifact_rejects_non_finite_float_bits() {
     let mut bytes = program.to_bytes().unwrap();
     // Locate this program's float record, then replace its finite payload with
     // quiet-NaN bits (0x7fc00000).
-    let float_record = [3u8, 0x00, 0x00, 0x80, 0x3f];
+    let float_record = borrowed_value_bits(&Value::float(1.0).unwrap()).to_le_bytes();
     let pos = bytes
         .windows(float_record.len())
         .position(|window| window == float_record)
         .expect("program contains the serialized 1.0 float record");
-    bytes[pos + 1..pos + 5].copy_from_slice(&[0x00, 0x00, 0xc0, 0x7f]);
+    bytes[pos..pos + 4].copy_from_slice(&[0x00, 0x00, 0xc0, 0x7f]);
     assert!(Program::from_bytes(&bytes).is_err());
 }
 

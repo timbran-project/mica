@@ -14,7 +14,7 @@
 use crate::RuntimeError;
 use arc_swap::ArcSwap;
 use mica_relation_kernel::{DispatchRelations, RelationId, RelationRead};
-use mica_var::{Identity, Symbol, Tuple, Value, ValueKind};
+use mica_var::{Identity, Symbol, Value, ValueKind, decode_value, encode_value};
 use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Arc;
@@ -2833,7 +2833,7 @@ impl Program {
 
     pub fn to_bytes(&self) -> Result<Vec<u8>, RuntimeError> {
         let mut out = Vec::new();
-        out.extend_from_slice(b"MICAPRG9");
+        out.extend_from_slice(b"MICAPRG10");
         write_u32(&mut out, self.register_count as u32);
         write_u32(&mut out, self.opcodes.len() as u32);
         for instruction in self.instructions() {
@@ -2847,7 +2847,7 @@ impl Program {
 
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, RuntimeError> {
         let mut input = ByteReader::new(bytes);
-        input.expect_magic(b"MICAPRG9")?;
+        input.expect_magic(b"MICAPRG10")?;
         let register_count = input.read_u32()? as usize;
         let instruction_count = input.read_u32()? as usize;
         let mut instructions = Vec::with_capacity(instruction_count);
@@ -4996,18 +4996,6 @@ const LIST_ITEM_SPLICE: u8 = 1;
 const MAP_ITEM_ENTRY: u8 = 0;
 const MAP_ITEM_SPLICE: u8 = 1;
 
-const VALUE_EMPTY_RELATION: u8 = 0;
-const VALUE_BOOL: u8 = 1;
-const VALUE_INT: u8 = 2;
-const VALUE_FLOAT: u8 = 3;
-const VALUE_IDENTITY: u8 = 4;
-const VALUE_SYMBOL: u8 = 5;
-const VALUE_ERROR_CODE: u8 = 6;
-const VALUE_STRING: u8 = 7;
-const VALUE_BYTES: u8 = 8;
-const VALUE_ERROR: u8 = 9;
-const VALUE_RELATION: u8 = 10;
-
 const TYPE_KIND: u8 = 0;
 const TYPE_LITERAL: u8 = 1;
 const TYPE_RELATION: u8 = 2;
@@ -5903,16 +5891,6 @@ fn write_optional_target(out: &mut Vec<u8>, target: Option<usize>) {
     }
 }
 
-fn write_optional_str(out: &mut Vec<u8>, value: Option<&str>) {
-    match value {
-        Some(value) => {
-            out.push(1);
-            write_str(out, value);
-        }
-        None => out.push(0),
-    }
-}
-
 fn write_optional_value(out: &mut Vec<u8>, value: Option<&Value>) -> Result<(), RuntimeError> {
     match value {
         Some(value) => {
@@ -5941,76 +5919,8 @@ fn write_operand(out: &mut Vec<u8>, operand: &Operand) -> Result<(), RuntimeErro
 }
 
 fn write_value(out: &mut Vec<u8>, value: &Value) -> Result<(), RuntimeError> {
-    if let Some(value) = value.as_bool() {
-        out.push(VALUE_BOOL);
-        out.push(value as u8);
-    } else if let Some(value) = value.as_int() {
-        out.push(VALUE_INT);
-        write_i64(out, value);
-    } else if let Some(value) = value.as_float() {
-        out.push(VALUE_FLOAT);
-        write_f32(out, value);
-    } else if let Some(value) = value.as_identity() {
-        out.push(VALUE_IDENTITY);
-        write_identity(out, value);
-    } else if let Some(value) = value.as_symbol() {
-        let Some(name) = value.name() else {
-            return Err(artifact_error("cannot serialize unnamed symbol"));
-        };
-        out.push(VALUE_SYMBOL);
-        write_str(out, name);
-    } else if let Some(value) = value.as_error_code() {
-        let Some(name) = value.name() else {
-            return Err(artifact_error("cannot serialize unnamed error code"));
-        };
-        out.push(VALUE_ERROR_CODE);
-        write_str(out, name);
-    } else if let Some(result) = value.with_error(|error| {
-        let Some(name) = error.code().name() else {
-            return Err(artifact_error("cannot serialize unnamed error code"));
-        };
-        out.push(VALUE_ERROR);
-        write_str(out, name);
-        write_optional_str(out, error.message());
-        write_optional_value(out, error.value())
-    }) {
-        result?;
-    } else if value.is_empty_relation() {
-        out.push(VALUE_EMPTY_RELATION);
-    } else if let Some(result) = value.with_relation(|relation| {
-        out.push(VALUE_RELATION);
-        write_u16(out, relation.arity() as u16);
-        for column in relation.heading() {
-            let Some(name) = column.name() else {
-                return Err(artifact_error("cannot serialize unnamed relation column"));
-            };
-            write_str(out, name);
-        }
-        write_u32(out, relation.len() as u32);
-        for row in relation.rows() {
-            for cell in row.values() {
-                write_value(out, cell)?;
-            }
-        }
-        Ok(())
-    }) {
-        result?;
-    } else if let Some(()) = value.with_str(|text| {
-        out.push(VALUE_STRING);
-        write_str(out, text);
-    }) {
-    } else if let Some(()) = value.with_bytes(|bytes| {
-        out.push(VALUE_BYTES);
-        write_bytes(out, bytes);
-    }) {
-    } else if value.as_capability().is_some() {
-        return Err(artifact_error("capability values are not serializable"));
-    } else {
-        return Err(artifact_error(
-            "collection values are not serializable in program artifacts yet",
-        ));
-    }
-    Ok(())
+    encode_value(value, out)
+        .map_err(|error| artifact_error(format!("cannot serialize program constant: {error}")))
 }
 
 fn write_identity(out: &mut Vec<u8>, identity: Identity) {
@@ -6035,14 +5945,6 @@ fn write_u32(out: &mut Vec<u8>, value: u32) {
 }
 
 fn write_u64(out: &mut Vec<u8>, value: u64) {
-    out.extend_from_slice(&value.to_le_bytes());
-}
-
-fn write_i64(out: &mut Vec<u8>, value: i64) {
-    out.extend_from_slice(&value.to_le_bytes());
-}
-
-fn write_f32(out: &mut Vec<u8>, value: f32) {
     out.extend_from_slice(&value.to_le_bytes());
 }
 
@@ -6609,55 +6511,10 @@ impl<'a> ByteReader<'a> {
     }
 
     fn read_value(&mut self) -> Result<Value, RuntimeError> {
-        Ok(match self.read_u8()? {
-            VALUE_EMPTY_RELATION => Value::empty_relation(),
-            VALUE_BOOL => Value::bool(self.read_u8()? != 0),
-            VALUE_INT => Value::int(self.read_i64()?).map_err(|error| {
-                artifact_error(format!("invalid serialized integer value: {error:?}"))
-            })?,
-            VALUE_FLOAT => Value::float(self.read_f32()?).map_err(|error| {
-                artifact_error(format!("invalid serialized float value: {error:?}"))
-            })?,
-            VALUE_IDENTITY => Value::identity(self.read_identity()?),
-            VALUE_SYMBOL => Value::symbol(Symbol::intern(&self.read_string()?)),
-            VALUE_ERROR_CODE => Value::error_code(Symbol::intern(&self.read_string()?)),
-            VALUE_STRING => Value::string(self.read_string()?),
-            VALUE_BYTES => Value::bytes(self.read_bytes()?),
-            VALUE_ERROR => {
-                let code = Symbol::intern(&self.read_string()?);
-                let message = self.read_optional_string()?;
-                let value = self.read_optional_value()?;
-                Value::error(code, message, value)
-            }
-            VALUE_RELATION => {
-                let arity = self.read_u16()? as usize;
-                let mut heading = Vec::with_capacity(arity);
-                for _ in 0..arity {
-                    heading.push(Symbol::intern(&self.read_string()?));
-                }
-                let row_count = self.read_u32()? as usize;
-                let mut rows = Vec::with_capacity(row_count);
-                for _ in 0..row_count {
-                    let mut cells = Vec::with_capacity(arity);
-                    for _ in 0..arity {
-                        cells.push(self.read_value()?);
-                    }
-                    rows.push(Tuple::new(cells));
-                }
-                Value::relation(heading, rows).map_err(|error| {
-                    artifact_error(format!("invalid serialized relation value: {error}"))
-                })?
-            }
-            _ => return Err(artifact_error("unknown value tag")),
-        })
-    }
-
-    fn read_optional_string(&mut self) -> Result<Option<String>, RuntimeError> {
-        match self.read_u8()? {
-            0 => Ok(None),
-            1 => self.read_string().map(Some),
-            _ => Err(artifact_error("invalid optional string tag")),
-        }
+        let (value, consumed) = decode_value(&self.bytes[self.offset..])
+            .map_err(|error| artifact_error(format!("invalid program constant: {error}")))?;
+        self.offset += consumed;
+        Ok(value)
     }
 
     fn read_optional_value(&mut self) -> Result<Option<Value>, RuntimeError> {
@@ -6761,18 +6618,6 @@ impl<'a> ByteReader<'a> {
         Ok(u64::from_le_bytes([
             bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
         ]))
-    }
-
-    fn read_i64(&mut self) -> Result<i64, RuntimeError> {
-        let bytes = self.read_exact(8)?;
-        Ok(i64::from_le_bytes([
-            bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
-        ]))
-    }
-
-    fn read_f32(&mut self) -> Result<f32, RuntimeError> {
-        let bytes = self.read_exact(4)?;
-        Ok(f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
     }
 
     fn read_exact(&mut self, len: usize) -> Result<&'a [u8], RuntimeError> {
