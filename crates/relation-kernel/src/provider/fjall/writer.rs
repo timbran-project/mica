@@ -18,7 +18,7 @@ use super::codec::{
 };
 use super::layout::{FjallKeyspaces, STATE_VERSION_KEY};
 use crate::{CatalogChange, Commit, FactChangeKind};
-use fjall::Database;
+use fjall::{Database, PersistMode};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread::{self, JoinHandle};
@@ -169,7 +169,12 @@ fn writer_loop(
     while let Ok(message) = receiver.recv() {
         match message {
             WriterMessage::Persist { commit, reply } => {
-                let result = write_commit(&database, &keyspaces, &commit);
+                let durability = if reply.is_some() {
+                    PersistMode::SyncAll
+                } else {
+                    PersistMode::Buffer
+                };
+                let result = write_commit(&database, &keyspaces, &commit, durability);
                 match &result {
                     Ok(()) => {
                         completed_version.fetch_max(commit.version(), Ordering::AcqRel);
@@ -189,7 +194,9 @@ fn writer_loop(
             WriterMessage::Flush { reply } => {
                 let result = match write_error.lock().unwrap().clone() {
                     Some(error) => Err(format!("fjall commit writer failed: {error}")),
-                    None => Ok(()),
+                    None => database
+                        .persist(PersistMode::SyncAll)
+                        .map_err(|error| format!("failed to sync fjall journal: {error}")),
                 };
                 let _ = reply.send(result);
             }
@@ -201,8 +208,9 @@ fn write_commit(
     database: &Database,
     keyspaces: &FjallKeyspaces,
     commit: &Commit,
+    durability: PersistMode,
 ) -> Result<(), String> {
-    let mut batch = database.batch();
+    let mut batch = database.batch().durability(Some(durability));
     batch.insert(
         &keyspaces.commits,
         commit.version().to_be_bytes(),

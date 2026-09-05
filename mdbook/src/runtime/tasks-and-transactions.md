@@ -69,6 +69,36 @@ need to write to a socket or invoke a service after receiving committed output. 
 operation needs an acknowledgement, use the host request or mailbox protocol for that operation
 and record the acknowledged result in a subsequent transaction.
 
+## Publication and Persistence
+
+Publication makes a committed snapshot visible to other tasks in the current process. Persistence
+determines when the host can recover those facts after a restart. The in-memory provider keeps the
+world for the life of that process. The Fjall provider stores durable relation metadata, rules, and
+facts, then reconstructs the in-memory world when opened again.
+
+With Fjall, the host chooses a durability mode. The runner exposes it through `--durability`:
+
+```sh
+cargo run --bin mica -- --storage fjall --store world-db --durability strict eval 'return ()'
+```
+
+| Mode | When a durable commit returns |
+| --- | --- |
+| `relaxed` | after the ordered background writer accepts the commit into its queue |
+| `strict` | after the writer applies the commit and syncs the journal |
+
+The default is `relaxed`. In that mode, another task can observe published facts while their write
+is still queued. Strict mode puts the journal sync before publication and release of buffered
+effects. An embedding host can call `flush_persistence()` to wait for earlier queued writes and
+sync the journal in either mode. A task's `commit()` ends its transaction; it uses the configured
+provider mode rather than changing that mode.
+
+Relation durability is a separate choice. A `:volatile` relation retains its definition across a
+Fjall restart but starts with no stored rows. Use it for process-lifetime facts such as open
+endpoints. Durable relations recover their stored rows. Derived answers are recomputed from the
+recovered facts and active rules; execution caches and live capabilities are not recovered as
+durable authority.
+
 ## Continuing After a Boundary
 
 Local bindings and the call stack survive suspension. The resumed task receives a fresh relation

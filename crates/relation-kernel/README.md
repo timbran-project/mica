@@ -68,9 +68,10 @@ work, not the only durable representation of the world.
 
 `FjallStateProvider::open` defaults to relaxed durability: a commit returns after it has been
 accepted into the provider's ordered writer queue, and normal provider shutdown drains that queue.
-`FjallStateProvider::open_strict` waits for the background writer to apply the Fjall batch before
-returning from the commit path. Strict mode gives an immediate disk-write acknowledgement at the
-cost of much slower commits.
+`FjallStateProvider::open_strict` waits for the background writer to apply the Fjall batch and sync
+its journal before returning from the commit path. `RelationKernel::flush_persistence` waits for
+queued writes and syncs the journal in either mode. Strict mode adds a journal sync to each durable
+commit; relaxed mode lets the host choose explicit flush boundaries.
 
 For developers, this means the persisted representation is the state encoding in
 `src/provider/fjall/codec.rs`, plus the commit encoding kept beside it. Changes to the state shape,
