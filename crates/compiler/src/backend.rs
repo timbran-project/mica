@@ -1547,7 +1547,7 @@ impl<'a> ProgramCompiler<'a> {
                     self.record_local_type(binding, value);
                     return Ok(dst);
                 }
-                let dst = match value {
+                let source = match value {
                     Some(value) => self.compile_expr_for_value(value)?,
                     None => {
                         let dst = self.alloc_register();
@@ -1557,6 +1557,14 @@ impl<'a> ProgramCompiler<'a> {
                         });
                         dst
                     }
+                };
+                // A local owns its register even when its initial value comes from another local.
+                let dst = if self.locals.values().any(|register| *register == source) {
+                    let dst = self.alloc_register();
+                    self.emit(Instruction::Move { dst, src: source });
+                    dst
+                } else {
+                    source
                 };
                 if let Some(binding) = binding {
                     if let Some(value) = value.as_deref() {
@@ -6485,6 +6493,130 @@ mod tests {
                 retries: 0,
             }
         );
+    }
+
+    #[test]
+    fn multiline_collections_calls_and_bindings_execute() {
+        let source = r#"
+            fn sum(
+                first,
+                ?second = 2,
+            )
+                return first + second
+            end
+            let [
+                first,
+                @rest,
+            ] = [
+                1, // retain comments between elements
+                2,
+                3,
+            ]
+            let counts = {
+                :total -> sum(
+                    first,
+                    rest[
+                        1
+                    ],
+                ),
+                :extra ->
+                    6,
+            }
+            let exactly {
+                total,
+            } = [:total] {
+                [counts[:total]],
+            }
+            let double = {
+                value,
+            } => value * 2
+            return (
+                double(total) + counts[:extra]
+            )
+        "#;
+        let context = CompileContext::new();
+        let mut task_manager = TaskManager::new(RelationKernel::new());
+        let submitted = submit_source_task(source, &context, &mut task_manager).unwrap();
+        assert_eq!(
+            submitted.outcome,
+            TaskOutcome::Complete {
+                value: Value::int(14).unwrap(),
+                effects: vec![],
+                mailbox_sends: vec![],
+                retries: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn local_bindings_retain_values_across_reassignment() {
+        let cases = [
+            "let original = 1; let saved = original; original = 2; return saved == 1",
+            "const original = 1; let copy = original; copy = 2; return original == 1",
+            "let original = 1; let copy = begin original end; copy = 2; return original == 1",
+            "let original = 1; let copy = (original = 2); copy = 3; return original == 2",
+            "let original = [1, 2]; const saved = original; original[0] = 3; return saved == [1, 2]",
+            "const original = {:count -> 1}; let copy = original; copy[:count] = 2; return original[:count] == 1",
+            "fn change(value)\nlet copy = value\ncopy = 2\nreturn value\nend\nreturn change(1) == 1",
+            "let original = 1; let saved = original; let read = fn() => saved; original = 2; return read() == 1",
+            "let saved = []; for item in [1, 2]\nlet copy = item\ncopy = 3\nsaved = [@saved, item]\nend\nreturn saved == [1, 2]",
+        ];
+        for source in cases {
+            let context = CompileContext::new();
+            let mut task_manager = TaskManager::new(RelationKernel::new());
+            let submitted = submit_source_task(source, &context, &mut task_manager).unwrap();
+            assert_eq!(
+                submitted.outcome,
+                TaskOutcome::Complete {
+                    value: Value::bool(true),
+                    effects: vec![],
+                    mailbox_sends: vec![],
+                    retries: 0,
+                },
+                "{source}"
+            );
+        }
+    }
+
+    #[test]
+    fn unary_and_postfix_expressions_bind_before_arithmetic() {
+        let cases = [
+            ("return -2 + 3", Value::int(1).unwrap()),
+            ("return -2 * -3 + 1", Value::int(7).unwrap()),
+            ("return !false == false", Value::bool(false)),
+            ("return not false && true", Value::bool(true)),
+            (
+                "fn twice(value) => value * 2; return 3 * twice(4)",
+                Value::int(24).unwrap(),
+            ),
+            (
+                "let items = [4]; return 3 * items[0]",
+                Value::int(12).unwrap(),
+            ),
+            (
+                "let items = [4]; return -items[0] + 3",
+                Value::int(-1).unwrap(),
+            ),
+            (
+                "let items = [{:count -> 4}]; return 3 * items[0][:count]",
+                Value::int(12).unwrap(),
+            ),
+        ];
+        for (source, value) in cases {
+            let context = CompileContext::new();
+            let mut task_manager = TaskManager::new(RelationKernel::new());
+            let submitted = submit_source_task(source, &context, &mut task_manager).unwrap();
+            assert_eq!(
+                submitted.outcome,
+                TaskOutcome::Complete {
+                    value,
+                    effects: vec![],
+                    mailbox_sends: vec![],
+                    retries: 0,
+                },
+                "{source}"
+            );
+        }
     }
 
     #[test]

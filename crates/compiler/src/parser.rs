@@ -13,6 +13,9 @@
 
 use crate::{CstElement, CstNode, CstToken, Parse, ParseError, SyntaxKind, Token, lex};
 
+const PREFIX_BINDING_POWER: u8 = 16;
+const POSTFIX_BINDING_POWER: u8 = 17;
+
 pub fn parse(source: &str) -> Parse {
     let tokens = lex(source);
     Parser::new(source, &tokens).parse()
@@ -140,12 +143,15 @@ impl<'a> Parser<'a> {
 
     fn parse_verb_param_list(&mut self) -> CstNode {
         let mut children = vec![self.expect_token(SyntaxKind::LParen, "expected '('")];
+        self.consume_line_breaks();
         while !matches!(self.current_kind(), SyntaxKind::RParen | SyntaxKind::Eof) {
             children.push(CstElement::Node(self.parse_verb_param()));
+            self.consume_line_breaks();
             if self.current_kind() != SyntaxKind::Comma {
                 break;
             }
             children.push(self.bump_element());
+            self.consume_line_breaks();
         }
         children.push(self.expect_token(SyntaxKind::RParen, "expected ')'"));
         CstNode::new(SyntaxKind::VerbParamList, children)
@@ -268,25 +274,25 @@ impl<'a> Parser<'a> {
         loop {
             lhs = match self.current_kind() {
                 SyntaxKind::LParen => {
-                    if 13 < min_bp {
+                    if POSTFIX_BINDING_POWER < min_bp {
                         break;
                     }
                     self.parse_call(lhs)
                 }
                 SyntaxKind::LBracket => {
-                    if 13 < min_bp {
+                    if POSTFIX_BINDING_POWER < min_bp {
                         break;
                     }
                     self.parse_index(lhs)
                 }
                 SyntaxKind::Dot => {
-                    if 13 < min_bp {
+                    if POSTFIX_BINDING_POWER < min_bp {
                         break;
                     }
                     self.parse_field(lhs)
                 }
                 SyntaxKind::Colon => {
-                    if 13 < min_bp {
+                    if POSTFIX_BINDING_POWER < min_bp {
                         break;
                     }
                     self.parse_receiver_call(lhs)
@@ -491,6 +497,7 @@ impl<'a> Parser<'a> {
 
     fn parse_row_pattern(&mut self) -> CstNode {
         let mut children = vec![self.bump_element()];
+        self.consume_line_breaks();
         while !matches!(self.current_kind(), SyntaxKind::RBrace | SyntaxKind::Eof) {
             let mut field = Vec::new();
             if self.current_kind() == SyntaxKind::Colon {
@@ -503,10 +510,12 @@ impl<'a> Parser<'a> {
                 SyntaxKind::PatternField,
                 field,
             )));
+            self.consume_line_breaks();
             if self.current_kind() != SyntaxKind::Comma {
                 break;
             }
             children.push(self.bump_element());
+            self.consume_line_breaks();
         }
         children.push(self.expect_token(SyntaxKind::RBrace, "expected '}' after row pattern"));
         CstNode::new(SyntaxKind::Pattern, children)
@@ -713,15 +722,20 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_unary_expr(&mut self) -> CstNode {
-        let children = vec![self.bump_element(), CstElement::Node(self.parse_expr(12))];
+        let children = vec![
+            self.bump_element(),
+            CstElement::Node(self.parse_expr(PREFIX_BINDING_POWER)),
+        ];
         CstNode::new(SyntaxKind::UnaryExpr, children)
     }
 
     fn parse_group_expr(&mut self) -> CstNode {
         let mut children = vec![self.bump_element()];
+        self.consume_line_breaks();
         if self.current_kind() != SyntaxKind::RParen {
             children.push(CstElement::Node(self.parse_expr(0)));
         }
+        self.consume_line_breaks();
         children.push(self.expect_token(SyntaxKind::RParen, "expected ')'"));
         CstNode::new(SyntaxKind::GroupExpr, children)
     }
@@ -778,17 +792,21 @@ impl<'a> Parser<'a> {
 
     fn parse_map_expr(&mut self) -> CstNode {
         let mut children = vec![self.bump_element()];
+        self.consume_line_breaks();
         while !matches!(self.current_kind(), SyntaxKind::RBrace | SyntaxKind::Eof) {
-            let entry = vec![
-                CstElement::Node(self.parse_expr(0)),
-                self.expect_token(SyntaxKind::Arrow, "expected '->' in map entry"),
-                CstElement::Node(self.parse_expr(0)),
-            ];
+            let key = CstElement::Node(self.parse_expr(0));
+            self.consume_line_breaks();
+            let arrow = self.expect_token(SyntaxKind::Arrow, "expected '->' in map entry");
+            self.consume_line_breaks();
+            let value = CstElement::Node(self.parse_expr(0));
+            let entry = vec![key, arrow, value];
             children.push(CstElement::Node(CstNode::new(SyntaxKind::MapEntry, entry)));
+            self.consume_line_breaks();
             if self.current_kind() != SyntaxKind::Comma {
                 break;
             }
             children.push(self.bump_element());
+            self.consume_line_breaks();
         }
         children.push(self.expect_token(SyntaxKind::RBrace, "expected '}'"));
         CstNode::new(SyntaxKind::MapExpr, children)
@@ -796,6 +814,7 @@ impl<'a> Parser<'a> {
 
     fn parse_brace_param_list(&mut self) -> CstNode {
         let mut children = vec![self.expect_token(SyntaxKind::LBrace, "expected parameter list")];
+        self.consume_line_breaks();
         while !matches!(self.current_kind(), SyntaxKind::RBrace | SyntaxKind::Eof) {
             let mut param = Vec::new();
             if matches!(self.current_kind(), SyntaxKind::Question | SyntaxKind::At) {
@@ -814,10 +833,12 @@ impl<'a> Parser<'a> {
                 param.push(CstElement::Node(self.parse_expr(0)));
             }
             children.push(CstElement::Node(CstNode::new(SyntaxKind::Param, param)));
+            self.consume_line_breaks();
             if self.current_kind() != SyntaxKind::Comma {
                 break;
             }
             children.push(self.bump_element());
+            self.consume_line_breaks();
         }
         children.push(self.expect_token(SyntaxKind::RBrace, "expected end of parameter list"));
         CstNode::new(SyntaxKind::ParamList, children)
@@ -826,6 +847,7 @@ impl<'a> Parser<'a> {
     fn parse_pattern_brackets(&mut self) -> CstNode {
         let mut children =
             vec![self.expect_token(SyntaxKind::LBracket, "expected scatter pattern")];
+        self.consume_line_breaks();
         while !matches!(self.current_kind(), SyntaxKind::RBracket | SyntaxKind::Eof) {
             let mut binding = Vec::new();
             if matches!(self.current_kind(), SyntaxKind::Question | SyntaxKind::At) {
@@ -844,10 +866,12 @@ impl<'a> Parser<'a> {
                 SyntaxKind::ScatterBinding,
                 binding,
             )));
+            self.consume_line_breaks();
             if self.current_kind() != SyntaxKind::Comma {
                 break;
             }
             children.push(self.bump_element());
+            self.consume_line_breaks();
         }
         children.push(self.expect_token(SyntaxKind::RBracket, "expected end of scatter pattern"));
         CstNode::new(SyntaxKind::ScatterPattern, children)
@@ -1089,9 +1113,11 @@ impl<'a> Parser<'a> {
 
     fn parse_index(&mut self, collection: CstNode) -> CstNode {
         let mut children = vec![CstElement::Node(collection), self.bump_element()];
+        self.consume_line_breaks();
         if self.current_kind() != SyntaxKind::RBracket {
             children.push(CstElement::Node(self.parse_expr(0)));
         }
+        self.consume_line_breaks();
         children.push(self.expect_token(SyntaxKind::RBracket, "expected ']'"));
         CstNode::new(SyntaxKind::IndexExpr, children)
     }
@@ -1105,6 +1131,7 @@ impl<'a> Parser<'a> {
     fn parse_param_list(&mut self) -> CstNode {
         let mut children = Vec::new();
         children.push(self.expect_token(SyntaxKind::LParen, "expected '('"));
+        self.consume_line_breaks();
         while !matches!(self.current_kind(), SyntaxKind::RParen | SyntaxKind::Eof) {
             let mut param = Vec::new();
             if matches!(self.current_kind(), SyntaxKind::Question | SyntaxKind::At) {
@@ -1120,10 +1147,12 @@ impl<'a> Parser<'a> {
                 param.push(CstElement::Node(self.parse_expr(0)));
             }
             children.push(CstElement::Node(CstNode::new(SyntaxKind::Param, param)));
+            self.consume_line_breaks();
             if self.current_kind() != SyntaxKind::Comma {
                 break;
             }
             children.push(self.bump_element());
+            self.consume_line_breaks();
         }
         children.push(self.expect_token(SyntaxKind::RParen, "expected ')'"));
         CstNode::new(SyntaxKind::ParamList, children)
@@ -1266,6 +1295,7 @@ impl<'a> Parser<'a> {
     fn parse_arg_list(&mut self, allow_named_args: bool) -> CstNode {
         let mut children = Vec::new();
         children.push(self.expect_token(SyntaxKind::LParen, "expected '('"));
+        self.consume_line_breaks();
         while !matches!(self.current_kind(), SyntaxKind::RParen | SyntaxKind::Eof) {
             let mut arg = Vec::new();
             if self.current_kind() == SyntaxKind::Ident && self.nth_kind(1) == SyntaxKind::Colon {
@@ -1283,10 +1313,12 @@ impl<'a> Parser<'a> {
             arg.push(CstElement::Node(self.parse_expr(0)));
             self.query_vars_allowed = query_vars_allowed;
             children.push(CstElement::Node(CstNode::new(SyntaxKind::Arg, arg)));
+            self.consume_line_breaks();
             if self.current_kind() != SyntaxKind::Comma {
                 break;
             }
             children.push(self.bump_element());
+            self.consume_line_breaks();
         }
         children.push(self.expect_token(SyntaxKind::RParen, "expected ')'"));
         CstNode::new(SyntaxKind::ArgList, children)
@@ -1298,6 +1330,7 @@ impl<'a> Parser<'a> {
         item_kind: SyntaxKind,
         children: &mut Vec<CstElement>,
     ) {
+        self.consume_line_breaks();
         while !matches!(self.current_kind(), SyntaxKind::Eof) && self.current_kind() != stop {
             let mut item = Vec::new();
             if self.current_kind() == SyntaxKind::At {
@@ -1305,10 +1338,12 @@ impl<'a> Parser<'a> {
             }
             item.push(CstElement::Node(self.parse_expr(0)));
             children.push(CstElement::Node(CstNode::new(item_kind, item)));
+            self.consume_line_breaks();
             if self.current_kind() != SyntaxKind::Comma {
                 break;
             }
             children.push(self.bump_element());
+            self.consume_line_breaks();
         }
     }
 
@@ -1470,6 +1505,12 @@ impl<'a> Parser<'a> {
             }
         }
         next(&mut index) == SyntaxKind::LBrace
+    }
+
+    fn consume_line_breaks(&mut self) {
+        while self.current_kind() == SyntaxKind::Newline {
+            self.pos += 1;
+        }
     }
 
     fn consume_separators(&mut self) {
@@ -1782,6 +1823,30 @@ mod tests {
                     CstElement::Token(token) => usize::from(token.kind == kind),
                 })
                 .sum::<usize>()
+    }
+
+    #[test]
+    fn multiline_verb_headers_and_dispatch_preserve_roles() {
+        let parsed = parse(
+            "verb transfer(\nactor @ #staff,\nreceiver @ #instrument,\n)\n\
+             return receiver\nend\n\
+             :transfer(\nactor: #alice,\nreceiver: #sensor,\n)\n\
+             #sensor:transfer(\nactor: #alice,\n)",
+        );
+        assert_eq!(parsed.errors, vec![]);
+        assert_eq!(count(&parsed.root, SyntaxKind::VerbParam), 2);
+        assert_eq!(count(&parsed.root, SyntaxKind::Arg), 3);
+    }
+
+    #[test]
+    fn delimited_line_breaks_preserve_expression_boundaries() {
+        let parsed = parse("let values = [\n1\n]\n[2]\n(3)\n{}");
+        assert_eq!(parsed.errors, vec![]);
+        assert_eq!(count(&parsed.root, SyntaxKind::ExprStmt), 4);
+
+        for source in ["[1\n2]", "f(1\n2)", "[1; 2]", "{:a -> 1\n:b -> 2}"] {
+            assert!(!parse(source).errors.is_empty(), "{source}");
+        }
     }
 
     #[test]
