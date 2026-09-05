@@ -1289,6 +1289,17 @@ impl<'a> Parser<'a> {
                 children.push(self.missing("expected cardinality upper bound or '*'"));
             }
         }
+        for child in &children {
+            if let CstElement::Token(token) = child
+                && token.kind == SyntaxKind::Int
+                && self.source[token.span.clone()].parse::<usize>().is_err()
+            {
+                self.errors.push(ParseError {
+                    message: "cardinality bound exceeds the row count range".to_owned(),
+                    span: token.span.clone(),
+                });
+            }
+        }
         CstNode::new(SyntaxKind::Cardinality, children)
     }
 
@@ -1878,6 +1889,25 @@ mod tests {
         assert_eq!(count(&parsed.root, SyntaxKind::TypeRow), 2);
         assert_eq!(count(&parsed.root, SyntaxKind::TypeColumn), 4);
         assert_eq!(count(&parsed.root, SyntaxKind::Cardinality), 1);
+    }
+
+    #[test]
+    fn rejects_cardinality_bounds_that_exceed_the_row_count_range() {
+        let overflow = format!("{}0", usize::MAX);
+        for bounds in [
+            overflow.clone(),
+            format!("0..{overflow}"),
+            format!("{overflow}..*"),
+        ] {
+            let source = format!("type Rows = relation<{{}}> where rows in {bounds}");
+            let parsed = parse(&source);
+            assert_eq!(parsed.errors.len(), 1, "{source}");
+            assert_eq!(
+                parsed.errors[0].message,
+                "cardinality bound exceeds the row count range"
+            );
+            assert_eq!(&source[parsed.errors[0].span.clone()], overflow);
+        }
     }
 
     #[test]
