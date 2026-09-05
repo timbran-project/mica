@@ -13,9 +13,9 @@
 
 use crate::kinds::{KindInference, KindSet};
 use crate::{Binding, BindingId, HirArg, HirCollectionItem, HirExpr, Literal};
-use mica_var::ValueKind;
+use mica_var::{Identity, Symbol, Tuple, Value, ValueKind};
 use std::cmp::{max, min};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::fmt;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
@@ -616,6 +616,7 @@ pub(crate) struct StaticTypeInference<'a> {
     bindings: &'a [Binding],
     locals: Option<&'a HashMap<BindingId, StaticType>>,
     kinds: KindInference<'a>,
+    identity: &'a dyn Fn(&str) -> Option<Identity>,
 }
 
 impl<'a> StaticTypeInference<'a> {
@@ -623,11 +624,13 @@ impl<'a> StaticTypeInference<'a> {
         bindings: &'a [Binding],
         direct_result: &'a dyn Fn(BindingId) -> Option<KindSet>,
         runtime_result: &'a dyn Fn(&str) -> Option<KindSet>,
+        identity: &'a dyn Fn(&str) -> Option<Identity>,
     ) -> Self {
         Self {
             bindings,
             locals: None,
             kinds: KindInference::new(bindings, direct_result, runtime_result),
+            identity,
         }
     }
 
@@ -710,7 +713,7 @@ impl<'a> StaticTypeInference<'a> {
             .map(|row| {
                 order
                     .iter()
-                    .map(|position| constant_value(&row[*position]))
+                    .map(|position| constant_value(&row[*position], self.identity))
                     .collect::<Option<Vec<_>>>()
             })
             .collect::<Option<Vec<_>>>();
@@ -975,81 +978,57 @@ fn static_type_from_kinds(kinds: KindSet) -> StaticType {
     StaticType::union(kinds.iter().map(StaticType::Kind))
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
-enum ConstantValue {
-    Int(String),
-    Float(String),
-    String(String),
-    Bytes(Vec<u8>),
-    Bool(bool),
-    ErrorCode(String),
-    Unit,
-    Identity(String),
-    Symbol(String),
-    Frob(String, Box<Self>),
-    List(Vec<Self>),
-    Relation {
-        heading: Vec<String>,
-        rows: Vec<Vec<Self>>,
-    },
-    Map(Vec<(Self, Self)>),
-}
-
-fn constant_value(expr: &HirExpr) -> Option<ConstantValue> {
+fn constant_value(expr: &HirExpr, identity: &dyn Fn(&str) -> Option<Identity>) -> Option<Value> {
     match expr {
         HirExpr::Literal { value, .. } => Some(match value {
-            Literal::Int(value) => ConstantValue::Int(value.clone()),
-            Literal::Float(value) => ConstantValue::Float(value.clone()),
-            Literal::String(value) => ConstantValue::String(value.clone()),
-            Literal::Bytes(value) => ConstantValue::Bytes(value.clone()),
-            Literal::Bool(value) => ConstantValue::Bool(*value),
-            Literal::ErrorCode(value) => ConstantValue::ErrorCode(value.clone()),
-            Literal::Unit => ConstantValue::Unit,
+            Literal::Int(value) => Value::int(value.parse().ok()?).ok()?,
+            Literal::Float(value) => Value::float(value.parse().ok()?).ok()?,
+            Literal::String(value) => Value::string(value),
+            Literal::Bytes(value) => Value::bytes(value),
+            Literal::Bool(value) => Value::bool(*value),
+            Literal::ErrorCode(value) => Value::error_code(Symbol::intern(value)),
+            Literal::Unit => Value::unit(),
         }),
-        HirExpr::Identity { name, .. } => Some(ConstantValue::Identity(name.clone())),
-        HirExpr::Symbol { name, .. } => Some(ConstantValue::Symbol(name.clone())),
+        HirExpr::Identity { name, .. } => identity(name).map(Value::identity),
+        HirExpr::Symbol { name, .. } => Some(Value::symbol(Symbol::intern(name))),
         HirExpr::Frob {
             delegate, value, ..
-        } => Some(ConstantValue::Frob(
-            delegate.clone(),
-            Box::new(constant_value(value)?),
+        } => Some(Value::frob(
+            identity(delegate)?,
+            constant_value(value, identity)?,
         )),
-        HirExpr::List { items, .. } => Some(ConstantValue::List(
+        HirExpr::List { items, .. } => Some(Value::list(
             items
                 .iter()
                 .map(|item| match item {
-                    HirCollectionItem::Expr(value) => constant_value(value),
+                    HirCollectionItem::Expr(value) => constant_value(value, identity),
                     HirCollectionItem::Splice(_) => None,
                 })
                 .collect::<Option<Vec<_>>>()?,
         )),
         HirExpr::Relation { heading, rows, .. } => {
-            let mut order = (0..heading.len()).collect::<Vec<_>>();
-            order.sort_by(|left, right| heading[*left].cmp(&heading[*right]));
-            let heading = order
-                .iter()
-                .map(|position| heading[*position].clone())
-                .collect();
-            let mut rows = rows
+            let rows = rows
                 .iter()
                 .map(|row| {
-                    order
-                        .iter()
-                        .map(|position| constant_value(&row[*position]))
+                    row.iter()
+                        .map(|cell| constant_value(cell, identity))
                         .collect::<Option<Vec<_>>>()
+                        .map(Tuple::new)
                 })
                 .collect::<Option<Vec<_>>>()?;
-            rows.sort();
-            rows.dedup();
-            Some(ConstantValue::Relation { heading, rows })
+            Value::relation(heading.iter().map(|name| Symbol::intern(name)), rows).ok()
         }
         HirExpr::Map { entries, .. } => {
             let entries = entries
                 .iter()
-                .map(|(key, value)| Some((constant_value(key)?, constant_value(value)?)))
+                .map(|(key, value)| {
+                    Some((
+                        constant_value(key, identity)?,
+                        constant_value(value, identity)?,
+                    ))
+                })
                 .collect::<Option<Vec<_>>>()?;
-            let canonical = entries.into_iter().collect::<BTreeMap<_, _>>();
-            Some(ConstantValue::Map(canonical.into_iter().collect()))
+            Some(Value::map(entries))
         }
         _ => None,
     }
@@ -1078,7 +1057,7 @@ mod tests {
         let crate::HirItem::Expr { expr, .. } = &items[0] else {
             panic!("expected expression");
         };
-        StaticTypeInference::new(&semantic.bindings, &|_| None, &|_| None).expr(expr)
+        StaticTypeInference::new(&semantic.bindings, &|_| None, &|_| None, &|_| None).expr(expr)
     }
 
     #[test]
@@ -1249,6 +1228,24 @@ mod tests {
             relation.alternatives()[0].columns()[0].1,
             StaticType::Kind(ValueKind::Int)
         );
+    }
+
+    #[test]
+    fn constant_row_cardinality_uses_value_equality() {
+        for source in [
+            "[:value] { [1], [01] }",
+            "[:value] { [1.0], [1.00] }",
+            "[:value] { [16777216.0], [16777217.0] }",
+            "[:value] { [0.0], [1e-99] }",
+            "[:value] { [()], [[] { [] }] }",
+            "[:value] { [[1]], [[01]] }",
+            "[:value] { [{1 -> :first, 01 -> :last}], [{1 -> :last}] }",
+        ] {
+            let StaticType::Relation(relation) = inferred(source) else {
+                panic!("expected relation type for {source}");
+            };
+            assert_eq!(relation.cardinality(), Cardinality::EXACTLY_ONE, "{source}");
+        }
     }
 
     #[test]

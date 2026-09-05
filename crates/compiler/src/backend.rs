@@ -2480,6 +2480,7 @@ impl<'a> ProgramCompiler<'a> {
                     &self.semantic.bindings,
                     &no_direct_result,
                     &runtime_result,
+                    &|name| self.context.identity(name),
                 )
                 .expr(default);
                 if inferred_type.is_disjoint(expected_type) {
@@ -5420,9 +5421,14 @@ impl<'a> ProgramCompiler<'a> {
                 .map(|function| function.result_kinds)
         };
         let runtime_result = |name: &str| runtime_result_kinds(self.context, name);
-        StaticTypeInference::new(&self.semantic.bindings, &direct_result, &runtime_result)
-            .with_locals(&self.local_types)
-            .relation(heading, rows)
+        StaticTypeInference::new(
+            &self.semantic.bindings,
+            &direct_result,
+            &runtime_result,
+            &|name| self.context.identity(name),
+        )
+        .with_locals(&self.local_types)
+        .relation(heading, rows)
     }
 
     fn infer_expr_static_type(&self, source: &HirExpr) -> StaticType {
@@ -5449,9 +5455,14 @@ impl<'a> ProgramCompiler<'a> {
                 .map(|function| function.result_kinds)
         };
         let runtime_result = |name: &str| runtime_result_kinds(self.context, name);
-        StaticTypeInference::new(&self.semantic.bindings, &direct_result, &runtime_result)
-            .with_locals(&self.local_types)
-            .expr(source)
+        StaticTypeInference::new(
+            &self.semantic.bindings,
+            &direct_result,
+            &runtime_result,
+            &|name| self.context.identity(name),
+        )
+        .with_locals(&self.local_types)
+        .expr(source)
     }
 
     fn record_local_type(&mut self, binding: BindingId, source: &HirExpr) {
@@ -7376,6 +7387,27 @@ mod tests {
                 .iter()
                 .any(|instruction| matches!(instruction, Instruction::CheckType { .. }))
         );
+    }
+
+    #[test]
+    fn relation_cardinality_resolves_identity_aliases() {
+        let identity = Identity::new(7).unwrap();
+        let context = CompileContext::new()
+            .with_identity("first", identity)
+            .with_identity("second", identity);
+        for values in ["[#first], [#second]", "[#first<1>], [#second<01>]"] {
+            let source = format!(
+                "let item: relation<{{:value -> dynamic}}> where rows in 1 = [:value] {{ {values} }}\nreturn item"
+            );
+            let compiled = compile_source(&source, &context).unwrap();
+            assert!(
+                !compiled
+                    .program
+                    .instructions()
+                    .iter()
+                    .any(|instruction| matches!(instruction, Instruction::CheckType { .. }))
+            );
+        }
     }
 
     #[test]
