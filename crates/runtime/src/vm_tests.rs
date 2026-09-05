@@ -783,7 +783,7 @@ fn compiler_indexed_range_loop_matches_native_and_interpreted_execution() {
     let program = compiled_indexed_range_loop_program();
     let resolver = Arc::new(ProgramResolver::new());
     let limits = TaskLimits {
-        instruction_budget: 163_851,
+        instruction_budget: 180_237,
         max_retries: 0,
         max_call_depth: 50,
     };
@@ -812,7 +812,7 @@ fn compiler_indexed_range_loop_matches_native_and_interpreted_execution() {
 
 #[test]
 fn compiler_indexed_range_loop_preserves_native_budget_boundaries() {
-    for budget in [1, 8, 1_024, 50_000, 100_000, 160_000, 163_850] {
+    for budget in [1, 8, 1_024, 50_000, 100_000, 160_000, 163_850, 180_236] {
         let kernel = RelationKernel::new();
         let program = compiled_indexed_range_loop_program();
         let resolver = Arc::new(ProgramResolver::new());

@@ -1511,14 +1511,14 @@ impl<'a> ProgramCompiler<'a> {
                 "query variables are only valid inside relation queries",
             )),
             HirExpr::LocalRef { id, binding } => {
-                self.locals
-                    .get(binding)
-                    .copied()
-                    .ok_or_else(|| CompileError::UnboundLocal {
+                let source = self.locals.get(binding).copied().ok_or_else(|| {
+                    CompileError::UnboundLocal {
                         node: *id,
                         span: self.span(*id),
                         binding: *binding,
-                    })
+                    }
+                })?;
+                Ok(self.preserve_assigned_local(*binding, source))
             }
             HirExpr::Binding {
                 binding,
@@ -1538,14 +1538,16 @@ impl<'a> ProgramCompiler<'a> {
                     && let HirExpr::Function { name: None, .. } = value
                 {
                     let function = self.compile_function(value)?;
-                    if function.captures.is_empty() {
+                    if function.captures.is_empty()
+                        && !self.semantic.bindings[binding.0 as usize].assigned
+                    {
                         self.functions.insert(binding, function.clone());
                     }
                     let dst = self.emit_function_value(*id, function)?;
                     self.enforce_binding_kind(*id, binding, value, dst)?;
                     self.locals.insert(binding, dst);
                     self.record_local_type(binding, value);
-                    return Ok(dst);
+                    return Ok(self.preserve_assigned_local(binding, dst));
                 }
                 let source = match value {
                     Some(value) => self.compile_expr_for_value(value)?,
@@ -1566,19 +1568,18 @@ impl<'a> ProgramCompiler<'a> {
                 } else {
                     source
                 };
-                if let Some(binding) = binding {
-                    if let Some(value) = value.as_deref() {
-                        self.enforce_binding_kind(*id, *binding, value, dst)?;
-                        self.record_local_type(*binding, value);
-                    }
-                    self.locals.insert(*binding, dst);
-                } else {
+                let Some(binding) = binding else {
                     return Err(self.unsupported(
                         *id,
                         "scatter assignment lowering is not implemented in the task compiler yet",
                     ));
+                };
+                if let Some(value) = value.as_deref() {
+                    self.enforce_binding_kind(*id, *binding, value, dst)?;
+                    self.record_local_type(*binding, value);
                 }
-                Ok(dst)
+                self.locals.insert(*binding, dst);
+                Ok(self.preserve_assigned_local(*binding, dst))
             }
             HirExpr::Assign { id, target, value } => {
                 let value_expr = value.as_ref();
@@ -1594,7 +1595,7 @@ impl<'a> ProgramCompiler<'a> {
                         })?;
                         self.enforce_binding_kind(*id, *binding, value_expr, value)?;
                         self.emit(Instruction::Move { dst, src: value });
-                        Ok(dst)
+                        Ok(value)
                     }
                     HirPlace::Index {
                         collection, index, ..
@@ -1792,6 +1793,16 @@ impl<'a> ProgramCompiler<'a> {
                 "HIR form is not implemented in the task compiler yet",
             )),
         }
+    }
+
+    fn preserve_assigned_local(&mut self, binding: BindingId, source: Register) -> Register {
+        if !self.semantic.bindings[binding.0 as usize].assigned {
+            return source;
+        }
+        // Later operands may assign to the local after this value has been evaluated.
+        let dst = self.alloc_register();
+        self.emit(Instruction::Move { dst, src: source });
+        dst
     }
 
     fn compile_unary(
@@ -2240,7 +2251,7 @@ impl<'a> ProgramCompiler<'a> {
             dst: collection,
             src: updated,
         });
-        Ok(collection)
+        Ok(updated)
     }
 
     fn compile_dot_read(

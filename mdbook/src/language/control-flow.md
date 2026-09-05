@@ -113,6 +113,20 @@ Loop bindings are local to the loop. Bind a mutable accumulator before the loop 
 must be used afterward. The value of the `for` or `while` expression itself is `()`; it does not
 collect the values of its body automatically.
 
+The loop keeps its evaluated collection value. Replacing the original local binding does not change
+which elements the loop visits:
+
+```mica,eval
+let pending = [1, 2]
+let visited = []
+for item in pending
+  visited = [@visited, item]
+  pending = [3, 4]
+end
+require visited == [1, 2]
+require pending == [3, 4]
+```
+
 Queries with named variables are iterable because they return relation values. A structural row
 pattern binds the projected cells directly:
 

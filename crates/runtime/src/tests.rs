@@ -273,6 +273,59 @@ fn suspension_in_finally_preserves_the_pending_loop_exit() {
 }
 
 #[test]
+fn expressions_preserve_values_evaluated_before_later_assignments() {
+    for (source, expected) in [
+        ("let value = 1\nreturn value + (value = 2)", "3"),
+        ("let value = 1\nreturn [value, value = 2]", "[1, 2]"),
+        ("let value = 1\nreturn [(value = 2), (value = 3)]", "[2, 3]"),
+        ("let key = 1\nreturn {key -> (key = 2)}", "{1 -> 2}"),
+        (
+            "fn pair(left, right) => [left, right]\nlet value = 1\nreturn pair(value, value = 2)",
+            "[1, 2]",
+        ),
+        (
+            "let items = [1, 2]\nlet seen = []\nfor item in items\nseen = [@seen, item]\nitems = [3, 4]\nend\nreturn seen",
+            "[1, 2]",
+        ),
+        (
+            "let items = [1]\nreturn [(items[0] = 2), (items[0] = 3)]",
+            "[[2], [3]]",
+        ),
+        (
+            "let items = [1, 2]\nreturn [items, items[0] = 3]",
+            "[[1, 2], [3, 2]]",
+        ),
+        (
+            "let items = [1, 2]\nreturn items[begin\nitems = [3, 4]\n0\nend]",
+            "1",
+        ),
+        (
+            "let transform = fn(value) => 1\nreturn transform(begin\ntransform = fn(value) => 2\n0\nend)",
+            "1",
+        ),
+        (
+            "let value = 0\nreturn [(let second = value), second = 2]",
+            "[0, 2]",
+        ),
+        (
+            "let transform = fn(value) => value + 1\ntransform = fn(value) => value + 2\nreturn transform(3)",
+            "5",
+        ),
+    ] {
+        let mut runner = SourceRunner::new_empty();
+        let expected = runner.run_source(expected).unwrap().outcome;
+        let TaskOutcome::Complete {
+            value: expected, ..
+        } = expected
+        else {
+            panic!("expected value is valid");
+        };
+        let report = runner.run_source(source).unwrap();
+        assert_completed_value(&report, expected);
+    }
+}
+
+#[test]
 fn runner_executes_source_against_empty_kernel() {
     let mut runner = SourceRunner::new_empty();
     let report = runner.run_source("return 1 + 2").unwrap();

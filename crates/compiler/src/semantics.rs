@@ -1763,13 +1763,21 @@ impl<'a> Analyzer<'a> {
                 collection,
                 index,
                 ..
-            } => HirPlace::Index {
-                id: *id,
-                collection: Box::new(self.lower_expr(collection, scope)),
-                index: index
-                    .as_ref()
-                    .map(|index| Box::new(self.lower_expr(index, scope))),
-            },
+            } => {
+                let collection = self.lower_expr(collection, scope);
+                if let HirExpr::LocalRef { binding, .. } = &collection
+                    && self.bindings[binding.0 as usize].mutable
+                {
+                    self.bindings[binding.0 as usize].assigned = true;
+                }
+                HirPlace::Index {
+                    id: *id,
+                    collection: Box::new(collection),
+                    index: index
+                        .as_ref()
+                        .map(|index| Box::new(self.lower_expr(index, scope))),
+                }
+            }
             Expr::Field { id, base, name, .. } => HirPlace::Dot {
                 id: *id,
                 base: Box::new(self.lower_expr(base, scope)),

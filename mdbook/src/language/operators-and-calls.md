@@ -123,6 +123,26 @@ let values = [2, 3]
 add(@values)
 ```
 
+Function arguments are evaluated from left to right. Each argument keeps the value it had when
+evaluated, even if a later argument changes the binding from which it came. Binary operands follow
+the same rule:
+
+```mica,eval
+fn pair(left, right) => [left, right]
+
+let count = 1
+require pair(count, count = 2) == [1, 2]
+count = 1
+require count + (count = 2) == 3
+
+let transform = fn(value) => value + 1
+transform = fn(value) => value + 2
+require transform(3) == 5
+```
+
+Assigning another function to a mutable binding changes subsequent calls through that binding.
+The function value for a call is selected before its arguments are evaluated.
+
 Named-role dispatch starts with a symbol and names every role explicitly:
 
 ```mica
