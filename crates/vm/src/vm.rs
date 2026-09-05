@@ -53,19 +53,28 @@ pub struct Frame {
     registers: Vec<Value>,
     return_register: Option<Register>,
     try_stack: Vec<TryRegion>,
-    pending_finally: Vec<FinallyContinuation>,
+    pending_finally: Vec<PendingFinally>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct TryRegion {
+    start: usize,
     catches: Vec<CatchHandler>,
     finally: Option<usize>,
     end: usize,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+struct PendingFinally {
+    start: usize,
+    end: usize,
+    continuation: FinallyContinuation,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 enum FinallyContinuation {
     Normal(usize),
+    Jump(usize),
     Raise(Value),
     Return(Value),
 }
@@ -123,6 +132,25 @@ impl Frame {
 
     pub fn return_register(&self) -> Option<Register> {
         self.return_register
+    }
+
+    fn enter_finally(&mut self, start: usize, end: usize, continuation: FinallyContinuation) {
+        self.pending_finally.push(PendingFinally {
+            start,
+            end,
+            continuation,
+        });
+        self.ip = start;
+    }
+
+    fn discard_exited_finally(&mut self, target: usize) {
+        while self
+            .pending_finally
+            .last()
+            .is_some_and(|region| target < region.start || target >= region.end)
+        {
+            self.pending_finally.pop();
+        }
     }
 }
 
@@ -2011,10 +2039,7 @@ impl RegisterVm {
                 self.advance_ip_unchecked();
                 Ok(VmHostResponse::Continue)
             }
-            Opcode::Jump { target } => {
-                self.current_frame_mut_unchecked().ip = target.0 as usize;
-                Ok(VmHostResponse::Continue)
-            }
+            Opcode::Jump { target } => self.jump_to(target.0 as usize),
             Opcode::EnterTry {
                 catches,
                 finally,
@@ -2029,13 +2054,13 @@ impl RegisterVm {
                         target: catch.target.0 as usize,
                     })
                     .collect();
-                self.current_frame_mut_unchecked()
-                    .try_stack
-                    .push(TryRegion {
-                        catches,
-                        finally: finally.map(|target| target.0 as usize),
-                        end: end.0 as usize,
-                    });
+                let frame = self.current_frame_mut_unchecked();
+                frame.try_stack.push(TryRegion {
+                    start: frame.ip + 1,
+                    catches,
+                    finally: finally.map(|target| target.0 as usize),
+                    end: end.0 as usize,
+                });
                 self.advance_ip_unchecked();
                 Ok(VmHostResponse::Continue)
             }
@@ -2510,19 +2535,32 @@ impl RegisterVm {
         }
     }
 
+    fn jump_to(&mut self, target: usize) -> Result<VmHostResponse, RuntimeError> {
+        let frame = self.current_frame_mut_unchecked();
+        frame.discard_exited_finally(target);
+        while frame
+            .try_stack
+            .last()
+            .is_some_and(|region| target < region.start || target >= region.end)
+        {
+            let region = frame.try_stack.pop().expect("try stack was checked above");
+            if let Some(finally) = region.finally {
+                frame.enter_finally(finally, region.end, FinallyContinuation::Jump(target));
+                return Ok(VmHostResponse::Continue);
+            }
+        }
+        frame.ip = target;
+        Ok(VmHostResponse::Continue)
+    }
+
     fn return_from_frame(&mut self, value: Value) -> Result<VmHostResponse, RuntimeError> {
         {
             let frame = self.current_frame_mut_unchecked();
-            if frame.pending_finally.pop().is_some() {
-                // A return from inside a finally body replaces the control flow
-                // that originally entered the finally.
-            }
+            // A return leaves the whole frame and replaces any pending unwinding.
+            frame.pending_finally.clear();
             while let Some(region) = frame.try_stack.pop() {
                 if let Some(finally) = region.finally {
-                    frame
-                        .pending_finally
-                        .push(FinallyContinuation::Return(value));
-                    frame.ip = finally;
+                    frame.enter_finally(finally, region.end, FinallyContinuation::Return(value));
                     return Ok(VmHostResponse::Continue);
                 }
             }
@@ -2544,10 +2582,7 @@ impl RegisterVm {
         let frame = self.current_frame_mut()?;
         let region = frame.try_stack.pop().ok_or(RuntimeError::EmptyTryStack)?;
         if let Some(finally) = region.finally {
-            frame
-                .pending_finally
-                .push(FinallyContinuation::Normal(region.end));
-            frame.ip = finally;
+            frame.enter_finally(finally, region.end, FinallyContinuation::Normal(region.end));
         } else {
             frame.ip = region.end;
         }
@@ -2559,12 +2594,14 @@ impl RegisterVm {
             .current_frame_mut()?
             .pending_finally
             .pop()
-            .ok_or(RuntimeError::EmptyTryStack)?;
+            .ok_or(RuntimeError::EmptyTryStack)?
+            .continuation;
         match continuation {
             FinallyContinuation::Normal(target) => {
                 self.current_frame_mut_unchecked().ip = target;
                 Ok(VmHostResponse::Continue)
             }
+            FinallyContinuation::Jump(target) => self.jump_to(target),
             FinallyContinuation::Raise(error) => self.begin_raise(error),
             FinallyContinuation::Return(value) => self.return_from_frame(value),
         }
@@ -2576,13 +2613,9 @@ impl RegisterVm {
                 return Ok(VmHostResponse::Abort(error));
             };
 
-            if frame.pending_finally.pop().is_some() {
-                // A raise from inside a finally body replaces the control flow
-                // that originally entered the finally.
-            }
-
             while let Some(region) = frame.try_stack.pop() {
                 if let Some(handler) = matching_handler(&region.catches, &error) {
+                    frame.discard_exited_finally(handler.target);
                     if let Some(binding) = handler.binding {
                         let register_count = frame.registers.len();
                         let slot = frame.registers.get_mut(binding.0 as usize).ok_or(
@@ -2595,6 +2628,7 @@ impl RegisterVm {
                     }
                     if let Some(finally) = region.finally {
                         frame.try_stack.push(TryRegion {
+                            start: region.start,
                             catches: Vec::new(),
                             finally: Some(finally),
                             end: region.end,
@@ -2605,10 +2639,8 @@ impl RegisterVm {
                 }
 
                 if let Some(finally) = region.finally {
-                    frame
-                        .pending_finally
-                        .push(FinallyContinuation::Raise(error));
-                    frame.ip = finally;
+                    frame.discard_exited_finally(finally);
+                    frame.enter_finally(finally, region.end, FinallyContinuation::Raise(error));
                     return Ok(VmHostResponse::Continue);
                 }
             }

@@ -64,6 +64,215 @@ fn query_relation<const COLUMNS: usize, const ROWS: usize>(
 }
 
 #[test]
+fn loop_control_unwinds_only_the_try_regions_it_leaves() {
+    for (source, expected) in [
+        (
+            "let cleaned = 0
+             while true
+               try
+                 break
+               finally
+                 cleaned = cleaned + 1
+               end
+             end
+             return cleaned",
+            Value::int(1).unwrap(),
+        ),
+        (
+            "let cleaned = 0
+             for item in [1, 2, 3]
+               try
+                 continue
+               finally
+                 cleaned = cleaned + 1
+               end
+             end
+             return cleaned",
+            Value::int(3).unwrap(),
+        ),
+        (
+            "let order = []
+             while true
+               try
+                 try
+                   break
+                 finally
+                   order = [@order, :inner]
+                 end
+               finally
+                 order = [@order, :outer]
+               end
+             end
+             return order",
+            Value::list(["inner", "outer"].map(|name| Value::symbol(Symbol::intern(name)))),
+        ),
+        (
+            "try
+               while true
+                 try
+                   break
+                 catch E_AFTER
+                   return 1
+                 end
+               end
+               raise E_AFTER
+             catch E_AFTER
+               return 2
+             end",
+            Value::int(2).unwrap(),
+        ),
+        (
+            "let cleaned = 0
+             try
+               while true
+                 break
+               end
+               require cleaned == 0
+             finally
+               cleaned = cleaned + 1
+             end
+             return cleaned",
+            Value::int(1).unwrap(),
+        ),
+        (
+            "let cleaned = 0
+             while true
+               try
+                 raise E_STOP
+               catch E_STOP
+                 break
+               finally
+                 cleaned = cleaned + 1
+               end
+             end
+             return cleaned",
+            Value::int(1).unwrap(),
+        ),
+    ] {
+        let mut runner = SourceRunner::new_empty();
+        let report = runner.run_source(source).unwrap();
+        assert_completed_value(&report, expected);
+    }
+}
+
+#[test]
+fn nested_finally_preserves_or_replaces_pending_control_flow() {
+    for (source, expected) in [
+        (
+            "try
+               return 7
+             finally
+               try
+                 raise E_INNER
+               catch E_INNER
+                 0
+               end
+             end",
+            7,
+        ),
+        (
+            "try
+               try
+                 raise E_ORIGINAL
+               finally
+                 try
+                   raise E_INNER
+                 catch E_INNER
+                   0
+                 end
+               end
+             catch E_ORIGINAL
+               return 9
+             end",
+            9,
+        ),
+        (
+            "while true
+               try
+                 return 7
+               finally
+                 break
+               end
+             end
+             return 8",
+            8,
+        ),
+        (
+            "let count = 0
+             for item in [1, 2]
+               try
+                 return 7
+               finally
+                 count = count + 1
+                 continue
+               end
+             end
+             return count",
+            2,
+        ),
+        (
+            "try
+               return 7
+             finally
+               while true
+                 break
+               end
+             end",
+            7,
+        ),
+        (
+            "try
+               return 7
+             finally
+               try
+                 raise E_INNER
+               catch E_INNER
+                 0
+               finally
+                 1
+               end
+             end",
+            7,
+        ),
+    ] {
+        let mut runner = SourceRunner::new_empty();
+        let report = runner.run_source(source).unwrap();
+        assert_completed_value(&report, Value::int(expected).unwrap());
+    }
+}
+
+#[test]
+fn suspension_in_finally_preserves_the_pending_loop_exit() {
+    let mut runner = SourceRunner::new_empty();
+    let report = runner
+        .run_source(
+            "let cleaned = 0
+             while true
+               try
+                 break
+               finally
+                 suspend()
+                 cleaned = cleaned + 1
+               end
+             end
+             return cleaned",
+        )
+        .unwrap();
+    assert!(matches!(report.outcome, TaskOutcome::Suspended { .. }));
+    let outcome = runner
+        .resume_task(TaskRequest {
+            input: TaskInput::Continuation {
+                task_id: report.task_id,
+                value: Value::unit(),
+            },
+            ..SourceRunner::root_source_request("")
+        })
+        .unwrap();
+    assert!(matches!(outcome, TaskOutcome::Complete { value, .. }
+        if value == Value::int(1).unwrap()));
+}
+
+#[test]
 fn runner_executes_source_against_empty_kernel() {
     let mut runner = SourceRunner::new_empty();
     let report = runner.run_source("return 1 + 2").unwrap();
