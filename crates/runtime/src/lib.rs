@@ -65,7 +65,8 @@ use mica_compiler::{
     DiagnosticSource, Expr, HirArg, HirCatch, HirCollectionItem, HirExpr, HirFunctionBody, HirItem,
     HirPlace, HirRecovery, HirRelationAtom, HostRequestFunction, Item, Literal, MethodInstallation,
     MethodKind, MethodRelations, NodeId, Span, UnaryOp, compile_semantic, format_compile_error,
-    install_methods, install_rules_from_source, parse, parse_ast, parse_semantic_with_context,
+    install_methods, install_rules_from_source, is_qualified_identifier, parse, parse_ast,
+    parse_semantic_with_context,
 };
 use mica_host_protocol::{
     DomNode, diff_dom_nodes, is_supported_dom_attribute, is_supported_dom_tag,
@@ -978,13 +979,7 @@ impl SourceRunner {
         outcome: TaskOutcome,
         options: ReadOnlySourceQueryOptions,
     ) -> ReadOnlySourceQueryReport {
-        read_only_query_report(
-            task_id,
-            outcome,
-            options,
-            &self.identity_names(),
-            &self.relation_names(),
-        )
+        read_only_query_report(task_id, outcome, options, &self.identity_names())
     }
 
     pub fn run_source_as(
@@ -2295,13 +2290,7 @@ impl SharedSourceRunner {
         outcome: TaskOutcome,
         options: ReadOnlySourceQueryOptions,
     ) -> ReadOnlySourceQueryReport {
-        read_only_query_report(
-            task_id,
-            outcome,
-            options,
-            &self.identity_names(),
-            &self.relation_names(),
-        )
+        read_only_query_report(task_id, outcome, options, &self.identity_names())
     }
 
     fn identity_names(&self) -> BTreeMap<Identity, String> {
@@ -3309,7 +3298,6 @@ fn grant_fact_source(
     relation_name: &str,
     tuple: &Tuple,
     identity_names: &BTreeMap<Identity, String>,
-    relation_names: &BTreeMap<Identity, String>,
 ) -> Option<(GrantBlockKey, GrantOp, Option<String>)> {
     let (kind, op) = match relation_name {
         "CanRead" => (GrantKind::Actor, GrantOp::Read),
@@ -3326,17 +3314,13 @@ fn grant_fact_source(
     let subject = values.first()?;
     let key = GrantBlockKey {
         kind,
-        subject: source_literal(subject, identity_names, relation_names),
+        subject: source_literal(subject, identity_names),
     };
     if op == GrantOp::Effect {
         return (values.len() == 1).then_some((key, op, None));
     }
     let target = values.get(1)?;
-    (values.len() == 2).then_some((
-        key,
-        op,
-        Some(source_literal(target, identity_names, relation_names)),
-    ))
+    (values.len() == 2).then_some((key, op, Some(source_literal(target, identity_names))))
 }
 
 fn render_grant_blocks(grants: GrantBlocks) -> String {
@@ -3452,7 +3436,7 @@ fn fileout_unit_source(kernel: &RelationKernel, unit: Symbol) -> Result<String, 
         if is_exported_fact_relation(relation) {
             if let Some(relation_name) = relation_names.get(&relation)
                 && let Some((key, op, target)) =
-                    grant_fact_source(relation_name, &tuple, &identity_names, &relation_names)
+                    grant_fact_source(relation_name, &tuple, &identity_names)
             {
                 let targets = grants.entry(key).or_default().entry(op).or_default();
                 if let Some(target) = target {
@@ -3517,7 +3501,7 @@ fn fileout_unit_source(kernel: &RelationKernel, unit: Symbol) -> Result<String, 
                         tuple
                             .values()
                             .iter()
-                            .map(|value| source_literal(value, &identity_names, &relation_names))
+                            .map(|value| source_literal(value, &identity_names))
                             .collect::<Vec<_>>()
                             .join(", ")
                     ))
@@ -3587,11 +3571,7 @@ fn relation_name_map(snapshot: &mica_relation_kernel::Snapshot) -> BTreeMap<Iden
         .collect()
 }
 
-fn source_literal(
-    value: &Value,
-    identity_names: &BTreeMap<Identity, String>,
-    relation_names: &BTreeMap<Identity, String>,
-) -> String {
+fn source_literal(value: &Value, identity_names: &BTreeMap<Identity, String>) -> String {
     if value.is_unit() {
         return "()".to_owned();
     }
@@ -3605,15 +3585,12 @@ fn source_literal(
         ValueKind::Identity => {
             let identity = value.as_identity().unwrap();
             match identity_names.get(&identity) {
-                Some(name) => format!("#{name}"),
-                None => match relation_names.get(&identity) {
-                    Some(name) => format!(":{name}"),
-                    None => format!("#{}", identity.raw()),
-                },
+                Some(name) if is_qualified_identifier(name) => format!("#{name}"),
+                _ => format!("#{}", identity.raw()),
             }
         }
-        ValueKind::Symbol => render_symbol(value.as_symbol().unwrap(), ":"),
-        ValueKind::ErrorCode => render_symbol(value.as_error_code().unwrap(), ""),
+        ValueKind::Symbol => symbol_source(value.as_symbol().unwrap()),
+        ValueKind::ErrorCode => error_code_source(value.as_error_code().unwrap()),
         ValueKind::String => value.with_str(|value| format!("{value:?}")).unwrap(),
         ValueKind::Bytes => bytes_literal(value),
         ValueKind::List => value
@@ -3623,7 +3600,7 @@ fn source_literal(
                     "]",
                     values
                         .iter()
-                        .map(|value| source_literal(value, identity_names, relation_names)),
+                        .map(|value| source_literal(value, identity_names)),
                 )
             })
             .unwrap(),
@@ -3635,8 +3612,8 @@ fn source_literal(
                     entries.iter().map(|(key, value)| {
                         format!(
                             "{} -> {}",
-                            source_literal(key, identity_names, relation_names),
-                            source_literal(value, identity_names, relation_names)
+                            source_literal(key, identity_names),
+                            source_literal(value, identity_names)
                         )
                     }),
                 )
@@ -3646,18 +3623,15 @@ fn source_literal(
             .with_range(|start, end| match end {
                 Some(end) => format!(
                     "{}..{}",
-                    source_literal(start, identity_names, relation_names),
-                    source_literal(end, identity_names, relation_names)
+                    source_literal(start, identity_names),
+                    source_literal(end, identity_names)
                 ),
-                None => format!(
-                    "{}.._",
-                    source_literal(start, identity_names, relation_names)
-                ),
+                None => format!("{}.._", source_literal(start, identity_names)),
             })
             .unwrap(),
         ValueKind::Error => value
             .with_error(|error| {
-                let mut out = format!("error({}", render_symbol(error.code(), ""));
+                let mut out = format!("error({}", error_code_source(error.code()));
                 if let Some(message) = error.message() {
                     out.push_str(", ");
                     out.push_str(&format!("{message:?}"));
@@ -3667,7 +3641,7 @@ fn source_literal(
                         out.push_str(", none");
                     }
                     out.push_str(", ");
-                    out.push_str(&source_literal(payload, identity_names, relation_names));
+                    out.push_str(&source_literal(payload, identity_names));
                 }
                 out.push(')');
                 out
@@ -3683,7 +3657,7 @@ fn source_literal(
                     relation
                         .heading()
                         .iter()
-                        .map(|column| render_symbol(*column, ":")),
+                        .map(|column| symbol_source(*column)),
                 );
                 let rows = render_sequence(
                     "{",
@@ -3694,7 +3668,7 @@ fn source_literal(
                             "]",
                             row.values()
                                 .iter()
-                                .map(|cell| source_literal(cell, identity_names, relation_names)),
+                                .map(|cell| source_literal(cell, identity_names)),
                         )
                     }),
                 );
@@ -3705,8 +3679,8 @@ fn source_literal(
             .with_frob(|delegate, payload| {
                 format!(
                     "{}<{}>",
-                    source_literal(&Value::identity(delegate), identity_names, relation_names),
-                    source_literal(payload, identity_names, relation_names)
+                    source_literal(&Value::identity(delegate), identity_names),
+                    source_literal(payload, identity_names)
                 )
             })
             .unwrap(),
@@ -3718,11 +3692,10 @@ fn read_only_query_report(
     outcome: TaskOutcome,
     options: ReadOnlySourceQueryOptions,
     identity_names: &BTreeMap<Identity, String>,
-    relation_names: &BTreeMap<Identity, String>,
 ) -> ReadOnlySourceQueryReport {
     let (status, value, error, rendered_value) = match outcome {
         TaskOutcome::Complete { value, .. } => {
-            let rendered = source_literal(&value, identity_names, relation_names);
+            let rendered = source_literal(&value, identity_names);
             (
                 ReadOnlySourceQueryStatus::Complete,
                 Some(value),
@@ -3731,7 +3704,7 @@ fn read_only_query_report(
             )
         }
         TaskOutcome::Aborted { error, .. } => {
-            let rendered = source_literal(&error, identity_names, relation_names);
+            let rendered = source_literal(&error, identity_names);
             (
                 ReadOnlySourceQueryStatus::Aborted,
                 None,
@@ -4457,6 +4430,16 @@ fn default_builtins(embedding_provider: Arc<dyn embedding::EmbeddingProvider>) -
             is_frob_builtin,
         )
         .with_builtin(
+            "error",
+            BuiltinResultKind::Exact(ValueKind::Error),
+            error_builtin,
+        )
+        .with_builtin(
+            "error_code",
+            BuiltinResultKind::Exact(ValueKind::ErrorCode),
+            error_code_builtin,
+        )
+        .with_builtin(
             "to_literal",
             BuiltinResultKind::Exact(ValueKind::String),
             to_literal_builtin,
@@ -4995,13 +4978,56 @@ fn to_literal_builtin(
         ));
     }
 
-    let relation_names = relation_name_map(&context.kernel().snapshot());
     let identity_names = identity_name_map(context.tx())?;
-    Ok(Value::string(source_literal(
-        &args[0],
-        &identity_names,
-        &relation_names,
-    )))
+    Ok(Value::string(source_literal(&args[0], &identity_names)))
+}
+
+fn error_builtin(
+    _context: &mut BuiltinContext<'_, '_>,
+    args: &[Value],
+) -> Result<Value, RuntimeError> {
+    error_value(args)
+}
+
+fn error_value(args: &[Value]) -> Result<Value, RuntimeError> {
+    if !(1..=3).contains(&args.len()) {
+        return Err(invalid_builtin_call(
+            "error",
+            "expected error(code[, message[, payload]])",
+        ));
+    }
+    let code = args[0]
+        .as_error_code()
+        .ok_or_else(|| invalid_builtin_call("error", "expected an error code"))?;
+    let payload = args.get(2).cloned();
+    match args.get(1) {
+        None => Ok(Value::error(code, None::<&str>, payload)),
+        Some(message) if *message == Value::option_none() => {
+            Ok(Value::error(code, None::<&str>, payload))
+        }
+        Some(message) => message
+            .with_str(|message| Value::error(code, Some(message), payload))
+            .ok_or_else(|| invalid_builtin_call("error", "expected a string message or none")),
+    }
+}
+
+fn error_code_builtin(
+    _context: &mut BuiltinContext<'_, '_>,
+    args: &[Value],
+) -> Result<Value, RuntimeError> {
+    error_code_value(args)
+}
+
+fn error_code_value(args: &[Value]) -> Result<Value, RuntimeError> {
+    let [code] = args else {
+        return Err(invalid_builtin_call(
+            "error_code",
+            "expected error_code(symbol)",
+        ));
+    };
+    code.as_symbol()
+        .map(Value::error_code)
+        .ok_or_else(|| invalid_builtin_call("error_code", "expected a symbol"))
 }
 
 fn from_literal_builtin(
@@ -5250,6 +5276,26 @@ fn value_from_literal_expr(
 ) -> Result<Option<Value>, RuntimeError> {
     match expr {
         Expr::Literal { value, .. } => literal_value(value),
+        Expr::Name { name, .. } if name == "none" => Ok(Some(Value::option_none())),
+        Expr::Call { callee, args, .. }
+            if let Expr::Name { name, .. } = callee.as_ref()
+                && matches!(name.as_str(), "error" | "error_code") =>
+        {
+            let mut values = Vec::with_capacity(args.len());
+            for arg in args {
+                if arg.role.is_some() || arg.splice {
+                    return Ok(None);
+                }
+                let Some(value) = value_from_literal_expr(context, &arg.value)? else {
+                    return Ok(None);
+                };
+                values.push(value);
+            }
+            match name.as_str() {
+                "error" => error_value(&values).map(Some),
+                _ => error_code_value(&values).map(Some),
+            }
+        }
         Expr::Identity { name, .. } => identity_literal_value(context, name),
         Expr::Symbol { name, .. } => Ok(Some(Value::symbol(Symbol::intern(name)))),
         Expr::Frob {
@@ -7443,6 +7489,8 @@ fn is_safe_read_only_builtin(name: &str) -> bool {
             | "to_literal"
             | "from_literal"
             | "to_symbol"
+            | "error"
+            | "error_code"
             | "index_or"
             | "project"
             | "union"
@@ -8166,6 +8214,29 @@ fn render_value(
                 )
             })
             .unwrap(),
+    }
+}
+
+fn symbol_source(symbol: Symbol) -> String {
+    match symbol.name() {
+        Some(name) if is_qualified_identifier(name) => format!(":{name}"),
+        Some(name) => format!(":{name:?}"),
+        None => render_symbol(symbol, ":"),
+    }
+}
+
+fn error_code_source(code: Symbol) -> String {
+    match code.name() {
+        Some(name)
+            if name.starts_with("E_")
+                && name.len() > 2
+                && name
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_') =>
+        {
+            name.to_owned()
+        }
+        _ => format!("error_code({})", symbol_source(code)),
     }
 }
 

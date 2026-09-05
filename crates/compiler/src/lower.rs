@@ -437,7 +437,7 @@ impl<'a> Lower<'a> {
         if let Some(colon) = tokens
             .iter()
             .position(|token| token.kind == SyntaxKind::Colon)
-            && let Some(name) = qualified_name_from_tokens(self.source, &tokens, colon + 1)
+            && let Some(name) = symbol_name_from_tokens(self.source, &tokens, colon + 1)
         {
             Expr::Symbol {
                 id: self.node_id(),
@@ -598,7 +598,7 @@ impl<'a> Lower<'a> {
                 let colon = tokens
                     .iter()
                     .position(|token| token.kind == SyntaxKind::Colon)?;
-                qualified_name_from_tokens(self.source, &tokens, colon + 1)
+                symbol_name_from_tokens(self.source, &tokens, colon + 1)
             })
             .collect::<Vec<_>>();
         let rows = self
@@ -820,7 +820,7 @@ impl<'a> Lower<'a> {
         let name = tokens
             .iter()
             .position(|token| token.kind == SyntaxKind::Colon)
-            .and_then(|idx| qualified_name_from_tokens(self.source, &tokens, idx + 1))
+            .and_then(|idx| symbol_name_from_tokens(self.source, &tokens, idx + 1))
             .unwrap_or_default();
         Expr::Symbol {
             id: self.node_id(),
@@ -1085,8 +1085,7 @@ impl<'a> Lower<'a> {
                     .first()
                     .is_some_and(|token| token.kind == SyntaxKind::Colon)
                 {
-                    qualified_name_from_tokens(self.source, &tokens, 1)
-                        .unwrap_or_else(|| name.clone())
+                    symbol_name_from_tokens(self.source, &tokens, 1).unwrap_or_else(|| name.clone())
                 } else {
                     name.clone()
                 };
@@ -1532,7 +1531,7 @@ impl<'a> Lower<'a> {
                 }
             }
             Some(SyntaxKind::Colon) => TypeRefKind::Literal(TypeLiteralRef::Symbol(
-                qualified_name_from_tokens(self.source, &tokens, 1).unwrap_or_default(),
+                symbol_name_from_tokens(self.source, &tokens, 1).unwrap_or_default(),
             )),
             Some(SyntaxKind::TrueKw) => TypeRefKind::Literal(TypeLiteralRef::Bool(true)),
             Some(SyntaxKind::FalseKw) => TypeRefKind::Literal(TypeLiteralRef::Bool(false)),
@@ -1581,7 +1580,7 @@ impl<'a> Lower<'a> {
                 let name = tokens
                     .iter()
                     .position(|token| token.kind == SyntaxKind::Colon)
-                    .and_then(|colon| qualified_name_from_tokens(self.source, &tokens, colon + 1))
+                    .and_then(|colon| symbol_name_from_tokens(self.source, &tokens, colon + 1))
                     .unwrap_or_default();
                 let ty = self
                     .node_children(column)
@@ -1717,6 +1716,15 @@ fn identity_after_hash(source: &str, tokens: &[&CstToken], start: usize) -> Opti
             .map(|token| source[token.span.clone()].to_owned());
     }
     qualified_name_from_tokens(source, tokens, idx)
+}
+
+fn symbol_name_from_tokens(source: &str, tokens: &[&CstToken], start: usize) -> Option<String> {
+    if let Some(token) = tokens.get(start)
+        && token.kind == SyntaxKind::String
+    {
+        return Some(unquote(&source[token.span.clone()]));
+    }
+    qualified_name_from_tokens(source, tokens, start)
 }
 
 fn qualified_name_from_tokens(source: &str, tokens: &[&CstToken], start: usize) -> Option<String> {

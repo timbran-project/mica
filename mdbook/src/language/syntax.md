@@ -27,6 +27,9 @@ workflow/AssignedTo(#change_request, #workflow/reviewer)
 The final segment determines whether a call is relation-shaped: `workflow/AssignedTo(...)` is a
 relation query because `AssignedTo` begins with an uppercase letter.
 
+Symbols can quote their names, as in `:"display name"` or `:"if"`. Quoted symbols use string
+escapes and can also appear in relation headings and after the dispatch colon.
+
 ## Bindings
 
 ```mica

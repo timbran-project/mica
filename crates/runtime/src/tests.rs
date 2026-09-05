@@ -1372,6 +1372,136 @@ fn string_literals_round_trip_control_characters_and_unicode() {
 }
 
 #[test]
+fn literal_round_trips_preserve_relation_identities() {
+    let mut runner = SourceRunner::new_empty();
+    assert_completed_value(
+        &runner.run_source(
+            "let identity = make_relation(:LiteralRelation, 1)\nreturn from_literal(to_literal(identity)) == ok(identity)"
+        ).unwrap(),
+        Value::bool(true),
+    );
+}
+
+#[test]
+fn literal_round_trips_preserve_arbitrary_symbol_names() {
+    let mut runner = SourceRunner::new_empty();
+    for name in [
+        "",
+        "hello world",
+        "Montréal",
+        "if",
+        "E_FAIL",
+        "_",
+        "a/b",
+        "quote\"\\\n",
+    ] {
+        assert_completed_value(
+            &runner.run_source(&format!(
+                "let value = to_symbol({name:?})\nreturn from_literal(to_literal(value)) == ok(value)"
+            )).unwrap(),
+            Value::bool(true),
+        );
+        let symbol = Value::symbol(Symbol::intern(name));
+        let quoted = format!(":{name:?}");
+        assert_completed_value(&runner.run_source(&quoted).unwrap(), symbol.clone());
+        let rows = Value::relation([Symbol::intern(name)], [Tuple::from([symbol])]).unwrap();
+        let source = format!("[{quoted}] {{[{quoted}]}}");
+        assert_completed_value(&runner.run_source(&source).unwrap(), rows.clone());
+        let report = runner.run_source(&format!("to_literal({source})")).unwrap();
+        let TaskOutcome::Complete { value, .. } = report.outcome else {
+            panic!("serialization must complete");
+        };
+        let literal = value.with_str(str::to_owned).unwrap();
+        assert_completed_value(&runner.run_source(&literal).unwrap(), rows.clone());
+        assert_completed_value(
+            &runner
+                .run_source(&format!("from_literal({literal:?})"))
+                .unwrap(),
+            Value::result_ok(rows),
+        );
+    }
+}
+
+#[test]
+fn literal_round_trips_preserve_structured_errors() {
+    let mut runner = SourceRunner::new_empty();
+    assert_completed_value(
+        &runner.run_source(
+            "try\nraise E_FAIL, \"bad input\", [1, :input]\ncatch problem\nreturn from_literal(to_literal(problem)) == ok(problem)\nend"
+        ).unwrap(),
+        Value::bool(true),
+    );
+    for code in ["E_FAIL", "ExternalTimeout", "E_", "bad code", ""] {
+        for message in [None, Some(""), Some("invalid\0input\n")] {
+            for payload in [
+                None,
+                Some(Value::unit()),
+                Some(Value::list([Value::int(7).unwrap()])),
+            ] {
+                let expected = Value::error(Symbol::intern(code), message, payload);
+                let literal = super::source_literal(&expected, &Default::default());
+                assert_completed_value(&runner.run_source(&literal).unwrap(), expected.clone());
+                assert_completed_value(
+                    &runner
+                        .run_source(&format!("from_literal({literal:?})"))
+                        .unwrap(),
+                    Value::result_ok(expected),
+                );
+            }
+        }
+        let expected = Value::error_code(Symbol::intern(code));
+        let literal = super::source_literal(&expected, &Default::default());
+        assert_completed_value(&runner.run_source(&literal).unwrap(), expected.clone());
+        assert_completed_value(
+            &runner
+                .run_source(&format!("from_literal({literal:?})"))
+                .unwrap(),
+            Value::result_ok(expected),
+        );
+    }
+}
+
+#[test]
+fn literal_error_constructors_validate_arguments_without_executing_source() {
+    let mut runner = SourceRunner::new_empty();
+    for literal in [
+        "error()",
+        "error(:bad)",
+        "error(E_FAIL, 1)",
+        "error(E_FAIL, none, 1, 2)",
+        "error_code()",
+        "error_code(1)",
+        "error_code(:a, :b)",
+        "error(E_FAIL, make_identity(:created_by_literal))",
+        "error(@[E_FAIL])",
+        "make_identity(:created_by_literal)",
+    ] {
+        assert_completed_value(
+            &runner.run_source(&format!(
+                "match from_literal({literal:?})\ncase err(problem)\ntrue\ncase ok(value)\nfalse\nend"
+            )).unwrap(),
+            Value::bool(true),
+        );
+    }
+    assert!(
+        runner
+            .named_identity(Symbol::intern("created_by_literal"))
+            .is_err()
+    );
+}
+
+#[test]
+fn quoted_symbols_select_named_and_receiver_calls() {
+    let mut runner = SourceRunner::new_empty();
+    runner
+        .run_source("verb literal_echo(receiver)\nreturn receiver\nend")
+        .unwrap();
+    for source in [":\"literal_echo\"(receiver: 42)", "42:\"literal_echo\"()"] {
+        assert_completed_value(&runner.run_source(source).unwrap(), Value::int(42).unwrap());
+    }
+}
+
+#[test]
 fn runner_to_literal_renders_parseable_value_source() {
     let mut runner = SourceRunner::new_empty();
     runner.run_source("make_identity(:take_event)").unwrap();

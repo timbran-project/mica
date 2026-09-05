@@ -27,6 +27,8 @@ return an `option` or `result` represent absence or an expected failure as ordin
 | `url_decode_component(text)`               | decoded URL component                                |
 | `sort(list)`                               | canonically sorted list                              |
 | `to_symbol(text)`                          | named symbol                                         |
+| `error_code(symbol)`                       | error code with the symbol's name                    |
+| `error(code[, message[, payload]])`        | structured error value                               |
 | `to_literal(value)`                        | parseable Mica value text                            |
 | `from_literal(text)`                       | `result<dynamic>`                                    |
 | `map_pairs(map)`                           | list of two-item key/value lists                     |

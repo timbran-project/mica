@@ -13,13 +13,38 @@ Three related forms serve different purposes:
 | Form | Meaning |
 | --- | --- |
 | `E_NOT_FOUND` | an error-code value, suitable for comparison or raising |
-| a caught `error` | the code together with an optional message and payload |
+| `error(E_NOT_FOUND, "Missing label")` | an error value containing a code, message, and optional payload |
 | `err(problem)` | an ordinary returned result containing an error value |
 
 Evaluating an error code or returning `err(problem)` does not unwind anything. `raise` transfers
 control to a matching handler, or aborts the current transaction when no handler accepts it. Use
 results for expected outcomes that callers should inspect and raised errors for failures that
 should interrupt the current computation.
+
+## Constructing Error Values
+
+`error(code[, message[, payload]])` constructs an error without raising it. Omit the message or
+pass `none` to leave it absent; an empty string is a present, empty message. Supplying a third
+argument records a present payload, including when that argument is `()` or `none`.
+
+```mica,eval
+let problem = error(E_NOT_FOUND, "Missing label", :label)
+require problem.code == E_NOT_FOUND
+require problem.message == some("Missing label")
+require problem.value == some(:label)
+require error(E_NOT_FOUND, none, ()).value == some(())
+require from_literal(to_literal(problem)) == ok(problem)
+return err(problem)
+```
+
+An integration can create an error code from any symbol with `error_code(symbol)`. For example,
+`error_code(:ExternalTimeout)` represents a host code whose name does not use the `E_` source
+convention. Error codes remain distinct from the symbols with the same names.
+
+`to_literal` writes structured errors using these constructors. `from_literal` recognizes the
+constructors and recursively decodes their literal arguments. It does not evaluate source code,
+look up arbitrary functions, or call verbs while decoding. This permits errors nested in lists,
+maps, relations, and other persistable values to cross the text boundary with their fields intact.
 
 ## Raising and Inspecting an Error
 

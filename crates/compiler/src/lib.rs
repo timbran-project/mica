@@ -11,12 +11,9 @@
 // You should have received a copy of the GNU Affero General Public License along
 // with this program. If not, see <https://www.gnu.org/licenses/>.
 
-//! Frontend syntax support for Mica.
-//!
-//! This crate intentionally starts with parsing rather than bytecode emission.
-//! The surface language still has open semantic questions around dispatch,
-//! relation metadata, and filein/fileout expansion, so the first artifact is a
-//! concrete syntax tree with source spans and recoverable parse errors.
+//! Mica parsing, semantic analysis, type inference, and bytecode compilation.
+//! Source spans are retained through syntax and lowering for diagnostics, while
+//! installation APIs compile methods and rules into a live relation kernel.
 
 mod ast;
 mod backend;
@@ -54,7 +51,7 @@ pub use hir::{
     HirMatchCase, HirMatchPattern, HirMethodParam, HirParam, HirPlace, HirProgram, HirRecovery,
     HirRelationAtom, HirRuleBodyItem, HirRuleGuard, HirScatterBinding,
 };
-pub use lexer::lex;
+pub use lexer::{is_qualified_identifier, lex};
 pub use lower::parse_ast;
 pub use parser::parse;
 pub use semantics::{

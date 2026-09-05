@@ -502,7 +502,7 @@ impl<'a> Parser<'a> {
             let mut field = Vec::new();
             if self.current_kind() == SyntaxKind::Colon {
                 field.push(self.bump_element());
-                field.extend(self.parse_qualified_ident_or_missing("expected relation column"));
+                field.extend(self.parse_symbol_name_or_missing("expected relation column"));
                 field.push(self.expect_token(SyntaxKind::Arrow, "expected -> in row pattern"));
             }
             field.push(self.expect_token(SyntaxKind::Ident, "expected row binding"));
@@ -1051,8 +1051,7 @@ impl<'a> Parser<'a> {
         if self.current_kind() == SyntaxKind::LParen {
             children.push(CstElement::Node(self.parse_group_expr()));
         } else {
-            children
-                .extend(self.parse_qualified_ident_or_missing("expected symbol name after ':'"));
+            children.extend(self.parse_symbol_name_or_missing("expected symbol name after ':'"));
         }
         if self.current_kind() == SyntaxKind::LParen {
             children.push(CstElement::Node(self.parse_arg_list(true)));
@@ -1075,7 +1074,7 @@ impl<'a> Parser<'a> {
         if self.current_kind() == SyntaxKind::LParen {
             children.push(CstElement::Node(self.parse_group_expr()));
         } else {
-            children.extend(self.parse_qualified_ident_or_missing("expected selector after ':'"));
+            children.extend(self.parse_symbol_name_or_missing("expected selector after ':'"));
         }
         children.push(CstElement::Node(self.parse_arg_list(true)));
         CstNode::new(SyntaxKind::ReceiverCallExpr, children)
@@ -1095,6 +1094,13 @@ impl<'a> Parser<'a> {
         } else {
             vec![self.missing(message)]
         }
+    }
+
+    fn parse_symbol_name_or_missing(&mut self, message: &str) -> Vec<CstElement> {
+        if self.current_kind() == SyntaxKind::String {
+            return vec![self.bump_element()];
+        }
+        self.parse_qualified_ident_or_missing(message)
     }
 
     fn parse_qualified_ident_tokens(&mut self) -> Vec<CstElement> {
@@ -1175,8 +1181,7 @@ impl<'a> Parser<'a> {
             }
             SyntaxKind::Colon => {
                 children.push(self.bump_element());
-                children
-                    .extend(self.parse_qualified_ident_or_missing("expected symbol type literal"));
+                children.extend(self.parse_symbol_name_or_missing("expected symbol type literal"));
             }
             SyntaxKind::TrueKw | SyntaxKind::FalseKw | SyntaxKind::ErrorCode => {
                 children.push(self.bump_element());
@@ -1257,9 +1262,7 @@ impl<'a> Parser<'a> {
             let mut column = vec![
                 self.type_expect_token(SyntaxKind::Colon, "expected relation type column symbol"),
             ];
-            column.extend(
-                self.parse_qualified_ident_or_missing("expected relation type column name"),
-            );
+            column.extend(self.parse_symbol_name_or_missing("expected relation type column name"));
             column.push(self.type_expect_token(
                 SyntaxKind::Arrow,
                 "expected '->' after relation type column",
@@ -1499,11 +1502,15 @@ impl<'a> Parser<'a> {
             return next(&mut index) == SyntaxKind::LBrace;
         }
         loop {
-            if kind != SyntaxKind::Colon || next(&mut index) != SyntaxKind::Ident {
+            if kind != SyntaxKind::Colon {
+                return false;
+            }
+            let name_kind = next(&mut index);
+            if !matches!(name_kind, SyntaxKind::Ident | SyntaxKind::String) {
                 return false;
             }
             kind = next(&mut index);
-            while kind == SyntaxKind::Slash {
+            while name_kind == SyntaxKind::Ident && kind == SyntaxKind::Slash {
                 if next(&mut index) != SyntaxKind::Ident {
                     return false;
                 }

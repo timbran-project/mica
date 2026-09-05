@@ -161,6 +161,27 @@ other program-facing labels:
 :inspection
 ```
 
+Use a quoted symbol when the name contains spaces, Unicode, punctuation, or a reserved word.
+The contents follow the same escaping rules as a string, while the value remains a symbol:
+
+```mica,eval
+require :"inspection complete" == to_symbol("inspection complete")
+require :"Montréal" != "Montréal"
+require :"approve" == :approve
+require from_literal(to_literal(:"line\nbreak")) == ok(:"line\nbreak")
+```
+
+Quoted symbols also name relation columns, row bindings, literal types, and dispatch selectors.
+Quoting changes how a name is written, without changing which name it denotes:
+
+```mica,eval
+let rows: relation<{:"display name" -> string}> = [:"display name"] {["Ada"]}
+let exactly {:"display name" -> label} = rows
+let status: :"ready to review" = :"ready to review"
+require label == "Ada"
+return [label, status]
+```
+
 Error codes are also values. By convention, error-code literals begin with `E_`:
 
 ```mica
@@ -241,6 +262,13 @@ SamePerson(#alice_account, #alice_profile)
 ```
 
 Those are domain claims. They do not merge identity values at the runtime level.
+
+`to_literal` preserves identity values as identity source. It uses a named `#identity` when a
+source-compatible identity name is available and a numeric `#12345` form otherwise. A relation's
+identity is still an identity; its naming symbol is a separate value. Numeric identity text refers
+to the same identity number when decoded, while a named identity is resolved in the receiving
+world. Choose an explicit application naming protocol when transferring references between
+independently created worlds.
 
 Frobs are delegated values. They carry a delegate identity plus a payload and can participate in
 dispatch without becoming durable world objects.

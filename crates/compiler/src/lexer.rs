@@ -17,6 +17,18 @@ pub fn lex(source: &str) -> Vec<Token> {
     Lexer::new(source).lex()
 }
 
+/// Whether a name can be written as unquoted slash-separated identifiers.
+pub fn is_qualified_identifier(name: &str) -> bool {
+    name.split('/').all(|part| {
+        let mut chars = part.chars();
+        matches!(chars.next(), Some('a'..='z' | 'A'..='Z' | '_'))
+            && chars.all(is_ident_continue)
+            && part != "_"
+            && keyword_kind(part).is_none()
+            && !is_error_code_literal(part)
+    })
+}
+
 struct Lexer<'a> {
     source: &'a str,
     pos: usize,
