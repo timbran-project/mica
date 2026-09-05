@@ -1537,11 +1537,15 @@ impl RegisterVm {
         for (slot, register) in site.registers.iter().enumerate() {
             scratch[slot] = borrowed_value_bits(self.read_register_unchecked(*register));
         }
-        let outcome = compiled.run(
-            &mut scratch[..site.registers.len()],
-            &collection_views[..site.collection_view_registers.len()],
-            u64::try_from(native_budget).ok()?,
-        );
+        // Scratch borrows valid register values, which the call leaves intact.
+        // Loop recognition keeps collection registers alive during result cloning.
+        let outcome = unsafe {
+            compiled.run(
+                &mut scratch[..site.registers.len()],
+                &collection_views[..site.collection_view_registers.len()],
+                u64::try_from(native_budget).ok()?,
+            )
+        };
         let (native_instructions, next_ip, modified_slots) = match outcome {
             NaturalLoopOutcome::Complete {
                 instructions,

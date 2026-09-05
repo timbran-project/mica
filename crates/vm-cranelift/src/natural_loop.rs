@@ -2435,7 +2435,26 @@ impl CompiledNaturalLoop {
         self.imported_helper_count
     }
 
-    pub fn run(
+    /// Executes against borrowed value words without changing their ownership.
+    ///
+    /// # Safety
+    ///
+    /// Every word in the used portion of `scratch`, and every constant in the
+    /// compiled plan, must represent a valid Mica value. The owners of any heap
+    /// values must remain alive throughout the call. Returned words may borrow
+    /// from those owners or `collection_views`;
+    /// callers must retain them while inspecting the words or clone the values
+    /// before releasing their owners. A side exit may leave scratch overwritten
+    /// with intermediate words, which must be discarded.
+    ///
+    /// ```compile_fail
+    /// use mica_vm_cranelift::CompiledNaturalLoop;
+    ///
+    /// fn execute(compiled: &CompiledNaturalLoop, words: &mut [u64]) {
+    ///     compiled.run(words, &[], 1);
+    /// }
+    /// ```
+    pub unsafe fn run(
         &self,
         scratch: &mut [u64],
         collection_views: &[NaturalLoopCollectionView<'_>],

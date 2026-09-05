@@ -115,10 +115,11 @@ impl NaturalIntegerLoopContext {
 
     fn run_once(&self) -> u64 {
         let mut scratch = self.initial_scratch;
-        let NaturalLoopOutcome::Complete { instructions, .. } =
+        // The fixture and loop contain only valid immediate values.
+        let NaturalLoopOutcome::Complete { instructions, .. } = (unsafe {
             self.compiled
                 .run(&mut scratch, &[], NATURAL_INTEGER_LOOP_INSTRUCTIONS)
-        else {
+        }) else {
             panic!("natural integer benchmark left the generated fast path");
         };
         debug_assert_eq!(instructions, NATURAL_INTEGER_LOOP_INSTRUCTIONS);

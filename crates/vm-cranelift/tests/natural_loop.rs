@@ -19,6 +19,9 @@ use mica_vm_cranelift::{
 };
 use std::sync::{Arc, Barrier};
 
+// Native calls below borrow valid Value words. Heap owners in each fixture
+// remain alive while the call and its result checks use those words.
+
 const CURRENT: u16 = 0;
 const TOTAL: u16 = 1;
 const LIMIT: u16 = 2;
@@ -29,6 +32,10 @@ const NEXT_TOTAL: u16 = 6;
 const ELEMENT: u16 = 7;
 
 fn bits(value: Value) -> u64 {
+    assert!(
+        value.is_immediate(),
+        "heap words must borrow a retained owner"
+    );
     borrowed_value_bits(&value)
 }
 
@@ -413,8 +420,8 @@ fn unboxed_integer_accumulator_matches_tagged_execution_without_helpers() {
     let budget = u64::try_from(limit * 9).unwrap();
 
     assert_eq!(
-        unboxed.run(&mut unboxed_scratch, &[], budget),
-        tagged.run(&mut tagged_scratch, &[], budget),
+        unsafe { unboxed.run(&mut unboxed_scratch, &[], budget) },
+        unsafe { tagged.run(&mut tagged_scratch, &[], budget) },
     );
     assert_eq!(unboxed_scratch, tagged_scratch);
     assert_eq!(
@@ -446,7 +453,7 @@ fn unboxed_integer_entry_guards_side_exit_atomically() {
     let original = values;
 
     assert_eq!(
-        compiled.run(&mut values, &[], 4_096 * 9),
+        unsafe { compiled.run(&mut values, &[], 4_096 * 9) },
         NaturalLoopOutcome::SideExit,
     );
     assert_eq!(values, original);
@@ -460,7 +467,7 @@ fn unboxed_integer_overflow_side_exits_atomically() {
     let original = values;
 
     assert_eq!(
-        compiled.run(&mut values, &[], 4_096 * 9),
+        unsafe { compiled.run(&mut values, &[], 4_096 * 9) },
         NaturalLoopOutcome::SideExit,
     );
     assert_eq!(values, original);
@@ -483,8 +490,8 @@ fn unboxed_float_collection_state_matches_tagged_execution() {
     let budget = (values.len() as u64 * 9) + 2;
 
     assert_eq!(
-        unboxed.run(&mut unboxed_scratch, &views, budget),
-        tagged.run(&mut tagged_scratch, &views, budget),
+        unsafe { unboxed.run(&mut unboxed_scratch, &views, budget) },
+        unsafe { tagged.run(&mut tagged_scratch, &views, budget) },
     );
     assert_eq!(unboxed_scratch, tagged_scratch);
     assert_eq!(
@@ -507,8 +514,8 @@ fn unboxed_float_collection_state_preserves_every_budget_boundary() {
     for budget in 0..=(values.len() as u64 * 9) + 2 {
         let mut tagged_scratch = float_collection_scratch(values.len());
         let mut unboxed_scratch = tagged_scratch;
-        let tagged_outcome = tagged.run(&mut tagged_scratch, &views, budget);
-        let unboxed_outcome = unboxed.run(&mut unboxed_scratch, &views, budget);
+        let tagged_outcome = unsafe { tagged.run(&mut tagged_scratch, &views, budget) };
+        let unboxed_outcome = unsafe { unboxed.run(&mut unboxed_scratch, &views, budget) };
         assert_eq!(unboxed_outcome, tagged_outcome, "budget {budget}",);
         let modified_slots = match tagged_outcome {
             NaturalLoopOutcome::Complete { modified_slots, .. }
@@ -542,7 +549,7 @@ fn unboxed_float_collection_guards_and_arithmetic_side_exit_atomically() {
         let mut scratch = float_collection_scratch(values.len());
         let original = scratch;
         assert_eq!(
-            compiled.run(&mut scratch, &views, u64::MAX),
+            unsafe { compiled.run(&mut scratch, &views, u64::MAX) },
             NaturalLoopOutcome::SideExit,
         );
         assert_eq!(scratch, original);
@@ -557,8 +564,8 @@ fn unboxed_float_state_supports_negate_subtract_multiply_and_divide() {
     let mut unboxed_scratch = tagged_scratch;
 
     assert_eq!(
-        unboxed.run(&mut unboxed_scratch, &[], u64::MAX),
-        tagged.run(&mut tagged_scratch, &[], u64::MAX),
+        unsafe { unboxed.run(&mut unboxed_scratch, &[], u64::MAX) },
+        unsafe { tagged.run(&mut tagged_scratch, &[], u64::MAX) },
     );
     assert_eq!(unboxed_scratch, tagged_scratch);
     assert_eq!(
@@ -575,7 +582,7 @@ fn unboxed_float_division_by_zero_side_exits_atomically() {
     let original = scratch;
 
     assert_eq!(
-        compiled.run(&mut scratch, &[], u64::MAX),
+        unsafe { compiled.run(&mut scratch, &[], u64::MAX) },
         NaturalLoopOutcome::SideExit,
     );
     assert_eq!(scratch, original);
@@ -588,7 +595,7 @@ fn generated_range_value_at_emits_checked_integer_values_without_helpers() {
     let mut scratch = [bits(Value::empty_relation()), int_bits(7)];
 
     assert_eq!(
-        compiled.run(&mut scratch, &range, 1),
+        unsafe { compiled.run(&mut scratch, &range, 1) },
         NaturalLoopOutcome::Complete {
             instructions: 1,
             modified_slots: 1,
@@ -617,7 +624,7 @@ fn generated_range_value_at_side_exits_on_invalid_indices_and_bounds() {
     for (range, index) in cases {
         let mut scratch = [bits(Value::empty_relation()), index];
         assert_eq!(
-            compiled.run(&mut scratch, &[range], 1),
+            unsafe { compiled.run(&mut scratch, &[range], 1) },
             NaturalLoopOutcome::SideExit,
         );
     }
@@ -630,7 +637,7 @@ fn generated_range_key_at_emits_checked_zero_based_ordinals_without_helpers() {
     let mut scratch = [bits(Value::empty_relation()), int_bits(7)];
 
     assert_eq!(
-        compiled.run(&mut scratch, &range, 1),
+        unsafe { compiled.run(&mut scratch, &range, 1) },
         NaturalLoopOutcome::Complete {
             instructions: 1,
             modified_slots: 1,
@@ -647,7 +654,7 @@ fn generated_range_key_at_side_exits_on_invalid_ordinals() {
     for index in [int_bits(-1), bits(Value::float(1.0).unwrap())] {
         let mut scratch = [bits(Value::empty_relation()), index];
         assert_eq!(
-            compiled.run(&mut scratch, &range, 1),
+            unsafe { compiled.run(&mut scratch, &range, 1) },
             NaturalLoopOutcome::SideExit,
         );
     }
@@ -665,7 +672,7 @@ fn generated_list_access_emits_immediate_values_and_ordinals_without_helpers() {
     let value_compiled = CompiledNaturalLoop::compile(&collection_value_plan()).unwrap();
 
     assert!(matches!(
-        value_compiled.run(&mut value_scratch, &view, 1),
+        unsafe { value_compiled.run(&mut value_scratch, &view, 1) },
         NaturalLoopOutcome::Complete { .. }
     ));
     assert_eq!(value(value_scratch[0]).as_float(), Some(2.5));
@@ -674,7 +681,7 @@ fn generated_list_access_emits_immediate_values_and_ordinals_without_helpers() {
     let mut key_scratch = [bits(Value::empty_relation()), int_bits(2)];
     let key_compiled = CompiledNaturalLoop::compile(&collection_key_plan()).unwrap();
     assert!(matches!(
-        key_compiled.run(&mut key_scratch, &view, 1),
+        unsafe { key_compiled.run(&mut key_scratch, &view, 1) },
         NaturalLoopOutcome::Complete { .. }
     ));
     assert_eq!(value(key_scratch[0]).as_int(), Some(2));
@@ -689,7 +696,7 @@ fn generated_list_index_emits_checked_values_without_calling_map_helper() {
     let mut scratch = [bits(Value::empty_relation()), int_bits(1)];
 
     assert!(matches!(
-        compiled.run(&mut scratch, &view, 1),
+        unsafe { compiled.run(&mut scratch, &view, 1) },
         NaturalLoopOutcome::Complete { .. }
     ));
     assert_eq!(value(scratch[0]).as_int(), Some(9));
@@ -700,7 +707,7 @@ fn generated_list_index_emits_checked_values_without_calling_map_helper() {
     for index in [int_bits(-1), int_bits(2), bits(Value::float(0.0).unwrap())] {
         let mut scratch = [bits(Value::empty_relation()), index];
         assert_eq!(
-            compiled.run(&mut scratch, &view, 1),
+            unsafe { compiled.run(&mut scratch, &view, 1) },
             NaturalLoopOutcome::SideExit,
         );
     }
@@ -737,7 +744,7 @@ fn generated_map_index_uses_native_canonical_order_for_immediate_keys() {
     ] {
         let mut scratch = [bits(Value::empty_relation()), borrowed_value_bits(&key)];
         assert_eq!(
-            compiled.run(&mut scratch, &view, 1),
+            unsafe { compiled.run(&mut scratch, &view, 1) },
             NaturalLoopOutcome::Complete {
                 instructions: 1,
                 modified_slots: 1,
@@ -749,7 +756,7 @@ fn generated_map_index_uses_native_canonical_order_for_immediate_keys() {
     for missing in [Value::int(0).unwrap(), Value::float(0.0).unwrap()] {
         let mut scratch = [bits(Value::bool(true)), borrowed_value_bits(&missing)];
         assert_eq!(
-            compiled.run(&mut scratch, &view, 1),
+            unsafe { compiled.run(&mut scratch, &view, 1) },
             NaturalLoopOutcome::SideExit,
         );
     }
@@ -780,7 +787,7 @@ fn generated_map_index_uses_canonical_helper_for_heap_keys() {
         let expected = map.map_get(key).unwrap();
         let mut scratch = [bits(Value::empty_relation()), borrowed_value_bits(key)];
         assert!(matches!(
-            compiled.run(&mut scratch, &view, 1),
+            unsafe { compiled.run(&mut scratch, &view, 1) },
             NaturalLoopOutcome::Complete { .. }
         ));
         assert_eq!(scratch[0], borrowed_value_bits(&expected), "key {key:?}");
@@ -788,7 +795,7 @@ fn generated_map_index_uses_canonical_helper_for_heap_keys() {
     for missing in [Value::string("missing"), Value::list([])] {
         let mut scratch = [bits(Value::empty_relation()), borrowed_value_bits(&missing)];
         assert_eq!(
-            compiled.run(&mut scratch, &view, 1),
+            unsafe { compiled.run(&mut scratch, &view, 1) },
             NaturalLoopOutcome::SideExit,
         );
     }
@@ -828,7 +835,7 @@ fn generated_map_index_matches_value_lookup_across_immediate_kinds() {
         let expected = map.map_get(key).unwrap();
         let mut scratch = [bits(Value::empty_relation()), borrowed_value_bits(key)];
         assert!(matches!(
-            compiled.run(&mut scratch, &view, 1),
+            unsafe { compiled.run(&mut scratch, &view, 1) },
             NaturalLoopOutcome::Complete { .. }
         ));
         assert_eq!(scratch[0], borrowed_value_bits(&expected), "key {key:?}");
@@ -836,7 +843,7 @@ fn generated_map_index_matches_value_lookup_across_immediate_kinds() {
     for missing in [Value::int(99).unwrap(), Value::float(0.5).unwrap()] {
         let mut scratch = [bits(Value::empty_relation()), borrowed_value_bits(&missing)];
         assert_eq!(
-            compiled.run(&mut scratch, &view, 1),
+            unsafe { compiled.run(&mut scratch, &view, 1) },
             NaturalLoopOutcome::SideExit,
         );
     }
@@ -856,7 +863,7 @@ fn generated_map_index_accepts_immediate_operands() {
     let mut scratch = [bits(Value::empty_relation())];
 
     assert!(matches!(
-        compiled.run(&mut scratch, &view, 1),
+        unsafe { compiled.run(&mut scratch, &view, 1) },
         NaturalLoopOutcome::Complete { .. }
     ));
     assert_eq!(value(scratch[0]).as_int(), Some(7));
@@ -884,7 +891,7 @@ fn generated_heap_map_index_helper_executes_concurrently() {
             let view = [NaturalLoopCollectionView::map(entries)];
             let mut scratch = [bits(Value::empty_relation()), borrowed_value_bits(&key)];
             barrier.wait();
-            let outcome = compiled.run(&mut scratch, &view, 1);
+            let outcome = unsafe { compiled.run(&mut scratch, &view, 1) };
             (outcome, scratch[0])
         }));
     }
@@ -910,7 +917,7 @@ fn generated_collection_access_preserves_heap_words_and_checks_ordinals() {
 
     let mut scratch = [bits(Value::empty_relation()), int_bits(0)];
     assert!(matches!(
-        compiled.run(&mut scratch, &view, 1),
+        unsafe { compiled.run(&mut scratch, &view, 1) },
         NaturalLoopOutcome::Complete { .. }
     ));
     assert_eq!(scratch[0], borrowed_value_bits(&values[0]));
@@ -918,7 +925,7 @@ fn generated_collection_access_preserves_heap_words_and_checks_ordinals() {
     for index in [int_bits(-1), int_bits(1)] {
         let mut scratch = [bits(Value::empty_relation()), index];
         assert_eq!(
-            compiled.run(&mut scratch, &view, 1),
+            unsafe { compiled.run(&mut scratch, &view, 1) },
             NaturalLoopOutcome::SideExit,
         );
     }
@@ -937,7 +944,7 @@ fn generated_map_access_emits_immediate_keys_and_values_without_helpers() {
     let mut key_scratch = [bits(Value::empty_relation()), int_bits(1)];
     let key_compiled = CompiledNaturalLoop::compile(&collection_key_plan()).unwrap();
     assert!(matches!(
-        key_compiled.run(&mut key_scratch, &view, 1),
+        unsafe { key_compiled.run(&mut key_scratch, &view, 1) },
         NaturalLoopOutcome::Complete { .. }
     ));
     assert_eq!(
@@ -948,7 +955,7 @@ fn generated_map_access_emits_immediate_keys_and_values_without_helpers() {
     let mut value_scratch = [bits(Value::empty_relation()), int_bits(0)];
     let value_compiled = CompiledNaturalLoop::compile(&collection_value_plan()).unwrap();
     assert!(matches!(
-        value_compiled.run(&mut value_scratch, &view, 1),
+        unsafe { value_compiled.run(&mut value_scratch, &view, 1) },
         NaturalLoopOutcome::Complete { .. }
     ));
     assert_eq!(value(value_scratch[0]).as_float(), Some(4.5));
@@ -961,7 +968,7 @@ fn generated_natural_loop_completes_compiler_shaped_accumulation() {
     let compiled = CompiledNaturalLoop::compile(&plan(16_384)).unwrap();
     let mut scratch = scratch(16_384);
     assert_eq!(
-        compiled.run(&mut scratch, &[], 16_384 * 9),
+        unsafe { compiled.run(&mut scratch, &[], 16_384 * 9) },
         NaturalLoopOutcome::Complete {
             instructions: 16_384 * 9,
             modified_slots: 0x7f,
@@ -981,7 +988,7 @@ fn generated_natural_loop_stops_at_an_exact_instruction_budget() {
     let compiled = CompiledNaturalLoop::compile(&plan(16_384)).unwrap();
     let mut scratch = scratch(16_384);
     assert_eq!(
-        compiled.run(&mut scratch, &[], 90),
+        unsafe { compiled.run(&mut scratch, &[], 90) },
         NaturalLoopOutcome::BudgetExhausted {
             instructions: 90,
             resume: 3,
@@ -1016,7 +1023,7 @@ fn generated_numeric_arithmetic_matches_float_and_mixed_value_semantics() {
             bits(Value::empty_relation()),
         ];
         assert_eq!(
-            compiled.run(&mut scratch, &[], 4),
+            unsafe { compiled.run(&mut scratch, &[], 4) },
             NaturalLoopOutcome::Complete {
                 instructions: 4,
                 modified_slots: 0x3c,
@@ -1046,7 +1053,7 @@ fn generated_numeric_arithmetic_side_exits_on_invalid_or_non_finite_results() {
             bits(Value::empty_relation()),
         ];
         assert_eq!(
-            compiled.run(&mut scratch, &[], 4),
+            unsafe { compiled.run(&mut scratch, &[], 4) },
             NaturalLoopOutcome::SideExit,
         );
     }
@@ -1069,7 +1076,7 @@ fn generated_numeric_division_matches_value_semantics() {
             bits(Value::empty_relation()),
         ];
         assert_eq!(
-            compiled.run(&mut scratch, &[], 1),
+            unsafe { compiled.run(&mut scratch, &[], 1) },
             NaturalLoopOutcome::Complete {
                 instructions: 1,
                 modified_slots: 0x4,
@@ -1096,7 +1103,7 @@ fn generated_numeric_remainder_matches_value_semantics() {
             bits(Value::empty_relation()),
         ];
         assert_eq!(
-            compiled.run(&mut scratch, &[], 1),
+            unsafe { compiled.run(&mut scratch, &[], 1) },
             NaturalLoopOutcome::Complete {
                 instructions: 1,
                 modified_slots: 0x4,
@@ -1123,7 +1130,7 @@ fn generated_numeric_division_and_remainder_side_exit_on_errors() {
                 bits(Value::empty_relation()),
             ];
             assert_eq!(
-                compiled.run(&mut scratch, &[], 1),
+                unsafe { compiled.run(&mut scratch, &[], 1) },
                 NaturalLoopOutcome::SideExit,
             );
         }
@@ -1135,7 +1142,7 @@ fn generated_numeric_division_and_remainder_side_exit_on_errors() {
         bits(Value::empty_relation()),
     ];
     assert_eq!(
-        divide.run(&mut scratch, &[], 1),
+        unsafe { divide.run(&mut scratch, &[], 1) },
         NaturalLoopOutcome::SideExit,
     );
     let mut scratch = [
@@ -1144,7 +1151,7 @@ fn generated_numeric_division_and_remainder_side_exit_on_errors() {
         bits(Value::empty_relation()),
     ];
     assert_eq!(
-        divide.run(&mut scratch, &[], 1),
+        unsafe { divide.run(&mut scratch, &[], 1) },
         NaturalLoopOutcome::SideExit,
     );
 }
@@ -1184,7 +1191,7 @@ fn generated_equality_calls_one_helper_for_heap_and_mixed_numeric_values() {
             bits(Value::empty_relation()),
         ];
         assert_eq!(
-            compiled.run(&mut scratch, &[], 1),
+            unsafe { compiled.run(&mut scratch, &[], 1) },
             NaturalLoopOutcome::Complete {
                 instructions: 1,
                 modified_slots: 4,
@@ -1207,7 +1214,7 @@ fn generated_language_ordering_calls_one_helper_for_heap_and_mixed_numeric_value
         bits(Value::empty_relation()),
     ];
     assert!(matches!(
-        not_equal.run(&mut scratch, &[], 1),
+        unsafe { not_equal.run(&mut scratch, &[], 1) },
         NaturalLoopOutcome::Complete { .. }
     ));
     assert_eq!(value(scratch[2]).as_bool(), Some(true));
@@ -1256,7 +1263,7 @@ fn generated_language_ordering_calls_one_helper_for_heap_and_mixed_numeric_value
                 bits(Value::empty_relation()),
             ];
             assert_eq!(
-                compiled.run(&mut scratch, &[], 1),
+                unsafe { compiled.run(&mut scratch, &[], 1) },
                 NaturalLoopOutcome::Complete {
                     instructions: 1,
                     modified_slots: 4,
@@ -1285,7 +1292,7 @@ fn generated_heap_equality_helper_executes_concurrently() {
                 bits(Value::empty_relation()),
             ];
             barrier.wait();
-            let outcome = compiled.run(&mut scratch, &[], 1);
+            let outcome = unsafe { compiled.run(&mut scratch, &[], 1) };
             (outcome, value(scratch[2]).as_bool())
         }));
     }
@@ -1322,7 +1329,7 @@ fn generated_language_ordering_helper_executes_concurrently() {
                 bits(Value::empty_relation()),
             ];
             barrier.wait();
-            let outcome = compiled.run(&mut scratch, &[], 1);
+            let outcome = unsafe { compiled.run(&mut scratch, &[], 1) };
             (outcome, value(scratch[2]).as_bool())
         }));
     }
@@ -1360,7 +1367,7 @@ fn generated_mixed_numeric_arithmetic_executes_concurrently() {
                 bits(Value::empty_relation()),
             ];
             barrier.wait();
-            let outcome = compiled.run(&mut scratch, &[], 4);
+            let outcome = unsafe { compiled.run(&mut scratch, &[], 4) };
             (outcome, value(scratch[5]).as_float())
         }));
     }
@@ -1395,7 +1402,7 @@ fn generated_float_remainder_helper_executes_concurrently() {
                 bits(Value::empty_relation()),
             ];
             barrier.wait();
-            let outcome = compiled.run(&mut scratch, &[], 1);
+            let outcome = unsafe { compiled.run(&mut scratch, &[], 1) };
             (outcome, value(scratch[2]).as_float())
         }));
     }
@@ -1424,7 +1431,7 @@ fn generated_natural_loop_executes_concurrently() {
         threads.push(std::thread::spawn(move || {
             let mut scratch = scratch(16_384);
             barrier.wait();
-            let outcome = compiled.run(&mut scratch, &[], 16_384 * 9);
+            let outcome = unsafe { compiled.run(&mut scratch, &[], 16_384 * 9) };
             (outcome, value(scratch[TOTAL as usize]).as_int())
         }));
     }
