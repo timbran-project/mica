@@ -420,6 +420,19 @@ mod tests {
         }
     }
 
+    async fn await_query_value(host: &TestHost, actor: Identity, source: &str, expected: Value) {
+        compio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if query_as(host, actor, source).await == expected {
+                    return;
+                }
+                compio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("background cleanup did not produce {expected:?} for {source}"));
+    }
+
     #[test]
     fn request_facts_include_core_request_neighbourhood() {
         let request_id = Identity::new(0x00eb_0000_0000_0001).unwrap();
@@ -599,17 +612,29 @@ mod tests {
             }
 
             assert!(task.cancel().await.is_none());
-            assert_eq!(
-                query_as(&host, web, "return HttpRequest(?request)").await,
+            await_query_value(
+                &host,
+                web,
+                "return HttpRequest(?request)",
                 Value::relation(
                     [Symbol::intern("request")],
                     [Tuple::from([Value::identity(live_request)])],
                 )
-                .unwrap()
-            );
+                .unwrap(),
+            )
+            .await;
             assert_ne!(cancelled_request, live_request);
 
             drop(live_scope);
+            await_query_value(
+                &host,
+                web,
+                "return [HttpRequest(?request), EndpointOpen(?endpoint)]",
+                Value::list(["request", "endpoint"].map(|heading| {
+                    Value::relation([Symbol::intern(heading)], std::iter::empty::<Tuple>()).unwrap()
+                })),
+            )
+            .await;
             assert_request_lifecycle_empty(&host, web).await;
         });
     }
