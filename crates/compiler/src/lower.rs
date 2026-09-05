@@ -803,9 +803,16 @@ impl<'a> Lower<'a> {
     }
 
     fn lower_selector_after_colon(&mut self, node: &CstNode) -> Expr {
-        if let Some(group) = self
-            .node_children(node)
-            .find(|child| child.kind == SyntaxKind::GroupExpr)
+        if let Some(group) = node
+            .children
+            .iter()
+            .skip_while(|child| {
+                !matches!(child, CstElement::Token(token) if token.kind == SyntaxKind::Colon)
+            })
+            .find_map(|child| match child {
+                CstElement::Node(group) if group.kind == SyntaxKind::GroupExpr => Some(group),
+                _ => None,
+            })
         {
             return self.lower_expr(group);
         }

@@ -185,5 +185,11 @@ roles are usually clearer for calls involving several identities with different 
 selector can also be computed with `:(selector)(actor: person, request: change)`, or with
 `change:(selector)(actor: person)` for a receiver call.
 
+Evaluation follows source order: a receiver expression runs first, then a computed selector, then
+the arguments from left to right. Parentheses group the receiver without changing that order.
+Named roles are arranged for method selection after their values have been evaluated; their names
+do not change the order of side effects. Spliced lists and role maps are also evaluated where they
+appear in the call.
+
 See [Verbs, Roles, and Dispatch](./verbs-roles-dispatch.md) for method selection and prototype
 delegation.

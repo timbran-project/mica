@@ -378,9 +378,7 @@ impl<'a> KindInference<'a> {
                     returns: preceding.returns.union(finally.returns),
                 }
             }
-            HirExpr::Function { name: None, .. } => {
-                KindFlow::value(KindSet::exact(ValueKind::Function))
-            }
+            HirExpr::Function { .. } => KindFlow::value(KindSet::exact(ValueKind::Function)),
             HirExpr::Call { callee, args, .. } => {
                 let mut flow = self.flow(callee);
                 for arg in args {
@@ -422,10 +420,9 @@ impl<'a> KindInference<'a> {
             HirExpr::ExternalRef { name, .. } if name == "none" => {
                 KindFlow::value(KindSet::exact(ValueKind::Relation))
             }
-            HirExpr::ExternalRef { .. }
-            | HirExpr::QueryVar { .. }
-            | HirExpr::Hole { .. }
-            | HirExpr::Function { name: Some(_), .. } => KindFlow::value(KindSet::ALL),
+            HirExpr::ExternalRef { .. } | HirExpr::QueryVar { .. } | HirExpr::Hole { .. } => {
+                KindFlow::value(KindSet::ALL)
+            }
         }
     }
 

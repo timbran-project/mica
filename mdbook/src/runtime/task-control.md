@@ -50,6 +50,11 @@ The optional `after` duration delays the child's invocation. The parent commits 
 can observe the parent's published facts. The parent resumes once the child is submitted; it does
 not wait for the child to finish and does not receive the child's return value.
 
+The parent evaluates the dispatch target's receiver, selector, and arguments in source order,
+followed by the `after` expression. These produce the values stored in the spawn request. A later
+assignment in the parent does not change the child's arguments. The child selects its method when
+its invocation runs, using the live method definitions and its authority at that point.
+
 ```mica
 assert AssignedTo(#task17, #worker)
 let child = spawn :work(agent: #worker, task: #task17)

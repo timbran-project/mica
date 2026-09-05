@@ -138,9 +138,9 @@ fn describe(item, ?style = :brief, @rest)
 end
 ```
 
-Named local functions can be called directly in the same task body. Anonymous functions are values,
-so they can be passed, returned, assigned, and called through aliases. They capture local values
-when the function value is created:
+Named and anonymous local functions are callable values. Both can be passed, returned, assigned,
+and called through aliases. A named declaration also binds its name in the enclosing scope. They
+capture local values when the function value is created:
 
 ```mica
 let make_adder = fn(base) => fn(value) => base + value
@@ -164,8 +164,20 @@ require charge(10) == 20
 return charge(10)
 ```
 
-Use an anonymous function when you need a callable value to pass, return, or store in a local
-collection. The unannotated brace form `{value} => value + 1` is also a function expression.
+Saving a named function in another binding retains that callable even if its original name is
+subsequently reassigned:
+
+```mica,eval
+fn increment(value) => value + 1
+const saved = increment
+increment = fn(value) => value + 10
+require saved(3) == 4
+require increment(3) == 13
+```
+
+Use an anonymous function when the surrounding code already supplies a useful name or when passing
+a short calculation directly to another function. The unannotated brace form
+`{value} => value + 1` is also a function expression.
 Use `fn(value: int) -> int => value + 1` when annotations are needed. These local function values
 cannot be persisted in relation tuples; their lifetime is tied to the VM that created them.
 

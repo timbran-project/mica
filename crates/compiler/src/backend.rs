@@ -1737,28 +1737,20 @@ impl<'a> ProgramCompiler<'a> {
                 catches,
                 finally,
             } => self.compile_try(*id, body, catches, finally),
-            HirExpr::Function { id, .. } => {
+            HirExpr::Function { id, name, .. } => {
                 let function = self.compile_function(expr)?;
-                let HirExpr::Function { name, .. } = expr else {
-                    unreachable!();
-                };
-                if let Some(binding) = name {
-                    if function.captures.is_empty() {
-                        self.functions.insert(*binding, function);
-                        let dst = self.alloc_register();
-                        self.emit(Instruction::Load {
-                            dst,
-                            value: Value::unit(),
-                        });
-                        Ok(dst)
-                    } else {
-                        let dst = self.emit_function_value(*id, function)?;
-                        self.locals.insert(*binding, dst);
-                        Ok(dst)
-                    }
-                } else {
-                    self.emit_function_value(*id, function)
+                if let Some(binding) = name
+                    && function.captures.is_empty()
+                    && !self.semantic.bindings[binding.0 as usize].assigned
+                {
+                    self.functions.insert(*binding, function.clone());
                 }
+                let dst = self.emit_function_value(*id, function)?;
+                let Some(binding) = name else {
+                    return Ok(dst);
+                };
+                self.locals.insert(*binding, dst);
+                Ok(self.preserve_assigned_local(*binding, dst))
             }
             HirExpr::RoleDispatch { id, selector, args } => {
                 self.compile_dispatch(*id, selector, args, None)
@@ -3087,8 +3079,8 @@ impl<'a> ProgramCompiler<'a> {
             ));
         }
         let has_splice = args.iter().any(|arg| arg.splice);
-        let selector = self.compile_expr_for_operand(selector)?;
         let receiver = self.compile_expr_for_value(receiver)?;
+        let selector = self.compile_expr_for_operand(selector)?;
         let dst = self.alloc_register();
         if has_splice {
             let mut items = Vec::with_capacity(args.len() + 1);
@@ -4735,11 +4727,11 @@ impl<'a> ProgramCompiler<'a> {
             .context
             .method_relations
             .ok_or_else(|| self.unsupported(id, "method relation ids are not configured"))?;
+        let receiver = receiver
+            .map(|receiver| self.compile_expr_for_operand(receiver))
+            .transpose()?;
         let selector = self.compile_expr_for_operand(selector)?;
         if args.iter().any(|arg| arg.splice) {
-            let receiver = receiver
-                .map(|receiver| self.compile_expr_for_value(receiver).map(Operand::Register))
-                .transpose()?;
             let roles = self.compile_role_map_items(receiver, args)?;
             let roles = self.alloc_map(roles);
             let dst = self.alloc_register();
@@ -4755,10 +4747,7 @@ impl<'a> ProgramCompiler<'a> {
         }
         let mut roles = Vec::new();
         if let Some(receiver) = receiver {
-            roles.push((
-                Value::symbol(Symbol::intern("receiver")),
-                Operand::Register(self.compile_expr_for_value(receiver)?),
-            ));
+            roles.push((Value::symbol(Symbol::intern("receiver")), receiver));
         }
         for arg in args {
             let Some(role) = &arg.role else {
@@ -4811,11 +4800,11 @@ impl<'a> ProgramCompiler<'a> {
         if receiver.is_none() && args.iter().all(|arg| arg.role.is_none()) {
             return self.compile_positional_spawn(id, selector, args, delay);
         }
+        let receiver = receiver
+            .map(|receiver| self.compile_expr_for_operand(receiver))
+            .transpose()?;
         let selector = self.compile_expr_for_operand(selector)?;
         if args.iter().any(|arg| arg.splice) {
-            let receiver = receiver
-                .map(|receiver| self.compile_expr_for_value(receiver).map(Operand::Register))
-                .transpose()?;
             let roles = self.compile_role_map_items(receiver, args)?;
             let roles = self.alloc_map(roles);
             let delay = delay
@@ -4832,10 +4821,7 @@ impl<'a> ProgramCompiler<'a> {
         }
         let mut roles = Vec::new();
         if let Some(receiver) = receiver {
-            roles.push((
-                Value::symbol(Symbol::intern("receiver")),
-                Operand::Register(self.compile_expr_for_value(receiver)?),
-            ));
+            roles.push((Value::symbol(Symbol::intern("receiver")), receiver));
         }
         for arg in args {
             let Some(role) = &arg.role else {
@@ -4874,12 +4860,12 @@ impl<'a> ProgramCompiler<'a> {
             );
         }
         let selector = self.compile_expr_for_operand(selector)?;
-        let delay = delay
-            .map(|delay| self.compile_expr_for_operand(delay))
-            .transpose()?;
         let dst = self.alloc_register();
         if args.iter().any(|arg| arg.splice) {
             let args = self.compile_arg_items(args)?;
+            let delay = delay
+                .map(|delay| self.compile_expr_for_operand(delay))
+                .transpose()?;
             self.emit(Instruction::SpawnPositionalDispatchDynamic {
                 dst,
                 selector,
@@ -4891,6 +4877,9 @@ impl<'a> ProgramCompiler<'a> {
                 .iter()
                 .map(|arg| self.compile_arg_operand(arg))
                 .collect::<Result<Vec<_>, _>>()?;
+            let delay = delay
+                .map(|delay| self.compile_expr_for_operand(delay))
+                .transpose()?;
             self.emit(Instruction::SpawnPositionalDispatch {
                 dst,
                 selector,
@@ -4915,16 +4904,16 @@ impl<'a> ProgramCompiler<'a> {
                 "receiver positional spawn calls do not accept named arguments",
             ));
         }
-        let selector = self.compile_expr_for_operand(selector)?;
         let receiver = self.compile_expr_for_value(receiver)?;
-        let delay = delay
-            .map(|delay| self.compile_expr_for_operand(delay))
-            .transpose()?;
+        let selector = self.compile_expr_for_operand(selector)?;
         let dst = self.alloc_register();
         if args.iter().any(|arg| arg.splice) {
             let mut items = Vec::with_capacity(args.len() + 1);
             items.push(ListItem::Value(Operand::Register(receiver)));
             items.extend(self.compile_arg_items(args)?);
+            let delay = delay
+                .map(|delay| self.compile_expr_for_operand(delay))
+                .transpose()?;
             self.emit(Instruction::SpawnPositionalDispatchDynamic {
                 dst,
                 selector,
@@ -4937,6 +4926,9 @@ impl<'a> ProgramCompiler<'a> {
             for arg in args {
                 operands.push(self.compile_arg_operand(arg)?);
             }
+            let delay = delay
+                .map(|delay| self.compile_expr_for_operand(delay))
+                .transpose()?;
             self.emit(Instruction::SpawnPositionalDispatch {
                 dst,
                 selector,
@@ -7110,14 +7102,14 @@ mod tests {
     }
 
     #[test]
-    fn named_function_declaration_expressions_are_not_proven_function_values() {
+    fn named_function_declaration_expressions_produce_function_values() {
         let compiled = compile_source(
             "let callback: function = fn inner() => 1\nreturn callback",
             &CompileContext::new(),
         )
         .unwrap();
 
-        assert_eq!(count_kind_checks(&compiled.program), 1);
+        assert_eq!(count_kind_checks(&compiled.program), 0);
     }
 
     #[test]
@@ -7683,7 +7675,8 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(count_kind_checks(&compiled.program), 1);
+        // The function body is reachable through its value wrapper and its direct call.
+        assert_eq!(count_kind_checks(&compiled.program), 2);
     }
 
     #[test]
@@ -7750,11 +7743,18 @@ mod tests {
         collect_kind_checks(&compiled.program, &mut checks);
         assert_eq!(
             checks,
-            vec![(
-                ValueKind::Int,
-                KindCheckSite::Parameter,
-                Symbol::intern("value")
-            )]
+            vec![
+                (
+                    ValueKind::Int,
+                    KindCheckSite::Parameter,
+                    Symbol::intern("value")
+                ),
+                (
+                    ValueKind::Int,
+                    KindCheckSite::Parameter,
+                    Symbol::intern("value")
+                ),
+            ]
         );
 
         assert!(matches!(
@@ -7806,7 +7806,8 @@ mod tests {
             &context,
         )
         .unwrap();
-        assert_eq!(count_kind_checks(&exact.program), 0);
+        // A call through the function value checks its supplied argument; direct exact calls do not.
+        assert_eq!(count_kind_checks(&exact.program), 1);
 
         let dynamic = compile_source(
             "fn pick(?value: int = opaque()) -> int => value
@@ -7814,7 +7815,7 @@ mod tests {
             &context,
         )
         .unwrap();
-        assert_eq!(count_kind_checks(&dynamic.program), 1);
+        assert_eq!(count_kind_checks(&dynamic.program), 2);
 
         let dynamic = compile_source(
             "fn pick(?value: int = 1) -> int => value
@@ -7822,7 +7823,7 @@ mod tests {
             &context,
         )
         .unwrap();
-        assert_eq!(count_kind_checks(&dynamic.program), 1);
+        assert_eq!(count_kind_checks(&dynamic.program), 2);
 
         assert!(matches!(
             compile_source("fn missing(?value: int) => value", &context),
@@ -7872,7 +7873,8 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(count_kind_checks(&compiled.program), 1);
+        // One check belongs to the direct call and one to the separately callable value wrapper.
+        assert_eq!(count_kind_checks(&compiled.program), 2);
     }
 
     #[test]

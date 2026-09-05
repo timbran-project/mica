@@ -326,6 +326,149 @@ fn expressions_preserve_values_evaluated_before_later_assignments() {
 }
 
 #[test]
+fn named_functions_support_reassignment_and_value_calls() {
+    for (source, expected) in [
+        (
+            "fn transform(value) => value + 1\ntransform = fn(value) => value + 2\nreturn transform(3)",
+            5,
+        ),
+        (
+            "fn transform(value) => value + 1\nreturn transform(begin\ntransform = fn(value) => value + 2\n3\nend)",
+            4,
+        ),
+        (
+            "fn transform(value) => value + 1\nlet saved = transform\nreturn saved(3)",
+            4,
+        ),
+        (
+            "fn transform(value) => value + 1\nfn apply(value) => transform(value)\nreturn apply(3)",
+            4,
+        ),
+        (
+            "let saved: function = fn transform(value) => value + 1\nreturn saved(3)",
+            4,
+        ),
+        (
+            "let offset = 1\nlet saved: function = fn transform(value) => value + offset\nreturn saved(3)",
+            4,
+        ),
+    ] {
+        let mut runner = SourceRunner::new_empty();
+        let report = runner.run_source(source).unwrap();
+        assert_completed_value(&report, Value::int(expected).unwrap());
+    }
+}
+
+#[test]
+fn receiver_dispatch_evaluates_receiver_selector_and_arguments_in_source_order() {
+    let mut runner = SourceRunner::new_empty();
+    runner
+        .run_filein("verb ordered(receiver, argument)\nreturn [receiver, argument]\nend")
+        .unwrap();
+    let report = runner.run_source("return (1 + 2):ordered(4)").unwrap();
+    assert_completed_value(
+        &report,
+        Value::list([Value::int(3).unwrap(), Value::int(4).unwrap()]),
+    );
+    for call in [
+        "(order = order * 10 + 1):(begin\norder = order * 10 + 2\n:ordered\nend)(order = order * 10 + 3)",
+        "(order = order * 10 + 1):(begin\norder = order * 10 + 2\n:ordered\nend)(@[order = order * 10 + 3])",
+        "(order = order * 10 + 1):(begin\norder = order * 10 + 2\n:ordered\nend)(argument: order = order * 10 + 3)",
+        "(order = order * 10 + 1):(begin\norder = order * 10 + 2\n:ordered\nend)(argument: order = order * 10 + 3, @{})",
+    ] {
+        let source = format!("let order = 0\nlet result = {call}\nreturn [result, order]");
+        let report = runner.run_source(&source).unwrap();
+        assert_completed_value(
+            &report,
+            Value::list([
+                Value::list([Value::int(1).unwrap(), Value::int(123).unwrap()]),
+                Value::int(123).unwrap(),
+            ]),
+        );
+    }
+}
+
+#[test]
+fn spawn_evaluates_target_before_delay_in_source_order() {
+    for (target, receiver, named) in [
+        (
+            ":(begin\norder = order * 10 + 1\n:ordered\nend)(order = order * 10 + 2)",
+            false,
+            false,
+        ),
+        (
+            ":(begin\norder = order * 10 + 1\n:ordered\nend)(@[order = order * 10 + 2])",
+            false,
+            false,
+        ),
+        (
+            ":(begin\norder = order * 10 + 1\n:ordered\nend)(argument: order = order * 10 + 2)",
+            false,
+            true,
+        ),
+        (
+            ":(begin\norder = order * 10 + 1\n:ordered\nend)(argument: order = order * 10 + 2, @{})",
+            false,
+            true,
+        ),
+        (
+            "(order = order * 10 + 1):(begin\norder = order * 10 + 2\n:ordered\nend)(order = order * 10 + 3)",
+            true,
+            false,
+        ),
+        (
+            "(order = order * 10 + 1):(begin\norder = order * 10 + 2\n:ordered\nend)(@[order = order * 10 + 3])",
+            true,
+            false,
+        ),
+        (
+            "(order = order * 10 + 1):(begin\norder = order * 10 + 2\n:ordered\nend)(argument: order = order * 10 + 3)",
+            true,
+            true,
+        ),
+        (
+            "(order = order * 10 + 1):(begin\norder = order * 10 + 2\n:ordered\nend)(argument: order = order * 10 + 3, @{})",
+            true,
+            true,
+        ),
+    ] {
+        let mut runner = SourceRunner::new_empty();
+        let source = format!("let order = 0\nspawn {target} after (order = order * 10 + 4)");
+        let report = runner.run_source(&source).unwrap();
+        let TaskOutcome::Suspended {
+            kind: SuspendKind::Spawn(request),
+            ..
+        } = report.outcome
+        else {
+            panic!("expected spawn request for {source}");
+        };
+        assert_eq!(request.selector, Symbol::intern("ordered"));
+        assert_eq!(
+            request.delay_millis,
+            Some(if receiver { 1_234_000 } else { 124_000 }),
+            "{source}"
+        );
+        let argument = Value::int(if receiver { 123 } else { 12 }).unwrap();
+        let expected = if named {
+            let mut roles = vec![(Symbol::intern("argument"), argument)];
+            if receiver {
+                roles.push((Symbol::intern("receiver"), Value::int(1).unwrap()));
+            }
+            roles.sort_unstable_by_key(|(role, _)| *role);
+            SpawnTarget::NamedRoles(roles)
+        } else {
+            let mut args = Vec::new();
+            if receiver {
+                args.push(Value::int(1).unwrap());
+            }
+            args.push(argument);
+            SpawnTarget::PositionalArgs(args)
+        };
+        assert_eq!(request.target, expected, "{source}");
+    }
+}
+
+#[test]
 fn runner_executes_source_against_empty_kernel() {
     let mut runner = SourceRunner::new_empty();
     let report = runner.run_source("return 1 + 2").unwrap();
