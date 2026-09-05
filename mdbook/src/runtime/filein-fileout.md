@@ -40,6 +40,10 @@ verb page_style()
 end
 ```
 
+The path uses ordinary Mica string escaping, including `\u{...}` for Unicode characters. The loader
+inserts the file's contents as one string value. Quotes, backslashes, newlines, and control
+characters in the asset retain their meaning as text; they do not become Mica expressions.
+
 Fileout preserves the `include_text(...)` call in stored verb source rather than emitting the
 included text inline. Filing the output back in therefore requires the referenced asset file to be
 present beside the fileout source.

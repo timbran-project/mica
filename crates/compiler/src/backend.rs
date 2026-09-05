@@ -1812,10 +1812,21 @@ impl<'a> ProgramCompiler<'a> {
 
     fn compile_unary(
         &mut self,
-        _id: NodeId,
+        id: NodeId,
         op: UnaryOp,
         expr: &HirExpr,
     ) -> Result<Register, CompileError> {
+        if op == UnaryOp::Neg
+            && let HirExpr::Literal {
+                value: Literal::Int(text),
+                ..
+            } = expr
+        {
+            let value = self.literal_value(id, &Literal::Int(format!("-{text}")))?;
+            let dst = self.alloc_register();
+            self.emit(Instruction::Load { dst, value });
+            return Ok(dst);
+        }
         let op = match op {
             UnaryOp::Not => RuntimeUnaryOp::Not,
             UnaryOp::Neg => RuntimeUnaryOp::Neg,

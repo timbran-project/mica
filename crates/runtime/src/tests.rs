@@ -1313,6 +1313,65 @@ fn runner_empty_relation_results_are_falsey() {
 }
 
 #[test]
+fn integer_literal_round_trips_include_the_minimum_value() {
+    let mut runner = SourceRunner::new_empty();
+    for number in [-(1_i64 << 55), -(1_i64 << 55) + 1, (1_i64 << 55) - 1] {
+        let expected = Value::int(number).unwrap();
+        let literal = number.to_string();
+        assert_completed_value(
+            &runner.run_source(&format!("return {literal}")).unwrap(),
+            expected.clone(),
+        );
+        assert_completed_value(
+            &runner
+                .run_source(&format!("return from_literal({literal:?})"))
+                .unwrap(),
+            Value::result_ok(expected),
+        );
+    }
+    for literal in ["36028797018963968", "-36028797018963969"] {
+        assert!(runner.run_source(literal).is_err(), "{literal}");
+    }
+}
+
+#[test]
+fn string_literals_round_trip_control_characters_and_unicode() {
+    let mut runner = SourceRunner::new_empty();
+    for text in [
+        "\0\u{1}\u{8}\u{b}\u{c}\u{7f}\u{85}",
+        "line\nreturn\rtab\tquote\"slash\\",
+        "Montréal\u{200d}🦀",
+        "\\u{41}\\0",
+    ] {
+        let source = format!(
+            "return to_literal(\"{}\")",
+            text.replace('\\', "\\\\").replace('"', "\\\"")
+        );
+        let report = runner.run_source(&source).unwrap();
+        let TaskOutcome::Complete { value, .. } = report.outcome else {
+            panic!("literal serialization must complete");
+        };
+        let literal = value.with_str(str::to_owned).unwrap();
+        assert_completed_value(
+            &runner.run_source(&format!("return {literal}")).unwrap(),
+            Value::string(text),
+        );
+        assert_completed_value(
+            &runner
+                .run_source(&format!("return from_literal({literal:?})"))
+                .unwrap(),
+            Value::result_ok(Value::string(text)),
+        );
+    }
+    for text in [r"\u{}", r"\u{d800}", r"\u{110000}", r"\u{xyz}", r"\u{41"] {
+        assert_completed_value(
+            &runner.run_source(&format!("return \"{text}\"")).unwrap(),
+            Value::string(text),
+        );
+    }
+}
+
+#[test]
 fn runner_to_literal_renders_parseable_value_source() {
     let mut runner = SourceRunner::new_empty();
     runner.run_source("make_identity(:take_event)").unwrap();
@@ -6137,6 +6196,33 @@ fn runner_filein_grant_blocks_fileout_as_grant_blocks() {
     let effect = imported.run_source("return CanEffect(#web)").unwrap();
     assert_relation_query_is_true(&read);
     assert_relation_query_is_true(&effect);
+}
+
+#[test]
+fn filein_include_paths_use_string_literal_escapes() {
+    for (literal, path) in [
+        (r#""\é.txt""#, "\\é.txt"),
+        (r#""caf\u{e9}.txt""#, "café.txt"),
+        (r#""\q.txt""#, "\\q.txt"),
+    ] {
+        let mut runner = SourceRunner::new_empty();
+        let text = "Montréal\0\u{1}\n";
+        runner
+            .run_filein_with_unit_and_include_loader(
+                Symbol::intern("asset"),
+                &format!("verb asset()\nreturn include_text({literal})\nend"),
+                FileinMode::Add,
+                |actual| {
+                    assert_eq!(actual, path);
+                    Ok(text.to_owned())
+                },
+            )
+            .unwrap();
+        assert_completed_value(
+            &runner.run_source("return :asset()").unwrap(),
+            Value::string(text),
+        );
+    }
 }
 
 #[test]

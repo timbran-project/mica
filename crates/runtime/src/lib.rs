@@ -2880,43 +2880,38 @@ fn skip_ascii_space(source: &str, mut index: usize) -> usize {
 }
 
 fn skip_string_literal(source: &str, start: usize) -> Result<usize, SourceTaskError> {
-    parse_filein_string_literal(source, start).map(|(end, _)| end)
+    let mut escaped = false;
+    for (offset, ch) in source[start + 1..].char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match ch {
+            '\\' => escaped = true,
+            '"' => return Ok(start + offset + 2),
+            _ => {}
+        }
+    }
+    Err(unterminated_string_error())
 }
 
 fn parse_filein_string_literal(
     source: &str,
     start: usize,
 ) -> Result<(usize, String), SourceTaskError> {
-    let bytes = source.as_bytes();
-    let mut index = start + 1;
-    let mut value = String::new();
-    while index < bytes.len() {
-        match bytes[index] {
-            b'"' => return Ok((index + 1, value)),
-            b'\\' => {
-                index += 1;
-                let Some(escaped) = bytes.get(index).copied() else {
-                    return Err(unterminated_string_error());
-                };
-                let ch = match escaped {
-                    b'"' => '"',
-                    b'\\' => '\\',
-                    b'n' => '\n',
-                    b'r' => '\r',
-                    b't' => '\t',
-                    other => other as char,
-                };
-                value.push(ch);
-                index += 1;
-            }
-            _ => {
-                let ch = source[index..].chars().next().unwrap();
-                value.push(ch);
-                index += ch.len_utf8();
-            }
-        }
-    }
-    Err(unterminated_string_error())
+    let end = skip_string_literal(source, start)?;
+    let ast = parse_ast(&source[start..end]);
+    let Some(Item::Expr {
+        expr: Expr::Literal {
+            value: Literal::String(value),
+            ..
+        },
+        ..
+    }) = ast.items.into_iter().next()
+    else {
+        return Err(include_text_parse_error());
+    };
+    Ok((end, value))
 }
 
 fn unterminated_string_error() -> SourceTaskError {
@@ -5365,6 +5360,13 @@ fn negated_literal_value(
     context: &mut BuiltinContext<'_, '_>,
     expr: &Expr,
 ) -> Result<Option<Value>, RuntimeError> {
+    if let Expr::Literal {
+        value: Literal::Int(text),
+        ..
+    } = expr
+    {
+        return literal_value(&Literal::Int(format!("-{text}")));
+    }
     let Some(value) = value_from_literal_expr(context, expr)? else {
         return Ok(None);
     };

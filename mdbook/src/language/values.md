@@ -123,15 +123,28 @@ Use `index_or(collection, index, default)` when absence is expected and should p
 ## Strings, Bytes, and Names
 
 Strings use double quotes and contain Unicode text. Supported escapes are `\"`, `\\`, `\n`, `\r`,
-and `\t`. Other backslash sequences are preserved literally; they do not introduce numeric or
-Unicode escapes. Write Unicode characters directly in the source.
+`\t`, and `\0` (the null character). `\u{...}` accepts one to six hexadecimal digits naming a Unicode
+scalar value, such as `\u{e9}` for `é` or `\u{1f980}` for `🦀`. Unicode characters may also appear
+directly in source. Other backslash sequences, including malformed Unicode escapes, are preserved
+literally. To include the text of a valid escape, escape its backslash: `"\\u{e9}"` contains six
+characters, starting with a backslash.
 
 ```mica,eval
 let label = "Montréal"
 let message = "First line\nSecond line"
 let quoted = "She said \"ready\"."
 require label != "Montreal"
+require label == "Montr\u{e9}al"
 return [label, message, quoted]
+```
+
+`to_literal` writes string contents using these escapes, including control characters that would
+otherwise be invisible in source. `from_literal` decodes that text into `ok(value)` or returns
+`err(problem)` for an invalid literal. This boundary preserves the value's contents:
+
+```mica,eval
+let text = "header\0body\u{1}\nMontréal"
+require from_literal(to_literal(text)) == ok(text)
 ```
 
 Byte literals contain **URL-safe, padded base64**, not text to encode as bytes. For example,
@@ -259,6 +272,16 @@ Mica has two numeric value families: integers and floats.
 Mica `Float` has less integer precision than Mica `Int`. Binary32 can represent every integer up to
 `2^24` exactly, but above that some integers round to the nearest representable float. A 56-bit Mica
 integer always carries more precision than a binary32 float.
+
+Both integer endpoints have decimal source literals. The negative endpoint is one unit farther
+from zero than the positive endpoint, so its sign is part of validating the literal:
+
+```mica,eval
+let minimum = -36028797018963968
+let maximum = 36028797018963967
+require minimum + maximum == -1
+require from_literal(to_literal(minimum)) == ok(minimum)
+```
 
 ### Numeric Equality And Key Identity
 

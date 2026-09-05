@@ -1843,6 +1843,19 @@ fn unquote(text: &str) -> String {
             Some('n') => out.push('\n'),
             Some('r') => out.push('\r'),
             Some('t') => out.push('\t'),
+            Some('0') => out.push('\0'),
+            Some('u')
+                if let Some((hex, tail)) = chars.as_str().strip_prefix('{').and_then(|rest| {
+                    let end = rest.bytes().take(7).position(|byte| byte == b'}')?;
+                    Some((&rest[..end], &rest[end + 1..]))
+                }) && (1..=6).contains(&hex.len())
+                    && hex.as_bytes().iter().all(u8::is_ascii_hexdigit)
+                    && let Ok(code) = u32::from_str_radix(hex, 16)
+                    && let Some(ch) = char::from_u32(code) =>
+            {
+                out.push(ch);
+                chars = tail.chars();
+            }
             Some(other) => {
                 out.push('\\');
                 out.push(other);
