@@ -230,14 +230,15 @@ impl<'a> KindInference<'a> {
                 HirPlace::Invalid { .. } => self.flow(value).with_normal(KindSet::ALL),
             },
             HirExpr::RelationAtom(atom) => {
-                let normal =
-                    if atom.args.iter().any(|arg| {
-                        matches!(arg.value, HirExpr::QueryVar { .. } | HirExpr::Hole { .. })
-                    }) {
-                        KindSet::exact(ValueKind::Relation)
-                    } else {
-                        KindSet::exact(ValueKind::Bool)
-                    };
+                let normal = if atom
+                    .args
+                    .iter()
+                    .any(|arg| matches!(arg.value, HirExpr::QueryVar { .. }))
+                {
+                    KindSet::exact(ValueKind::Relation)
+                } else {
+                    KindSet::exact(ValueKind::Bool)
+                };
                 self.args(&atom.args).with_normal(normal)
             }
             HirExpr::FactChange { atom, .. } => self

@@ -4975,7 +4975,10 @@ impl<'a> ProgramCompiler<'a> {
         let bindings = atom
             .args
             .iter()
-            .map(|arg| self.compile_arg_operand(arg).map(Some))
+            .map(|arg| match arg.value {
+                HirExpr::Hole { .. } => Ok(None),
+                _ => self.compile_arg_operand(arg).map(Some),
+            })
             .collect::<Result<Vec<_>, _>>()?;
         self.emit(Instruction::ScanExists {
             dst,

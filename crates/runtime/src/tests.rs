@@ -626,6 +626,49 @@ fn delegated_roles_can_grant_environment_reads() {
 }
 
 #[test]
+fn wildcard_predicates_return_booleans_with_or_without_argument_splicing() {
+    let mut runner = SourceRunner::new_empty();
+    runner
+        .run_source("make_relation(:Reading, 2)\nassert Reading(:sensor, 20)")
+        .unwrap();
+    for (source, expected) in [
+        ("Reading(_, 20)", true),
+        ("Reading(:sensor, _)", true),
+        ("Reading(_, _)", true),
+        ("Reading(_, 21)", false),
+        ("Reading(@[], _, 20)", true),
+        ("Reading(@[:sensor], _)", true),
+    ] {
+        let report = runner.run_source(source).unwrap();
+        assert_completed_value(&report, Value::bool(expected));
+    }
+    let report = runner
+        .run_source("fn has_reading() -> bool\nreturn Reading(_, 20)\nend\nreturn has_reading()")
+        .unwrap();
+    assert_completed_value(&report, Value::bool(true));
+}
+
+#[test]
+fn string_slices_raise_index_errors_for_invalid_integer_bounds() {
+    let mut runner = SourceRunner::new_empty();
+    for (start, end) in [(-1, 1), (0, -1), (2, 1), (0, 4)] {
+        let report = runner
+            .run_source(&format!(
+                "try\nstring_slice(\"AéB\", {start}, {end})\ncatch E_INDEX as problem\nreturn problem.value\nend"
+            ))
+            .unwrap();
+        assert_completed_value(
+            &report,
+            Value::option_some(Value::list([
+                Value::string("AéB"),
+                Value::int(start).unwrap(),
+                Value::int(end).unwrap(),
+            ])),
+        );
+    }
+}
+
+#[test]
 fn installed_builtin_result_contracts_reach_source_compilation() {
     let mut runner = SourceRunner::new_empty();
 

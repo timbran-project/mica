@@ -1,7 +1,7 @@
 use crate::{
     BuiltinContext, BuiltinRegistry, BuiltinResultKind, RuntimeError, builtin_char_list_arg,
-    builtin_string_arg, builtin_usize_arg, invalid_builtin_call, option_builtin_result,
-    raised_builtin_error, result_builtin_result,
+    builtin_string_arg, invalid_builtin_call, option_builtin_result, raised_builtin_error,
+    result_builtin_result,
 };
 use mica_var::{Symbol, Value, ValueKind};
 use mica_vm::TypeContract;
@@ -137,10 +137,14 @@ fn string_slice_builtin(
         ));
     }
     let value = builtin_string_arg("string_slice", args, 0)?;
-    let start = builtin_usize_arg("string_slice", args, 1)?;
-    let end = builtin_usize_arg("string_slice", args, 2)?;
+    let start = args[1]
+        .as_int()
+        .ok_or_else(|| invalid_builtin_call("string_slice", "expected integer start position"))?;
+    let end = args[2]
+        .as_int()
+        .ok_or_else(|| invalid_builtin_call("string_slice", "expected integer end position"))?;
     let char_len = value.chars().count();
-    if start > end || end > char_len {
+    if start < 0 || start > end || !usize::try_from(end).is_ok_and(|end| end <= char_len) {
         return Err(raised_builtin_error(
             "E_INDEX",
             format!(
@@ -149,7 +153,11 @@ fn string_slice_builtin(
             Some(Value::list(args.iter().cloned())),
         ));
     }
-    Ok(Value::string(string_slice_chars(&value, start, end)))
+    Ok(Value::string(string_slice_chars(
+        &value,
+        start as usize,
+        end as usize,
+    )))
 }
 
 fn string_from_chars_builtin(
