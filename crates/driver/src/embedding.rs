@@ -312,7 +312,12 @@ pub(crate) struct InvocationState {
 #[derive(Default)]
 struct InvocationCompletionState {
     outcome: Option<InvocationOutcome>,
-    waker: Option<Waker>,
+    waiters: Vec<Option<Waker>>,
+}
+
+struct InvocationWait<'a> {
+    state: &'a InvocationState,
+    registration: Option<usize>,
 }
 
 impl InvocationState {
@@ -325,33 +330,61 @@ impl InvocationState {
     }
 
     pub(crate) fn complete(&self, outcome: InvocationOutcome) {
-        let waker = {
+        let waiters = {
             let mut completion = self.completion.lock().unwrap();
             if completion.outcome.is_some() {
                 return;
             }
             completion.outcome = Some(outcome);
-            completion.waker.take()
+            std::mem::take(&mut completion.waiters)
         };
-        if let Some(waker) = waker {
+        for waker in waiters.into_iter().flatten() {
             waker.wake();
         }
     }
+}
 
-    fn poll(&self, context: &mut Context<'_>) -> Poll<InvocationOutcome> {
-        let mut completion = self.completion.lock().unwrap();
+impl Future for InvocationWait<'_> {
+    type Output = InvocationOutcome;
+
+    fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = self.get_mut();
+        let mut completion = this.state.completion.lock().unwrap();
         if let Some(outcome) = completion.outcome.clone() {
             return Poll::Ready(outcome);
         }
-        let waker = context.waker().clone();
-        if completion
-            .waker
-            .as_ref()
-            .is_none_or(|current| !current.will_wake(&waker))
-        {
-            completion.waker = Some(waker);
+        if let Some(registration) = this.registration {
+            completion.waiters[registration]
+                .as_mut()
+                .expect("a pending invocation wait retains its registration")
+                .clone_from(context.waker());
+            return Poll::Pending;
         }
+        let registration = completion
+            .waiters
+            .iter()
+            .position(Option::is_none)
+            .unwrap_or(completion.waiters.len());
+        let waker = Some(context.waker().clone());
+        if registration == completion.waiters.len() {
+            completion.waiters.push(waker);
+        } else {
+            completion.waiters[registration] = waker;
+        }
+        this.registration = Some(registration);
         Poll::Pending
+    }
+}
+
+impl Drop for InvocationWait<'_> {
+    fn drop(&mut self) {
+        let Some(registration) = self.registration else {
+            return;
+        };
+        let mut completion = self.state.completion.lock().unwrap();
+        if let Some(waiter) = completion.waiters.get_mut(registration) {
+            waiter.take();
+        }
     }
 }
 
@@ -377,8 +410,14 @@ impl InvocationHandle {
         &self.state.initial_report
     }
 
+    /// Waits for the terminal outcome, which is retained for every waiter.
+    /// Dropping a wait future unregisters its wakeup without cancelling the task.
     pub async fn wait(&self) -> InvocationOutcome {
-        poll_fn(|context| self.state.poll(context)).await
+        InvocationWait {
+            state: &self.state,
+            registration: None,
+        }
+        .await
     }
 
     pub fn try_outcome(&self) -> Option<InvocationOutcome> {
@@ -879,6 +918,75 @@ mod tests {
     use mica_runtime::SourceRunner;
     use std::num::NonZeroUsize;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::task::Wake;
+
+    #[derive(Default)]
+    struct WakeCounter(AtomicUsize);
+
+    impl Wake for WakeCounter {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[test]
+    fn invocation_completion_wakes_each_waiter() {
+        crate::test_support::run(async {
+            let resources = DriverResources::new(NonZeroUsize::new(1).unwrap());
+            let mut owner = DriverOwner::builder(resources).build().unwrap();
+            let mut pump = owner.take_event_pump().unwrap();
+            let invocation = owner
+                .administrator()
+                .evaluate("suspend()\nreturn 42".to_owned())
+                .await
+                .unwrap();
+            let counters = [
+                Arc::new(WakeCounter::default()),
+                Arc::new(WakeCounter::default()),
+            ];
+            let wakers = counters
+                .each_ref()
+                .map(|counter| Waker::from(Arc::clone(counter)));
+            let cancelled_counter = Arc::new(WakeCounter::default());
+            let cancelled_waker = Waker::from(Arc::clone(&cancelled_counter));
+            let mut cancelled_wait = Box::pin(invocation.wait());
+            assert!(
+                cancelled_wait
+                    .as_mut()
+                    .poll(&mut Context::from_waker(&cancelled_waker))
+                    .is_pending()
+            );
+            drop(cancelled_wait);
+            assert_eq!(Arc::strong_count(&cancelled_counter), 2);
+            let mut first = Box::pin(invocation.wait());
+            let mut second = Box::pin(invocation.wait());
+            assert!(
+                first
+                    .as_mut()
+                    .poll(&mut Context::from_waker(&wakers[0]))
+                    .is_pending()
+            );
+            assert!(
+                second
+                    .as_mut()
+                    .poll(&mut Context::from_waker(&wakers[1]))
+                    .is_pending()
+            );
+            owner
+                .driver
+                .resume(invocation.task_id(), Value::unit())
+                .await
+                .unwrap();
+            for counter in &counters {
+                assert_eq!(counter.0.load(Ordering::Relaxed), 1);
+            }
+            let expected = InvocationOutcome::Completed(Value::int(42).unwrap());
+            assert_eq!(first.await, expected);
+            assert_eq!(second.await, expected);
+            assert_eq!(invocation.wait().await, expected);
+            owner.shutdown(&mut pump, |_| {}).await.unwrap();
+        });
+    }
 
     #[test]
     fn invocation_handles_and_scoped_endpoint_facts_are_first_class() {
