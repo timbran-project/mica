@@ -1076,6 +1076,19 @@ fn compile_rule_term(
         HirExpr::Literal { id, value } => {
             literal_value_for_rule(semantic, *id, value).map(Term::Value)
         }
+        HirExpr::Unary {
+            id,
+            op: UnaryOp::Neg,
+            expr,
+        } if let HirExpr::Literal { value, .. } = expr.as_ref()
+            && let Some(literal) = match value {
+                Literal::Int(value) => Some(Literal::Int(format!("-{value}"))),
+                Literal::Float(value) => Some(Literal::Float(format!("-{value}"))),
+                _ => None,
+            } =>
+        {
+            literal_value_for_rule(semantic, *id, &literal).map(Term::Value)
+        }
         _ => Err(CompileError::Unsupported {
             node: expr_id(expr),
             span: semantic.span(expr_id(expr)).cloned(),

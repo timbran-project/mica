@@ -5433,6 +5433,28 @@ fn runner_installs_relation_rules_with_comparison_guards() {
 }
 
 #[test]
+fn relation_rules_accept_negative_numeric_constants() {
+    let mut runner = SourceRunner::new_empty();
+    let report = runner
+        .run_source(
+            "make_relation(:Reading, 2)
+             make_relation(:Freezing, 1)
+             make_relation(:Status, 2)
+             make_relation(:BelowThreshold, 1)
+             assert Reading(:north, -5)
+             assert Reading(:south, 3)
+             Freezing(site) :- Reading(site, -5)
+             Status(site, -1) :- Freezing(site)
+             BelowThreshold(site) :- Reading(site, value), value < -1.5
+             require Freezing(?site) == [:site] { [:north] }
+             require Status(:north, ?status) == [:status] { [-1] }
+             return BelowThreshold(?site) == [:site] { [:north] }",
+        )
+        .unwrap();
+    assert_completed_value(&report, Value::bool(true));
+}
+
+#[test]
 fn runner_inspects_and_disables_rules() {
     let mut runner = SourceRunner::new_empty();
     runner.run_source("make_relation(:LocatedIn, 2)").unwrap();
