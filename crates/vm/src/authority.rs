@@ -12,7 +12,7 @@
 // with this program. If not, see <https://www.gnu.org/licenses/>.
 
 use mica_relation_kernel::RelationId;
-use mica_var::{CapabilityId, Value};
+use mica_var::{CapabilityId, Symbol, Value};
 use std::collections::BTreeMap;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
@@ -29,6 +29,7 @@ pub enum CapabilityScope {
     All,
     Relation(RelationId),
     Method(Value),
+    Builtin(Symbol),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -66,6 +67,10 @@ impl CapabilityGrant {
         Self::new([CapabilityOp::Invoke], CapabilityScope::Method(method))
     }
 
+    pub fn builtin(name: Symbol) -> Self {
+        Self::new([CapabilityOp::Invoke], CapabilityScope::Builtin(name))
+    }
+
     fn allows_relation(&self, op: CapabilityOp, relation: RelationId) -> bool {
         if !self.ops.contains(op) {
             return false;
@@ -73,7 +78,7 @@ impl CapabilityGrant {
         match &self.scope {
             CapabilityScope::All => true,
             CapabilityScope::Relation(scope) => *scope == relation,
-            CapabilityScope::Method(_) => false,
+            CapabilityScope::Method(_) | CapabilityScope::Builtin(_) => false,
         }
     }
 
@@ -84,7 +89,18 @@ impl CapabilityGrant {
         match &self.scope {
             CapabilityScope::All => true,
             CapabilityScope::Method(scope) => scope == method,
-            CapabilityScope::Relation(_) => false,
+            CapabilityScope::Relation(_) | CapabilityScope::Builtin(_) => false,
+        }
+    }
+
+    fn allows_builtin(&self, name: Symbol) -> bool {
+        if !self.ops.contains(CapabilityOp::Invoke) {
+            return false;
+        }
+        match &self.scope {
+            CapabilityScope::All => true,
+            CapabilityScope::Builtin(scope) => *scope == name,
+            CapabilityScope::Relation(_) | CapabilityScope::Method(_) => false,
         }
     }
 
@@ -210,6 +226,14 @@ impl AuthorityContext {
             .any(CapabilityGrant::allows_effect)
     }
 
+    pub fn can_invoke_builtin(&self, name: Symbol) -> bool {
+        self.root
+            || self
+                .capabilities
+                .values()
+                .any(|grant| grant.allows_builtin(name))
+    }
+
     pub fn can_grant(&self) -> bool {
         if self.root {
             return true;
@@ -229,5 +253,39 @@ impl AuthorityContext {
                 return id;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{AuthorityContext, CapabilityGrant, CapabilityOp, CapabilityScope};
+    use mica_var::{Identity, Symbol, Value};
+
+    #[test]
+    fn builtin_authority_is_distinct_from_world_authority() {
+        let builtin = Symbol::intern("os_getenv");
+        let relation = Identity::new(1).unwrap();
+        let method = Value::symbol(builtin);
+        let mut authority = AuthorityContext::empty();
+        authority.mint(CapabilityGrant::builtin(builtin));
+        assert!(authority.can_invoke_builtin(builtin));
+        assert!(!authority.can_invoke_builtin(Symbol::intern("another_builtin")));
+        assert!(!authority.can_invoke_method(&method));
+        assert!(!authority.can_read_relation(relation));
+        assert!(!authority.can_write_relation(relation));
+        assert!(!authority.can_effect());
+        assert!(!authority.can_grant());
+
+        let mut authority = AuthorityContext::empty();
+        authority.mint(CapabilityGrant::method(method));
+        authority.mint(CapabilityGrant::relation(CapabilityOp::Read, relation));
+        authority.mint(CapabilityGrant::new(
+            [CapabilityOp::Read],
+            CapabilityScope::Builtin(builtin),
+        ));
+        assert!(!authority.can_invoke_builtin(builtin));
+        authority.mint(CapabilityGrant::all());
+        assert!(authority.can_invoke_builtin(builtin));
+        assert!(AuthorityContext::root().can_invoke_builtin(builtin));
     }
 }

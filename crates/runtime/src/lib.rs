@@ -6778,6 +6778,9 @@ fn mint_invoke_grants(
                 "expected selector name symbol",
             ));
         };
+        if selector == Symbol::intern("os_getenv") {
+            authority.mint(CapabilityGrant::builtin(selector));
+        }
         for method in snapshot
             .scan(
                 method_selector_relation(),
@@ -6815,6 +6818,9 @@ fn mint_role_invoke_grants(
                     "expected selector name symbol",
                 ));
             };
+            if selector == Symbol::intern("os_getenv") {
+                authority.mint(CapabilityGrant::builtin(selector));
+            }
             for method in snapshot
                 .scan(
                     method_selector_relation(),

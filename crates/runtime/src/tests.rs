@@ -576,6 +576,56 @@ fn runner_string_primitives_support_character_level_munging() {
 }
 
 #[test]
+fn environment_reads_require_explicit_builtin_authority() {
+    let mut runner = SourceRunner::new_empty();
+    runner.run_source("make_identity(:reader)").unwrap();
+    let source = "return os_getenv(\"MICA_DEFINITELY_NOT_SET_xyzzy\")";
+    let denied = runner.run_source_as(Symbol::intern("reader"), source);
+    assert!(matches!(denied,
+        Err(SourceTaskError::TaskManager(TaskManagerError::Task(TaskError::Runtime(
+            RuntimeError::PermissionDenied { operation: "invoke", target }
+        )))) if target == Value::symbol(Symbol::intern("os_getenv"))));
+
+    runner
+        .run_source("make_relation(:CanInvoke, 2)\nassert CanInvoke(#reader, :os_getenv)")
+        .unwrap();
+    let report = runner
+        .run_source_as(Symbol::intern("reader"), source)
+        .unwrap();
+    assert_completed_value(&report, Value::option_none());
+
+    runner
+        .run_source("retract CanInvoke(#reader, :os_getenv)")
+        .unwrap();
+    assert!(
+        runner
+            .run_source_as(Symbol::intern("reader"), source)
+            .is_err()
+    );
+}
+
+#[test]
+fn delegated_roles_can_grant_environment_reads() {
+    let mut runner = SourceRunner::new_empty();
+    runner
+        .run_source(
+            "make_identity(:reader)\n\
+             make_identity(:configuration_reader)\n\
+             make_relation(:RoleCanInvoke, 2)\n\
+             assert Delegates(#reader, #configuration_reader, 0)\n\
+             assert RoleCanInvoke(#configuration_reader, :os_getenv)",
+        )
+        .unwrap();
+    let report = runner
+        .run_source_as(
+            Symbol::intern("reader"),
+            "return os_getenv(\"MICA_DEFINITELY_NOT_SET_xyzzy\")",
+        )
+        .unwrap();
+    assert_completed_value(&report, Value::option_none());
+}
+
+#[test]
 fn installed_builtin_result_contracts_reach_source_compilation() {
     let mut runner = SourceRunner::new_empty();
 

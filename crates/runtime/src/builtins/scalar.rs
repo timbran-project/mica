@@ -407,7 +407,7 @@ fn lower_builtin(
 }
 
 fn os_getenv_builtin(
-    _context: &mut BuiltinContext<'_, '_>,
+    context: &mut BuiltinContext<'_, '_>,
     args: &[Value],
 ) -> Result<Value, RuntimeError> {
     if args.len() != 1 {
@@ -415,6 +415,13 @@ fn os_getenv_builtin(
             "os_getenv",
             "expected os_getenv(name)",
         ));
+    }
+    let builtin = Symbol::intern("os_getenv");
+    if !context.authority().can_invoke_builtin(builtin) {
+        return Err(RuntimeError::PermissionDenied {
+            operation: "invoke",
+            target: Value::symbol(builtin),
+        });
     }
     let name = builtin_string_arg("os_getenv", args, 0)?;
     match std::env::var(&name) {
