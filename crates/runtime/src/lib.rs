@@ -7917,6 +7917,24 @@ fn render_kernel_error(
                 )
             )
         }
+        KernelError::FunctionalKeyViolation {
+            relation,
+            existing,
+            attempted,
+        } => format!(
+            "functional key violation in relation {}: {} conflicts with existing {}",
+            render_relation(relation),
+            render_value(
+                &Value::list(attempted.values().iter().cloned()),
+                identity_names,
+                relation_names
+            ),
+            render_value(
+                &Value::list(existing.values().iter().cloned()),
+                identity_names,
+                relation_names
+            )
+        ),
         KernelError::InvalidIndex {
             relation,
             position,

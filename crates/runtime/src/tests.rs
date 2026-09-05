@@ -5274,6 +5274,30 @@ fn exact_binding_and_dot_read_project_functional_relations() {
 }
 
 #[test]
+fn functional_assertions_preserve_keys_and_dot_assignment_replaces_the_value() {
+    let mut runner = SourceRunner::new_empty();
+    runner
+        .run_source("make_identity(:sensor)\nmake_functional_relation(:Label, 2, [0])\nassert Label(#sensor, \"initial\")")
+        .unwrap();
+    let error = runner
+        .run_source("assert Label(:another, \"draft\")\nassert Label(#sensor, \"conflict\")")
+        .unwrap_err();
+    let rendered = runner.render_source_task_error(&error);
+    assert!(rendered.contains("functional key violation"), "{rendered}");
+    assert!(rendered.contains("#sensor"), "{rendered}");
+    let report = runner
+        .run_source(
+            "return Label(?subject, ?label) == [:subject, :label] { [#sensor, \"initial\"] }",
+        )
+        .unwrap();
+    assert_completed_value(&report, Value::bool(true));
+    let report = runner
+        .run_source("#sensor.label = \"updated\"\nreturn #sensor.label")
+        .unwrap();
+    assert_completed_value(&report, Value::string("updated"));
+}
+
+#[test]
 fn runner_namespaced_dot_read_and_assignment_project_functional_relations() {
     let mut runner = SourceRunner::new_empty();
     runner.run_source("make_identity(:endpoint)").unwrap();

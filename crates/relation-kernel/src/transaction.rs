@@ -445,15 +445,13 @@ impl<'a> Transaction<'a> {
         tuple: Tuple,
     ) -> Result<(), KernelError> {
         self.base.relation(relation)?.validate_tuple(&tuple)?;
-        let ConflictPolicy::Functional { key_positions } =
+        let ConflictPolicy::Functional { .. } =
             self.base.relation(relation)?.metadata().conflict_policy()
         else {
             self.assert(relation, tuple)?;
             return Ok(());
         };
-        let key_positions = key_positions.clone();
-
-        if let Some(old_tuple) = self.visible_tuple_for_key(relation, &key_positions, &tuple)? {
+        if let Some(old_tuple) = self.visible_tuple_for_key(relation, &tuple)? {
             self.retract(relation, old_tuple)?;
         }
         let result = self.assert(relation, tuple);
@@ -897,38 +895,23 @@ impl<'a> Transaction<'a> {
     fn visible_tuple_for_key(
         &mut self,
         relation: RelationId,
-        positions: &[u16],
         tuple: &Tuple,
     ) -> Result<Option<Tuple>, KernelError> {
-        self.ensure_functional_visible(relation, positions)?;
-        let visible = self
-            .functional_visible
-            .get(&relation)
-            .expect("ensured functional visibility map should exist");
+        let base_relation = self.base.relation(relation)?;
+        let ConflictPolicy::Functional { key_positions } =
+            base_relation.metadata().conflict_policy()
+        else {
+            unreachable!("functional key lookup requires a functional relation");
+        };
+        let visible = self.functional_visible.entry(relation).or_insert_with(|| {
+            FunctionalVisibleMap::from_writes(key_positions, self.writes.get(&relation), |tuple| {
+                base_relation.tuple_for_key(key_positions, tuple)
+            })
+        });
         if let Some(tuple) = visible.tracked_tuple(tuple) {
             return Ok(tuple);
         }
-        self.base
-            .relation(relation)
-            .map(|base_relation| base_relation.tuple_for_key(positions, tuple))
-    }
-
-    fn ensure_functional_visible(
-        &mut self,
-        relation: RelationId,
-        positions: &[u16],
-    ) -> Result<(), KernelError> {
-        if self.functional_visible.contains_key(&relation) {
-            return Ok(());
-        }
-
-        let base_relation = self.base.relation(relation)?;
-        let visible =
-            FunctionalVisibleMap::from_writes(positions, self.writes.get(&relation), |tuple| {
-                base_relation.tuple_for_key(positions, tuple)
-            });
-        self.functional_visible.insert(relation, visible);
-        Ok(())
+        Ok(base_relation.tuple_for_key(key_positions, tuple))
     }
 
     fn apply_local_change(
@@ -942,6 +925,20 @@ impl<'a> Transaction<'a> {
             return Err(KernelError::ReadOnlyRelation(relation));
         }
         self.base.relation(relation)?.validate_tuple(&tuple)?;
+        if matches!(change, LocalChange::Assert)
+            && matches!(
+                metadata.conflict_policy(),
+                ConflictPolicy::Functional { .. }
+            )
+            && let Some(existing) = self.visible_tuple_for_key(relation, &tuple)?
+            && existing != tuple
+        {
+            return Err(KernelError::FunctionalKeyViolation {
+                relation,
+                existing,
+                attempted: tuple,
+            });
+        }
         self.writes
             .entry(relation)
             .or_default()

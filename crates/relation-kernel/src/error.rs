@@ -36,6 +36,11 @@ pub enum KernelError {
         relation: RelationId,
         tuple: Tuple,
     },
+    FunctionalKeyViolation {
+        relation: RelationId,
+        existing: Tuple,
+        attempted: Tuple,
+    },
     InvalidIndex {
         relation: RelationId,
         position: u16,

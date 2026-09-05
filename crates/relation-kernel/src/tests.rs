@@ -1385,6 +1385,63 @@ fn functional_replace_conflicts_when_key_changes_concurrently() {
 }
 
 #[test]
+fn functional_assertions_reject_a_second_value_for_a_visible_key() {
+    for key_positions in [vec![0], vec![1], vec![0, 2], vec![]] {
+        let kernel = RelationKernel::new();
+        kernel
+            .create_relation(
+                RelationMetadata::new(rel(1), Symbol::intern("Setting"), 3).with_conflict_policy(
+                    ConflictPolicy::Functional {
+                        key_positions: key_positions.clone(),
+                    },
+                ),
+            )
+            .unwrap();
+        let original = Tuple::from([int(1), int(1), int(1)]);
+        let changed_position = (0..3)
+            .find(|position| !key_positions.contains(position))
+            .unwrap();
+        let mut values = original.values().to_vec();
+        values[changed_position as usize] = int(2);
+        let replacement = Tuple::new(values);
+
+        let mut tx = kernel.begin();
+        tx.assert(rel(1), original.clone()).unwrap();
+        tx.assert(rel(1), original.clone()).unwrap();
+        assert_eq!(
+            tx.assert(rel(1), replacement.clone()),
+            Err(KernelError::FunctionalKeyViolation {
+                relation: rel(1),
+                existing: original.clone(),
+                attempted: replacement.clone(),
+            })
+        );
+        assert_eq!(
+            tx.scan(rel(1), &[None, None, None]).unwrap(),
+            vec![original.clone()]
+        );
+        tx.commit().unwrap();
+
+        let mut tx = kernel.begin();
+        assert_eq!(
+            tx.assert(rel(1), replacement.clone()),
+            Err(KernelError::FunctionalKeyViolation {
+                relation: rel(1),
+                existing: original.clone(),
+                attempted: replacement.clone(),
+            })
+        );
+        tx.retract(rel(1), original).unwrap();
+        tx.assert(rel(1), replacement.clone()).unwrap();
+        tx.commit().unwrap();
+        assert_eq!(
+            kernel.snapshot().scan(rel(1), &[None, None, None]).unwrap(),
+            vec![replacement]
+        );
+    }
+}
+
+#[test]
 fn functional_replace_uses_latest_local_value_in_transaction() {
     let kernel = RelationKernel::new();
     kernel
