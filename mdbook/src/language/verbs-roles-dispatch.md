@@ -130,9 +130,89 @@ end
 That form exists to preserve explicit method identity in import/export workflows. Most handwritten
 code should use `verb`.
 
-If multiple methods match a dispatch, the dispatcher must choose according to the current dispatch
-rules or report ambiguity. Authoring should avoid relying on accidental ties.
+## Selecting a Branch
 
-When ambiguity is useful, authors should make it explicit at a higher level: query for applicable
-behaviours, inspect the candidates, or install a more specific dispatch rule. Silent accidental
-choice is the part to avoid.
+Dispatch first finds applicable branches, then compares their restrictions. A branch is more
+specific when it accepts a subset of another branch's role values and narrows at least one role.
+For named calls, requiring an additional supplied role can also make a branch more specific.
+
+```mica,eval
+make_identity(:instrument)
+make_identity(:thermometer)
+make_identity(:probe17)
+assert Delegates(#thermometer, #instrument, 0)
+assert Delegates(#probe17, #thermometer, 0)
+
+verb describe(item)
+  return "value"
+end
+
+verb describe(item @ #instrument)
+  return "instrument"
+end
+
+verb describe(item @ #thermometer)
+  return "thermometer"
+end
+
+require :describe(item: #probe17) == "thermometer"
+require :describe(item: #instrument) == "instrument"
+require :describe(item: 17) == "value"
+```
+
+The unrestricted `item` parameter still requires an `item` argument. It accepts any value in that
+role. The instrument branch narrows the role to matching identities and values, and the thermometer
+branch narrows it further through delegation. Method definition order does not establish priority.
+
+Named calls supply roles by name, so argument order at the call site does not affect matching.
+Every declared parameter must be supplied; additional call roles can be present. A branch receives
+its own declared parameters in their declaration order. Positional calls instead require the same
+number of arguments as the branch and associate them with parameter positions.
+
+## Ambiguity Across Roles
+
+More specific on one role does not automatically mean more specific overall. Consider these two
+signatures:
+
+```mica
+verb handle(actor @ #reviewer, item)
+  return :reviewer_action
+end
+
+verb handle(actor, item @ #change_request)
+  return :change_action
+end
+```
+
+For a reviewer handling a change request, both branches apply. The first narrows `actor`; the second
+narrows `item`. Neither accepts a subset of the other's complete role combinations, so the call is
+ambiguous. Define a branch for their intersection when that combination has a deliberate meaning:
+
+```mica
+verb handle(actor @ #reviewer, item @ #change_request)
+  return :review_change
+end
+```
+
+The intersection branch is more specific than both. If no branch applies, dispatch fails with
+`NoApplicableMethod`. If several incomparable branches remain, it fails with `AmbiguousDispatch`.
+Those failures stop the task segment; they do not run every matching branch or choose by method
+identity. Prototype cycles can make restrictions equivalent, so they do not establish a strict
+preference between otherwise matching branches either.
+
+## Restrictions and Live Context
+
+A role restriction matches the supplied value itself or a reachable prototype. Primitive values
+also match their primitive prototype, and a frob matches through its delegate as well as `#frob`.
+All reachable prototypes participate. Delegation rank records an ordering of prototype facts;
+applicability follows reachability across those facts.
+
+Dispatch reads the task's world view. An assertion or retraction affecting `Delegates` can therefore
+change a later call in the same task. After commit, later tasks use the resulting world definition.
+The runtime scopes cached dispatch answers to that view and invalidates affected answers when the
+task changes dispatch facts.
+
+Supplying a value in a role named `actor` or `agent` does not change the task's actor, principal, or
+authority. Roles select behaviour and pass arguments. Runtime authority still comes from the task
+context, and the selected method must be invokable under that authority. See
+[Authority and Capabilities](./authority.md).
