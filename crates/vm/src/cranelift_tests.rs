@@ -1142,6 +1142,7 @@ fn natural_scalar_program() -> (Arc<Program>, Value) {
 fn natural_branch_program(
     initial_flag: Value,
     toggle_flag: bool,
+    initial_accumulator: Value,
     then_increment: Value,
     else_increment: Value,
 ) -> Arc<Program> {
@@ -1163,7 +1164,7 @@ fn natural_branch_program(
                 },
                 Instruction::Load {
                     dst: register(3),
-                    value: Value::int(0).unwrap(),
+                    value: initial_accumulator,
                 },
                 Instruction::Load {
                     dst: register(4),
@@ -1749,12 +1750,14 @@ fn natural_integer_accumulators_select_unboxed_region_state() {
         .expect("integer accumulator has a natural loop");
     assert_ne!(integer_site.plan.unboxed_integer_slots(), 0);
 
-    let float = natural_accumulator_program(Value::float(0.0).unwrap());
-    let float_site = float
+    // A float total with an integer counter mixes kinds, so the loop cannot
+    // use the unboxed integer representation for the accumulator slot.
+    let mixed = natural_accumulator_program(Value::float(0.0).unwrap());
+    let mixed_site = mixed
         .natural_integer_loop_site(5)
-        .expect("float accumulator has a natural loop");
-    assert_ne!(float_site.plan.unboxed_integer_slots(), 0);
-    assert_ne!(float_site.plan.unboxed_float_slots(), 0);
+        .expect("mixed accumulator still has a natural loop");
+    assert_eq!(mixed_site.plan.unboxed_integer_slots(), 0);
+    assert_eq!(mixed_site.plan.unboxed_float_slots(), 0);
 }
 
 #[test]
@@ -1850,25 +1853,32 @@ fn native_natural_list_loop_matches_interpreter_completion() {
 
 #[test]
 fn native_natural_float_and_mixed_collection_sums_match_interpreter() {
-    let cases = [
+    // A float accumulator over a float collection stays on the native float
+    // path. An integer accumulator over an integer collection stays on the
+    // native integer path.
+    for (collection, initial, expected, expect_float_slots) in [
         (
             Value::list((0..ITERATIONS).map(|_| Value::float(0.25).unwrap())),
             Value::float(0.0).unwrap(),
             Value::float(4_096.0).unwrap(),
+            true,
         ),
         (
             Value::list((0..ITERATIONS).map(|_| Value::int(2).unwrap())),
-            Value::float(0.0).unwrap(),
-            Value::float(32_768.0).unwrap(),
+            Value::int(0).unwrap(),
+            Value::int(32_768).unwrap(),
+            false,
         ),
-    ];
-    for (collection, initial, expected) in cases {
+    ] {
         let program = natural_numeric_collection_program(collection, initial);
         let site = program
             .natural_integer_loop_site(6)
             .expect("numeric collection sum has a natural loop");
-        assert_ne!(site.plan.unboxed_integer_slots(), 0);
-        assert_ne!(site.plan.unboxed_float_slots(), 0);
+        assert_eq!(
+            site.plan.unboxed_float_slots() != 0,
+            expect_float_slots,
+            "unexpected unboxed float specialization",
+        );
         let mut interpreted = RegisterVm::new_interpreted(Arc::clone(&program));
         let mut native = RegisterVm::new(Arc::clone(&program));
 
@@ -1880,6 +1890,24 @@ fn native_natural_float_and_mixed_collection_sums_match_interpreter() {
         assert_eq!(program.native_compile_attempts(), 1);
         assert_eq!(native.native_side_exit_count(), 0);
     }
+}
+
+#[test]
+fn native_natural_mixed_collection_sum_matches_interpreter() {
+    // A float accumulator over an integer collection mixes kinds on every
+    // addition. Both paths must abort identically, not widen.
+    let program = natural_numeric_collection_program(
+        Value::list((0..ITERATIONS).map(|_| Value::int(2).unwrap())),
+        Value::float(0.0).unwrap(),
+    );
+    let mut interpreted = RegisterVm::new_interpreted(Arc::clone(&program));
+    let mut native = RegisterVm::new(Arc::clone(&program));
+
+    let interpreted_outcome = run(&mut interpreted, NATURAL_RANGE_INSTRUCTION_COUNT).unwrap();
+    let native_outcome = run(&mut native, NATURAL_RANGE_INSTRUCTION_COUNT).unwrap();
+    assert_eq!(native_outcome, interpreted_outcome);
+    assert!(matches!(native_outcome, VmHostResponse::Abort(_)));
+    assert_eq!(native.snapshot_state(), interpreted.snapshot_state());
 }
 
 #[test]
@@ -1931,6 +1959,46 @@ fn checked_collection_ingress_feeds_native_float_state_and_preserves_type_errors
 
 #[test]
 fn native_natural_division_and_remainder_match_interpreter() {
+    // The accumulator is a float, so only float/float division and remainder
+    // stay within one numeric kind and execute natively.
+    for (element, divisor, operation, expected) in [
+        (
+            Value::float(5.5).unwrap(),
+            Value::float(2.0).unwrap(),
+            RuntimeBinaryOp::Div,
+            Value::float(45_056.0).unwrap(),
+        ),
+        (
+            Value::float(5.5).unwrap(),
+            Value::float(2.0).unwrap(),
+            RuntimeBinaryOp::Rem,
+            Value::float(24_576.0).unwrap(),
+        ),
+    ] {
+        let program = natural_div_rem_collection_program(element, divisor, operation);
+        let mut interpreted = RegisterVm::new_interpreted(Arc::clone(&program));
+        let mut native = RegisterVm::new(Arc::clone(&program));
+        let expected = VmHostResponse::Complete(expected);
+
+        assert_eq!(
+            run(&mut interpreted, NATURAL_DIV_REM_INSTRUCTION_COUNT).unwrap(),
+            expected,
+        );
+        assert_eq!(
+            run(&mut native, NATURAL_DIV_REM_INSTRUCTION_COUNT).unwrap(),
+            expected,
+        );
+        assert_eq!(native.snapshot_state(), interpreted.snapshot_state());
+        assert_eq!(program.native_compile_attempts(), 1);
+        assert_eq!(native.native_side_exit_count(), 0);
+    }
+}
+
+#[test]
+fn native_natural_mixed_division_aborts_like_interpreter() {
+    // Inexact integer division and mixed-kind division both raise. The two
+    // execution paths must agree, and native execution must side exit rather
+    // than trap.
     for (element, divisor, operation) in [
         (
             Value::int(3).unwrap(),
@@ -1944,26 +2012,19 @@ fn native_natural_division_and_remainder_match_interpreter() {
         ),
         (
             Value::float(5.5).unwrap(),
-            Value::float(2.0).unwrap(),
+            Value::int(2).unwrap(),
             RuntimeBinaryOp::Rem,
         ),
     ] {
         let program = natural_div_rem_collection_program(element, divisor, operation);
         let mut interpreted = RegisterVm::new_interpreted(Arc::clone(&program));
         let mut native = RegisterVm::new(Arc::clone(&program));
-        let expected = VmHostResponse::Complete(Value::float(24_576.0).unwrap());
 
-        assert_eq!(
-            run(&mut interpreted, NATURAL_DIV_REM_INSTRUCTION_COUNT).unwrap(),
-            expected,
-        );
-        assert_eq!(
-            run(&mut native, NATURAL_DIV_REM_INSTRUCTION_COUNT).unwrap(),
-            expected,
-        );
+        let interpreted_outcome = run(&mut interpreted, NATURAL_DIV_REM_INSTRUCTION_COUNT).unwrap();
+        let native_outcome = run(&mut native, NATURAL_DIV_REM_INSTRUCTION_COUNT).unwrap();
+        assert_eq!(native_outcome, interpreted_outcome);
+        assert!(matches!(native_outcome, VmHostResponse::Abort(_)));
         assert_eq!(native.snapshot_state(), interpreted.snapshot_state());
-        assert_eq!(program.native_compile_attempts(), 1);
-        assert_eq!(native.native_side_exit_count(), 0);
     }
 }
 
@@ -2460,7 +2521,10 @@ fn native_natural_loop_preserves_budget_remainders() {
 }
 
 #[test]
-fn native_natural_loop_executes_float_accumulation_without_side_exits() {
+fn native_natural_loop_aborts_on_mixed_accumulator_like_interpreter() {
+    // The loop below adds an integer counter to a float total, which mixes
+    // kinds. Both paths must abort identically; the native path side exits
+    // to the interpreter instead of widening.
     let program = natural_accumulator_program(Value::float(0.0).unwrap());
     let mut interpreted = RegisterVm::new_interpreted(Arc::clone(&program));
     let mut native = RegisterVm::new(Arc::clone(&program));
@@ -2468,9 +2532,10 @@ fn native_natural_loop_executes_float_accumulation_without_side_exits() {
     let interpreted_outcome = run(&mut interpreted, NATURAL_INSTRUCTION_COUNT).unwrap();
     let native_outcome = run(&mut native, NATURAL_INSTRUCTION_COUNT).unwrap();
     assert_eq!(native_outcome, interpreted_outcome);
+    assert!(matches!(native_outcome, VmHostResponse::Abort(_)));
     assert_eq!(native.snapshot_state(), interpreted.snapshot_state());
     assert_eq!(program.native_compile_attempts(), 1);
-    assert_eq!(native.native_side_exit_count(), 0);
+    assert_eq!(native.native_side_exit_count(), 1);
 }
 
 #[test]
@@ -2517,6 +2582,7 @@ fn native_natural_loop_executes_predictable_internal_branch_and_join() {
     let program = natural_branch_program(
         Value::bool(true),
         false,
+        Value::int(0).unwrap(),
         Value::int(1).unwrap(),
         Value::int(2).unwrap(),
     );
@@ -2539,6 +2605,7 @@ fn native_natural_loop_executes_alternating_internal_branches() {
     let program = natural_branch_program(
         Value::bool(true),
         true,
+        Value::int(0).unwrap(),
         Value::int(1).unwrap(),
         Value::int(2).unwrap(),
     );
@@ -2561,6 +2628,7 @@ fn native_branch_loop_preserves_unequal_path_budget_boundaries() {
     let program = natural_branch_program(
         Value::bool(true),
         true,
+        Value::int(0).unwrap(),
         Value::int(1).unwrap(),
         Value::int(2).unwrap(),
     );
@@ -2595,29 +2663,57 @@ fn native_branch_loop_preserves_unequal_path_budget_boundaries() {
 
 #[test]
 fn native_branch_loop_executes_float_arithmetic_in_either_arm() {
-    for (initial_flag, then_increment, else_increment) in [
-        (
-            Value::bool(true),
-            Value::float(1.0).unwrap(),
-            Value::int(2).unwrap(),
-        ),
-        (
-            Value::bool(true),
-            Value::int(1).unwrap(),
-            Value::float(2.0).unwrap(),
-        ),
+    // Both arms increment the same float accumulator, so the loop stays
+    // within one numeric kind and runs natively without side exits.
+    let program = natural_branch_program(
+        Value::bool(true),
+        true,
+        Value::float(0.0).unwrap(),
+        Value::float(1.0).unwrap(),
+        Value::float(2.0).unwrap(),
+    );
+    let mut interpreted = RegisterVm::new_interpreted(Arc::clone(&program));
+    let mut native = RegisterVm::new(Arc::clone(&program));
+    let mut replay = RegisterVm::new(Arc::clone(&program));
+
+    assert_eq!(
+        run(&mut native, ALTERNATING_BRANCH_INSTRUCTION_COUNT).unwrap(),
+        run(&mut interpreted, ALTERNATING_BRANCH_INSTRUCTION_COUNT).unwrap(),
+    );
+    assert_eq!(
+        run(&mut replay, ALTERNATING_BRANCH_INSTRUCTION_COUNT).unwrap(),
+        VmHostResponse::Complete(Value::float(24_576.0).unwrap()),
+    );
+    assert_eq!(native.snapshot_state(), interpreted.snapshot_state());
+    assert_eq!(program.native_compile_attempts(), 1);
+    assert_eq!(native.native_side_exit_count(), 0);
+}
+
+#[test]
+fn native_branch_loop_aborts_on_mixed_kind_arms_like_interpreter() {
+    // A branch that can add an integer to a float accumulator mixes kinds.
+    // Both execution paths must abort with the same error rather than
+    // widening, and the native path must side exit rather than trap.
+    for (then_increment, else_increment) in [
+        (Value::float(1.0).unwrap(), Value::int(2).unwrap()),
+        (Value::int(1).unwrap(), Value::float(2.0).unwrap()),
     ] {
-        let program = natural_branch_program(initial_flag, true, then_increment, else_increment);
+        let program = natural_branch_program(
+            Value::bool(true),
+            true,
+            Value::float(0.0).unwrap(),
+            then_increment,
+            else_increment,
+        );
         let mut interpreted = RegisterVm::new_interpreted(Arc::clone(&program));
         let mut native = RegisterVm::new(Arc::clone(&program));
 
-        assert_eq!(
-            run(&mut native, ALTERNATING_BRANCH_INSTRUCTION_COUNT).unwrap(),
-            run(&mut interpreted, ALTERNATING_BRANCH_INSTRUCTION_COUNT).unwrap(),
-        );
+        let native_outcome = run(&mut native, ALTERNATING_BRANCH_INSTRUCTION_COUNT).unwrap();
+        let interpreted_outcome =
+            run(&mut interpreted, ALTERNATING_BRANCH_INSTRUCTION_COUNT).unwrap();
+        assert_eq!(native_outcome, interpreted_outcome);
+        assert!(matches!(native_outcome, VmHostResponse::Abort(_)));
         assert_eq!(native.snapshot_state(), interpreted.snapshot_state());
-        assert_eq!(program.native_compile_attempts(), 1);
-        assert_eq!(native.native_side_exit_count(), 0);
     }
 }
 
@@ -2626,6 +2722,7 @@ fn native_branch_loop_side_exit_from_condition_is_atomic() {
     let program = natural_branch_program(
         Value::list([]),
         false,
+        Value::int(0).unwrap(),
         Value::int(1).unwrap(),
         Value::int(2).unwrap(),
     );
@@ -2706,18 +2803,30 @@ fn native_natural_integer_surface_preserves_budget_remainders() {
 }
 
 #[test]
-fn native_natural_fractional_division_executes_without_side_exits() {
-    let program = natural_integer_surface_program(Value::int(4).unwrap());
-    let mut interpreted = RegisterVm::new_interpreted(Arc::clone(&program));
-    let mut native = RegisterVm::new(Arc::clone(&program));
+fn native_natural_fractional_division_side_exits_and_aborts() {
+    // The integer surface program multiplies by 6 each iteration, so dividing
+    // by 3 is always exact and stays native without side exits.
+    let exact = natural_integer_surface_program(Value::int(3).unwrap());
+    let mut interpreted = RegisterVm::new_interpreted(Arc::clone(&exact));
+    let mut native = RegisterVm::new(Arc::clone(&exact));
 
     assert_eq!(
         run(&mut native, NATURAL_INTEGER_SURFACE_INSTRUCTION_COUNT).unwrap(),
         run(&mut interpreted, NATURAL_INTEGER_SURFACE_INSTRUCTION_COUNT).unwrap(),
     );
     assert_eq!(native.snapshot_state(), interpreted.snapshot_state());
-    assert_eq!(program.native_compile_attempts(), 1);
+    assert_eq!(exact.native_compile_attempts(), 1);
     assert_eq!(native.native_side_exit_count(), 0);
+
+    let fractional = natural_integer_surface_program(Value::int(5).unwrap());
+    let mut interpreted = RegisterVm::new_interpreted(Arc::clone(&fractional));
+    let mut native = RegisterVm::new(Arc::clone(&fractional));
+    let interpreted_outcome =
+        run(&mut interpreted, NATURAL_INTEGER_SURFACE_INSTRUCTION_COUNT).unwrap();
+    let native_outcome = run(&mut native, NATURAL_INTEGER_SURFACE_INSTRUCTION_COUNT).unwrap();
+    assert_eq!(native_outcome, interpreted_outcome);
+    assert!(matches!(native_outcome, VmHostResponse::Abort(_)));
+    assert_eq!(native.snapshot_state(), interpreted.snapshot_state());
 }
 
 #[test]

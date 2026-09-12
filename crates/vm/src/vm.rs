@@ -3278,30 +3278,52 @@ fn eval_binary(op: RuntimeBinaryOp, left: &Value, right: &Value) -> Result<Value
             mica_var::language_cmp::numeric_cmp(left, right),
             std::cmp::Ordering::Greater | std::cmp::Ordering::Equal
         ))),
-        RuntimeBinaryOp::Add => left
-            .checked_add(right)
-            .ok_or_else(|| arithmetic_error("E_ARITH", "invalid addition", [left, right])),
-        RuntimeBinaryOp::Sub => left
-            .checked_sub(right)
-            .ok_or_else(|| arithmetic_error("E_ARITH", "invalid subtraction", [left, right])),
-        RuntimeBinaryOp::Mul => left
-            .checked_mul(right)
-            .ok_or_else(|| arithmetic_error("E_ARITH", "invalid multiplication", [left, right])),
+        RuntimeBinaryOp::Add => {
+            eval_arithmetic(left, right, "invalid addition", Value::checked_add)
+        }
+        RuntimeBinaryOp::Sub => {
+            eval_arithmetic(left, right, "invalid subtraction", Value::checked_sub)
+        }
+        RuntimeBinaryOp::Mul => {
+            eval_arithmetic(left, right, "invalid multiplication", Value::checked_mul)
+        }
         RuntimeBinaryOp::Div if is_zero(right) => {
             Err(arithmetic_error("E_DIV", "division by zero", [left, right]))
         }
-        RuntimeBinaryOp::Div => left
-            .checked_div(right)
-            .ok_or_else(|| arithmetic_error("E_ARITH", "invalid division", [left, right])),
+        RuntimeBinaryOp::Div => {
+            eval_arithmetic(left, right, "invalid division", Value::checked_div)
+        }
         RuntimeBinaryOp::Rem if is_zero(right) => Err(arithmetic_error(
             "E_DIV",
             "remainder by zero",
             [left, right],
         )),
-        RuntimeBinaryOp::Rem => left
-            .checked_rem(right)
-            .ok_or_else(|| arithmetic_error("E_ARITH", "invalid remainder", [left, right])),
+        RuntimeBinaryOp::Rem => {
+            eval_arithmetic(left, right, "invalid remainder", Value::checked_rem)
+        }
     }
+}
+
+/// Evaluates a binary arithmetic operation, choosing the error code by cause.
+///
+/// A pair that mixes integer and float operands raises `E_TYPE`; other
+/// failures, such as overflow or a non-finite float result, raise `E_ARITH`.
+fn eval_arithmetic(
+    left: &Value,
+    right: &Value,
+    message: &str,
+    operation: impl FnOnce(&Value, &Value) -> Option<Value>,
+) -> Result<Value, Value> {
+    if let Some(value) = operation(left, right) {
+        return Ok(value);
+    }
+    let both_numeric = left.as_int().is_some() || left.as_float().is_some();
+    let right_numeric = right.as_int().is_some() || right.as_float().is_some();
+    let mixes_kinds = left.as_int().is_some() != right.as_int().is_some();
+    if both_numeric && right_numeric && mixes_kinds {
+        return Err(arithmetic_error("E_TYPE", message, [left, right]));
+    }
+    Err(arithmetic_error("E_ARITH", message, [left, right]))
 }
 
 fn is_zero(value: &Value) -> bool {

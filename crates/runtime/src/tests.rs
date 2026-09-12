@@ -1918,20 +1918,25 @@ fn annotated_integer_bindings_check_division_result_kinds() {
             .outcome,
         TaskOutcome::Complete { value, .. } if value == Value::int(2).unwrap()
     ));
+    // Inexact division raises E_ARITH before the annotation is reached, and
+    // the raised error carries the original operands.
     assert!(matches!(
         runner
             .run_source(
                 "try
                    let quotient: int = 3 / 2
                    return quotient
-                 catch E_TYPE as err
+                 catch E_ARITH as err
                    return err.value
                  end"
             )
             .unwrap()
             .outcome,
         TaskOutcome::Complete { value, .. }
-            if value == Value::option_some(Value::float(1.5).unwrap())
+            if value == Value::option_some(Value::list([
+                Value::int(3).unwrap(),
+                Value::int(2).unwrap()
+            ]))
     ));
 }
 
@@ -7840,19 +7845,68 @@ fn vm_float_arithmetic_is_binary32() {
 #[test]
 fn vm_division_result_kind_rule() {
     let mut runner = SourceRunner::new_empty();
+    // Exact integer division stays integer.
     assert!(matches!(
         runner.run_source("return 4 / 2").unwrap().outcome,
         TaskOutcome::Complete { value, .. } if value == Value::int(2).unwrap()
     ));
+    // Inexact integer division raises; the result is not representable as
+    // an integer, so the error is E_ARITH.
     assert!(matches!(
-        runner.run_source("return 4 / 2.0").unwrap().outcome,
+        runner
+            .run_source("try\n  return 5 / 2\ncatch E_ARITH\n  return 42\nend")
+            .unwrap()
+            .outcome,
+        TaskOutcome::Complete { value, .. } if value == Value::int(42).unwrap()
+    ));
+    // Mixed kinds raise E_TYPE.
+    assert!(matches!(
+        runner
+            .run_source("try\n  return 4 / 2.0\ncatch E_TYPE\n  return 42\nend")
+            .unwrap()
+            .outcome,
+        TaskOutcome::Complete { value, .. } if value == Value::int(42).unwrap()
+    ));
+    // Explicit conversion restores float arithmetic.
+    assert!(matches!(
+        runner
+            .run_source("return to_float(5) / 2.0")
+            .unwrap()
+            .outcome,
+        TaskOutcome::Complete { value, .. }
+            if value == Value::float(2.5).unwrap()
+    ));
+    assert!(matches!(
+        runner.run_source("return to_float(4) / 2.0").unwrap().outcome,
         TaskOutcome::Complete { value, .. }
             if value == Value::float(2.0).unwrap()
     ));
+}
+
+#[test]
+fn vm_explicit_numeric_conversions() {
+    let mut runner = SourceRunner::new_empty();
     assert!(matches!(
-        runner.run_source("return 5 / 2").unwrap().outcome,
-        TaskOutcome::Complete { value, .. }
-            if value == Value::float(2.5).unwrap()
+        runner.run_source("return to_float(7)").unwrap().outcome,
+        TaskOutcome::Complete { value, .. } if value == Value::float(7.0).unwrap()
+    ));
+    assert!(matches!(
+        runner.run_source("return to_int(7.0)").unwrap().outcome,
+        TaskOutcome::Complete { value, .. } if value == Value::int(7).unwrap()
+    ));
+    // A fractional float does not convert.
+    assert!(matches!(
+        runner
+            .run_source(
+                "try
+                   return to_int(7.5)
+                 catch E_TYPE
+                   return 42
+                 end"
+            )
+            .unwrap()
+            .outcome,
+        TaskOutcome::Complete { value, .. } if value == Value::int(42).unwrap()
     ));
 }
 

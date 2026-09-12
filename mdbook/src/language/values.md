@@ -337,22 +337,34 @@ Numeric equality applies when the two operands themselves are numbers. It does n
 coerce cells inside lists, maps, frobs, or relation values. This is why the list comparison above is
 false even though its individual numeric elements compare equal.
 
-Arithmetic on two integers stays integer where the operation permits it. Mixing an integer and a
-float converts the arithmetic operands to binary32, which can lose precision. Mixed _comparison_
-does not round the integer to binary32 first: a large integer and a nearby rounded float can compare
-unequal. Integer overflow and non-finite arithmetic results raise `E_ARITH`; division or remainder
-by zero raises `E_DIV`. The arithmetic operators do not concatenate strings or collections.
+Arithmetic does not mix integer and float operands. Both operands must have the same numeric kind;
+a mixed pair raises `E_TYPE`, and no implicit conversion is performed. Use `to_float` or `to_int`
+to convert an operand explicitly. Converting an integer to a float rounds to binary32 and can lose
+precision.
+
+Integer overflow and non-finite arithmetic results raise `E_ARITH`; division or remainder by zero
+raises `E_DIV`. Mixed _comparison_ does not round the integer to binary32 first: a large integer and
+a nearby rounded float can compare unequal. The arithmetic operators do not concatenate strings or
+collections.
 
 ### Division Result Kinds
 
 Division follows a result-kind rule:
 
 - `4 / 2` produces `Int(2)` because integer division is exact.
-- `4 / 2.0` produces `Float(2.0)` because a float operand produces a float result.
-- `5 / 2` produces `Float(2.5)` because integer division is not exact.
+- `5 / 2` raises `E_ARITH` because the quotient is not representable as an integer.
+- `4.0 / 2.0` produces `Float(2.0)` because both operands are floats.
+- `4 / 2.0` raises `E_TYPE` because the operands mix kinds.
 
-The numeric values `4 / 2` and `4 / 2.0` are numerically equal (`2 == 2.0` is true), but the
+The numeric values `4 / 2` and `4.0 / 2.0` are numerically equal (`2 == 2.0` is true), but the
 resulting values have different kinds and occupy different map or relation keys.
+
+Explicit conversion makes the intent clear when a float result is wanted:
+
+```mica,eval
+require to_float(5) / to_float(2) == 2.5
+require to_int(4.0 / 2.0) == 2
+```
 
 ### Structural Sorting
 

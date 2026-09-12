@@ -1386,33 +1386,22 @@ fn infer_numeric_result_kind(
     let (Some(left), Some(right)) = (left, right) else {
         return None;
     };
-    let both_numeric = matches!(left, ValueKind::Int | ValueKind::Float)
-        && matches!(right, ValueKind::Int | ValueKind::Float);
-    if !both_numeric {
+    // Arithmetic does not mix numeric kinds: a mixed pair raises at runtime,
+    // so no result kind can be inferred.
+    let same_kind = left == right && matches!(left, ValueKind::Int | ValueKind::Float);
+    if !same_kind {
         return None;
     }
     match op {
-        RuntimeBinaryOp::Add | RuntimeBinaryOp::Sub | RuntimeBinaryOp::Mul => {
-            if left == ValueKind::Int && right == ValueKind::Int {
-                Some(ValueKind::Int)
-            } else {
-                Some(ValueKind::Float)
-            }
-        }
+        RuntimeBinaryOp::Add | RuntimeBinaryOp::Sub | RuntimeBinaryOp::Mul => Some(left),
         RuntimeBinaryOp::Div => {
-            if left == ValueKind::Int && right == ValueKind::Int {
+            if left == ValueKind::Int {
                 None
             } else {
                 Some(ValueKind::Float)
             }
         }
-        RuntimeBinaryOp::Rem => {
-            if left == ValueKind::Int && right == ValueKind::Int {
-                Some(ValueKind::Int)
-            } else {
-                Some(ValueKind::Float)
-            }
-        }
+        RuntimeBinaryOp::Rem => Some(left),
         RuntimeBinaryOp::Eq
         | RuntimeBinaryOp::Ne
         | RuntimeBinaryOp::Lt

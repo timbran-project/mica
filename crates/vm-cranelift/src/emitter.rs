@@ -478,31 +478,16 @@ impl ValueEmitter {
         builder.switch_to_block(float_block);
         let left_is_float = Self::emit_is_float(builder, left);
         let right_is_float = Self::emit_is_float(builder, right);
-        let left_is_numeric = builder.ins().bor(left_is_int, left_is_float);
-        let right_is_numeric = builder.ins().bor(right_is_int, right_is_float);
-        let operands_are_numeric = builder.ins().band(left_is_numeric, right_is_numeric);
-
-        let left_int = Self::emit_unbox_int(builder, left);
-        let right_int = Self::emit_unbox_int(builder, right);
-        let left_int_float = builder.ins().fcvt_from_sint(types::F32, left_int);
-        let right_int_float = builder.ins().fcvt_from_sint(types::F32, right_int);
+        let both_float = builder.ins().band(left_is_float, right_is_float);
         let left_float = Self::emit_unbox_float(builder, left);
         let right_float = Self::emit_unbox_float(builder, right);
-        let left_float = builder
-            .ins()
-            .select(left_is_int, left_int_float, left_float);
-        let right_float = builder
-            .ins()
-            .select(right_is_int, right_int_float, right_float);
         let float_value = match operation {
             NumericArithmetic::Add => builder.ins().fadd(left_float, right_float),
             NumericArithmetic::Subtract => builder.ins().fsub(left_float, right_float),
             NumericArithmetic::Multiply => builder.ins().fmul(left_float, right_float),
         };
         let float_result = Self::emit_pack_checked_float(builder, float_value);
-        let float_is_fast = builder
-            .ins()
-            .band(operands_are_numeric, float_result.is_fast());
+        let float_is_fast = builder.ins().band(both_float, float_result.is_fast());
         builder
             .ins()
             .jump(done, &[float_result.word().into(), float_is_fast.into()]);
@@ -538,31 +523,10 @@ impl ValueEmitter {
         );
 
         builder.switch_to_block(fallback);
-        let left_is_int = Self::emit_is_int(builder, left);
-        let right_is_int = Self::emit_is_int(builder, right);
-        let both_int = builder.ins().band(left_is_int, right_is_int);
         let left_is_float = Self::emit_is_float(builder, left);
         let right_is_float = Self::emit_is_float(builder, right);
-        let left_is_numeric = builder.ins().bor(left_is_int, left_is_float);
-        let right_is_numeric = builder.ins().bor(right_is_int, right_is_float);
-        let operands_are_numeric = builder.ins().band(left_is_numeric, right_is_numeric);
-        let not_both_int = builder.ins().icmp_imm(IntCC::Equal, both_int, 0);
-        let mixed_or_float = builder.ins().band(operands_are_numeric, not_both_int);
-        let use_float = match operation {
-            NumericQuotient::Divide => {
-                let left_int = Self::emit_unbox_int(builder, left);
-                let right_int = Self::emit_unbox_int(builder, right);
-                let divisor_is_nonzero = builder.ins().icmp_imm(IntCC::NotEqual, right_int, 0);
-                let one = builder.ins().iconst(types::I64, 1);
-                let safe_right = builder.ins().select(divisor_is_nonzero, right_int, one);
-                let remainder = builder.ins().srem(left_int, safe_right);
-                let is_fractional = builder.ins().icmp_imm(IntCC::NotEqual, remainder, 0);
-                let fractional_int = builder.ins().band(both_int, divisor_is_nonzero);
-                let fractional_int = builder.ins().band(fractional_int, is_fractional);
-                builder.ins().bor(mixed_or_float, fractional_int)
-            }
-            NumericQuotient::Remainder => mixed_or_float,
-        };
+        let both_float = builder.ins().band(left_is_float, right_is_float);
+        let use_float = both_float;
         builder.ins().brif(
             use_float,
             float_block,
@@ -572,18 +536,8 @@ impl ValueEmitter {
         );
 
         builder.switch_to_block(float_block);
-        let left_int = Self::emit_unbox_int(builder, left);
-        let right_int = Self::emit_unbox_int(builder, right);
-        let left_int_float = builder.ins().fcvt_from_sint(types::F32, left_int);
-        let right_int_float = builder.ins().fcvt_from_sint(types::F32, right_int);
         let left_float = Self::emit_unbox_float(builder, left);
         let right_float = Self::emit_unbox_float(builder, right);
-        let left_float = builder
-            .ins()
-            .select(left_is_int, left_int_float, left_float);
-        let right_float = builder
-            .ins()
-            .select(right_is_int, right_int_float, right_float);
         let zero = builder.ins().f32const(Ieee32::with_bits(0));
         let divisor_is_nonzero = builder.ins().fcmp(FloatCC::NotEqual, right_float, zero);
         let one = builder.ins().f32const(Ieee32::with_bits(1.0f32.to_bits()));
@@ -597,7 +551,7 @@ impl ValueEmitter {
             }
         };
         let float_result = Self::emit_pack_checked_float(builder, float_value);
-        let is_fast = builder.ins().band(operands_are_numeric, divisor_is_nonzero);
+        let is_fast = builder.ins().band(both_float, divisor_is_nonzero);
         let is_fast = builder.ins().band(is_fast, float_result.is_fast());
         builder
             .ins()

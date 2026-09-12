@@ -27,6 +27,8 @@ expected failure as ordinary values.
 | `url_decode_component(text)`               | decoded URL component                                |
 | `sort(list)`                               | canonically sorted list                              |
 | `to_symbol(text)`                          | named symbol                                         |
+| `to_float(number)`                         | explicit numeric conversion to float                 |
+| `to_int(number)`                           | explicit numeric conversion to an integral int       |
 | `error_code(symbol)`                       | error code with the symbol's name                    |
 | `error(code[, message[, payload]])`        | structured error value                               |
 | `to_literal(value)`                        | parseable Mica value text                            |
@@ -74,6 +76,23 @@ require string_concat() == ""
 
 Both operations require string pieces. Use `to_literal` explicitly when the text should contain a
 Mica representation of another value.
+
+### Numeric Conversion
+
+Arithmetic does not mix integers and floats; use `to_float` or `to_int` at the point where a
+conversion is intended:
+
+```mica,eval
+require to_float(5) / to_float(2) == 2.5
+require to_int(4.0 / 2.0) == 2
+require to_float(3) == 3.0
+require to_int(3.0) == 3
+```
+
+`to_float` accepts an integer or float. Converting an integer to a float rounds to binary32 and can
+lose precision above `2^24`. `to_int` accepts an integer or a float that is exactly integral and
+within the Mica integer range; a fractional or out-of-range float raises `E_TYPE`. Non-numeric
+arguments raise `E_TYPE` in both cases.
 
 ### Parsing Small Inputs
 

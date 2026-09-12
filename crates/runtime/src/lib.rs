@@ -4455,6 +4455,16 @@ fn default_builtins(embedding_provider: Arc<dyn embedding::EmbeddingProvider>) -
             to_symbol_builtin,
         )
         .with_builtin(
+            "to_float",
+            BuiltinResultKind::Exact(ValueKind::Float),
+            to_float_builtin,
+        )
+        .with_builtin(
+            "to_int",
+            BuiltinResultKind::Exact(ValueKind::Int),
+            to_int_builtin,
+        )
+        .with_builtin(
             "map_pairs",
             BuiltinResultKind::Exact(ValueKind::List),
             map_pairs_builtin,
@@ -5102,6 +5112,41 @@ fn to_symbol_builtin(
         ));
     };
     Ok(Value::symbol(Symbol::intern(&name)))
+}
+
+fn to_float_builtin(
+    _context: &mut BuiltinContext<'_, '_>,
+    args: &[Value],
+) -> Result<Value, RuntimeError> {
+    if args.len() != 1 {
+        return Err(invalid_builtin_call(
+            "to_float",
+            "expected to_float(number)",
+        ));
+    }
+    args[0].to_float().ok_or_else(|| {
+        raised_builtin_error(
+            "E_TYPE",
+            "to_float expected a numeric value",
+            Some(args[0].clone()),
+        )
+    })
+}
+
+fn to_int_builtin(
+    _context: &mut BuiltinContext<'_, '_>,
+    args: &[Value],
+) -> Result<Value, RuntimeError> {
+    if args.len() != 1 {
+        return Err(invalid_builtin_call("to_int", "expected to_int(number)"));
+    }
+    args[0].to_int().ok_or_else(|| {
+        raised_builtin_error(
+            "E_TYPE",
+            "to_int expected an exactly integral numeric value",
+            Some(args[0].clone()),
+        )
+    })
 }
 
 fn map_pairs_builtin(

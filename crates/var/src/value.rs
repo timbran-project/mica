@@ -794,9 +794,11 @@ impl Value {
             (Some(left), Some(right)) => {
                 left.checked_add(right).and_then(|sum| Self::int(sum).ok())
             }
-            _ => Some(Self::float_checked(
-                self.numeric_as_f32()? + rhs.numeric_as_f32()?,
-            )?),
+            (None, None) => {
+                let (left, right) = (self.as_float()?, rhs.as_float()?);
+                Self::float_checked(left + right)
+            }
+            _ => None,
         }
     }
 
@@ -805,9 +807,11 @@ impl Value {
             (Some(left), Some(right)) => left
                 .checked_sub(right)
                 .and_then(|diff| Self::int(diff).ok()),
-            _ => Some(Self::float_checked(
-                self.numeric_as_f32()? - rhs.numeric_as_f32()?,
-            )?),
+            (None, None) => {
+                let (left, right) = (self.as_float()?, rhs.as_float()?);
+                Self::float_checked(left - right)
+            }
+            _ => None,
         }
     }
 
@@ -816,41 +820,49 @@ impl Value {
             (Some(left), Some(right)) => left
                 .checked_mul(right)
                 .and_then(|product| Self::int(product).ok()),
-            _ => Some(Self::float_checked(
-                self.numeric_as_f32()? * rhs.numeric_as_f32()?,
-            )?),
+            (None, None) => {
+                let (left, right) = (self.as_float()?, rhs.as_float()?);
+                Self::float_checked(left * right)
+            }
+            _ => None,
         }
     }
 
     pub fn checked_div(&self, rhs: &Self) -> Option<Self> {
         match (self.as_int(), rhs.as_int()) {
-            (_, Some(0)) => None,
-            (Some(left), Some(right)) if left % right == 0 => Self::int(left / right).ok(),
-            _ => {
-                let rhs = rhs.numeric_as_f32()?;
-                if rhs == 0.0 {
-                    None
-                } else {
-                    Some(Self::float_checked(self.numeric_as_f32()? / rhs)?)
+            (Some(left), Some(right)) => {
+                if right == 0 || left % right != 0 {
+                    return None;
                 }
+                Self::int(left / right).ok()
             }
+            (None, None) => {
+                let (left, right) = (self.as_float()?, rhs.as_float()?);
+                if right == 0.0 {
+                    return None;
+                }
+                Self::float_checked(left / right)
+            }
+            _ => None,
         }
     }
 
     pub fn checked_rem(&self, rhs: &Self) -> Option<Self> {
         match (self.as_int(), rhs.as_int()) {
-            (_, Some(0)) => None,
             (Some(left), Some(right)) => {
+                if right == 0 {
+                    return None;
+                }
                 left.checked_rem(right).and_then(|rem| Self::int(rem).ok())
             }
-            _ => {
-                let rhs = rhs.numeric_as_f32()?;
-                if rhs == 0.0 {
-                    None
-                } else {
-                    Some(Self::float_checked(self.numeric_as_f32()? % rhs)?)
+            (None, None) => {
+                let (left, right) = (self.as_float()?, rhs.as_float()?);
+                if right == 0.0 {
+                    return None;
                 }
+                Self::float_checked(left % right)
             }
+            _ => None,
         }
     }
 
@@ -858,7 +870,35 @@ impl Value {
         if let Some(value) = self.as_int() {
             value.checked_neg().and_then(|value| Self::int(value).ok())
         } else {
-            Some(Self::float_checked(-self.numeric_as_f32()?)?)
+            let value = self.as_float()?;
+            Self::float_checked(-value)
+        }
+    }
+
+    /// Explicitly converts a numeric value to a float.
+    ///
+    /// Integers round to the nearest binary32 value; floats are returned
+    /// unchanged. Non-numeric values fail.
+    pub fn to_float(&self) -> Option<Self> {
+        match self.as_int() {
+            Some(value) => Self::float(value as f32).ok(),
+            None => self.as_float().map(|_| self.clone()),
+        }
+    }
+
+    /// Explicitly converts a numeric value to an integer.
+    ///
+    /// A float converts only when it is exactly integral and within the Mica
+    /// integer range; integers are returned unchanged. Other values fail.
+    pub fn to_int(&self) -> Option<Self> {
+        match self.as_float() {
+            Some(value) => {
+                if value.fract() != 0.0 {
+                    return None;
+                }
+                Self::int(value as i64).ok()
+            }
+            None => self.as_int().map(|_| self.clone()),
         }
     }
 
@@ -907,14 +947,6 @@ impl Value {
             return None;
         }
         Some(unsafe { &*self.heap_ptr() })
-    }
-
-    pub(crate) fn numeric_as_f32(&self) -> Option<f32> {
-        if let Some(value) = self.as_int() {
-            Some(value as f32)
-        } else {
-            self.as_float()
-        }
     }
 
     pub(crate) fn heap_ptr(&self) -> *const HeapValue {

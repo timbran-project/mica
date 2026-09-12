@@ -1426,7 +1426,7 @@ fn program_artifact_round_trips_direct_relation_pattern_operations() {
 #[test]
 fn program_kind_facts_propagate_exact_instruction_results() {
     let program = Program::new(
-        7,
+        8,
         [
             Instruction::Load {
                 dst: reg(0),
@@ -1452,14 +1452,18 @@ fn program_kind_facts_propagate_exact_instruction_results() {
                 dst: reg(4),
                 value: Value::float(0.5).unwrap(),
             },
-            Instruction::Binary {
+            Instruction::Load {
                 dst: reg(5),
+                value: Value::float(0.25).unwrap(),
+            },
+            Instruction::Binary {
+                dst: reg(6),
                 op: RuntimeBinaryOp::Add,
-                left: reg(2),
-                right: reg(4),
+                left: reg(4),
+                right: reg(5),
             },
             Instruction::CheckKind {
-                value: reg(6),
+                value: reg(7),
                 expected: ValueKind::String,
                 site: KindCheckSite::Parameter,
                 subject: Symbol::intern("name"),
@@ -1474,9 +1478,10 @@ fn program_kind_facts_propagate_exact_instruction_results() {
     assert_eq!(program.kind_fact_after(3), None);
     assert_eq!(program.kind_fact_after(4), Some((reg(4), ValueKind::Float)),);
     assert_eq!(program.kind_fact_after(5), Some((reg(5), ValueKind::Float)),);
+    assert_eq!(program.kind_fact_after(6), Some((reg(6), ValueKind::Float)),);
     assert_eq!(
-        program.kind_fact_after(6),
-        Some((reg(6), ValueKind::String)),
+        program.kind_fact_after(7),
+        Some((reg(7), ValueKind::String)),
     );
 
     let restored = Program::from_bytes(&program.to_bytes().unwrap()).unwrap();

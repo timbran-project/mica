@@ -465,20 +465,59 @@ fn numeric_operations_preserve_ints_when_exact() {
 }
 
 #[test]
+fn explicit_numeric_conversions() {
+    assert_eq!(
+        Value::int(7)
+            .unwrap()
+            .to_float()
+            .and_then(|value| value.as_float()),
+        Some(7.0)
+    );
+    assert_eq!(
+        Value::float(7.0)
+            .unwrap()
+            .to_int()
+            .and_then(|value| value.as_int()),
+        Some(7)
+    );
+    // A float with a fractional part does not convert.
+    assert_eq!(Value::float(7.5).unwrap().to_int(), None);
+    // A value already in the target kind converts to itself.
+    assert_eq!(
+        Value::float(1.5).unwrap().to_float(),
+        Some(Value::float(1.5).unwrap())
+    );
+    assert_eq!(
+        Value::int(3).unwrap().to_int(),
+        Some(Value::int(3).unwrap())
+    );
+    // Non-numeric values do not convert.
+    assert_eq!(Value::string("7").to_float(), None);
+    assert_eq!(Value::string("7").to_int(), None);
+    // A float outside the integer range does not convert.
+    assert_eq!(Value::float(f32::MAX).unwrap().to_int(), None);
+}
+
+#[test]
 fn numeric_operations_fall_back_to_floats() {
     let five = Value::int(5).unwrap();
     let two = Value::int(2).unwrap();
     let half = Value::float(0.5).unwrap();
 
+    // Inexact integer division is rejected rather than widened.
+    assert_eq!(five.checked_div(&two), None);
+    // Mixing kinds is rejected rather than widened.
+    assert_eq!(five.checked_add(&half), None);
+    assert_eq!(half.checked_add(&five), None);
+    assert_eq!(five.checked_div(&Value::int(0).unwrap()), None);
+
+    // Explicit conversion restores the arithmetic.
     assert_eq!(
-        five.checked_div(&two).and_then(|value| value.as_float()),
-        Some(2.5)
-    );
-    assert_eq!(
-        five.checked_add(&half).and_then(|value| value.as_float()),
+        five.to_float()
+            .and_then(|value| value.checked_add(&half))
+            .and_then(|value| value.as_float()),
         Some(5.5)
     );
-    assert_eq!(five.checked_div(&Value::int(0).unwrap()), None);
 }
 
 #[test]
@@ -1203,7 +1242,7 @@ fn arithmetic_fast_path() {
     assert_eq!(
         Value::float(1.5)
             .unwrap()
-            .checked_add(&Value::int(2).unwrap())
+            .checked_add(&Value::float(2.0).unwrap())
             .unwrap()
             .as_float(),
         Some(3.5)
@@ -1395,13 +1434,11 @@ fn division_result_kind_rule() {
         Value::int(6).unwrap().checked_div(&Value::int(2).unwrap()),
         Some(Value::int(3).unwrap())
     );
-    // Non-exact integer division produces float.
-    let result = Value::int(5)
-        .unwrap()
-        .checked_div(&Value::int(2).unwrap())
-        .unwrap();
-    assert!(result.as_float().is_some());
-    assert!(result.as_int().is_none());
+    // Non-exact integer division is rejected.
+    assert_eq!(
+        Value::int(5).unwrap().checked_div(&Value::int(2).unwrap()),
+        None
+    );
 }
 
 #[test]
