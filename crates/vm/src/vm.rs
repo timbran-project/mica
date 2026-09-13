@@ -525,6 +525,36 @@ impl DispatchRead for VmHostContext<'_, '_> {
         );
         Ok(methods)
     }
+
+    fn cached_method_candidates(
+        &self,
+        relations: DispatchRelations,
+        selector: &Value,
+    ) -> Result<Option<Arc<[mica_relation_kernel::ApplicableMethod]>>, mica_relation_kernel::KernelError>
+    {
+        // Forward so the value-independent candidate cache is actually used;
+        // the trait default would return `None` and force a rescan per call.
+        DispatchRead::cached_method_candidates(&*self.tx, relations, selector)
+    }
+
+    fn store_method_candidates(
+        &self,
+        relations: DispatchRelations,
+        selector: &Value,
+        candidates: Arc<[mica_relation_kernel::ApplicableMethod]>,
+    ) {
+        DispatchRead::store_method_candidates(&*self.tx, relations, selector, candidates);
+    }
+
+    fn store_positional_methods(
+        &self,
+        relations: DispatchRelations,
+        selector: &Value,
+        args: &[Value],
+        methods: Arc<[Value]>,
+    ) {
+        DispatchRead::store_positional_methods(&*self.tx, relations, selector, args, methods);
+    }
 }
 
 impl RelationWorkspace for VmHostContext<'_, '_> {

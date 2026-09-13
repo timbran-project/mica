@@ -79,6 +79,34 @@ pub trait DispatchRead: RelationRead {
         Ok(None)
     }
 
+    /// Returns the cached value-independent candidate set for a selector.
+    fn cached_method_candidates(
+        &self,
+        _relations: DispatchRelations,
+        _selector: &Value,
+    ) -> Result<Option<Arc<[ApplicableMethod]>>, KernelError> {
+        Ok(None)
+    }
+
+    /// Stores the value-independent candidate set for a selector.
+    fn store_method_candidates(
+        &self,
+        _relations: DispatchRelations,
+        _selector: &Value,
+        _candidates: Arc<[ApplicableMethod]>,
+    ) {
+    }
+
+    /// Stores the filtered positional result for a selector and argument tuple.
+    fn store_positional_methods(
+        &self,
+        _relations: DispatchRelations,
+        _selector: &Value,
+        _args: &[Value],
+        _methods: Arc<[Value]>,
+    ) {
+    }
+
     fn cached_applicable_positional_methods(
         &self,
         _relations: DispatchRelations,
@@ -97,7 +125,7 @@ pub fn applicable_methods(
 ) -> Result<Vec<Value>, KernelError> {
     let roles = roles.into_iter().collect::<Vec<_>>();
     Ok(
-        applicable_method_entries(reader, relations, selector, &roles)?
+        applicable_method_entries_scan(reader, relations, selector, &roles)?
             .into_iter()
             .map(|entry| entry.method)
             .collect(),
@@ -105,16 +133,39 @@ pub fn applicable_methods(
 }
 
 pub fn applicable_method_entries(
-    reader: &impl RelationRead,
+    reader: &impl DispatchRead,
     relations: DispatchRelations,
     selector: Value,
     roles: &[(Value, Value)],
 ) -> Result<Vec<ApplicableMethod>, KernelError> {
-    let mut methods = Vec::new();
+    // The candidate cache is used by the uncached scan-and-filter path only
+    // when it can prove the view matches; the ordering here must stay:
+    // scan (value-independent) -> filter by arguments -> prune by dominance.
+    let candidates = if let Some(cached) = reader.cached_method_candidates(relations, &selector)? {
+        cached
+    } else {
+        let scanned = scan_method_candidates(reader, relations, &selector)?;
+        let shared: Arc<[ApplicableMethod]> = scanned.into();
+        reader.store_method_candidates(relations, &selector, Arc::clone(&shared));
+        shared
+    };
+    let matched = filter_method_candidates(reader, relations, roles, &candidates)?;
+    prune_named_methods(reader, relations.delegates, matched)
+}
 
+/// Scans the method-selector and param relations for `selector`, producing the
+/// value-independent candidate set: every method that declares the selector,
+/// with its declared params, sorted and deduplicated. Not yet filtered by the
+/// call's arguments and not yet dominance-pruned.
+pub(crate) fn scan_method_candidates(
+    reader: &impl RelationRead,
+    relations: DispatchRelations,
+    selector: &Value,
+) -> Result<Vec<ApplicableMethod>, KernelError> {
+    let mut methods = Vec::new();
     reader.visit_relation(
         relations.method_selector,
-        &[None, Some(selector)],
+        &[None, Some(selector.clone())],
         &mut |row| {
             let method = row.values()[0].clone();
             let mut params = Vec::new();
@@ -126,16 +177,46 @@ pub fn applicable_method_entries(
                     Ok(ScanControl::Continue)
                 },
             )?;
-            if params_match(reader, relations.delegates, roles, &params)? {
-                methods.push(ApplicableMethod { method, params });
-            }
+            methods.push(ApplicableMethod { method, params });
             Ok(ScanControl::Continue)
         },
     )?;
 
+    // Do not dedup here: overloads of the same method carry different params,
+    // and dominance pruning needs every declaration to pick the most specific.
+    // Duplicates are removed after filtering, in the prune pass.
     methods.sort_by(|left, right| left.method.cmp(&right.method));
-    methods.dedup_by(|left, right| left.method == right.method);
-    prune_named_methods(reader, relations.delegates, methods)
+    Ok(methods)
+}
+
+/// Applies the per-call argument restrictions to a candidate set.
+fn filter_method_candidates(
+    reader: &impl RelationRead,
+    relations: DispatchRelations,
+    roles: &[(Value, Value)],
+    candidates: &[ApplicableMethod],
+) -> Result<Vec<ApplicableMethod>, KernelError> {
+    let mut methods = Vec::new();
+    for candidate in candidates {
+        if params_match(reader, relations.delegates, roles, &candidate.params)? {
+            methods.push(candidate.clone());
+        }
+    }
+    Ok(methods)
+}
+
+/// Uncached scan-and-filter over the relation surface. Used by callers that
+/// only have a `RelationRead`; `applicable_method_entries` is the caching
+/// entry point.
+fn applicable_method_entries_scan(
+    reader: &impl RelationRead,
+    relations: DispatchRelations,
+    selector: Value,
+    roles: &[(Value, Value)],
+) -> Result<Vec<ApplicableMethod>, KernelError> {
+    let candidates = scan_method_candidates(reader, relations, &selector)?;
+    let matched = filter_method_candidates(reader, relations, roles, &candidates)?;
+    prune_named_methods(reader, relations.delegates, matched)
 }
 
 pub fn applicable_method_calls(
@@ -195,7 +276,7 @@ pub(crate) fn applicable_method_calls_uncached(
     selector: &Value,
     roles: &[(Value, Value)],
 ) -> Result<Vec<ApplicableMethodCall>, KernelError> {
-    applicable_method_entries(reader, relations, selector.clone(), roles).map(|methods| {
+    applicable_method_entries_scan(reader, relations, selector.clone(), roles).map(|methods| {
         methods
             .into_iter()
             .map(|entry| ApplicableMethodCall {
@@ -212,29 +293,28 @@ pub fn applicable_positional_methods(
     selector: Value,
     args: &[Value],
 ) -> Result<Vec<Value>, KernelError> {
+    let candidates = scan_method_candidates(reader, relations, &selector)?;
+    filter_positional_candidates(reader, relations, args, &candidates)
+}
+
+/// Applies the per-call positional argument restrictions to a candidate set.
+pub(crate) fn filter_positional_candidates(
+    reader: &impl RelationRead,
+    relations: DispatchRelations,
+    args: &[Value],
+    candidates: &[ApplicableMethod],
+) -> Result<Vec<Value>, KernelError> {
     let mut methods = Vec::new();
-
-    reader.visit_relation(
-        relations.method_selector,
-        &[None, Some(selector)],
-        &mut |row| {
-            let method = row.values()[0].clone();
-            let mut params = Vec::new();
-            reader.visit_relation(
-                relations.param,
-                &[Some(method.clone()), None, None, None],
-                &mut |param| {
-                    params.push(param.clone());
-                    Ok(ScanControl::Continue)
-                },
-            )?;
-            if positional_params_match(reader, relations.delegates, args, &params)? {
-                methods.push(ApplicableMethod { method, params });
-            }
-            Ok(ScanControl::Continue)
-        },
-    )?;
-
+    for candidate in candidates {
+        if positional_params_match(reader, relations.delegates, args, &candidate.params)? {
+            methods.push(candidate.clone());
+        }
+    }
+    // A single applicable method needs no ordering or dominance pruning; this
+    // is the common case and avoids sorting and the prune pass per call.
+    if methods.len() == 1 {
+        return Ok(vec![methods.pop().unwrap().method]);
+    }
     methods.sort_by(|left, right| left.method.cmp(&right.method));
     methods.dedup_by(|left, right| left.method == right.method);
     Ok(
@@ -256,7 +336,22 @@ pub fn applicable_positional_methods_cached(
     {
         return Ok(methods);
     }
-    applicable_positional_methods(reader, relations, selector, args).map(Arc::from)
+    // Cache the value-independent candidate scan, then filter per call: a
+    // positional key that includes the argument values would miss on every
+    // call in a loop that dispatches on changing data, and each miss would
+    // rescan the selector and param relations.
+    let candidates = if let Some(cached) = reader.cached_method_candidates(relations, &selector)? {
+        cached
+    } else {
+        let scanned = scan_method_candidates(reader, relations, &selector)?;
+        let shared: Arc<[ApplicableMethod]> = scanned.into();
+        reader.store_method_candidates(relations, &selector, Arc::clone(&shared));
+        shared
+    };
+    let methods = filter_positional_candidates(reader, relations, args, &candidates)?;
+    let shared: Arc<[Value]> = methods.into();
+    reader.store_positional_methods(relations, &selector, args, Arc::clone(&shared));
+    Ok(shared)
 }
 
 fn method_call_args_from_params(
@@ -536,6 +631,10 @@ fn matches_restriction(
     restriction: &Value,
 ) -> Result<bool, KernelError> {
     if restriction == unrestricted_marker() {
+        return Ok(true);
+    }
+    // An exact value match needs no traversal either.
+    if value == restriction {
         return Ok(true);
     }
     if let Some(required_delegate) = frob_only_restriction(restriction) {

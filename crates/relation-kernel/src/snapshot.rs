@@ -19,7 +19,8 @@ use crate::method_program_cache::MethodProgramCache;
 use crate::relation_algebra::union_ordered_tuple_rows;
 use crate::relation_states::RelationStates;
 use crate::{
-    ApplicableMethodCall, DispatchRead, DispatchRelations, KernelError, PackedRelation,
+    ApplicableMethod, ApplicableMethodCall, DispatchRead, DispatchRelations, KernelError,
+    PackedRelation,
     RelationCapabilities, RelationId, RelationMetadata, RelationRead, RelationSource,
     RuleDefinition, RuleEvalError, RuleSet, ScanControl, Tuple, ValueDomain, Version,
 };
@@ -561,13 +562,28 @@ impl Snapshot {
             return Ok(methods);
         }
 
-        let methods = crate::dispatch::applicable_positional_methods(
-            self,
-            relations,
-            selector.clone(),
-            args,
-        )?;
-        let methods = Arc::from(methods);
+        // Reuse the value-independent candidate scan across calls that differ
+        // only in argument values, then filter per call. The candidate set is
+        // scanned once per selector instead of once per (selector, args).
+        let candidates = if let Some(cached) =
+            self.dispatch_cache.get_candidates(relations, selector)
+        {
+            cached
+        } else {
+            let scanned = crate::dispatch::scan_method_candidates(self, relations, selector)?;
+            let shared: Arc<[ApplicableMethod]> = scanned.into();
+            self.dispatch_cache.insert_candidates(
+                relations,
+                selector,
+                Arc::clone(&shared),
+            );
+            shared
+        };
+        let filtered =
+            crate::dispatch::filter_positional_candidates(self, relations, args, &candidates)?;
+        let methods: Arc<[Value]> = filtered.into();
+        // Only cache the per-call result while there is room; past the bound
+        // the candidate cache still avoids the rescan.
         self.dispatch_cache
             .insert_positional(relations, selector, args, Arc::clone(&methods));
         Ok(methods)
@@ -692,6 +708,35 @@ impl DispatchRead for Snapshot {
         method: &Value,
     ) -> Result<Option<Option<Value>>, KernelError> {
         self.cached_method_program(relation, method).map(Some)
+    }
+
+    fn cached_method_candidates(
+        &self,
+        relations: DispatchRelations,
+        selector: &Value,
+    ) -> Result<Option<Arc<[ApplicableMethod]>>, KernelError> {
+        Ok(self.dispatch_cache.get_candidates(relations, selector))
+    }
+
+    fn store_method_candidates(
+        &self,
+        relations: DispatchRelations,
+        selector: &Value,
+        candidates: Arc<[ApplicableMethod]>,
+    ) {
+        self.dispatch_cache
+            .insert_candidates(relations, selector, candidates);
+    }
+
+    fn store_positional_methods(
+        &self,
+        relations: DispatchRelations,
+        selector: &Value,
+        args: &[Value],
+        methods: Arc<[Value]>,
+    ) {
+        self.dispatch_cache
+            .insert_positional(relations, selector, args, methods);
     }
 
     fn cached_applicable_positional_methods(

@@ -11,7 +11,7 @@
 // You should have received a copy of the GNU Affero General Public License along
 // with this program. If not, see <https://www.gnu.org/licenses/>.
 
-use crate::{ApplicableMethodCall, DispatchRelations};
+use crate::{ApplicableMethod, ApplicableMethodCall, DispatchRelations};
 use arc_swap::ArcSwap;
 use mica_var::Value;
 use std::collections::BTreeMap;
@@ -21,19 +21,65 @@ use std::sync::{Arc, Mutex};
 pub(crate) struct DispatchCache {
     entries: Arc<ArcSwap<BTreeMap<DispatchCacheKey, Arc<[ApplicableMethodCall]>>>>,
     positional_entries: Arc<ArcSwap<PositionalDispatchEntries>>,
+    /// Candidate methods and their params per `(relations, selector)`. This is
+    /// the value-independent part of dispatch: applicability still depends on
+    /// the argument values (restrictions), but the candidate set and the param
+    /// rows do not, so they are scanned once per selector rather than once per
+    /// call.
+    candidates: Arc<ArcSwap<BTreeMap<CandidateKey, Arc<[ApplicableMethod]>>>>,
     publish_lock: Arc<Mutex<()>>,
 }
 
+type CandidateKey = (DispatchRelationsKey, Value);
+
 type PositionalDispatchEntries =
     BTreeMap<DispatchRelationsKey, Arc<[PositionalDispatchCacheEntry]>>;
+
+/// Upper bound on cached positional entries per relation. The cache key
+/// includes argument values, so an unbounded cache grows without limit for a
+/// loop that dispatches on changing data; insertion also rewrites the
+/// relation's entry vector, which is O(n) per insert. Both problems go away
+/// with a bound: past the cap, calls simply take the uncached path.
+const MAX_POSITIONAL_ENTRIES_PER_RELATION: usize = 1024;
+
+/// Upper bound on keyed (named-dispatch) entries. The same O(n)-per-insert
+/// rewrite applies, and the key holds a role vector per entry.
+const MAX_KEYED_ENTRIES: usize = 4096;
 
 impl DispatchCache {
     pub(crate) fn new() -> Self {
         Self {
             entries: Arc::new(ArcSwap::from_pointee(BTreeMap::new())),
             positional_entries: Arc::new(ArcSwap::from_pointee(BTreeMap::new())),
+            candidates: Arc::new(ArcSwap::from_pointee(BTreeMap::new())),
             publish_lock: Arc::new(Mutex::new(())),
         }
+    }
+
+    pub(crate) fn get_candidates(
+        &self,
+        relations: DispatchRelations,
+        selector: &Value,
+    ) -> Option<Arc<[ApplicableMethod]>> {
+        let key = (DispatchRelationsKey::from(relations), selector.clone());
+        self.candidates.load().get(&key).map(Arc::clone)
+    }
+
+    pub(crate) fn insert_candidates(
+        &self,
+        relations: DispatchRelations,
+        selector: &Value,
+        candidates: Arc<[ApplicableMethod]>,
+    ) {
+        let key = (DispatchRelationsKey::from(relations), selector.clone());
+        let _guard = self.publish_lock.lock().unwrap();
+        let entries = self.candidates.load_full();
+        if entries.contains_key(&key) || entries.len() >= MAX_KEYED_ENTRIES {
+            return;
+        }
+        let mut next = (*entries).clone();
+        next.insert(key, candidates);
+        self.candidates.store(Arc::new(next));
     }
 
     pub(crate) fn get(
@@ -107,9 +153,14 @@ impl DispatchCache {
         let relations = DispatchRelationsKey::from(relations);
         let _guard = self.publish_lock.lock().unwrap();
         let entries = self.positional_entries.load_full();
-        let mut relation_entries = entries
-            .get(&relations)
-            .map_or_else(Vec::new, |entries| entries.to_vec());
+        let existing = entries.get(&relations);
+        // Past the cap, stop inserting: the entry vector rewrite below is
+        // O(cached entries) and the key contains argument values, so an
+        // unbounded cache would grow and slow down with every distinct call.
+        if existing.map_or(0, |entries| entries.len()) >= MAX_POSITIONAL_ENTRIES_PER_RELATION {
+            return;
+        }
+        let mut relation_entries = existing.map_or_else(Vec::new, |entries| entries.to_vec());
         let index =
             match relation_entries.binary_search_by(|entry| entry.compare_key(selector, args)) {
                 Ok(_) => return,
@@ -132,6 +183,11 @@ impl DispatchCache {
         let _guard = self.publish_lock.lock().unwrap();
         let entries = self.entries.load_full();
         if entries.contains_key(&key) {
+            return;
+        }
+        // Bound the keyed cache too: insertion rewrites the whole map, so an
+        // unbounded cache is O(n) per distinct role vector.
+        if entries.len() >= MAX_KEYED_ENTRIES {
             return;
         }
         let methods = Arc::<[ApplicableMethodCall]>::from(methods);

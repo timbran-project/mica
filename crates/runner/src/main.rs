@@ -11,11 +11,13 @@
 // You should have received a copy of the GNU Affero General Public License along
 // with this program. If not, see <https://www.gnu.org/licenses/>.
 
+mod bench;
+
 use clap::{ArgAction, Parser, Subcommand, ValueEnum};
 use mica_compiler::parse;
 use mica_driver::{
     DriverError, DriverEvent, DriverEventPump, DriverOwner, DriverResources, EndpointConfiguration,
-    EndpointSession, InvocationHandle,
+    EndpointSession, InvocationHandle, InvocationOutcome,
 };
 use mica_relation_kernel::FjallDurabilityMode;
 use mica_runtime::{EmbeddingProviderKind, FileinMode, SourceRunner, SuspendKind, TaskOutcome};
@@ -122,6 +124,16 @@ enum Command {
         output: PathBuf,
     },
     Repl,
+    /// Time repeated `bench()` calls from a Mica corpus file; the same
+    /// corpus runs on the Odin implementation via `tools/micabench`.
+    Bench {
+        #[arg(long, default_value_t = 15)]
+        samples: usize,
+        #[arg(long = "budget-ms", default_value_t = 20)]
+        budget_ms: u64,
+        #[arg(required = true, value_name = "FILE")]
+        files: Vec<PathBuf>,
+    },
 }
 
 fn main() -> ExitCode {
@@ -237,6 +249,19 @@ async fn run() -> Result<(), String> {
             }
         }
         Command::Repl => repl(&cli).await,
+        Command::Bench {
+            samples,
+            budget_ms,
+            files,
+        } => {
+            bench_files(
+                &cli,
+                *samples,
+                std::time::Duration::from_millis(*budget_ms),
+                files,
+            )
+            .await
+        }
     }
 }
 
@@ -380,6 +405,228 @@ impl CliSession {
     }
 }
 
+/// Times repeated `bench()` calls from each corpus file, mirroring the Odin
+/// `tools/micabench` driver: load once, run `setup` once, calibrate an inner
+/// repeat count, then report median/min nanoseconds per call.
+async fn bench_files(
+    cli: &Cli,
+    samples: usize,
+    budget: std::time::Duration,
+    files: &[PathBuf],
+) -> Result<(), String> {
+    let mut reported = 0usize;
+    for file in files {
+        if bench_one(cli, samples, budget, file).await {
+            reported += 1;
+        }
+    }
+    if reported == 0 {
+        return Err("no benchmarks ran".to_owned());
+    }
+    Ok(())
+}
+
+async fn bench_one(
+    cli: &Cli,
+    samples: usize,
+    budget: std::time::Duration,
+    file: &PathBuf,
+) -> bool {
+    let source = match fs::read_to_string(file) {
+        Ok(source) => source,
+        Err(error) => {
+            eprintln!("FAIL {}: {error}", file.display());
+            return false;
+        }
+    };
+
+    // Install the corpus through the driver's initial-filein path, which runs
+    // it against the session's own kernel before the endpoint opens.
+    let _ = cli;
+    let include_base = file.parent().unwrap_or_else(|| std::path::Path::new("."));
+    let include_base = include_base.to_path_buf();
+    let include_loader: mica_driver::FileinIncludeLoader =
+        std::sync::Arc::new(move |path: &str| read_filein_include(&include_base, path));
+    let mut resources =
+        DriverResources::new(std::thread::available_parallelism().unwrap_or(NonZeroUsize::MIN));
+    resources.relation_acceleration = mica_driver::RelationAcceleration::Automatic;
+    // The Rust runtime caps a task at 1M instructions by default; the corpus
+    // workloads are deliberately long-running, and the Odin runtime has no
+    // equivalent cap, so raise it for the benchmark session.
+    resources.task_limits.instruction_budget = 100_000_000_000;
+    let mut owner = match DriverOwner::builder(resources)
+        .initial_filein(source, Some(include_loader))
+        .build()
+    {
+        Ok(owner) => owner,
+        Err(error) => {
+            eprintln!("FAIL {}: {error}", file.display());
+            return false;
+        }
+    };
+    let event_pump = match owner.take_event_pump() {
+        Ok(pump) => pump,
+        Err(error) => {
+            eprintln!("FAIL {}: {error}", file.display());
+            return false;
+        }
+    };
+    // Run as the corpus's own `#bench` actor so the grant block in the file
+    // authorizes invoke/read; without an actor the endpoint has empty
+    // authority and dispatch fails.
+    let mut configuration = EndpointConfiguration::new(Symbol::intern("bench"));
+    if let Ok(actor) = owner.client().named_identity(Symbol::intern("bench")) {
+        configuration = configuration.actor(actor);
+    }
+    let endpoint = match owner.client().open_endpoint(configuration) {
+        Ok(endpoint) => endpoint,
+        Err(error) => {
+            eprintln!("FAIL {}: {error}", file.display());
+            return false;
+        }
+    };
+    let mut session = CliSession {
+        owner,
+        event_pump,
+        endpoint,
+    };
+
+    // Optional one-time setup (seeding rows, building indexes).
+    if let Err(error) = timed_selector(&session, "setup").await
+        && !error.contains("no applicable method")
+    {
+        eprintln!("FAIL {}: setup: {error}", file.display());
+        let _ = close_quiet(&mut session).await;
+        return false;
+    }
+
+    let probe = timed_selector(&session, "bench").await;
+    if let Err(error) = probe {
+        eprintln!("FAIL {}: bench: {error}", file.display());
+        let _ = close_quiet(&mut session).await;
+        return false;
+    }
+
+    // Calibrate one call, then sample.
+    let single = match time_bench_call(&session).await {
+        Ok(ns) => ns,
+        Err(error) => {
+            eprintln!("FAIL {}: bench: {error}", file.display());
+            let _ = close_quiet(&mut session).await;
+            return false;
+        }
+    };
+    let inner = bench::calibrate(single, budget);
+
+    for _ in 0..2 {
+        for _ in 0..inner {
+            if let Err(error) = timed_call(&session).await {
+                eprintln!("FAIL {}: bench: {error}", file.display());
+                let _ = close_quiet(&mut session).await;
+                return false;
+            }
+        }
+    }
+
+    let mut results = Vec::with_capacity(samples);
+    for _ in 0..samples {
+        let start = std::time::Instant::now();
+        for _ in 0..inner {
+            if let Err(error) = timed_call(&session).await {
+                eprintln!("FAIL {}: bench: {error}", file.display());
+                let _ = close_quiet(&mut session).await;
+                return false;
+            }
+        }
+        results.push((start.elapsed().as_nanos() as u64) / inner as u64);
+    }
+
+    let _ = close_quiet(&mut session).await;
+    let name = file
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("bench")
+        .to_owned();
+    let sample = bench::summarize(name, results);
+    println!(
+        "{}\t{}\t{}\t{}",
+        sample.name, sample.median_ns, sample.min_ns, sample.samples
+    );
+    true
+}
+
+async fn timed_selector(session: &CliSession, selector: &str) -> Result<(), String> {
+    let handle = session
+        .endpoint
+        .invoke(Symbol::intern(selector), Vec::new())
+        .await
+        .map_err(format_driver_error)?;
+    match handle.wait().await {
+        InvocationOutcome::Completed(_) => Ok(()),
+        InvocationOutcome::Failed(message) => Err(message),
+        other => Err(format!("{selector} did not complete: {other:?}")),
+    }
+}
+
+async fn timed_call(session: &CliSession) -> Result<(), String> {
+    timed_selector(session, "bench").await
+}
+
+async fn time_bench_call(session: &CliSession) -> Result<u64, String> {
+    let start = std::time::Instant::now();
+    timed_call(session).await?;
+    Ok(start.elapsed().as_nanos() as u64)
+}
+
+/// Closes a session without printing the driver's task events; the benchmark
+/// generates thousands and the output would drown the results.
+async fn close_quiet(session: &mut CliSession) -> Result<(), String> {
+    session
+        .endpoint
+        .close_with_pump(&mut session.event_pump, |_| {})
+        .await
+        .map_err(format_driver_error)?;
+    session
+        .owner
+        .shutdown(&mut session.event_pump, |_| {})
+        .await
+        .map_err(format_driver_error)
+}
+
+fn open_session_with_runner(
+    cli: &Cli,
+    protocol: Symbol,
+    runner: SourceRunner,
+) -> Result<CliSession, String> {
+    let actor = cli
+        .actor
+        .as_deref()
+        .map(actor_symbol)
+        .map(|actor| runner.named_identity(actor).map_err(format_source_error))
+        .transpose()?;
+    let mut resources =
+        DriverResources::new(std::thread::available_parallelism().unwrap_or(NonZeroUsize::MIN));
+    resources.relation_acceleration = mica_driver::RelationAcceleration::Automatic;
+    let mut owner = DriverOwner::builder(resources)
+        .source_runner(runner)
+        .build()
+        .map_err(format_driver_error)?;
+    let event_pump = owner.take_event_pump().map_err(format_driver_error)?;
+    let mut configuration = EndpointConfiguration::new(protocol);
+    if let Some(actor) = actor {
+        configuration = configuration.actor(actor);
+    }
+    let endpoint = owner
+        .client()
+        .open_endpoint(configuration)
+        .map_err(format_driver_error)?;
+    Ok(CliSession {
+        owner,
+        event_pump,
+        endpoint,
+    })
+}
+
 fn load_fileins(runner: &mut SourceRunner, fileins: &[PathBuf]) -> Result<(), String> {
     for file in fileins {
         let source = fs::read_to_string(file)
@@ -392,8 +639,7 @@ fn load_fileins(runner: &mut SourceRunner, fileins: &[PathBuf]) -> Result<(), St
     Ok(())
 }
 
-async fn repl(cli: &Cli) -> Result<(), String> {
-    let mut editor =
+async fn repl(cli: &Cli) -> Result<(), String> {    let mut editor =
         DefaultEditor::new().map_err(|error| format!("failed to initialize repl: {error}"))?;
     let mut session = open_cli_session(cli, Symbol::intern("repl"))?;
     let result = repl_loop(&mut session, &mut editor).await;
