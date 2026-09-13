@@ -14,6 +14,11 @@ pub(crate) fn install(registry: BuiltinRegistry) -> BuiltinRegistry {
             string_len_builtin,
         )
         .with_builtin(
+            "len",
+            BuiltinResultKind::Exact(ValueKind::Int),
+            len_builtin,
+        )
+        .with_builtin(
             "string_chars",
             BuiltinResultKind::Exact(ValueKind::List),
             string_chars_builtin,
@@ -108,6 +113,32 @@ fn string_len_builtin(
     let value = builtin_string_arg("string_len", args, 0)?;
     Value::int(value.chars().count() as i64)
         .map_err(|_| invalid_builtin_call("string_len", "string length is out of range"))
+}
+
+/// `len(collection)`: the element count of a list, map, or relation. Other
+/// kinds are a type error, matching the other implementation's `len`.
+fn len_builtin(
+    _context: &mut BuiltinContext<'_, '_>,
+    args: &[Value],
+) -> Result<Value, RuntimeError> {
+    if args.len() != 1 {
+        return Err(invalid_builtin_call("len", "expected len(collection)"));
+    }
+    let value = &args[0];
+    let length = match value.kind() {
+        ValueKind::List => value.with_list(<[Value]>::len),
+        ValueKind::Map => value.with_map(<[(Value, Value)]>::len),
+        ValueKind::Relation => value.with_relation(|relation| relation.len()),
+        _ => None,
+    };
+    let Some(length) = length else {
+        return Err(invalid_builtin_call(
+            "len",
+            "len expects a list, map, or relation",
+        ));
+    };
+    Value::int(length as i64)
+        .map_err(|_| invalid_builtin_call("len", "length does not fit an integer"))
 }
 
 fn string_chars_builtin(

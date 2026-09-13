@@ -637,6 +637,25 @@ fn runner_string_primitives_support_character_level_munging() {
     ));
     assert!(matches!(
         runner
+            .run_source("return len([1, 2, 3])")
+            .unwrap()
+            .outcome,
+        TaskOutcome::Complete { value, .. } if value == Value::int(3).unwrap()
+    ));
+    assert!(matches!(
+        runner
+            .run_source("return len({:a -> 1, :b -> 2})")
+            .unwrap()
+            .outcome,
+        TaskOutcome::Complete { value, .. } if value == Value::int(2).unwrap()
+    ));
+    // `len` is only defined for collections; other kinds are an error,
+    // matching the other implementation. A builtin type error surfaces as a
+    // run error rather than a completed task.
+    assert!(runner.run_source("return len(\"abc\")").is_err());
+    assert!(runner.run_source("return len(5)").is_err());
+    assert!(matches!(
+        runner
             .run_source("return string_join([\"a\", \"b\", \"c\"], \"/\")")
             .unwrap()
             .outcome,
