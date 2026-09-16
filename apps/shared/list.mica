@@ -1,0 +1,142 @@
+// List utility surface for example fileins.
+//
+// The runtime provides only low-level primitives:
+//
+//   list indexing `items[index]`
+//   iteration `for item in list`
+//   append `[@list, item]` (amortized, reuses buffer capacity)
+//   index_or(collection, index, default)
+//   sort(list)
+//
+// Deliberately no `len`: it is an Odin-port compiler extension, not part of
+// the shared language, so the verbs below count by iterating instead.
+//
+// The higher-level operations below are ordinary Mica verbs. Calls such as
+// map(items, f) or items :map(f) dispatch against the #list primitive
+// prototype, so they compose:
+//
+//   let names = users :filter(fn(u) => u[:active]) :map(fn(u) => u[:name])
+//
+// Higher-order calls go through function values, so they cost a little more
+// than a hand-written loop; keep the loop where a hot path needs it.
+
+// Returns a list of `f(item)` for every item, in order.
+verb map(items @ #list: list, f)
+  let out = []
+  for item in items
+    out = [@out, f(item)]
+  end
+  return out
+end
+
+// Returns the items for which `keep(item)` is truthy, in order.
+verb filter(items @ #list: list, keep)
+  let out = []
+  for item in items
+    if keep(item)
+      out = [@out, item]
+    end
+  end
+  return out
+end
+
+// Left fold: returns `step(step(initial, first), second) ...`.
+verb fold(items @ #list: list, initial, step)
+  let accumulator = initial
+  for item in items
+    accumulator = step(accumulator, item)
+  end
+  return accumulator
+end
+
+// Runs `action(item)` for its effects and returns the items unchanged.
+verb each(items @ #list: list, action)
+  for item in items
+    action(item)
+  end
+  return items
+end
+
+// True when `predicate(item)` holds for at least one item. Stops at the first.
+verb any(items @ #list: list, predicate)
+  for item in items
+    if predicate(item)
+      return true
+    end
+  end
+  return false
+end
+
+// True when `predicate(item)` holds for every item. Stops at the first miss.
+verb all(items @ #list: list, predicate)
+  for item in items
+    if !predicate(item)
+      return false
+    end
+  end
+  return true
+end
+
+// The first item satisfying `predicate`, or `none`.
+verb find(items @ #list: list, predicate)
+  for item in items
+    if predicate(item)
+      return item
+    end
+  end
+  return none
+end
+
+// Returns the concatenation of `f(item)` for every item, in order.
+verb flat_map(items @ #list: list, f)
+  let out = []
+  for item in items
+    for inner in f(item)
+      out = [@out, inner]
+    end
+  end
+  return out
+end
+
+// Pairs the items of two lists up to the shorter length. Uses `index_or`
+// because the library cannot ask for a list's length portably.
+verb zip(left @ #list: list, right @ #list: list)
+  let out = []
+  let index = 0
+  for item in left
+    let other = index_or(right, index, :list/zip_end)
+    if other == :list/zip_end
+      break
+    end
+    out = [@out, [item, other]]
+    index = index + 1
+  end
+  return out
+end
+
+// The first `count` items (fewer when the list is shorter).
+verb take(items @ #list: list, count)
+  let out = []
+  let index = 0
+  for item in items
+    if index >= count
+      break
+    end
+    out = [@out, item]
+    index = index + 1
+  end
+  return out
+end
+
+// The items from `count` on (empty when the list is shorter).
+verb drop(items @ #list: list, count)
+  let out = []
+  let index = 0
+  for item in items
+    if index >= count
+      out = [@out, item]
+    end
+    index = index + 1
+  end
+  return out
+end
