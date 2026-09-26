@@ -21,6 +21,10 @@ rayon.workspace = true
 [dev-dependencies]
 micromeasure.workspace = true
 
+[[example]]
+name = "buffer_persistence_probe"
+required-features = ["fjall-provider"]
+
 [[bench]]
 name = "relation_index_benches"
 harness = false
