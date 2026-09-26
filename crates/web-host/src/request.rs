@@ -194,6 +194,12 @@ pub(crate) async fn handle_in_process_request(
         binding.actor
     };
 
+    if let Some(response) =
+        crate::editor::handle_request(host, binding, effective_actor, request, close).await
+    {
+        return response;
+    }
+
     let request_id = match host.allocate_request() {
         Ok(request_id) => request_id,
         Err(error) => return internal_error_response(error, close),

@@ -333,6 +333,10 @@ end
 
 // --- JSON bridge ------------------------------------------------------------
 
+verb editor/input_response_json(endpoint, session, actor, frame, text, client_token, known_keymap_generation)
+  return json_encode(editor_input_json(endpoint, session, actor, frame, text, client_token, known_keymap_generation))
+end
+
 // Decodes one browser input item and runs it. The host passes the raw item
 // JSON and never builds a Mica item itself, so keymap policy stays in Mica.
 verb editor_input_json(endpoint, session, actor, frame, text, client_token, known_keymap_generation)

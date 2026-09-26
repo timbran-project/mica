@@ -50,12 +50,13 @@ pub(crate) struct InProcessSyncHost {
 }
 
 #[derive(Debug)]
-struct SyncSession {
+pub(crate) struct SyncSession {
     session_id: u64,
-    endpoint: EndpointSession,
+    pub(crate) endpoint: EndpointSession,
     actor: Option<Identity>,
     output: Arc<SessionOutput>,
     sync: Mutex<SessionSyncState>,
+    pub(crate) editor: Mutex<crate::editor::EditorState>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -105,6 +106,7 @@ struct SessionOutputState {
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum SessionOutputMessage {
     SyncEnvelope(SyncEnvelope),
+    Editor(Arc<str>),
 }
 
 struct SessionOutputRecv<'a> {
@@ -202,12 +204,17 @@ impl Drop for InProcessSyncHost {
 }
 
 impl SyncSession {
+    pub(crate) fn send_editor(&self, body: Arc<str>) {
+        self.output.send_editor(body);
+    }
+
     fn new(session_id: u64, endpoint: EndpointSession, actor: Option<Identity>) -> Arc<Self> {
         Arc::new(Self {
             session_id,
             endpoint,
             actor,
             output: SessionOutput::new(),
+            editor: Mutex::default(),
             sync: Mutex::new(SessionSyncState::default()),
         })
     }
@@ -237,6 +244,35 @@ impl SessionSyncState {
 }
 
 impl SessionOutput {
+    fn send_editor(&self, body: Arc<str>) {
+        let waker = {
+            let mut state = self.state.lock().unwrap();
+            if state.closed {
+                return;
+            }
+            let (count, bytes) = state
+                .messages
+                .iter()
+                .fold((0, 0), |(count, bytes), message| match message {
+                    SessionOutputMessage::Editor(body) => (count + 1, bytes + body.len()),
+                    _ => (count, bytes),
+                });
+            if count >= 256 || bytes + body.len() > crate::editor::MAX_REPLY_BYTES {
+                // End this writer so the client reconnects and replays outstanding
+                // sequences. Completed replies remain in the editor replay cache.
+                state.writer_generation += 1;
+                state
+                    .messages
+                    .retain(|message| !matches!(message, SessionOutputMessage::Editor(_)));
+            }
+            state.messages.push_back(SessionOutputMessage::Editor(body));
+            state.waker.take()
+        };
+        if let Some(waker) = waker {
+            waker.wake();
+        }
+    }
+
     fn new() -> Arc<Self> {
         Arc::new(Self::default())
     }
@@ -265,6 +301,7 @@ impl SessionOutput {
                         queued.session_id != envelope.session_id
                             || queued.view_id != envelope.view_id
                     }
+                    SessionOutputMessage::Editor(_) => true,
                 });
             }
             state
@@ -755,7 +792,7 @@ async fn reinstall_view_subscriptions(
     result
 }
 
-async fn ensure_session(
+pub(crate) async fn ensure_session(
     host: &InProcessWebHost,
     binding: &RequestBinding,
     session_id: u64,
@@ -763,7 +800,9 @@ async fn ensure_session(
 ) -> Result<Arc<SyncSession>, String> {
     let effective_actor = actor_override.or(binding.actor);
     if let Some(session) = host.sync.sessions.lock().unwrap().get(&session_id).cloned() {
-        if effective_actor.is_some() && session.actor != effective_actor {
+        if session.actor.or(session.endpoint.principal())
+            != Some(effective_actor.unwrap_or(binding.principal))
+        {
             return Err("session belongs to a different actor".to_owned());
         }
         return Ok(session);
@@ -795,7 +834,9 @@ async fn ensure_session(
         endpoint
             .close_in_background()
             .map_err(|error| format_driver_error(&host.sync.client, error))?;
-        if effective_actor.is_some() && existing.actor != effective_actor {
+        if existing.actor.or(existing.endpoint.principal())
+            != Some(effective_actor.unwrap_or(binding.principal))
+        {
             return Err("session belongs to a different actor".to_owned());
         }
         return Ok(existing);
@@ -1427,6 +1468,7 @@ async fn write_event_stream_loop(
         for message in output.drain_batch(ENDPOINT_OUTPUT_DRAIN_MESSAGES) {
             let payload = match message {
                 SessionOutputMessage::SyncEnvelope(envelope) => sync_sse_payload(&envelope),
+                SessionOutputMessage::Editor(body) => format!("event: editor\ndata: {body}\n\n"),
             };
             write_event_chunk(stream, payload.as_bytes()).await?;
         }
@@ -1707,6 +1749,25 @@ mod tests {
     }
 
     #[test]
+    fn editor_output_overflow_replaces_writer_and_preserves_sync_messages() {
+        let output = SessionOutput::new();
+        let generation = output.claim_writer();
+        output
+            .send_sync_envelope(test_envelope(SyncMessageKind::ViewSnapshot, 7, 21, 1))
+            .unwrap();
+        for _ in 0..256 {
+            output.send_editor(Arc::from("{}"));
+        }
+        assert_eq!(output.state.lock().unwrap().writer_generation, generation);
+        output.send_editor(Arc::from("{\"through_sequence\":257}"));
+        assert_ne!(output.state.lock().unwrap().writer_generation, generation);
+        let messages = output.drain_batch(300);
+        assert_eq!(messages.len(), 2);
+        assert!(matches!(messages[0], SessionOutputMessage::SyncEnvelope(_)));
+        assert!(matches!(&messages[1], SessionOutputMessage::Editor(body) if body.contains("257")));
+    }
+
+    #[test]
     fn sse_output_snapshot_replaces_queued_updates_for_same_view() {
         let output = SessionOutput::new();
 
@@ -1725,6 +1786,7 @@ mod tests {
             .into_iter()
             .map(|message| match message {
                 SessionOutputMessage::SyncEnvelope(envelope) => envelope,
+                SessionOutputMessage::Editor(_) => panic!("unexpected editor message"),
             })
             .collect();
 

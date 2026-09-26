@@ -18,7 +18,7 @@ Passing an early workstream does not complete this plan.
 | Calls | Reduced allocation with exception, suspension, closure, and retry regressions | Implemented; dispatch and interpreter performance remain open |
 | Computed scans | CPU batches and cached retrieval preparation with unchanged authority, transaction visibility, output bindings, and exact ranking | Implemented for positive rule steps and equality probes; exact retrieval measured |
 | Transactional buffers | Atomic fact/text commits, conflict handling, durable recovery, marker rebasing, and client revision results | Implemented, including client results, history, compaction, and computed views; editor integration and comparative measurements remain |
-| Editor | Shared buffer library and programmable editor running through Rust host services | Shared library, editor scenarios, and confined file services pass; browser transport pending |
+| Editor | Shared buffer library and programmable editor running through Rust host services | Shared library, source scenarios, confined files, browser input, and reconnect replay implemented; comparative measurements remain |
 | Query and storage execution | Measured columnar/storage improvements that preserve incremental maintenance | Pending |
 | Query measurements | Separate initial derivation and small-update maintenance workloads | Pending |
 | Mica compiler | Ported compiler with an intentional Rust assembly interface and bootstrap conformance | Pending |
@@ -279,3 +279,21 @@ The host reuses `sha2` for content stamps and `rustix` for nonblocking file open
 Seven real-filesystem tests cover revisions, concurrent saves, Unicode/CRLF, limits, completion, symlink escapes, and named pipes.
 The real driver integration test visits, edits, saves, detects an external change, and confirms replacement through Mica file commands.
 Web-host and daemon tests and workspace clippy pass. Browser session transport and editor measurements remain pending.
+
+The editor host now accepts ordered input batches and sends replies through the existing SSE session.
+Sessions bind to an actor. Fixed Mica entry points run through ordinary driver endpoints with fresh task authority.
+A shared workspace role grants editor operations without policy writes or code installation.
+Completion tokens use a host counter independent of each browser's input sequence.
+
+Admission validates each complete batch before queueing it. Pending input, reply caches, and editor output queues have count and byte limits.
+Completed replies enter the cache before publication. Repeated sequences replay the same reply without repeating edits.
+An output overflow ends the current writer so the browser reconnects and replays outstanding input.
+Expired replies return HTTP 410. Permanent failures stop automatic retries and retain pending input for review.
+Session and replay state remains ephemeral; restarting the daemon requires a new browser session.
+
+All 43 web-host tests and 33 browser-client tests pass. Protocol coverage includes ordinary actors, two-session token separation, bounds, admission failures, replay, and ownership.
+A real TCP/SSE test reconnects and replays a Unicode edit without duplicating text.
+Workspace tests and clippy pass. Focused daemon and file-service checks also pass after the missing-stamp correction.
+A browser check exercised Unicode insertion, movement, deletion, undo, file visiting, and saving a new UTF-8 file through ordinary web authority.
+The file service now uses Mica's headed `none` value for absent stamps; an unheaded empty relation caused false external-change prompts.
+The launcher is `scripts/editor.sh`. Browser and file checks establish functionality, not performance parity.

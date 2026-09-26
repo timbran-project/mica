@@ -3,6 +3,15 @@
 These fileins implement editor buffers, windows, keymaps, commands, markers, undo/redo, minibuffers, and bounded browser snapshots.
 The application owns editor policy. Runtime buffers own transactional text and committed revisions.
 
+Start the local editor from the repository root:
+
+```sh
+scripts/editor.sh --editor-root /path/to/workspace
+```
+
+Open `http://127.0.0.1:8008/editor`. Set `MICA_EDITOR_BIND` to change the listen address.
+Additional arguments pass to `mica-daemon`. File access is disabled when no `--editor-root` is supplied.
+
 Run the application scenarios:
 
 ```sh
@@ -12,7 +21,7 @@ cargo test -p mica-runtime --test editor
 The harness loads the shared host and buffer libraries, then the editor files in dependency order.
 It runs 45 scenarios from omica and one additional keymap regression in both interpreter-only and native-enabled modes.
 Each scenario commits separately. The harness resumes explicit commit boundaries to check tagged acknowledgements after publication.
-It also renders the page shell. Browser transport remains pending.
+It also renders the page shell. The host supplies the browser client, input transport, and bounded snapshots.
 
 Load `host-policy.mica` after the editor verbs to enable the shared workspace role.
 The policy enrols `#web` for a local unauthenticated host. Authenticated actors require an explicit `HasRole(actor, #editor/user)` fact.
@@ -53,3 +62,21 @@ The Rust port makes these adaptations:
 The extra scenario checks that a stale browser keymap generation receives the current plan.
 The cleanup scenario also checks removal of a populated search match.
 The runtime's empty-buffer revision and catchable JSON errors have separate regression tests.
+
+The browser sends ordered input batches and receives replies through `/sync/events`.
+The host binds each session to its actor and invokes fixed editor entry points with ordinary authority.
+Each session admits at most 1,024 pending items and 1 MiB of pending input. Batches contain at most 256 items and 256 KiB.
+Each item is limited to 64 KiB. Input requests require `application/json`.
+
+Completed replies are cached before delivery. Retries replay replies without executing commands again.
+The replay cache retains at most 256 replies and 8 MiB per session. An expired reply returns HTTP 410.
+The client stops resubmitting permanent failures and retains unconfirmed input in the tab for review.
+Session queues and replay caches are ephemeral; they do not survive a daemon restart.
+Buffer durability follows the selected daemon storage and durability settings.
+
+Run the transport and browser-client checks:
+
+```sh
+cargo test -p mica-web-host --lib
+node --test crates/web-host/editor-client.test.mjs
+```
