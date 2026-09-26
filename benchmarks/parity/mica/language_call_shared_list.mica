@@ -1,0 +1,23 @@
+// Calls carry a changing parser-like state with one shared large list.
+// The result is 400 * 2048 + sum(0..399) = 899000.
+verb shared_list_call(state)
+  return len(state[0]) + state[1]
+end
+
+verb bench()
+  let shared = []
+  let index = 0
+  while index < 2048
+    shared = [@shared, index]
+    index = index + 1
+  end
+  let total = 0
+  index = 0
+  while index < 400
+    total = total + shared_list_call([shared, index])
+    index = index + 1
+  end
+  require len(shared) == 2048
+  require shared[0] == 0 && shared[2047] == 2047
+  return total
+end
