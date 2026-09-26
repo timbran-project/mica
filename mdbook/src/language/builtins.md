@@ -268,3 +268,8 @@ These calls resemble built-ins but compile directly to task operations:
 `spawn` is a language form rather than a function. See [Task Control](../runtime/task-control.md).
 Hosts may register additional request functions. Those are deployment APIs, not part of this core
 catalogue.
+
+## Program assembly
+
+`assemble(description)` returns a validated Rust program artifact as bytes.
+See [Program Assembly](assembly.md) for the description format, instruction forms, limits, and execution authority.

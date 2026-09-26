@@ -323,3 +323,9 @@ The capture at `665dfb7` passes all 18 processes and reduces the 16-update workl
 Initial derivation stays near 28 ms, and update RSS stays near 27 MiB.
 This is an 8.1-times update improvement from the first capture, with an approximately 6.4-times gap remaining against Odin.
 Workspace tests and clippy pass. Regressions cover secondary indexes, stored/derived overlap, unrelated commits, and retained snapshots.
+
+The runtime now exposes `assemble(description)` for explicit Rust register-program descriptions.
+It validates operands, registers, targets, nested function frames, and serializable constants before returning an ordinary Rust artifact.
+Assembly neither installs code nor grants execution authority. The format uses absolute local targets and explicit constant/register operands.
+Six focused tests cover malformed input, bounded nesting, Unicode control flow, closures, errors, commit continuation, and denied writes.
+Runtime tests and workspace clippy pass. The compiler emitter still needs conversion to this interface.

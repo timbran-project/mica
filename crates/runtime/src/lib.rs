@@ -7555,6 +7555,7 @@ fn is_safe_read_only_builtin(name: &str) -> bool {
     matches!(
         name,
         "actor"
+            | "assemble"
             | "principal"
             | "endpoint"
             | "frob"

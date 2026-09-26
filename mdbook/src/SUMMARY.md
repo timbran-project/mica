@@ -47,6 +47,7 @@
 - [Authority](./language/authority.md)
 - [Effects and Hosts](./language/effects-hosts.md)
 - [Built-in Functions](./language/builtins.md)
+- [Program Assembly](./language/assembly.md)
 
 # Runtime Reference
 
