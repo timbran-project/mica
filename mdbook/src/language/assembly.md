@@ -41,6 +41,7 @@ An `items` list contains operands or `[:Splice, operand]` entries.
 | Instruction | Behaviour |
 | --- | --- |
 | `[:Load, dst, value]` | Load a constant value. |
+| `[:CheckKind, register, kind, site, subject]` | Check a value kind. The site is `:Binding`, `:Parameter`, or `:Builtin`; the subject is a symbol. |
 | `[:Move, dst, src]` | Copy a register value. |
 | `[:Unary, dst, operation, src]` | Apply `:Not` or `:Neg`. |
 | `[:Binary, dst, operation, left, right]` | Apply `:Eq`, `:Ne`, `:Lt`, `:Le`, `:Gt`, `:Ge`, `:Add`, `:Sub`, `:Mul`, `:Div`, or `:Rem`. |
@@ -67,6 +68,7 @@ An `items` list contains operands or `[:Splice, operand]` entries.
 | `[:ExitTry]` | Leave an exception region through its normal path. |
 | `[:EndFinally]` | Finish the current finally handler. |
 | `[:Raise, error_operand, message_operand, value_operand]` | Raise an error. Message and value can be `none`. |
+| `[:Abort, operand]` | Abort the task with the operand as its error value. |
 | `[:Return, operand]` | Return a value. |
 | `[:Emit, target_operand, value_operand]` | Stage an emission. |
 | `[:CommitValue, dst]` | Commit and suspend; receive the continuation value in `dst`. |

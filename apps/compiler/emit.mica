@@ -1,0 +1,777 @@
+// Mica compiler backend for the Rust register-program assembly interface.
+// AST lookup routines derive from omica bfb368c.
+
+verb sort_ast_rows(rows)
+  return sort(rows)
+end
+
+// The first row index whose node id is `node_id`, or the insertion point when
+// absent. Rows must be sorted by node id. Mica integer division is exact, so
+// the midpoint forces an even numerator rather than writing `(low + high) / 2`.
+verb lower_bound(rows, node_id)
+  let low = 0
+  let high = len(rows)
+  while low < high
+    let sum = low + high
+    let mid = (sum - (sum % 2)) / 2
+    if rows[mid][0] < node_id
+      low = mid + 1
+    else
+      high = mid
+    end
+  end
+  return low
+end
+
+// The :kind target of a node, or :Unknown.
+verb ast_kind(rows, node_id)
+  let index = lower_bound(rows, node_id)
+  while index < len(rows) && rows[index][0] == node_id
+    if rows[index][1] == :kind
+      return rows[index][2]
+    end
+    index = index + 1
+  end
+  return :Unknown
+end
+
+// The first target for (node, role) as [found, target].
+verb ast_attr(rows, node_id, role)
+  let index = lower_bound(rows, node_id)
+  while index < len(rows) && rows[index][0] == node_id
+    if rows[index][1] == role
+      return [true, rows[index][2]]
+    end
+    index = index + 1
+  end
+  return [false, 0]
+end
+
+// Every target for (node, role), ordered by ordinal. The node's block is
+// small, so scanning it once per ordinal is cheap.
+verb ast_children(rows, node_id, role)
+  let start = lower_bound(rows, node_id)
+  let finish = start
+  while finish < len(rows) && rows[finish][0] == node_id
+    finish = finish + 1
+  end
+  let count = 0
+  let index = start
+  while index < finish
+    if rows[index][1] == role
+      count = count + 1
+    end
+    index = index + 1
+  end
+  let targets = []
+  let ordinal = 0
+  while ordinal < count
+    index = start
+    while index < finish
+      if rows[index][1] == role && rows[index][3] == ordinal
+        targets = [@targets, rows[index][2]]
+        break
+      end
+      index = index + 1
+    end
+    ordinal = ordinal + 1
+  end
+  return targets
+end
+
+verb emit_source(source) -> map
+  let parsed = parse_rows(source)
+  if len(parsed[:errors]) > 0
+    return {:ok -> false, :errors -> parsed[:errors]}
+  end
+  let module = emit_program(parsed[:rows], parsed[:root])
+  if len(module[:errors]) > 0
+    return {:ok -> false, :errors -> module[:errors]}
+  end
+  let methods = []
+  for definition in module[:methods]
+    let compiled = definition
+    compiled[:program] = assemble(definition[:program])
+    methods = [@methods, compiled]
+  end
+  return {:ok -> true, :entry -> assemble(module[:entry]), :methods -> methods, :errors -> []}
+end
+
+verb emit_state()
+  return {:code -> [], :next -> 0, :scopes -> [{}], :loops -> [], :errors -> [], :result_annotation -> "", :binding_types -> {}}
+end
+
+verb emit_program(raw_rows, root) -> map
+  let rows = sort_ast_rows(raw_rows)
+  let entry_nodes = []
+  let methods = []
+  let errors = []
+  for item in ast_children(rows, root, :item)
+    let kind = ast_kind(rows, item)
+    if kind == :ExprItem
+      let [_, expr] = ast_attr(rows, item, :expr)
+      entry_nodes = [@entry_nodes, expr]
+    elseif kind == :VerbItem
+      let [_, selector] = ast_attr(rows, item, :name)
+      let state = emit_state()
+      let [has_result, result_annotation] = ast_attr(rows, item, :result)
+      if has_result
+        state[:result_annotation] = result_annotation
+      end
+      let parameters = []
+      for param in ast_children(rows, item, :param)
+        let [_, name_text] = ast_attr(rows, param, :name)
+        let [_, mode] = ast_attr(rows, param, :mode)
+        if mode != :req
+          state = emit_diagnostic(state, "verb default and rest parameters need an argument wrapper")
+        end
+        let [restricted, _] = ast_attr(rows, param, :restrict)
+        if restricted
+          state = emit_diagnostic(state, "prototype-restricted verbs require installation metadata")
+        end
+        let [reg, allocated] = emit_register(state)
+        state = emit_declare(allocated, name_text, reg, true)
+        let [annotated, annotation] = ast_attr(rows, param, :annotation)
+        if annotated
+          state = emit_annotation(state, reg, annotation, :Parameter, name_text)
+        end
+        parameters = [@parameters, to_symbol(name_text)]
+      end
+      let [result, emitted] = emit_block(rows, ast_children(rows, item, :body), state)
+      state = emit_finish(emitted, result)
+      methods = [@methods, {:selector -> to_symbol(selector), :parameters -> parameters, :program -> emit_description(state)}]
+      errors = [@errors, @state[:errors]]
+    else
+      errors = [@errors, string_concat("unsupported program item: ", to_literal(kind))]
+    end
+  end
+  let [result, entry] = emit_block(rows, entry_nodes, emit_state())
+  entry = emit_append(entry, [:Return, [:Register, result]])
+  return {:entry -> emit_description(entry), :methods -> methods, :errors -> [@errors, @entry[:errors]]}
+end
+
+verb emit_description(state)
+  return {:registers -> state[:next], :code -> state[:code]}
+end
+
+verb emit_register(input_state)
+  let state = input_state
+  let reg = state[:next]
+  state[:next] = reg + 1
+  return [reg, state]
+end
+
+verb emit_append(input_state, instruction)
+  let state = input_state
+  state[:code] = [@state[:code], instruction]
+  return state
+end
+
+verb emit_constant(input_state, constant_value)
+  let [reg, state] = emit_register(input_state)
+  state = emit_append(state, [:Load, reg, constant_value])
+  return [reg, state]
+end
+
+verb emit_diagnostic(input_state, message)
+  let state = input_state
+  state[:errors] = [@state[:errors], message]
+  return state
+end
+
+verb emit_error(state, message)
+  return emit_constant(emit_diagnostic(state, message), none)
+end
+
+verb emit_scope(input_state)
+  let state = input_state
+  state[:scopes] = [@state[:scopes], {}]
+  return state
+end
+
+verb emit_unscope(input_state)
+  let state = input_state
+  let scopes = []
+  let index = 0
+  while index + 1 < len(state[:scopes])
+    scopes = [@scopes, state[:scopes][index]]
+    index = index + 1
+  end
+  state[:scopes] = scopes
+  return state
+end
+
+verb emit_declare(input_state, name_text, reg, immutable)
+  let state = input_state
+  let scopes = state[:scopes]
+  let last = len(scopes) - 1
+  let locals = scopes[last]
+  if index_or(locals, name_text, none) != none
+    return emit_diagnostic(state, string_concat("duplicate binding: ", name_text))
+  end
+  locals[name_text] = [reg, immutable]
+  scopes[last] = locals
+  state[:scopes] = scopes
+  return state
+end
+
+verb emit_local(state, name_text)
+  let scopes = state[:scopes]
+  let index = len(scopes)
+  while index > 0
+    index = index - 1
+    let binding = index_or(scopes[index], name_text, none)
+    if binding != none
+      return [true, binding[0], binding[1]]
+    end
+  end
+  return [false, 0, false]
+end
+
+verb emit_patch(input_state, position, instruction)
+  let state = input_state
+  let code = state[:code]
+  code[position] = instruction
+  state[:code] = code
+  return state
+end
+
+verb emit_block(rows, nodes, input_state)
+  let [result, state] = emit_constant(input_state, [] {[]})
+  for node in nodes
+    let [value_reg, after_value] = emit_expr(rows, node, state)
+    state = after_value
+    result = value_reg
+  end
+  return [result, state]
+end
+
+verb emit_expr(rows, node, input_state)
+  let state = input_state
+  let kind = ast_kind(rows, node)
+  if kind == :Int_Literal || kind == :Float_Literal || kind == :String_Literal || kind == :Bytes_Literal || kind == :Error_Code_Literal
+    let [_, text] = ast_attr(rows, node, :text)
+    let parsed = from_literal(text)
+    if parsed[0][:case] != :ok
+      return emit_error(state, string_concat("invalid literal: ", text))
+    end
+    return emit_constant(state, parsed[0][:value])
+  end
+  if kind == :Bool_Literal
+    let [_, flag] = ast_attr(rows, node, :value)
+    return emit_constant(state, flag)
+  end
+  if kind == :Symbol_Literal || kind == :Identity_Literal
+    let [_, text] = ast_attr(rows, node, :name)
+    let prefix = ":"
+    if kind == :Identity_Literal
+      prefix = "#"
+    end
+    let parsed = from_literal(string_concat(prefix, text))
+    if parsed[0][:case] != :ok
+      return emit_error(state, string_concat("unresolved literal: ", prefix, text))
+    end
+    return emit_constant(state, parsed[0][:value])
+  end
+  if kind == :Name
+    let name_text = string_join(ast_children(rows, node, :part), "/")
+    if name_text == "none"
+      return emit_constant(state, none)
+    end
+    let [found, reg, _] = emit_local(state, name_text)
+    if !found
+      return emit_error(state, string_concat("unbound name: ", name_text))
+    end
+    let [copy, allocated] = emit_register(state)
+    return [copy, emit_append(allocated, [:Move, copy, reg])]
+  end
+  if kind == :Unary
+    let [_, child] = ast_attr(rows, node, :operand)
+    let [_, op_symbol] = ast_attr(rows, node, :op)
+    let [src, emitted] = emit_expr(rows, child, state)
+    let [dst, allocated] = emit_register(emitted)
+    let operation = :Not
+    if op_symbol == :neg
+      operation = :Neg
+    end
+    return [dst, emit_append(allocated, [:Unary, dst, operation, src])]
+  end
+  if kind == :Binary
+    return emit_binary(rows, node, state)
+  end
+  if kind == :List_Literal || kind == :Relation_Literal
+    return emit_collection(rows, node, state)
+  end
+  if kind == :Map_Literal
+    let entries = []
+    for entry in ast_children(rows, node, :entry)
+      let [_, key_node] = ast_attr(rows, entry, :key)
+      let [_, value_node] = ast_attr(rows, entry, :value)
+      let [key_reg, after_key] = emit_expr(rows, key_node, state)
+      let [value_reg, after_value] = emit_expr(rows, value_node, after_key)
+      state = after_value
+      entries = [@entries, [[:Register, key_reg], [:Register, value_reg]]]
+    end
+    let [dst, allocated] = emit_register(state)
+    return [dst, emit_append(allocated, [:BuildMap, dst, entries])]
+  end
+  if kind == :Index
+    let [_, collection_node] = ast_attr(rows, node, :collection)
+    let [_, key_node] = ast_attr(rows, node, :key)
+    let [collection, after_collection] = emit_expr(rows, collection_node, state)
+    let [key, after_key] = emit_expr(rows, key_node, after_collection)
+    let [dst, allocated] = emit_register(after_key)
+    return [dst, emit_append(allocated, [:Index, dst, collection, [:Register, key]])]
+  end
+  if kind == :Binding
+    let [_, pattern] = ast_attr(rows, node, :pattern)
+    let [found, value_node] = ast_attr(rows, node, :value)
+    let reg = 0
+    if found
+      let [emitted, after_value] = emit_expr(rows, value_node, state)
+      state = after_value
+      reg = emitted
+    else
+      let initial = [] {}
+      if ast_kind(rows, pattern) == :List_Pattern
+        initial = []
+      end
+      let [emitted, after_value] = emit_constant(state, initial)
+      state = after_value
+      reg = emitted
+    end
+    let [annotated, annotation_text] = ast_attr(rows, node, :annotation)
+    let annotation = ""
+    if annotated
+      annotation = annotation_text
+      state = emit_annotation(state, reg, annotation, :Binding, "binding")
+    end
+    let [exact, _] = ast_attr(rows, node, :is_exactly)
+    if exact
+      return emit_error(state, "exact bindings require cardinality checks")
+    end
+    let [constant, _] = ast_attr(rows, node, :is_const)
+    return emit_pattern(rows, pattern, reg, constant, annotation, state)
+  end
+  if kind == :Assignment
+    return emit_assignment(rows, node, state)
+  end
+  if kind == :Call
+    return emit_call(rows, node, state)
+  end
+  if kind == :Return
+    let [found, child] = ast_attr(rows, node, :value)
+    if !found
+      let [reg, emitted] = emit_constant(state, [] {[]})
+      return [reg, emit_finish(emitted, reg)]
+    end
+    let [reg, emitted] = emit_expr(rows, child, state)
+    return [reg, emit_finish(emitted, reg)]
+  end
+  if kind == :Require
+    let [_, condition_node] = ast_attr(rows, node, :condition)
+    let [condition, emitted] = emit_expr(rows, condition_node, state)
+    state = emitted
+    let branch = len(state[:code])
+    state = emit_append(state, [:Branch, condition, branch + 2, branch + 1])
+    state = emit_append(state, [:Abort, [:Constant, "require failed"]])
+    return emit_constant(state, true)
+  end
+  if kind == :If
+    return emit_if(rows, node, state)
+  end
+  if kind == :While || kind == :For
+    return emit_loop(rows, node, state)
+  end
+  if kind == :Break || kind == :Continue
+    return emit_loop_exit(kind, state)
+  end
+  if kind == :Begin
+    let [reg, emitted] = emit_block(rows, ast_children(rows, node, :body), emit_scope(state))
+    return [reg, emit_unscope(emitted)]
+  end
+  return emit_error(state, string_concat("unsupported expression: ", to_literal(kind)))
+end
+
+verb emit_binary(rows, node, input_state)
+  let [_, left_node] = ast_attr(rows, node, :left)
+  let [_, right_node] = ast_attr(rows, node, :right)
+  let [_, operation] = ast_attr(rows, node, :op)
+  let [left, state] = emit_expr(rows, left_node, input_state)
+  let [dst, allocated] = emit_register(state)
+  state = allocated
+  if operation == :and || operation == :or
+    let branch = len(state[:code])
+    state = emit_append(state, [:Branch, left, 0, 0])
+    let right_start = len(state[:code])
+    let [right, after_right] = emit_expr(rows, right_node, state)
+    state = emit_append(after_right, [:Move, dst, right])
+    let jump = len(state[:code])
+    state = emit_append(state, [:Jump, 0])
+    let short_start = len(state[:code])
+    state = emit_append(state, [:Load, dst, operation == :or])
+    let finish = len(state[:code])
+    state = emit_patch(state, jump, [:Jump, finish])
+    if operation == :and
+      state = emit_patch(state, branch, [:Branch, left, right_start, short_start])
+    else
+      state = emit_patch(state, branch, [:Branch, left, short_start, right_start])
+    end
+    return [dst, state]
+  end
+  let operations = {:add -> :Add, :sub -> :Sub, :mul -> :Mul, :div -> :Div, :rem -> :Rem,
+                    :eq -> :Eq, :ne -> :Ne, :lt -> :Lt, :le -> :Le, :gt -> :Gt, :ge -> :Ge}
+  let op_symbol = index_or(operations, operation, none)
+  if op_symbol == none
+    return emit_error(state, string_concat("unsupported binary operation: ", to_literal(operation)))
+  end
+  let [right, after_right] = emit_expr(rows, right_node, state)
+  return [dst, emit_append(after_right, [:Binary, dst, op_symbol, left, right])]
+end
+
+verb emit_items(rows, nodes, input_state)
+  let state = input_state
+  let items = []
+  for child in nodes
+    let spliced = ast_kind(rows, child) == :Splice
+    let value_node = child
+    if spliced
+      let [_, inner] = ast_attr(rows, child, :value)
+      value_node = inner
+    end
+    let [reg, after_value] = emit_expr(rows, value_node, state)
+    state = after_value
+    let operand = [:Register, reg]
+    if spliced
+      operand = [:Splice, operand]
+    end
+    items = [@items, operand]
+  end
+  return [items, state]
+end
+
+verb emit_collection(rows, node, input_state)
+  if ast_kind(rows, node) == :List_Literal
+    let [items, state] = emit_items(rows, ast_children(rows, node, :element), input_state)
+    let [dst, allocated] = emit_register(state)
+    return [dst, emit_append(allocated, [:BuildList, dst, items])]
+  end
+  let [heading, state] = emit_items(rows, ast_children(rows, node, :heading), input_state)
+  let [heading_reg, after_heading_reg] = emit_register(state)
+  state = emit_append(after_heading_reg, [:BuildList, heading_reg, heading])
+  let [row_items, after_rows] = emit_items(rows, ast_children(rows, node, :row), state)
+  let [rows_reg, after_rows_reg] = emit_register(after_rows)
+  state = emit_append(after_rows_reg, [:BuildList, rows_reg, row_items])
+  let [dst, allocated] = emit_register(state)
+  return [dst, emit_append(allocated, [:BuiltinCall, dst, :relation_from_rows, [[:Register, heading_reg], [:Register, rows_reg]]])]
+end
+
+verb emit_pattern(rows, node, source_reg, immutable, annotation, input_state)
+  let state = input_state
+  let kind = ast_kind(rows, node)
+  if kind == :Wildcard_Pattern
+    return [source_reg, state]
+  end
+  if kind == :Binding_Pattern
+    let [_, name_text] = ast_attr(rows, node, :name)
+    let [reg, allocated] = emit_register(state)
+    state = emit_append(allocated, [:Move, reg, source_reg])
+    let types = state[:binding_types]
+    types[reg] = annotation
+    state[:binding_types] = types
+    return [reg, emit_declare(state, name_text, reg, immutable)]
+  end
+  if kind == :List_Pattern
+    let [result, initialized] = emit_constant(state, [] {})
+    state = initialized
+    let index = 0
+    for element in ast_children(rows, node, :element)
+      let [reg, allocated] = emit_register(state)
+      state = emit_append(allocated, [:Index, reg, source_reg, [:Constant, index]])
+      let [bound, after_pattern] = emit_pattern(rows, element, reg, immutable, "", state)
+      result = bound
+      state = after_pattern
+      index = index + 1
+    end
+    return [result, state]
+  end
+  return emit_error(state, string_concat("unsupported binding pattern: ", to_literal(kind)))
+end
+
+verb emit_assignment(rows, node, input_state)
+  let [_, target] = ast_attr(rows, node, :target)
+  let [_, rhs] = ast_attr(rows, node, :value)
+  let target_kind = ast_kind(rows, target)
+  let root = target
+  if target_kind == :Index
+    let [_, collection_node] = ast_attr(rows, target, :collection)
+    root = collection_node
+  end
+  if ast_kind(rows, root) != :Name
+    return emit_error(input_state, "assignment requires a local name or one indexed local")
+  end
+  let name_text = string_join(ast_children(rows, root, :part), "/")
+  let [found, dst, immutable] = emit_local(input_state, name_text)
+  if !found || immutable
+    return emit_error(input_state, string_concat("assignment requires a mutable local: ", name_text))
+  end
+  let [value_reg, after_value] = emit_expr(rows, rhs, input_state)
+  let state = after_value
+  let collection_reg = dst
+  let key_reg = 0
+  if target_kind == :Index
+    let [copy, allocated] = emit_register(state)
+    state = emit_append(allocated, [:Move, copy, dst])
+    collection_reg = copy
+    let [_, key_node] = ast_attr(rows, target, :key)
+    let [key, after_key] = emit_expr(rows, key_node, state)
+    state = after_key
+    key_reg = key
+  end
+  if target_kind == :Index
+    state = emit_append(state, [:SetIndex, dst, collection_reg, [:Register, key_reg], [:Register, value_reg]])
+  else
+    let annotation = index_or(state[:binding_types], dst, "")
+    state = emit_annotation(state, value_reg, annotation, :Binding, name_text)
+    state = emit_append(state, [:Move, dst, value_reg])
+  end
+  return [value_reg, state]
+end
+
+verb emit_call(rows, node, input_state)
+  let [_, callee] = ast_attr(rows, node, :callee)
+  let callee_kind = ast_kind(rows, callee)
+  let name_text = ""
+  if callee_kind == :Name
+    name_text = string_join(ast_children(rows, callee, :part), "/")
+  elseif callee_kind == :Symbol_Literal
+    let [_, name] = ast_attr(rows, callee, :name)
+    name_text = name
+  end
+  let state = input_state
+  let callee_reg = 0
+  let is_function = false
+  if callee_kind == :Name
+    let [found, reg, _] = emit_local(state, name_text)
+    if found
+      is_function = true
+      let [copy, allocated] = emit_register(state)
+      state = emit_append(allocated, [:Move, copy, reg])
+      callee_reg = copy
+    end
+  elseif callee_kind != :Symbol_Literal
+    let [reg, after_callee] = emit_expr(rows, callee, state)
+    state = after_callee
+    is_function = true
+    callee_reg = reg
+  end
+  let args = []
+  let roles = []
+  for arg in ast_children(rows, node, :arg)
+    let [_, value_node] = ast_attr(rows, arg, :expr)
+    let [items, after_value] = emit_items(rows, [value_node], state)
+    state = after_value
+    let [named, role] = ast_attr(rows, arg, :role)
+    if named
+      roles = [@roles, [[:Constant, to_symbol(role)], items[0]]]
+    else
+      args = [@args, items[0]]
+    end
+  end
+  let [dst, allocated] = emit_register(state)
+  state = allocated
+  if len(roles) > 0
+    if len(args) > 0 || is_function
+      return emit_error(state, "named arguments require a selector call without positional arguments")
+    end
+    let [role_reg, after_roles] = emit_register(state)
+    state = emit_append(after_roles, [:BuildMap, role_reg, roles])
+    return [dst, emit_append(state, [:DynamicDispatch, dst, [:Constant, to_symbol(name_text)], [:Register, role_reg]])]
+  end
+  if is_function
+    return [dst, emit_append(state, [:CallValue, dst, [:Register, callee_reg], args])]
+  end
+  if callee_kind == :Name && name_text == "commit"
+    if len(args) != 0
+      return emit_error(state, "commit expects no arguments")
+    end
+    return [dst, emit_append(state, [:CommitValue, dst])]
+  end
+  if callee_kind == :Name && name_text == "suspend"
+    if len(args) > 1
+      return emit_error(state, "suspend expects at most one argument")
+    end
+    let duration = none
+    if len(args) == 1
+      duration = args[0]
+    end
+    return [dst, emit_append(state, [:SuspendValue, dst, duration])]
+  end
+  if callee_kind == :Name && is_builtin(to_symbol(name_text))
+    return [dst, emit_append(state, [:BuiltinCall, dst, to_symbol(name_text), args])]
+  end
+  return [dst, emit_append(state, [:PositionalDispatch, dst, [:Constant, to_symbol(name_text)], args])]
+end
+
+verb emit_if(rows, node, input_state)
+  let [result, state] = emit_constant(input_state, [] {[]})
+  let exits = []
+  for branch_node in ast_children(rows, node, :branch)
+    let [_, condition_node] = ast_attr(rows, branch_node, :condition)
+    let [condition, after_condition] = emit_expr(rows, condition_node, state)
+    state = after_condition
+    let position = len(state[:code])
+    state = emit_append(state, [:Branch, condition, position + 1, 0])
+    let [body_reg, after_body] = emit_block(rows, ast_children(rows, branch_node, :body), emit_scope(state))
+    state = emit_unscope(after_body)
+    state = emit_append(state, [:Move, result, body_reg])
+    exits = [@exits, len(state[:code])]
+    state = emit_append(state, [:Jump, 0])
+    state = emit_patch(state, position, [:Branch, condition, position + 1, len(state[:code])])
+  end
+  let [has_else, _] = ast_attr(rows, node, :has_else)
+  if has_else
+    let [body_reg, after_body] = emit_block(rows, ast_children(rows, node, :else_body), emit_scope(state))
+    state = emit_append(emit_unscope(after_body), [:Move, result, body_reg])
+  end
+  for position in exits
+    state = emit_patch(state, position, [:Jump, len(state[:code])])
+  end
+  return [result, state]
+end
+
+verb emit_loop(rows, node, input_state)
+  let [result, state] = emit_constant(emit_scope(input_state), [] {[]})
+  let is_for = ast_kind(rows, node) == :For
+  let collection = 0
+  let index_reg = 0
+  let one_reg = 0
+  let length_reg = 0
+  if is_for
+    let [_, iterable] = ast_attr(rows, node, :iterable)
+    let [reg, after_collection] = emit_expr(rows, iterable, state)
+    state = after_collection
+    collection = reg
+    let [index, after_index] = emit_constant(state, 0)
+    let [one, after_one] = emit_constant(after_index, 1)
+    let [length, after_length] = emit_register(after_one)
+    state = emit_append(after_length, [:CollectionLen, length, collection])
+    index_reg = index
+    one_reg = one
+    length_reg = length
+  end
+  let start = len(state[:code])
+  let condition = 0
+  if is_for
+    let [reg, allocated] = emit_register(state)
+    state = emit_append(allocated, [:Binary, reg, :Lt, index_reg, length_reg])
+    condition = reg
+  else
+    let [_, condition_node] = ast_attr(rows, node, :condition)
+    let [reg, after_condition] = emit_expr(rows, condition_node, state)
+    state = after_condition
+    condition = reg
+  end
+  let branch = len(state[:code])
+  state = emit_append(state, [:Branch, condition, branch + 1, 0])
+  if is_for
+    let [item_reg, allocated] = emit_register(state)
+    state = emit_append(allocated, [:CollectionValueAt, item_reg, collection, index_reg])
+    let [has_pattern, pattern] = ast_attr(rows, node, :pattern)
+    if has_pattern
+      let [_, after_pattern] = emit_pattern(rows, pattern, item_reg, true, "", state)
+      state = after_pattern
+    else
+      let names = ast_children(rows, node, :name)
+      if len(names) == 1
+        state = emit_loop_binding(rows, names[0], item_reg, state)
+      elseif len(names) == 2
+        let [key_reg, after_key] = emit_register(state)
+        state = emit_append(after_key, [:CollectionKeyAt, key_reg, collection, index_reg])
+        state = emit_loop_binding(rows, names[0], key_reg, state)
+        state = emit_loop_binding(rows, names[1], item_reg, state)
+      else
+        state = emit_diagnostic(state, "for expects one or two bindings")
+      end
+    end
+  end
+  state[:loops] = [@state[:loops], {:breaks -> [], :continues -> []}]
+  let [_, after_body] = emit_block(rows, ast_children(rows, node, :body), state)
+  state = after_body
+  let continue_target = start
+  if is_for
+    continue_target = len(state[:code])
+    state = emit_append(state, [:Binary, index_reg, :Add, index_reg, one_reg])
+  end
+  state = emit_append(state, [:Jump, start])
+  let finish = len(state[:code])
+  state = emit_patch(state, branch, [:Branch, condition, branch + 1, finish])
+  let loops = state[:loops]
+  let loop_info = loops[len(loops) - 1]
+  for position in loop_info[:breaks]
+    state = emit_patch(state, position, [:Jump, finish])
+  end
+  for position in loop_info[:continues]
+    state = emit_patch(state, position, [:Jump, continue_target])
+  end
+  let retained = []
+  let index = 0
+  while index + 1 < len(loops)
+    retained = [@retained, loops[index]]
+    index = index + 1
+  end
+  state[:loops] = retained
+  return [result, emit_unscope(state)]
+end
+
+verb emit_loop_exit(kind, input_state)
+  let state = input_state
+  let loops = state[:loops]
+  if len(loops) == 0
+    return emit_error(state, "break and continue require a loop")
+  end
+  let last = len(loops) - 1
+  let loop_info = loops[last]
+  let key = :breaks
+  if kind == :Continue
+    key = :continues
+  end
+  loop_info[key] = [@loop_info[key], len(state[:code])]
+  loops[last] = loop_info
+  state[:loops] = loops
+  state = emit_append(state, [:Jump, 0])
+  return emit_constant(state, [] {[]})
+end
+
+verb emit_annotation(state, reg, annotation, site, subject)
+  if annotation == "" || annotation == "any"
+    return state
+  end
+  let kinds = ["bool", "int", "float", "identity", "symbol", "error_code", "string", "bytes", "list", "map", "range", "error", "capability", "frob", "function", "relation"]
+  let found = false
+  for spelling in kinds
+    if spelling == annotation
+      found = true
+      break
+    end
+  end
+  if !found
+    return emit_diagnostic(state, string_concat("unsupported type annotation: ", annotation))
+  end
+  return emit_append(state, [:CheckKind, reg, to_symbol(annotation), site, to_symbol(subject)])
+end
+
+verb emit_finish(state, reg)
+  let checked = emit_annotation(state, reg, state[:result_annotation], :Binding, "result")
+  return emit_append(checked, [:Return, [:Register, reg]])
+end
+
+verb emit_loop_binding(rows, node, reg, input_state)
+  let [_, name_text] = ast_attr(rows, node, :name)
+  let state = emit_declare(input_state, name_text, reg, true)
+  let [annotated, annotation] = ast_attr(rows, node, :annotation)
+  if annotated
+    state = emit_annotation(state, reg, annotation, :Binding, name_text)
+  end
+  return state
+end

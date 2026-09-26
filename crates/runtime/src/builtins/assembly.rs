@@ -8,8 +8,8 @@ use crate::{
 use mica_relation_kernel::RelationId;
 use mica_var::{Symbol, Value, ValueKind};
 use mica_vm::{
-    CatchHandler, Instruction, ListItem, MapItem, Operand, Program, Register, RelationArg,
-    RuntimeBinaryOp, RuntimeUnaryOp,
+    CatchHandler, Instruction, KindCheckSite, ListItem, MapItem, Operand, Program, Register,
+    RelationArg, RuntimeBinaryOp, RuntimeUnaryOp,
 };
 use std::fmt::{Display, Formatter};
 use std::sync::Arc;
@@ -102,6 +102,31 @@ fn relation(value: &Value) -> Result<RelationId, AssemblyError> {
     value
         .as_identity()
         .ok_or_else(|| invalid("expected a relation identity"))
+}
+
+fn value_kind(value: &Value) -> Result<ValueKind, AssemblyError> {
+    let name = symbol(value)?;
+    [
+        ValueKind::Bool,
+        ValueKind::Int,
+        ValueKind::Float,
+        ValueKind::Identity,
+        ValueKind::Symbol,
+        ValueKind::ErrorCode,
+        ValueKind::String,
+        ValueKind::Bytes,
+        ValueKind::List,
+        ValueKind::Map,
+        ValueKind::Range,
+        ValueKind::Error,
+        ValueKind::Capability,
+        ValueKind::Frob,
+        ValueKind::Function,
+        ValueKind::Relation,
+    ]
+    .into_iter()
+    .find(|kind| Some(kind.name()) == name.name())
+    .ok_or_else(|| invalid("unknown value kind"))
 }
 
 fn operand(value: &Value) -> Result<Operand, AssemblyError> {
@@ -221,6 +246,17 @@ fn instruction(
     let op = symbol(op)?;
     let methods = method_relations();
     Ok(match (op.name(), args) {
+        (Some("CheckKind"), [value, expected, site, subject]) => Instruction::CheckKind {
+            value: register(value)?,
+            expected: value_kind(expected)?,
+            subject: symbol(subject)?,
+            site: match symbol(site)?.name() {
+                Some("Binding") => KindCheckSite::Binding,
+                Some("Parameter") => KindCheckSite::Parameter,
+                Some("Builtin") => KindCheckSite::Builtin,
+                _ => return Err(invalid("unknown kind-check site")),
+            },
+        },
         (Some("Load"), [dst, value]) => Instruction::Load {
             dst: register(dst)?,
             value: value.clone(),
@@ -424,6 +460,9 @@ fn instruction(
         (Some("Return"), [value]) => Instruction::Return {
             value: operand(value)?,
         },
+        (Some("Abort"), [error]) => Instruction::Abort {
+            error: operand(error)?,
+        },
         (Some("Emit"), [target, value]) => Instruction::Emit {
             target: operand(target)?,
             value: operand(value)?,
@@ -594,6 +633,9 @@ mod tests {
             "{:registers -> 1, :code -> [[:Return, [:Register, -1]]]}",
             "{:registers -> 1, :code -> [[:Load, 0]]}",
             "{:registers -> 1, :code -> [[:Missing, 0]]}",
+            "{:registers -> 1, :code -> [[:CheckKind, 0, :missing, :Binding, :x]]}",
+            "{:registers -> 1, :code -> [[:CheckKind, 0, :int, :Missing, :x]]}",
+            "{:registers -> 1, :code -> [[:CheckKind, 1, :int, :Binding, :x]]}",
             "{:registers -> 1, :code -> [[:BuildRelation, 0, [:a], [], 1]]}",
             "{:registers -> 1, :code -> [[:Load, 0, fn() => 1]]}",
             "{:registers -> 1, :code -> [[:LoadFunction, 0, {:registers -> 1, :code -> [[:Return, [:Constant, true]]]}, [], 2, 1]]}",

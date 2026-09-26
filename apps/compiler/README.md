@@ -1,7 +1,7 @@
 # Mica compiler
 
 The lexer and parser are written in Mica. They are ported from omica revision `bfb368c0b7586ab98c3915c0ae7cd3b46843fc8f`.
-Load `lex.mica` before `parse.mica`.
+Load `lex.mica`, `parse.mica`, and `emit.mica` in that order.
 
 - `lex(source)` returns `[tokens, errors]`. Tokens record Unicode scalar offsets, lines, and columns.
 - `parse_rows(source)` returns `{:root, :rows, :errors}`. Each AST row is `[node, role, target, ordinal]`.
@@ -12,4 +12,32 @@ It renames the parser's `exactly` local and constructs AST relations with `relat
 The parser retains the donor's AST vocabulary. Parser acceptance alone does not establish executable language support.
 
 The Rust runtime provides `assemble(description)` for validated register programs. Its format is documented in [Program Assembly](../../mdbook/src/language/assembly.md).
-The Mica emitter and bootstrap execution remain under implementation.
+The emitter produces Rust artifacts directly. It does not translate Odin bytecode.
+
+`emit_source(source)` returns `{:ok -> true, :entry -> bytes, :methods -> definitions, :errors -> []}`.
+Each method definition contains a selector, an ordered parameter list, and program bytes.
+A parse or emission diagnostic returns `{:ok -> false, :errors -> diagnostics}`.
+`emit_program(rows, root)` returns assembly descriptions before serialization.
+
+The current emitter covers literals, local bindings, required list destructuring, collection construction, indexing, assignment, calls, conditionals, loops, and required verb parameters.
+Calls include builtins, explicit selectors, named roles, and function values supplied by other code.
+Forward calls and recursive verbs resolve through the runtime method catalogue.
+Basic type annotations produce runtime checks. The emitter does not implement Rust's static type analysis.
+Unsupported syntax produces diagnostics, including declarations, relation queries, closures, exception handlers, default parameters, and rest parameters.
+Identity literals resolve in the compilation world. Compilation does not install methods or grant authority.
+
+The bootstrap test compiles all three compiler sources, installs their emitted artifacts, then compiles another program with the emitted compiler.
+It compares the target artifacts byte for byte and executes the target in interpreter and native-enabled modes.
+The test installer writes ordinary method-catalogue facts with root authority and assigns a fresh identity to each program version.
+A public module-installation workflow and broader donor feature coverage remain pending.
+
+For example, compile an expression without installing it:
+
+```sh
+cargo run --bin mica -- eval \
+  --filein apps/compiler/lex.mica \
+  --filein apps/compiler/parse.mica \
+  --filein apps/compiler/emit.mica \
+  'return emit_source("return 2 + 3")[:ok]'
+```
+

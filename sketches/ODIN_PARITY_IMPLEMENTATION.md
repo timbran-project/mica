@@ -348,3 +348,12 @@ This prevents unrestricted calls from retaining every changing parser and emitte
 Regressions cover restricted overloads, arity differences, transaction-local catalogue changes, and retained snapshots.
 Workspace tests and clippy pass. The full compiler bootstrap also passes after the cache change.
 A fixed-work timing capture remains pending for this change.
+
+The Rust assembly interface now includes kind checks and task aborts.
+The Mica emitter produces separate entry and method artifacts, with catalogue dispatch for forward and recursive calls.
+Its supported core includes local state, collections, calls, conditionals, loops, required parameters, and basic runtime type checks.
+Tests compare execution against the Rust compiler, including alias preservation, evaluation order, Unicode, annotations, and explicit selector calls.
+The bootstrap compiles the lexer, parser, and emitter, installs the emitted methods, and reproduces target artifacts byte for byte.
+All six compiler tests pass in 117.7 seconds in the debug build. The test process tree peaks at 107,476 KiB.
+Assembly validation tests and runtime clippy pass. These checks do not establish compiler performance parity.
+Relation operations, closures, exceptions, broader parameter and pattern support, and public module installation remain pending.
