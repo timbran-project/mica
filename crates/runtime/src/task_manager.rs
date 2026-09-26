@@ -545,6 +545,7 @@ pub struct TaskManager {
     mailboxes: MailboxRuntimeHandle,
     subscriptions: SubscriptionRuntimeHandle,
     limits: TaskLimits,
+    interpret_only: bool,
     resolver: Arc<ProgramResolver>,
     builtins: Arc<BuiltinRegistry>,
 }
@@ -556,6 +557,7 @@ pub(crate) struct SharedTaskManager {
     mailboxes: MailboxRuntimeHandle,
     subscriptions: SubscriptionRuntimeHandle,
     limits: TaskLimits,
+    interpret_only: bool,
     resolver: Arc<ProgramResolver>,
     builtins: Arc<BuiltinRegistry>,
 }
@@ -581,9 +583,15 @@ impl TaskManager {
             subscriptions: SubscriptionRuntimeHandle::new(mailboxes.clone()),
             mailboxes,
             limits: TaskLimits::default(),
+            interpret_only: false,
             resolver: Arc::new(ProgramResolver::new()),
             builtins: Arc::new(BuiltinRegistry::new()),
         }
+    }
+
+    pub fn with_interpreter_only(mut self, interpret_only: bool) -> Self {
+        self.interpret_only = interpret_only;
+        self
     }
 
     pub fn with_limits(mut self, limits: TaskLimits) -> Self {
@@ -613,6 +621,7 @@ impl TaskManager {
     pub(crate) fn fork_with_kernel(&self, kernel: RelationKernel) -> Self {
         Self::new(kernel)
             .with_limits(self.limits)
+            .with_interpreter_only(self.interpret_only)
             .with_resolver(self.resolver.clone())
             .with_builtins(self.builtins.clone())
     }
@@ -859,6 +868,7 @@ impl TaskManager {
             mailboxes: self.mailboxes,
             subscriptions: self.subscriptions,
             limits: self.limits,
+            interpret_only: self.interpret_only,
             resolver: self.resolver,
             builtins: self.builtins,
         }
@@ -906,6 +916,9 @@ impl TaskManager {
             authority,
             limits,
         );
+        if self.interpret_only {
+            task.vm_mut().disable_native_execution();
+        }
         task.set_task_snapshot(task_snapshot);
         task.set_runtime_context(runtime_context);
         task.set_mailbox_runtime(self.mailboxes.clone());
@@ -988,6 +1001,9 @@ impl TaskManager {
             suspended.state,
             authority,
         );
+        if self.interpret_only {
+            task.vm_mut().disable_native_execution();
+        }
         task.set_task_snapshot(task_snapshot);
         task.set_runtime_context(runtime_context);
         task.set_mailbox_runtime(self.mailboxes.clone());
@@ -1173,6 +1189,7 @@ impl SharedTaskManager {
     pub(crate) fn fork_with_kernel(&self, kernel: RelationKernel) -> TaskManager {
         TaskManager::new(kernel)
             .with_limits(self.limits)
+            .with_interpreter_only(self.interpret_only)
             .with_resolver(self.resolver.clone())
             .with_builtins(self.builtins.clone())
     }
@@ -1211,6 +1228,9 @@ impl SharedTaskManager {
             authority,
             limits,
         );
+        if self.interpret_only {
+            task.vm_mut().disable_native_execution();
+        }
         task.set_task_snapshot(task_snapshot);
         task.set_runtime_context(runtime_context);
         task.set_mailbox_runtime(self.mailboxes.clone());
@@ -1266,6 +1286,9 @@ impl SharedTaskManager {
             suspended.state,
             authority,
         );
+        if self.interpret_only {
+            task.vm_mut().disable_native_execution();
+        }
         task.set_task_snapshot(task_snapshot);
         task.set_runtime_context(runtime_context);
         task.set_mailbox_runtime(self.mailboxes.clone());

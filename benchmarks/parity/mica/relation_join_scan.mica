@@ -1,0 +1,43 @@
+// Shared benchmark grant preamble (see the other corpus files).
+make_identity(:bench)
+make_relation(:CanInvoke, 2)
+make_relation(:CanRead, 2)
+make_relation(:CanWrite, 2)
+grant #bench
+  invoke:
+    :bench
+    :setup
+  read:
+    :Point
+    :Label
+  write:
+    :Point
+    :Label
+end
+// Relation: large sequential scan with a natural join.
+//
+// Per-call workload: scan a 1000-row relation and a 1000-row companion, then
+// join them on their shared `key` column. Exercises the scan path over a
+// larger row set than relation_scan plus a two-relation join.
+make_relation(:Point, 2)
+make_relation(:Label, 2)
+
+verb setup()
+  let index = 0
+  while index < 1000
+    assert Point(index, index * 2)
+    assert Label(index, index + 1)
+    index = index + 1
+  end
+end
+
+verb bench()
+  let count = 0
+  for point in Point(?x, ?y)
+    let key = point[:x]
+    for found in Label(key, ?name)
+      count = count + 1
+    end
+  end
+  return count
+end

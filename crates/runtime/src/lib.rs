@@ -258,6 +258,12 @@ impl SourceRunner {
         runner
     }
 
+    /// Select interpreter execution for all tasks, including resumed and spawned tasks.
+    pub fn with_interpreter_only(mut self, interpret_only: bool) -> Self {
+        self.task_manager = self.task_manager.with_interpreter_only(interpret_only);
+        self
+    }
+
     pub fn with_task_limits(mut self, limits: TaskLimits) -> Self {
         self.task_manager = self.task_manager.with_limits(limits);
         self

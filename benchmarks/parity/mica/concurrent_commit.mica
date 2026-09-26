@@ -1,0 +1,61 @@
+// Shared benchmark grant preamble. The Rust host derives endpoint authority
+// from grant facts, so the harness runs as #bench; the Odin host parses the
+// same block. Grants cover the relations and verbs each bench uses.
+make_identity(:bench)
+make_relation(:CanInvoke, 2)
+make_relation(:CanRead, 2)
+make_relation(:CanWrite, 2)
+grant #bench
+  invoke:
+    :bench
+    :worker
+  read:
+    :Work
+  write:
+    :Work
+end
+// Concurrent relation commits.
+//
+// Per-call workload: 8 spawned workers each perform 64 insert/delete
+// transactions on disjoint keys, then report completion through a mailbox
+// that the caller waits on. Measures parallel commit throughput.
+make_relation(:Work, 1)
+
+verb worker(sender, base, count)
+  let index = 0
+  while index < count
+    let key = base + index
+    if Work(key)
+      retract Work(key)
+    else
+      assert Work(key)
+    end
+    commit()
+    index = index + 1
+  end
+  mailbox_send(sender, 1)
+end
+
+verb bench()
+  let box = mailbox()
+  let receiver = box[0]
+  let sender = box[1]
+  let worker_index = 0
+  while worker_index < 8
+    spawn :worker(sender: sender, base: worker_index * 100000, count: 64)
+    worker_index = worker_index + 1
+  end
+  // mailbox_recv delivers a batch of queued messages per call, so count the
+  // messages themselves rather than the recv calls.
+  let completed = 0
+  while completed < 8
+    let ready = mailbox_recv([receiver])
+    for group in ready
+      for message in group[1]
+        completed = completed + 1
+      end
+    end
+  end
+  mailbox_close(receiver)
+  return completed
+end

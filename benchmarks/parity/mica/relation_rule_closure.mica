@@ -1,0 +1,39 @@
+// Derived rule evaluation (fixpoint).
+//
+// Per-call workload: scan a derived relation whose rules compute the
+// transitive closure over a 40-node chain (820 derived rows). Exercises rule
+// evaluation and the derived-relation scan, a distinct path from stored-fact
+// scans.
+make_identity(:bench)
+make_relation(:CanInvoke, 2)
+make_relation(:CanRead, 2)
+make_relation(:CanWrite, 2)
+grant #bench
+  invoke:
+    :bench
+    :setup
+  read:
+    :Edge
+    :Reach
+  write:
+    :Edge
+end
+
+make_relation(:Edge, 2)
+make_relation(:Reach, 2)
+
+Reach(a, b) :- Edge(a, b)
+Reach(a, c) :- Edge(a, b), Reach(b, c)
+
+verb setup()
+  let index = 0
+  while index < 40
+    assert Edge(index, index + 1)
+    index = index + 1
+  end
+end
+
+verb bench()
+  let rows = Reach(?a, ?b)
+  return len(rows)
+end

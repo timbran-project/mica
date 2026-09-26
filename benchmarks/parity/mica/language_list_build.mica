@@ -1,0 +1,34 @@
+// Shared benchmark grant preamble (see the other corpus files).
+make_identity(:bench)
+make_relation(:CanInvoke, 2)
+make_relation(:CanRead, 2)
+make_relation(:CanWrite, 2)
+grant #bench
+  invoke:
+    :bench
+    :setup
+  read:
+    :Point
+    :Label
+    :Entry
+    :Edge
+    :Reach
+  write:
+    :Point
+    :Label
+    :Entry
+    :Edge
+end
+// List append and build.
+//
+// Per-call workload: build a 2000-element list one item at a time, then read
+// it back. Exercises list allocation and the append path rather than indexing.
+verb bench()
+  let items = []
+  let index = 0
+  while index < 2000
+    items = [@items, index]
+    index = index + 1
+  end
+  return len(items)
+end

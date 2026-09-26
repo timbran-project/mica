@@ -1,0 +1,26 @@
+// Shared benchmark grant preamble. The Rust host derives endpoint authority
+// from grant facts, so the harness runs as #bench; the Odin host parses the
+// same block. Grants cover the relations and verbs each bench uses.
+make_identity(:bench)
+make_relation(:CanInvoke, 2)
+make_relation(:CanRead, 2)
+make_relation(:CanWrite, 2)
+grant #bench
+  invoke:
+    :bench
+end
+// String building with the amortized append primitive (Odin-only; the Rust
+// runtime has no string_append and fails to load this file, which is why it
+// is separate from the shared corpus).
+//
+// Per-call workload: 1000 appends of a one-character string. Linear, because
+// the append reuses buffer capacity.
+verb bench()
+  let text = ""
+  let index = 0
+  while index < 1000
+    text = string_append(text, "x")
+    index = index + 1
+  end
+  return string_len(text)
+end

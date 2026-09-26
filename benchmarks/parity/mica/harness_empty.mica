@@ -1,0 +1,15 @@
+// The per-call floor: an empty bench, to separate harness cost (task dispatch,
+// transaction setup, dispatch resolution) from the workload itself. Every
+// reported number for the other benches includes this floor.
+make_identity(:bench)
+make_relation(:CanInvoke, 2)
+make_relation(:CanRead, 2)
+make_relation(:CanWrite, 2)
+grant #bench
+  invoke:
+    :bench
+end
+
+verb bench()
+  return 1
+end

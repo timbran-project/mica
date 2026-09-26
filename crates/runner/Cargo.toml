@@ -19,3 +19,4 @@ mica-runtime.workspace = true
 mica-source-provider.workspace = true
 mica-var.workspace = true
 rustyline.workspace = true
+serde_json.workspace = true

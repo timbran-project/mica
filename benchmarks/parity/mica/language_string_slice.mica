@@ -1,0 +1,37 @@
+// Shared benchmark grant preamble (see the other corpus files).
+make_identity(:bench)
+make_relation(:CanInvoke, 2)
+make_relation(:CanRead, 2)
+make_relation(:CanWrite, 2)
+grant #bench
+  invoke:
+    :bench
+    :setup
+  read:
+    :Point
+    :Label
+    :Entry
+    :Edge
+    :Reach
+  write:
+    :Point
+    :Label
+    :Entry
+    :Edge
+end
+// String scanning.
+//
+// Per-call workload: 2000 slices and length checks over a fixed string.
+// Exercises string_slice and string_len, the read-only string path, as
+// opposed to the concat/append growth path.
+verb bench()
+  let text = "the quick brown fox jumps over the lazy dog"
+  let index = 0
+  let total = 0
+  while index < 2000
+    let part = string_slice(text, index % 20, index % 20 + 5)
+    total = total + string_len(part)
+    index = index + 1
+  end
+  return total
+end

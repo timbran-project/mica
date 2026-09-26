@@ -11,6 +11,8 @@
 // You should have received a copy of the GNU Affero General Public License along
 // with this program. If not, see <https://www.gnu.org/licenses/>.
 
+mod bench;
+
 use clap::{ArgAction, Parser, Subcommand, ValueEnum};
 use mica_compiler::parse;
 use mica_driver::{
@@ -90,6 +92,8 @@ impl From<EmbeddingProviderMode> for EmbeddingProviderKind {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Measure complete invocations of a verb in a source fixture.
+    Bench(bench::Options),
     Run {
         file: PathBuf,
     },
@@ -139,6 +143,7 @@ fn main() -> ExitCode {
 async fn run() -> Result<(), String> {
     let cli = Cli::parse();
     match cli.command.as_ref().unwrap_or(&Command::Repl) {
+        Command::Bench(options) => bench::run(&cli, options).await,
         Command::Run { file } => {
             let source = fs::read_to_string(file)
                 .map_err(|error| format!("failed to read {}: {error}", file.display()))?;

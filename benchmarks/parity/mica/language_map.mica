@@ -1,0 +1,25 @@
+// Shared benchmark grant preamble. The Rust host derives endpoint authority
+// from grant facts, so the harness runs as #bench; the Odin host parses the
+// same block. Grants cover the relations and verbs each bench uses.
+make_identity(:bench)
+make_relation(:CanInvoke, 2)
+make_relation(:CanRead, 2)
+make_relation(:CanWrite, 2)
+grant #bench
+  invoke:
+    :bench
+end
+// Map lookup over a loop.
+//
+// Per-call workload: 100k lookups across a 4-entry symbol map.
+verb bench()
+  let table = {:a -> 1, :b -> 2, :c -> 3, :d -> 4}
+  let index = 0
+  let total = 0
+  while index < 100000
+    total = total + table[:a]
+    total = total + table[:b]
+    index = index + 1
+  end
+  return total
+end

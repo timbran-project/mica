@@ -672,6 +672,17 @@ impl DriverAdministrator {
         self.driver.submit_root_source_handle(source).await
     }
 
+    /// Invokes an installed method with administrative authority, without compiling source.
+    pub async fn invoke(
+        &self,
+        selector: Symbol,
+        roles: Vec<(Symbol, Value)>,
+    ) -> Result<InvocationHandle, DriverError> {
+        self.driver
+            .submit_root_invocation_handle(selector, roles)
+            .await
+    }
+
     pub async fn check_filein(
         &self,
         source: String,

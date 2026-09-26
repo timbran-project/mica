@@ -1,0 +1,16 @@
+// 2,000 role-based calls through invoke, including role-map construction.
+// Unlike language_call, this does not compile to a direct function call.
+verb step(value)
+  return value + 1
+end
+
+verb bench()
+  let total = 0
+  let i = 0
+  while i < 2000
+    total = invoke(:step, {:value -> total})
+    i = i + 1
+  end
+  require(total == 2000)
+  return total
+end

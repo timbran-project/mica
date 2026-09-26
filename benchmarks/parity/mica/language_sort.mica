@@ -1,0 +1,51 @@
+// Sorting a list of integers.
+//
+// Per-call workload: sort an 8192-element pseudo-random list. The input is
+// built once in `setup` and stored in a relation, so this measures the sort
+// rather than list construction (which has its own bench, language_list_build).
+// Two earlier shapes made this row misleading: building the list inside the
+// timed call measured mostly construction, and a descending input is Timsort's
+// best case (CPython reverses the single run in O(n)). Pseudo-random order
+// exercises the real comparison and partition work.
+//
+// 8192 elements keeps the sort well above the ~31us fixed per-call cost
+// (harness floor plus relation read), so the row reflects sorting rather than
+// overhead.
+make_identity(:bench)
+make_relation(:CanInvoke, 2)
+make_relation(:CanRead, 2)
+make_relation(:CanWrite, 2)
+grant #bench
+  invoke:
+    :bench
+    :setup
+  read:
+    :Unsorted
+  write:
+    :Unsorted
+end
+
+// Filled once by setup. A filein has no top-level mutable binding, so the
+// pre-built input lives in a relation and is read (shared, not copied) by the
+// bench.
+make_relation(:Unsorted, 1)
+
+verb setup()
+  let items = []
+  let index = 0
+  let seed = 12345
+  while index < 8192
+    // Keep the generator inside the 56-bit Mica integer range.
+    seed = (seed * 97 + 7919) % 100003
+    items = [@items, (seed % 2001) - 1000]
+    index = index + 1
+  end
+  assert Unsorted(items)
+end
+
+verb bench()
+  let rows = Unsorted(?value)
+  let stored = rows[0][:value]
+  let ordered = sort(stored)
+  return len(ordered)
+end

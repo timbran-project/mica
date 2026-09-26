@@ -1,0 +1,12 @@
+// 30,000 calls through a function value. Program ownership changes must
+// preserve this path as well as direct calls and role-based dispatch.
+verb bench()
+  let add = fn(a, b) => a + b
+  let total = 0
+  let i = 0
+  while i < 30000
+    total = add(total, 1)
+    i = i + 1
+  end
+  return total
+end

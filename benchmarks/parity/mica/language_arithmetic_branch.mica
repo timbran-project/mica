@@ -1,0 +1,39 @@
+// Shared benchmark grant preamble (see the other corpus files).
+make_identity(:bench)
+make_relation(:CanInvoke, 2)
+make_relation(:CanRead, 2)
+make_relation(:CanWrite, 2)
+grant #bench
+  invoke:
+    :bench
+    :setup
+  read:
+    :Point
+    :Label
+    :Entry
+    :Edge
+    :Reach
+  write:
+    :Point
+    :Label
+    :Entry
+    :Edge
+end
+// Integer arithmetic with a range guard (the `if` shape, not just a loop).
+//
+// Per-call workload: 100k iterations, each doing a multiply-add and a branch
+// that is taken every other time. Exercises comparison + branch + arithmetic
+// together, which is closer to real code than a bare loop counter.
+verb bench()
+  let index = 0
+  let total = 0
+  while index < 100000
+    if index % 2 == 0
+      total = total + index * 3
+    else
+      total = total - index
+    end
+    index = index + 1
+  end
+  return total
+end

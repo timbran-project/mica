@@ -3640,6 +3640,7 @@ dependencies = [
  "mica-source-provider",
  "mica-var",
  "rustyline",
+ "serde_json",
 ]
 
 [[package]]

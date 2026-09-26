@@ -1,0 +1,15 @@
+// 10,000 idempotent identity constructor calls with an already declared name.
+// This measures existing-name lookup, not fresh identity creation (#111).
+make_identity(:lookup_target)
+
+verb bench()
+  let name = :lookup_target
+  let id = #lookup_target
+  let i = 0
+  while i < 10000
+    id = make_identity(name)
+    i = i + 1
+  end
+  require(id == #lookup_target)
+  return i
+end

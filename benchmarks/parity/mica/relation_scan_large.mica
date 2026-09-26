@@ -1,0 +1,32 @@
+// Relation: larger sequential scan.
+//
+// Per-call workload: scan a 5000-row relation and count. relation_scan uses
+// 1000 rows; this checks that scan cost grows as expected with row count.
+make_identity(:bench)
+make_relation(:CanInvoke, 2)
+make_relation(:CanRead, 2)
+make_relation(:CanWrite, 2)
+grant #bench
+  invoke:
+    :bench
+    :setup
+  read:
+    :Point
+  write:
+    :Point
+end
+
+make_relation(:Point, 2)
+
+verb setup()
+  let index = 0
+  while index < 5000
+    assert Point(index, index * 2)
+    index = index + 1
+  end
+end
+
+verb bench()
+  let rows = Point(?x, ?y)
+  return len(rows)
+end

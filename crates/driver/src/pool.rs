@@ -694,6 +694,35 @@ impl CompioTaskDriver {
             .await
     }
 
+    pub(crate) async fn submit_root_invocation_handle(
+        &self,
+        selector: Symbol,
+        roles: Vec<(Symbol, Value)>,
+    ) -> Result<InvocationHandle, DriverError> {
+        self.ensure_running()?;
+        let context = TaskContext {
+            principal: None,
+            actor: None,
+            endpoint: SYSTEM_ENDPOINT,
+            authority: AuthorityContext::root(),
+        };
+        let request = TaskRequest {
+            principal: None,
+            actor: None,
+            endpoint: SYSTEM_ENDPOINT,
+            authority: AuthorityContext::root(),
+            input: TaskInput::Invocation { selector, roles },
+        };
+        let runner = Arc::clone(&self.inner.runner);
+        let submitted = self
+            .dispatch(DispatchOperation::RootSubmit, move || async move {
+                runner.submit_invocation(request)
+            })
+            .await?;
+        self.install_invocation_handle(selector, context, submitted)
+            .await
+    }
+
     pub async fn check_filein(
         &self,
         source: String,
