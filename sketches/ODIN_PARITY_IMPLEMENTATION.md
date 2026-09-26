@@ -375,3 +375,10 @@ Emitted scans support bound arguments, output variables, repeated-variable equal
 Assertions and retractions use the existing dynamic relation instructions, including transaction-local visibility.
 Execution comparisons and authority regressions pass in both modes. Root compilation does not let an artifact bypass execution-time read or write grants.
 Source declarations still require a compilation/installation stage that establishes their identities before assembly.
+
+Closure conformance exposed two Rust compiler defects in direct local calls.
+Optional defaults could not resolve earlier parameters. Spliced arguments bypassed the function-value arity check.
+The direct binder now gives defaults access to preceding arguments and restores the caller's local bindings afterwards.
+Calls with splices use the existing checked function-value path. Ordinary calls retain direct execution.
+Both regressions fail before the fixes. All 238 compiler tests and compiler clippy pass afterwards.
+The tests cover direct and aliased calls, missing/excess arguments, chained defaults, nested closures in defaults, and caller binding preservation.

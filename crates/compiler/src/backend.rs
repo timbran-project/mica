@@ -2778,7 +2778,9 @@ impl<'a> ProgramCompiler<'a> {
                 let name = binding_info.name.clone();
                 return self.compile_builtin_call(id, &name, args);
             }
-            if let Some(function) = self.functions.get(binding).cloned() {
+            if !args.iter().any(|arg| arg.splice)
+                && let Some(function) = self.functions.get(binding).cloned()
+            {
                 return self.compile_direct_function_call(id, &function, args);
             }
         }
@@ -2822,15 +2824,11 @@ impl<'a> ProgramCompiler<'a> {
                 "direct function calls only support positional arguments",
             ));
         }
-        let has_splice = args.iter().any(|arg| arg.splice);
-        if !has_splice {
-            self.validate_static_function_arity(id, function, args.len())?;
-        }
+        self.validate_static_function_arity(id, function, args.len())?;
         let call_args = if function
             .params
             .iter()
             .all(|param| param.kind == LocalKind::Param)
-            && !has_splice
         {
             self.compile_direct_required_args(function, args)?
         } else {
@@ -3540,7 +3538,6 @@ impl<'a> ProgramCompiler<'a> {
         function: &FunctionInfo,
         args: &[HirArg],
     ) -> Result<Vec<Operand>, CompileError> {
-        let has_splice = args.iter().any(|arg| arg.splice);
         let items = self.compile_arg_items(args)?;
         let actuals = self.alloc_register();
         self.emit(Instruction::BuildList {
@@ -3554,12 +3551,13 @@ impl<'a> ProgramCompiler<'a> {
         });
 
         let mut operands = Vec::with_capacity(function.params.len());
+        let saved_locals = self.locals.clone();
         let mut position = 0usize;
         for param in &function.params {
             let value = match param.kind {
                 LocalKind::Param => {
                     let value = self.compile_collection_slot(actuals, position, param.id)?;
-                    let source = (!has_splice).then(|| &args[position].value);
+                    let source = Some(&args[position].value);
                     position += 1;
                     self.enforce_compiled_parameter(param, source, value)?;
                     value
@@ -3572,13 +3570,10 @@ impl<'a> ProgramCompiler<'a> {
                         param.id,
                         param.default.as_ref(),
                     )?;
-                    let source = if has_splice {
-                        None
-                    } else {
-                        args.get(position)
-                            .map(|arg| &arg.value)
-                            .or(param.default.as_ref())
-                    };
+                    let source = args
+                        .get(position)
+                        .map(|arg| &arg.value)
+                        .or(param.default.as_ref());
                     position += 1;
                     self.enforce_compiled_parameter(param, source, value)?;
                     value
@@ -3592,8 +3587,10 @@ impl<'a> ProgramCompiler<'a> {
                     );
                 }
             };
+            self.locals.insert(param.binding, value);
             operands.push(Operand::Register(value));
         }
+        self.locals = saved_locals;
         Ok(operands)
     }
 
@@ -7971,7 +7968,7 @@ mod tests {
     }
 
     #[test]
-    fn direct_spliced_arguments_receive_one_parameter_check() {
+    fn spliced_arguments_receive_one_parameter_check() {
         let context = CompileContext::new().with_runtime_function("opaque");
         let compiled = compile_source(
             "fn accept(value: int) -> int => value
@@ -7981,8 +7978,8 @@ mod tests {
         )
         .unwrap();
 
-        // One check belongs to the direct call and one to the separately callable value wrapper.
-        assert_eq!(count_kind_checks(&compiled.program), 2);
+        // The function value wrapper checks the argument after dynamic arity validation.
+        assert_eq!(count_kind_checks(&compiled.program), 1);
     }
 
     #[test]
@@ -8697,6 +8694,65 @@ mod tests {
                 mailbox_sends: Vec::new(),
                 retries: 0,
             }
+        );
+    }
+
+    #[test]
+    fn direct_and_aliased_splices_enforce_function_arity() {
+        for (call, actual) in [
+            ("pick(@[])", 0),
+            ("pick(@[1, 2, 3])", 3),
+            ("alias(@[])", 0),
+            ("alias(@[1, 2, 3])", 3),
+        ] {
+            let mut task_manager = TaskManager::new(RelationKernel::new());
+            let source = format!(
+                "let pick = fn(first, ?second = first) => [first, second]\nlet alias = pick\nreturn {call}"
+            );
+            assert!(
+                matches!(
+                    submit_source_task(&source, &CompileContext::new(), &mut task_manager),
+                    Err(mica_runtime::TaskManagerError::Task(mica_runtime::TaskError::Runtime(
+                        RuntimeError::InvalidCallArity { expected_min: 1, expected_max: 2, actual: count }
+                    ))) if count == actual
+                ),
+                "{call}"
+            );
+        }
+    }
+
+    #[test]
+    fn direct_function_defaults_can_reference_prior_parameters() {
+        let mut task_manager = TaskManager::new(RelationKernel::new());
+        let submitted = submit_source_task(
+            "let value = 99
+             let pick = fn(value, ?extra = value + 2, ?third = extra * 2, @rest) => [value, extra, third, rest]
+             let alias = pick
+             let make = fn(value, ?mapper = fn(item) => value + item) => mapper(3)
+             return [pick(1), alias(1), pick(@[2, 7]), pick(3, 4, 5, 6), make(10), value]",
+            &CompileContext::new(),
+            &mut task_manager,
+        )
+        .unwrap();
+        let ints =
+            |values: &[i64]| Value::list(values.iter().map(|value| Value::int(*value).unwrap()));
+        let row = |first, second, third, rest| {
+            Value::list([
+                Value::int(first).unwrap(),
+                Value::int(second).unwrap(),
+                Value::int(third).unwrap(),
+                rest,
+            ])
+        };
+        assert!(
+            matches!(submitted.outcome, TaskOutcome::Complete { value, .. } if value == Value::list([
+                row(1, 3, 6, ints(&[])),
+                row(1, 3, 6, ints(&[])),
+                row(2, 7, 14, ints(&[])),
+                row(3, 4, 5, ints(&[6])),
+                Value::int(13).unwrap(),
+                Value::int(99).unwrap(),
+            ]))
         );
     }
 
