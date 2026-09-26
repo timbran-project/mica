@@ -148,3 +148,9 @@ Fjall strict and relaxed recovery retain durable text and reset volatile text wi
 The store format is `mica-relation-kernel-state-2.0.0`; earlier formats are rejected without compatibility adapters.
 The buffer journal still replays all deltas. Bounded checkpoints, runtime operations, client results, markers, and editor integration remain required.
 Workspace tests and clippy pass. Recovery tests cover strict and relaxed Fjall stores, volatile reset, deletion, and staged name reuse.
+
+Fjall buffer recovery now reads a checkpoint and fewer than 64 deltas totalling less than 1 MiB per buffer.
+Checkpoint replacement and delta removal share the atomic fact/text batch. Ordinary writes append one delta and update a small counter.
+Startup no longer eagerly scans commit history to compute an unused fallback version.
+Focused tests verify checkpoint limits, Unicode text, reopening, and deletion. The buffer persistence probe measures complete edits, flush, and reopening.
+Pinned measurements remain required to quantify checkpoint latency and recovery cost.

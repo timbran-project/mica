@@ -73,8 +73,8 @@ path still runs from memory. Startup loads the current relation state with
 The retained commit entries are an implementation aid for inspection, testing, and future recovery
 work, not the only durable representation of the world.
 
-Buffers share the snapshot and commit boundary with facts. The current Fjall buffer journal replays
-buffer deltas during startup. Bounded buffer checkpoints remain pending. See
+Buffers share the snapshot and commit boundary with facts. Fjall recovers each buffer from a
+checkpoint and fewer than 64 deltas totalling less than 1 MiB. See
 [Transactional Buffers](../../mdbook/src/runtime/buffers.md) for the Rust API and conflict semantics.
 
 `FjallStateProvider::open` defaults to relaxed durability: a commit returns after it has been

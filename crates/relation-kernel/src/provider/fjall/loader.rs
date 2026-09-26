@@ -36,18 +36,17 @@ pub(super) fn load_state_version(metadata: &Keyspace) -> Result<Option<u64>, Str
 }
 
 pub(super) fn load_last_commit_version(commits: &Keyspace) -> Result<u64, String> {
-    let mut last = 0;
-    for entry in commits.iter() {
-        let (key, _) = entry
-            .into_inner()
-            .map_err(|error| format!("failed to read fjall commit key: {error}"))?;
-        let key = key.as_ref();
-        if key.len() != 8 {
-            return Err(format!("invalid fjall commit key length {}", key.len()));
-        }
-        last = u64::from_be_bytes(key.try_into().unwrap());
+    let Some(entry) = commits.iter().next_back() else {
+        return Ok(0);
+    };
+    let (key, _) = entry
+        .into_inner()
+        .map_err(|error| format!("failed to read fjall commit key: {error}"))?;
+    let key = key.as_ref();
+    if key.len() != 8 {
+        return Err(format!("invalid fjall commit key length {}", key.len()));
     }
-    Ok(last)
+    Ok(u64::from_be_bytes(key.try_into().unwrap()))
 }
 
 pub(super) fn load_commits(commits: &Keyspace) -> Result<Vec<Commit>, String> {
@@ -62,11 +61,13 @@ pub(super) fn load_commits(commits: &Keyspace) -> Result<Vec<Commit>, String> {
 }
 
 pub(super) fn load_state(keyspaces: &FjallKeyspaces) -> Result<PersistedKernelState, String> {
-    let version = load_state_version(&keyspaces.metadata)?
-        .unwrap_or(load_last_commit_version(&keyspaces.commits)?);
+    let version = match load_state_version(&keyspaces.metadata)? {
+        Some(version) => version,
+        None => load_last_commit_version(&keyspaces.commits)?,
+    };
 
     Ok(PersistedKernelState {
-        buffers: load_buffers(&keyspaces.buffers)?,
+        buffers: super::buffers::load_buffers(&keyspaces.buffers)?,
         version,
         relations: load_relations(&keyspaces.relations)?,
         rules: load_rules(&keyspaces.rules)?,
@@ -111,19 +112,4 @@ fn load_facts(facts: &Keyspace) -> Result<Vec<(RelationId, crate::Tuple)>, Strin
         out.push((relation, decode_tuple(value.as_ref())?));
     }
     Ok(out)
-}
-
-fn load_buffers(journal: &Keyspace) -> Result<Vec<crate::buffer::PersistedBufferState>, String> {
-    let mut buffers = crate::buffer::store::BufferStates::default();
-    for entry in journal.iter() {
-        let (_, value) = entry
-            .into_inner()
-            .map_err(|error| format!("failed to read buffer journal: {error}"))?;
-        for change in super::codec::decode_buffer_changes_record(value.as_ref())? {
-            buffers
-                .replay(&change)
-                .map_err(|error| format!("invalid buffer journal: {error:?}"))?;
-        }
-    }
-    Ok(buffers.persisted())
 }

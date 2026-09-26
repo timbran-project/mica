@@ -216,13 +216,7 @@ fn write_commit(
         commit.version().to_be_bytes(),
         &encode_commit(commit)?,
     );
-    if !commit.buffer_changes().is_empty() {
-        batch.insert(
-            &keyspaces.buffers,
-            commit.version().to_be_bytes(),
-            &super::codec::encode_buffer_changes_record(commit.buffer_changes())?,
-        );
-    }
+    super::buffers::write_changes(&mut batch, &keyspaces.buffers, commit.buffer_changes())?;
     for change in commit.catalog_changes() {
         match change {
             CatalogChange::RelationCreated(metadata) => {

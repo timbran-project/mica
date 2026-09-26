@@ -14,9 +14,9 @@
 use fjall::{Database, Keyspace, KeyspaceCreateOptions};
 use std::path::Path;
 
-const FJALL_FORMAT_VERSION: &str = "mica-relation-kernel-state-2.0.0";
+const FJALL_FORMAT_VERSION: &str = "mica-relation-kernel-state-2.1.0";
 const FJALL_SHAPE: &str =
-    "relations:v1;rules:v1;facts:v1;commits:v2;buffers:v1;encoding:mica-binary-v1";
+    "relations:v1;rules:v1;facts:v1;commits:v2;buffers:v2;encoding:mica-binary-v1";
 const FJALL_METADATA_KEYSPACE: &str = "metadata";
 const FJALL_RELATIONS_KEYSPACE: &str = "relations";
 const FJALL_RULES_KEYSPACE: &str = "rules";

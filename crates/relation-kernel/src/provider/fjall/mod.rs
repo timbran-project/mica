@@ -11,6 +11,7 @@
 // You should have received a copy of the GNU Affero General Public License along
 // with this program. If not, see <https://www.gnu.org/licenses/>.
 
+mod buffers;
 mod codec;
 mod layout;
 mod loader;
@@ -72,8 +73,10 @@ impl FjallStateProvider {
             .map_err(|error| format!("failed to open fjall database: {error}"))?;
         let keyspaces = FjallKeyspaces::open(&database)?;
         write_format_markers(&keyspaces.metadata)?;
-        let initial_version = load_state_version(&keyspaces.metadata)?
-            .unwrap_or(load_last_commit_version(&keyspaces.commits)?);
+        let initial_version = match load_state_version(&keyspaces.metadata)? {
+            Some(version) => version,
+            None => load_last_commit_version(&keyspaces.commits)?,
+        };
         let writer = FjallCommitWriter::spawn(
             database.clone(),
             keyspaces.clone(),

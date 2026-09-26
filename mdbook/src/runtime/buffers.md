@@ -41,9 +41,12 @@ Strict mode waits for the durable write. Relaxed mode uses the existing asynchro
 Durable buffers recover their text and revision. Volatile buffers recover empty text and advance their revision to invalidate earlier client revisions.
 Both modes retain buffer metadata and tombstones.
 
-The store format is `mica-relation-kernel-state-2.0.0`, with commit encoding `MICACMT3`.
+The store format is `mica-relation-kernel-state-2.1.0`, with commit encoding `MICACMT3`.
 Earlier store formats are rejected. There is no migration adapter.
-The current buffer journal requires all buffer deltas during recovery. Bounded checkpoints remain required before editor deployment.
+Each buffer has a checkpoint and fewer than 64 delta records totalling less than 1 MiB.
+Reaching either limit writes a checkpoint and removes those deltas in the same atomic batch.
+Ordinary edits write one delta and a small counter. Checkpoints reconstruct and serialize the full buffer, which can increase edit latency.
+Startup reads these bounded records. The separate commit history remains available for inspection and explicit replay.
 
 The text tree shares immutable UTF-8 chunks and balanced nodes across snapshots.
 Splices copy the affected tree paths. Line coordinates use cached subtree counts, and search streams across chunks.
