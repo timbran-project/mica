@@ -8277,3 +8277,122 @@ fn destructured_loop_closures_keep_each_iteration_value_across_suspension() {
     assert!(matches!(outcome, TaskOutcome::Complete { value, .. }
         if value == Value::list([Value::int(1).unwrap(), Value::int(2).unwrap()])));
 }
+
+#[test]
+fn comprehensions_map_filter_sort_and_destructure() {
+    for interpreter_only in [true, false] {
+        let mut runner = SourceRunner::new_empty().with_interpreter_only(interpreter_only);
+        for (source, expected) in [
+            ("return [n + 1 for n in [1, 2, 3]]", "[2,3,4]"),
+            ("return [n for n in [1, 2, 3, 4] if n == 2]", "[2]"),
+            ("return [n for n in [3, 1, 2] sort]", "[1,2,3]"),
+            (
+                "return [pair[1] for pair in [[1, 2], [0, 3]] sort pair[0]]",
+                "[3,2]",
+            ),
+            (
+                "return [pair[1] for pair in [[0, 3], [0, 2]] sort pair[0]]",
+                "[2,3]",
+            ),
+            ("return [a + b for [a, b] in [[1, 2], [3, 4]]]", "[3,7]"),
+            ("return [v for {v} in [{:v -> 5}, {:v -> 7}]]", "[5,7]"),
+            ("return [v for {v} in [:v] { [5], [7] }]", "[5,7]"),
+            (
+                "return [index + value for index, value in [10, 20]]",
+                "[10,21]",
+            ),
+            ("return [1 for _ in [10, 20]]", "[1,1]"),
+            ("return [n for n in [] sort]", "[]"),
+            ("return [1 / 0 for n in [1, 2] if false]", "[]"),
+            (
+                "return [[n + m for m in [10, 20]] for n in [1, 2]]",
+                "[[11,21],[12,22]]",
+            ),
+            ("return [f() for f in [fn() => n for n in [1, 2]]]", "[1,2]"),
+            (
+                "let n = 99\nlet values = [n for n in [1, 2]]\nreturn [n, values]",
+                "[99,[1,2]]",
+            ),
+            (
+                "fn sort(items) => [99]\nreturn [n for n in [3, 1, 2] sort]",
+                "[1,2,3]",
+            ),
+            ("return [scalar for scalar in \"é🦀\"]", "[233,129408]"),
+            (
+                "let items = [1, 2]\nreturn [(items = [9])[0] + n for n in items]",
+                "[10,11]",
+            ),
+            (
+                "let seen = []\nlet values = [begin\nseen = [@seen, n + 10]\nn\nend for n in [2, 1] sort begin\nseen = [@seen, n]\nn\nend]\nreturn [values, seen]",
+                "[[1,2],[2,12,1,11]]",
+            ),
+            (
+                "return [begin\nif n == 3\nbreak\nend\nn\nend for n in [1, 2, 3, 4]]",
+                "[1,2]",
+            ),
+            (
+                "return [begin\nif n == 2\ncontinue\nend\nn\nend for n in [1, 2, 3]]",
+                "[1,3]",
+            ),
+        ] {
+            let report = runner
+                .run_source(source)
+                .unwrap_or_else(|error| panic!("{source}: {error:?}"));
+            assert_completed_value(&report, super::value_from_json_text(expected).unwrap());
+        }
+    }
+}
+
+#[test]
+fn comprehension_accumulator_survives_suspension() {
+    let mut runner = SourceRunner::new_empty();
+    let report = runner
+        .run_source("return [begin\nif n == 2\nsuspend()\nend\nn\nend for n in [3, 2, 1] sort]")
+        .unwrap();
+    assert!(matches!(report.outcome, TaskOutcome::Suspended { .. }));
+    let outcome = runner
+        .resume_task(TaskRequest {
+            input: TaskInput::Continuation {
+                task_id: report.task_id,
+                value: Value::unit(),
+            },
+            ..SourceRunner::root_source_request("")
+        })
+        .unwrap();
+    assert!(matches!(outcome, TaskOutcome::Complete { value, .. }
+        if value == Value::list([Value::int(1).unwrap(), Value::int(2).unwrap(), Value::int(3).unwrap()])));
+}
+
+#[test]
+fn comprehensions_match_shared_odin_pattern_fixture() {
+    let mut runner = SourceRunner::new_empty();
+    runner
+        .run_filein(include_str!(
+            "../../../benchmarks/parity/mica/language_for_pattern.mica"
+        ))
+        .unwrap();
+    assert_completed_value(
+        &runner.run_source("return bench()").unwrap(),
+        Value::int(47).unwrap(),
+    );
+}
+
+#[test]
+fn read_only_comprehensions_validate_every_clause() {
+    let runner = SourceRunner::new_empty();
+    for (source, accepted) in [
+        ("return [n for n in [3, 1, 2] if n > 1 sort]", true),
+        ("return [len(v) for v in [[1], []] sort]", true),
+        ("return [suspend() for n in [1]]", false),
+        ("return [n for n in [1] if suspend()]", false),
+        ("return [n for n in [1] sort suspend()]", false),
+        ("return [n for [n, ?other = suspend()] in [[1]]]", false),
+    ] {
+        let semantic = mica_compiler::parse_semantic_with_context(source, &runner.context);
+        assert_eq!(
+            super::validate_read_only_source_query(&semantic).is_ok(),
+            accepted,
+            "{source}"
+        );
+    }
+}

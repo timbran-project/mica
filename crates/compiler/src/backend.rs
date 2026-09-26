@@ -647,6 +647,7 @@ impl<'a> ContextValidator<'a> {
                 self.validate_identity(*id, delegate);
                 self.validate_expr(value, ExprUse::Value);
             }
+            HirExpr::Sort { collection, .. } => self.validate_expr(collection, ExprUse::Value),
             HirExpr::List { items, .. } => {
                 for item in items {
                     match item {
@@ -1621,6 +1622,17 @@ impl<'a> ProgramCompiler<'a> {
                         "only local, indexed local, and declared dot assignment are implemented in the task compiler yet",
                     )),
                 }
+            }
+            HirExpr::Sort { collection, .. } => {
+                let source = self.compile_expr_for_operand(collection)?;
+                let dst = self.alloc_register();
+                self.emit(Instruction::BuiltinCall {
+                    dst,
+                    name: Symbol::intern("sort"),
+                    result_kind: Some(ValueKind::List),
+                    args: vec![source],
+                });
+                Ok(dst)
             }
             HirExpr::List { id, items } => self.compile_list(*id, items),
             HirExpr::Relation { id, heading, rows } => self.compile_relation(*id, heading, rows),
@@ -5841,6 +5853,7 @@ fn expr_id(expr: &HirExpr) -> NodeId {
         | HirExpr::QueryVar { id, .. }
         | HirExpr::Hole { id }
         | HirExpr::List { id, .. }
+        | HirExpr::Sort { id, .. }
         | HirExpr::Relation { id, .. }
         | HirExpr::Map { id, .. }
         | HirExpr::Unary { id, .. }

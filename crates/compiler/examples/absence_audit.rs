@@ -108,6 +108,9 @@ impl Audit {
                     self.visit_expr(file, delay, Parent::Other);
                 }
             }
+            Expr::Sort { collection, .. } => {
+                self.visit_expr(file, collection, Parent::CallArgument)
+            }
             Expr::List { items, .. } => {
                 for item in items {
                     match item {

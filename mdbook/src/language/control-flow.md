@@ -175,6 +175,31 @@ Calibrated(instrument) || return false
 Use this style for preconditions that stop the body. Prefer a full `if` when there is meaningful
 alternative work to perform.
 
+## List Comprehensions
+
+A comprehension builds a list from an iterable. It accepts the same bindings and destructuring patterns as `for`.
+The iterable is evaluated once. Without sorting, retained values keep their iteration order.
+
+```mica,eval
+require [n + 1 for n in [1, 2, 3]] == [2, 3, 4]
+require [n for n in [1, 2, 3, 4] if n > 2] == [3, 4]
+require [left + right for [left, right] in [[1, 2], [3, 4]]] == [3, 7]
+```
+
+The optional `if` clause runs before the produced value. Rejected items do not evaluate that value or a sorting key.
+Bindings remain local to the comprehension.
+
+A bare `sort` orders the produced values. An expression after `sort` supplies a key for each retained item.
+Keys are evaluated once, before their corresponding values. Equal keys use the produced values as tie breakers.
+Sorting uses Mica's canonical value order.
+
+```mica,eval
+require [n for n in [3, 1, 2] sort] == [1, 2, 3]
+require [pair[1] for pair in [[1, "b"], [0, "a"]] sort pair[0]] == ["a", "b"]
+```
+
+Comprehensions can nest. A `break` or `continue` inside a comprehension clause targets that comprehension's loop.
+
 ## Blocks and Ranges
 
 `begin ... end` groups a sequence of expressions into one expression:
@@ -194,7 +219,7 @@ items[2.._]
 ```
 
 An underscore endpoint means an open-ended range. Range indexing applies to lists; integer indexing
-also applies to lists and relation rows, while maps use value keys.
+also applies to strings, lists, and relation rows, while maps use value keys.
 
 A closed integer range includes both endpoints. Ascending ranges iterate in steps of one; a range
 whose end is below its start has no iterations:

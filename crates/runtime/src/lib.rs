@@ -7261,6 +7261,7 @@ fn validate_read_only_expr(
         | HirExpr::Hole { .. }
         | HirExpr::Error { .. } => Ok(()),
         HirExpr::Frob { id: _, value, .. } => validate_read_only_expr(semantic, value),
+        HirExpr::Sort { collection, .. } => validate_read_only_expr(semantic, collection),
         HirExpr::List { items, .. } => {
             for item in items {
                 match item {
@@ -7534,6 +7535,7 @@ fn is_safe_read_only_builtin(name: &str) -> bool {
             | "string_append"
             | "string_span"
             | "string_find_any"
+            | "sort"
             | "string_len"
             | "string_chars"
             | "string_slice"

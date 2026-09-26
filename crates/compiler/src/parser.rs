@@ -540,6 +540,15 @@ impl<'a> Parser<'a> {
 
     fn parse_for_expr(&mut self) -> CstNode {
         let mut children = vec![self.bump_element()];
+        self.parse_iteration_bindings(&mut children);
+        children.push(self.expect_token(SyntaxKind::InKw, "expected in in for loop"));
+        children.push(CstElement::Node(self.parse_expr(0)));
+        children.push(CstElement::Node(self.parse_block(&[SyntaxKind::EndKw])));
+        children.push(self.expect_token(SyntaxKind::EndKw, "expected end after for"));
+        CstNode::new(SyntaxKind::ForExpr, children)
+    }
+
+    fn parse_iteration_bindings(&mut self, children: &mut Vec<CstElement>) {
         if self.current_kind() == SyntaxKind::LBrace {
             children.push(CstElement::Node(self.parse_row_pattern()));
         } else if self.current_kind() == SyntaxKind::LBracket {
@@ -551,11 +560,6 @@ impl<'a> Parser<'a> {
                 children.push(CstElement::Node(self.parse_loop_binding()));
             }
         }
-        children.push(self.expect_token(SyntaxKind::InKw, "expected in in for loop"));
-        children.push(CstElement::Node(self.parse_expr(0)));
-        children.push(CstElement::Node(self.parse_block(&[SyntaxKind::EndKw])));
-        children.push(self.expect_token(SyntaxKind::EndKw, "expected end after for"));
-        CstNode::new(SyntaxKind::ForExpr, children)
     }
 
     fn parse_loop_binding(&mut self) -> CstNode {
@@ -749,7 +753,58 @@ impl<'a> Parser<'a> {
 
     fn parse_list_expr(&mut self) -> CstNode {
         let mut children = vec![self.bump_element()];
-        self.parse_delimited_items(SyntaxKind::RBracket, SyntaxKind::ListItem, &mut children);
+        self.consume_line_breaks();
+        let mut first = true;
+        while !matches!(self.current_kind(), SyntaxKind::RBracket | SyntaxKind::Eof) {
+            let mut item = Vec::new();
+            let splice = self.current_kind() == SyntaxKind::At;
+            if splice {
+                item.push(self.bump_element());
+            }
+            item.push(CstElement::Node(self.parse_expr(0)));
+            children.push(CstElement::Node(CstNode::new(SyntaxKind::ListItem, item)));
+            self.consume_line_breaks();
+            if first && self.current_kind() == SyntaxKind::ForKw {
+                if splice {
+                    self.error("comprehension elements cannot be spliced");
+                }
+                children.push(self.bump_element());
+                self.parse_iteration_bindings(&mut children);
+                children.push(self.expect_token(SyntaxKind::InKw, "expected in in comprehension"));
+                children.push(CstElement::Node(self.parse_expr(0)));
+                self.consume_line_breaks();
+                if self.current_kind() == SyntaxKind::IfKw {
+                    let filter = vec![self.bump_element(), CstElement::Node(self.parse_expr(0))];
+                    children.push(CstElement::Node(CstNode::new(
+                        SyntaxKind::ComprehensionFilter,
+                        filter,
+                    )));
+                    self.consume_line_breaks();
+                }
+                if self.current_text_is("sort") {
+                    let mut sort = vec![self.bump_element()];
+                    self.consume_line_breaks();
+                    if self.current_kind() != SyntaxKind::RBracket {
+                        sort.push(CstElement::Node(self.parse_expr(0)));
+                        self.consume_line_breaks();
+                    }
+                    children.push(CstElement::Node(CstNode::new(
+                        SyntaxKind::ComprehensionSort,
+                        sort,
+                    )));
+                }
+                children.push(
+                    self.expect_token(SyntaxKind::RBracket, "expected ']' after comprehension"),
+                );
+                return CstNode::new(SyntaxKind::ComprehensionExpr, children);
+            }
+            first = false;
+            if self.current_kind() != SyntaxKind::Comma {
+                break;
+            }
+            children.push(self.bump_element());
+            self.consume_line_breaks();
+        }
         children.push(self.expect_token(SyntaxKind::RBracket, "expected ']'"));
         CstNode::new(SyntaxKind::ListExpr, children)
     }

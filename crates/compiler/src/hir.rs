@@ -92,6 +92,10 @@ pub enum HirExpr {
         id: NodeId,
         items: Vec<HirCollectionItem>,
     },
+    Sort {
+        id: NodeId,
+        collection: Box<HirExpr>,
+    },
     Relation {
         id: NodeId,
         heading: Vec<String>,

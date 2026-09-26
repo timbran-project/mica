@@ -13,9 +13,9 @@ Passing an early workstream does not complete this plan.
 | Workstream | Required result | Status |
 | --- | --- | --- |
 | Shared baselines | Pinned Rust and Odin revisions, shared source corpus, independent expected results, and reproducible captures | In progress |
-| Measurement metadata | Execution tier, workers, durability, accelerator placement, whole-invocation samples, and fixed-work memory use | Pending |
-| Strings and collections | Unicode indexing and iteration, efficient scanning and construction, and preservation of aliased values | Pending |
-| Calls | Reduced allocation with exception, suspension, closure, and retry regressions | Pending |
+| Measurement metadata | Execution tier, workers, durability, accelerator placement, whole-invocation samples, and fixed-work memory use | Implemented for repeated invocation corpus |
+| Strings and collections | Unicode indexing and iteration, efficient scanning and construction, and preservation of aliased values | Implemented; general nested-list construction still needs measurement |
+| Calls | Reduced allocation with exception, suspension, closure, and retry regressions | Implemented; dispatch and interpreter performance remain open |
 | Computed scans | CPU batches and cached retrieval preparation with unchanged authority, transaction visibility, output bindings, and exact ranking | Pending |
 | Transactional buffers | Atomic fact/text commits, conflict handling, durable recovery, marker rebasing, and client revision results | Pending |
 | Editor | Shared buffer library and programmable editor running through Rust host services | Pending |
@@ -97,3 +97,10 @@ Row loops also accept map values. Relation rows retain exact-heading checks; mis
 The bytecode operation is named `CollectionFieldAt` to describe both cases.
 Tests cover scope, type errors, missing fields, defaults, continue, closures, suspension, artifact round trips, and unique node ids.
 Compiler, VM, and runtime library tests pass. Relevant clippy checks pass. Comprehensions remain pending.
+
+List comprehensions now support mapping, filtering, sorting, keyed sorting, and loop destructuring.
+They lower to ordinary loops and bindings; sorting has an explicit operation independent of lexical name lookup.
+Tests cover evaluation order, ties, nested comprehensions, scope, closures, break/continue, suspension, and read-only validation.
+The shared loop-pattern fixture returns its expected result, 47. Workspace tests and clippy pass.
+All 22 repeated-invocation fixtures now have implementations; a full pinned release capture is the next verification step.
+Keyed comprehensions currently build nested lists, so their accumulation still uses the copying append path.

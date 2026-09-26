@@ -292,6 +292,7 @@ impl<'a> Lower<'a> {
                 span: node.span.clone(),
             },
             SyntaxKind::ListExpr => self.lower_list(node),
+            SyntaxKind::ComprehensionExpr => self.lower_comprehension(node),
             SyntaxKind::RelationExpr => self.lower_relation(node),
             SyntaxKind::MapExpr => self.lower_map(node),
             SyntaxKind::UnaryExpr => self.lower_unary(node),
@@ -1097,6 +1098,171 @@ impl<'a> Lower<'a> {
                 }
             })
             .collect()
+    }
+
+    fn lower_comprehension(&mut self, node: &CstNode) -> Expr {
+        let id = self.node_id();
+        let span = node.span.clone();
+        let accumulator = format!("<comprehension {}>", id.0);
+        let element = self
+            .node_children(node)
+            .find(|child| child.kind == SyntaxKind::ListItem)
+            .and_then(|item| {
+                self.node_children(item)
+                    .find(|child| is_expr_node(child.kind))
+            })
+            .map(|element| self.lower_expr(element))
+            .unwrap_or_else(|| self.error_expr(node));
+        let sort = self
+            .node_children(node)
+            .find(|child| child.kind == SyntaxKind::ComprehensionSort);
+        let key = sort
+            .and_then(|sort| {
+                self.node_children(sort)
+                    .find(|child| is_expr_node(child.kind))
+            })
+            .map(|key| self.lower_expr(key));
+        let keyed = key.is_some();
+        let element = match key {
+            Some(key) => Expr::List {
+                id: self.node_id(),
+                span: span.clone(),
+                items: vec![CollectionItem::Expr(key), CollectionItem::Expr(element)],
+            },
+            None => element,
+        };
+        let append = self.list_append_item(&accumulator, element, &span);
+        let append = if let Some(filter) = self
+            .node_children(node)
+            .find(|child| child.kind == SyntaxKind::ComprehensionFilter)
+        {
+            let condition = self
+                .node_children(filter)
+                .find(|child| is_expr_node(child.kind))
+                .map(|condition| self.lower_expr(condition))
+                .unwrap_or_else(|| self.error_expr(filter));
+            let conditional = Expr::If {
+                id: self.node_id(),
+                span: filter.span.clone(),
+                condition: Box::new(condition),
+                then_items: vec![append],
+                elseif: Vec::new(),
+                else_items: Vec::new(),
+            };
+            Item::Expr {
+                id: self.node_id(),
+                expr: conditional,
+            }
+        } else {
+            append
+        };
+        let mut iteration = self.lower_for(node);
+        let Expr::For { body, .. } = &mut iteration else {
+            unreachable!("lower_for produces a loop");
+        };
+        body.push(append);
+        let mut items = vec![
+            self.empty_list_binding(&accumulator, &span),
+            Item::Expr {
+                id: self.node_id(),
+                expr: iteration,
+            },
+        ];
+        let accumulated = self.name_expr(span.clone(), &accumulator);
+        let result = if sort.is_some() {
+            Expr::Sort {
+                id: self.node_id(),
+                span: span.clone(),
+                collection: Box::new(accumulated),
+            }
+        } else {
+            accumulated
+        };
+        let result = if keyed {
+            let projected = format!("<comprehension values {}>", id.0);
+            let entry = format!("<comprehension entry {}>", id.0);
+            items.push(self.empty_list_binding(&projected, &span));
+            let row = self.name_expr(span.clone(), &entry);
+            let index = Expr::Literal {
+                id: self.node_id(),
+                span: span.clone(),
+                value: Literal::Int("1".to_owned()),
+            };
+            let selected = Expr::Index {
+                id: self.node_id(),
+                span: span.clone(),
+                collection: Box::new(row),
+                index: Some(Box::new(index)),
+            };
+            let body = vec![self.list_append_item(&projected, selected, &span)];
+            let key = LoopBinding {
+                id: self.node_id(),
+                name: entry,
+                annotation: None,
+                span: span.clone(),
+            };
+            let iteration = Expr::For {
+                id: self.node_id(),
+                span: span.clone(),
+                key,
+                value: None,
+                row: None,
+                iter: Box::new(result),
+                body,
+            };
+            items.push(Item::Expr {
+                id: self.node_id(),
+                expr: iteration,
+            });
+            self.name_expr(span.clone(), &projected)
+        } else {
+            result
+        };
+        items.push(Item::Expr {
+            id: self.node_id(),
+            expr: result,
+        });
+        Expr::Block { id, span, items }
+    }
+
+    fn list_append_item(&mut self, name: &str, value: Expr, span: &Span) -> Item {
+        let prefix = self.name_expr(span.clone(), name);
+        let appended = Expr::List {
+            id: self.node_id(),
+            span: span.clone(),
+            items: vec![CollectionItem::Splice(prefix), CollectionItem::Expr(value)],
+        };
+        let target = self.name_expr(span.clone(), name);
+        let assignment = Expr::Assign {
+            id: self.node_id(),
+            span: span.clone(),
+            target: Box::new(target),
+            value: Box::new(appended),
+        };
+        Item::Expr {
+            id: self.node_id(),
+            expr: assignment,
+        }
+    }
+
+    fn empty_list_binding(&mut self, name: &str, span: &Span) -> Item {
+        let value = Expr::List {
+            id: self.node_id(),
+            span: span.clone(),
+            items: Vec::new(),
+        };
+        let binding = Expr::Binding {
+            id: self.node_id(),
+            span: span.clone(),
+            kind: BindingKind::Let,
+            pattern: BindingPattern::Name(name.to_owned()),
+            annotation: None,
+            value: Some(Box::new(value)),
+        };
+        Item::Expr {
+            id: self.node_id(),
+            expr: binding,
+        }
     }
 
     fn lower_for(&mut self, node: &CstNode) -> Expr {
@@ -1957,6 +2123,7 @@ fn is_expr_node(kind: SyntaxKind) -> bool {
             | SyntaxKind::IndexExpr
             | SyntaxKind::FieldExpr
             | SyntaxKind::ListExpr
+            | SyntaxKind::ComprehensionExpr
             | SyntaxKind::RelationExpr
             | SyntaxKind::MapExpr
             | SyntaxKind::GroupExpr
@@ -2707,6 +2874,21 @@ mod tests {
     }
 
     #[test]
+    fn comprehension_lowering_keeps_node_ids_unique_and_dense() {
+        let ast = parse_ast(
+            "let result = [[a + n for n in [1, 2]] for [a, b] in [[3, 4]] if b > 0 sort a]",
+        );
+        assert_eq!(ast.errors, vec![]);
+        let mut ids = Vec::new();
+        for item in &ast.items {
+            collect_item_ids(item, &mut ids);
+        }
+        let unique = ids.iter().copied().collect::<BTreeSet<_>>();
+        assert_eq!(ids.len(), unique.len());
+        assert_eq!(ids.len(), ast.node_count as usize);
+    }
+
+    #[test]
     fn assigns_unique_dense_node_ids() {
         let ast = parse_ast(
             "let f = {x, ?style = :short, @rest} => x + 1\n\
@@ -2762,6 +2944,7 @@ mod tests {
     fn collect_expr_ids(expr: &Expr, ids: &mut Vec<NodeId>) {
         ids.push(expr.id());
         match expr {
+            Expr::Sort { collection, .. } => collect_expr_ids(collection, ids),
             Expr::List { items, .. } => {
                 for item in items {
                     match item {

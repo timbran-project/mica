@@ -460,6 +460,9 @@ impl<'a> Analyzer<'a> {
             HirExpr::QueryVar { id, .. } => {
                 self.unsupported(*id, "query variables are only valid as relation arguments");
             }
+            HirExpr::Sort { collection, .. } => {
+                self.validate_supported_surface_expr(collection, false)
+            }
             HirExpr::List { items, .. } => {
                 for item in items {
                     match item {
@@ -1006,6 +1009,10 @@ impl<'a> Analyzer<'a> {
                 name: name.clone(),
             },
             Expr::Hole { id, .. } => HirExpr::Hole { id: *id },
+            Expr::Sort { id, collection, .. } => HirExpr::Sort {
+                id: *id,
+                collection: Box::new(self.lower_expr(collection, scope)),
+            },
             Expr::List { id, items, .. } => HirExpr::List {
                 id: *id,
                 items: items
@@ -2137,6 +2144,7 @@ fn collect_expr_span(expr: &Expr, spans: &mut HashMap<NodeId, Span>) {
         | Expr::Continue { .. }
         | Expr::Error { .. } => {}
         Expr::Frob { value, .. } => collect_expr_span(value, spans),
+        Expr::Sort { collection, .. } => collect_expr_span(collection, spans),
         Expr::List { items, .. } => {
             for item in items {
                 match item {

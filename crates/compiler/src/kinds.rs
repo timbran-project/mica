@@ -172,6 +172,9 @@ impl<'a> KindInference<'a> {
                 .flow(value)
                 .with_normal(KindSet::exact(ValueKind::Frob)),
             HirExpr::Symbol { .. } => KindFlow::value(KindSet::exact(ValueKind::Symbol)),
+            HirExpr::Sort { collection, .. } => self
+                .flow(collection)
+                .with_normal(KindSet::exact(ValueKind::List)),
             HirExpr::List { items, .. } => {
                 let mut flow = KindFlow::reachable();
                 for item in items {

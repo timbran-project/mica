@@ -147,6 +147,11 @@ pub enum Expr {
         span: Span,
         items: Vec<CollectionItem>,
     },
+    Sort {
+        id: NodeId,
+        span: Span,
+        collection: Box<Expr>,
+    },
     Relation {
         id: NodeId,
         span: Span,
@@ -320,6 +325,7 @@ impl Expr {
             | Self::Symbol { id, .. }
             | Self::Hole { id, .. }
             | Self::List { id, .. }
+            | Self::Sort { id, .. }
             | Self::Relation { id, .. }
             | Self::Map { id, .. }
             | Self::Unary { id, .. }
@@ -359,6 +365,7 @@ impl Expr {
             | Self::Symbol { span, .. }
             | Self::Hole { span, .. }
             | Self::List { span, .. }
+            | Self::Sort { span, .. }
             | Self::Relation { span, .. }
             | Self::Map { span, .. }
             | Self::Unary { span, .. }
