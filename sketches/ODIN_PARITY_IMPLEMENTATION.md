@@ -24,6 +24,28 @@ Passing an early workstream does not complete this plan.
 | Mica compiler | Ported compiler with an intentional Rust assembly interface and bootstrap conformance | Pending |
 | Ingestion | Ported ingestion applications with verified loaded facts and inference results | Pending |
 
+## RFC cross-check
+
+[The comment on omica #120](https://github.com/rdaum/omica/pull/120#issuecomment-5849929673) records suggested conformance rows from the RFC review.
+The RFC baseline differs from this plan's pinned donor. Draft requirements do not establish implemented behaviour.
+
+| Suggested row | Acceptance boundary | Direction and status |
+| --- | --- | --- |
+| Declarations and catalogue | Matching redeclarations, metadata conflicts, constructor results, runtime calls, and filein declarations | Cross-implementation conformance; the pinned Odin branch already validates constructor metadata and returns identities |
+| Units and live replacement | Atomic Add/Replace, ownership, rollback, restart, and fileout | Preserve Rust's existing Replace behaviour; distinguish proposed persistent mutable unit slots from source ownership |
+| Transactions and effects | Conflict diagnostics and commit-gated effects through abort, retry, conflict, and suspension | Preserve Rust guarantees; verify Odin gaps against the pinned revision |
+| Demand evaluation | Recursive tabling, completion, visibility, authority, invalidation, negation, and subscriptions | Experimental proposal; separate from implemented incremental forward derivation |
+
+The editor port targets the Rust runtime and existing Rust hosts. It does not require Odin to implement MHP1 first.
+Connecting Rust hosts to an Odin world is a separate interoperability task.
+Initial derivation and small-update measurements must expose the difference between weighted maintenance and full fixpoint recomputation.
+Odin #125 shares unchanged derived blocks after evaluation; it does not complete incremental maintenance.
+
+Conformance review must cover language exceptions, default/rest parameters, selector-specific invocation, capability expiry, and source-root confinement.
+The rules draft contradicts itself about unsafe-rule validation timing. Verify executable cases before treating that claim as an implemented advantage.
+The demand draft also overstates current DRed support and derived-state persistence. Its proposed semantics remain separate from implementation evidence.
+Buffers need explicit semantic coverage for revisions, atomic facts/text, conflicts, completion, markers, history, and recovery.
+
 ## Commit boundaries
 
 1. Shared source runner, conformance corpus, and measurement protocol.
