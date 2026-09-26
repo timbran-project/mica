@@ -81,6 +81,16 @@ def validate_report(report, fixture, protocol, implementation, tier):
         raise ValueError("missing or invalid elapsed samples")
 
 
+def fixture_protocol(protocol, fixture):
+    selected = dict(protocol)
+    mode = fixture.get("invocation_mode", "repeated")
+    if mode == "single":
+        selected.update(warmup=0, samples=1, iterations=1)
+    elif mode != "repeated":
+        raise ValueError(f"unknown invocation mode: {mode}")
+    return selected
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("output", type=Path)
@@ -150,24 +160,26 @@ def main():
     variants = [("rust-interpreter", "rust", "interpreter"), ("odin", "odin", "interpreter"), ("rust-native", "rust", "native-enabled")]
     for repetition in range(args.runs):
         for fixture in fixtures[repetition % len(fixtures):] + fixtures[:repetition % len(fixtures)]:
+            selected_protocol = fixture_protocol(protocol, fixture)
             for label, implementation, tier in variants[repetition % 3:] + variants[:repetition % 3]:
                 path = output / "harness" / fixture["file"]
                 if implementation == "rust":
                     command = [str(rust), "bench", str(path), "--expected", fixture["expected"],
-                               "--samples", str(args.samples), "--iterations", str(args.iterations),
-                               "--warmup", str(args.warmup), "--workers", str(args.workers),
+                               "--samples", str(selected_protocol["samples"]), "--iterations", str(selected_protocol["iterations"]),
+                               "--warmup", str(selected_protocol["warmup"]), "--workers", str(args.workers),
                                "--tier", "interpreter" if tier == "interpreter" else "native"]
                     if fixture["setup"]:
                         command.append("--setup")
                 else:
-                    command = [str(output / "odin-bench"), str(path), fixture["expected"], str(args.samples),
-                               str(args.iterations), str(args.warmup), str(args.workers), "yes" if fixture["setup"] else "no"]
+                    command = [str(output / "odin-bench"), str(path), fixture["expected"], str(selected_protocol["samples"]),
+                               str(selected_protocol["iterations"]), str(selected_protocol["warmup"]), str(args.workers), "yes" if fixture["setup"] else "no"]
                 stem = f"{fixture['name']}-{label}-{repetition}"
                 memory = output / f"{stem}.rss"
                 command = ["/usr/bin/time", "-f", "%M", "-o", str(memory),
                            "taskset", "-c", ",".join(map(str, cpus)), *command]
                 print(stem, flush=True)
-                result = {"case": fixture["name"], "variant": label, "run": repetition, "command": command}
+                result = {"case": fixture["name"], "variant": label, "run": repetition, "command": command,
+                          "protocol": selected_protocol}
                 try:
                     process = execute(command, output, args.timeout)
                     (output / f"{stem}.stdout").write_text(process.stdout)
@@ -176,9 +188,9 @@ def main():
                     if process.returncode:
                         raise ValueError(process.stderr[-3000:])
                     report = json.loads(process.stdout)
-                    validate_report(report, fixture, protocol, implementation, tier)
+                    validate_report(report, fixture, selected_protocol, implementation, tier)
                     result.update(status="passed", report=report, peak_rss_kib=int(memory.read_text().strip()))
-                    result["median_ns"] = statistics.median(report["sample_elapsed_ns"]) / args.iterations
+                    result["median_ns"] = statistics.median(report["sample_elapsed_ns"]) / selected_protocol["iterations"]
                 except (ValueError, subprocess.TimeoutExpired) as error:
                     result.update(status="failed", error=str(error))
                 manifest["results"].append(result)
@@ -190,7 +202,7 @@ def main():
             rows = [r for r in manifest["results"] if r["case"] == fixture["name"] and r["variant"] == label]
             entry = {"case": fixture["name"], "variant": label, "status": "failed"}
             if len(rows) == args.runs and all(r["status"] == "passed" for r in rows):
-                samples = sorted(n / args.iterations for r in rows for n in r["report"]["sample_elapsed_ns"])
+                samples = sorted(n / r["protocol"]["iterations"] for r in rows for n in r["report"]["sample_elapsed_ns"])
                 entry.update(status="passed", median_ns=statistics.median(r["median_ns"] for r in rows),
                              process_median_range_ns=[min(r["median_ns"] for r in rows), max(r["median_ns"] for r in rows)],
                              p95_sample_ns=samples[max(0, (len(samples) * 95 + 99) // 100 - 1)],

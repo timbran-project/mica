@@ -53,7 +53,9 @@ It copies the current measurement harness and corpus, with hashes, into the capt
 It builds Rust with `--locked --release` and Odin with `-o:speed`.
 The source exports, binaries, compiler identities, commands, and build logs remain in the capture directory.
 
-Each workload runs in fresh processes with identical warmup and timed invocation counts.
+Each workload runs in fresh processes with identical invocation counts across implementations.
+Fixtures marked `invocation_mode: single` force zero warmup, one sample, and one invocation per process.
+Other fixtures use the command-line counts. Each result records its effective protocol.
 Workload and implementation order rotate across repetitions.
 The launcher records all failures and returns a nonzero status if any workload fails.
 A known capability gap remains a failed result. It is not silently skipped.
@@ -71,7 +73,11 @@ It is not an allocation count or a measurement of retained memory alone.
 The fixed work avoids faster implementations performing more allocations during adaptive calibration.
 
 `relation_rule_closure` measures a warm derived scan.
-Initial derivation and incremental maintenance require separate workloads and remain part of the parity plan.
+`relation_rule_initial` loads 16 disjoint 32-edge chains, commits, and reads 8,448 initial closure rows.
+Its single invocation includes insertion, publication, and the first derived read. Repetition in the same world fails.
+`relation_rule_small_update` materializes that closure during setup, then removes and restores one edge eight times per invocation.
+All 16 updates commit. Bound derived reads verify changed reachability and an untouched component after every publication.
+Each update changes 32 closure rows out of 8,448. Initial derivation and maintenance therefore have separate measurements.
 The single-use identity and installation fixtures also require a separate protocol.
 
 Run the harness contract tests:

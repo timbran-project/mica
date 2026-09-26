@@ -217,6 +217,29 @@
       "source_sha256": null,
       "sha256": "b2215d4f8cba233c4b31ad63c55372da971ba69cc8be249fd84a58eaf9d86de2",
       "adaptation": "Shared acceptance fixture added in Rust parity work; no donor source. Exercises exact ties, score checks, and repeated retrieval preparation."
+    },
+    {
+      "name": "relation_rule_initial",
+      "file": "mica/relation_rule_initial.mica",
+      "expected": "8448",
+      "setup": false,
+      "rust_gap": null,
+      "source_sha256": null,
+      "sha256": "dd2dbbc7176651991e9f1799cc041c37fe941a94432041298c21793b4b51050e",
+      "measurement": "Fresh world: load 512 edges, publish, and scan 8,448 initial closure rows. Exactly one timed invocation and no warmup.",
+      "adaptation": "Shared rule-maintenance acceptance fixture; no donor source.",
+      "invocation_mode": "single"
+    },
+    {
+      "name": "relation_rule_small_update",
+      "file": "mica/relation_rule_small_update.mica",
+      "expected": "504",
+      "setup": true,
+      "rust_gap": null,
+      "source_sha256": null,
+      "sha256": "12914b54b39519cbf6d3736cc0b8285bc2e24df8adf2fa82f3bb1276b506f17b",
+      "measurement": "Setup materializes 8,448 closure rows. Each invocation removes and restores one edge eight times, with committed visibility and exact bound-result checks after all 16 updates.",
+      "adaptation": "Shared rule-maintenance acceptance fixture; no donor source."
     }
   ],
   "excluded": {

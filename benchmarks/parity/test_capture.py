@@ -1,7 +1,7 @@
 import copy
 import unittest
 
-from capture import validate_report
+from capture import fixture_protocol, validate_report
 
 
 class CaptureContract(unittest.TestCase):
@@ -29,6 +29,20 @@ class CaptureContract(unittest.TestCase):
 
     def test_accepts_complete_measurements(self):
         validate_report(self.report, self.fixture, self.protocol, "rust", "interpreter")
+
+    def test_initial_derivation_cannot_become_a_warmed_scan(self):
+        fixture = {**self.fixture, "invocation_mode": "single"}
+        protocol = fixture_protocol(self.protocol, fixture)
+        self.assertEqual(protocol, {"workers": 1, "warmup": 0, "samples": 1, "iterations": 1})
+        self.assertEqual(self.protocol["iterations"], 3)
+        with self.assertRaises(ValueError):
+            validate_report(self.report, fixture, protocol, "rust", "interpreter")
+        report = {**self.report, "warmup_invocations": 0, "iterations_per_sample": 1,
+                  "timed_invocations": 1, "sample_elapsed_ns": [100]}
+        validate_report(report, fixture, protocol, "rust", "interpreter")
+        self.assertEqual(fixture_protocol(self.protocol, self.fixture), self.protocol)
+        with self.assertRaises(ValueError):
+            fixture_protocol(self.protocol, {"invocation_mode": "typo"})
 
 
 if __name__ == "__main__":
