@@ -13,15 +13,15 @@ Passing an early workstream does not complete this plan.
 | Workstream | Required result | Status |
 | --- | --- | --- |
 | Shared baselines | Pinned Rust and Odin revisions, shared source corpus, independent expected results, and reproducible captures | In progress |
-| Measurement metadata | Execution tier, workers, durability, accelerator placement, whole-invocation samples, and fixed-work memory use | Implemented for repeated invocation corpus |
+| Measurement metadata | Execution tier, workers, durability, accelerator placement, whole-invocation samples, and fixed-work memory use | Implemented for repeated and single-invocation workloads |
 | Strings and collections | Unicode indexing and iteration, efficient scanning and construction, and preservation of aliased values | Implemented; general nested-list construction still needs measurement |
 | Calls | Reduced allocation with exception, suspension, closure, and retry regressions | Implemented; dispatch and interpreter performance remain open |
 | Computed scans | CPU batches and cached retrieval preparation with unchanged authority, transaction visibility, output bindings, and exact ranking | Implemented for positive rule steps and equality probes; exact retrieval measured |
-| Transactional buffers | Atomic fact/text commits, conflict handling, durable recovery, marker rebasing, and client revision results | Implemented, including client results, history, compaction, and computed views; editor integration and comparative measurements remain |
+| Transactional buffers | Atomic fact/text commits, conflict handling, durable recovery, marker rebasing, and client revision results | Implemented, including client results, history, compaction, and computed views; comparative measurements remain |
 | Editor | Shared buffer library and programmable editor running through Rust host services | Shared library, source scenarios, confined files, browser input, and reconnect replay implemented; comparative measurements remain |
 | Query and storage execution | Measured columnar/storage improvements that preserve incremental maintenance | Persistent rule collections, indexed recursive reseeding, retained visible rows, and retained derived indexes measured; initial derivation remains open |
 | Query measurements | Separate initial derivation and small-update maintenance workloads | Implemented and measured; Rust has substantial initial and recursive-deletion costs |
-| Mica compiler | Ported compiler with an intentional Rust assembly interface and bootstrap conformance | Pending |
+| Mica compiler | Ported compiler with an intentional Rust assembly interface and bootstrap conformance | Assembly, frontend, bootstrap, collections, closures, exceptions, and relation operations implemented; further donor features and public installation remain |
 | Ingestion | Ported ingestion applications with verified loaded facts and inference results | Pending |
 
 ## RFC cross-check
@@ -382,3 +382,9 @@ The direct binder now gives defaults access to preceding arguments and restores 
 Calls with splices use the existing checked function-value path. Ordinary calls retain direct execution.
 Both regressions fail before the fixes. All 238 compiler tests and compiler clippy pass afterwards.
 The tests cover direct and aliased calls, missing/excess arguments, chained defaults, nested closures in defaults, and caller binding preservation.
+
+The emitter now builds local function values with nested captures, typed parameters, dependent defaults, and rest arguments.
+Closure comparisons cover aliases, captured lists, shadowed parameters, and runtime kind and arity errors.
+The bootstrap target includes nested closures and an omitted default. Its artifacts match before and after the compiler compiles itself.
+All eight compiler application tests pass in the full workspace run. Workspace clippy also passes with warnings denied.
+Self-recursive local functions remain unsupported. Capture discovery can retain an unused outer name when an inner binding shadows it.

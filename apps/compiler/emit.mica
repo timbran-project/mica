@@ -97,12 +97,18 @@ verb emit_source(source) -> map
   return {:ok -> true, :entry -> assemble(module[:entry]), :methods -> methods, :errors -> []}
 end
 
-verb emit_state(relations)
-  return {:code -> [], :next -> 0, :scopes -> [{}], :loops -> [], :errors -> [], :result_annotation -> "", :binding_types -> {}, :relations -> relations}
+verb emit_state(relations, node_kinds)
+  return {:code -> [], :next -> 0, :scopes -> [{}], :loops -> [], :errors -> [], :result_annotation -> "", :binding_types -> {}, :relations -> relations, :node_kinds -> node_kinds, :self_name -> ""}
 end
 
 verb emit_program(raw_rows, root) -> map
   let rows = sort_ast_rows(raw_rows)
+  let node_kinds = {}
+  for row in rows
+    if row[1] == :kind
+      node_kinds[row[0]] = row[2]
+    end
+  end
   let relations = {}
   for entry in RelationName(?relation, ?name)
     relations[entry[:name]] = entry[:relation]
@@ -117,7 +123,7 @@ verb emit_program(raw_rows, root) -> map
       entry_nodes = [@entry_nodes, expr]
     elseif kind == :VerbItem
       let [_, selector] = ast_attr(rows, item, :name)
-      let state = emit_state(relations)
+      let state = emit_state(relations, node_kinds)
       let [has_result, result_annotation] = ast_attr(rows, item, :result)
       if has_result
         state[:result_annotation] = result_annotation
@@ -149,7 +155,7 @@ verb emit_program(raw_rows, root) -> map
       errors = [@errors, string_concat("unsupported program item: ", to_literal(kind))]
     end
   end
-  let [result, entry] = emit_block(rows, entry_nodes, emit_state(relations))
+  let [result, entry] = emit_block(rows, entry_nodes, emit_state(relations, node_kinds))
   entry = emit_append(entry, [:Return, [:Register, result]])
   return {:entry -> emit_description(entry), :methods -> methods, :errors -> [@errors, @entry[:errors]]}
 end
@@ -386,6 +392,9 @@ verb emit_expr(rows, node, input_state)
   if kind == :Assignment
     return emit_assignment(rows, node, state)
   end
+  if kind == :Fn
+    return emit_function(rows, node, state)
+  end
   if kind == :Call
     return emit_call(rows, node, state)
   end
@@ -610,7 +619,7 @@ verb emit_pattern(rows, node, source_reg, immutable, annotation, input_state)
         end
         saw_rest = true
       end
-      let [reg, after_slot] = emit_pattern_slot(rows, element, source_reg, index, length, state)
+      let [reg, after_slot] = emit_collection_slot(rows, element, element_kind, source_reg, index, length, state)
       state = after_slot
       let [bound, after_pattern] = emit_pattern(rows, element, reg, immutable, "", state)
       result = bound
@@ -666,8 +675,7 @@ verb emit_assignment(rows, node, input_state)
   return [value_reg, state]
 end
 
-verb emit_pattern_slot(rows, node, source_reg, position, length, input_state)
-  let kind = ast_kind(rows, node)
+verb emit_collection_slot(rows, node, kind, source_reg, position, length, input_state)
   let [dst, state] = emit_register(input_state)
   if kind != :Optional_Pattern && kind != :Rest_Pattern
     return [dst, emit_append(state, [:Index, dst, source_reg, [:Constant, position]])]
@@ -733,6 +741,9 @@ verb emit_call(rows, node, input_state)
     callee_reg = reg
   end
   if callee_kind == :Name && !is_function
+    if name_text == state[:self_name]
+      return emit_error(state, "self-recursive local functions are not supported")
+    end
     let target = index_or(state[:relations], to_symbol(name_text), none)
     if target != none
       return emit_relation_call(rows, node, target, :ScanDynamic, state)
@@ -784,6 +795,133 @@ verb emit_call(rows, node, input_state)
     return [dst, emit_append(state, [:BuiltinCall, dst, to_symbol(name_text), args])]
   end
   return [dst, emit_append(state, [:PositionalDispatch, dst, [:Constant, to_symbol(name_text)], args])]
+end
+
+// Collect references through AST edges. Shadowed names can add harmless
+// captures, but unrelated locals never enter the function environment.
+verb emit_referenced_names(rows, node, node_kinds)
+  let names = {}
+  let visited = {}
+  let pending = [node]
+  while len(pending) > 0
+    let last = len(pending) - 1
+    let current = pending[last]
+    if last == 0
+      pending = []
+    else
+      pending = pending[0..(last - 1)]
+    end
+    if index_or(visited, current, false)
+      continue
+    end
+    visited[current] = true
+    if index_or(node_kinds, current, :Unknown) == :Name
+      names[string_join(ast_children(rows, current, :part), "/")] = true
+    end
+    let position = lower_bound(rows, current)
+    while position < len(rows) && rows[position][0] == current
+      let target = rows[position][2]
+      if index_or(node_kinds, target, none) != none
+        pending = [@pending, target]
+      end
+      position = position + 1
+    end
+  end
+  return names
+end
+
+verb emit_function(rows, node, input_state)
+  let state = input_state
+  let nested = emit_state(state[:relations], state[:node_kinds])
+  let [has_name, name_text] = ast_attr(rows, node, :name)
+  if has_name
+    nested[:self_name] = name_text
+  end
+  let [has_result, result_text] = ast_attr(rows, node, :result)
+  if has_result
+    nested[:result_annotation] = result_text
+  end
+  let captures = []
+  for name, referenced in emit_referenced_names(rows, node, state[:node_kinds])
+    let [found, outer_reg, immutable] = emit_local(state, name)
+    if found
+      let [reg, allocated] = emit_register(nested)
+      nested = emit_declare(allocated, name, reg, immutable)
+      let types = nested[:binding_types]
+      types[reg] = index_or(state[:binding_types], outer_reg, "")
+      nested[:binding_types] = types
+      captures = [@captures, [:Register, outer_reg]]
+    end
+  end
+  let [actuals, after_actuals] = emit_register(nested)
+  let [length, after_length] = emit_register(after_actuals)
+  nested = emit_scope(emit_append(after_length, [:CollectionLen, length, actuals]))
+  let minimum = 0
+  let position = 0
+  let saw_optional = false
+  let saw_rest = false
+  for param in ast_children(rows, node, :param)
+    let [_, param_name] = ast_attr(rows, param, :name)
+    let [_, mode] = ast_attr(rows, param, :mode)
+    let [restricted, _] = ast_attr(rows, param, :restrict)
+    if restricted
+      nested = emit_diagnostic(nested, "local function parameters do not dispatch on prototypes")
+    end
+    let slot_kind = :Binding_Pattern
+    if mode == :req
+      if saw_optional || saw_rest
+        nested = emit_diagnostic(nested, "required parameters must precede optional and rest parameters")
+      end
+      minimum = minimum + 1
+    elseif mode == :opt
+      if saw_rest
+        nested = emit_diagnostic(nested, "optional parameters must precede a rest parameter")
+      end
+      saw_optional = true
+      slot_kind = :Optional_Pattern
+      let [has_default, _] = ast_attr(rows, param, :default)
+      if !has_default
+        nested = emit_diagnostic(nested, "optional function parameters require a default")
+      end
+    elseif mode == :rest
+      if saw_rest
+        nested = emit_diagnostic(nested, "a function supports only one rest parameter")
+      end
+      saw_rest = true
+      slot_kind = :Rest_Pattern
+    end
+    let [reg, emitted] = emit_collection_slot(rows, param, slot_kind, actuals, position, length, nested)
+    nested = emit_declare(emitted, param_name, reg, true)
+    let [annotated, annotation] = ast_attr(rows, param, :annotation)
+    if annotated
+      if mode == :rest && annotation != "list" && annotation != "any"
+        nested = emit_diagnostic(nested, "a rest parameter must accept a list")
+      end
+      nested = emit_annotation(nested, reg, annotation, :Parameter, param_name)
+    end
+    if mode != :rest
+      position = position + 1
+    end
+  end
+  let [expression, expression_node] = ast_attr(rows, node, :expression_body)
+  let result = 0
+  if expression
+    let [reg, emitted] = emit_expr(rows, expression_node, nested)
+    result = reg
+    nested = emitted
+  else
+    let [reg, emitted] = emit_block(rows, ast_children(rows, node, :body), nested)
+    result = reg
+    nested = emitted
+  end
+  nested = emit_finish(nested, result)
+  state[:errors] = [@state[:errors], @nested[:errors]]
+  let maximum = position
+  if saw_rest
+    maximum = 65535
+  end
+  let [dst, allocated] = emit_register(state)
+  return [dst, emit_append(allocated, [:LoadFunction, dst, emit_description(nested), captures, minimum, maximum])]
 end
 
 verb emit_relation_call(rows, node, target, operation, input_state)

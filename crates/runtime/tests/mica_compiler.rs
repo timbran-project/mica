@@ -177,6 +177,15 @@ fn mica_emitter_artifacts_agree_with_rust_execution() {
         runner.run_filein(INSTALL_EMITTED).unwrap();
         for source in [
             "return 2 + 3 * 4",
+            "let make_adder = fn(base) => fn(value) => base + value\nlet add10 = make_adder(10)\nreturn add10(32)",
+            "let rate = [2]\nlet charge = fn(quantity) => quantity * rate[0]\nrate[0] = 3\nreturn [charge(10), rate]",
+            "fn increment(value) => value + 1\nconst saved = increment\nincrement = fn(value) => value + 10\nreturn [saved(3), increment(3)]",
+            "let add = fn(value, ?extra = value + 2, @rest) => [value, extra, rest]\nreturn [add(1), add(@[1, 4, 5, 6])]",
+            "let base = 9\nlet f = fn(base) => base + 1\nreturn f(2)",
+            "let base = 10\nlet f = fn(value, ?extra = base) => value + extra\nbase = 20\nreturn f(1)",
+            "let f = fn(value: int, ?extra: int = value + 2, @rest: list) -> list => [value, extra, rest]\nreturn [f(1), f(2, 3, 4)]",
+            "let f = fn(value: int) -> int => value * 2\nreturn f(4)",
+            "let f = fn(value: int) => value * 2\nlet alias = f\ntry\n return alias(\"bad\")\ncatch E_TYPE\n return true\nend",
             "let uninitialized\nreturn uninitialized",
             "return begin\n let [first, last] = [3, 7]\nend",
             "return begin\n let [first, _] = [3, 7]\nend",
@@ -208,7 +217,9 @@ fn mica_emitter_artifacts_agree_with_rust_execution() {
             "try\n try\n raise E_TEST, \"payload\", 17\n catch as inner\n raise inner\n end\ncatch E_TEST as outer\n return outer.value\nend",
             "return [:a, :b] {[2, 1], [1, 3]}",
         ] {
-            let expected = runner.run_source(source).unwrap();
+            let expected = runner
+                .run_source(source)
+                .unwrap_or_else(|error| panic!("{source}: {error:?}"));
             let module = invoke(&mut runner, "emit_source", source);
             install_emitted(&mut runner, module);
             let actual = runner.run_source("return :compiler_test_entry()").unwrap();
@@ -312,7 +323,9 @@ fn mica_compiler_bootstrap_preserves_artifacts_and_execution() {
         for [left, right] in [[1, 2], [3, 4]]
           total = total + left * right
         end
-        return factorial(5) + total + len("é🦀")
+        let adjust = fn(base) => fn(value, ?extra = base, @rest) => value + extra + len(rest)
+        let finish = adjust(2)
+        return finish(factorial(5) + total + len("é🦀"))
     "#;
     for interpreter_only in [true, false] {
         let mut runner = compiler(interpreter_only).with_task_limits(TaskLimits {
@@ -334,7 +347,7 @@ fn mica_compiler_bootstrap_preserves_artifacts_and_execution() {
         install_emitted(&mut runner, actual);
         let report = runner.run_source("return :compiler_test_entry()").unwrap();
         assert!(
-            matches!(report.outcome, TaskOutcome::Complete { ref value, .. } if *value == Value::int(136).unwrap()),
+            matches!(report.outcome, TaskOutcome::Complete { ref value, .. } if *value == Value::int(138).unwrap()),
             "{}",
             report.render()
         );
@@ -358,7 +371,9 @@ fn mica_emitter_queries_and_mutates_catalogue_relations() {
             "assert CompilerData(@[8, 9])\nlet rows = CompilerData(8, ?right)\nretract CompilerData(@[8], _)\nreturn rows",
             "let names = []\nfor row in RelationName(?relation, :CompilerData)\n names = [@names, row[:relation]]\nend\nreturn names",
         ] {
-            let expected = runner.run_source(source).unwrap();
+            let expected = runner
+                .run_source(source)
+                .unwrap_or_else(|error| panic!("{source}: {error:?}"));
             let module = invoke(&mut runner, "emit_source", source);
             install_emitted(&mut runner, module);
             let actual = runner.run_source("return :compiler_test_entry()").unwrap();
@@ -402,6 +417,51 @@ fn mica_emitter_queries_and_mutates_catalogue_relations() {
                 report.outcome,
                 TaskOutcome::Complete { value, .. } if value == Value::bool(false)
             ));
+        }
+    }
+}
+
+#[test]
+fn mica_emitter_rejects_invalid_function_parameters_and_preserves_arity_errors() {
+    for interpreter_only in [true, false] {
+        let mut runner = compiler(interpreter_only);
+        runner.run_filein(INSTALL_EMITTED).unwrap();
+        for source in [
+            "return fn(?value) => value",
+            "return fn(@first, @second) => first",
+            "return fn(?first = 1, second) => second",
+            "return fn(@rest: int) => rest",
+            "fn recur(value) => recur(value - 1)\nreturn recur(2)",
+        ] {
+            let module = invoke(&mut runner, "emit_source", source);
+            assert_eq!(
+                module.map_get(&Value::symbol(Symbol::intern("ok"))),
+                Some(Value::bool(false)),
+                "{source}"
+            );
+            assert!(
+                module
+                    .map_get(&Value::symbol(Symbol::intern("errors")))
+                    .unwrap()
+                    .list_len()
+                    .unwrap()
+                    > 0
+            );
+        }
+        for (call, actual) in [("pick(@[])", 0), ("pick(@[1, 2, 3])", 3)] {
+            let source =
+                format!("let pick = fn(first, ?second = first) => [first, second]\nreturn {call}");
+            let module = invoke(&mut runner, "emit_source", &source);
+            install_emitted(&mut runner, module);
+            assert!(
+                matches!(
+                    runner.run_source("return :compiler_test_entry()"),
+                    Err(SourceTaskError::TaskManager(TaskManagerError::Task(TaskError::Runtime(
+                        RuntimeError::InvalidCallArity { expected_min: 1, expected_max: 2, actual: count }
+                    )))) if count == actual
+                ),
+                "{call}"
+            );
         }
     }
 }

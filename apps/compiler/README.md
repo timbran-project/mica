@@ -20,12 +20,15 @@ A parse or emission diagnostic returns `{:ok -> false, :errors -> diagnostics}`.
 `emit_program(rows, root)` returns assembly descriptions before serialization.
 
 The current emitter covers literals, local bindings, list destructuring, collection construction, indexing, assignment, calls, conditionals, loops, and required verb parameters.
-Calls include builtins, explicit selectors, named roles, and function values supplied by other code.
+Calls include builtins, explicit selectors, named roles, and local function values.
 Forward calls and recursive verbs resolve through the runtime method catalogue.
 List destructuring supports optional defaults and one rest binding. Range values support list slicing.
 `raise` and `try` support error-code catches, error bindings, and `finally`. Error fields retain Rust's option-valued message and payload.
+Local functions support nested closures, typed parameters, dependent optional defaults, and rest arguments.
+Closures capture referenced outer names at creation time. A shadowed name can add an unused capture, but unrelated locals are excluded.
+The parser accepts function result annotations and places parameter annotations before optional defaults.
 Basic type annotations produce runtime checks. The emitter does not implement Rust's static type analysis.
-Unsupported syntax produces diagnostics, including declarations, closures, catch patterns and guards, default verb parameters, and rest verb parameters.
+Unsupported syntax produces diagnostics, including declarations, self-recursive local functions, catch patterns and guards, default verb parameters, and rest verb parameters.
 The emitter reads `RelationName` once per compilation and resolves existing relations in that snapshot.
 Compilation requires permission to read that catalogue. Relations used by the source must already exist.
 Emitted scans support output variables, repeated variables, holes, and splices. Assertions and retractions use the runtime transaction.

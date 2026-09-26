@@ -314,12 +314,6 @@ verb parse_params(input_state)
     let [name_token, after_name] = expect(state, :Ident, "expected parameter name")
     state = after_name
     state = fact(state, param, :name, name_token[:text], 0)
-    if mode == :opt && at(state, :Eq)
-      state = bump(state)
-      let [default_node, after_default] = parse_expression(state)
-      state = after_default
-      state = fact(state, param, :default, default_node, 0)
-    end
     if at(state, :At) && mode != :rest
       state = bump(state)
       let [restriction, after_restriction] = parse_unary(state)
@@ -331,6 +325,12 @@ verb parse_params(input_state)
       let [annotation, after_annotation] = parse_type_text(state)
       state = after_annotation
       state = fact(state, param, :annotation, annotation, 0)
+    end
+    if mode == :opt && at(state, :Eq)
+      state = bump(state)
+      let [default_node, after_default] = parse_expression(state)
+      state = after_default
+      state = fact(state, param, :default, default_node, 0)
     end
     state = fact(state, param, :mode, mode, 0)
     param_list = [@param_list, param]
@@ -1025,6 +1025,11 @@ verb parse_fn_literal(input_state)
     state = fact(state, fn_node, :param, param, param_index)
     param_index = param_index + 1
   end
+  if at(state, :Arrow)
+    state = bump(state)
+    let [result_text, after_result] = parse_type_text(state)
+    state = fact(after_result, fn_node, :result, result_text, 0)
+  end
   if at(state, :Fat_Arrow)
     state = bump(state)
     let [expression_body, after_expression] = parse_expression(state)
@@ -1046,6 +1051,7 @@ verb parse_fn_literal(input_state)
   if name_text == ""
     return [fn_node, state]
   end
+  state = fact(state, fn_node, :name, name_text, 0)
   // A named fn is a self-recursive binding.
   let [pattern_node, after_pattern] = make_node(state, :Binding_Pattern)
   state = after_pattern
