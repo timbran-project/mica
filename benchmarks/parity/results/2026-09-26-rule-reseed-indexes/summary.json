@@ -1,0 +1,98 @@
+[
+  {
+    "case": "relation_rule_initial",
+    "variant": "rust-interpreter",
+    "status": "passed",
+    "median_ns": 27159864.0,
+    "process_median_range_ns": [
+      26863320.0,
+      27504872.0
+    ],
+    "p95_sample_ns": 27504872.0,
+    "peak_rss_kib": [
+      25044,
+      25172,
+      25044
+    ]
+  },
+  {
+    "case": "relation_rule_initial",
+    "variant": "odin",
+    "status": "passed",
+    "median_ns": 1982368.0,
+    "process_median_range_ns": [
+      1882640.0,
+      2085568.0
+    ],
+    "p95_sample_ns": 2085568.0,
+    "peak_rss_kib": [
+      6296,
+      6296,
+      6292
+    ]
+  },
+  {
+    "case": "relation_rule_initial",
+    "variant": "rust-native",
+    "status": "passed",
+    "median_ns": 27156969.0,
+    "process_median_range_ns": [
+      26946952.0,
+      27248473.0
+    ],
+    "p95_sample_ns": 27248473.0,
+    "peak_rss_kib": [
+      25044,
+      25172,
+      25172
+    ]
+  },
+  {
+    "case": "relation_rule_small_update",
+    "variant": "rust-interpreter",
+    "status": "passed",
+    "median_ns": 212867524.0,
+    "process_median_range_ns": [
+      212750615.0,
+      213512934.0
+    ],
+    "p95_sample_ns": 215791798.0,
+    "peak_rss_kib": [
+      27512,
+      27496,
+      27464
+    ]
+  },
+  {
+    "case": "relation_rule_small_update",
+    "variant": "odin",
+    "status": "passed",
+    "median_ns": 15177744.0,
+    "process_median_range_ns": [
+      14441824.0,
+      15242608.0
+    ],
+    "p95_sample_ns": 15663056.0,
+    "peak_rss_kib": [
+      9652,
+      9532,
+      10544
+    ]
+  },
+  {
+    "case": "relation_rule_small_update",
+    "variant": "rust-native",
+    "status": "passed",
+    "median_ns": 213395844.0,
+    "process_median_range_ns": [
+      212636087.0,
+      214929445.0
+    ],
+    "p95_sample_ns": 218442372.0,
+    "peak_rss_kib": [
+      27484,
+      27508,
+      27340
+    ]
+  }
+]

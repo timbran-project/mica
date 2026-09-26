@@ -297,3 +297,11 @@ Workspace tests and clippy pass. Focused daemon and file-service checks also pas
 A browser check exercised Unicode insertion, movement, deletion, undo, file visiting, and saving a new UTF-8 file through ordinary web authority.
 The file service now uses Mica's headed `none` value for absent stamps; an unheaded empty relation caused false external-change prompts.
 The launcher is `scripts/editor.sh`. Browser and file checks establish functionality, not performance parity.
+
+The rule measurements now separate initial loading and derivation from repeated small updates.
+Their initial capture passes 18 processes but exposes substantial Rust costs: 27.7 ms for initial work and 761.9 ms for 16 updates.
+Odin takes 2.0 ms and 15.2 ms respectively. Each update changes 32 of 8,448 closure rows.
+A profile traced substantial update cost to unindexed full joins during recursive replacement-derivation searches.
+Reusing maintained join indexes reduces the Rust update workload to 212.9 ms; all 18 follow-up processes pass.
+Workspace tests and clippy pass, including randomized recursion, negation, deletion, and retained-snapshot coverage.
+Rust remains approximately 14 times slower on updates. Initial derivation is essentially unchanged and remains a separate gap.
