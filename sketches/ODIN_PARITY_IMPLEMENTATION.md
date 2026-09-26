@@ -114,3 +114,10 @@ The registry validates input requirements, output arity, row association, and bo
 Rule planning waits for required computed inputs. Default providers retain scalar execution semantics.
 Kernel tests cover transaction overlays, repeated keys, bound outputs, malformed providers, and actual batch dispatch.
 Kernel library tests and clippy pass; runtime retrieval tests pass. Retrieval preparation caching is next.
+
+Exact embedding search now caches parsed candidate vectors, subjects, and norms within a transaction.
+The cache admits at most 16 indexes, clears on every write, and does not survive transaction replacement or suspension.
+Batch calls share preparation even when their reader has no persistent cache. Estimates use the requested limit instead of running a search.
+Tests verify one preparation for repeated queries, exact ties, best-per-subject ranking, post-top-k filters, local writes, rollback, suspension, invalid vectors, and denied relation access.
+Workspace tests pass. Seventeen focused retrieval tests pass, including the additional suspension and invalid-vector cases.
+The shared retrieval workload has an independent checksum and score assertions. Pinned before/after capture remains required.

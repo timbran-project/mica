@@ -12,8 +12,8 @@
 // with this program. If not, see <https://www.gnu.org/licenses/>.
 
 use mica_relation_kernel::{
-    ComputedRelation, ComputedRelationRead, KernelError, RelationId, RelationMetadata,
-    RelationRead, Tuple, system_computed_relations,
+    ComputedPreparationCache, ComputedRelation, ComputedRelationRead, ComputedRow, KernelError,
+    RelationId, RelationMetadata, RelationRead, Tuple, system_computed_relations,
 };
 use mica_var::{Symbol, Value};
 use std::cmp::Ordering;
@@ -49,102 +49,166 @@ impl ComputedRelation for ExactEmbeddingSearchRelation {
         metadata: &RelationMetadata,
         bindings: &[Option<Value>],
     ) -> Result<Vec<Tuple>, KernelError> {
-        let index = bindings[0]
-            .clone()
-            .ok_or_else(|| invalid_relation(metadata.id(), "expected bound index in position 0"))?;
-        let query = parse_vector(
-            metadata.id(),
-            &bindings[1].clone().ok_or_else(|| {
-                invalid_relation(
-                    metadata.id(),
-                    "expected bound query embedding in position 1",
-                )
-            })?,
-        )?;
-        let limit = parse_limit(
-            metadata.id(),
-            &bindings[2].clone().ok_or_else(|| {
-                invalid_relation(metadata.id(), "expected bound limit in position 2")
-            })?,
-        )?;
-
-        let vector_index_contains =
-            relation_id(reader, "VectorIndexContains", 2).ok_or_else(|| {
-                invalid_relation(metadata.id(), "missing relation VectorIndexContains/2")
-            })?;
-        let embedding_of = relation_id(reader, "EmbeddingOf", 2)
-            .ok_or_else(|| invalid_relation(metadata.id(), "missing relation EmbeddingOf/2"))?;
-        let embedding_vector = relation_id(reader, "EmbeddingVector", 2)
-            .ok_or_else(|| invalid_relation(metadata.id(), "missing relation EmbeddingVector/2"))?;
-
-        let mut best_by_subject = BTreeMap::<Value, f64>::new();
-        for membership in
-            reader.scan_relation(vector_index_contains, &[Some(index.clone()), None])?
-        {
-            let Some(embedding) = membership.values().get(1).cloned() else {
-                continue;
-            };
-            let vector_row = expect_single_value(
-                reader,
-                embedding_vector,
-                &[Some(embedding.clone()), None],
-                metadata.id(),
-                "expected EmbeddingVector(embedding, payload)",
-            )?;
-            let subject = expect_single_value(
-                reader,
-                embedding_of,
-                &[Some(embedding.clone()), None],
-                metadata.id(),
-                "expected EmbeddingOf(embedding, subject)",
-            )?;
-            let candidate = parse_vector(metadata.id(), &vector_row)?;
-            let score = cosine_similarity(metadata.id(), &query, &candidate)?;
-            best_by_subject
-                .entry(subject)
-                .and_modify(|current| {
-                    if score > *current {
-                        *current = score;
-                    }
-                })
-                .or_insert(score);
-        }
-
-        let snapshot_version = Value::int(reader.version() as i64)
-            .map_err(|_| invalid_relation(metadata.id(), "snapshot version exceeds i64"))?;
-        let mut rows = best_by_subject
-            .into_iter()
-            .map(|(subject, score)| {
-                Ok((
-                    subject.clone(),
-                    score,
-                    Tuple::from([
-                        index.clone(),
-                        bindings[1]
-                            .clone()
-                            .expect("validated query embedding should exist"),
-                        bindings[2].clone().expect("validated limit should exist"),
-                        subject,
-                        host_score_to_value(metadata.id(), score)?,
-                        snapshot_version.clone(),
-                    ]),
-                ))
-            })
-            .collect::<Result<Vec<_>, KernelError>>()?;
-        rows.sort_by(|left, right| {
-            right
-                .1
-                .partial_cmp(&left.1)
-                .unwrap_or(Ordering::Equal)
-                .then_with(|| left.0.cmp(&right.0))
-        });
-        Ok(rows
-            .into_iter()
-            .take(limit)
-            .map(|(_, _, tuple)| tuple)
-            .filter(|tuple| tuple.matches_bindings(bindings))
-            .collect())
+        let local = ComputedPreparationCache::default();
+        search(
+            reader,
+            metadata,
+            bindings,
+            reader.preparation_cache().unwrap_or(&local),
+        )
     }
+
+    fn scan_batch(
+        &self,
+        reader: &dyn ComputedRelationRead,
+        metadata: &RelationMetadata,
+        bindings: &[Vec<Option<Value>>],
+    ) -> Result<Vec<ComputedRow>, KernelError> {
+        let local = ComputedPreparationCache::default();
+        let cache = reader.preparation_cache().unwrap_or(&local);
+        let mut rows = Vec::new();
+        for (input_row, bindings) in bindings.iter().enumerate() {
+            rows.extend(
+                search(reader, metadata, bindings, cache)?
+                    .into_iter()
+                    .map(|tuple| ComputedRow { input_row, tuple }),
+            );
+        }
+        Ok(rows)
+    }
+
+    fn estimate(
+        &self,
+        _reader: &dyn ComputedRelationRead,
+        metadata: &RelationMetadata,
+        bindings: &[Option<Value>],
+    ) -> Result<usize, KernelError> {
+        parse_limit(
+            metadata.id(),
+            bindings[2]
+                .as_ref()
+                .expect("registry checks required inputs"),
+        )
+    }
+}
+
+struct PreparedEmbedding {
+    subject: Value,
+    vector: Vec<f64>,
+    squared_norm: f64,
+}
+
+fn prepare_embeddings(
+    reader: &dyn ComputedRelationRead,
+    relation: RelationId,
+    index: &Value,
+) -> Result<Vec<PreparedEmbedding>, KernelError> {
+    let vector_index_contains = relation_id(reader, "VectorIndexContains", 2)
+        .ok_or_else(|| invalid_relation(relation, "missing relation VectorIndexContains/2"))?;
+    let embedding_of = relation_id(reader, "EmbeddingOf", 2)
+        .ok_or_else(|| invalid_relation(relation, "missing relation EmbeddingOf/2"))?;
+    let embedding_vector = relation_id(reader, "EmbeddingVector", 2)
+        .ok_or_else(|| invalid_relation(relation, "missing relation EmbeddingVector/2"))?;
+    let members = reader.scan_relation(vector_index_contains, &[Some(index.clone()), None])?;
+    let mut prepared = Vec::with_capacity(members.len());
+    for membership in members {
+        let Some(embedding) = membership.values().get(1).cloned() else {
+            continue;
+        };
+        let vector = expect_single_value(
+            reader,
+            embedding_vector,
+            &[Some(embedding.clone()), None],
+            relation,
+            "expected EmbeddingVector(embedding, payload)",
+        )?;
+        let subject = expect_single_value(
+            reader,
+            embedding_of,
+            &[Some(embedding), None],
+            relation,
+            "expected EmbeddingOf(embedding, subject)",
+        )?;
+        let vector = parse_vector(relation, &vector)?;
+        let squared_norm = vector.iter().map(|value| value * value).sum();
+        prepared.push(PreparedEmbedding {
+            subject,
+            vector,
+            squared_norm,
+        });
+    }
+    Ok(prepared)
+}
+
+fn search(
+    reader: &dyn ComputedRelationRead,
+    metadata: &RelationMetadata,
+    bindings: &[Option<Value>],
+    cache: &ComputedPreparationCache,
+) -> Result<Vec<Tuple>, KernelError> {
+    let index = bindings[0]
+        .as_ref()
+        .expect("registry checks required inputs");
+    let query_value = bindings[1]
+        .as_ref()
+        .expect("registry checks required inputs");
+    let limit_value = bindings[2]
+        .as_ref()
+        .expect("registry checks required inputs");
+    let query = parse_vector(metadata.id(), query_value)?;
+    let query_norm = query.iter().map(|value| value * value).sum();
+    let limit = parse_limit(metadata.id(), limit_value)?;
+    let prepared = cache.get_or_prepare(metadata.id(), index, || {
+        prepare_embeddings(reader, metadata.id(), index)
+    })?;
+    let mut best_by_subject = BTreeMap::<Value, f64>::new();
+    for candidate in prepared.iter() {
+        let score = cosine_similarity(
+            metadata.id(),
+            &query,
+            query_norm,
+            &candidate.vector,
+            candidate.squared_norm,
+        )?;
+        best_by_subject
+            .entry(candidate.subject.clone())
+            .and_modify(|current| {
+                if score > *current {
+                    *current = score;
+                }
+            })
+            .or_insert(score);
+    }
+    let snapshot_version = Value::int(reader.version() as i64)
+        .map_err(|_| invalid_relation(metadata.id(), "snapshot version exceeds integer range"))?;
+    let mut ranked = best_by_subject.into_iter().collect::<Vec<_>>();
+    ranked.sort_by(|left, right| {
+        right
+            .1
+            .partial_cmp(&left.1)
+            .unwrap_or(Ordering::Equal)
+            .then_with(|| left.0.cmp(&right.0))
+    });
+    // Output bindings filter the selected top-k subjects, never the search population.
+    ranked
+        .into_iter()
+        .take(limit)
+        .map(|(subject, score)| {
+            Ok(Tuple::from([
+                index.clone(),
+                query_value.clone(),
+                limit_value.clone(),
+                subject,
+                host_score_to_value(metadata.id(), score)?,
+                snapshot_version.clone(),
+            ]))
+        })
+        .filter_map(|row| match row {
+            Ok(row) if row.matches_bindings(bindings) => Some(Ok(row)),
+            Ok(_) => None,
+            Err(error) => Some(Err(error)),
+        })
+        .collect()
 }
 
 fn invalid_relation(relation: RelationId, message: impl Into<String>) -> KernelError {
@@ -217,7 +281,9 @@ fn expect_single_value(
 fn cosine_similarity(
     relation: RelationId,
     left: &[f64],
+    left_norm: f64,
     right: &[f64],
+    right_norm: f64,
 ) -> Result<f64, KernelError> {
     if left.is_empty() || right.is_empty() {
         return Err(invalid_relation(
@@ -233,12 +299,8 @@ fn cosine_similarity(
     }
 
     let mut dot = 0.0;
-    let mut left_norm = 0.0;
-    let mut right_norm = 0.0;
     for (left_value, right_value) in left.iter().zip(right.iter()) {
         dot += left_value * right_value;
-        left_norm += left_value * left_value;
-        right_norm += right_value * right_value;
     }
     if left_norm == 0.0 || right_norm == 0.0 {
         return Err(invalid_relation(
@@ -251,8 +313,14 @@ fn cosine_similarity(
 
 #[cfg(test)]
 mod tests {
-    use crate::{SourceRunner, TaskOutcome};
+    use crate::{SourceRunner, TaskInput, TaskOutcome, TaskRequest};
+    use mica_relation_kernel::{
+        ComputedPreparationCache, ComputedRelation, ComputedRelationRead, KernelError, RelationId,
+        RelationMetadata, RelationRead, RuleDefinition, Snapshot, Version,
+    };
     use mica_var::{Symbol, Tuple, Value};
+    use mica_vm::AuthorityContext;
+    use std::cell::Cell;
     use std::sync::Arc;
 
     struct ConstantEmbeddingProvider;
@@ -800,5 +868,261 @@ mod tests {
             panic!("expected complete outcome, got {:?}", panel.outcome);
         };
         assert_eq!(value, Value::bool(true));
+    }
+    fn search_fixture() -> SourceRunner {
+        let mut runner = SourceRunner::new_empty();
+        runner
+            .run_filein(
+                "make_relation(:NearestEmbedding, 6)
+            make_relation(:VectorIndexContains, 2)
+            make_functional_relation(:EmbeddingOf, 2, [0])
+            make_functional_relation(:EmbeddingVector, 2, [0])
+            assert VectorIndexContains(:docs, :a)
+            assert VectorIndexContains(:docs, :b)
+            assert VectorIndexContains(:docs, :c)
+            assert EmbeddingOf(:a, 1)
+            assert EmbeddingOf(:b, 2)
+            assert EmbeddingOf(:c, 1)
+            assert EmbeddingVector(:a, [1.0, 0.0])
+            assert EmbeddingVector(:b, [1.0, 0.0])
+            assert EmbeddingVector(:c, [0.0, 1.0])",
+            )
+            .unwrap();
+        runner
+    }
+
+    struct CountedSnapshot<'a> {
+        snapshot: &'a Snapshot,
+        reads: Cell<usize>,
+        cache: ComputedPreparationCache,
+    }
+
+    impl RelationRead for CountedSnapshot<'_> {
+        fn scan_relation(
+            &self,
+            relation: RelationId,
+            bindings: &[Option<Value>],
+        ) -> Result<Vec<Tuple>, KernelError> {
+            self.reads.set(self.reads.get() + 1);
+            self.snapshot.scan_relation(relation, bindings)
+        }
+    }
+
+    impl ComputedRelationRead for CountedSnapshot<'_> {
+        fn version(&self) -> Version {
+            self.snapshot.version()
+        }
+        fn relation_metadata_vec(&self) -> Vec<RelationMetadata> {
+            self.snapshot.relation_metadata_vec()
+        }
+        fn rules_vec(&self) -> Vec<RuleDefinition> {
+            self.snapshot.rules_vec()
+        }
+        fn index_storage_kind(&self, relation: RelationId, ordinal: usize) -> Option<Symbol> {
+            self.snapshot.index_storage_kind(relation, ordinal)
+        }
+        fn extensional_facts(&self) -> Result<Vec<(RelationId, Tuple)>, KernelError> {
+            self.snapshot.extensional_facts()
+        }
+        fn preparation_cache(&self) -> Option<&ComputedPreparationCache> {
+            Some(&self.cache)
+        }
+    }
+
+    #[test]
+    fn batched_exact_search_prepares_once_and_preserves_ranking_and_output_filters() {
+        let runner = search_fixture();
+        let snapshot = runner.task_manager.kernel().snapshot();
+        let reader = CountedSnapshot {
+            snapshot: &snapshot,
+            reads: Cell::new(0),
+            cache: ComputedPreparationCache::default(),
+        };
+        let relation = super::relation_id(&reader, "NearestEmbedding", 6).unwrap();
+        let metadata = snapshot
+            .relation_metadata()
+            .find(|metadata| metadata.id() == relation)
+            .unwrap();
+        let query = Value::list([Value::float(1.0).unwrap(), Value::float(0.0).unwrap()]);
+        let keys = [
+            vec![
+                Some(Value::symbol(Symbol::intern("docs"))),
+                Some(query.clone()),
+                Some(Value::int(1).unwrap()),
+                None,
+                None,
+                None,
+            ],
+            vec![
+                Some(Value::symbol(Symbol::intern("docs"))),
+                Some(query),
+                Some(Value::int(1).unwrap()),
+                Some(Value::int(2).unwrap()),
+                None,
+                None,
+            ],
+            vec![
+                Some(Value::symbol(Symbol::intern("docs"))),
+                Some(Value::list([
+                    Value::float(0.0).unwrap(),
+                    Value::float(1.0).unwrap(),
+                ])),
+                Some(Value::int(2).unwrap()),
+                None,
+                None,
+                None,
+            ],
+        ];
+        let rows = super::ExactEmbeddingSearchRelation
+            .scan_batch(&reader, metadata, &keys)
+            .unwrap();
+        assert_eq!(
+            reader.reads.get(),
+            7,
+            "one membership scan plus vector and subject reads for three embeddings"
+        );
+        let expected = [(0, 1, 1.0), (2, 1, 1.0), (2, 2, 0.0)];
+        assert_eq!(rows.len(), expected.len());
+        for (row, (input, subject, score)) in rows.iter().zip(expected) {
+            assert_eq!(row.input_row, input);
+            assert_eq!(row.tuple.values()[3], Value::int(subject).unwrap());
+            assert_eq!(row.tuple.values()[4], Value::float(score).unwrap());
+        }
+        for (input, key) in keys.iter().enumerate() {
+            assert_eq!(
+                super::ExactEmbeddingSearchRelation
+                    .scan(&reader, metadata, key)
+                    .unwrap(),
+                rows.iter()
+                    .filter(|row| row.input_row == input)
+                    .map(|row| row.tuple.clone())
+                    .collect::<Vec<_>>()
+            );
+        }
+        assert_eq!(
+            reader.reads.get(),
+            7,
+            "later scalar calls reuse prepared candidates"
+        );
+    }
+
+    #[test]
+    fn prepared_search_observes_membership_vector_and_subject_writes_and_rollback() {
+        let mut runner = search_fixture();
+        let error = runner
+            .run_source(
+                "require NearestEmbedding(:docs, [1.0, 0.0], 1, 1, _, _)
+            retract VectorIndexContains(:docs, :a)
+            require NearestEmbedding(:docs, [1.0, 0.0], 1, 2, _, _)
+            retract EmbeddingVector(:b, [1.0, 0.0])
+            assert EmbeddingVector(:b, [0.0, 1.0])
+            require NearestEmbedding(:docs, [1.0, 0.0], 1, 1, _, _)
+            retract EmbeddingOf(:c, 1)
+            assert EmbeddingOf(:c, 3)
+            require NearestEmbedding(:docs, [1.0, 0.0], 1, 2, _, _)
+            raise E_ROLLBACK, \"discard this transaction\"",
+            )
+            .unwrap();
+        assert!(
+            matches!(error.outcome, TaskOutcome::Aborted { error, .. } if error.error_code_symbol() == Some(Symbol::intern("E_ROLLBACK")))
+        );
+        let report = runner
+            .run_source("return NearestEmbedding(:docs, [1.0, 0.0], 1, 1, _, _)")
+            .unwrap();
+        assert!(
+            matches!(report.outcome, TaskOutcome::Complete { value, .. } if value == Value::bool(true))
+        );
+    }
+
+    #[test]
+    fn search_cache_does_not_bypass_relation_authority() {
+        let mut runner = search_fixture();
+        let source = "return NearestEmbedding(:docs, [1.0, 0.0], 1, ?subject, _, _)";
+        runner.run_source(source).unwrap();
+        let result = runner.submit_source(TaskRequest {
+            authority: AuthorityContext::empty(),
+            ..SourceRunner::root_source_request(source)
+        });
+        assert!(format!("{result:?}").contains("PermissionDenied"));
+    }
+    #[test]
+    fn embedding_rules_bind_queries_and_observe_local_changes() {
+        let mut runner = search_fixture();
+        runner.run_filein("make_relation(:SearchQuery, 2)
+            make_relation(:SearchHit, 3)
+            SearchHit(query, subject, score) :- SearchQuery(query, ?vector), NearestEmbedding(:docs, ?vector, 1, subject, score, ?version)
+            assert SearchQuery(1, [1.0, 0.0])
+            assert SearchQuery(2, [0.0, 1.0])").unwrap();
+        let result = runner
+            .run_source(
+                "require SearchHit(1, 1, 1.0)
+            require SearchHit(2, 1, 1.0)
+            retract VectorIndexContains(:docs, :a)
+            require SearchHit(1, 2, 1.0)
+            return SearchHit(2, 1, 1.0)",
+            )
+            .unwrap();
+        assert!(
+            matches!(result.outcome, TaskOutcome::Complete { value, .. } if value == Value::bool(true)),
+            "expected local writes to update computed rule results"
+        );
+    }
+    #[test]
+    fn resumed_search_uses_fresh_preparation() {
+        let mut runner = search_fixture();
+        let report = runner
+            .run_source(
+                "require NearestEmbedding(:docs, [1.0, 0.0], 1, 1, _, _)
+suspend()
+return NearestEmbedding(:docs, [1.0, 0.0], 1, 2, _, _)",
+            )
+            .unwrap();
+        assert!(matches!(report.outcome, TaskOutcome::Suspended { .. }));
+        runner
+            .run_source("retract VectorIndexContains(:docs, :a)")
+            .unwrap();
+        let outcome = runner
+            .resume_task(TaskRequest {
+                input: TaskInput::Continuation {
+                    task_id: report.task_id,
+                    value: Value::unit(),
+                },
+                ..SourceRunner::root_source_request("")
+            })
+            .unwrap();
+        assert!(
+            matches!(outcome, TaskOutcome::Complete { value, .. } if value == Value::bool(true))
+        );
+    }
+
+    #[test]
+    fn prepared_search_reports_invalid_vectors_and_recovers_after_writes() {
+        let mut runner = search_fixture();
+        let result = runner
+            .run_source(
+                "require NearestEmbedding(:docs, [1.0, 0.0], 1, 1, _, _)
+            retract EmbeddingVector(:b, [1.0, 0.0])
+            assert EmbeddingVector(:b, [0.0, 0.0])
+            let invalid = try
+              NearestEmbedding(:docs, [1.0, 0.0], 1, ?subject, _, _)
+              false
+            catch E_DB
+              true
+            end
+            require invalid
+            retract EmbeddingVector(:b, [0.0, 0.0])
+            assert EmbeddingVector(:b, [1.0, 0.0])
+            require NearestEmbedding(:docs, [1.0, 0.0], 1, 1, _, _)
+            return try
+              NearestEmbedding(:docs, [1.0], 1, ?subject, _, _)
+              false
+            catch E_DB
+              true
+            end",
+            )
+            .unwrap();
+        assert!(
+            matches!(result.outcome, TaskOutcome::Complete { value, .. } if value == Value::bool(true))
+        );
     }
 }

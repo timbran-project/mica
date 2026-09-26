@@ -14,11 +14,60 @@
 use crate::query::RelationRead;
 use crate::{KernelError, RelationId, RelationMetadata, RuleDefinition, Tuple, Version};
 use mica_var::{Symbol, Value};
+use std::any::Any;
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
 
+type PreparedEntry = (RelationId, Value, Arc<dyn Any + Send + Sync>);
+
+/// Prepared provider data owned by one transaction read view.
+/// Every local write clears it. Entries never cross a transaction boundary.
+#[derive(Default)]
+pub struct ComputedPreparationCache {
+    entries: RefCell<Vec<PreparedEntry>>,
+}
+
+impl ComputedPreparationCache {
+    pub fn get_or_prepare<T: Any + Send + Sync>(
+        &self,
+        relation: RelationId,
+        key: &Value,
+        prepare: impl FnOnce() -> Result<T, KernelError>,
+    ) -> Result<Arc<T>, KernelError> {
+        if let Some(prepared) =
+            self.entries
+                .borrow()
+                .iter()
+                .find_map(|(stored_relation, stored_key, value)| {
+                    (*stored_relation == relation && stored_key == key)
+                        .then(|| Arc::clone(value).downcast::<T>().ok())
+                        .flatten()
+                })
+        {
+            return Ok(prepared);
+        }
+        // Preparation can itself query computed relations. Do not hold a borrow across it.
+        let prepared = Arc::new(prepare()?);
+        let mut entries = self.entries.borrow_mut();
+        // Bound the number of retained indexes. A full cache continues serving admitted keys.
+        if entries.len() < 16 {
+            entries.push((relation, key.clone(), prepared.clone()));
+        }
+        Ok(prepared)
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.entries.get_mut().clear();
+    }
+}
+
 pub trait ComputedRelationRead: RelationRead {
+    fn preparation_cache(&self) -> Option<&ComputedPreparationCache> {
+        None
+    }
+
     fn version(&self) -> Version;
 
     fn relation_metadata_vec(&self) -> Vec<RelationMetadata>;

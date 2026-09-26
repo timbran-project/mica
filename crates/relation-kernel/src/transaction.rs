@@ -13,7 +13,7 @@
 
 mod overlay;
 
-use crate::computed::ComputedRelationRead;
+use crate::computed::{ComputedPreparationCache, ComputedRelationRead};
 use crate::index::{RelationMutationKind, RelationState};
 use crate::metrics::{CommitOutcome, TransactionReadOperation, TransactionWriteOperation};
 use crate::relation_algebra::{
@@ -47,6 +47,7 @@ pub struct Transaction<'a> {
     writes: HashMap<RelationId, RelationWriteOverlay>,
     functional_visible: HashMap<RelationId, FunctionalVisibleMap>,
     derived_cache: RefCell<TransactionDerivedCache>,
+    computed_preparation: ComputedPreparationCache,
     #[cfg(test)]
     differential_overlay_work: RefCell<Option<crate::differential::MaintenanceWork>>,
     dispatch_inline_cache: TransactionDispatchCache,
@@ -237,6 +238,7 @@ impl<'a> Transaction<'a> {
             writes: HashMap::new(),
             functional_visible: HashMap::new(),
             derived_cache: RefCell::new(HashMap::new()),
+            computed_preparation: ComputedPreparationCache::default(),
             #[cfg(test)]
             differential_overlay_work: RefCell::new(None),
             dispatch_inline_cache: TransactionDispatchCache::new(),
@@ -472,6 +474,15 @@ impl<'a> Transaction<'a> {
             .transaction_read_operations
             .inc(TransactionReadOperation::Scan);
         let metadata = self.base.relation(relation)?.metadata();
+        if self.base.computed_relations.is_computed_relation(metadata)
+            && !relation_has_active_rule_head(self.base.rules(), relation)
+        {
+            let rows = self.scan_extensional_rows(relation, bindings)?;
+            crate::metrics::metrics()
+                .transaction_read_rows
+                .record(TransactionReadOperation::Scan, rows.len() as u64);
+            return Ok(rows);
+        }
         if self.writes.is_empty() {
             let rows = self.base.scan(relation, bindings)?;
             crate::metrics::metrics()
@@ -944,6 +955,7 @@ impl<'a> Transaction<'a> {
             .or_default()
             .insert(tuple.clone(), change);
         self.dispatch_inline_cache.clear();
+        self.computed_preparation.clear();
         match change {
             LocalChange::Assert => crate::metrics::metrics()
                 .transaction_write_operations
@@ -1371,6 +1383,10 @@ impl RelationRead for Transaction<'_> {
 }
 
 impl ComputedRelationRead for Transaction<'_> {
+    fn preparation_cache(&self) -> Option<&ComputedPreparationCache> {
+        Some(&self.computed_preparation)
+    }
+
     fn version(&self) -> Version {
         self.base.version()
     }
