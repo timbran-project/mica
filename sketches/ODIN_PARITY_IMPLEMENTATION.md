@@ -48,7 +48,7 @@ Commits include only files for this objective. No push is authorized.
 
 ## Current evidence
 
-The initial survey is read-only. No performance baseline is verified yet.
+The initial survey was read-only. The first pinned release baseline is now recorded.
 The implementation adds `mica bench`, a pinned corpus, and a capture launcher under `benchmarks/parity`.
 The runner tests cover suspended work, result changes after warmup, invalid counts, and failed setup.
 Runtime and driver library tests pass. Relevant clippy checks pass with warnings denied.
@@ -56,3 +56,9 @@ Runtime and driver library tests pass. Relevant clippy checks pass with warnings
 Initial conformance probes expose additional language gaps: `len`, loop destructuring, and comprehensions.
 The manifest records these gaps. The helper-call fixture exceeds a 40-second debug probe limit.
 These probes establish conformance status only. They are not release performance measurements.
+
+The initial release capture contains 198 processes: 162 passed and 36 failed.
+All Odin fixtures passed. Six Rust fixtures fail across both tiers and all three repetitions.
+The failures require `len`, `string_append`, loop destructuring, or comprehensions.
+The release helper-call fixture passes; its earlier debug timeout was not a conformance failure.
+Raw samples, metadata, and failures are in `benchmarks/parity/results/2026-09-26-baseline`.
