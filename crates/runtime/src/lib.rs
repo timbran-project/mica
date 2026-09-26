@@ -6894,7 +6894,7 @@ fn mint_invoke_grants(
                 "expected selector name symbol",
             ));
         };
-        if selector == Symbol::intern("os_getenv") {
+        if matches!(selector.name(), Some("os_getenv" | "buffer_revert")) {
             authority.mint(CapabilityGrant::builtin(selector));
         }
         for method in snapshot
@@ -6934,7 +6934,7 @@ fn mint_role_invoke_grants(
                     "expected selector name symbol",
                 ));
             };
-            if selector == Symbol::intern("os_getenv") {
+            if matches!(selector.name(), Some("os_getenv" | "buffer_revert")) {
                 authority.mint(CapabilityGrant::builtin(selector));
             }
             for method in snapshot

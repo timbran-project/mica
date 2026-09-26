@@ -33,6 +33,7 @@ pub struct BufferState {
     pub(crate) revision: u64,
     pub(crate) text: Text,
     pub(crate) deleted: bool,
+    pub(crate) structure_epoch: u64,
 }
 
 impl BufferState {
@@ -74,6 +75,7 @@ pub enum BufferError {
     AlreadyExists,
     MetadataMismatch,
     Conflict { expected: u64, actual: u64 },
+    StructureConflict { expected: u64, actual: u64 },
     RevisionExhausted,
     Text(TextError),
     Delta(DeltaError),
@@ -159,6 +161,7 @@ impl BufferStates {
                 revision,
                 text,
                 deleted: record.deleted,
+                structure_epoch: 0,
             });
         }
         Ok(states)
@@ -192,6 +195,7 @@ impl BufferStates {
             revision: change.revision,
             text,
             deleted: change.deleted,
+            structure_epoch: 0,
         });
         Ok(())
     }
@@ -230,6 +234,8 @@ pub(crate) struct PendingBuffer {
     pub(super) touched: bool,
     pub(super) sealed: bool,
     pub(super) token: Option<NonZeroU64>,
+    pub(super) compact: bool,
+    pub(super) reverted: bool,
 }
 
 pub(crate) type BufferWrites = BTreeMap<Identity, PendingBuffer>;
@@ -281,6 +287,8 @@ impl Transaction<'_> {
                 touched: false,
                 sealed: false,
                 token: None,
+                compact: false,
+                reverted: false,
             },
         );
         self.invalidate_computed_views();
@@ -379,6 +387,8 @@ impl Transaction<'_> {
                     touched: false,
                     sealed: false,
                     token: None,
+                    compact: false,
+                    reverted: false,
                 },
             );
         }
@@ -419,9 +429,20 @@ impl Transaction<'_> {
                     let latest = states
                         .get(id)
                         .ok_or_else(|| error(id, BufferError::Unknown))?;
+                    if latest.structure_epoch != base.structure_epoch {
+                        return Err(error(
+                            id,
+                            BufferError::StructureConflict {
+                                expected: base.structure_epoch,
+                                actual: latest.structure_epoch,
+                            },
+                        ));
+                    }
                     if latest.deleted
                         || (latest.revision != base.revision
                             && (pending.deleted
+                                || pending.compact
+                                || pending.reverted
                                 || pending.metadata.conflict == BufferConflictPolicy::Reject))
                     {
                         return Err(error(
@@ -432,7 +453,9 @@ impl Transaction<'_> {
                             },
                         ));
                     }
-                    if latest.revision == base.revision {
+                    if pending.compact {
+                        (pending.text.clone(), latest.revision, Delta::default())
+                    } else if latest.revision == base.revision {
                         let delta = complete_delta(&base.text, &pending.text)
                             .map_err(|failure| error(id, BufferError::Delta(failure)))?;
                         (pending.text.clone(), latest.revision, delta)
@@ -468,18 +491,31 @@ impl Transaction<'_> {
                     }
                 }
             };
-            if pending.base.is_some() && delta.is_empty() && !pending.deleted {
+            if pending.base.is_some() && delta.is_empty() && !pending.deleted && !pending.compact {
                 continue;
             }
-            let revision = base_revision
-                .checked_add(1)
+            let revision = if pending.compact {
+                base_revision
+            } else {
+                base_revision
+                    .checked_add(1)
+                    .ok_or_else(|| error(id, BufferError::RevisionExhausted))?
+            };
+            let structure_epoch = states
+                .get(id)
+                .map_or(0, |state| state.structure_epoch)
+                .checked_add(u64::from(pending.compact || pending.reverted))
                 .ok_or_else(|| error(id, BufferError::RevisionExhausted))?;
             states.insert(BufferState {
                 metadata: pending.metadata.clone(),
                 revision,
                 text,
                 deleted: pending.deleted,
+                structure_epoch,
             });
+            if pending.compact {
+                continue;
+            }
             changes.push(BufferChange {
                 metadata: pending.metadata.clone(),
                 base_revision,

@@ -3,11 +3,13 @@
 
 pub(crate) mod client;
 mod delta;
+pub(crate) mod history;
 pub(crate) mod store;
 mod text;
 
 pub use client::{BufferApplyOutcome, BufferApplyResult, BufferApplyStatus};
 pub use delta::{Delta, DeltaBudget, DeltaError, InsertionAffinity, Replacement};
+pub use history::BufferRevertStatus;
 pub use text::{Text, TextError};
 
 pub use store::{

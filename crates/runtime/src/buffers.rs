@@ -4,7 +4,7 @@
 use crate::{EPHEMERAL_HOST_IDENTITY_START, GENERATED_RELATION_ID_START, require_admin_builtin};
 use mica_relation_kernel::buffer::{
     BufferApplyOutcome, BufferApplyStatus, BufferConflictPolicy, BufferError, BufferMetadata,
-    Delta, InsertionAffinity, Replacement, TextError,
+    BufferRevertStatus, Delta, InsertionAffinity, Replacement, TextError,
 };
 use mica_relation_kernel::{KernelError, RelationDurability};
 use mica_var::{Identity, Symbol, Tuple, Value, ValueKind};
@@ -21,6 +21,16 @@ pub(crate) fn install(mut registry: BuiltinRegistry) -> BuiltinRegistry {
         },
     );
     registry = registry
+        .with_builtin(
+            "buffer_compact",
+            BuiltinResultKind::Exact(ValueKind::Bool),
+            compact_builtin,
+        )
+        .with_builtin(
+            "buffer_revert",
+            BuiltinResultKind::Exact(ValueKind::Symbol),
+            revert_builtin,
+        )
         .with_builtin(
             "buffer_apply",
             BuiltinResultKind::Exact(ValueKind::Symbol),
@@ -461,6 +471,44 @@ impl Builtin for WriteBuffer {
         }
         Ok(Value::bool(true))
     }
+}
+
+fn compact_builtin(
+    context: &mut BuiltinContext<'_, '_>,
+    args: &[Value],
+) -> Result<Value, RuntimeError> {
+    arity("buffer_compact", args, 1)?;
+    let id = resolve(context, &args[0], true)?;
+    context.tx().compact_buffer(id).map_err(kernel_error)?;
+    Ok(Value::bool(true))
+}
+
+fn revert_builtin(
+    context: &mut BuiltinContext<'_, '_>,
+    args: &[Value],
+) -> Result<Value, RuntimeError> {
+    arity("buffer_revert", args, 3)?;
+    let id = resolve(context, &args[0], true)?;
+    if !context
+        .authority()
+        .can_invoke_builtin(Symbol::intern("buffer_revert"))
+    {
+        return Err(fault(
+            "E_PERMISSION",
+            "buffer reversion requires an invoke grant",
+        ));
+    }
+    let revision = nonnegative(&args[1])?;
+    let expected = nonnegative(&args[2])?;
+    let status = context
+        .tx()
+        .revert_buffer(id, revision, expected)
+        .map_err(kernel_error)?;
+    Ok(Value::symbol(Symbol::intern(match status {
+        BufferRevertStatus::Staged => "staged",
+        BufferRevertStatus::Stale => "stale",
+        BufferRevertStatus::Unknown => "unknown",
+    })))
 }
 
 fn parse_edits(value: &Value) -> Result<Vec<Replacement>, RuntimeError> {
@@ -1202,6 +1250,106 @@ mod tests {
         assert_eq!(
             kernel.snapshot().buffer(id).unwrap().text().to_text(),
             "winnerase"
+        );
+    }
+
+    #[test]
+    fn buffer_reversion_and_compaction_keep_their_revision_and_authority_contracts() {
+        let mut runner = SourceRunner::new_empty();
+        result(
+            &mut runner,
+            "make_buffer(:notes, :durable)\nbuffer_insert(:notes, 0, \"one\")",
+        );
+        result(&mut runner, "buffer_replace(:notes, 0, 3, \"two\")");
+        assert_eq!(
+            result(
+                &mut runner,
+                r#"
+            let stale = buffer_revert(:notes, 1, 1)
+            let unknown = buffer_revert(:notes, 99, 2)
+            let staged = buffer_revert(:notes, 1, 2)
+            let blocked = false
+            try
+              buffer_insert(:notes, 0, "later")
+            catch E_STATE
+              blocked = true
+            end
+            return [stale, unknown, staged, buffer_text(:notes), buffer_revision(:notes), blocked]
+        "#
+            ),
+            Value::list([
+                Value::symbol(Symbol::intern("stale")),
+                Value::symbol(Symbol::intern("unknown")),
+                Value::symbol(Symbol::intern("staged")),
+                Value::string("one"),
+                integer(2).unwrap(),
+                Value::bool(true)
+            ])
+        );
+        assert_eq!(
+            result(
+                &mut runner,
+                r#"
+            buffer_compact(:notes)
+            let blocked = false
+            try
+              buffer_replace(:notes, 0, 3, "later")
+            catch E_STATE
+              blocked = true
+            end
+            return [buffer_revision(:notes), buffer_text(:notes), blocked]
+        "#
+            ),
+            Value::list([integer(3).unwrap(), Value::string("one"), Value::bool(true)])
+        );
+        assert_eq!(
+            result(&mut runner, "return buffer_revision(:notes)"),
+            integer(3).unwrap()
+        );
+        runner
+            .run_filein(
+                r#"
+            make_identity(:alice)
+            make_relation(:GrantWrite, 2)
+            make_relation(:GrantInvoke, 2)
+            assert GrantWrite(#alice, :notes)
+        "#,
+            )
+            .unwrap();
+        let report = runner
+            .run_source_as(
+                Symbol::intern("alice"),
+                r#"
+            try
+              buffer_revert(:notes, 2, 3)
+            catch E_PERMISSION
+              return true
+            end
+            return false
+        "#,
+            )
+            .unwrap();
+        assert!(
+            matches!(report.outcome, TaskOutcome::Complete { value, .. } if value == Value::bool(true))
+        );
+        result(&mut runner, "assert GrantInvoke(#alice, :buffer_revert)");
+        let report = runner
+            .run_source_as(
+                Symbol::intern("alice"),
+                "return buffer_revert(:notes, 2, 3)",
+            )
+            .unwrap();
+        assert!(
+            matches!(&report.outcome, TaskOutcome::Complete { value, .. } if *value == Value::symbol(Symbol::intern("staged"))),
+            "{}",
+            report.render()
+        );
+        assert_eq!(
+            result(
+                &mut runner,
+                "return [buffer_text(:notes), buffer_revision(:notes)]"
+            ),
+            Value::list([Value::string("two"), integer(4).unwrap()])
         );
     }
 }

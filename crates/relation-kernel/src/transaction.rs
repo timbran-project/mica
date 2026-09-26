@@ -879,7 +879,9 @@ impl<'a> Transaction<'a> {
             Err(
                 KernelError::Conflict(_)
                 | KernelError::Buffer {
-                    error: crate::buffer::BufferError::Conflict { .. },
+                    error:
+                        crate::buffer::BufferError::Conflict { .. }
+                        | crate::buffer::BufferError::StructureConflict { .. },
                     ..
                 },
             ) => crate::metrics::metrics()
@@ -907,7 +909,11 @@ impl<'a> Transaction<'a> {
             }
             let (next, commit) = self.build_next_snapshot(&current)?;
             self.kernel.persist_commit(&commit)?;
-            if !self.kernel.try_publish(current.version(), next.clone()) {
+            if !self.kernel.try_publish_with_buffer_history(
+                &current,
+                next.clone(),
+                self.buffer_writes.keys().copied(),
+            ) {
                 return Err(KernelError::Persistence(
                     "commit publish failed after serialized persistence".to_owned(),
                 ));

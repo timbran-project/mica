@@ -570,7 +570,8 @@ fn is_retryable_conflict(error: &KernelError) -> bool {
             tuple: _,
             kind: _
         }) | KernelError::Buffer {
-            error: mica_relation_kernel::buffer::BufferError::Conflict { .. },
+            error: mica_relation_kernel::buffer::BufferError::Conflict { .. }
+                | mica_relation_kernel::buffer::BufferError::StructureConflict { .. },
             ..
         }
     )

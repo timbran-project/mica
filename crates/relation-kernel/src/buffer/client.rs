@@ -202,7 +202,8 @@ impl Transaction<'_> {
             } => BufferApplyOutcome::Conflict,
             KernelError::Buffer {
                 error:
-                    BufferError::Delta(DeltaError::BudgetExceeded | DeltaError::ForeignProvenance),
+                    BufferError::Delta(DeltaError::BudgetExceeded | DeltaError::ForeignProvenance)
+                    | BufferError::StructureConflict { .. },
                 ..
             } => BufferApplyOutcome::Resync,
             _ => BufferApplyOutcome::Aborted,

@@ -5,7 +5,7 @@ A buffer has an identity, a unique name, a durability policy, a conflict policy,
 Buffer names share the relation namespace. Deleted buffers retain tombstones that reserve their identities and names.
 
 Language builtins use the current task transaction and its authority context.
-Computed buffer relations, history, compaction, and editor integration remain pending.
+Computed buffer relations and editor integration remain pending.
 
 ## Language interface
 
@@ -72,6 +72,25 @@ Results are ephemeral and disappear after restart. An unknown or evicted token r
 `buffer_marker_rebase(edits, position, :stick_before | :stick_after)` moves a marker through a committed, base-relative delta.
 The delta must contain sorted, non-overlapping ranges. Insertions at the marker follow its selected affinity.
 A removed interior position collapses to the start of the removed range. Marker state remains application-owned.
+
+## Reversion and compaction
+
+The kernel retains up to 32 revisions for each of 256 recently changed buffers. This history is ephemeral and disappears after restart.
+Retiring a buffer removes its history. Existing snapshots still retain their own text.
+
+`buffer_revert(name, revision, expected_revision)` stages a whole-buffer replacement with retained text.
+It returns `:staged`, `:stale`, or `:unknown`. An unknown revision is outside the retained history or greater than the current revision.
+Reversion requires buffer write authority and an invoke grant for `:buffer_revert` through the existing invocation policy.
+It discards subsequent text changes, so it uses fresh chunks and an exclusive commit check.
+It does not selectively undo one writer's edits. Reversion to the current revision changes nothing and does not advance the revision.
+
+`buffer_compact(name)` rebuilds committed text into fresh chunks and returns `true`.
+It preserves the text revision and advances an internal structure generation. That generation prevents older transactions from restoring superseded chunks.
+Compaction requires buffer write authority. A newly created buffer needs no compaction, so this call leaves its private view open.
+
+Compaction and reversion require an unchanged transaction view. Both seal an existing buffer against further edits until the transaction ends.
+Both reject concurrent text changes. Tagged applies that cross a compaction boundary receive `:resync`.
+Compaction has no durable text delta because the content is unchanged. Recovery reconstructs fresh chunks without retaining earlier structure generations.
 
 ## Transaction interface
 

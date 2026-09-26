@@ -190,3 +190,10 @@ The result cache retains at most 1,024 entries and 8 MiB of delta storage, never
 Tagged task conflicts return their recorded outcome instead of automatically re-executing the submission.
 The runtime exposes apply, result, and Unicode marker-rebase builtins. Result reads require buffer read authority.
 Six kernel tests and eleven runtime buffer tests pass. Workspace tests and clippy pass.
+
+Buffer history retains 32 versions for up to 256 recently changed buffers and releases entries on retirement.
+Reversion stages fresh chunks with an exclusive commit check. Compaction preserves the text revision and advances an ephemeral structure generation.
+All conflict policies reject writes against superseded structure. Tagged applies report resync across compaction boundaries.
+History publication shares a lock with snapshot publication, so readers of a new revision can find its predecessor.
+The runtime exposes compaction and reversion. Reversion requires its own invoke grant as well as buffer write authority.
+Five focused kernel tests and twelve runtime buffer tests pass. Workspace tests and clippy pass.

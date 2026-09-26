@@ -34,6 +34,7 @@ pub struct RelationKernel {
     provider: Arc<dyn CommitProvider>,
     commit_lock: Mutex<()>,
     pub(crate) buffer_results: Mutex<crate::buffer::client::ClientResults>,
+    pub(crate) buffer_history: Mutex<crate::buffer::history::BufferHistory>,
     execution_context: ExecutionContext,
 }
 
@@ -70,6 +71,7 @@ impl RelationKernel {
             provider,
             commit_lock: Mutex::new(()),
             buffer_results: Mutex::new(Default::default()),
+            buffer_history: Mutex::new(Default::default()),
             execution_context: ExecutionContext::serial(),
         }
     }
@@ -159,6 +161,7 @@ impl RelationKernel {
             provider,
             commit_lock: Mutex::new(()),
             buffer_results: Mutex::new(Default::default()),
+            buffer_history: Mutex::new(Default::default()),
             execution_context: ExecutionContext::serial(),
         })
     }
@@ -249,6 +252,7 @@ impl RelationKernel {
             provider,
             commit_lock: Mutex::new(()),
             buffer_results: Mutex::new(Default::default()),
+            buffer_history: Mutex::new(Default::default()),
             execution_context: ExecutionContext::serial(),
         })
     }
@@ -319,6 +323,7 @@ impl RelationKernel {
             provider,
             commit_lock: Mutex::new(()),
             buffer_results: Mutex::new(Default::default()),
+            buffer_history: Mutex::new(Default::default()),
             execution_context: ExecutionContext::serial(),
         })
     }
@@ -343,6 +348,7 @@ impl RelationKernel {
             provider: Arc::new(crate::InMemoryCommitProvider::new()),
             commit_lock: Mutex::new(()),
             buffer_results: Mutex::new(Default::default()),
+            buffer_history: Mutex::new(Default::default()),
             execution_context: self.execution_context.clone(),
         }
     }
@@ -392,7 +398,11 @@ impl RelationKernel {
         let next = Arc::new(next);
 
         self.persist_commit_against(&next, &commit)?;
-        if !self.try_publish(current.version(), next.clone()) {
+        if !self.try_publish_with_buffer_history(
+            &current,
+            next.clone(),
+            next.buffer_catalog().map(|state| state.metadata().id),
+        ) {
             return Err(KernelError::Persistence(
                 "staged commit publish failed after serialized persistence".to_owned(),
             ));
