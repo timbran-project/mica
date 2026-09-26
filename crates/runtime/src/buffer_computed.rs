@@ -292,7 +292,7 @@ buffer_insert(:notes, 0, "aé🦀\nxy\n")"#,
             buffer_delete(:notes, 1, 1)
             require BufferStat(:notes, 7, 3, 1)
             make_buffer(:fresh, :volatile)
-            require BufferStat(:fresh, 0, 1, 1)
+            require BufferStat(:fresh, 0, 1, 0)
             return buffer_revision(:notes)
         "#
             ),

@@ -222,3 +222,11 @@ The editor and Mica compiler require numeric parsing. Runtime builtins now provi
 Conversions preserve finite binary32 and signed 56-bit integer constraints. Parsing rejects partial spellings and raises catchable type or argument errors.
 Focused tests pass for integer endpoints, float rounding and underflow, nonintegral conversion, malformed input, and non-finite results.
 Runtime integration tests and workspace clippy pass.
+
+Untouched empty buffers now retain revision zero through publication, staged filein, commit-log replay, and Fjall recovery.
+Their first content change commits at revision one. Computed views and tagged acknowledgements use the same revision contract.
+Recovery rejects revision-zero text, tombstones, and repeated declarations. Volatile recovery advances only nonzero revisions.
+The 33 kernel buffer tests, workspace library tests, shared source scenarios, and workspace clippy pass.
+The editor corpus now passes its tagged revision assertion and exposes a separate uncaught JSON parse error.
+Rust retains its documented no-op rule: edits that restore the original provenance do not advance the revision.
+Odin can advance a revision for such writes; exact no-op revision parity is not claimed.

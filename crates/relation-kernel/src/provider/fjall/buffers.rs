@@ -31,7 +31,9 @@ impl Counter {
             deltas: u64::from_be_bytes(bytes[8..16].try_into().unwrap()),
             bytes: u64::from_be_bytes(bytes[16..].try_into().unwrap()),
         };
-        if counter.revision == 0 || counter.deltas >= MAX_DELTAS || counter.bytes >= MAX_DELTA_BYTES
+        if (counter.revision == 0 && (counter.deltas != 0 || counter.bytes != 0))
+            || counter.deltas >= MAX_DELTAS
+            || counter.bytes >= MAX_DELTA_BYTES
         {
             return Err("invalid buffer checkpoint counter".to_owned());
         }
@@ -131,7 +133,7 @@ pub(super) fn write_changes(
             .map(|bytes| Counter::decode(bytes))
             .transpose()?
             .unwrap_or_default();
-        if change.revision <= counter.revision
+        if (prior.is_some() && change.revision <= counter.revision)
             || (prior.is_none() && change.base_revision != 0)
             || change.base_revision < counter.revision
             || (change.metadata.durability == RelationDurability::Durable
@@ -212,6 +214,62 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn empty_buffer_catalogue_survives_reopen_at_revision_zero() {
+        let store = Store::new();
+        {
+            let provider = Arc::new(FjallStateProvider::open_strict(&store.0).unwrap());
+            let kernel = RelationKernel::with_provider(provider);
+            let mut tx = kernel.begin();
+            for (raw, name, durability) in [
+                (10, "durable", RelationDurability::Durable),
+                (11, "volatile", RelationDurability::Volatile),
+            ] {
+                tx.create_buffer(BufferMetadata {
+                    id: Identity::new(raw).unwrap(),
+                    name: Symbol::intern(name),
+                    durability,
+                    conflict: BufferConflictPolicy::Span,
+                })
+                .unwrap();
+            }
+            tx.commit().unwrap();
+        }
+        {
+            let provider = Arc::new(FjallStateProvider::open_strict(&store.0).unwrap());
+            let kernel =
+                RelationKernel::load_from_state(provider.load_state().unwrap(), provider).unwrap();
+            let mut tx = kernel.begin();
+            for raw in [10, 11] {
+                let id = Identity::new(raw).unwrap();
+                assert_eq!(tx.buffer_revision(id).unwrap(), 0);
+                assert!(tx.buffer_text(id).unwrap().is_empty());
+                tx.replace_buffer(id, 0..0, "é🦀").unwrap();
+            }
+            let result = tx.commit().unwrap();
+            for raw in [10, 11] {
+                assert_eq!(
+                    result
+                        .snapshot()
+                        .buffer(Identity::new(raw).unwrap())
+                        .unwrap()
+                        .revision(),
+                    1
+                );
+            }
+        }
+        let provider = Arc::new(FjallStateProvider::open_strict(&store.0).unwrap());
+        let kernel =
+            RelationKernel::load_from_state(provider.load_state().unwrap(), provider).unwrap();
+        let snapshot = kernel.snapshot();
+        let durable = snapshot.buffer(Identity::new(10).unwrap()).unwrap();
+        assert_eq!(durable.text().to_text(), "é🦀");
+        assert_eq!(durable.revision(), 1);
+        let volatile = snapshot.buffer(Identity::new(11).unwrap()).unwrap();
+        assert!(volatile.text().is_empty());
+        assert_eq!(volatile.revision(), 2);
     }
 
     #[test]

@@ -138,25 +138,27 @@ impl BufferStates {
         let mut states = Self::default();
         for record in records {
             let id = record.metadata.id;
-            if record.revision == 0
+            if (record.revision == 0 && (!record.text.is_empty() || record.deleted))
                 || (record.deleted && !record.text.is_empty())
                 || states.get(id).is_some()
                 || states.named(record.metadata.name).is_some()
             {
                 return Err(error(id, BufferError::InvalidRecovery));
             }
-            let (text, revision) =
-                if record.metadata.durability == RelationDurability::Volatile && !record.deleted {
-                    (
-                        Text::default(),
-                        record
-                            .revision
-                            .checked_add(1)
-                            .ok_or_else(|| error(id, BufferError::RevisionExhausted))?,
-                    )
-                } else {
-                    (Text::from_text(&record.text), record.revision)
-                };
+            let (text, revision) = if record.metadata.durability == RelationDurability::Volatile
+                && !record.deleted
+                && record.revision != 0
+            {
+                (
+                    Text::default(),
+                    record
+                        .revision
+                        .checked_add(1)
+                        .ok_or_else(|| error(id, BufferError::RevisionExhausted))?,
+                )
+            } else {
+                (Text::from_text(&record.text), record.revision)
+            };
             states.insert(BufferState {
                 metadata: record.metadata,
                 revision,
@@ -172,8 +174,13 @@ impl BufferStates {
         let id = change.metadata.id;
         let previous = self.get(id);
         let previous_revision = previous.map_or(0, |state| state.revision);
-        if change.revision <= previous_revision
-            || change.base_revision >= change.revision
+        let empty_creation = previous.is_none()
+            && change.base_revision == 0
+            && change.revision == 0
+            && change.delta.is_empty()
+            && !change.deleted;
+        if (!empty_creation
+            && (change.revision <= previous_revision || change.base_revision >= change.revision))
             || (previous.is_none() && change.base_revision != 0)
             || change.base_revision < previous_revision
             || previous.is_some_and(|state| state.metadata != change.metadata || state.deleted)
@@ -358,7 +365,7 @@ impl Transaction<'_> {
                 return Ok(Some(crate::ComputedBufferView { id, text, revision }));
             }
             let changed = match &pending.base {
-                None => true,
+                None => !text.is_empty(),
                 Some(base) if !pending.compact => !complete_delta(&base.text, &text)
                     .map_err(|failure| error(id, BufferError::Delta(failure)))?
                     .is_empty(),
@@ -542,7 +549,9 @@ impl Transaction<'_> {
             if pending.base.is_some() && delta.is_empty() && !pending.deleted && !pending.compact {
                 continue;
             }
-            let revision = if pending.compact {
+            // Publishing the catalogue entry alone does not write text.
+            let empty_creation = pending.base.is_none() && delta.is_empty() && !pending.deleted;
+            let revision = if pending.compact || empty_creation {
                 base_revision
             } else {
                 base_revision
@@ -630,6 +639,7 @@ pub(crate) fn staged_changes(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::buffer::{BufferApplyOutcome, BufferApplyStatus, Replacement};
     use crate::{
         Commit, CommitProvider, InMemoryCommitProvider, RelationKernel, RelationMetadata, Tuple,
     };
@@ -652,6 +662,121 @@ mod tests {
         tx.create_buffer(metadata(10, "notes", conflict)).unwrap();
         tx.replace_buffer(id(10), 0..0, "héllo→").unwrap();
         tx.commit().unwrap();
+    }
+
+    #[test]
+    fn empty_creation_retains_revision_zero_through_replay_and_first_client_apply() {
+        let provider = Arc::new(InMemoryCommitProvider::new());
+        let kernel = RelationKernel::with_provider(provider.clone());
+        let mut tx = kernel.begin();
+        tx.create_buffer(metadata(10, "notes", BufferConflictPolicy::Span))
+            .unwrap();
+        assert_eq!(
+            tx.computed_buffer_view(Symbol::intern("notes"))
+                .unwrap()
+                .unwrap()
+                .revision,
+            0
+        );
+        tx.commit().unwrap();
+        let restored = RelationKernel::load_from_commit_log(
+            provider.commits(),
+            Arc::new(InMemoryCommitProvider::new()),
+        )
+        .unwrap();
+        for kernel in [&kernel, &restored] {
+            assert_eq!(kernel.snapshot().buffer(id(10)).unwrap().revision(), 0);
+            let mut tx = kernel.begin();
+            let token = NonZeroU64::new(1).unwrap();
+            assert_eq!(
+                tx.apply_buffer(
+                    id(10),
+                    0,
+                    &[Replacement {
+                        range: 0..0,
+                        text: "é🦀".to_owned(),
+                    }],
+                    Some(token)
+                )
+                .unwrap(),
+                BufferApplyStatus::Staged
+            );
+            assert_eq!(
+                tx.computed_buffer_view(Symbol::intern("notes"))
+                    .unwrap()
+                    .unwrap()
+                    .revision,
+                1
+            );
+            tx.commit().unwrap();
+            let result = kernel.buffer_apply_result(token).unwrap();
+            assert_eq!(result.revision, 1);
+            assert!(matches!(result.outcome, BufferApplyOutcome::Ok { .. }));
+            assert_eq!(
+                kernel.snapshot().buffer(id(10)).unwrap().text().to_text(),
+                "é🦀"
+            );
+        }
+    }
+
+    #[test]
+    fn revision_zero_recovery_requires_an_empty_live_creation() {
+        for durability in [RelationDurability::Durable, RelationDurability::Volatile] {
+            let mut metadata = metadata(10, "notes", BufferConflictPolicy::Reject);
+            metadata.durability = durability;
+            let record = PersistedBufferState {
+                metadata: metadata.clone(),
+                revision: 0,
+                text: String::new(),
+                deleted: false,
+            };
+            assert_eq!(
+                BufferStates::restore(vec![record.clone()])
+                    .unwrap()
+                    .get(id(10))
+                    .unwrap()
+                    .revision(),
+                0
+            );
+            for invalid in [
+                PersistedBufferState {
+                    text: "x".to_owned(),
+                    ..record.clone()
+                },
+                PersistedBufferState {
+                    deleted: true,
+                    ..record
+                },
+            ] {
+                assert!(BufferStates::restore(vec![invalid]).is_err());
+            }
+            let change = BufferChange {
+                metadata,
+                base_revision: 0,
+                revision: 0,
+                delta: Delta::default(),
+                deleted: false,
+            };
+            let mut states = BufferStates::default();
+            states.replay(&change).unwrap();
+            assert!(states.replay(&change).is_err());
+            for invalid in [
+                BufferChange {
+                    deleted: true,
+                    ..change.clone()
+                },
+                BufferChange {
+                    delta: Delta::new(vec![Replacement {
+                        range: 0..0,
+                        text: "x".to_owned(),
+                    }])
+                    .unwrap(),
+                    ..change
+                },
+            ] {
+                assert!(BufferStates::default().replay(&invalid).is_err());
+            }
+        }
     }
 
     #[test]
@@ -789,7 +914,7 @@ mod tests {
             Err(KernelError::Buffer {
                 error: BufferError::Conflict {
                     expected: 0,
-                    actual: 1
+                    actual: 0
                 },
                 ..
             })
@@ -803,8 +928,8 @@ mod tests {
             writer.commit(),
             Err(KernelError::Buffer {
                 error: BufferError::Conflict {
-                    expected: 1,
-                    actual: 2
+                    expected: 0,
+                    actual: 1
                 },
                 ..
             })
@@ -943,6 +1068,8 @@ mod tests {
         tx.create_buffer(metadata(2, "replacement", BufferConflictPolicy::Span))
             .unwrap();
         tx.replace_buffer(id(2), 0..0, "replacement").unwrap();
+        tx.create_buffer(metadata(3, "empty", BufferConflictPolicy::Span))
+            .unwrap();
         tx.commit().unwrap();
         kernel
             .commit_staged_snapshot(base_version, staged.snapshot())
@@ -957,5 +1084,6 @@ mod tests {
             "replacement"
         );
         assert!(restored.snapshot().buffer(id(10)).is_err());
+        assert_eq!(restored.snapshot().buffer(id(3)).unwrap().revision(), 0);
     }
 }

@@ -21,7 +21,7 @@ The default conflict policy is `:reject`. A retired name raises `E_KILLED`.
 | `kill_buffer(name)` | Retire the buffer, its identity, and its name. |
 | `buffer_len(name)` | Scalar count. |
 | `buffer_line_count(name)` | Logical line count, including a final empty line after a newline. |
-| `buffer_revision(name)` | Committed base revision, or zero during creation. |
+| `buffer_revision(name)` | Committed base revision. An untouched empty buffer has revision zero. |
 | `buffer_text(name)` | Complete transaction text. |
 | `buffer_slice(name, start, stop)` | Text in the half-open scalar range. |
 | `buffer_find(name, pattern, from, limit)` | First scalar position, or `none`. Zero limit searches the remaining text. |
@@ -128,7 +128,7 @@ Compaction has no durable text delta because the content is unchanged. Recovery 
 
 `Transaction::create_buffer` stages an empty buffer. `replace_buffer` replaces a half-open range of Unicode scalar positions.
 `buffer_text`, `buffer_metadata`, and `buffer_revision` read the transaction view. `delete_buffer` stages a tombstone.
-New buffers have revision zero inside the creation transaction. Their first committed revision is one.
+New buffers retain revision zero when their declaration commits without text changes. Their first content change commits at revision one.
 Each later text commit advances the buffer revision once, regardless of the number of local replacements.
 An edit sequence that retains the original text provenance does not advance the revision.
 
@@ -156,7 +156,8 @@ Exhausting this budget rejects the commit. Ordinary commits currently normalize 
 
 Fjall stores buffer deltas in the same atomic batch as facts, catalogue changes, and the commit version.
 Strict mode waits for the durable write. Relaxed mode uses the existing asynchronous writer and flush boundary.
-Durable buffers recover their text and revision. Volatile buffers recover empty text and advance their revision to invalidate earlier client revisions.
+Durable buffers recover their text and revision. Volatile buffers recover empty text and advance nonzero revisions to invalidate earlier client revisions.
+An untouched empty buffer retains revision zero after recovery.
 Both modes retain buffer metadata and tombstones.
 
 The store format is `mica-relation-kernel-state-2.1.0`, with commit encoding `MICACMT3`.
