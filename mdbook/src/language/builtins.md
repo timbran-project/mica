@@ -189,12 +189,16 @@ builtin call.
 
 | Function                          | Result                                        |
 | --------------------------------- | --------------------------------------------- |
+| `relation_from_rows(heading, rows)` | relation value from a symbol heading and lists of cells |
 | `project(relation, :column, ...)` | selected heading columns                      |
 | `union(left, right)`              | rows present in either equal-heading relation |
 | `difference(left, right)`         | left rows absent from the right relation      |
 | `natural_join(left, right)`       | natural join over shared heading names        |
 
 See [Relations](./relations.md#relation-value-algebra) for heading and duplicate semantics.
+
+`relation_from_rows` preserves column meaning when it canonicalizes the heading. It sorts and deduplicates rows without changing either input.
+Invalid argument kinds raise `E_TYPE`; duplicate columns and row arity mismatches raise `E_INVARG`.
 
 ## World Definition and Introspection
 
