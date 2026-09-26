@@ -1,0 +1,50 @@
+[
+  {
+    "case": "language_call_shared_list",
+    "variant": "rust-interpreter",
+    "status": "passed",
+    "median_ns": 21490421.0,
+    "process_median_range_ns": [
+      21466165.0,
+      21498645.0
+    ],
+    "p95_sample_ns": 21679173.0,
+    "peak_rss_kib": [
+      21440,
+      21316,
+      21332
+    ]
+  },
+  {
+    "case": "language_call_shared_list",
+    "variant": "odin",
+    "status": "passed",
+    "median_ns": 330656.0,
+    "process_median_range_ns": [
+      327200.0,
+      356832.0
+    ],
+    "p95_sample_ns": 358608.0,
+    "peak_rss_kib": [
+      5392,
+      5400,
+      5328
+    ]
+  },
+  {
+    "case": "language_call_shared_list",
+    "variant": "rust-native",
+    "status": "passed",
+    "median_ns": 21466485.0,
+    "process_median_range_ns": [
+      21447061.0,
+      21474021.0
+    ],
+    "p95_sample_ns": 21501493.0,
+    "peak_rss_kib": [
+      21332,
+      21332,
+      21316
+    ]
+  }
+]

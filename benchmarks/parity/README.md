@@ -86,3 +86,7 @@ Run the harness contract tests:
 python3 -m unittest discover -s benchmarks/parity -p 'test_*.py'
 cargo test -p mica-runner --test bench
 ```
+
+`language_call_shared_list` builds 2,048 scalar values and makes 400 calls with fresh outer state lists that share that input.
+Its expected result is `400 * 2048 + sum(0..399) = 899000`.
+The repeated protocol includes equal inputs retained from preceding invocations in the same process.

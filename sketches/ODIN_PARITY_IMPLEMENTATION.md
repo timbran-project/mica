@@ -337,3 +337,7 @@ The corpus test exposed repeated deep comparisons of shared token lists during d
 Value equality and ordering now check identical value words before traversing immutable payloads.
 Workspace tests and clippy pass, including shared graphs, retained list views, and the frontend corpus.
 The Mica emitter and self-hosted bootstrap remain pending.
+
+The shared-list call captures pass all 18 before/after processes at `59c39a2` and `0ad9d57`.
+The 400-call workload improves from 21.49 ms to 13.54 ms with essentially unchanged RSS near 21 MiB.
+Odin takes 0.35 ms after the change, leaving a substantial gap. Separate but equal lists still require structural comparisons.
