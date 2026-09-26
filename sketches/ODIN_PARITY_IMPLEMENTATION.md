@@ -18,7 +18,7 @@ Passing an early workstream does not complete this plan.
 | Calls | Reduced allocation with exception, suspension, closure, and retry regressions | Implemented; dispatch and interpreter performance remain open |
 | Computed scans | CPU batches and cached retrieval preparation with unchanged authority, transaction visibility, output bindings, and exact ranking | Implemented for positive rule steps and equality probes; exact retrieval measured |
 | Transactional buffers | Atomic fact/text commits, conflict handling, durable recovery, marker rebasing, and client revision results | Implemented, including client results, history, compaction, and computed views; editor integration and comparative measurements remain |
-| Editor | Shared buffer library and programmable editor running through Rust host services | Shared library and editor source scenarios pass; browser transport and file services pending |
+| Editor | Shared buffer library and programmable editor running through Rust host services | Shared library, editor scenarios, and confined file services pass; browser transport pending |
 | Query and storage execution | Measured columnar/storage improvements that preserve incremental maintenance | Pending |
 | Query measurements | Separate initial derivation and small-update maintenance workloads | Pending |
 | Mica compiler | Ported compiler with an intentional Rust assembly interface and bootstrap conformance | Pending |

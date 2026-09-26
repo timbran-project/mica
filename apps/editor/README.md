@@ -14,6 +14,13 @@ It runs 45 scenarios from omica and one additional keymap regression in both int
 Each scenario commits separately. The harness resumes explicit commit boundaries to check tagged acknowledgements after publication.
 It also renders the page shell. Browser transport remains pending.
 
+Load `host-policy.mica` after the editor verbs to enable the shared workspace role.
+The policy enrols `#web` for a local unauthenticated host. Authenticated actors require an explicit `HasRole(actor, #editor/user)` fact.
+Members can edit all editor buffers, markers, and application state. This role does not isolate users' documents.
+Members can invoke installed editor commands and request host effects. They cannot change authority policy or install code.
+The filein captures installed editor selectors; added commands require a grant or policy reload.
+New tasks and commit continuations rebuild authority from current policy. Tests check tagged edits and role revocation under ordinary actor authority.
+
 The daemon exposes fixed file services when started with one or more `--editor-root DIR` arguments.
 Relative paths start at the first root. Absolute paths must resolve within a configured root.
 Directory capabilities confine reads and replacements. Completion skips symbolic links and returns at most 100 entries.

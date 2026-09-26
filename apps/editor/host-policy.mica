@@ -1,0 +1,49 @@
+// Shared editor workspace policy. Load after the editor verbs.
+// Members can edit all editor buffers and editor state. They cannot modify
+// authority policy or install code. HTTP sessions still bind to one actor.
+
+make_identity(:editor/user)
+make_relation(:HasRole, 2)
+make_relation(:RoleCanRead, 2)
+make_relation(:RoleCanWrite, 2)
+make_relation(:RoleCanInvoke, 2)
+make_relation(:RoleCanEffect, 1)
+
+for row in RelationName(_, ?name)
+  if string_starts_with(to_literal(row[:name]), ":editor/")
+    assert RoleCanRead(#editor/user, row[:name])
+    assert RoleCanWrite(#editor/user, row[:name])
+  end
+end
+
+for name in [:Marker, :MarkerBuffer, :MarkerPosition, :MarkerInsertionType, :MarkerRevision,
+             :Annotation, :AnnotationBuffer, :AnnotationSpan, :AnnotationKind, :AnnotationText]
+  assert RoleCanRead(#editor/user, name)
+  assert RoleCanWrite(#editor/user, name)
+end
+for name in [:BufferStat, :BufferLine, :BufferMarkers, :RequestMethod, :RequestPath]
+  assert RoleCanRead(#editor/user, name)
+end
+
+for row in MethodSelector(_, ?selector)
+  let name = to_literal(row[:selector])
+  if string_starts_with(name, ":editor/") || string_starts_with(name, ":buffers/")
+    assert RoleCanInvoke(#editor/user, row[:selector])
+  end
+end
+for selector in [:editor_input, :editor_input_json, :editor_input_result, :make_buffer,
+                 :http_request, :http_html, :http_text, :http_response]
+  assert RoleCanInvoke(#editor/user, selector)
+end
+assert RoleCanEffect(#editor/user)
+
+CanRead(actor, relation) :- HasRole(actor, #editor/user), RoleCanRead(#editor/user, relation)
+CanWrite(actor, relation) :- HasRole(actor, #editor/user), RoleCanWrite(#editor/user, relation)
+CanInvoke(actor, selector) :- HasRole(actor, #editor/user), RoleCanInvoke(#editor/user, selector)
+CanEffect(actor) :- HasRole(actor, #editor/user), RoleCanEffect(#editor/user)
+CanRead(actor, buffer) :- HasRole(actor, #editor/user), editor/Buffer(buffer)
+CanWrite(actor, buffer) :- HasRole(actor, #editor/user), editor/Buffer(buffer)
+
+// The unauthenticated local host uses this explicit workspace member.
+// Authenticated deployments enrol their own actor identities in this role.
+assert HasRole(#web, #editor/user)
