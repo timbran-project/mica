@@ -311,3 +311,9 @@ The capture at `15cd6ff` passes all 18 processes and reduces the 16-update workl
 Initial derivation rises from 27.2 ms to 28.9 ms, and update RSS rises by roughly 2 MiB.
 This measured tradeoff favours repeated updates. It does not close the performance gap with Odin.
 Tests cover compact/radix ordering, promotion, retained branches, and recursive retractions across both storage sizes.
+
+Recursive overdeletion now retains visible tuple storage and removes only unsupported overdeleted rows.
+The capture at `84be391` passes 18 processes and reduces the 16-update workload from 166.5 ms to 118.8 ms.
+Update RSS falls from approximately 28.7 MiB to 27.5 MiB. Initial derivation remains approximately 28 ms.
+This is a 6.4-times update improvement from the first capture, with an approximately eight-times gap remaining against Odin.
+Kernel checks cover simultaneous stored-support replacement, subsequent removal, full recomputation, and retained snapshots.
