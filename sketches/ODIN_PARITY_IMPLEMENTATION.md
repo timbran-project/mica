@@ -104,3 +104,7 @@ Tests cover evaluation order, ties, nested comprehensions, scope, closures, brea
 The shared loop-pattern fixture returns its expected result, 47. Workspace tests and clippy pass.
 All 22 repeated-invocation fixtures now have implementations; a full pinned release capture is the next verification step.
 Keyed comprehensions currently build nested lists, so their accumulation still uses the copying append path.
+The comprehension capture passes 196 of 198 processes, including all nine loop-pattern/comprehension runs.
+Two Rust helper-call processes exceed the 30-second whole-process limit; the other four pass.
+These failures remain in the capture. Cold dispatch-cache population needs investigation.
+The small loop-pattern fixture takes 19.7 microseconds in Rust and 59.3 microseconds in Odin, including invocation overhead.
