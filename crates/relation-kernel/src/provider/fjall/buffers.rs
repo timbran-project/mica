@@ -8,7 +8,7 @@ use crate::buffer::{BufferChange, Delta, PersistedBufferState, Replacement};
 use fjall::{Keyspace, OwnedWriteBatch};
 use mica_var::Identity;
 
-const MAX_DELTAS: u64 = 64;
+const MAX_DELTAS: u64 = 4096;
 const MAX_DELTA_BYTES: u64 = 1024 * 1024;
 const COUNTER: u8 = 0;
 const CHECKPOINT: u8 = 1;
@@ -232,9 +232,9 @@ mod tests {
             .unwrap();
             tx.replace_buffer(id, 0..0, "héllo→").unwrap();
             tx.commit().unwrap();
-            for index in 0..150 {
+            for index in 0..(2 * MAX_DELTAS + 22) {
                 let mut tx = kernel.begin();
-                tx.replace_buffer(id, 2..2, if index % 2 == 0 { "🦀" } else { "λ" })
+                tx.replace_buffer(id, 2..3, if index % 2 == 0 { "🦀" } else { "λ" })
                     .unwrap();
                 tx.commit().unwrap();
             }

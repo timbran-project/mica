@@ -2,7 +2,7 @@
 
 The relation kernel stores buffers beside relation state in each immutable snapshot.
 A buffer has an identity, a unique name, a durability policy, a conflict policy, and a revision.
-Buffer names share the relation namespace. Deleted buffers retain tombstones that reserve their identities.
+Buffer names share the relation namespace. Deleted buffers retain tombstones that reserve their identities and names.
 
 The current interface is the Rust kernel API. Language builtins and editor integration remain pending.
 
@@ -43,7 +43,7 @@ Both modes retain buffer metadata and tombstones.
 
 The store format is `mica-relation-kernel-state-2.1.0`, with commit encoding `MICACMT3`.
 Earlier store formats are rejected. There is no migration adapter.
-Each buffer has a checkpoint and fewer than 64 delta records totalling less than 1 MiB.
+Each buffer has a checkpoint and fewer than 4096 delta records totalling less than 1 MiB.
 Reaching either limit writes a checkpoint and removes those deltas in the same atomic batch.
 Ordinary edits write one delta and a small counter. Checkpoints reconstruct and serialize the full buffer, which can increase edit latency.
 Startup reads these bounded records. The separate commit history remains available for inspection and explicit replay.

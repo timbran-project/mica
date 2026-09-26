@@ -154,3 +154,12 @@ Checkpoint replacement and delta removal share the atomic fact/text batch. Ordin
 Startup no longer eagerly scans commit history to compute an unused fallback version.
 Focused tests verify checkpoint limits, Unicode text, reopening, and deletion. The buffer persistence probe measures complete edits, flush, and reopening.
 Pinned measurements remain required to quantify checkpoint latency and recovery cost.
+
+The first checkpoint capture rejects the 64-delta interval: strict edits take 8.07 s versus 2.32 s, and recovery takes 96 ms versus 43 ms.
+All 12 processes recover correct text and revisions. Raw results remain in `benchmarks/parity/results/2026-09-26-buffer-checkpoints-64`.
+A longer bounded interval is under measurement to reduce full-buffer write amplification.
+
+The pinned Odin buffer tests require retired names to remain reserved. Kernel tombstones now reserve both identities and names.
+Reads distinguish deleted buffers from unknown buffers. Recovery and staged publication retain retirement, so earlier name-based grants cannot resolve to replacement buffers.
+The larger checkpoint test exposed recursive destruction of retained commit history. History nodes now release iteratively.
+A regression test releases 100,000 shared commits on 64 KiB thread stacks and verifies that retained snapshots still expose their history.
