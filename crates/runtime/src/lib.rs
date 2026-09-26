@@ -7949,6 +7949,9 @@ fn render_kernel_error(
     let render_relation =
         |relation: &RelationId| render_identity(*relation, identity_names, relation_names);
     match error {
+        KernelError::Buffer { buffer, error } => {
+            format!("buffer {}: {error:?}", render_relation(buffer))
+        }
         KernelError::UnknownRelation(relation) => {
             format!("unknown relation {}", render_relation(relation))
         }

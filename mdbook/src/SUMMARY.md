@@ -52,6 +52,7 @@
 
 - [Runtime Overview](./runtime/index.md)
 - [Tasks and Transactions](./runtime/tasks-and-transactions.md)
+- [Transactional Buffers](./runtime/buffers.md)
 - [Task Control](./runtime/task-control.md)
 - [Subscriptions](./runtime/subscriptions.md)
 - [Catalogue and Introspection](./runtime/catalogue-and-introspection.md)

@@ -25,6 +25,7 @@ pub use memory::InMemoryCommitProvider;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PersistedKernelState {
     pub version: Version,
+    pub buffers: Vec<crate::buffer::PersistedBufferState>,
     pub relations: Vec<RelationMetadata>,
     pub rules: Vec<RuleDefinition>,
     pub facts: Vec<(RelationId, Tuple)>,

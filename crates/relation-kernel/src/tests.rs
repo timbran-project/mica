@@ -1851,6 +1851,7 @@ fn volatile_changes_publish_live_without_entering_persistent_commits() {
 #[test]
 fn persisted_state_loader_discards_volatile_facts() {
     let state = crate::PersistedKernelState {
+        buffers: Vec::new(),
         version: 7,
         relations: vec![
             RelationMetadata::new(rel(1), Symbol::intern("Durable"), 1),
@@ -2299,4 +2300,103 @@ fn transaction_neighborhood_views_include_local_overlay() {
             tuple: local,
         }]
     );
+}
+
+#[cfg(feature = "fjall-provider")]
+#[test]
+fn fjall_recovers_atomic_buffer_fact_commits_and_volatile_revisions() {
+    for durability in [FjallDurabilityMode::Strict, FjallDurabilityMode::Relaxed] {
+        let store = TempStore::new("buffer-recovery");
+        let buffer = rel(50);
+        let volatile = rel(51);
+        let committed_revision;
+        {
+            let provider = Arc::new(
+                FjallStateProvider::open_with_durability(store.path(), durability).unwrap(),
+            );
+            let kernel = RelationKernel::with_provider(provider.clone());
+            kernel
+                .create_relation(RelationMetadata::new(
+                    rel(1),
+                    Symbol::intern("RevisionFact"),
+                    1,
+                ))
+                .unwrap();
+            let mut tx = kernel.begin();
+            for (id, name, durability) in [
+                (buffer, "notes", RelationDurability::Durable),
+                (volatile, "scratch", RelationDurability::Volatile),
+            ] {
+                tx.create_buffer(crate::buffer::BufferMetadata {
+                    id,
+                    name: Symbol::intern(name),
+                    durability,
+                    conflict: crate::buffer::BufferConflictPolicy::Span,
+                })
+                .unwrap();
+                tx.replace_buffer(id, 0..0, "héllo→").unwrap();
+            }
+            tx.assert(rel(1), Tuple::from([int(1)])).unwrap();
+            tx.commit().unwrap();
+            let mut tx = kernel.begin();
+            tx.replace_buffer(buffer, 1..2, "🦀").unwrap();
+            tx.replace_buffer(volatile, 1..2, "🦀").unwrap();
+            tx.retract(rel(1), Tuple::from([int(1)])).unwrap();
+            tx.assert(rel(1), Tuple::from([int(2)])).unwrap();
+            let result = tx.commit().unwrap();
+            committed_revision = result.snapshot().buffer(volatile).unwrap().revision();
+            kernel.flush_persistence().unwrap();
+            assert_eq!(provider.completed_version(), result.snapshot().version());
+        }
+        {
+            let provider = Arc::new(
+                FjallStateProvider::open_with_durability(store.path(), durability).unwrap(),
+            );
+            let persisted = provider.load_state().unwrap();
+            assert!(
+                persisted
+                    .buffers
+                    .iter()
+                    .find(|state| state.metadata.id == volatile)
+                    .unwrap()
+                    .text
+                    .is_empty()
+            );
+            let from_log = RelationKernel::load_from_commit_log(
+                provider.load_commits().unwrap(),
+                Arc::new(InMemoryCommitProvider::new()),
+            )
+            .unwrap();
+            let kernel = RelationKernel::load_from_state(persisted, provider.clone()).unwrap();
+            for snapshot in [kernel.snapshot(), from_log.snapshot()] {
+                assert_eq!(snapshot.buffer(buffer).unwrap().text().to_text(), "h🦀llo→");
+                assert!(snapshot.buffer(volatile).unwrap().text().is_empty());
+                assert!(snapshot.buffer(volatile).unwrap().revision() > committed_revision);
+                assert_eq!(
+                    snapshot.scan(rel(1), &[None]).unwrap(),
+                    vec![Tuple::from([int(2)])]
+                );
+            }
+            let mut tx = kernel.begin();
+            tx.replace_buffer(volatile, 0..0, "second lifetime")
+                .unwrap();
+            tx.delete_buffer(buffer).unwrap();
+            tx.commit().unwrap();
+            kernel.flush_persistence().unwrap();
+        }
+        let provider =
+            Arc::new(FjallStateProvider::open_with_durability(store.path(), durability).unwrap());
+        let kernel =
+            RelationKernel::load_from_state(provider.load_state().unwrap(), provider).unwrap();
+        assert!(kernel.snapshot().buffer(buffer).is_err());
+        assert!(
+            kernel
+                .snapshot()
+                .buffer(volatile)
+                .unwrap()
+                .text()
+                .is_empty()
+        );
+        assert!(kernel.snapshot().buffer(volatile).unwrap().revision() > committed_revision + 1);
+    }
 }

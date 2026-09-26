@@ -15,6 +15,10 @@ use crate::{RelationId, RuleError, Tuple, Version};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum KernelError {
+    Buffer {
+        buffer: mica_var::Identity,
+        error: crate::buffer::BufferError,
+    },
     UnknownRelation(RelationId),
     UnknownRule(crate::FactId),
     RelationAlreadyExists(RelationId),

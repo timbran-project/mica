@@ -139,3 +139,12 @@ Splices retain unchanged chunks. Bounded search streams across chunks; line coor
 Provenance deltas distinguish edits to equal text at different positions. Normalization, disjoint transforms, and marker rebasing have explicit work limits.
 Ten focused tests pass, including generated Unicode edits, fragmented-base normalization, and commuting disjoint edits. Kernel clippy passes.
 This core is not yet connected to transactions or persistence. Atomic publication, recovery, runtime operations, client results, and editor integration remain required.
+
+Buffers now participate in kernel transactions and staged snapshot publication.
+Text and facts share persistence and publication, including creation, deletion, and rollback.
+Reject, span, and whole-buffer conflict policies have focused concurrency coverage.
+The catalogue retains deleted identities and permits name reuse after deletion.
+Fjall strict and relaxed recovery retain durable text and reset volatile text with an advanced revision.
+The store format is `mica-relation-kernel-state-2.0.0`; earlier formats are rejected without compatibility adapters.
+The buffer journal still replays all deltas. Bounded checkpoints, runtime operations, client results, markers, and editor integration remain required.
+Workspace tests and clippy pass. Recovery tests cover strict and relaxed Fjall stores, volatile reset, deletion, and staged name reuse.

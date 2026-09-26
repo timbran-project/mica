@@ -51,6 +51,7 @@ impl RelationKernel {
     ) -> Self {
         let computed_relations = Arc::new(ComputedRelationRegistry::new(computed_relations));
         let snapshot = Arc::new(Snapshot {
+            buffers: Default::default(),
             version: 0,
             relations: RelationStates::new(),
             rules: Vec::new(),
@@ -92,7 +93,11 @@ impl RelationKernel {
 
         let commits = commits.into_iter().collect::<Vec<_>>();
         let mut rules = Vec::new();
+        let mut buffers = crate::buffer::store::BufferStates::default();
         for commit in &commits {
+            for change in commit.buffer_changes() {
+                buffers.replay(change)?;
+            }
             for change in commit.catalog_changes() {
                 if let CatalogChange::RuleInstalled(rule) = change {
                     validate_rule_definition_against_relations(&states, rule)?;
@@ -132,7 +137,9 @@ impl RelationKernel {
                 .bind_relations(states.values().map(RelationState::metadata)),
         );
         let version = commits.last().map_or(0, Commit::version);
+        buffers.validate_catalog(&states)?;
         let snapshot = Arc::new(Snapshot {
+            buffers: crate::buffer::store::BufferStates::restore(buffers.persisted())?,
             version,
             relations: states,
             rules,
@@ -168,8 +175,12 @@ impl RelationKernel {
         let commits = commits.into_iter().collect::<Vec<_>>();
         let mut states = RelationStates::new();
         let mut rules = Vec::new();
+        let mut buffers = crate::buffer::store::BufferStates::default();
 
         for commit in &commits {
+            for change in commit.buffer_changes() {
+                buffers.replay(change)?;
+            }
             for change in commit.catalog_changes() {
                 match change {
                     CatalogChange::RelationCreated(metadata) => {
@@ -215,7 +226,9 @@ impl RelationKernel {
                 .bind_relations(states.values().map(RelationState::metadata)),
         );
         let version = commits.last().map_or(0, Commit::version);
+        buffers.validate_catalog(&states)?;
         let snapshot = Arc::new(Snapshot {
+            buffers: crate::buffer::store::BufferStates::restore(buffers.persisted())?,
             version,
             relations: states,
             rules,
@@ -281,7 +294,10 @@ impl RelationKernel {
             ComputedRelationRegistry::new(computed_relations)
                 .bind_relations(states.values().map(RelationState::metadata)),
         );
+        let buffers = crate::buffer::store::BufferStates::restore(state.buffers)?;
+        buffers.validate_catalog(&states)?;
         let snapshot = Arc::new(Snapshot {
+            buffers,
             version: state.version,
             relations: states,
             rules: state.rules,
@@ -347,6 +363,7 @@ impl RelationKernel {
         validate_staged_snapshot(&current, &staged)?;
         let staged_commits = staged.commits_since(expected_version);
         let catalog_changes = staged_catalog_changes(&current, &staged);
+        let buffer_changes = crate::buffer::store::staged_changes(&current, &staged)?;
         let changes = staged_fact_changes(&current, &staged, &staged_commits)?;
 
         let mut next = (*staged).clone();
@@ -358,6 +375,7 @@ impl RelationKernel {
         next.method_program_cache = empty_method_program_cache();
         let relation_changes = settled_snapshot_relation_changes(&current, &next)?;
         let commit = Commit {
+            buffer_changes: buffer_changes.into(),
             version: next.version,
             catalog_changes: catalog_changes.into(),
             changes: changes.into(),
@@ -396,7 +414,10 @@ impl RelationKernel {
         let _guard = self.commit_guard();
         let relation = RelationState::empty(metadata.clone())?;
         let current = self.snapshot();
-        if current.relations.contains_key(&metadata.id()) {
+        if current.relations.contains_key(&metadata.id())
+            || current.buffers.get(metadata.id()).is_some()
+            || current.buffers.named(metadata.name()).is_some()
+        {
             return Err(KernelError::RelationAlreadyExists(metadata.id()));
         }
 
@@ -410,6 +431,7 @@ impl RelationKernel {
         next.method_program_cache = empty_method_program_cache();
         next.version += 1;
         let commit = Commit {
+            buffer_changes: Arc::from([]),
             version: next.version,
             catalog_changes: Arc::from([CatalogChange::RelationCreated(metadata.clone())]),
             changes: Arc::from([]),
@@ -458,6 +480,7 @@ impl RelationKernel {
         next.version += 1;
         let relation_changes = settled_snapshot_relation_changes(&current, &next)?;
         let commit = Commit {
+            buffer_changes: Arc::from([]),
             version: next.version,
             catalog_changes: Arc::from([CatalogChange::RuleInstalled(definition.clone())]),
             changes: Arc::from([]),
@@ -498,6 +521,7 @@ impl RelationKernel {
         next.version += 1;
         let relation_changes = settled_snapshot_relation_changes(&current, &next)?;
         let commit = Commit {
+            buffer_changes: Arc::from([]),
             version: next.version,
             catalog_changes: Arc::from([CatalogChange::RuleDisabled(rule_id)]),
             changes: Arc::from([]),
@@ -573,10 +597,22 @@ impl RelationKernel {
             .into_iter()
             .flatten()
             .collect::<Vec<_>>();
-        if commit.catalog_changes().is_empty() && changes.is_empty() {
+        let buffer_changes = commit
+            .buffer_changes()
+            .iter()
+            .map(|change| {
+                let mut change = change.clone();
+                if change.metadata.durability == RelationDurability::Volatile {
+                    change.delta = crate::buffer::Delta::default();
+                }
+                change
+            })
+            .collect::<Vec<_>>();
+        if commit.catalog_changes().is_empty() && changes.is_empty() && buffer_changes.is_empty() {
             return Ok(());
         }
         let persistent_commit = Commit {
+            buffer_changes: buffer_changes.into(),
             version: commit.version(),
             catalog_changes: commit.catalog_changes.clone(),
             changes: changes.into(),

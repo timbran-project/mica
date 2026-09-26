@@ -568,6 +568,9 @@ fn is_retryable_conflict(error: &KernelError) -> bool {
             relation: _,
             tuple: _,
             kind: _
-        })
+        }) | KernelError::Buffer {
+            error: mica_relation_kernel::buffer::BufferError::Conflict { .. },
+            ..
+        }
     )
 }

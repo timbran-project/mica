@@ -14,8 +14,9 @@
 use fjall::{Database, Keyspace, KeyspaceCreateOptions};
 use std::path::Path;
 
-const FJALL_FORMAT_VERSION: &str = "mica-relation-kernel-state-1.0.0";
-const FJALL_SHAPE: &str = "relations:v1;rules:v1;facts:v1;commits:v1;encoding:mica-binary-v1";
+const FJALL_FORMAT_VERSION: &str = "mica-relation-kernel-state-2.0.0";
+const FJALL_SHAPE: &str =
+    "relations:v1;rules:v1;facts:v1;commits:v2;buffers:v1;encoding:mica-binary-v1";
 const FJALL_METADATA_KEYSPACE: &str = "metadata";
 const FJALL_RELATIONS_KEYSPACE: &str = "relations";
 const FJALL_RULES_KEYSPACE: &str = "rules";
@@ -45,6 +46,7 @@ pub(super) struct FjallKeyspaces {
     pub(super) rules: Keyspace,
     pub(super) facts: Keyspace,
     pub(super) commits: Keyspace,
+    pub(super) buffers: Keyspace,
 }
 
 impl FjallKeyspaces {
@@ -55,6 +57,7 @@ impl FjallKeyspaces {
             rules: open_keyspace(database, FJALL_RULES_KEYSPACE)?,
             facts: open_keyspace(database, FJALL_FACTS_KEYSPACE)?,
             commits: open_keyspace(database, FJALL_COMMITS_KEYSPACE)?,
+            buffers: open_keyspace(database, "buffers")?,
         })
     }
 
@@ -63,6 +66,7 @@ impl FjallKeyspaces {
             && !has_entries(&self.rules)
             && !has_entries(&self.facts)
             && !has_entries(&self.commits)
+            && !has_entries(&self.buffers)
     }
 }
 

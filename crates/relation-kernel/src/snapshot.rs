@@ -41,6 +41,7 @@ pub(crate) type PackedCache =
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Commit {
     pub(crate) version: Version,
+    pub(crate) buffer_changes: Arc<[crate::buffer::BufferChange]>,
     pub(crate) catalog_changes: Arc<[CatalogChange]>,
     pub(crate) changes: Arc<[FactChange]>,
     pub(crate) relation_changes: Arc<[FactChange]>,
@@ -48,6 +49,10 @@ pub struct Commit {
 }
 
 impl Commit {
+    pub fn buffer_changes(&self) -> &[crate::buffer::BufferChange] {
+        &self.buffer_changes
+    }
+
     pub fn version(&self) -> Version {
         self.version
     }
@@ -165,6 +170,7 @@ impl CommitResult {
 
 #[derive(Clone, Debug)]
 pub struct Snapshot {
+    pub(crate) buffers: crate::buffer::store::BufferStates,
     pub(crate) version: Version,
     pub(crate) relations: RelationStates,
     pub(crate) rules: Vec<RuleDefinition>,

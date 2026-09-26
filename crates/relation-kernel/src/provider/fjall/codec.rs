@@ -80,6 +80,7 @@ pub(super) fn encode_commit(commit: &Commit) -> Result<Vec<u8>, String> {
     for change in commit.changes() {
         encode_fact_change(change, &mut out)?;
     }
+    encode_buffer_changes(commit.buffer_changes(), &mut out)?;
     Ok(out)
 }
 
@@ -97,8 +98,10 @@ pub(super) fn decode_commit(bytes: &[u8]) -> Result<Commit, String> {
     for _ in 0..fact_count {
         changes.push(reader.read_fact_change()?);
     }
+    let buffer_changes = reader.read_buffer_changes()?;
     reader.expect_end()?;
     Ok(Commit {
+        buffer_changes: buffer_changes.into(),
         version,
         catalog_changes: catalog_changes.into(),
         changes: changes.into(),
@@ -107,8 +110,55 @@ pub(super) fn decode_commit(bytes: &[u8]) -> Result<Commit, String> {
     })
 }
 
+pub(super) fn encode_buffer_changes_record(
+    changes: &[crate::buffer::BufferChange],
+) -> Result<Vec<u8>, String> {
+    let mut out = Vec::new();
+    encode_buffer_changes(changes, &mut out)?;
+    Ok(out)
+}
+
+pub(super) fn decode_buffer_changes_record(
+    bytes: &[u8],
+) -> Result<Vec<crate::buffer::BufferChange>, String> {
+    let mut reader = Reader::new(bytes);
+    let changes = reader.read_buffer_changes()?;
+    reader.expect_end()?;
+    Ok(changes)
+}
+
+fn encode_buffer_changes(
+    changes: &[crate::buffer::BufferChange],
+    out: &mut Vec<u8>,
+) -> Result<(), String> {
+    write_u32(out, changes.len())?;
+    for change in changes {
+        write_identity(out, change.metadata.id);
+        write_symbol(out, change.metadata.name)?;
+        out.push(match change.metadata.durability {
+            RelationDurability::Durable => 0,
+            RelationDurability::Volatile => 1,
+        });
+        out.push(match change.metadata.conflict {
+            crate::buffer::BufferConflictPolicy::Reject => 0,
+            crate::buffer::BufferConflictPolicy::Span => 1,
+            crate::buffer::BufferConflictPolicy::Whole => 2,
+        });
+        write_u64(out, change.base_revision);
+        write_u64(out, change.revision);
+        out.push(u8::from(change.deleted));
+        write_u32(out, change.delta.replacements().len())?;
+        for replacement in change.delta.replacements() {
+            write_u64(out, replacement.range.start as u64);
+            write_u64(out, replacement.range.end as u64);
+            write_string(out, &replacement.text)?;
+        }
+    }
+    Ok(())
+}
+
 fn write_magic(out: &mut Vec<u8>) {
-    out.extend_from_slice(b"MICACMT2");
+    out.extend_from_slice(b"MICACMT3");
 }
 
 fn encode_catalog_change(change: &CatalogChange, out: &mut Vec<u8>) -> Result<(), String> {
@@ -301,7 +351,7 @@ impl<'a> Reader<'a> {
 
     fn expect_magic(&mut self) -> Result<(), String> {
         let magic = self.read_exact(8)?;
-        if magic == b"MICACMT2" {
+        if magic == b"MICACMT3" {
             Ok(())
         } else {
             Err("invalid mica commit record magic".to_owned())
@@ -317,6 +367,57 @@ impl<'a> Reader<'a> {
                 self.bytes.len() - self.offset
             ))
         }
+    }
+
+    fn read_buffer_changes(&mut self) -> Result<Vec<crate::buffer::BufferChange>, String> {
+        let count = self.read_len()?;
+        let mut changes = Vec::new();
+        for _ in 0..count {
+            let id = self.read_identity()?;
+            let name = self.read_symbol()?;
+            let durability = match self.read_u8()? {
+                0 => RelationDurability::Durable,
+                1 => RelationDurability::Volatile,
+                _ => return Err("invalid buffer durability".to_owned()),
+            };
+            let conflict = match self.read_u8()? {
+                0 => crate::buffer::BufferConflictPolicy::Reject,
+                1 => crate::buffer::BufferConflictPolicy::Span,
+                2 => crate::buffer::BufferConflictPolicy::Whole,
+                _ => return Err("invalid buffer conflict policy".to_owned()),
+            };
+            let base_revision = self.read_u64()?;
+            let revision = self.read_u64()?;
+            let deleted = self.read_bool()?;
+            let count = self.read_len()?;
+            let mut replacements = Vec::new();
+            for _ in 0..count {
+                let start =
+                    usize::try_from(self.read_u64()?).map_err(|_| "buffer offset exceeds usize")?;
+                let end =
+                    usize::try_from(self.read_u64()?).map_err(|_| "buffer offset exceeds usize")?;
+                let text = self.read_string()?;
+                replacements.push(crate::buffer::Replacement {
+                    range: start..end,
+                    text,
+                });
+            }
+            let delta = crate::buffer::Delta::new(replacements)
+                .map_err(|error| format!("invalid buffer delta: {error:?}"))?;
+            changes.push(crate::buffer::BufferChange {
+                metadata: crate::buffer::BufferMetadata {
+                    id,
+                    name,
+                    durability,
+                    conflict,
+                },
+                base_revision,
+                revision,
+                delta,
+                deleted,
+            });
+        }
+        Ok(changes)
     }
 
     fn read_catalog_change(&mut self) -> Result<CatalogChange, String> {

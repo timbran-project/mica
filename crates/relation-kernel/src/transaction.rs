@@ -42,6 +42,7 @@ type DerivedRelations = HashMap<RelationId, RelationState>;
 type TransactionDerivedCache = HashMap<RelationId, Result<DerivedRelations, KernelError>>;
 
 pub struct Transaction<'a> {
+    pub(crate) buffer_writes: crate::buffer::store::BufferWrites,
     kernel: &'a RelationKernel,
     pub(crate) base: Arc<Snapshot>,
     writes: HashMap<RelationId, RelationWriteOverlay>,
@@ -236,6 +237,7 @@ impl<'a> Transaction<'a> {
             kernel,
             base,
             writes: HashMap::new(),
+            buffer_writes: Default::default(),
             functional_visible: HashMap::new(),
             derived_cache: RefCell::new(HashMap::new()),
             computed_preparation: ComputedPreparationCache::default(),
@@ -244,6 +246,14 @@ impl<'a> Transaction<'a> {
             dispatch_inline_cache: TransactionDispatchCache::new(),
             execution_context,
         }
+    }
+
+    pub(crate) fn invalidate_computed_views(&mut self) {
+        self.derived_cache.get_mut().clear();
+        self.computed_preparation.clear();
+        self.dispatch_inline_cache.clear();
+        #[cfg(test)]
+        self.differential_overlay_work.replace(None);
     }
 
     pub fn base_version(&self) -> Version {
@@ -259,7 +269,7 @@ impl<'a> Transaction<'a> {
     }
 
     pub fn is_read_only(&self) -> bool {
-        self.writes.is_empty()
+        self.writes.is_empty() && self.buffer_writes.is_empty()
     }
 
     pub(crate) fn has_local_writes(&self, relation: RelationId) -> bool {
@@ -411,7 +421,7 @@ impl<'a> Transaction<'a> {
         &self,
         relations: DispatchRelations,
     ) -> Result<bool, KernelError> {
-        if self.writes.is_empty() {
+        if self.writes.is_empty() && self.buffer_writes.is_empty() {
             return Ok(true);
         }
         Ok(self.relation_view_matches_base(relations.method_selector)?
@@ -420,7 +430,7 @@ impl<'a> Transaction<'a> {
     }
 
     fn relation_view_matches_base(&self, relation: RelationId) -> Result<bool, KernelError> {
-        if self.writes.is_empty() {
+        if self.writes.is_empty() && self.buffer_writes.is_empty() {
             return Ok(true);
         }
         if self.has_local_writes(relation) {
@@ -483,7 +493,7 @@ impl<'a> Transaction<'a> {
                 .record(TransactionReadOperation::Scan, rows.len() as u64);
             return Ok(rows);
         }
-        if self.writes.is_empty() {
+        if self.writes.is_empty() && self.buffer_writes.is_empty() {
             let rows = self.base.scan(relation, bindings)?;
             crate::metrics::metrics()
                 .transaction_read_rows
@@ -528,7 +538,7 @@ impl<'a> Transaction<'a> {
         crate::metrics::metrics()
             .transaction_read_operations
             .inc(TransactionReadOperation::EstimateScan);
-        if self.writes.is_empty() {
+        if self.writes.is_empty() && self.buffer_writes.is_empty() {
             let rows = self.base.estimate_scan(relation, bindings)?;
             crate::metrics::metrics()
                 .transaction_read_rows
@@ -574,7 +584,7 @@ impl<'a> Transaction<'a> {
         &self,
         relation: RelationId,
     ) -> Result<Option<DerivedRelations>, KernelError> {
-        if self.writes.is_empty() {
+        if self.writes.is_empty() && self.buffer_writes.is_empty() {
             return Ok(None);
         }
         let mut maintained = self.base.maintained_state();
@@ -866,7 +876,13 @@ impl<'a> Transaction<'a> {
                     .transaction_commit_changes
                     .record(result.commit().changes().len() as u64);
             }
-            Err(KernelError::Conflict(_)) => crate::metrics::metrics()
+            Err(
+                KernelError::Conflict(_)
+                | KernelError::Buffer {
+                    error: crate::buffer::BufferError::Conflict { .. },
+                    ..
+                },
+            ) => crate::metrics::metrics()
                 .transaction_commits
                 .inc(CommitOutcome::Conflict),
             Err(KernelError::Persistence(_)) => crate::metrics::metrics()
@@ -1088,6 +1104,8 @@ impl<'a> Transaction<'a> {
         current: &Snapshot,
     ) -> Result<(Arc<Snapshot>, Commit), KernelError> {
         let mut next = current.clone();
+        let (buffers, buffer_changes) = self.materialize_buffers(current)?;
+        next.buffers = buffers;
         let mut changes = Vec::new();
 
         let mut relation_ids = self.writes.keys().copied().collect::<Vec<_>>();
@@ -1137,6 +1155,7 @@ impl<'a> Transaction<'a> {
         }
         let commit = Commit {
             version: next.version,
+            buffer_changes: buffer_changes.into(),
             catalog_changes: Arc::from([]),
             changes: changes.into(),
             relation_changes: relation_changes.into(),
