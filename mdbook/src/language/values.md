@@ -312,6 +312,24 @@ require minimum + maximum == -1
 require from_literal(to_literal(minimum)) == ok(minimum)
 ```
 
+### Numeric Conversion
+
+`to_float(number)` returns a float. Integer conversion rounds to binary32. A float argument passes through unchanged.
+`to_int(number)` returns an integer only if the input is exactly integral and fits the integer range.
+Both functions raise `E_TYPE` for unsupported values. `to_int` also raises `E_TYPE` for fractional or out-of-range numbers.
+
+`parse_int(text)` accepts decimal digits with an optional leading minus.
+`parse_float(text)` accepts a decimal number with an optional sign, fraction, and exponent, then rounds it to binary32.
+Neither parser accepts surrounding whitespace, separators, or trailing text. Invalid spelling or overflow raises `E_INVARG`. A non-string argument raises `E_TYPE`.
+Float underflow can round to zero. Infinity and NaN remain invalid.
+
+```mica,eval
+require parse_int("-42") == -42
+require parse_float("1.25e2") == 125.0
+require to_float(16777217) == 16777216.0
+require to_int(42.0) == 42
+```
+
 ### Numeric Equality And Key Identity
 
 Mica has two distinct comparison concepts:

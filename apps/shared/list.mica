@@ -3,13 +3,11 @@
 // The runtime provides only low-level primitives:
 //
 //   list indexing `items[index]`
+//   length `len(items)`
 //   iteration `for item in list`
 //   append `[@list, item]` (amortized, reuses buffer capacity)
 //   index_or(collection, index, default)
 //   sort(list)
-//
-// Deliberately no `len`: it is an Odin-port compiler extension, not part of
-// the shared language, so the verbs below count by iterating instead.
 //
 // The higher-level operations below are ordinary Mica verbs. Calls such as
 // map(items, f) or items :map(f) dispatch against the #list primitive

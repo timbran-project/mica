@@ -216,3 +216,9 @@ Wildcard retraction checks writability before scanning, including an empty match
 The shared buffer library and 39 pinned Mica scenarios now pass in interpreter-only and native-enabled runs.
 The port corrects the annotation retirement arity and projects each endpoint accessor to its exact binding heading.
 Workspace tests and clippy pass for this application boundary.
+
+
+The editor and Mica compiler require numeric parsing. Runtime builtins now provide `parse_int`, `parse_float`, `to_int`, and `to_float`.
+Conversions preserve finite binary32 and signed 56-bit integer constraints. Parsing rejects partial spellings and raises catchable type or argument errors.
+Focused tests pass for integer endpoints, float rounding and underflow, nonintegral conversion, malformed input, and non-finite results.
+Runtime integration tests and workspace clippy pass.
