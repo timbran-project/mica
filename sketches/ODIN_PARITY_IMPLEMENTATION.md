@@ -369,3 +369,9 @@ The emitter now supports list slices, optional/rest list destructuring, `raise`,
 Error fields use the VM's existing option-valued message and payload semantics through the assembly interface.
 Execution comparisons cover lazy defaults, omitted values, indexed-assignment results, rethrows, and finally execution on break, continue, and return.
 Focused assembly and emitter checks pass. The extended compiler still bootstraps and reproduces target artifacts in both execution modes.
+
+The emitter resolves existing relation identities from one `RelationName` read per compilation.
+Emitted scans support bound arguments, output variables, repeated-variable equality, holes, and splices.
+Assertions and retractions use the existing dynamic relation instructions, including transaction-local visibility.
+Execution comparisons and authority regressions pass in both modes. Root compilation does not let an artifact bypass execution-time read or write grants.
+Source declarations still require a compilation/installation stage that establishes their identities before assembly.

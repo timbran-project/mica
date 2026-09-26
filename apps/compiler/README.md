@@ -25,8 +25,12 @@ Forward calls and recursive verbs resolve through the runtime method catalogue.
 List destructuring supports optional defaults and one rest binding. Range values support list slicing.
 `raise` and `try` support error-code catches, error bindings, and `finally`. Error fields retain Rust's option-valued message and payload.
 Basic type annotations produce runtime checks. The emitter does not implement Rust's static type analysis.
-Unsupported syntax produces diagnostics, including declarations, relation queries, closures, catch patterns and guards, default verb parameters, and rest verb parameters.
-Identity literals resolve in the compilation world. Compilation does not install methods or grant authority.
+Unsupported syntax produces diagnostics, including declarations, closures, catch patterns and guards, default verb parameters, and rest verb parameters.
+The emitter reads `RelationName` once per compilation and resolves existing relations in that snapshot.
+Compilation requires permission to read that catalogue. Relations used by the source must already exist.
+Emitted scans support output variables, repeated variables, holes, and splices. Assertions and retractions use the runtime transaction.
+The artifact retains relation identities from the compilation world and performs ordinary read/write checks when it executes.
+Identity literals also resolve in the compilation world. Compilation does not install methods or grant authority.
 
 The bootstrap test compiles all three compiler sources, installs their emitted artifacts, then compiles another program with the emitted compiler.
 It compares the target artifacts byte for byte and executes the target in interpreter and native-enabled modes.

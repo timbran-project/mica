@@ -1,8 +1,11 @@
 // Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-use mica_runtime::{SourceRunner, TaskInput, TaskLimits, TaskOutcome};
+use mica_runtime::{
+    SourceRunner, SourceTaskError, TaskError, TaskInput, TaskLimits, TaskManagerError, TaskOutcome,
+};
 use mica_var::{Symbol, Value};
+use mica_vm::{AuthorityContext, CapabilityGrant, RuntimeError};
 use std::path::Path;
 
 const SOURCES: &[(&str, &str)] = &[
@@ -335,5 +338,70 @@ fn mica_compiler_bootstrap_preserves_artifacts_and_execution() {
             "{}",
             report.render()
         );
+    }
+}
+
+#[test]
+fn mica_emitter_queries_and_mutates_catalogue_relations() {
+    for interpreter_only in [true, false] {
+        let mut runner = compiler(interpreter_only);
+        runner.run_filein(INSTALL_EMITTED).unwrap();
+        runner
+            .run_filein("make_relation(:CompilerData, 2)\nassert CompilerData(1, 2)\nassert CompilerData(2, 2)\nassert CompilerData(3, 4)")
+            .unwrap();
+        for source in [
+            "return CompilerData(?left, ?right)",
+            "return CompilerData(?same, ?same)",
+            "return [CompilerData(1, 2), CompilerData(1, 3), CompilerData(_, 4)]",
+            "return CompilerData(@[1], ?right)",
+            "assert CompilerData(8, 9)\nlet present = CompilerData(8, 9)\nretract CompilerData(8, _)\nreturn [present, CompilerData(8, 9)]",
+            "assert CompilerData(@[8, 9])\nlet rows = CompilerData(8, ?right)\nretract CompilerData(@[8], _)\nreturn rows",
+            "let names = []\nfor row in RelationName(?relation, :CompilerData)\n names = [@names, row[:relation]]\nend\nreturn names",
+        ] {
+            let expected = runner.run_source(source).unwrap();
+            let module = invoke(&mut runner, "emit_source", source);
+            install_emitted(&mut runner, module);
+            let actual = runner.run_source("return :compiler_test_entry()").unwrap();
+            let TaskOutcome::Complete {
+                value: expected, ..
+            } = expected.outcome
+            else {
+                panic!("{source}: {}", expected.render());
+            };
+            let TaskOutcome::Complete { value: actual, .. } = actual.outcome else {
+                panic!("{source}: {}", actual.render());
+            };
+            assert_eq!(actual, expected, "{source}");
+        }
+        for (source, operation) in [
+            ("return CompilerData(?left, ?right)", "read"),
+            ("assert CompilerData(8, 9)", "write"),
+        ] {
+            let module = invoke(&mut runner, "emit_source", source);
+            install_emitted(&mut runner, module);
+            let method = runner
+                .named_identity(Symbol::intern("compiler-test/method/:compiler_test_entry"))
+                .unwrap();
+            let mut request = SourceRunner::root_source_request("");
+            request.authority = AuthorityContext::empty();
+            request
+                .authority
+                .mint(CapabilityGrant::method(Value::identity(method)));
+            request.input = TaskInput::Invocation {
+                selector: Symbol::intern("compiler_test_entry"),
+                roles: vec![],
+            };
+            assert!(matches!(
+                runner.submit_invocation(request),
+                Err(SourceTaskError::TaskManager(TaskManagerError::Task(TaskError::Runtime(
+                    RuntimeError::PermissionDenied { operation: denied, .. }
+                )))) if denied == operation
+            ));
+            let report = runner.run_source("return CompilerData(8, 9)").unwrap();
+            assert!(matches!(
+                report.outcome,
+                TaskOutcome::Complete { value, .. } if value == Value::bool(false)
+            ));
+        }
     }
 }

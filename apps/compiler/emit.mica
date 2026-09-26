@@ -97,12 +97,16 @@ verb emit_source(source) -> map
   return {:ok -> true, :entry -> assemble(module[:entry]), :methods -> methods, :errors -> []}
 end
 
-verb emit_state()
-  return {:code -> [], :next -> 0, :scopes -> [{}], :loops -> [], :errors -> [], :result_annotation -> "", :binding_types -> {}}
+verb emit_state(relations)
+  return {:code -> [], :next -> 0, :scopes -> [{}], :loops -> [], :errors -> [], :result_annotation -> "", :binding_types -> {}, :relations -> relations}
 end
 
 verb emit_program(raw_rows, root) -> map
   let rows = sort_ast_rows(raw_rows)
+  let relations = {}
+  for entry in RelationName(?relation, ?name)
+    relations[entry[:name]] = entry[:relation]
+  end
   let entry_nodes = []
   let methods = []
   let errors = []
@@ -113,7 +117,7 @@ verb emit_program(raw_rows, root) -> map
       entry_nodes = [@entry_nodes, expr]
     elseif kind == :VerbItem
       let [_, selector] = ast_attr(rows, item, :name)
-      let state = emit_state()
+      let state = emit_state(relations)
       let [has_result, result_annotation] = ast_attr(rows, item, :result)
       if has_result
         state[:result_annotation] = result_annotation
@@ -145,7 +149,7 @@ verb emit_program(raw_rows, root) -> map
       errors = [@errors, string_concat("unsupported program item: ", to_literal(kind))]
     end
   end
-  let [result, entry] = emit_block(rows, entry_nodes, emit_state())
+  let [result, entry] = emit_block(rows, entry_nodes, emit_state(relations))
   entry = emit_append(entry, [:Return, [:Register, result]])
   return {:entry -> emit_description(entry), :methods -> methods, :errors -> [@errors, @entry[:errors]]}
 end
@@ -384,6 +388,23 @@ verb emit_expr(rows, node, input_state)
   end
   if kind == :Call
     return emit_call(rows, node, state)
+  end
+  if kind == :Assert || kind == :Retract
+    let [_, atom] = ast_attr(rows, node, :atom)
+    let [has_callee, callee] = ast_attr(rows, atom, :callee)
+    if !has_callee || ast_kind(rows, callee) != :Name
+      return emit_error(state, "fact changes require a named relation call")
+    end
+    let name_text = string_join(ast_children(rows, callee, :part), "/")
+    let target = index_or(state[:relations], to_symbol(name_text), none)
+    if target == none
+      return emit_error(state, string_concat("relation is not declared: ", name_text))
+    end
+    let operation = :AssertDynamic
+    if kind == :Retract
+      operation = :RetractDynamic
+    end
+    return emit_relation_call(rows, atom, target, operation, state)
   end
   if kind == :Return
     let [found, child] = ast_attr(rows, node, :value)
@@ -711,6 +732,12 @@ verb emit_call(rows, node, input_state)
     is_function = true
     callee_reg = reg
   end
+  if callee_kind == :Name && !is_function
+    let target = index_or(state[:relations], to_symbol(name_text), none)
+    if target != none
+      return emit_relation_call(rows, node, target, :ScanDynamic, state)
+    end
+  end
   let args = []
   let roles = []
   for arg in ast_children(rows, node, :arg)
@@ -757,6 +784,41 @@ verb emit_call(rows, node, input_state)
     return [dst, emit_append(state, [:BuiltinCall, dst, to_symbol(name_text), args])]
   end
   return [dst, emit_append(state, [:PositionalDispatch, dst, [:Constant, to_symbol(name_text)], args])]
+end
+
+verb emit_relation_call(rows, node, target, operation, input_state)
+  let state = input_state
+  let args = []
+  for arg in ast_children(rows, node, :arg)
+    let [named, _] = ast_attr(rows, arg, :role)
+    if named
+      return emit_error(state, "relation arguments are positional")
+    end
+    let [_, expr] = ast_attr(rows, arg, :expr)
+    let kind = ast_kind(rows, expr)
+    if kind == :Query_Variable
+      if operation != :ScanDynamic
+        return emit_error(state, "fact changes do not bind query variables")
+      end
+      let [_, name_text] = ast_attr(rows, expr, :name)
+      args = [@args, [:Query, to_symbol(name_text)]]
+    elseif kind == :Wildcard
+      if operation == :AssertDynamic
+        return emit_error(state, "assertions require a value at every position")
+      end
+      args = [@args, [:Hole]]
+    else
+      let [items, emitted] = emit_items(rows, [expr], state)
+      state = emitted
+      args = [@args, items[0]]
+    end
+  end
+  if operation == :ScanDynamic
+    let [dst, allocated] = emit_register(state)
+    return [dst, emit_append(allocated, [:ScanDynamic, dst, target, args])]
+  end
+  state = emit_append(state, [operation, target, args])
+  return emit_constant(state, [] {[]})
 end
 
 verb emit_if(rows, node, input_state)
