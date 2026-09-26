@@ -1,0 +1,27 @@
+// Bycycle constraints: disjointness is symmetric; violations are derived
+// facts the checker queries. QuotedIsa/TypeGenls propagate like Isa/Genls
+// for the quoted (non-asserted) reading.
+// Load 10_taxonomy.mica before these rules.
+
+make_relation(:InconsistentWith, 3)
+make_relation(:QuotedInstanceOf, 2)
+make_relation(:TypedInstanceOf, 2)
+
+DisjointWith(a, b) :-
+  DisjointWith(b, a)
+
+InconsistentWith(item, a, b) :-
+  InstanceOf(item, a),
+  InstanceOf(item, b),
+  DisjointWith(a, b)
+
+QuotedInstanceOf(item, collection) :-
+  QuotedIsa(item, collection)
+
+QuotedInstanceOf(item, ancestor) :-
+  QuotedIsa(item, collection),
+  Subsumes(ancestor, collection)
+
+TypedInstanceOf(item, ancestor) :-
+  QuotedIsa(item, collection),
+  TypeGenls(collection, ancestor)

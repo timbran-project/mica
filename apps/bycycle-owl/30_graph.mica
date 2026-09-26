@@ -1,0 +1,30 @@
+// Bycycle graph: symmetric broader-term navigation and rewrite chains.
+// RewriteOf is transitive; BroaderTerm reads both directions.
+// The TextUnit/TextUnitText heads below are declared in
+// apps/shared/retrieval.mica. Load that file before these rules.
+
+make_relation(:Broader, 2)
+make_relation(:RewrittenTo, 2)
+
+Broader(a, b) :-
+  BroaderTerm(a, b)
+
+Broader(a, b) :-
+  BroaderTerm(b, a)
+
+RewrittenTo(a, c) :-
+  RewriteOf(a, c)
+
+RewrittenTo(a, c) :-
+  RewriteOf(a, b),
+  RewrittenTo(b, c)
+
+// Retrieval wiring: every labeled subject is a text unit whose text is its
+// label. The store has no actor model to derive CanRetrieveSubject from (a
+// head variable with no positive binding is unsafe, so no rule here).
+// The loader supplies explicit CanRetrieveSubject(actor, subject) facts.
+TextUnit(subject) :-
+  Label(subject, _)
+
+TextUnitText(unit, text) :-
+  Label(unit, text)

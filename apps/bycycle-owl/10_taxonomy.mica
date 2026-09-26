@@ -1,0 +1,30 @@
+// Bycycle taxonomy: transitive closure over Isa/Genls.
+// The loader asserts only direct edges; these rules derive the rest.
+// Load the schema before these rules.
+
+make_relation(:Subsumes, 2)
+make_relation(:InstanceOf, 2)
+make_relation(:DirectChild, 2)
+make_relation(:IndirectChild, 2)
+
+Subsumes(ancestor, descendant) :-
+  Genls(descendant, ancestor)
+
+Subsumes(ancestor, descendant) :-
+  Genls(descendant, middle),
+  Subsumes(ancestor, middle)
+
+InstanceOf(item, collection) :-
+  Isa(item, collection)
+
+InstanceOf(item, ancestor) :-
+  Isa(item, collection),
+  Subsumes(ancestor, collection)
+
+DirectChild(parent, child) :-
+  Genls(child, parent),
+  not IndirectChild(parent, child)
+
+IndirectChild(parent, child) :-
+  Genls(child, middle),
+  Subsumes(parent, middle)

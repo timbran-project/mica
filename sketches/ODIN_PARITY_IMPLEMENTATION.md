@@ -22,7 +22,7 @@ Passing an early workstream does not complete this plan.
 | Query and storage execution | Measured columnar/storage improvements that preserve incremental maintenance | Persistent rule collections, indexed recursive reseeding, retained visible rows, and retained derived indexes measured; initial derivation remains open |
 | Query measurements | Separate initial derivation and small-update maintenance workloads | Implemented and measured; Rust has substantial initial and recursive-deletion costs |
 | Mica compiler | Ported compiler with an intentional Rust assembly interface and bootstrap conformance | Assembly, frontend, bootstrap, collections, closures, exceptions, and relation operations implemented; further donor features and public installation remain |
-| Ingestion | Ported ingestion applications with verified loaded facts and inference results | Pending |
+| Ingestion | Ported ingestion applications with verified loaded facts and inference results | OWL ontology ported and tested; loader and CycL census remain |
 
 ## RFC cross-check
 
@@ -388,3 +388,7 @@ Closure comparisons cover aliases, captured lists, shadowed parameters, and runt
 The bootstrap target includes nested closures and an omitted default. Its artifacts match before and after the compiler compiles itself.
 All eight compiler application tests pass in the full workspace run. Workspace clippy also passes with warnings denied.
 Self-recursive local functions remain unsupported. Capture discovery can retain an unused outer name when an inner binding shadows it.
+
+The pinned Bycycle OWL schema and rules now load in Rust. The application test checks taxonomy, contradictions, graph navigation, and retrieval.
+Committed retractions remove unsupported derived rows while alternate taxonomy paths remain. Both execution modes pass.
+The full OWL loader, batch recovery, and CycL census remain separate ingestion work.
