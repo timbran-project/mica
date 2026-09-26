@@ -68,6 +68,7 @@ An `items` list contains operands or `[:Splice, operand]` entries.
 | `[:ExitTry]` | Leave an exception region through its normal path. |
 | `[:EndFinally]` | Finish the current finally handler. |
 | `[:Raise, error_operand, message_operand, value_operand]` | Raise an error. Message and value can be `none`. |
+| `[:ErrorField, dst, error_register, field]` | Read `:Code`, `:Message`, or `:Value` from an error. |
 | `[:Abort, operand]` | Abort the task with the operand as its error value. |
 | `[:Return, operand]` | Return a value. |
 | `[:Emit, target_operand, value_operand]` | Stage an emission. |

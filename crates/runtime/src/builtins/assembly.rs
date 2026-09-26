@@ -8,8 +8,8 @@ use crate::{
 use mica_relation_kernel::RelationId;
 use mica_var::{Symbol, Value, ValueKind};
 use mica_vm::{
-    CatchHandler, Instruction, KindCheckSite, ListItem, MapItem, Operand, Program, Register,
-    RelationArg, RuntimeBinaryOp, RuntimeUnaryOp,
+    CatchHandler, ErrorField, Instruction, KindCheckSite, ListItem, MapItem, Operand, Program,
+    Register, RelationArg, RuntimeBinaryOp, RuntimeUnaryOp,
 };
 use std::fmt::{Display, Formatter};
 use std::sync::Arc;
@@ -457,6 +457,16 @@ fn instruction(
             message: optional_operand(message)?,
             value: optional_operand(value)?,
         },
+        (Some("ErrorField"), [dst, error, field]) => Instruction::ErrorField {
+            dst: register(dst)?,
+            error: register(error)?,
+            field: match symbol(field)?.name() {
+                Some("Code") => ErrorField::Code,
+                Some("Message") => ErrorField::Message,
+                Some("Value") => ErrorField::Value,
+                _ => return Err(invalid("unknown error field")),
+            },
+        },
         (Some("Return"), [value]) => Instruction::Return {
             value: operand(value)?,
         },
@@ -619,6 +629,28 @@ mod tests {
     }
 
     #[test]
+    fn assembly_reads_fields_of_a_caught_error() {
+        let program = assembled(
+            r#"return assemble({:registers -> 5, :code -> [
+          [:EnterTry, [[E_TEST, 0, 2]], none, 6],
+          [:Raise, [:Constant, E_TEST], [:Constant, "é🦀"], [:Constant, 42]],
+          [:ErrorField, 1, 0, :Code], [:ErrorField, 2, 0, :Message],
+          [:ErrorField, 3, 0, :Value],
+          [:BuildList, 4, [[:Register, 1], [:Register, 2], [:Register, 3]]],
+          [:Return, [:Register, 4]]
+        ]})"#,
+        );
+        assert_eq!(
+            execute(program),
+            Value::list([
+                Value::error_code(Symbol::intern("E_TEST")),
+                Value::option_some(Value::string("é🦀")),
+                Value::option_some(Value::int(42).unwrap()),
+            ])
+        );
+    }
+
+    #[test]
     fn assembly_rejects_invalid_shapes_registers_targets_and_artifacts() {
         let mut runner = SourceRunner::new_empty();
         for description in [
@@ -633,6 +665,7 @@ mod tests {
             "{:registers -> 1, :code -> [[:Return, [:Register, -1]]]}",
             "{:registers -> 1, :code -> [[:Load, 0]]}",
             "{:registers -> 1, :code -> [[:Missing, 0]]}",
+            "{:registers -> 1, :code -> [[:ErrorField, 0, 0, :Missing]]}",
             "{:registers -> 1, :code -> [[:CheckKind, 0, :missing, :Binding, :x]]}",
             "{:registers -> 1, :code -> [[:CheckKind, 0, :int, :Missing, :x]]}",
             "{:registers -> 1, :code -> [[:CheckKind, 1, :int, :Binding, :x]]}",
