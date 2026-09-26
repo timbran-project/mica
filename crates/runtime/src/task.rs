@@ -393,6 +393,7 @@ impl<'a> Task<'a> {
     ) -> Result<BoundaryResult, TaskError> {
         let start = tracing::enabled!(tracing::Level::TRACE).then(Instant::now);
         let tx = self.tx.take().ok_or(TaskError::MissingTransaction)?;
+        let retryable = !tx.has_tagged_buffer_apply();
         if tx.is_read_only() {
             if let Some(subscription_runtime) = &self.subscription_runtime {
                 self.kernel.at_publication_boundary(|snapshot| {
@@ -429,7 +430,7 @@ impl<'a> Task<'a> {
                 self.trace_successful_boundary(start, false, disposition);
                 Ok(BoundaryResult::Committed)
             }
-            Err(error) if is_retryable_conflict(&error) => {
+            Err(error) if retryable && is_retryable_conflict(&error) => {
                 self.retry_from_boundary()?;
                 self.trace_retried_boundary(start, disposition);
                 Ok(BoundaryResult::Retried)

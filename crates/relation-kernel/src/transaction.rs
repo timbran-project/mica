@@ -896,27 +896,35 @@ impl<'a> Transaction<'a> {
     }
 
     fn commit_inner(
-        self,
+        mut self,
         post_publish: impl FnOnce(&CommitResult),
     ) -> Result<CommitResult, KernelError> {
         let _guard = self.kernel.commit_guard();
         let current = self.kernel.snapshot();
-        if current.version() != self.base.version() {
-            self.validate_conflicts(&current)?;
+        let result = (|| {
+            if current.version() != self.base.version() {
+                self.validate_conflicts(&current)?;
+            }
+            let (next, commit) = self.build_next_snapshot(&current)?;
+            self.kernel.persist_commit(&commit)?;
+            if !self.kernel.try_publish(current.version(), next.clone()) {
+                return Err(KernelError::Persistence(
+                    "commit publish failed after serialized persistence".to_owned(),
+                ));
+            }
+            Ok(CommitResult {
+                snapshot: next,
+                commit,
+            })
+        })();
+        match &result {
+            Ok(result) => {
+                self.complete_buffer_applies(result.snapshot());
+                post_publish(result);
+            }
+            Err(error) => self.fail_buffer_applies(error, &current),
         }
-        let (next, commit) = self.build_next_snapshot(&current)?;
-        self.kernel.persist_commit(&commit)?;
-        if !self.kernel.try_publish(current.version(), next.clone()) {
-            return Err(KernelError::Persistence(
-                "commit publish failed after serialized persistence".to_owned(),
-            ));
-        }
-        let result = CommitResult {
-            snapshot: next,
-            commit,
-        };
-        post_publish(&result);
-        Ok(result)
+        result
     }
 
     fn visible_tuple_for_key(

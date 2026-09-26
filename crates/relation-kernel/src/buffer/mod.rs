@@ -1,10 +1,12 @@
 // Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
+pub(crate) mod client;
 mod delta;
 pub(crate) mod store;
 mod text;
 
+pub use client::{BufferApplyOutcome, BufferApplyResult, BufferApplyStatus};
 pub use delta::{Delta, DeltaBudget, DeltaError, InsertionAffinity, Replacement};
 pub use text::{Text, TextError};
 

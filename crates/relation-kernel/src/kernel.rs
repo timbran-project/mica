@@ -33,6 +33,7 @@ pub struct RelationKernel {
     root: ArcSwap<Snapshot>,
     provider: Arc<dyn CommitProvider>,
     commit_lock: Mutex<()>,
+    pub(crate) buffer_results: Mutex<crate::buffer::client::ClientResults>,
     execution_context: ExecutionContext,
 }
 
@@ -68,6 +69,7 @@ impl RelationKernel {
             root: ArcSwap::new(snapshot),
             provider,
             commit_lock: Mutex::new(()),
+            buffer_results: Mutex::new(Default::default()),
             execution_context: ExecutionContext::serial(),
         }
     }
@@ -156,6 +158,7 @@ impl RelationKernel {
             root: ArcSwap::new(snapshot),
             provider,
             commit_lock: Mutex::new(()),
+            buffer_results: Mutex::new(Default::default()),
             execution_context: ExecutionContext::serial(),
         })
     }
@@ -245,6 +248,7 @@ impl RelationKernel {
             root: ArcSwap::new(snapshot),
             provider,
             commit_lock: Mutex::new(()),
+            buffer_results: Mutex::new(Default::default()),
             execution_context: ExecutionContext::serial(),
         })
     }
@@ -314,6 +318,7 @@ impl RelationKernel {
             root: ArcSwap::new(snapshot),
             provider,
             commit_lock: Mutex::new(()),
+            buffer_results: Mutex::new(Default::default()),
             execution_context: ExecutionContext::serial(),
         })
     }
@@ -337,6 +342,7 @@ impl RelationKernel {
             root: ArcSwap::new(self.snapshot()),
             provider: Arc::new(crate::InMemoryCommitProvider::new()),
             commit_lock: Mutex::new(()),
+            buffer_results: Mutex::new(Default::default()),
             execution_context: self.execution_context.clone(),
         }
     }

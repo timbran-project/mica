@@ -16,8 +16,8 @@ Passing an early workstream does not complete this plan.
 | Measurement metadata | Execution tier, workers, durability, accelerator placement, whole-invocation samples, and fixed-work memory use | Implemented for repeated invocation corpus |
 | Strings and collections | Unicode indexing and iteration, efficient scanning and construction, and preservation of aliased values | Implemented; general nested-list construction still needs measurement |
 | Calls | Reduced allocation with exception, suspension, closure, and retry regressions | Implemented; dispatch and interpreter performance remain open |
-| Computed scans | CPU batches and cached retrieval preparation with unchanged authority, transaction visibility, output bindings, and exact ranking | Pending |
-| Transactional buffers | Atomic fact/text commits, conflict handling, durable recovery, marker rebasing, and client revision results | Pending |
+| Computed scans | CPU batches and cached retrieval preparation with unchanged authority, transaction visibility, output bindings, and exact ranking | Implemented for positive rule steps and equality probes; exact retrieval measured |
+| Transactional buffers | Atomic fact/text commits, conflict handling, durable recovery, marker rebasing, and client revision results | Kernel, persistence, and basic runtime complete; client protocol in verification; history and computed views pending |
 | Editor | Shared buffer library and programmable editor running through Rust host services | Pending |
 | Query and storage execution | Measured columnar/storage improvements that preserve incremental maintenance | Pending |
 | Query measurements | Separate initial derivation and small-update maintenance workloads | Pending |
@@ -182,3 +182,11 @@ The single-open capture passes all 12 processes at 4,096 edits. Recovery improve
 Strict edits still cost 2.82 s versus 2.65 s, and relaxed edits cost 81 ms versus 69 ms. RSS increases by approximately 2 MiB.
 At 32,768 edits, all six relaxed processes pass: recovery improves from 328 ms to 211 ms, while edit/flush time rises from 520 ms to 604 ms.
 Four strict processes time out at 120 seconds, two per revision. Those failures remain in the capture and prevent a stable strict-mode comparison.
+
+Revision-checked applies now validate complete sequential batches before changing transaction text.
+An apply seals that buffer against later mutations. Tagged results settle after publication or record conflict, resync, or abort.
+Acknowledgement deltas use the client's original revision and include merged concurrent changes.
+The result cache retains at most 1,024 entries and 8 MiB of delta storage, never evicts pending entries, and rejects token collisions.
+Tagged task conflicts return their recorded outcome instead of automatically re-executing the submission.
+The runtime exposes apply, result, and Unicode marker-rebase builtins. Result reads require buffer read authority.
+Six kernel tests and eleven runtime buffer tests pass. Workspace tests and clippy pass.

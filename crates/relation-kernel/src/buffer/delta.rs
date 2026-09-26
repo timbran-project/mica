@@ -74,6 +74,17 @@ struct BaseSpan {
 }
 
 impl Delta {
+    pub(crate) fn retained_bytes(&self) -> usize {
+        self.replacements
+            .capacity()
+            .saturating_mul(std::mem::size_of::<Replacement>())
+            .saturating_add(
+                self.replacements
+                    .iter()
+                    .map(|replacement| replacement.text.capacity())
+                    .sum::<usize>(),
+            )
+    }
     pub fn new(replacements: Vec<Replacement>) -> Result<Self, DeltaError> {
         let mut normalized: Vec<Replacement> = Vec::new();
         for replacement in replacements {

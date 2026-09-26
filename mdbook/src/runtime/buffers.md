@@ -5,7 +5,7 @@ A buffer has an identity, a unique name, a durability policy, a conflict policy,
 Buffer names share the relation namespace. Deleted buffers retain tombstones that reserve their identities and names.
 
 Language builtins use the current task transaction and its authority context.
-Client revision results, computed buffer relations, history, and editor integration remain pending.
+Computed buffer relations, history, compaction, and editor integration remain pending.
 
 ## Language interface
 
@@ -38,6 +38,40 @@ Empty search patterns return `none`.
 Read operations require a read grant for the buffer identity. Mutations require a write grant.
 The existing `GrantRead`, `GrantWrite`, and derived policy relations resolve active buffer names when the runtime builds authority.
 Suspended tasks resume with fresh authority. Buffer reads are available to read-only queries, and mutations are rejected.
+
+## Client revisions and markers
+
+`buffer_apply(name, expected_revision, edits[, token])` checks the revision before it stages any edit.
+Each edit is a map with optional `at`, `remove`, and `text` fields, which default to zero, zero, and an empty string.
+Edits execute sequentially against the private transaction text. An invalid batch leaves that text unchanged.
+The result is `:stale` when the revision differs, or `:staged` when the batch succeeds.
+An apply must precede other text mutations. An empty buffer created in the same transaction can receive an apply at revision zero.
+After an apply, further mutations of that buffer raise `E_STATE` until the transaction ends.
+
+A positive token reserves a completion result. Zero requests no completion result.
+`buffer_apply_result(token)` returns `:pending` before settlement or when the token is unknown.
+After settlement, it returns a map with `status` and `revision`:
+
+| Status | Meaning |
+| --- | --- |
+| `:ok` | The transaction committed. The `applied` field contains the complete delta against the client's original revision. |
+| `:conflict` | A concurrent change prevented the commit. |
+| `:aborted` | The transaction ended without publication, including a persistence error. |
+| `:resync` | Reconciliation exceeded its work budget or could not express the result against the client's text. |
+
+A `:resync` result can follow a successful commit when its acknowledgement delta exceeds the result budget.
+Clients must read authoritative text before they submit another edit after `:resync`.
+An `:ok` delta includes merged concurrent changes. Its ranges use the original client revision, and clients apply them from the highest position down.
+Tagged conflicts do not automatically re-execute the task. A resubmission uses a fresh token and the required current revision.
+
+Result reads require read authority for the buffer identity. Tokens remain reserved while their result is retained.
+The cache holds at most 1,024 entries and 8 MiB of delta storage. It evicts only completed entries.
+When all slots are pending, another tagged apply raises `E_STATE` without staging changes.
+Results are ephemeral and disappear after restart. An unknown or evicted token returns `:pending`, so clients need a timeout and resynchronization path.
+
+`buffer_marker_rebase(edits, position, :stick_before | :stick_after)` moves a marker through a committed, base-relative delta.
+The delta must contain sorted, non-overlapping ranges. Insertions at the marker follow its selected affinity.
+A removed interior position collapses to the start of the removed range. Marker state remains application-owned.
 
 ## Transaction interface
 

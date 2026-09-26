@@ -7,6 +7,7 @@ use mica_var::{Identity, Symbol};
 use rart::{ArrayKey, VersionedAdaptiveRadixTree};
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
+use std::num::NonZeroU64;
 use std::ops::Range;
 use std::sync::Arc;
 
@@ -77,6 +78,9 @@ pub enum BufferError {
     Text(TextError),
     Delta(DeltaError),
     InvalidRecovery,
+    AlreadyApplied,
+    TokenInUse,
+    ResultsFull,
 }
 
 pub(crate) fn error(buffer: Identity, error: BufferError) -> KernelError {
@@ -219,10 +223,13 @@ impl BufferStates {
 }
 
 pub(crate) struct PendingBuffer {
-    metadata: BufferMetadata,
-    base: Option<Arc<BufferState>>,
-    text: Text,
+    pub(super) metadata: BufferMetadata,
+    pub(super) base: Option<Arc<BufferState>>,
+    pub(super) text: Text,
     deleted: bool,
+    pub(super) touched: bool,
+    pub(super) sealed: bool,
+    pub(super) token: Option<NonZeroU64>,
 }
 
 pub(crate) type BufferWrites = BTreeMap<Identity, PendingBuffer>;
@@ -271,6 +278,9 @@ impl Transaction<'_> {
                 base: None,
                 text: Text::default(),
                 deleted: false,
+                touched: false,
+                sealed: false,
+                token: None,
             },
         );
         self.invalidate_computed_views();
@@ -319,6 +329,7 @@ impl Transaction<'_> {
         range: Range<usize>,
         text: &str,
     ) -> Result<(), KernelError> {
+        self.ensure_buffer_mutable(id)?;
         let previous = self.buffer_text(id)?;
         let next = previous
             .replace(range, text)
@@ -326,7 +337,9 @@ impl Transaction<'_> {
         if previous.shares_root(&next) {
             return Ok(());
         }
-        self.buffer_write(id)?.text = next;
+        let pending = self.buffer_write(id)?;
+        pending.text = next;
+        pending.touched = true;
         self.invalidate_computed_views();
         Ok(())
     }
@@ -334,12 +347,25 @@ impl Transaction<'_> {
     pub fn delete_buffer(&mut self, id: Identity) -> Result<(), KernelError> {
         let pending = self.buffer_write(id)?;
         pending.deleted = true;
+        pending.touched = true;
         pending.text = Text::default();
         self.invalidate_computed_views();
         Ok(())
     }
 
-    fn buffer_write(&mut self, id: Identity) -> Result<&mut PendingBuffer, KernelError> {
+    fn ensure_buffer_mutable(&self, id: Identity) -> Result<(), KernelError> {
+        if self
+            .buffer_writes
+            .get(&id)
+            .is_some_and(|pending| pending.sealed)
+        {
+            return Err(error(id, BufferError::AlreadyApplied));
+        }
+        Ok(())
+    }
+
+    pub(super) fn buffer_write(&mut self, id: Identity) -> Result<&mut PendingBuffer, KernelError> {
+        self.ensure_buffer_mutable(id)?;
         self.buffer_metadata(id)?;
         if !self.buffer_writes.contains_key(&id) {
             let base = self.base.buffers.get(id).unwrap().clone();
@@ -350,6 +376,9 @@ impl Transaction<'_> {
                     text: base.text.clone(),
                     base: Some(base),
                     deleted: false,
+                    touched: false,
+                    sealed: false,
+                    token: None,
                 },
             );
         }

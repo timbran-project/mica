@@ -7590,6 +7590,8 @@ fn is_safe_read_only_builtin(name: &str) -> bool {
             | "buffer_line_span"
             | "buffer_position_line_column"
             | "buffer_line_column_offset"
+            | "buffer_apply_result"
+            | "buffer_marker_rebase"
             | "string_append"
             | "string_span"
             | "string_find_any"

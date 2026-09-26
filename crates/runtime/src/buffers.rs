@@ -2,10 +2,14 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 use crate::{EPHEMERAL_HOST_IDENTITY_START, GENERATED_RELATION_ID_START, require_admin_builtin};
-use mica_relation_kernel::buffer::{BufferConflictPolicy, BufferError, BufferMetadata, TextError};
+use mica_relation_kernel::buffer::{
+    BufferApplyOutcome, BufferApplyStatus, BufferConflictPolicy, BufferError, BufferMetadata,
+    Delta, InsertionAffinity, Replacement, TextError,
+};
 use mica_relation_kernel::{KernelError, RelationDurability};
 use mica_var::{Identity, Symbol, Tuple, Value, ValueKind};
 use mica_vm::{Builtin, BuiltinContext, BuiltinRegistry, BuiltinResultKind, RuntimeError};
+use std::num::NonZeroU64;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 pub(crate) fn install(mut registry: BuiltinRegistry) -> BuiltinRegistry {
@@ -16,6 +20,22 @@ pub(crate) fn install(mut registry: BuiltinRegistry) -> BuiltinRegistry {
             next_id: AtomicU64::new(GENERATED_RELATION_ID_START),
         },
     );
+    registry = registry
+        .with_builtin(
+            "buffer_apply",
+            BuiltinResultKind::Exact(ValueKind::Symbol),
+            apply_builtin,
+        )
+        .with_builtin(
+            "buffer_apply_result",
+            BuiltinResultKind::Dynamic,
+            apply_result_builtin,
+        )
+        .with_builtin(
+            "buffer_marker_rebase",
+            BuiltinResultKind::Exact(ValueKind::Int),
+            marker_rebase_builtin,
+        );
     for (name, operation, count, kind) in [
         ("buffer_len", Read::Len, 1, Some(ValueKind::Int)),
         (
@@ -100,6 +120,21 @@ fn kernel_error(error: KernelError) -> RuntimeError {
             error: BufferError::Text(_),
             ..
         } => fault("E_INDEX", "buffer range is outside the text"),
+        KernelError::Buffer {
+            error: BufferError::AlreadyApplied,
+            ..
+        } => fault(
+            "E_STATE",
+            "this buffer was already modified or applied in this transaction",
+        ),
+        KernelError::Buffer {
+            error: BufferError::TokenInUse,
+            ..
+        } => fault("E_STATE", "the buffer apply token is already in use"),
+        KernelError::Buffer {
+            error: BufferError::ResultsFull,
+            ..
+        } => fault("E_STATE", "too many buffer apply results are pending"),
         error => RuntimeError::Kernel(error),
     }
 }
@@ -121,14 +156,19 @@ fn symbol(value: &Value) -> Result<Symbol, RuntimeError> {
 }
 
 fn offset(value: &Value) -> Result<usize, RuntimeError> {
+    usize::try_from(nonnegative(value)?).map_err(|_| fault("E_RANGE", "buffer offset is too large"))
+}
+
+fn nonnegative(value: &Value) -> Result<u64, RuntimeError> {
     value
         .as_int()
-        .and_then(|value| usize::try_from(value).ok())
+        .and_then(|value| u64::try_from(value).ok())
         .ok_or_else(|| fault("E_TYPE", "expected a non-negative integer"))
 }
 
-fn integer(value: usize) -> Result<Value, RuntimeError> {
-    i64::try_from(value)
+fn integer(value: impl TryInto<i64>) -> Result<Value, RuntimeError> {
+    value
+        .try_into()
         .ok()
         .and_then(|value| Value::int(value).ok())
         .ok_or_else(|| fault("E_RANGE", "buffer position exceeds the integer range"))
@@ -275,9 +315,7 @@ impl Builtin for ReadBuffer {
         let id = resolve(context, &args[0], false)?;
         if matches!(self.operation, Read::Revision) {
             let revision = context.tx().buffer_revision(id).map_err(kernel_error)?;
-            return usize::try_from(revision)
-                .map_err(|_| fault("E_RANGE", "buffer revision exceeds the integer range"))
-                .and_then(integer);
+            return integer(revision);
         }
         let text = context.tx().buffer_text(id).map_err(kernel_error)?;
         match self.operation {
@@ -425,10 +463,174 @@ impl Builtin for WriteBuffer {
     }
 }
 
+fn parse_edits(value: &Value) -> Result<Vec<Replacement>, RuntimeError> {
+    let at = Value::symbol(Symbol::intern("at"));
+    let remove = Value::symbol(Symbol::intern("remove"));
+    let text = Value::symbol(Symbol::intern("text"));
+    value
+        .with_list(|values| {
+            values
+                .iter()
+                .map(|value| {
+                    if value.with_map(|_| ()).is_none() {
+                        return Err(fault("E_TYPE", "each buffer edit must be a map"));
+                    }
+                    let start = value
+                        .map_get(&at)
+                        .as_ref()
+                        .map(offset)
+                        .transpose()?
+                        .unwrap_or(0);
+                    let count = value
+                        .map_get(&remove)
+                        .as_ref()
+                        .map(offset)
+                        .transpose()?
+                        .unwrap_or(0);
+                    let end = start
+                        .checked_add(count)
+                        .ok_or_else(|| fault("E_INDEX", "buffer edit range overflows"))?;
+                    let text = value
+                        .map_get(&text)
+                        .map(|value| {
+                            value
+                                .with_str(str::to_owned)
+                                .ok_or_else(|| fault("E_TYPE", "buffer edit text must be a string"))
+                        })
+                        .transpose()?
+                        .unwrap_or_default();
+                    Ok(Replacement {
+                        range: start..end,
+                        text,
+                    })
+                })
+                .collect::<Result<Vec<_>, RuntimeError>>()
+        })
+        .ok_or_else(|| fault("E_TYPE", "buffer edits must be a list"))?
+}
+
+fn apply_builtin(
+    context: &mut BuiltinContext<'_, '_>,
+    args: &[Value],
+) -> Result<Value, RuntimeError> {
+    if !(3..=4).contains(&args.len()) {
+        return Err(fault(
+            "E_INVARG",
+            "buffer_apply expects a buffer, revision, edits, and optional token",
+        ));
+    }
+    let id = resolve(context, &args[0], true)?;
+    let expected = nonnegative(&args[1])?;
+    let edits = parse_edits(&args[2])?;
+    let token = args
+        .get(3)
+        .map(nonnegative)
+        .transpose()?
+        .and_then(NonZeroU64::new);
+    let status = context
+        .tx()
+        .apply_buffer(id, expected, &edits, token)
+        .map_err(kernel_error)?;
+    Ok(Value::symbol(Symbol::intern(match status {
+        BufferApplyStatus::Staged => "staged",
+        BufferApplyStatus::Stale => "stale",
+    })))
+}
+
+fn apply_result_builtin(
+    context: &mut BuiltinContext<'_, '_>,
+    args: &[Value],
+) -> Result<Value, RuntimeError> {
+    arity("buffer_apply_result", args, 1)?;
+    let result = NonZeroU64::new(nonnegative(&args[0])?)
+        .and_then(|token| context.kernel().buffer_apply_result(token));
+    let Some(result) = result else {
+        return Ok(Value::symbol(Symbol::intern("pending")));
+    };
+    if !context.authority().can_read_relation(result.buffer) {
+        return Err(fault("E_PERMISSION", "buffer apply result read denied"));
+    }
+    let status = match &result.outcome {
+        BufferApplyOutcome::Pending => return Ok(Value::symbol(Symbol::intern("pending"))),
+        BufferApplyOutcome::Ok { .. } => "ok",
+        BufferApplyOutcome::Resync => "resync",
+        BufferApplyOutcome::Conflict => "conflict",
+        BufferApplyOutcome::Aborted => "aborted",
+    };
+    let mut fields = vec![
+        (
+            Value::symbol(Symbol::intern("status")),
+            Value::symbol(Symbol::intern(status)),
+        ),
+        (
+            Value::symbol(Symbol::intern("revision")),
+            integer(result.revision)?,
+        ),
+    ];
+    if let BufferApplyOutcome::Ok { applied } = &result.outcome {
+        let edits = applied
+            .replacements()
+            .iter()
+            .map(|replacement| {
+                Ok(Value::map([
+                    (
+                        Value::symbol(Symbol::intern("at")),
+                        integer(replacement.range.start)?,
+                    ),
+                    (
+                        Value::symbol(Symbol::intern("remove")),
+                        integer(replacement.range.len())?,
+                    ),
+                    (
+                        Value::symbol(Symbol::intern("text")),
+                        Value::string(&replacement.text),
+                    ),
+                ]))
+            })
+            .collect::<Result<Vec<_>, RuntimeError>>()?;
+        fields.push((Value::symbol(Symbol::intern("applied")), Value::list(edits)));
+    }
+    Ok(Value::map(fields))
+}
+
+fn marker_rebase_builtin(
+    _context: &mut BuiltinContext<'_, '_>,
+    args: &[Value],
+) -> Result<Value, RuntimeError> {
+    arity("buffer_marker_rebase", args, 3)?;
+    let edits = parse_edits(&args[0])?;
+    let position = offset(&args[1])?;
+    let affinity = match symbol(&args[2])?.name() {
+        Some("stick_before") => InsertionAffinity::Before,
+        Some("stick_after") => InsertionAffinity::After,
+        _ => {
+            return Err(fault(
+                "E_INVARG",
+                "marker insertion type must be :stick_before or :stick_after",
+            ));
+        }
+    };
+    Delta::new(edits)
+        .and_then(|delta| delta.rebase_marker(position, affinity))
+        .map_err(|_| {
+            fault(
+                "E_INVARG",
+                "marker delta must have sorted, non-overlapping ranges",
+            )
+        })
+        .and_then(integer)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{SourceRunner, TaskInput, TaskOutcome, TaskRequest};
+    use crate::{
+        Instruction, Operand, Program, ProgramResolver, Register, SourceRunner, Task, TaskError,
+        TaskInput, TaskLimits, TaskOutcome, TaskRequest,
+    };
+    use mica_relation_kernel::RelationKernel;
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicUsize;
 
     fn result(runner: &mut SourceRunner, source: &str) -> Value {
         let report = runner
@@ -790,5 +992,216 @@ mod tests {
                 "{source}"
             );
         }
+    }
+
+    #[test]
+    fn tagged_buffer_applies_settle_only_after_publication() {
+        let mut runner = SourceRunner::new_empty();
+        assert_eq!(
+            result(
+                &mut runner,
+                r#"
+            make_buffer(:notes, :durable)
+            let stale = buffer_apply(:notes, 99, [{:at -> 999, :text -> "stale"}], 1)
+            let staged = buffer_apply(:notes, 0, [{:text -> "aé"}, {:at -> 2, :text -> "🦀"}], 42)
+            let blocked = false
+            try
+              buffer_insert(:notes, 0, "later")
+            catch E_STATE
+              blocked = true
+            end
+            return [stale, staged, buffer_apply_result(42), buffer_text(:notes), blocked]
+        "#
+            ),
+            Value::list([
+                Value::symbol(Symbol::intern("stale")),
+                Value::symbol(Symbol::intern("staged")),
+                Value::symbol(Symbol::intern("pending")),
+                Value::string("aé🦀"),
+                Value::bool(true)
+            ])
+        );
+        assert_eq!(
+            result(
+                &mut runner,
+                r#"
+            let settled = buffer_apply_result(42)
+            return [settled[:status] == :ok, settled[:revision],
+              settled[:applied] == [{:at -> 0, :remove -> 0, :text -> "aé🦀"}],
+              buffer_apply_result(1) == :pending]
+        "#
+            ),
+            Value::list([
+                Value::bool(true),
+                integer(1).unwrap(),
+                Value::bool(true),
+                Value::bool(true)
+            ])
+        );
+        let report = runner
+            .run_source(
+                r#"
+            buffer_apply(:notes, 1, [{:at -> 0, :remove -> 3, :text -> "private"}], 43)
+            raise E_ABORT
+        "#,
+            )
+            .unwrap();
+        assert!(matches!(report.outcome, TaskOutcome::Aborted { .. }));
+        assert_eq!(
+            result(
+                &mut runner,
+                "return [buffer_apply_result(43)[:status] == :aborted, buffer_text(:notes)]"
+            ),
+            Value::list([Value::bool(true), Value::string("aé🦀")])
+        );
+    }
+
+    #[test]
+    fn buffer_result_reads_require_buffer_authority() {
+        let mut runner = SourceRunner::new_empty();
+        runner
+            .run_filein("make_identity(:alice)\nmake_relation(:GrantRead, 2)")
+            .unwrap();
+        result(
+            &mut runner,
+            "make_buffer(:notes, :durable)\nbuffer_apply(:notes, 0, [{:text -> \"secret\"}], 42)",
+        );
+        let report = runner
+            .run_source_as(
+                Symbol::intern("alice"),
+                r#"
+            try
+              buffer_apply_result(42)
+            catch E_PERMISSION
+              return true
+            end
+            return false
+        "#,
+            )
+            .unwrap();
+        assert!(
+            matches!(report.outcome, TaskOutcome::Complete { value, .. } if value == Value::bool(true))
+        );
+        result(&mut runner, "assert GrantRead(#alice, :notes)");
+        let report = runner
+            .run_source_as(
+                Symbol::intern("alice"),
+                "return buffer_apply_result(42)[:status] == :ok",
+            )
+            .unwrap();
+        assert!(
+            matches!(report.outcome, TaskOutcome::Complete { value, .. } if value == Value::bool(true))
+        );
+    }
+
+    #[test]
+    fn marker_rebasing_counts_unicode_scalars_and_validates_deltas() {
+        let mut runner = SourceRunner::new_empty();
+        assert_eq!(
+            result(
+                &mut runner,
+                r#"
+            let insertion = [{:at -> 2, :text -> "é🦀"}]
+            let removal = [{:at -> 2, :remove -> 3, :text -> "x"}]
+            let rejected = false
+            try
+              buffer_marker_rebase([{:at -> 5, :remove -> 2}, {:at -> 3, :text -> "x"}], 4, :stick_after)
+            catch E_INVARG
+              rejected = true
+            end
+            return [buffer_marker_rebase(insertion, 2, :stick_before),
+              buffer_marker_rebase(insertion, 2, :stick_after),
+              buffer_marker_rebase(removal, 3, :stick_after),
+              buffer_marker_rebase(removal, 5, :stick_after), rejected]
+        "#
+            ),
+            Value::list([
+                integer(2).unwrap(),
+                integer(4).unwrap(),
+                integer(2).unwrap(),
+                integer(3).unwrap(),
+                Value::bool(true)
+            ])
+        );
+    }
+
+    #[test]
+    fn tagged_client_conflicts_do_not_reexecute_the_submission() {
+        let kernel = RelationKernel::new();
+        let id = Identity::new(10).unwrap();
+        let token = NonZeroU64::new(42).unwrap();
+        let mut tx = kernel.begin();
+        tx.create_buffer(BufferMetadata {
+            id,
+            name: Symbol::intern("notes"),
+            durability: RelationDurability::Durable,
+            conflict: BufferConflictPolicy::Span,
+        })
+        .unwrap();
+        tx.replace_buffer(id, 0..0, "base").unwrap();
+        tx.commit().unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let observed = calls.clone();
+        let builtins = BuiltinRegistry::new().with_builtin(
+            "race",
+            BuiltinResultKind::Dynamic,
+            move |context: &mut BuiltinContext<'_, '_>, _: &[Value]| {
+                observed.fetch_add(1, Ordering::Relaxed);
+                context.tx().apply_buffer(
+                    id,
+                    1,
+                    &[Replacement {
+                        range: 0..1,
+                        text: "client".to_owned(),
+                    }],
+                    Some(token),
+                )?;
+                let mut concurrent = context.kernel().begin();
+                concurrent.replace_buffer(id, 0..1, "winner")?;
+                concurrent.commit()?;
+                Ok(Value::bool(true))
+            },
+        );
+        let program = Program::new(
+            1,
+            [
+                Instruction::BuiltinCall {
+                    dst: Register(0),
+                    name: Symbol::intern("race"),
+                    result_kind: None,
+                    args: vec![],
+                },
+                Instruction::Return {
+                    value: Operand::Register(Register(0)),
+                },
+            ],
+        )
+        .unwrap();
+        let mut task = Task::new_with_builtins(
+            1,
+            &kernel,
+            Arc::new(program),
+            Arc::new(ProgramResolver::new()),
+            Arc::new(builtins),
+            TaskLimits::default(),
+        );
+        assert!(matches!(
+            task.run(),
+            Err(TaskError::Runtime(RuntimeError::Kernel(
+                KernelError::Buffer {
+                    error: BufferError::Conflict { .. },
+                    ..
+                }
+            )))
+        ));
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        assert!(matches!(
+            kernel.buffer_apply_result(token).unwrap().outcome,
+            BufferApplyOutcome::Conflict
+        ));
+        assert_eq!(
+            kernel.snapshot().buffer(id).unwrap().text().to_text(),
+            "winnerase"
+        );
     }
 }
