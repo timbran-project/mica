@@ -130,3 +130,6 @@ Positional hits borrow the argument slice for lookup and retain the shared metho
 Concurrent publication tests preserve independent keys and previously returned results.
 Kernel, runtime, and VM library tests pass, including dispatch replacement and conflict coverage. Kernel clippy passes.
 This removes a quadratic insertion algorithm; pinned cold and warm measurements must establish its effect.
+Cold helper-call captures pass all 18 processes. Rust interpreter latency falls from 29.14 seconds to 27.6 ms after dispatch insertion stops copying prior entries.
+The full warmed capture passes all 207 processes across 23 fixtures. Warm helper calls take 10.80 ms versus the earlier 13.14 ms; Odin takes 1.20 ms.
+Other original fixtures remain within five percent of the comprehension capture. Cache contention across multiple task workers is not measured yet.
