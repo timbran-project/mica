@@ -7949,15 +7949,41 @@ fn json_decode_classifies_token_kinds() {
 fn json_decode_rejects_oversized_integer() {
     let mut runner = SourceRunner::new_empty();
     // 2^55 is outside the Mica integer range (INT_MAX = 2^55 - 1).
-    let error = runner
-        .run_source("return json_decode(\"36028797018963968\")")
-        .unwrap_err();
-    assert!(format!("{error:?}").contains("outside the Mica integer range"));
+    for number in ["36028797018963968", "18446744073709551616"] {
+        let report = runner
+            .run_source(&format!("return json_decode(\"{number}\")"))
+            .unwrap();
+        assert!(matches!(report.outcome, TaskOutcome::Aborted { .. }));
+        assert!(report.render().contains("outside the Mica integer range"));
+    }
+}
 
-    let error = runner
-        .run_source("return json_decode(\"18446744073709551616\")")
-        .unwrap_err();
-    assert!(format!("{error:?}").contains("outside the Mica integer range"));
+#[test]
+fn json_conversion_errors_are_catchable_in_mica() {
+    for interpreter_only in [true, false] {
+        let mut runner = SourceRunner::new_empty().with_interpreter_only(interpreter_only);
+        for (call, code) in [
+            (r#"json_decode("not json")"#, "E_INVARG"),
+            (r#"json_decode("[1,")"#, "E_INVARG"),
+            (r#"json_decode("36028797018963968")"#, "E_INVARG"),
+            (r#"json_decode("1e99")"#, "E_INVARG"),
+            ("json_decode(42)", "E_TYPE"),
+            ("json_encode({1 -> 2})", "E_INVARG"),
+            ("json_encode(error(E_INVARG))", "E_INVARG"),
+        ] {
+            let report = runner
+                .run_source(&format!(
+                    "try\n{call}\ncatch {code}\nreturn true\nend\nreturn false"
+                ))
+                .unwrap();
+            assert!(
+                matches!(&report.outcome, TaskOutcome::Complete { value, .. }
+                if *value == Value::bool(true)),
+                "{call}: {}",
+                report.render()
+            );
+        }
+    }
 }
 
 #[test]

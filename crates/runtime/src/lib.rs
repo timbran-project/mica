@@ -5497,10 +5497,11 @@ fn json_encode_builtin(
             "expected json_encode(value)",
         ));
     }
-    let json = json_value(&args[0])?;
+    let json = crate::json::json_from_value(&args[0])
+        .map_err(|error| raised_builtin_error("E_INVARG", error.to_string(), None))?;
     serde_json::to_string(&json)
         .map(Value::string)
-        .map_err(|error| invalid_builtin_call("json_encode", error.to_string()))
+        .map_err(|error| raised_builtin_error("E_INVARG", error.to_string(), None))
 }
 
 fn json_decode_builtin(
@@ -5513,9 +5514,12 @@ fn json_decode_builtin(
             "expected json_decode(text)",
         ));
     }
-    let text = builtin_string_arg("json_decode", args, 0)?;
-    value_from_json_text(&text)
-        .map_err(|error| invalid_builtin_call("json_decode", error.to_string()))
+    args[0]
+        .with_str(|text| {
+            value_from_json_text(text)
+                .map_err(|error| raised_builtin_error("E_INVARG", error.to_string(), None))
+        })
+        .ok_or_else(|| raised_builtin_error("E_TYPE", "json_decode expects a string", None))?
 }
 
 fn json_null_builtin(
@@ -5700,11 +5704,6 @@ fn sync_signature_builtin(
     let signature = sync_payload_signature(revision, payload.as_bytes());
     Value::int(i64::try_from(signature).expect("sync signatures fit in signed integers"))
         .map_err(|_| invalid_builtin_call("sync_signature", "signature is out of range"))
-}
-
-fn json_value(value: &Value) -> Result<serde_json::Value, RuntimeError> {
-    crate::json::json_from_value(value)
-        .map_err(|e| invalid_builtin_call("json_encode", e.to_string()))
 }
 
 fn dom_text_value(text: impl AsRef<str>) -> Value {

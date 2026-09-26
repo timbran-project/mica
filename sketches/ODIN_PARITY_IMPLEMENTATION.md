@@ -252,3 +252,7 @@ The 33 kernel buffer tests, workspace library tests, shared source scenarios, an
 The editor corpus now passes its tagged revision assertion and exposes a separate uncaught JSON parse error.
 Rust retains its documented no-op rule: edits that restore the original provenance do not advance the revision.
 Odin can advance a revision for such writes; exact no-op revision parity is not claimed.
+
+JSON conversion failures now raise catchable language errors. Malformed or unrepresentable values raise `E_INVARG`; non-string decoder input raises `E_TYPE`.
+Eight focused JSON tests, all runtime tests, and workspace clippy pass.
+The editor reaches session cleanup after this fix; application arity corrections remain in the separate editor port.

@@ -176,6 +176,9 @@ Encoding accepts booleans, numbers, strings, symbols, lists, maps, and the null 
 must be strings or symbols. Symbols become JSON strings, so decoding an encoded symbol returns a
 string. Decoded object keys are always symbols, even when the original Mica map used string keys.
 
+Malformed JSON, out-of-range numbers, and values that cannot be encoded raise catchable `E_INVARG` errors.
+Passing a non-string value to `json_decode` raises `E_TYPE`.
+
 Project identities, relations, errors, and other application values to a deliberate wire shape
 before encoding them. For example, encode a query as a list of maps with fields your protocol
 defines. JSON conversion does not choose whether an empty relation means an empty collection,
