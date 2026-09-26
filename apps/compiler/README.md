@@ -19,11 +19,13 @@ Each method definition contains a selector, an ordered parameter list, and progr
 A parse or emission diagnostic returns `{:ok -> false, :errors -> diagnostics}`.
 `emit_program(rows, root)` returns assembly descriptions before serialization.
 
-The current emitter covers literals, local bindings, required list destructuring, collection construction, indexing, assignment, calls, conditionals, loops, and required verb parameters.
+The current emitter covers literals, local bindings, list destructuring, collection construction, indexing, assignment, calls, conditionals, loops, and required verb parameters.
 Calls include builtins, explicit selectors, named roles, and function values supplied by other code.
 Forward calls and recursive verbs resolve through the runtime method catalogue.
+List destructuring supports optional defaults and one rest binding. Range values support list slicing.
+`raise` and `try` support error-code catches, error bindings, and `finally`. Error fields retain Rust's option-valued message and payload.
 Basic type annotations produce runtime checks. The emitter does not implement Rust's static type analysis.
-Unsupported syntax produces diagnostics, including declarations, relation queries, closures, exception handlers, default parameters, and rest parameters.
+Unsupported syntax produces diagnostics, including declarations, relation queries, closures, catch patterns and guards, default verb parameters, and rest verb parameters.
 Identity literals resolve in the compilation world. Compilation does not install methods or grant authority.
 
 The bootstrap test compiles all three compiler sources, installs their emitted artifacts, then compiles another program with the emitted compiler.

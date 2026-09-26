@@ -299,6 +299,20 @@ verb emit_expr(rows, node, input_state)
   if kind == :Binary
     return emit_binary(rows, node, state)
   end
+  if kind == :Range_Literal
+    let [_, start_node] = ast_attr(rows, node, :start)
+    let [start, after_start] = emit_expr(rows, start_node, state)
+    state = after_start
+    let finish = none
+    let [bounded, end_node] = ast_attr(rows, node, :range_end)
+    if bounded
+      let [end_reg, after_end] = emit_expr(rows, end_node, state)
+      state = after_end
+      finish = [:Register, end_reg]
+    end
+    let [dst, allocated] = emit_register(state)
+    return [dst, emit_append(allocated, [:BuildRange, dst, [:Register, start], finish])]
+  end
   if kind == :List_Literal || kind == :Relation_Literal
     return emit_collection(rows, node, state)
   end
@@ -322,6 +336,18 @@ verb emit_expr(rows, node, input_state)
     let [key, after_key] = emit_expr(rows, key_node, after_collection)
     let [dst, allocated] = emit_register(after_key)
     return [dst, emit_append(allocated, [:Index, dst, collection, [:Register, key]])]
+  end
+  if kind == :Field
+    let [_, name_text] = ast_attr(rows, node, :name)
+    let fields = {"code" -> :Code, "message" -> :Message, "value" -> :Value}
+    let field_name = index_or(fields, name_text, none)
+    if field_name == none
+      return emit_error(state, "functional relation fields require catalogue metadata")
+    end
+    let [_, receiver] = ast_attr(rows, node, :receiver)
+    let [error_reg, emitted] = emit_expr(rows, receiver, state)
+    let [dst, allocated] = emit_register(emitted)
+    return [dst, emit_append(allocated, [:ErrorField, dst, error_reg, field_name])]
   end
   if kind == :Binding
     let [_, pattern] = ast_attr(rows, node, :pattern)
@@ -380,6 +406,26 @@ verb emit_expr(rows, node, input_state)
   if kind == :If
     return emit_if(rows, node, state)
   end
+  if kind == :Try
+    return emit_try(rows, node, state)
+  end
+  if kind == :Raise
+    let parts = ast_children(rows, node, :part)
+    if len(parts) < 1 || len(parts) > 3
+      return emit_error(state, "raise expects an error and optional message and value")
+    end
+    let operands = []
+    for part in parts
+      let [reg, emitted] = emit_expr(rows, part, state)
+      state = emitted
+      operands = [@operands, [:Register, reg]]
+    end
+    while len(operands) < 3
+      operands = [@operands, none]
+    end
+    state = emit_append(state, [:Raise, operands[0], operands[1], operands[2]])
+    return emit_constant(state, [] {[]})
+  end
   if kind == :While || kind == :For
     return emit_loop(rows, node, state)
   end
@@ -391,6 +437,54 @@ verb emit_expr(rows, node, input_state)
     return [reg, emit_unscope(emitted)]
   end
   return emit_error(state, string_concat("unsupported expression: ", to_literal(kind)))
+end
+
+verb emit_try(rows, node, input_state)
+  let [result, state] = emit_constant(input_state, [] {[]})
+  let enter = len(state[:code])
+  state = emit_append(state, [:EnterTry, [], none, 0])
+  let [body_reg, emitted] = emit_block(rows, ast_children(rows, node, :body), emit_scope(state))
+  state = emit_append(emit_unscope(emitted), [:Move, result, body_reg])
+  state = emit_append(state, [:ExitTry])
+  let [has_finally, _] = ast_attr(rows, node, :has_finally)
+  let handlers = []
+  let exits = []
+  for clause in ast_children(rows, node, :catch_clause)
+    let code = none
+    let [has_code, code_text] = ast_attr(rows, clause, :code)
+    if has_code
+      code = error_code(to_symbol(code_text))
+    end
+    let binding = none
+    state = emit_scope(state)
+    let [has_name, name_text] = ast_attr(rows, clause, :name)
+    if has_name
+      let [reg, allocated] = emit_register(state)
+      state = emit_declare(allocated, name_text, reg, true)
+      binding = reg
+    end
+    handlers = [@handlers, [code, binding, len(state[:code])]]
+    let [catch_reg, after_catch] = emit_block(rows, ast_children(rows, clause, :body), state)
+    state = emit_append(emit_unscope(after_catch), [:Move, result, catch_reg])
+    if has_finally
+      state = emit_append(state, [:ExitTry])
+    else
+      exits = [@exits, len(state[:code])]
+      state = emit_append(state, [:Jump, 0])
+    end
+  end
+  let finally_target = none
+  if has_finally
+    finally_target = len(state[:code])
+    let [_, after_finally] = emit_block(rows, ast_children(rows, node, :finally_body), emit_scope(state))
+    state = emit_append(emit_unscope(after_finally), [:EndFinally])
+  end
+  let finish = len(state[:code])
+  for position in exits
+    state = emit_patch(state, position, [:Jump, finish])
+  end
+  state = emit_patch(state, enter, [:EnterTry, handlers, finally_target, finish])
+  return [result, state]
 end
 
 verb emit_binary(rows, node, input_state)
@@ -472,7 +566,7 @@ verb emit_pattern(rows, node, source_reg, immutable, annotation, input_state)
   if kind == :Wildcard_Pattern
     return [source_reg, state]
   end
-  if kind == :Binding_Pattern
+  if kind == :Binding_Pattern || kind == :Optional_Pattern || kind == :Rest_Pattern
     let [_, name_text] = ast_attr(rows, node, :name)
     let [reg, allocated] = emit_register(state)
     state = emit_append(allocated, [:Move, reg, source_reg])
@@ -483,15 +577,26 @@ verb emit_pattern(rows, node, source_reg, immutable, annotation, input_state)
   end
   if kind == :List_Pattern
     let [result, initialized] = emit_constant(state, [] {})
-    state = initialized
+    let [length, allocated] = emit_register(initialized)
+    state = emit_append(allocated, [:CollectionLen, length, source_reg])
     let index = 0
+    let saw_rest = false
     for element in ast_children(rows, node, :element)
-      let [reg, allocated] = emit_register(state)
-      state = emit_append(allocated, [:Index, reg, source_reg, [:Constant, index]])
+      let element_kind = ast_kind(rows, element)
+      if element_kind == :Rest_Pattern
+        if saw_rest
+          return emit_error(state, "a list pattern supports only one rest binding")
+        end
+        saw_rest = true
+      end
+      let [reg, after_slot] = emit_pattern_slot(rows, element, source_reg, index, length, state)
+      state = after_slot
       let [bound, after_pattern] = emit_pattern(rows, element, reg, immutable, "", state)
       result = bound
       state = after_pattern
-      index = index + 1
+      if element_kind != :Rest_Pattern
+        index = index + 1
+      end
     end
     return [result, state]
   end
@@ -530,12 +635,53 @@ verb emit_assignment(rows, node, input_state)
   end
   if target_kind == :Index
     state = emit_append(state, [:SetIndex, dst, collection_reg, [:Register, key_reg], [:Register, value_reg]])
+    let [result, allocated] = emit_register(state)
+    return [result, emit_append(allocated, [:Move, result, dst])]
   else
     let annotation = index_or(state[:binding_types], dst, "")
     state = emit_annotation(state, value_reg, annotation, :Binding, name_text)
     state = emit_append(state, [:Move, dst, value_reg])
   end
   return [value_reg, state]
+end
+
+verb emit_pattern_slot(rows, node, source_reg, position, length, input_state)
+  let kind = ast_kind(rows, node)
+  let [dst, state] = emit_register(input_state)
+  if kind != :Optional_Pattern && kind != :Rest_Pattern
+    return [dst, emit_append(state, [:Index, dst, source_reg, [:Constant, position]])]
+  end
+  let [index_reg, after_index] = emit_constant(state, position)
+  let [condition, allocated] = emit_register(after_index)
+  let operation = :Lt
+  if kind == :Rest_Pattern
+    operation = :Le
+  end
+  state = emit_append(allocated, [:Binary, condition, operation, index_reg, length])
+  let branch = len(state[:code])
+  state = emit_append(state, [:Branch, condition, branch + 1, 0])
+  let key_reg = index_reg
+  if kind == :Rest_Pattern
+    let [range_reg, after_range] = emit_register(state)
+    state = emit_append(after_range, [:BuildRange, range_reg, [:Register, index_reg], none])
+    key_reg = range_reg
+  end
+  state = emit_append(state, [:Index, dst, source_reg, [:Register, key_reg]])
+  let jump = len(state[:code])
+  state = emit_append(state, [:Jump, 0])
+  let absent = len(state[:code])
+  let [has_default, default_node] = ast_attr(rows, node, :default)
+  if has_default
+    let [value_reg, after_value] = emit_expr(rows, default_node, state)
+    state = emit_append(after_value, [:Move, dst, value_reg])
+  elseif kind == :Rest_Pattern
+    state = emit_append(state, [:Load, dst, []])
+  else
+    state = emit_append(state, [:Load, dst, [] {}])
+  end
+  state = emit_patch(state, branch, [:Branch, condition, branch + 1, absent])
+  state = emit_patch(state, jump, [:Jump, len(state[:code])])
+  return [dst, state]
 end
 
 verb emit_call(rows, node, input_state)

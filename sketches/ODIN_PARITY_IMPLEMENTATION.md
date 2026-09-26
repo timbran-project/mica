@@ -364,3 +364,8 @@ Rust RSS stays near 21 MiB. This leaves an approximately two-times timing gap on
 The frontend constructs and lexes 200 Unicode declarations, then parses them into AST rows with checked counts and source positions.
 Rust measures 36.1 ms and approximately 26.3 MiB peak RSS. Odin measures 37.1 ms and approximately 19.0 MiB.
 The frontend result excludes emission and installation. Each implementation loads its own pinned Mica sources, with hashes in the manifest.
+
+The emitter now supports list slices, optional/rest list destructuring, `raise`, and static-code or catch-all handlers with `finally`.
+Error fields use the VM's existing option-valued message and payload semantics through the assembly interface.
+Execution comparisons cover lazy defaults, omitted values, indexed-assignment results, rethrows, and finally execution on break, continue, and return.
+Focused assembly and emitter checks pass. The extended compiler still bootstraps and reproduces target artifacts in both execution modes.
