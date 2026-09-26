@@ -177,3 +177,8 @@ The runtime prevents pending buffer identities and names from colliding with tup
 Seven focused tests pass, including rollback, retirement, actor grants, authority revocation during suspension, and read-only validation.
 Workspace tests and clippy pass for the runtime buffer API.
 Client applies/results, history, compaction, computed relations, markers, and editor integration remain pending.
+
+The single-open capture passes all 12 processes at 4,096 edits. Recovery improves from 43–45 ms to 29–31 ms.
+Strict edits still cost 2.82 s versus 2.65 s, and relaxed edits cost 81 ms versus 69 ms. RSS increases by approximately 2 MiB.
+At 32,768 edits, all six relaxed processes pass: recovery improves from 328 ms to 211 ms, while edit/flush time rises from 520 ms to 604 ms.
+Four strict processes time out at 120 seconds, two per revision. Those failures remain in the capture and prevent a stable strict-mode comparison.
