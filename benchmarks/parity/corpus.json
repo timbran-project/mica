@@ -207,6 +207,16 @@
       "rust_gap": null,
       "source_sha256": "09665bc1b0784680ab152db2b53f1ff66a8ec9559013c6e13a9c1a6e0723b1fc",
       "sha256": "09665bc1b0784680ab152db2b53f1ff66a8ec9559013c6e13a9c1a6e0723b1fc"
+    },
+    {
+      "name": "retrieval_repeated_exact",
+      "file": "mica/retrieval_repeated_exact.mica",
+      "expected": "33664",
+      "setup": true,
+      "rust_gap": null,
+      "source_sha256": null,
+      "sha256": "b2215d4f8cba233c4b31ad63c55372da971ba69cc8be249fd84a58eaf9d86de2",
+      "adaptation": "Shared acceptance fixture added in Rust parity work; no donor source. Exercises exact ties, score checks, and repeated retrieval preparation."
     }
   ],
   "excluded": {
