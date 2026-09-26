@@ -19,7 +19,7 @@ Passing an early workstream does not complete this plan.
 | Computed scans | CPU batches and cached retrieval preparation with unchanged authority, transaction visibility, output bindings, and exact ranking | Implemented for positive rule steps and equality probes; exact retrieval measured |
 | Transactional buffers | Atomic fact/text commits, conflict handling, durable recovery, marker rebasing, and client revision results | Implemented, including client results, history, compaction, and computed views; editor integration and comparative measurements remain |
 | Editor | Shared buffer library and programmable editor running through Rust host services | Shared library, source scenarios, confined files, browser input, and reconnect replay implemented; comparative measurements remain |
-| Query and storage execution | Measured columnar/storage improvements that preserve incremental maintenance | Pending |
+| Query and storage execution | Measured columnar/storage improvements that preserve incremental maintenance | Persistent rule collections, indexed recursive reseeding, retained visible rows, and retained derived indexes measured; initial derivation remains open |
 | Query measurements | Separate initial derivation and small-update maintenance workloads | Implemented and measured; Rust has substantial initial and recursive-deletion costs |
 | Mica compiler | Ported compiler with an intentional Rust assembly interface and bootstrap conformance | Pending |
 | Ingestion | Ported ingestion applications with verified loaded facts and inference results | Pending |
@@ -317,3 +317,9 @@ The capture at `84be391` passes 18 processes and reduces the 16-update workload 
 Update RSS falls from approximately 28.7 MiB to 27.5 MiB. Initial derivation remains approximately 28 ms.
 This is a 6.4-times update improvement from the first capture, with an approximately eight-times gap remaining against Odin.
 Kernel checks cover simultaneous stored-support replacement, subsequent removal, full recomputation, and retained snapshots.
+
+Maintained state now retains query-facing derived tables and updates their indexes when support crosses zero.
+The capture at `665dfb7` passes all 18 processes and reduces the 16-update workload from 118.8 ms to 93.8 ms.
+Initial derivation stays near 28 ms, and update RSS stays near 27 MiB.
+This is an 8.1-times update improvement from the first capture, with an approximately 6.4-times gap remaining against Odin.
+Workspace tests and clippy pass. Regressions cover secondary indexes, stored/derived overlap, unrelated commits, and retained snapshots.
