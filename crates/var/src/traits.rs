@@ -151,6 +151,9 @@ impl Value {
 
 impl PartialEq for Value {
     fn eq(&self, other: &Self) -> bool {
+        if self.raw_bits() == other.raw_bits() {
+            return true;
+        }
         match (self.kind(), other.kind()) {
             (ValueKind::Bool, ValueKind::Bool)
             | (ValueKind::Int, ValueKind::Int)
@@ -211,6 +214,9 @@ impl PartialOrd for Value {
 
 impl Ord for Value {
     fn cmp(&self, other: &Self) -> Ordering {
+        if self.raw_bits() == other.raw_bits() {
+            return Ordering::Equal;
+        }
         let left_kind = self.kind();
         let right_kind = other.kind();
         if left_kind != right_kind {

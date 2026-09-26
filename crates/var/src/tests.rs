@@ -35,6 +35,31 @@ fn value_is_one_word() {
 }
 
 #[test]
+fn comparisons_preserve_order_for_shared_graphs_and_list_views() {
+    let mut shared = Value::string("é🦀");
+    for _ in 0..32 {
+        shared = Value::list([shared.clone(), shared]);
+    }
+    let first = Value::list([shared.clone(), Value::int(1).unwrap()]);
+    let equal = Value::list([shared.clone(), Value::int(1).unwrap()]);
+    let later = Value::list([shared, Value::int(2).unwrap()]);
+    assert_ne!(first.raw_bits(), equal.raw_bits());
+    assert_eq!(first, equal);
+    assert_eq!(first.cmp(&equal), Ordering::Equal);
+    assert_eq!(first.cmp(&later), Ordering::Less);
+    assert_eq!(later.cmp(&first), Ordering::Greater);
+
+    let prefix = Value::list([]).list_append(Value::int(1).unwrap()).unwrap();
+    let alias = prefix.clone();
+    let extension = prefix.list_append(Value::int(2).unwrap()).unwrap();
+    let branch = prefix.list_append(Value::int(3).unwrap()).unwrap();
+    assert_eq!(prefix, alias);
+    assert_eq!(prefix, Value::list([Value::int(1).unwrap()]));
+    assert_eq!(prefix.cmp(&extension), Ordering::Less);
+    assert_eq!(extension.cmp(&branch), Ordering::Less);
+}
+
+#[test]
 fn process_local_value_abi_matches_value_layout() {
     assert_eq!(VALUE_ABI_VERSION, 5);
     assert_eq!(VALUE_TAG_SHIFT, 56);
