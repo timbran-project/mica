@@ -51,7 +51,13 @@ conflict validation, durable commit acknowledgement, or restart recovery; those 
 
 Computed relations are read-only relation surfaces. They are scanned through the same `RelationRead`
 path as stored relations and may be visible to rule evaluation, but their rows are not durable
-truth. Callers that use computed search rows must validate the candidate against ordinary relation
+truth. Providers can override `ComputedRelation::scan_batch` to prepare work once for several input
+rows. Positive rule steps and equality probes use this hook when inputs are available. Each output
+carries its input-row index; the registry checks arity and all bindings for both scalar and batch
+scans. Rule planning defers computed atoms until their required input positions are bound.
+The default batch implementation calls the scalar provider with the same read view.
+
+Callers that use computed search rows must validate the candidate against ordinary relation
 state for existence, freshness, and authority before recording or exposing derived context.
 
 Persistence stores canonical relation state: relation metadata, rule definitions, current

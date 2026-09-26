@@ -108,3 +108,9 @@ The comprehension capture passes 196 of 198 processes, including all nine loop-p
 Two Rust helper-call processes exceed the 30-second whole-process limit; the other four pass.
 These failures remain in the capture. Cold dispatch-cache population needs investigation.
 The small loop-pattern fixture takes 19.7 microseconds in Rust and 59.3 microseconds in Odin, including invocation overhead.
+
+Computed providers now have a CPU batch hook used by positive rule steps and equality probes.
+The registry validates input requirements, output arity, row association, and bound outputs.
+Rule planning waits for required computed inputs. Default providers retain scalar execution semantics.
+Kernel tests cover transaction overlays, repeated keys, bound outputs, malformed providers, and actual batch dispatch.
+Kernel library tests and clippy pass; runtime retrieval tests pass. Retrieval preparation caching is next.

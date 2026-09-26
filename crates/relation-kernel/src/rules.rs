@@ -565,6 +565,27 @@ struct TupleMapReader<'a> {
 }
 
 impl<R: RelationRead> RelationRead for DerivedReader<'_, R> {
+    fn computed_required_bindings(
+        &self,
+        relation: RelationId,
+    ) -> Result<Option<&[u16]>, KernelError> {
+        match self.base.computed_required_bindings(relation) {
+            Err(KernelError::UnknownRelation(unknown)) if unknown == relation => Ok(None),
+            result => result,
+        }
+    }
+
+    fn scan_relation_batch(
+        &self,
+        relation: RelationId,
+        bindings: &[Vec<Option<Value>>],
+    ) -> Result<Option<Vec<crate::ComputedRow>>, KernelError> {
+        if self.derived.contains_key(&relation) {
+            return Ok(None);
+        }
+        self.base.scan_relation_batch(relation, bindings)
+    }
+
     fn scan_relation(
         &self,
         relation: RelationId,
@@ -648,6 +669,27 @@ impl<R: RelationRead> RelationRead for DerivedReader<'_, R> {
 }
 
 impl<R: RelationRead> RelationRead for SccReader<'_, R> {
+    fn computed_required_bindings(
+        &self,
+        relation: RelationId,
+    ) -> Result<Option<&[u16]>, KernelError> {
+        match self.base.computed_required_bindings(relation) {
+            Err(KernelError::UnknownRelation(unknown)) if unknown == relation => Ok(None),
+            result => result,
+        }
+    }
+
+    fn scan_relation_batch(
+        &self,
+        relation: RelationId,
+        bindings: &[Vec<Option<Value>>],
+    ) -> Result<Option<Vec<crate::ComputedRow>>, KernelError> {
+        if self.completed.contains_key(&relation) || self.full.contains_key(&relation) {
+            return Ok(None);
+        }
+        self.base.scan_relation_batch(relation, bindings)
+    }
+
     fn scan_relation(
         &self,
         relation: RelationId,
@@ -1598,6 +1640,7 @@ fn select_next_item(
     items: &[(usize, &CompiledBodyItem)],
 ) -> Result<usize, RuleEvalError> {
     let mut best = None;
+    let mut missing_inputs = None;
     for (index, (body_index, item)) in items.iter().enumerate() {
         let reader = reader_for_body_item(full_reader, delta, *body_index);
         let rank = match item {
@@ -1610,6 +1653,26 @@ fn select_next_item(
                 continue;
             }
             CompiledBodyItem::Atom(atom) => {
+                if let Some(required) = reader.computed_required_bindings(atom.relation)? {
+                    let missing = required
+                        .iter()
+                        .copied()
+                        .filter(|position| {
+                            bindings.iter().any(|binding| {
+                                atom.terms
+                                    .get(*position as usize)
+                                    .is_none_or(|term| !term_is_bound(term, binding))
+                            })
+                        })
+                        .collect::<Vec<_>>();
+                    if !missing.is_empty() {
+                        missing_inputs = Some(KernelError::MissingRequiredBindings {
+                            relation: atom.relation,
+                            positions: missing,
+                        });
+                        continue;
+                    }
+                }
                 let estimate = atom_estimate(reader, atom, bindings)?;
                 let bound_terms = bindings
                     .iter()
@@ -1634,8 +1697,11 @@ fn select_next_item(
             best = Some((index, rank));
         }
     }
-    best.map(|(index, _)| index)
-        .ok_or_else(|| first_unsafe_error(items))
+    best.map(|(index, _)| index).ok_or_else(|| {
+        missing_inputs
+            .map(RuleEvalError::from)
+            .unwrap_or_else(|| first_unsafe_error(items))
+    })
 }
 
 fn first_unsafe_error(items: &[(usize, &CompiledBodyItem)]) -> RuleEvalError {
@@ -1706,6 +1772,20 @@ fn apply_positive_atom(
     bindings: Vec<Binding>,
 ) -> Result<Vec<Binding>, RuleEvalError> {
     let mut out = Vec::new();
+    if bindings.len() > 1 && reader.computed_required_bindings(atom.relation)?.is_some() {
+        let keys = bindings
+            .iter()
+            .map(|binding| scan_bindings(atom, binding))
+            .collect::<Result<Vec<_>, _>>()?;
+        if let Some(rows) = reader.scan_relation_batch(atom.relation, &keys)? {
+            for row in rows {
+                if let Some(next) = unify_tuple(atom, &bindings[row.input_row], &row.tuple) {
+                    out.push(next);
+                }
+            }
+            return Ok(out);
+        }
+    }
     for binding in bindings {
         let scan_bindings = scan_bindings(atom, &binding)?;
         reader.visit_relation(atom.relation, &scan_bindings, &mut |tuple| {

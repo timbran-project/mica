@@ -706,6 +706,28 @@ impl DispatchRead for Snapshot {
 }
 
 impl RelationRead for Snapshot {
+    fn computed_required_bindings(
+        &self,
+        relation: RelationId,
+    ) -> Result<Option<&[u16]>, KernelError> {
+        let metadata = self.relation(relation)?.metadata();
+        Ok(self.computed_relations.required_bound_positions(metadata))
+    }
+
+    fn scan_relation_batch(
+        &self,
+        relation: RelationId,
+        bindings: &[Vec<Option<Value>>],
+    ) -> Result<Option<Vec<crate::ComputedRow>>, KernelError> {
+        if relation_has_active_rule_head(self.rules(), relation) {
+            return Ok(None);
+        }
+        let metadata = self.relation(relation)?.metadata();
+        self.computed_relations
+            .scan_batch(self, metadata, bindings)
+            .transpose()
+    }
+
     fn scan_relation(
         &self,
         relation: RelationId,
@@ -885,6 +907,25 @@ fn combine_value_domains(
 }
 
 impl crate::RelationRead for ExtensionalSnapshotReader<'_> {
+    fn computed_required_bindings(
+        &self,
+        relation: RelationId,
+    ) -> Result<Option<&[u16]>, KernelError> {
+        self.snapshot.computed_required_bindings(relation)
+    }
+
+    fn scan_relation_batch(
+        &self,
+        relation: RelationId,
+        bindings: &[Vec<Option<Value>>],
+    ) -> Result<Option<Vec<crate::ComputedRow>>, KernelError> {
+        let metadata = self.snapshot.relation(relation)?.metadata();
+        self.snapshot
+            .computed_relations
+            .scan_batch(self.snapshot, metadata, bindings)
+            .transpose()
+    }
+
     fn scan_relation(
         &self,
         relation: RelationId,

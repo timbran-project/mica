@@ -17,7 +17,7 @@ use crate::relation_algebra::{
     union_tuple_rows,
 };
 use crate::tuple::TupleKey;
-use crate::{ExecutionContext, KernelError, RelationId, Tuple};
+use crate::{ComputedRow, ExecutionContext, KernelError, RelationId, Tuple};
 use mica_var::{RelationValue, Value};
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -146,6 +146,24 @@ pub trait RelationRead {
         relation: RelationId,
         bindings: &[Option<Value>],
     ) -> Result<Vec<Tuple>, KernelError>;
+
+    /// Required inputs when this view exposes a computed relation.
+    fn computed_required_bindings(
+        &self,
+        _relation: RelationId,
+    ) -> Result<Option<&[u16]>, KernelError> {
+        Ok(None)
+    }
+
+    /// Returns candidates associated with each input row, or declines batching.
+    /// Implementations must apply all bindings before returning candidates.
+    fn scan_relation_batch(
+        &self,
+        _relation: RelationId,
+        _bindings: &[Vec<Option<Value>>],
+    ) -> Result<Option<Vec<ComputedRow>>, KernelError> {
+        Ok(None)
+    }
 
     fn visit_relation(
         &self,
@@ -587,6 +605,13 @@ fn direct_relation_join(
         return Ok(None);
     };
 
+    if reader.computed_required_bindings(*left_relation)?.is_some()
+        || reader
+            .computed_required_bindings(*right_relation)?
+            .is_some()
+    {
+        return Ok(None);
+    }
     reader.join_relation_scans(
         *left_relation,
         left_bindings,
@@ -645,6 +670,9 @@ fn should_probe_join(
     right_bindings: &[Option<Value>],
     right_positions: &[u16],
 ) -> Result<bool, KernelError> {
+    if reader.computed_required_bindings(right_relation)?.is_some() {
+        return Ok(true);
+    }
     if left_len <= PROBE_JOIN_LEFT_ROW_LIMIT {
         return Ok(true);
     }
@@ -667,6 +695,22 @@ fn indexed_nested_loop_join_rows(
     reader: &impl RelationRead,
 ) -> Result<Vec<Tuple>, KernelError> {
     let mut out = Vec::new();
+    if left_rows.len() > 1 && reader.computed_required_bindings(right_relation)?.is_some() {
+        let (inputs, keys): (Vec<_>, Vec<_>) = left_rows
+            .iter()
+            .enumerate()
+            .filter_map(|(index, row)| {
+                probe_bindings(right_bindings, row, left_positions, right_positions)
+                    .map(|key| (index, key))
+            })
+            .unzip();
+        if let Some(rows) = reader.scan_relation_batch(right_relation, &keys)? {
+            for row in rows {
+                out.push(left_rows[inputs[row.input_row]].concat(&row.tuple));
+            }
+            return Ok(finish_tuple_rows(out));
+        }
+    }
     for left_row in left_rows {
         let Some(probe_bindings) =
             probe_bindings(right_bindings, &left_row, left_positions, right_positions)

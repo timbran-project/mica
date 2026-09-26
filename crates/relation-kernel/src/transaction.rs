@@ -1245,6 +1245,32 @@ impl DispatchRead for Transaction<'_> {
 }
 
 impl RelationRead for Transaction<'_> {
+    fn computed_required_bindings(
+        &self,
+        relation: RelationId,
+    ) -> Result<Option<&[u16]>, KernelError> {
+        let metadata = self.base.relation(relation)?.metadata();
+        Ok(self
+            .base
+            .computed_relations
+            .required_bound_positions(metadata))
+    }
+
+    fn scan_relation_batch(
+        &self,
+        relation: RelationId,
+        bindings: &[Vec<Option<Value>>],
+    ) -> Result<Option<Vec<crate::ComputedRow>>, KernelError> {
+        if relation_has_active_rule_head(self.base.rules(), relation) {
+            return Ok(None);
+        }
+        let metadata = self.base.relation(relation)?.metadata();
+        self.base
+            .computed_relations
+            .scan_batch(self, metadata, bindings)
+            .transpose()
+    }
+
     fn scan_relation(
         &self,
         relation: RelationId,
@@ -1380,6 +1406,26 @@ struct ExtensionalTransactionReader<'a, 'kernel> {
 }
 
 impl crate::RelationRead for ExtensionalTransactionReader<'_, '_> {
+    fn computed_required_bindings(
+        &self,
+        relation: RelationId,
+    ) -> Result<Option<&[u16]>, KernelError> {
+        self.tx.computed_required_bindings(relation)
+    }
+
+    fn scan_relation_batch(
+        &self,
+        relation: RelationId,
+        bindings: &[Vec<Option<Value>>],
+    ) -> Result<Option<Vec<crate::ComputedRow>>, KernelError> {
+        let metadata = self.tx.base.relation(relation)?.metadata();
+        self.tx
+            .base
+            .computed_relations
+            .scan_batch(self.tx, metadata, bindings)
+            .transpose()
+    }
+
     fn scan_relation(
         &self,
         relation: RelationId,
