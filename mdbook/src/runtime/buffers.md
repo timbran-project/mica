@@ -10,8 +10,13 @@ Computed relations expose bounded text and marker views. Editor integration rema
 ## Language interface
 
 `make_buffer(:name, :durable | :volatile[, :reject | :span | :whole])` stages an empty buffer and returns `true`.
-Creation requires grant authority, like relation creation. Repeating the declaration adopts a buffer only when its metadata matches.
+Creation requires administrative authority or an invoke grant for `:make_buffer` through the existing invocation policy.
+Repeating the declaration adopts a buffer only when its metadata matches.
 The default conflict policy is `:reject`. A retired name raises `E_KILLED`.
+
+Creating a buffer grants read/write access to that identity for the current task transaction.
+Adopting an existing buffer does not grant access. Later tasks and resumed tasks require fresh grants from policy facts.
+Applications can derive those grants from durable ownership relations. Creation does not grant authority to install code or modify policy.
 
 | Builtin | Result |
 | --- | --- |

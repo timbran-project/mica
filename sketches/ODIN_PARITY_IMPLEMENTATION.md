@@ -264,3 +264,8 @@ The harness renders the page shell and resumes explicit commits to verify final 
 Workspace tests and clippy pass. Browser transport and actual filesystem requests remain unimplemented.
 Host wiring exposed a creation-authority gap: ordinary actors cannot create buffers without administrative grant authority.
 The next runtime boundary is a specific creation grant with transaction-local access to newly created buffers and fresh policy checks afterwards.
+
+Buffer creation now accepts a `:make_buffer` invoke grant, including role grants, without granting administrative authority.
+Only newly created buffers receive temporary read/write capabilities. Re-declaring an existing buffer confers no access.
+Focused tests cover private-buffer denial, computed reads, later policy grants, and authority refresh after suspension in both execution modes.
+Runtime tests and workspace clippy pass. Application ownership policy and host wiring remain separate work.

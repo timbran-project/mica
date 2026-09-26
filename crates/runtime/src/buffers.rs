@@ -1,14 +1,17 @@
 // Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-use crate::{EPHEMERAL_HOST_IDENTITY_START, GENERATED_RELATION_ID_START, require_admin_builtin};
+use crate::{EPHEMERAL_HOST_IDENTITY_START, GENERATED_RELATION_ID_START};
 use mica_relation_kernel::buffer::{
     BufferApplyOutcome, BufferApplyStatus, BufferConflictPolicy, BufferError, BufferMetadata,
     BufferRevertStatus, Delta, InsertionAffinity, Replacement, TextError,
 };
 use mica_relation_kernel::{KernelError, RelationDurability};
 use mica_var::{Identity, Symbol, Tuple, Value, ValueKind};
-use mica_vm::{Builtin, BuiltinContext, BuiltinRegistry, BuiltinResultKind, RuntimeError};
+use mica_vm::{
+    Builtin, BuiltinContext, BuiltinRegistry, BuiltinResultKind, CapabilityGrant, CapabilityOp,
+    RuntimeError,
+};
 use std::num::NonZeroU64;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -229,7 +232,16 @@ impl Builtin for MakeBuffer {
                 "make_buffer expects a name, durability, and optional conflict policy",
             ));
         }
-        require_admin_builtin(context, "make_buffer")?;
+        if !context.authority().can_grant()
+            && !context
+                .authority()
+                .can_invoke_builtin(Symbol::intern("make_buffer"))
+        {
+            return Err(fault(
+                "E_PERMISSION",
+                "buffer creation requires a make_buffer invoke grant",
+            ));
+        }
         let name = symbol(&args[0])?;
         let durability = match symbol(&args[1])?.name() {
             Some("durable") => RelationDurability::Durable,
@@ -285,7 +297,15 @@ impl Builtin for MakeBuffer {
                 durability,
                 conflict,
             }) {
-                Ok(()) => return Ok(Value::bool(true)),
+                Ok(()) => {
+                    if !context.authority().can_read_relation(id) {
+                        context.mint_capability(CapabilityGrant::relation(CapabilityOp::Read, id));
+                    }
+                    if !context.authority().can_write_relation(id) {
+                        context.mint_capability(CapabilityGrant::relation(CapabilityOp::Write, id));
+                    }
+                    return Ok(Value::bool(true));
+                }
                 Err(KernelError::Buffer {
                     error: BufferError::AlreadyExists,
                     ..
@@ -838,6 +858,121 @@ mod tests {
             ),
             integer(2).unwrap()
         );
+    }
+
+    #[test]
+    fn buffer_creation_grants_only_new_buffer_access_until_the_next_task_boundary() {
+        for interpreter_only in [true, false] {
+            let mut runner = SourceRunner::new_empty().with_interpreter_only(interpreter_only);
+            runner
+                .run_filein(
+                    r#"
+                make_identity(:alice)
+                make_identity(:bob)
+                make_relation(:CanInvoke, 2)
+                make_relation(:CanRead, 2)
+                make_relation(:CanWrite, 2)
+                make_relation(:BufferStat, 4)
+                make_buffer(:private, :durable)
+                buffer_insert(:private, 0, "secret")
+                assert CanInvoke(#alice, :make_buffer)
+                assert CanRead(#alice, :BufferStat)
+            "#,
+                )
+                .unwrap();
+            let report = runner
+                .run_source_as(
+                    Symbol::intern("alice"),
+                    r#"
+                make_buffer(:mine, :durable)
+                buffer_insert(:mine, 0, "owned")
+                require BufferStat(:mine, 5, 1, 1)
+                require buffer_text(:mine) == "owned"
+                make_buffer(:private, :durable)
+                let denied = 0
+                try
+                  buffer_text(:private)
+                catch E_PERMISSION
+                  denied = denied + 1
+                end
+                try
+                  buffer_insert(:private, 0, "denied")
+                catch E_PERMISSION
+                  denied = denied + 1
+                end
+                return denied == 2
+            "#,
+                )
+                .unwrap();
+            assert!(
+                matches!(&report.outcome, TaskOutcome::Complete { value, .. }
+                if *value == Value::bool(true)),
+                "{}",
+                report.render()
+            );
+            for (actor, source) in [
+                ("alice", "buffer_text(:mine)"),
+                ("alice", "buffer_insert(:mine, 0, \"denied\")"),
+                ("bob", "make_buffer(:denied, :durable)"),
+            ] {
+                let report = runner
+                    .run_source_as(
+                        Symbol::intern(actor),
+                        &format!(
+                            "try\n{source}\ncatch E_PERMISSION\nreturn true\nend\nreturn false"
+                        ),
+                    )
+                    .unwrap();
+                assert!(
+                    matches!(&report.outcome, TaskOutcome::Complete { value, .. }
+                    if *value == Value::bool(true)),
+                    "{}",
+                    report.render()
+                );
+            }
+            result(
+                &mut runner,
+                "assert CanRead(#alice, :mine)\nassert CanWrite(#alice, :mine)",
+            );
+            let report = runner
+                .run_source_as(
+                    Symbol::intern("alice"),
+                    "buffer_insert(:mine, 5, \"!\")\nreturn buffer_text(:mine)",
+                )
+                .unwrap();
+            assert!(
+                matches!(&report.outcome, TaskOutcome::Complete { value, .. }
+                if *value == Value::string("owned!")),
+                "{}",
+                report.render()
+            );
+            let report = runner
+                .run_source_as(
+                    Symbol::intern("alice"),
+                    r#"
+                make_buffer(:temporary, :volatile)
+                buffer_insert(:temporary, 0, "before")
+                suspend()
+                try
+                  buffer_text(:temporary)
+                catch E_PERMISSION
+                  return true
+                end
+                return false
+            "#,
+                )
+                .unwrap();
+            assert!(matches!(report.outcome, TaskOutcome::Suspended { .. }));
+            let report = runner
+                .resume_as(Symbol::intern("alice"), report.task_id)
+                .unwrap();
+            assert!(
+                matches!(&report.outcome, TaskOutcome::Complete { value, .. }
+                if *value == Value::bool(true)),
+                "{}",
+                report.render()
+            );
+        }
     }
 
     #[test]
