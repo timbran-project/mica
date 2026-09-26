@@ -1405,9 +1405,9 @@ fn program_artifact_round_trips_direct_relation_pattern_operations() {
                 dst: reg(3),
                 value: Value::int(0).unwrap(),
             },
-            Instruction::RelationCellAt {
+            Instruction::CollectionFieldAt {
                 dst: reg(4),
-                relation: reg(0),
+                collection: reg(0),
                 index: reg(3),
                 heading,
                 column: Symbol::intern("right"),

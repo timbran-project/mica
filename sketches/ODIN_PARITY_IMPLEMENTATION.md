@@ -90,3 +90,10 @@ Workspace tests and clippy pass. The storage concurrency test passes Miri with s
 The process-local value ABI is version 5. Durable encoding is unchanged. The list capture passes all 54 processes.
 List construction improves from 4.51 to 0.427 milliseconds; Odin takes 0.265 milliseconds.
 This result applies to scalar append. Nested-list append still copies and needs separate performance work.
+
+Loop headers now support list scatter patterns and ignored bindings, including annotations, optional defaults, and rest bindings.
+Scatter headers lower into the existing loop and binding representation with unspellable temporary names.
+Row loops also accept map values. Relation rows retain exact-heading checks; missing fields raise `E_MATCH`.
+The bytecode operation is named `CollectionFieldAt` to describe both cases.
+Tests cover scope, type errors, missing fields, defaults, continue, closures, suspension, artifact round trips, and unique node ids.
+Compiler, VM, and runtime library tests pass. Relevant clippy checks pass. Comprehensions remain pending.

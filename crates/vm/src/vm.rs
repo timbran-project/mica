@@ -984,7 +984,7 @@ fn opcode_name(opcode: &Opcode) -> &'static str {
         Opcode::CollectionValueAt { .. } => "CollectionValueAt",
         Opcode::RelationPattern { .. } => "RelationPattern",
         Opcode::RelationCell { .. } => "RelationCell",
-        Opcode::RelationCellAt { .. } => "RelationCellAt",
+        Opcode::CollectionFieldAt { .. } => "CollectionFieldAt",
         Opcode::ScanExists { .. } => "ScanExists",
         Opcode::ScanBindings { .. } => "ScanBindings",
         Opcode::ScanValue { .. } => "ScanValue",
@@ -1870,48 +1870,55 @@ impl RegisterVm {
                 self.advance_ip_unchecked();
                 Ok(VmHostResponse::Continue)
             }
-            Opcode::RelationCellAt {
+            Opcode::CollectionFieldAt {
                 dst,
-                relation,
+                collection,
                 index,
                 heading,
                 column,
             } => {
-                let relation_value = self.read_register_unchecked(*relation).clone();
+                let collection_value = self.read_register_unchecked(*collection).clone();
                 let row_index = self
                     .read_register_unchecked(*index)
                     .as_int()
                     .and_then(|index| usize::try_from(index).ok());
                 let expected_heading = program.operands(*heading);
-                let value = relation_value
-                    .with_relation(|value| {
-                        if value.heading().len() != expected_heading.len()
-                            || !value.heading().iter().zip(expected_heading).all(
-                                |(actual, expected)| {
-                                    *actual
-                                        == self
-                                            .resolve_operand_ref(program, *expected)
-                                            .as_symbol()
-                                            .expect("validated row heading is symbolic")
-                                },
-                            )
-                        {
-                            return None;
-                        }
-                        let position = value.column_position(*column)?;
-                        value
-                            .rows()
-                            .get(row_index?)?
-                            .values()
-                            .get(position)
-                            .cloned()
+                let value = if collection_value.kind() == ValueKind::Relation {
+                    collection_value
+                        .with_relation(|value| {
+                            if value.heading().len() != expected_heading.len()
+                                || !value.heading().iter().zip(expected_heading).all(
+                                    |(actual, expected)| {
+                                        *actual
+                                            == self
+                                                .resolve_operand_ref(program, *expected)
+                                                .as_symbol()
+                                                .expect("validated row heading is symbolic")
+                                    },
+                                )
+                            {
+                                return None;
+                            }
+                            let position = value.column_position(*column)?;
+                            value
+                                .rows()
+                                .get(row_index?)?
+                                .values()
+                                .get(position)
+                                .cloned()
+                        })
+                        .flatten()
+                } else {
+                    row_index.and_then(|_| {
+                        collection_value_at(&collection_value, self.read_register_unchecked(*index))
+                            .map_get(&Value::symbol(*column))
                     })
-                    .flatten();
+                };
                 let Some(value) = value else {
                     return self.begin_raise(Value::error(
                         Symbol::intern("E_MATCH"),
-                        Some("relation row does not match the loop pattern"),
-                        Some(relation_value),
+                        Some("collection row does not match the loop pattern"),
+                        Some(collection_value),
                     ));
                 };
                 self.write_register_unchecked(*dst, value);

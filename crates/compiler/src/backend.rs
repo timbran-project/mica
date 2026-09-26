@@ -4201,9 +4201,9 @@ impl<'a> ProgramCompiler<'a> {
             heading.sort_unstable();
             for (column, binding) in row {
                 let register = self.alloc_register();
-                self.emit(Instruction::RelationCellAt {
+                self.emit(Instruction::CollectionFieldAt {
                     dst: register,
-                    relation: collection,
+                    collection,
                     index,
                     heading: heading.clone(),
                     column: Symbol::intern(column),

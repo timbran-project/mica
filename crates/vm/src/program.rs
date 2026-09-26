@@ -390,9 +390,9 @@ pub enum Instruction {
         relation: Register,
         column: Symbol,
     },
-    RelationCellAt {
+    CollectionFieldAt {
         dst: Register,
-        relation: Register,
+        collection: Register,
         index: Register,
         heading: Vec<Symbol>,
         column: Symbol,
@@ -753,9 +753,9 @@ pub(crate) enum Opcode {
         relation: Register,
         column: Symbol,
     },
-    RelationCellAt {
+    CollectionFieldAt {
         dst: Register,
-        relation: Register,
+        collection: Register,
         index: Register,
         heading: TableRange,
         column: Symbol,
@@ -966,7 +966,7 @@ impl Opcode {
             | Self::CollectionValueAt { dst, .. }
             | Self::RelationPattern { dst, .. }
             | Self::RelationCell { dst, .. }
-            | Self::RelationCellAt { dst, .. }
+            | Self::CollectionFieldAt { dst, .. }
             | Self::ScanExists { dst, .. }
             | Self::ScanBindings { dst, .. }
             | Self::ScanValue { dst, .. }
@@ -3111,15 +3111,15 @@ impl Program {
                 relation: *relation,
                 column: *column,
             },
-            Opcode::RelationCellAt {
+            Opcode::CollectionFieldAt {
                 dst,
-                relation,
+                collection: relation,
                 index,
                 heading,
                 column,
-            } => Instruction::RelationCellAt {
+            } => Instruction::CollectionFieldAt {
                 dst: *dst,
-                relation: *relation,
+                collection: *relation,
                 index: *index,
                 heading: self
                     .operands(*heading)
@@ -3837,15 +3837,15 @@ impl ProgramBuilder {
                 relation,
                 column,
             },
-            Instruction::RelationCellAt {
+            Instruction::CollectionFieldAt {
                 dst,
-                relation,
+                collection: relation,
                 index,
                 heading,
                 column,
-            } => Opcode::RelationCellAt {
+            } => Opcode::CollectionFieldAt {
                 dst,
-                relation,
+                collection: relation,
                 index,
                 heading: self.operands(
                     heading
@@ -4732,9 +4732,9 @@ fn validate_instruction(
             validate_register(register_count, *dst)?;
             validate_register(register_count, *relation)
         }
-        Instruction::RelationCellAt {
+        Instruction::CollectionFieldAt {
             dst,
-            relation,
+            collection: relation,
             index,
             ..
         } => {
@@ -4945,7 +4945,7 @@ const INST_CHECK_KIND: u8 = 57;
 const INST_CHECK_TYPE: u8 = 58;
 const INST_RELATION_PATTERN: u8 = 59;
 const INST_RELATION_CELL: u8 = 60;
-const INST_RELATION_CELL_AT: u8 = 61;
+const INST_COLLECTION_FIELD_AT: u8 = 61;
 
 const UNARY_NOT: u8 = 0;
 const UNARY_NEG: u8 = 1;
@@ -5282,14 +5282,14 @@ fn write_instruction(out: &mut Vec<u8>, instruction: &Instruction) -> Result<(),
             write_register(out, *relation);
             write_named_symbol(out, *column, "relation cell column")
         }
-        Instruction::RelationCellAt {
+        Instruction::CollectionFieldAt {
             dst,
-            relation,
+            collection: relation,
             index,
             heading,
             column,
         } => {
-            out.push(INST_RELATION_CELL_AT);
+            out.push(INST_COLLECTION_FIELD_AT);
             write_register(out, *dst);
             write_register(out, *relation);
             write_register(out, *index);
@@ -6100,7 +6100,7 @@ impl<'a> ByteReader<'a> {
                 relation: self.read_register()?,
                 column: Symbol::intern(&self.read_string()?),
             },
-            INST_RELATION_CELL_AT => {
+            INST_COLLECTION_FIELD_AT => {
                 let dst = self.read_register()?;
                 let relation = self.read_register()?;
                 let index = self.read_register()?;
@@ -6109,9 +6109,9 @@ impl<'a> ByteReader<'a> {
                 for _ in 0..heading_count {
                     heading.push(Symbol::intern(&self.read_string()?));
                 }
-                Instruction::RelationCellAt {
+                Instruction::CollectionFieldAt {
                     dst,
-                    relation,
+                    collection: relation,
                     index,
                     heading,
                     column: Symbol::intern(&self.read_string()?),

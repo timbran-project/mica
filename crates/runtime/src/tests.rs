@@ -8185,3 +8185,95 @@ fn list_append_keeps_nested_aliases_across_errors_and_suspension() {
         Value::list([int(1), original.clone(), int(3), int(4), int(5)]),
     ])));
 }
+
+#[test]
+fn loop_patterns_destructure_lists_maps_and_relations() {
+    for interpreter_only in [true, false] {
+        let mut runner = SourceRunner::new_empty().with_interpreter_only(interpreter_only);
+        for (source, expected) in [
+            (
+                "let total = 0\nfor [a, b] in [[1, 2], [3, 4]]\ntotal = total + a + b\nend\nreturn total",
+                10,
+            ),
+            (
+                "let total = 0\nfor {a} in [{:a -> 1}, {:a -> 2, :extra -> 3}]\ntotal = total + a\nend\nreturn total",
+                3,
+            ),
+            (
+                "let total = 0\nfor {a} in [:a] { [1], [2] }\ntotal = total + a\nend\nreturn total",
+                3,
+            ),
+            (
+                "let total = 0\nfor _ in [1, 2, 3]\ntotal = total + 1\nend\nreturn total",
+                3,
+            ),
+            (
+                "let total = 0\nfor _, _ in [1, 2, 3]\ntotal = total + 1\nend\nreturn total",
+                3,
+            ),
+            (
+                "let total = 0\nfor [_, a, @rest] in [[99, 1, 3, 4], [99, 2]]\ntotal = total + a + len(rest)\nend\nreturn total",
+                5,
+            ),
+            (
+                "let calls = 0\nfor [a, ?b = (calls = calls + 1)] in [[1], [1, 5]]\nend\nreturn calls",
+                1,
+            ),
+            ("let a = 99\nfor [a] in [[1], [2]]\nend\nreturn a", 99),
+            (
+                "let total = 0\nfor [a: int, b: int] in [[1, 2], [3, 4]]\nif a == 1\ncontinue\nend\ntotal = total + b\nend\nreturn total",
+                4,
+            ),
+            (
+                "try\nfor {a} in [:a, :extra] { [1, 2] }\nend\ncatch E_MATCH\nreturn 42\nend",
+                42,
+            ),
+            (
+                "try\nfor {a} in [{:wrong -> 1}]\nend\ncatch E_MATCH\nreturn 42\nend",
+                42,
+            ),
+            (
+                "try\nfor [a, b] in [[1]]\nend\ncatch E_INDEX\nreturn 42\nend",
+                42,
+            ),
+            (
+                "try\nfor [a: int] in [[\"wrong\"]]\nend\ncatch E_TYPE\nreturn 42\nend",
+                42,
+            ),
+        ] {
+            let report = runner
+                .run_source(source)
+                .unwrap_or_else(|error| panic!("{source}: {error:?}"));
+            assert_completed_value(&report, Value::int(expected).unwrap());
+        }
+    }
+}
+
+#[test]
+fn destructured_loop_closures_keep_each_iteration_value_across_suspension() {
+    let mut runner = SourceRunner::new_empty();
+    let report = runner
+        .run_source(
+            "let callbacks = []
+         for [value] in [[1], [2]]
+           callbacks = [@callbacks, fn() => value]
+           if value == 1
+             suspend()
+           end
+         end
+         return [callbacks[0](), callbacks[1]()]",
+        )
+        .unwrap();
+    assert!(matches!(report.outcome, TaskOutcome::Suspended { .. }));
+    let outcome = runner
+        .resume_task(TaskRequest {
+            input: TaskInput::Continuation {
+                task_id: report.task_id,
+                value: Value::unit(),
+            },
+            ..SourceRunner::root_source_request("")
+        })
+        .unwrap();
+    assert!(matches!(outcome, TaskOutcome::Complete { value, .. }
+        if value == Value::list([Value::int(1).unwrap(), Value::int(2).unwrap()])));
+}

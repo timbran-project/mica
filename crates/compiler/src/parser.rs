@@ -542,6 +542,8 @@ impl<'a> Parser<'a> {
         let mut children = vec![self.bump_element()];
         if self.current_kind() == SyntaxKind::LBrace {
             children.push(CstElement::Node(self.parse_row_pattern()));
+        } else if self.current_kind() == SyntaxKind::LBracket {
+            children.push(CstElement::Node(self.parse_pattern_brackets()));
         } else {
             children.push(CstElement::Node(self.parse_loop_binding()));
             if self.current_kind() == SyntaxKind::Comma {
@@ -557,7 +559,12 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_loop_binding(&mut self) -> CstNode {
-        let mut children = vec![self.expect_token(SyntaxKind::Ident, "expected loop binding")];
+        let binding = if self.current_kind() == SyntaxKind::Underscore {
+            self.bump_element()
+        } else {
+            self.expect_token(SyntaxKind::Ident, "expected loop binding")
+        };
+        let mut children = vec![binding];
         if self.current_kind() == SyntaxKind::Colon {
             children.push(self.bump_element());
             children.push(CstElement::Node(self.parse_type_ref()));
@@ -853,7 +860,11 @@ impl<'a> Parser<'a> {
             if matches!(self.current_kind(), SyntaxKind::Question | SyntaxKind::At) {
                 binding.push(self.bump_element());
             }
-            binding.push(self.expect_token(SyntaxKind::Ident, "expected scatter binding name"));
+            binding.push(if self.current_kind() == SyntaxKind::Underscore {
+                self.bump_element()
+            } else {
+                self.expect_token(SyntaxKind::Ident, "expected scatter binding name")
+            });
             if self.current_kind() == SyntaxKind::Colon {
                 binding.push(self.bump_element());
                 binding.push(CstElement::Node(self.parse_type_ref()));

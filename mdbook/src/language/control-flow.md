@@ -93,6 +93,7 @@ each iteration receives:
 
 | Iterable             | One binding | Two bindings                  |
 | -------------------- | ----------- | ----------------------------- |
+| string               | Unicode scalar integer | scalar position, scalar integer |
 | list                 | element     | zero-based index, element     |
 | map                  | value       | key, value                    |
 | relation value       | row map     | zero-based row index, row map |
@@ -107,6 +108,28 @@ for index, label in ["inspect", "repair"]
   numbered = [@numbered, [index, label]]
 end
 require numbered == [[0, "inspect"], [1, "repair"]]
+```
+
+List patterns use the same bindings as scatter assignment. They support annotations, optional values, rest bindings, and `_` for ignored elements.
+A single `_` ignores the whole iteration value.
+
+```mica,eval
+let total = 0
+for [left: int, right: int] in [[1, 2], [3, 4]]
+  total = total + left + right
+end
+require total == 10
+```
+
+Row patterns also bind fields from maps. A map can contain additional fields.
+A relation row must have the pattern's exact heading. Missing map fields or mismatched relation headings raise `E_MATCH`.
+
+```mica,eval
+let total = 0
+for {count} in [{:count -> 2}, {:count -> 3, :label -> "three"}]
+  total = total + count
+end
+require total == 5
 ```
 
 Loop bindings are local to the loop. Bind a mutable accumulator before the loop when the result must

@@ -1110,7 +1110,7 @@ impl<'a> Lower<'a> {
             .map(|binding| self.lower_loop_binding(binding))
             .collect::<Vec<_>>()
             .into_iter();
-        let key = bindings.next().unwrap_or_else(|| LoopBinding {
+        let mut key = bindings.next().unwrap_or_else(|| LoopBinding {
             id: self.node_id(),
             name: String::new(),
             annotation: None,
@@ -1122,11 +1122,37 @@ impl<'a> Lower<'a> {
             .find(|child| is_expr_node(child.kind))
             .map(|child| self.lower_expr(child))
             .unwrap_or_else(|| self.error_expr(node));
-        let body = self
+        let mut body = self
             .node_children(node)
             .find(|child| child.kind == SyntaxKind::Block)
             .map(|block| self.lower_items(block))
             .unwrap_or_default();
+        if let Some(pattern) = self
+            .node_children(node)
+            .find(|child| child.kind == SyntaxKind::ScatterPattern)
+        {
+            key.name = format!("<loop value {}>", key.id.0);
+            let source = Expr::Name {
+                id: self.node_id(),
+                span: pattern.span.clone(),
+                name: key.name.clone(),
+            };
+            let scatter = Expr::Binding {
+                id: self.node_id(),
+                span: pattern.span.clone(),
+                kind: BindingKind::Let,
+                pattern: BindingPattern::Scatter(self.lower_scatter_bindings(pattern)),
+                annotation: None,
+                value: Some(Box::new(source)),
+            };
+            body.insert(
+                0,
+                Item::Expr {
+                    id: self.node_id(),
+                    expr: scatter,
+                },
+            );
+        }
         Expr::For {
             id: self.node_id(),
             span: node.span.clone(),
@@ -1424,9 +1450,12 @@ impl<'a> Lower<'a> {
     }
 
     fn lower_loop_binding(&mut self, node: &CstNode) -> LoopBinding {
+        let id = self.node_id();
         LoopBinding {
-            id: self.node_id(),
-            name: self.first_text(node, SyntaxKind::Ident).unwrap_or_default(),
+            id,
+            name: self
+                .first_text(node, SyntaxKind::Ident)
+                .unwrap_or_else(|| format!("<ignored binding {}>", id.0)),
             annotation: self
                 .node_children(node)
                 .find(|child| child.kind == SyntaxKind::TypeRef)
@@ -1456,9 +1485,12 @@ impl<'a> Lower<'a> {
         } else {
             ParamMode::Required
         };
+        let id = self.node_id();
         ScatterBinding {
-            id: self.node_id(),
-            name: self.first_text(node, SyntaxKind::Ident).unwrap_or_default(),
+            id,
+            name: self
+                .first_text(node, SyntaxKind::Ident)
+                .unwrap_or_else(|| format!("<ignored binding {}>", id.0)),
             mode,
             annotation: self
                 .node_children(node)
@@ -2657,6 +2689,21 @@ mod tests {
                 .iter()
                 .any(|error| error.message.contains("invalid bytes literal"))
         );
+    }
+
+    #[test]
+    fn loop_pattern_lowering_keeps_node_ids_unique_and_dense() {
+        let ast = parse_ast(
+            "for [_, first, ?second = 2, @rest] in [[0, 1]]\nfirst + second\nend\nfor _, _ in [1]\nend",
+        );
+        assert_eq!(ast.errors, vec![]);
+        let mut ids = Vec::new();
+        for item in &ast.items {
+            collect_item_ids(item, &mut ids);
+        }
+        let unique = ids.iter().copied().collect::<BTreeSet<_>>();
+        assert_eq!(ids.len(), unique.len());
+        assert_eq!(ids.len(), ast.node_count as usize);
     }
 
     #[test]
