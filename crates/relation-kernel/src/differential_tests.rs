@@ -1674,3 +1674,59 @@ fn recursive_deletion_reseeds_through_maintained_join_indexes() {
         );
     }
 }
+
+#[test]
+fn recursive_overdeletion_keeps_facts_asserted_in_the_same_commit() {
+    let kernel = RelationKernel::new();
+    create_relations(&kernel, &[(590, "Seed", 1), (591, "Present", 1)]);
+    for source in [rel(590), rel(591)] {
+        kernel
+            .install_rule(
+                Rule::new(
+                    rel(591),
+                    [var("value")],
+                    [Atom::positive(source, [var("value")])],
+                ),
+                "recursive presence with stored support",
+            )
+            .unwrap();
+    }
+    let seven = Tuple::from([int(7)]);
+    let eight = Tuple::from([int(8)]);
+    let mut seed = kernel.begin();
+    seed.assert(rel(590), seven.clone()).unwrap();
+    seed.assert(rel(590), eight.clone()).unwrap();
+    seed.commit().unwrap();
+    let before = kernel.snapshot();
+    assert_eq!(
+        before.scan(rel(591), &[None]).unwrap(),
+        vec![seven.clone(), eight.clone()]
+    );
+    let mut replacement = kernel.begin();
+    replacement.retract(rel(590), seven.clone()).unwrap();
+    replacement.assert(rel(591), seven.clone()).unwrap();
+    replacement.commit().unwrap();
+    let replaced = kernel.snapshot();
+    assert_eq!(
+        replaced.scan(rel(591), &[None]).unwrap(),
+        vec![seven.clone(), eight.clone()]
+    );
+    assert_maintained_matches_complete(&replaced, &[(rel(591), 1)]);
+    let mut removal = kernel.begin();
+    removal.retract(rel(591), seven.clone()).unwrap();
+    removal.commit().unwrap();
+    let removed = kernel.snapshot();
+    assert_eq!(
+        removed.scan(rel(591), &[None]).unwrap(),
+        vec![eight.clone()]
+    );
+    assert_maintained_matches_complete(&removed, &[(rel(591), 1)]);
+    assert_eq!(
+        before.scan(rel(591), &[None]).unwrap(),
+        vec![seven.clone(), eight.clone()]
+    );
+    assert_eq!(
+        replaced.scan(rel(591), &[None]).unwrap(),
+        vec![seven, eight]
+    );
+}

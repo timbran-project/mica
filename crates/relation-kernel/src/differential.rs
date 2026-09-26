@@ -981,9 +981,21 @@ fn advance_recursive_component(
             .difference(overdeleted.get(target).unwrap_or(&BTreeSet::new()))
             .cloned()
             .collect::<BTreeSet<_>>();
-        let mut visible = extensional_rows(advance.next, *target)?;
-        visible.extend(remaining.iter().cloned());
-        settled.insert(*target, visible);
+        let extensional = extensional_rows(advance.next, *target)?;
+        let visible = settled
+            .get_mut(target)
+            .expect("recursive target should have a maintained collection");
+        // The collection already contains the extensional changes and previous
+        // derived rows. Remove only overdeleted rows without a stored fact.
+        if remaining.is_empty() {
+            *visible = extensional;
+        } else if let Some(overdeleted) = overdeleted.get(target) {
+            for tuple in overdeleted {
+                if !extensional.contains(tuple) {
+                    visible.remove(tuple);
+                }
+            }
+        }
         next_derived.insert(*target, remaining);
     }
 
