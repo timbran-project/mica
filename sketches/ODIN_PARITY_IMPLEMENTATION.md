@@ -20,7 +20,7 @@ Passing an early workstream does not complete this plan.
 | Transactional buffers | Atomic fact/text commits, conflict handling, durable recovery, marker rebasing, and client revision results | Implemented, including client results, history, compaction, and computed views; editor integration and comparative measurements remain |
 | Editor | Shared buffer library and programmable editor running through Rust host services | Shared library, source scenarios, confined files, browser input, and reconnect replay implemented; comparative measurements remain |
 | Query and storage execution | Measured columnar/storage improvements that preserve incremental maintenance | Pending |
-| Query measurements | Separate initial derivation and small-update maintenance workloads | Pending |
+| Query measurements | Separate initial derivation and small-update maintenance workloads | Implemented and measured; Rust has substantial initial and recursive-deletion costs |
 | Mica compiler | Ported compiler with an intentional Rust assembly interface and bootstrap conformance | Pending |
 | Ingestion | Ported ingestion applications with verified loaded facts and inference results | Pending |
 
