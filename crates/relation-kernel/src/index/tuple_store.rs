@@ -14,7 +14,7 @@ use super::natural_prefix_covers_all_bindings;
 const TUPLE_STORE_RADIX_THRESHOLD: usize = 4096;
 
 #[derive(Clone)]
-pub(super) enum TupleStore {
+pub(crate) enum TupleStore {
     Small(Arc<BTreeSet<Tuple>>),
     Radix {
         entries: VersionedAdaptiveRadixTree<RadixTupleKey, Tuple>,
@@ -38,7 +38,7 @@ impl fmt::Debug for TupleStore {
 }
 
 impl TupleStore {
-    pub(super) fn empty() -> Self {
+    pub(crate) fn empty() -> Self {
         Self::Small(Arc::new(BTreeSet::new()))
     }
 
@@ -58,14 +58,14 @@ impl TupleStore {
         }
     }
 
-    pub(super) fn len(&self) -> usize {
+    pub(crate) fn len(&self) -> usize {
         match self {
             Self::Small(tuples) => tuples.len(),
             Self::Radix { len, .. } => *len,
         }
     }
 
-    pub(super) fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
@@ -76,7 +76,7 @@ impl TupleStore {
         }
     }
 
-    pub(super) fn contains(&self, tuple: &Tuple) -> bool {
+    pub(crate) fn contains(&self, tuple: &Tuple) -> bool {
         match self {
             Self::Small(tuples) => tuples.contains(tuple),
             Self::Radix { entries, .. } => {
@@ -109,7 +109,7 @@ impl TupleStore {
         }
     }
 
-    pub(super) fn insert(&mut self, tuple: Tuple) -> bool {
+    pub(crate) fn insert(&mut self, tuple: Tuple) -> bool {
         match self {
             Self::Small(tuples) => {
                 let tuples = Arc::make_mut(tuples);
@@ -130,7 +130,7 @@ impl TupleStore {
         }
     }
 
-    pub(super) fn remove(&mut self, tuple: &Tuple) -> bool {
+    pub(crate) fn remove(&mut self, tuple: &Tuple) -> bool {
         match self {
             Self::Small(tuples) => Arc::make_mut(tuples).remove(tuple),
             Self::Radix { entries, len } => {
@@ -177,6 +177,17 @@ impl TupleStore {
             Self::Radix { entries, .. } => out.extend(entries.values_iter().cloned()),
         }
         out
+    }
+
+    pub(crate) fn iter(&self) -> impl Iterator<Item = &Tuple> {
+        let (small, radix) = match self {
+            Self::Small(tuples) => (Some(tuples.iter()), None),
+            Self::Radix { entries, .. } => (None, Some(entries.values_iter())),
+        };
+        small
+            .into_iter()
+            .flatten()
+            .chain(radix.into_iter().flatten())
     }
 
     pub(super) fn scan_prefix(
@@ -334,7 +345,7 @@ impl TupleStore {
     }
 
     fn promote_to_radix(&mut self) {
-        let Self::Small(tuples) = std::mem::replace(self, Self::empty()) else {
+        let Self::Small(tuples) = std::mem::take(self) else {
             return;
         };
         let tuples = match Arc::try_unwrap(tuples) {
@@ -348,5 +359,73 @@ impl TupleStore {
             entries.insert_k(&key, tuple);
         }
         *self = Self::Radix { entries, len };
+    }
+}
+
+impl Default for TupleStore {
+    fn default() -> Self {
+        Self::empty()
+    }
+}
+
+impl FromIterator<Tuple> for TupleStore {
+    fn from_iter<T: IntoIterator<Item = Tuple>>(iter: T) -> Self {
+        let mut rows: Vec<_> = iter.into_iter().collect();
+        rows.sort_unstable();
+        rows.dedup();
+        Self::from_sorted_unique(&rows)
+    }
+}
+
+impl Extend<Tuple> for TupleStore {
+    fn extend<T: IntoIterator<Item = Tuple>>(&mut self, iter: T) {
+        if self.is_empty() {
+            *self = iter.into_iter().collect();
+            return;
+        }
+        for tuple in iter {
+            self.insert(tuple);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ordered_iteration_and_retained_branches_survive_radix_promotion() {
+        let row = |value: i64| {
+            Tuple::from([
+                Value::int(value).unwrap(),
+                Value::string(format!("é🦀/{value}")),
+            ])
+        };
+        let input = (0..4096).rev().chain(0..128).map(row).collect::<Vec<_>>();
+        let mut rows: TupleStore = input.clone().into_iter().collect();
+        let mut oracle: BTreeSet<_> = input.into_iter().collect();
+        let before_promotion = rows.clone();
+        rows.extend((4096..4208).map(row));
+        oracle.extend((4096..4208).map(row));
+        let retained_radix = rows.clone();
+        for value in (0..4208).step_by(3) {
+            assert_eq!(rows.remove(&row(value)), oracle.remove(&row(value)));
+        }
+        rows.extend((-50..50).rev().map(row));
+        oracle.extend((-50..50).map(row));
+        assert_eq!(
+            rows.iter().collect::<Vec<_>>(),
+            oracle.iter().collect::<Vec<_>>()
+        );
+        assert_eq!(
+            before_promotion.iter().cloned().collect::<Vec<_>>(),
+            (0..4096).map(row).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            retained_radix.iter().cloned().collect::<Vec<_>>(),
+            (0..4208).map(row).collect::<Vec<_>>()
+        );
+        assert!(!retained_radix.contains(&row(-1)));
+        assert!(rows.contains(&row(-1)));
     }
 }

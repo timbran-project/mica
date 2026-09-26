@@ -11,7 +11,7 @@
 // You should have received a copy of the GNU Affero General Public License along
 // with this program. If not, see <https://www.gnu.org/licenses/>.
 
-use crate::index::RelationState;
+use crate::index::{RelationState, TupleStore};
 use crate::rules::{
     CompiledAtom, CompiledBodyItem, CompiledGuard, CompiledRule, CompiledTerm, compare_values,
 };
@@ -28,7 +28,7 @@ pub(crate) type Diff = i64;
 type WeightedRows = BTreeMap<Tuple, Diff>;
 type Binding = Vec<Option<Value>>;
 type WeightedBindings = BTreeMap<Binding, Diff>;
-type Collection = Arc<BTreeSet<Tuple>>;
+type Collection = TupleStore;
 type Collections = BTreeMap<RelationId, Collection>;
 const TRACE_COMPACTION_BATCHES: usize = 8;
 
@@ -61,9 +61,9 @@ struct Arrangement {
 }
 
 impl Arrangement {
-    fn build(spec: ArrangementSpec, rows: &BTreeSet<Tuple>) -> Self {
+    fn build(spec: ArrangementSpec, rows: &Collection) -> Self {
         let mut grouped = BTreeMap::<Vec<Value>, Vec<Tuple>>::new();
-        for tuple in rows {
+        for tuple in rows.iter() {
             grouped
                 .entry(arrangement_tuple_key(tuple, &spec.positions))
                 .or_default()
@@ -154,7 +154,7 @@ impl TraceBatch {
         }
     }
 
-    fn from_set(epoch: Version, rows: &BTreeSet<Tuple>) -> Self {
+    fn from_set(epoch: Version, rows: &Collection) -> Self {
         Self::from_rows(epoch, rows.iter().cloned().map(|tuple| (tuple, 1)))
     }
 
@@ -182,7 +182,7 @@ struct Trace {
 }
 
 impl Trace {
-    fn initialize(epoch: Version, rows: &BTreeSet<Tuple>) -> Self {
+    fn initialize(epoch: Version, rows: &Collection) -> Self {
         Self {
             base: Arc::new(TraceBatch::from_set(epoch, rows)),
             batches: Arc::from([]),
@@ -193,7 +193,7 @@ impl Trace {
         &self,
         epoch: Version,
         changes: &WeightedRows,
-        current: &BTreeSet<Tuple>,
+        current: &Collection,
     ) -> (Self, usize) {
         debug_assert!(epoch > self.base.epoch);
         let batch = Arc::new(TraceBatch::from_rows(
@@ -276,7 +276,7 @@ impl MaintainedState {
         let program = Arc::new(program);
         let mut collections = BTreeMap::new();
         for relation in &program.relations {
-            collections.insert(*relation, Arc::new(extensional_rows(snapshot, *relation)?));
+            collections.insert(*relation, extensional_rows(snapshot, *relation)?);
         }
         let mut derived_support = BTreeMap::new();
         let mut negated_rules = BTreeMap::new();
@@ -291,12 +291,10 @@ impl MaintainedState {
                         .into_iter()
                         .collect::<BTreeSet<_>>();
                     let support = derived.iter().cloned().map(|tuple| (tuple, 1)).collect();
-                    Arc::make_mut(
-                        collections
-                            .get_mut(target)
-                            .expect("recursive target should have a maintained collection"),
-                    )
-                    .extend(derived);
+                    collections
+                        .get_mut(target)
+                        .expect("recursive target should have a maintained collection")
+                        .extend(derived);
                     derived_support.insert(*target, support);
                 }
                 continue;
@@ -325,12 +323,10 @@ impl MaintainedState {
             }
             ensure_non_negative(&support, target, snapshot.version())?;
             let derived = positive_rows(&support);
-            Arc::make_mut(
-                collections
-                    .get_mut(&target)
-                    .expect("rule target should have a maintained collection"),
-            )
-            .extend(derived);
+            collections
+                .get_mut(&target)
+                .expect("rule target should have a maintained collection")
+                .extend(derived);
             derived_support.insert(target, support);
         }
 
@@ -395,11 +391,7 @@ impl MaintainedState {
                 continue;
             }
             let old_support = self.derived_support.get(relation);
-            let collection = Arc::make_mut(
-                collections
-                    .entry(*relation)
-                    .or_insert_with(|| Arc::new(BTreeSet::new())),
-            );
+            let collection = collections.entry(*relation).or_default();
             let deltas = relation_deltas.entry(*relation).or_default();
             for change in changes {
                 let old_visible = collection.contains(&change.tuple);
@@ -516,11 +508,7 @@ impl MaintainedState {
             if let Some(changes) = changed_by_relation.get(&target) {
                 touched.extend(changes.iter().map(|change| change.tuple.clone()));
             }
-            let collection = Arc::make_mut(
-                collections
-                    .entry(target)
-                    .or_insert_with(|| Arc::new(BTreeSet::new())),
-            );
+            let collection = collections.entry(target).or_default();
             let deltas = relation_deltas.entry(target).or_default();
             for tuple in touched {
                 let old_visible = self
@@ -995,7 +983,7 @@ fn advance_recursive_component(
             .collect::<BTreeSet<_>>();
         let mut visible = extensional_rows(advance.next, *target)?;
         visible.extend(remaining.iter().cloned());
-        settled.insert(*target, Arc::new(visible));
+        settled.insert(*target, visible);
         next_derived.insert(*target, remaining);
     }
 
@@ -1088,11 +1076,9 @@ fn advance_recursive_component(
         let old_settled = settled.clone();
         let old_arrangements = settled_arrangements.clone();
         for (relation, changes) in &settled_frontier.changes {
-            let rows = Arc::make_mut(
-                settled
-                    .get_mut(relation)
-                    .expect("recursive target should have a settled collection"),
-            );
+            let rows = settled
+                .get_mut(relation)
+                .expect("recursive target should have a settled collection");
             rows.extend(changes.keys().cloned());
             next_derived
                 .get_mut(relation)
@@ -1122,14 +1108,11 @@ fn advance_recursive_component(
             .cloned()
             .map(|tuple| (tuple, 1))
             .collect::<WeightedRows>();
-        let next_rows = settled
-            .remove(target)
-            .map(Arc::unwrap_or_clone)
-            .unwrap_or_default();
+        let next_rows = settled.remove(target).unwrap_or_default();
         let changes = set_difference_changes(&advance.current.collections[target], &next_rows);
         advance.work.consolidated_changes += changes.len();
         advance.derived_support.insert(*target, support);
-        advance.collections.insert(*target, Arc::new(next_rows));
+        advance.collections.insert(*target, next_rows);
         reset_relation_arrangements(advance.arrangements, &advance.current.arrangements, *target);
         update_arrangements(advance.arrangements, *target, &changes);
         advance.relation_deltas.insert(*target, changes.clone());
@@ -1190,11 +1173,9 @@ fn overdelete_recursive_derivations(
         let mut next_collections = collections.clone();
         let mut next_arrangements = arrangements.clone();
         for (relation, changes) in &frontier {
-            let rows = Arc::make_mut(
-                next_collections
-                    .get_mut(relation)
-                    .expect("recursive dependency should have a maintained collection"),
-            );
+            let rows = next_collections
+                .get_mut(relation)
+                .expect("recursive dependency should have a maintained collection");
             for tuple in changes.keys() {
                 rows.remove(tuple);
             }
@@ -1343,12 +1324,27 @@ fn collection_differences(
         .collect()
 }
 
-fn set_difference_changes(old: &BTreeSet<Tuple>, new: &BTreeSet<Tuple>) -> WeightedRows {
-    old.difference(new)
-        .cloned()
-        .map(|tuple| (tuple, -1))
-        .chain(new.difference(old).cloned().map(|tuple| (tuple, 1)))
-        .collect()
+fn set_difference_changes(old: &Collection, new: &Collection) -> WeightedRows {
+    let mut changes = WeightedRows::new();
+    let mut old_rows = old.iter().peekable();
+    let mut new_rows = new.iter().peekable();
+    while let (Some(old), Some(new)) = (old_rows.peek(), new_rows.peek()) {
+        match old.cmp(new) {
+            std::cmp::Ordering::Less => {
+                changes.insert(old_rows.next().unwrap().clone(), -1);
+            }
+            std::cmp::Ordering::Greater => {
+                changes.insert(new_rows.next().unwrap().clone(), 1);
+            }
+            std::cmp::Ordering::Equal => {
+                old_rows.next();
+                new_rows.next();
+            }
+        }
+    }
+    changes.extend(old_rows.cloned().map(|tuple| (tuple, -1)));
+    changes.extend(new_rows.cloned().map(|tuple| (tuple, 1)));
+    changes
 }
 
 fn reset_relation_arrangements(
@@ -1741,7 +1737,7 @@ fn join_weighted_trace(
 }
 
 struct FullJoinInput<'a> {
-    rows: &'a BTreeSet<Tuple>,
+    rows: &'a Collection,
     arrangements: &'a BTreeMap<ArrangementSpec, Arc<Arrangement>>,
     trace: Option<&'a Trace>,
     target: RelationId,
@@ -2146,7 +2142,7 @@ fn group_fact_changes(changes: &[FactChange]) -> BTreeMap<RelationId, Vec<&FactC
 }
 
 fn set_presence_delta(
-    collection: &mut BTreeSet<Tuple>,
+    collection: &mut Collection,
     deltas: &mut WeightedRows,
     tuple: Tuple,
     old_visible: bool,
@@ -2167,18 +2163,12 @@ fn set_presence_delta(
     }
 }
 
-fn extensional_rows(
-    snapshot: &Snapshot,
-    relation: RelationId,
-) -> Result<BTreeSet<Tuple>, KernelError> {
+fn extensional_rows(snapshot: &Snapshot, relation: RelationId) -> Result<Collection, KernelError> {
     let state = snapshot
         .relations
         .get(&relation)
         .ok_or(KernelError::UnknownRelation(relation))?;
-    Ok(state
-        .scan(&vec![None; state.metadata().arity() as usize])?
-        .into_iter()
-        .collect())
+    Ok(state.tuples().clone())
 }
 
 fn extensional_contains(

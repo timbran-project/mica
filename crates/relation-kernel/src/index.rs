@@ -19,7 +19,7 @@ use crate::tuple::{Tuple, TupleKey};
 use mica_var::Value;
 pub(crate) use tuple_index::ProjectedTupleIndex;
 use tuple_index::TupleIndex;
-use tuple_store::TupleStore;
+pub(crate) use tuple_store::TupleStore;
 
 mod tuple_bucket;
 mod tuple_index;
@@ -60,6 +60,10 @@ impl RelationState {
 
     pub(crate) fn metadata(&self) -> &RelationMetadata {
         &self.metadata
+    }
+
+    pub(crate) fn tuples(&self) -> &TupleStore {
+        &self.tuples
     }
 
     pub(crate) fn index_storage_kind(&self, ordinal: usize) -> Option<&'static str> {

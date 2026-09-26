@@ -1590,76 +1590,87 @@ fn recursive_maintenance_handles_multiple_feedback_atoms_and_lower_negation() {
 
 #[test]
 fn recursive_deletion_reseeds_through_maintained_join_indexes() {
-    let kernel = RelationKernel::new();
-    create_relations(&kernel, &[(580, "Edge", 2), (581, "Reach", 2)]);
-    kernel
-        .install_rule(
-            Rule::new(
-                rel(581),
-                [var("a"), var("b")],
-                [Atom::positive(rel(580), [var("a"), var("b")])],
-            ),
-            "Reach(a, b) :- Edge(a, b)",
-        )
-        .unwrap();
-    kernel
-        .install_rule(
-            Rule::new(
-                rel(581),
-                [var("a"), var("c")],
-                [
-                    Atom::positive(rel(580), [var("a"), var("b")]),
-                    Atom::positive(rel(581), [var("b"), var("c")]),
-                ],
-            ),
-            "Reach(a, c) :- Edge(a, b), Reach(b, c)",
-        )
-        .unwrap();
-    let mut seed = kernel.begin();
-    for component in 0..8 {
-        for edge in 0..12 {
-            seed.assert(
-                rel(580),
-                Tuple::from([int(component * 100 + edge), int(component * 100 + edge + 1)]),
+    for (components, edges) in [(8, 12), (16, 32)] {
+        let kernel = RelationKernel::new();
+        create_relations(&kernel, &[(580, "Edge", 2), (581, "Reach", 2)]);
+        kernel
+            .install_rule(
+                Rule::new(
+                    rel(581),
+                    [var("a"), var("b")],
+                    [Atom::positive(rel(580), [var("a"), var("b")])],
+                ),
+                "Reach(a, b) :- Edge(a, b)",
             )
             .unwrap();
+        kernel
+            .install_rule(
+                Rule::new(
+                    rel(581),
+                    [var("a"), var("c")],
+                    [
+                        Atom::positive(rel(580), [var("a"), var("b")]),
+                        Atom::positive(rel(581), [var("b"), var("c")]),
+                    ],
+                ),
+                "Reach(a, c) :- Edge(a, b), Reach(b, c)",
+            )
+            .unwrap();
+        let mut seed = kernel.begin();
+        for component in 0..components {
+            for edge in 0..edges {
+                seed.assert(
+                    rel(580),
+                    Tuple::from([int(component * 100 + edge), int(component * 100 + edge + 1)]),
+                )
+                .unwrap();
+            }
         }
+        seed.commit().unwrap();
+        let original = kernel.snapshot();
+        assert_eq!(
+            original.scan(rel(581), &[None, None]).unwrap().len(),
+            (components * edges * (edges + 1) / 2) as usize
+        );
+        let mut deletion = kernel.begin();
+        deletion
+            .retract(rel(580), Tuple::from([int(edges - 1), int(edges)]))
+            .unwrap();
+        deletion.commit().unwrap();
+        let next = kernel.snapshot();
+        assert_eq!(
+            next.scan(rel(581), &[None, None]).unwrap().len(),
+            (components * edges * (edges + 1) / 2 - edges) as usize
+        );
+        assert!(
+            next.scan(rel(581), &[Some(int(0)), Some(int(edges))])
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            next.scan(rel(581), &[Some(int(700)), Some(int(700 + edges))])
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_maintained_matches_complete(&next, &[(rel(581), 2)]);
+        let maintained = next.maintained_state().unwrap();
+        // Each retained Edge binding probes the Reach index during reseeding.
+        // Include both compact and radix-backed maintained collections.
+        assert!(
+            maintained.work().arrangement_lookups >= (components * edges - 1) as usize,
+            "{:?}",
+            maintained.work()
+        );
+        assert!(
+            maintained.work().rows_visited < (components * edges * edges) as usize,
+            "{:?}",
+            maintained.work()
+        );
+        assert_eq!(maintained.work().visible_changes, (edges + 1) as usize); // The edge and its derived closure rows.
+        assert_eq!(
+            original.scan(rel(581), &[None, None]).unwrap().len(),
+            (components * edges * (edges + 1) / 2) as usize
+        );
     }
-    seed.commit().unwrap();
-    let original = kernel.snapshot();
-    assert_eq!(original.scan(rel(581), &[None, None]).unwrap().len(), 624);
-    let mut deletion = kernel.begin();
-    deletion
-        .retract(rel(580), Tuple::from([int(11), int(12)]))
-        .unwrap();
-    deletion.commit().unwrap();
-    let next = kernel.snapshot();
-    assert_eq!(next.scan(rel(581), &[None, None]).unwrap().len(), 612);
-    assert!(
-        next.scan(rel(581), &[Some(int(0)), Some(int(12))])
-            .unwrap()
-            .is_empty()
-    );
-    assert_eq!(
-        next.scan(rel(581), &[Some(int(700)), Some(int(712))])
-            .unwrap()
-            .len(),
-        1
-    );
-    assert_maintained_matches_complete(&next, &[(rel(581), 2)]);
-    let maintained = next.maintained_state().unwrap();
-    // Each retained Edge binding probes the Reach index during reseeding.
-    // Cartesian reseeding would inspect more than 58,000 candidate rows.
-    assert!(
-        maintained.work().arrangement_lookups >= 95,
-        "{:?}",
-        maintained.work()
-    );
-    assert!(
-        maintained.work().rows_visited < 2_000,
-        "{:?}",
-        maintained.work()
-    );
-    assert_eq!(maintained.work().visible_changes, 13); // One edge and twelve derived rows.
-    assert_eq!(original.scan(rel(581), &[None, None]).unwrap().len(), 624);
 }
