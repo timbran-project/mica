@@ -307,7 +307,9 @@ impl MaintainedState {
                 let (contribution, negated) = evaluate_rule_full(
                     rule,
                     &collections,
+                    &BTreeMap::new(),
                     snapshot.version(),
+                    &ExecutionContext::serial(),
                     &mut MaintenanceWork::default(),
                 )?;
                 if let Some(negated) = negated {
@@ -861,7 +863,9 @@ fn has_negation(rule: &CompiledRule) -> bool {
 fn evaluate_rule_full(
     rule: &CompiledRule,
     collections: &Collections,
+    arrangements: &BTreeMap<ArrangementSpec, Arc<Arrangement>>,
     version: Version,
+    execution_context: &ExecutionContext,
     work: &mut MaintenanceWork,
 ) -> Result<(WeightedRows, Option<NegatedRuleState>), KernelError> {
     let mut bindings = unit_binding(rule.slot_count);
@@ -869,7 +873,19 @@ fn evaluate_rule_full(
         let rows = collections
             .get(&atom.relation)
             .expect("compiled relation should have a maintained collection");
-        bindings = join_full(bindings, atom, rows, rule.head_relation, version)?;
+        bindings = join_arranged(
+            bindings,
+            atom,
+            FullJoinInput {
+                rows,
+                arrangements,
+                trace: None,
+                target: rule.head_relation,
+                version,
+                execution_context,
+            },
+            work,
+        )?;
     }
     bindings = filter_guards(rule, bindings);
     if !has_negation(rule) {
@@ -1006,7 +1022,15 @@ fn advance_recursive_component(
                     .is_some_and(|changes| !changes.is_empty())
             });
     let mut frontier = if needs_full_seed {
-        recursive_full_candidates(component, &settled, &next_derived, version, advance.work)?
+        recursive_full_candidates(
+            component,
+            &settled,
+            &settled_arrangements,
+            &next_derived,
+            version,
+            advance.execution_context,
+            advance.work,
+        )?
     } else {
         let seed_deltas = collection_differences(
             component
@@ -1222,13 +1246,22 @@ fn overdelete_recursive_derivations(
 fn recursive_full_candidates(
     component: &MaintainedComponent,
     collections: &Collections,
+    arrangements: &BTreeMap<ArrangementSpec, Arc<Arrangement>>,
     derived: &BTreeMap<RelationId, BTreeSet<Tuple>>,
     version: Version,
+    execution_context: &ExecutionContext,
     work: &mut MaintenanceWork,
 ) -> Result<BTreeMap<RelationId, BTreeSet<Tuple>>, KernelError> {
     let mut frontier = BTreeMap::<RelationId, BTreeSet<Tuple>>::new();
     for rule in &component.rules {
-        let (candidates, _) = evaluate_rule_full(rule, collections, version, work)?;
+        let (candidates, _) = evaluate_rule_full(
+            rule,
+            collections,
+            arrangements,
+            version,
+            execution_context,
+            work,
+        )?;
         for (tuple, difference) in candidates {
             if difference > 0 && !derived[&rule.head_relation].contains(&tuple) {
                 frontier
@@ -1579,17 +1612,6 @@ fn right_key_is_present(
 
 fn unit_binding(slot_count: usize) -> WeightedBindings {
     BTreeMap::from([(vec![None; slot_count], 1)])
-}
-
-fn join_full(
-    bindings: WeightedBindings,
-    atom: &CompiledAtom,
-    rows: &BTreeSet<Tuple>,
-    target: RelationId,
-    version: Version,
-) -> Result<WeightedBindings, KernelError> {
-    let weighted = rows.iter().map(|tuple| (tuple, 1));
-    join_rows(bindings, atom, weighted, target, version)
 }
 
 fn join_weighted(
