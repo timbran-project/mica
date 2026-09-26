@@ -11,7 +11,7 @@
 // You should have received a copy of the GNU Affero General Public License along
 // with this program. If not, see <https://www.gnu.org/licenses/>.
 
-use mica_relation_kernel::RelationId;
+use mica_relation_kernel::{ReadAuthority, RelationId};
 use mica_var::{CapabilityId, Symbol, Value};
 use std::collections::BTreeMap;
 
@@ -149,6 +149,7 @@ impl CapabilityOps {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AuthorityContext {
     root: bool,
+    read_authority: ReadAuthority,
     capabilities: BTreeMap<CapabilityId, CapabilityGrant>,
     next_id: u64,
 }
@@ -163,6 +164,7 @@ impl AuthorityContext {
     pub fn empty() -> Self {
         Self {
             root: false,
+            read_authority: ReadAuthority::empty(),
             capabilities: BTreeMap::new(),
             next_id: 1,
         }
@@ -171,6 +173,7 @@ impl AuthorityContext {
     pub fn root() -> Self {
         Self {
             root: true,
+            read_authority: ReadAuthority::All,
             capabilities: BTreeMap::new(),
             next_id: 1,
         }
@@ -182,6 +185,13 @@ impl AuthorityContext {
 
     pub fn mint(&mut self, grant: CapabilityGrant) -> Value {
         let id = self.allocate_id();
+        if grant.ops.contains(CapabilityOp::Read) {
+            match grant.scope {
+                CapabilityScope::All => self.read_authority = ReadAuthority::All,
+                CapabilityScope::Relation(relation) => self.read_authority.grant(relation),
+                _ => {}
+            }
+        }
         self.capabilities.insert(id, grant);
         Value::capability(id)
     }
@@ -190,13 +200,12 @@ impl AuthorityContext {
         self.capabilities.get(&capability.as_capability()?)
     }
 
+    pub fn read_authority(&self) -> ReadAuthority {
+        self.read_authority.clone()
+    }
+
     pub fn can_read_relation(&self, relation: RelationId) -> bool {
-        if self.root {
-            return true;
-        }
-        self.capabilities
-            .values()
-            .any(|grant| grant.allows_relation(CapabilityOp::Read, relation))
+        self.read_authority.allows(relation)
     }
 
     pub fn can_write_relation(&self, relation: RelationId) -> bool {
@@ -260,6 +269,27 @@ impl AuthorityContext {
 mod tests {
     use super::{AuthorityContext, CapabilityGrant, CapabilityOp, CapabilityScope};
     use mica_var::{Identity, Symbol, Value};
+
+    #[test]
+    fn compiled_read_grants_preserve_clones_and_distinguish_scopes() {
+        let first = Identity::new(1).unwrap();
+        let second = Identity::new(2).unwrap();
+        let mut authority = AuthorityContext::empty();
+        authority.mint(CapabilityGrant::relation(CapabilityOp::Read, first));
+        let retained = authority.clone();
+        authority.mint(CapabilityGrant::relation(CapabilityOp::Write, second));
+        assert!(!authority.can_read_relation(second));
+        authority.mint(CapabilityGrant::relation(CapabilityOp::Read, second));
+        assert!(authority.can_read_relation(second));
+        assert!(retained.can_read_relation(first));
+        assert!(!retained.can_read_relation(second));
+        authority.mint(CapabilityGrant::new(
+            [CapabilityOp::Read],
+            CapabilityScope::All,
+        ));
+        assert!(authority.can_read_relation(Identity::new(3).unwrap()));
+        assert!(!authority.can_grant());
+    }
 
     #[test]
     fn builtin_authority_is_distinct_from_world_authority() {

@@ -5,6 +5,7 @@ use super::{Delta, DeltaBudget, DeltaError, Text, TextError};
 use crate::{KernelError, RelationDurability, Snapshot, Transaction};
 use mica_var::{Identity, Symbol};
 use rart::{ArrayKey, VersionedAdaptiveRadixTree};
+use std::cell::Cell;
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::num::NonZeroU64;
@@ -236,6 +237,7 @@ pub(crate) struct PendingBuffer {
     pub(super) token: Option<NonZeroU64>,
     pub(super) compact: bool,
     pub(super) reverted: bool,
+    projected_revision: Cell<Option<u64>>,
 }
 
 pub(crate) type BufferWrites = BTreeMap<Identity, PendingBuffer>;
@@ -289,6 +291,7 @@ impl Transaction<'_> {
                 token: None,
                 compact: false,
                 reverted: false,
+                projected_revision: Cell::new(None),
             },
         );
         self.invalidate_computed_views();
@@ -329,6 +332,48 @@ impl Transaction<'_> {
     pub fn buffer_revision(&self, id: Identity) -> Result<u64, KernelError> {
         self.buffer_metadata(id)?;
         Ok(self.base.buffers.get(id).map_or(0, |state| state.revision))
+    }
+
+    pub(crate) fn computed_buffer_view(
+        &self,
+        name: Symbol,
+    ) -> Result<Option<crate::ComputedBufferView>, KernelError> {
+        let Some(id) = self.buffer_named(name) else {
+            return Ok(None);
+        };
+        if matches!(
+            self.buffer_metadata(id),
+            Err(KernelError::Buffer {
+                error: BufferError::Deleted,
+                ..
+            })
+        ) {
+            return Ok(None);
+        }
+        crate::ComputedRelationRead::require_read(self, id)?;
+        let text = self.buffer_text(id)?.clone();
+        let mut revision = self.buffer_revision(id)?;
+        if let Some(pending) = self.buffer_writes.get(&id) {
+            if let Some(revision) = pending.projected_revision.get() {
+                return Ok(Some(crate::ComputedBufferView { id, text, revision }));
+            }
+            let changed = match &pending.base {
+                None => true,
+                Some(base) if !pending.compact => !complete_delta(&base.text, &text)
+                    .map_err(|failure| error(id, BufferError::Delta(failure)))?
+                    .is_empty(),
+                _ => false,
+            };
+            if changed {
+                revision = revision
+                    .checked_add(1)
+                    .ok_or_else(|| error(id, BufferError::RevisionExhausted))?;
+            }
+        }
+        if let Some(pending) = self.buffer_writes.get(&id) {
+            pending.projected_revision.set(Some(revision));
+        }
+        Ok(Some(crate::ComputedBufferView { id, text, revision }))
     }
 
     pub fn replace_buffer(
@@ -389,10 +434,13 @@ impl Transaction<'_> {
                     token: None,
                     compact: false,
                     reverted: false,
+                    projected_revision: Cell::new(None),
                 },
             );
         }
-        Ok(self.buffer_writes.get_mut(&id).unwrap())
+        let pending = self.buffer_writes.get_mut(&id).unwrap();
+        pending.projected_revision.set(None);
+        Ok(pending)
     }
 
     pub(crate) fn materialize_buffers(

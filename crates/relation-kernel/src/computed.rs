@@ -16,11 +16,52 @@ use crate::{KernelError, RelationId, RelationMetadata, RuleDefinition, Tuple, Ve
 use mica_var::{Symbol, Value};
 use std::any::Any;
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::fmt;
 use std::sync::Arc;
 
 type PreparedEntry = (RelationId, Value, Arc<dyn Any + Send + Sync>);
+
+/// Ephemeral read grants compiled by the host at a task boundary.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ReadAuthority {
+    All,
+    Relations(Arc<BTreeSet<RelationId>>),
+}
+
+impl ReadAuthority {
+    pub fn empty() -> Self {
+        Self::Relations(Arc::default())
+    }
+
+    pub fn allows(&self, relation: RelationId) -> bool {
+        match self {
+            Self::All => true,
+            Self::Relations(relations) => relations.contains(&relation),
+        }
+    }
+
+    pub fn grant(&mut self, relation: RelationId) {
+        if let Self::Relations(relations) = self {
+            Arc::make_mut(relations).insert(relation);
+        }
+    }
+
+    pub(crate) fn same_grants(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::All, Self::All) => true,
+            (Self::Relations(left), Self::Relations(right)) => Arc::ptr_eq(left, right),
+            _ => false,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct ComputedBufferView {
+    pub id: RelationId,
+    pub text: crate::buffer::Text,
+    pub revision: u64,
+}
 
 /// Prepared provider data owned by one transaction read view.
 /// Every local write clears it. Entries never cross a transaction boundary.
@@ -64,6 +105,15 @@ impl ComputedPreparationCache {
 }
 
 pub trait ComputedRelationRead: RelationRead {
+    /// Trusted kernel readers have unrestricted access unless the host supplies grants.
+    fn require_read(&self, _relation: RelationId) -> Result<(), KernelError> {
+        Ok(())
+    }
+
+    fn buffer_view(&self, _name: Symbol) -> Result<Option<ComputedBufferView>, KernelError> {
+        Ok(None)
+    }
+
     fn preparation_cache(&self) -> Option<&ComputedPreparationCache> {
         None
     }
@@ -96,6 +146,11 @@ pub struct ComputedRow {
 
 pub trait ComputedRelation: Send + Sync {
     fn name(&self) -> &'static str;
+
+    /// Providers that inspect read grants must keep derived results task-local.
+    fn uses_read_authority(&self) -> bool {
+        false
+    }
 
     fn matches(&self, metadata: &RelationMetadata) -> bool;
 
@@ -143,6 +198,7 @@ pub trait ComputedRelation: Send + Sync {
 pub struct ComputedRelationRegistry {
     relations: Vec<Arc<dyn ComputedRelation>>,
     bindings: HashMap<RelationId, Option<usize>>,
+    uses_read_authority: bool,
 }
 
 impl ComputedRelationRegistry {
@@ -150,6 +206,7 @@ impl ComputedRelationRegistry {
         Self {
             relations: relations.into_iter().collect(),
             bindings: HashMap::new(),
+            uses_read_authority: false,
         }
     }
 
@@ -171,6 +228,10 @@ impl ComputedRelationRegistry {
 
     pub fn is_computed_relation(&self, metadata: &RelationMetadata) -> bool {
         self.find(metadata).is_some()
+    }
+
+    pub(crate) fn uses_read_authority(&self) -> bool {
+        self.uses_read_authority
     }
 
     pub fn scan(
@@ -249,6 +310,8 @@ impl ComputedRelationRegistry {
             .iter()
             .position(|relation| relation.matches(metadata));
         self.bindings.insert(metadata.id(), index);
+        self.uses_read_authority |=
+            index.is_some_and(|index| self.relations[index].uses_read_authority());
     }
 }
 

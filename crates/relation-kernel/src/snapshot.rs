@@ -861,6 +861,17 @@ impl RelationRead for Snapshot {
 }
 
 impl ComputedRelationRead for Snapshot {
+    fn buffer_view(&self, name: Symbol) -> Result<Option<crate::ComputedBufferView>, KernelError> {
+        let Some(state) = self.buffers.named(name).filter(|state| !state.is_deleted()) else {
+            return Ok(None);
+        };
+        Ok(Some(crate::ComputedBufferView {
+            id: state.metadata().id,
+            text: state.text().clone(),
+            revision: state.revision(),
+        }))
+    }
+
     fn version(&self) -> Version {
         Snapshot::version(self)
     }

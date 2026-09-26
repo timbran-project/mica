@@ -49,6 +49,7 @@ pub struct Transaction<'a> {
     functional_visible: HashMap<RelationId, FunctionalVisibleMap>,
     derived_cache: RefCell<TransactionDerivedCache>,
     computed_preparation: ComputedPreparationCache,
+    read_authority: crate::ReadAuthority,
     #[cfg(test)]
     differential_overlay_work: RefCell<Option<crate::differential::MaintenanceWork>>,
     dispatch_inline_cache: TransactionDispatchCache,
@@ -241,11 +242,29 @@ impl<'a> Transaction<'a> {
             functional_visible: HashMap::new(),
             derived_cache: RefCell::new(HashMap::new()),
             computed_preparation: ComputedPreparationCache::default(),
+            read_authority: crate::ReadAuthority::All,
             #[cfg(test)]
             differential_overlay_work: RefCell::new(None),
             dispatch_inline_cache: TransactionDispatchCache::new(),
             execution_context,
         }
+    }
+
+    pub fn set_read_authority(&mut self, authority: crate::ReadAuthority) {
+        if self.read_authority.same_grants(&authority) {
+            return;
+        }
+        self.read_authority = authority;
+        self.invalidate_computed_views();
+    }
+
+    fn read_view_matches_base(&self) -> bool {
+        self.is_read_only() && !self.has_restricted_computed_reads()
+    }
+
+    fn has_restricted_computed_reads(&self) -> bool {
+        !matches!(self.read_authority, crate::ReadAuthority::All)
+            && self.base.computed_relations.uses_read_authority()
     }
 
     pub(crate) fn invalidate_computed_views(&mut self) {
@@ -421,7 +440,7 @@ impl<'a> Transaction<'a> {
         &self,
         relations: DispatchRelations,
     ) -> Result<bool, KernelError> {
-        if self.writes.is_empty() && self.buffer_writes.is_empty() {
+        if self.read_view_matches_base() {
             return Ok(true);
         }
         Ok(self.relation_view_matches_base(relations.method_selector)?
@@ -430,7 +449,7 @@ impl<'a> Transaction<'a> {
     }
 
     fn relation_view_matches_base(&self, relation: RelationId) -> Result<bool, KernelError> {
-        if self.writes.is_empty() && self.buffer_writes.is_empty() {
+        if self.read_view_matches_base() {
             return Ok(true);
         }
         if self.has_local_writes(relation) {
@@ -493,7 +512,7 @@ impl<'a> Transaction<'a> {
                 .record(TransactionReadOperation::Scan, rows.len() as u64);
             return Ok(rows);
         }
-        if self.writes.is_empty() && self.buffer_writes.is_empty() {
+        if self.read_view_matches_base() {
             let rows = self.base.scan(relation, bindings)?;
             crate::metrics::metrics()
                 .transaction_read_rows
@@ -538,7 +557,7 @@ impl<'a> Transaction<'a> {
         crate::metrics::metrics()
             .transaction_read_operations
             .inc(TransactionReadOperation::EstimateScan);
-        if self.writes.is_empty() && self.buffer_writes.is_empty() {
+        if self.read_view_matches_base() {
             let rows = self.base.estimate_scan(relation, bindings)?;
             crate::metrics::metrics()
                 .transaction_read_rows
@@ -584,7 +603,7 @@ impl<'a> Transaction<'a> {
         &self,
         relation: RelationId,
     ) -> Result<Option<DerivedRelations>, KernelError> {
-        if self.writes.is_empty() && self.buffer_writes.is_empty() {
+        if self.read_view_matches_base() {
             return Ok(None);
         }
         let mut maintained = self.base.maintained_state();
@@ -592,6 +611,9 @@ impl<'a> Transaction<'a> {
             .as_ref()
             .is_none_or(|maintained| !maintained.serves(relation))
         {
+            if self.has_restricted_computed_reads() {
+                return Ok(None);
+            }
             self.base.warm_maintained_relation_result(relation)?;
             maintained = self.base.maintained_state();
         }
@@ -1345,14 +1367,22 @@ impl RelationRead for Transaction<'_> {
         &self,
         relation: RelationId,
     ) -> Result<RelationCapabilities, KernelError> {
-        if !self.has_local_writes(relation) {
+        if self.relation_view_matches_base(relation)? {
             return self.base.relation_capabilities(relation);
         }
         let mut capabilities = self.base.extensional_relation_capabilities(relation)?;
         capabilities.source = RelationSource::TransactionOverlay;
-        capabilities.cardinality = capabilities
-            .cardinality
-            .map(|rows| rows.saturating_add(self.writes[&relation].len()));
+        capabilities.cardinality = if relation_has_active_rule_head(self.base.rules(), relation) {
+            None
+        } else {
+            capabilities.cardinality.map(|rows| {
+                rows.saturating_add(
+                    self.writes
+                        .get(&relation)
+                        .map_or(0, RelationWriteOverlay::len),
+                )
+            })
+        };
         capabilities.exact_indexes.clear();
         capabilities.value_domains =
             vec![ValueDomain::Unknown; self.base.relation(relation)?.metadata().arity() as usize];
@@ -1365,7 +1395,7 @@ impl RelationRead for Transaction<'_> {
         relation: RelationId,
         bindings: &[Option<Value>],
     ) -> Result<Option<Arc<PackedRelation>>, KernelError> {
-        if self.has_local_writes(relation) {
+        if !self.relation_view_matches_base(relation)? {
             return Ok(None);
         }
         self.base.export_relation_batch(relation, bindings)
@@ -1416,6 +1446,18 @@ impl RelationRead for Transaction<'_> {
 }
 
 impl ComputedRelationRead for Transaction<'_> {
+    fn require_read(&self, relation: RelationId) -> Result<(), KernelError> {
+        if self.read_authority.allows(relation) {
+            Ok(())
+        } else {
+            Err(KernelError::ReadPermissionDenied(relation))
+        }
+    }
+
+    fn buffer_view(&self, name: Symbol) -> Result<Option<crate::ComputedBufferView>, KernelError> {
+        self.computed_buffer_view(name)
+    }
+
     fn preparation_cache(&self) -> Option<&ComputedPreparationCache> {
         Some(&self.computed_preparation)
     }

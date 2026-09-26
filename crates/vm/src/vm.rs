@@ -387,6 +387,7 @@ impl<'ctx, 'kernel> VmHostContext<'ctx, 'kernel> {
         task_snapshot: &'ctx [Value],
         runtime_context: RuntimeContext,
     ) -> Self {
+        tx.set_read_authority(authority.read_authority());
         Self {
             tx,
             authority,
@@ -815,7 +816,9 @@ impl VmHost for VmHostContext<'_, '_> {
             self.task_snapshot,
             self.runtime_context,
         );
-        builtin.call(&mut context, args)
+        let result = builtin.call(&mut context, args);
+        self.tx.set_read_authority(self.authority.read_authority());
+        result
     }
 }
 

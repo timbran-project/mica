@@ -11,6 +11,7 @@
 // You should have received a copy of the GNU Affero General Public License along
 // with this program. If not, see <https://www.gnu.org/licenses/>.
 
+mod buffer_computed;
 mod buffers;
 mod builtins;
 mod embedding;
@@ -8009,6 +8010,9 @@ fn render_kernel_error(
     let render_relation =
         |relation: &RelationId| render_identity(*relation, identity_names, relation_names);
     match error {
+        KernelError::ReadPermissionDenied(relation) => {
+            format!("read permission denied for {}", render_relation(relation))
+        }
         KernelError::Buffer { buffer, error } => {
             format!("buffer {}: {error:?}", render_relation(buffer))
         }

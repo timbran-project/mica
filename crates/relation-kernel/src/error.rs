@@ -15,6 +15,7 @@ use crate::{RelationId, RuleError, Tuple, Version};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum KernelError {
+    ReadPermissionDenied(RelationId),
     Buffer {
         buffer: mica_var::Identity,
         error: crate::buffer::BufferError,

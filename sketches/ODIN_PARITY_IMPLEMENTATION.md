@@ -197,3 +197,11 @@ All conflict policies reject writes against superseded structure. Tagged applies
 History publication shares a lock with snapshot publication, so readers of a new revision can find its predecessor.
 The runtime exposes compaction and reversion. Reversion requires its own invoke grant as well as buffer write authority.
 Five focused kernel tests and twelve runtime buffer tests pass. Workspace tests and clippy pass.
+
+
+Computed buffer providers now expose bounded statistics, lines, and revision-filtered marker windows.
+They read private text and projected revisions. Projected revisions and sorted marker points are cached until local mutation.
+Authority contexts compile read grants once and share them with transactions. Buffer providers check buffer and marker relation grants.
+Restricted computed reads bypass shared derived and packed caches. Providers declare authority dependence, so ordinary worlds retain existing cache paths.
+Six focused runtime tests pass, covering Unicode, cancelled edits, rule visibility, rollback, output bindings, marker writes, authority changes, and suspension.
+Workspace tests and clippy pass for computed buffer views. The imported application scenarios remain under separate validation.

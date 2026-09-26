@@ -163,6 +163,7 @@ impl<'ctx, 'kernel> BuiltinContext<'ctx, 'kernel> {
     }
 
     pub fn tx(&mut self) -> &mut Transaction<'kernel> {
+        self.tx.set_read_authority(self.authority.read_authority());
         self.tx
     }
 

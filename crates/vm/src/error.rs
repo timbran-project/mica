@@ -95,6 +95,12 @@ pub enum RuntimeError {
 
 impl From<KernelError> for RuntimeError {
     fn from(value: KernelError) -> Self {
-        Self::Kernel(value)
+        match value {
+            KernelError::ReadPermissionDenied(relation) => Self::PermissionDenied {
+                operation: "read",
+                target: Value::identity(relation),
+            },
+            error => Self::Kernel(error),
+        }
     }
 }

@@ -5,7 +5,7 @@ A buffer has an identity, a unique name, a durability policy, a conflict policy,
 Buffer names share the relation namespace. Deleted buffers retain tombstones that reserve their identities and names.
 
 Language builtins use the current task transaction and its authority context.
-Computed buffer relations and editor integration remain pending.
+Computed relations expose bounded text and marker views. Editor integration remains pending.
 
 ## Language interface
 
@@ -72,6 +72,38 @@ Results are ephemeral and disappear after restart. An unknown or evicted token r
 `buffer_marker_rebase(edits, position, :stick_before | :stick_after)` moves a marker through a committed, base-relative delta.
 The delta must contain sorted, non-overlapping ranges. Insertions at the marker follow its selected affinity.
 A removed interior position collapses to the start of the removed range. Marker state remains application-owned.
+
+## Computed relations
+
+These standard declarations activate runtime providers:
+
+```mica
+make_relation(:BufferStat, 4)
+make_relation(:BufferLine, 7)
+make_relation(:BufferMarkers, 6)
+```
+
+| Relation | Columns | Required inputs |
+| --- | --- | --- |
+| `BufferStat` | buffer, scalars, lines, revision | buffer |
+| `BufferLine` | buffer, first, count, line, start, stop, text | buffer, first, count |
+| `BufferMarkers` | buffer, window_start, window_end, marker, start, stop | buffer, window_start, window_end |
+
+Buffer names are symbols. Coordinates and bounds are nonnegative Unicode scalar integers. Lines start at zero and exclude their terminating newline.
+Marker windows include their start and exclude their end. A point marker has equal start and stop columns.
+All output bindings filter the resulting rows. Unknown or retired buffers produce no rows.
+
+The views read private transaction text. Their revision is the projected commit revision, including local text changes.
+`buffer_revision` still returns the transaction's base revision. Edits that cancel without changing retained text do not advance the projected revision.
+
+Marker views read `MarkerBuffer/2`, `MarkerPosition/2`, and `MarkerRevision/2`.
+They include only markers with one position and one revision that matches the projected buffer revision.
+The transaction caches sorted marker positions. Writes and authority changes invalidate that cache.
+
+The caller needs read authority for the target buffer as well as the computed relation.
+Marker views also require read authority for their three backing relations.
+Restricted computed results remain transaction-local, including results reached through rules and packed query plans.
+Suspended tasks resume with fresh views and explicitly supplied authority.
 
 ## Reversion and compaction
 

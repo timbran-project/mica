@@ -25,6 +25,7 @@ const REQUIRED_BOUND_POSITIONS: &[u16] = &[0, 1, 2];
 pub(crate) fn default_computed_relations() -> Vec<Arc<dyn ComputedRelation>> {
     let mut relations = system_computed_relations();
     relations.push(Arc::new(ExactEmbeddingSearchRelation));
+    relations.extend(crate::buffer_computed::relations());
     relations
 }
 

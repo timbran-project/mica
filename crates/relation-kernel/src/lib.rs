@@ -63,8 +63,8 @@ pub use closure::{
     delegates_reaches, delegates_star, delegates_star_from, materialize_delegates_star,
 };
 pub use computed::{
-    ComputedPreparationCache, ComputedRelation, ComputedRelationRead, ComputedRelationRegistry,
-    ComputedRow,
+    ComputedBufferView, ComputedPreparationCache, ComputedRelation, ComputedRelationRead,
+    ComputedRelationRegistry, ComputedRow, ReadAuthority,
 };
 pub use dispatch::{
     ApplicableMethod, ApplicableMethodCall, DispatchRead, DispatchRelations,
