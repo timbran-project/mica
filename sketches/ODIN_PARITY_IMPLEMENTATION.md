@@ -87,4 +87,6 @@ Ordinary lists retain exact arrays. Appends containing lists copy the prefix to 
 This restriction includes nested list references inside maps, errors, frobs, and relations; bounded traversal falls back to copying.
 Tests cover aliases, branches, encoding, concurrent access, self/cross references, exception handling, and suspension.
 Workspace tests and clippy pass. The storage concurrency test passes Miri with strict provenance enabled.
-The process-local value ABI is version 5. Durable encoding is unchanged. List performance capture remains pending.
+The process-local value ABI is version 5. Durable encoding is unchanged. The list capture passes all 54 processes.
+List construction improves from 4.51 to 0.427 milliseconds; Odin takes 0.265 milliseconds.
+This result applies to scalar append. Nested-list append still copies and needs separate performance work.
