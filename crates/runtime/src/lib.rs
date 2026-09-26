@@ -7556,6 +7556,7 @@ fn is_safe_read_only_builtin(name: &str) -> bool {
         name,
         "actor"
             | "assemble"
+            | "is_builtin"
             | "relation_from_rows"
             | "principal"
             | "endpoint"

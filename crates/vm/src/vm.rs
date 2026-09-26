@@ -816,6 +816,7 @@ impl VmHost for VmHostContext<'_, '_> {
             },
             self.task_snapshot,
             self.runtime_context,
+            self.builtins,
         );
         let result = builtin.call(&mut context, args);
         self.tx.set_read_authority(self.authority.read_authority());

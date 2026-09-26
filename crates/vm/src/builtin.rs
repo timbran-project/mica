@@ -66,6 +66,7 @@ pub struct BuiltinContext<'ctx, 'kernel> {
     ports: RuntimePorts<'ctx>,
     task_snapshot: &'ctx [Value],
     runtime_context: RuntimeContext,
+    builtins: &'ctx BuiltinRegistry,
 }
 
 pub struct RuntimePorts<'ctx> {
@@ -147,6 +148,7 @@ impl<'ctx, 'kernel> BuiltinContext<'ctx, 'kernel> {
         ports: RuntimePorts<'ctx>,
         task_snapshot: &'ctx [Value],
         runtime_context: RuntimeContext,
+        builtins: &'ctx BuiltinRegistry,
     ) -> Self {
         Self {
             kernel,
@@ -155,6 +157,7 @@ impl<'ctx, 'kernel> BuiltinContext<'ctx, 'kernel> {
             ports,
             task_snapshot,
             runtime_context,
+            builtins,
         }
     }
 
@@ -181,6 +184,10 @@ impl<'ctx, 'kernel> BuiltinContext<'ctx, 'kernel> {
 
     pub fn runtime_context(&self) -> RuntimeContext {
         self.runtime_context
+    }
+
+    pub fn is_builtin(&self, name: Symbol) -> bool {
+        self.builtins.contains(name)
     }
 
     pub fn mint_capability(&mut self, grant: CapabilityGrant) -> Value {

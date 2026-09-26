@@ -17,6 +17,10 @@ Assembly is a pure operation. It does not install methods, run instructions, or 
 The runtime checks authority when the resulting program executes through its ordinary task and method interfaces.
 An artifact contains the current Rust program format. It is not portable across program-format versions or worlds with different relation identities.
 
+`is_builtin(name)` reports whether a symbol names a builtin in the executing task's registry.
+It includes host-added builtins. Compiler forms such as `commit` are not builtins.
+The query confers no authority to call the named operation.
+
 ## Operands and bounds
 
 A register operand is `[:Register, index]`. A constant operand is `[:Constant, value]`.

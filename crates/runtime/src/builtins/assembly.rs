@@ -15,11 +15,31 @@ use std::fmt::{Display, Formatter};
 use std::sync::Arc;
 
 pub(super) fn install(registry: BuiltinRegistry) -> BuiltinRegistry {
-    registry.with_builtin(
-        "assemble",
-        BuiltinResultKind::Exact(ValueKind::Bytes),
-        assemble,
-    )
+    registry
+        .with_builtin(
+            "is_builtin",
+            BuiltinResultKind::Exact(ValueKind::Bool),
+            is_builtin,
+        )
+        .with_builtin(
+            "assemble",
+            BuiltinResultKind::Exact(ValueKind::Bytes),
+            assemble,
+        )
+}
+
+fn is_builtin(context: &mut BuiltinContext<'_, '_>, args: &[Value]) -> Result<Value, RuntimeError> {
+    let [name] = args else {
+        return Err(raised_builtin_error(
+            "E_INVARG",
+            "is_builtin expects one symbol",
+            None,
+        ));
+    };
+    let name = name
+        .as_symbol()
+        .ok_or_else(|| raised_builtin_error("E_TYPE", "is_builtin expects a symbol", None))?;
+    Ok(Value::bool(context.is_builtin(name)))
 }
 
 fn assemble(_: &mut BuiltinContext<'_, '_>, args: &[Value]) -> Result<Value, RuntimeError> {
@@ -446,12 +466,12 @@ fn instruction(
 mod tests {
     use super::program;
     use crate::{
-        AuthorityContext, BuiltinRegistry, RuntimeError, SourceRunner, SuspendKind, Task,
-        TaskError, TaskLimits, TaskOutcome,
+        AuthorityContext, BuiltinContext, BuiltinRegistry, BuiltinResultKind, RuntimeError,
+        SourceRunner, SuspendKind, Task, TaskError, TaskLimits, TaskOutcome,
     };
     use mica_relation_kernel::{RelationKernel, RelationMetadata};
-    use mica_var::{Symbol, Value};
-    use mica_vm::{Instruction, Program, ProgramResolver};
+    use mica_var::{Symbol, Value, ValueKind};
+    use mica_vm::{Instruction, Operand, Program, ProgramResolver, Register};
     use std::sync::Arc;
 
     fn assembled(source: &str) -> Program {
@@ -477,6 +497,55 @@ mod tests {
             panic!("{outcome:?}");
         };
         value
+    }
+
+    fn host_builtin(_: &mut BuiltinContext<'_, '_>, _: &[Value]) -> Result<Value, RuntimeError> {
+        Ok(Value::bool(true))
+    }
+
+    #[test]
+    fn builtin_query_uses_the_executing_registry() {
+        let registry = super::install(BuiltinRegistry::new()).with_builtin(
+            "host_extension",
+            BuiltinResultKind::Exact(ValueKind::Bool),
+            host_builtin,
+        );
+        let kernel = RelationKernel::new();
+        for (name, expected) in [
+            ("host_extension", true),
+            ("assemble", true),
+            ("missing", false),
+            ("commit", false),
+        ] {
+            let program = Program::new(
+                1,
+                [
+                    Instruction::BuiltinCall {
+                        dst: Register(0),
+                        name: Symbol::intern("is_builtin"),
+                        result_kind: None,
+                        args: vec![Operand::Value(Value::symbol(Symbol::intern(name)))],
+                    },
+                    Instruction::Return {
+                        value: Operand::Register(Register(0)),
+                    },
+                ],
+            )
+            .unwrap();
+            let mut task = Task::new_with_authority(
+                1,
+                &kernel,
+                Arc::new(program),
+                Arc::new(ProgramResolver::new()),
+                Arc::new(registry.clone()),
+                AuthorityContext::empty(),
+                TaskLimits::default(),
+            );
+            assert!(
+                matches!(task.run().unwrap(), TaskOutcome::Complete { value, .. } if value == Value::bool(expected)),
+                "{name}"
+            );
+        }
     }
 
     #[test]

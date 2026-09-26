@@ -276,4 +276,5 @@ catalogue.
 ## Program assembly
 
 `assemble(description)` returns a validated Rust program artifact as bytes.
+`is_builtin(name)` checks a symbol against the executing task's builtin registry.
 See [Program Assembly](assembly.md) for the description format, instruction forms, limits, and execution authority.
