@@ -12,6 +12,7 @@
 // with this program. If not, see <https://www.gnu.org/licenses/>.
 
 use crate::RelationValue;
+use crate::list::HeapList;
 use crate::string::HeapString;
 use crate::value::{
     ErrorValue, FrobValue, TAG_BYTES, TAG_ERROR, TAG_FROB, TAG_LIST, TAG_MAP, TAG_RANGE,
@@ -21,7 +22,7 @@ use crate::value::{
 pub(crate) enum HeapValue {
     String(HeapString),
     Bytes(Box<[u8]>),
-    List(Box<[Value]>),
+    List(HeapList),
     Map(Box<[(Value, Value)]>),
     Relation(RelationValue),
     Range { start: Value, end: Option<Value> },

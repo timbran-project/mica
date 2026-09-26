@@ -81,3 +81,10 @@ VM and runtime library tests pass, including existing conflict-retry and authori
 The call-storage capture passes all 54 processes across six selected fixtures.
 Helper calls improve from 13.66 to 13.14 milliseconds; the other changes are small.
 Dispatch and interpreter overhead remain substantial. This change does not establish general call-performance parity.
+
+The common `[@items, value]` construction now uses immutable prefix storage with spare capacity.
+Ordinary lists retain exact arrays. Appends containing lists copy the prefix to prevent ownership cycles through shared tails.
+This restriction includes nested list references inside maps, errors, frobs, and relations; bounded traversal falls back to copying.
+Tests cover aliases, branches, encoding, concurrent access, self/cross references, exception handling, and suspension.
+Workspace tests and clippy pass. The storage concurrency test passes Miri with strict provenance enabled.
+The process-local value ABI is version 5. Durable encoding is unchanged. List performance capture remains pending.

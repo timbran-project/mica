@@ -173,7 +173,7 @@ impl Value {
         match self.heap_ref().unwrap() {
             HeapValue::String(value) => ValueRef::String(value.as_str()),
             HeapValue::Bytes(value) => ValueRef::Bytes(value),
-            HeapValue::List(values) => ValueRef::List(values),
+            HeapValue::List(values) => ValueRef::List(values.as_slice()),
             HeapValue::Map(entries) => ValueRef::Map(entries),
             HeapValue::Relation(relation) => ValueRef::Relation(relation),
             HeapValue::Range { start, end } => ValueRef::Range {

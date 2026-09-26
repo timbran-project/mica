@@ -12,6 +12,7 @@
 // with this program. If not, see <https://www.gnu.org/licenses/>.
 
 use crate::heap::HeapValue;
+use crate::list::HeapList;
 use crate::string::HeapString;
 use crate::symbol::Symbol;
 use crate::tuple::empty_relation;
@@ -48,8 +49,8 @@ pub(crate) const MAX_PAYLOAD: u64 = PAYLOAD_MASK;
 /// or invariants of `Value` change so that native code generators and external
 /// processes can detect compatibility.
 ///
-/// Version 4: heap strings use immutable views over appendable UTF-8 storage.
-pub const VALUE_ABI_VERSION: u32 = 4;
+/// Version 5: heap lists use immutable views over appendable value storage.
+pub const VALUE_ABI_VERSION: u32 = 5;
 
 /// A compact Mica value.
 ///
@@ -428,9 +429,7 @@ impl Value {
     }
 
     pub fn list(values: impl IntoIterator<Item = Value>) -> Self {
-        Self::heap(HeapValue::List(
-            values.into_iter().collect::<Vec<_>>().into_boxed_slice(),
-        ))
+        Self::heap(HeapValue::List(HeapList::new(values.into_iter().collect())))
     }
 
     pub fn map(entries: impl IntoIterator<Item = (Value, Value)>) -> Self {
@@ -677,7 +676,7 @@ impl Value {
 
     pub fn with_list<R>(&self, f: impl FnOnce(&[Value]) -> R) -> Option<R> {
         self.with_heap(|heap| match heap {
-            HeapValue::List(values) => Some(f(values)),
+            HeapValue::List(values) => Some(f(values.as_slice())),
             _ => None,
         })?
     }
@@ -791,6 +790,14 @@ impl Value {
                 return None;
             }
             Some(Self::list(values[start..end_exclusive].iter().cloned()))
+        })?
+    }
+
+    /// Appends while preserving every earlier list view and avoiding ownership cycles.
+    pub fn list_append(&self, value: Value) -> Option<Self> {
+        self.with_heap(|heap| match heap {
+            HeapValue::List(list) => Some(Self::heap(HeapValue::List(list.append(value)))),
+            _ => None,
         })?
     }
 

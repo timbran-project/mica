@@ -8144,3 +8144,44 @@ fn repeated_calls_preserve_closure_captures_and_unwind_after_suspension() {
         ])));
     }
 }
+
+#[test]
+fn list_append_keeps_nested_aliases_across_errors_and_suspension() {
+    let mut runner = SourceRunner::new_empty();
+    let report = runner
+        .run_source(
+            "let items = [1]
+         let original = items
+         let snapshot = fn() => original
+         items = [@items, items]
+         let nested = items
+         try
+           items = [@items, 3]
+           let invalid = items[99]
+         catch E_INDEX
+           items = [@items, 4]
+         end
+         suspend()
+         items = [@items, 5]
+         return [snapshot(), nested, items]",
+        )
+        .unwrap();
+    assert!(matches!(report.outcome, TaskOutcome::Suspended { .. }));
+    let outcome = runner
+        .resume_task(TaskRequest {
+            input: TaskInput::Continuation {
+                task_id: report.task_id,
+                value: Value::unit(),
+            },
+            ..SourceRunner::root_source_request("")
+        })
+        .unwrap();
+    let int = |value| Value::int(value).unwrap();
+    let original = Value::list([int(1)]);
+    assert!(matches!(outcome, TaskOutcome::Complete { value, .. }
+    if value == Value::list([
+        original.clone(),
+        Value::list([int(1), original.clone()]),
+        Value::list([int(1), original.clone(), int(3), int(4), int(5)]),
+    ])));
+}

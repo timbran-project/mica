@@ -36,7 +36,7 @@ fn value_is_one_word() {
 
 #[test]
 fn process_local_value_abi_matches_value_layout() {
-    assert_eq!(VALUE_ABI_VERSION, 4);
+    assert_eq!(VALUE_ABI_VERSION, 5);
     assert_eq!(VALUE_TAG_SHIFT, 56);
     assert_eq!(VALUE_PAYLOAD_MASK, 0x00ff_ffff_ffff_ffff);
     assert_eq!(VALUE_INT_MIN, INT_MIN);
@@ -1493,4 +1493,25 @@ fn concurrent_string_appends_do_not_change_shared_aliases() {
         }
     });
     assert_eq!(seed, Value::string("é"));
+}
+
+#[test]
+fn list_append_preserves_aliases_branches_and_encoded_values() {
+    let mut list = Value::list([]);
+    let mut snapshots = Vec::new();
+    for index in 0..128 {
+        snapshots.push(list.clone());
+        list = list.list_append(Value::int(index).unwrap()).unwrap();
+    }
+    for (len, snapshot) in snapshots.iter().enumerate() {
+        let expected = Value::list((0..len).map(|index| Value::int(index as i64).unwrap()));
+        assert_eq!(*snapshot, expected);
+        let branch = snapshot.list_append(Value::string("branch")).unwrap();
+        assert_eq!(branch.list_len(), Some(len + 1));
+        assert_eq!(branch.list_get(len), Some(Value::string("branch")));
+        let mut encoded = Vec::new();
+        encode_value(&branch, &mut encoded).unwrap();
+        assert_eq!(decode_value_exact(&encoded).unwrap(), branch);
+        assert_eq!(*snapshot, expected);
+    }
 }

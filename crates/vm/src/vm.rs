@@ -2907,6 +2907,21 @@ impl RegisterVm {
 
     #[inline]
     fn build_list(&self, program: &Program, items: &[CompactListItem]) -> Result<Value, Value> {
+        if let [
+            CompactListItem::Splice(prefix),
+            CompactListItem::Value(value),
+        ] = items
+        {
+            let prefix = self.resolve_operand_ref(program, *prefix);
+            let value = self.resolve_operand_ref(program, *value);
+            return prefix.list_append(value).ok_or_else(|| {
+                Value::error(
+                    Symbol::intern("E_TYPE"),
+                    Some("list splice requires a list"),
+                    Some(prefix),
+                )
+            });
+        }
         let mut values = Vec::new();
         for item in items {
             match item {
