@@ -124,3 +124,9 @@ The shared retrieval workload has an independent checksum and score assertions. 
 The pinned retrieval captures pass all 18 processes. Rust interpreter latency improves from 52.90 ms to 2.78 ms for 32 searches over 512 vectors.
 Odin takes 6.54 ms in the after capture. Fixed-work Rust RSS remains approximately 22 MiB.
 The result measures exact CPU search with preparation reuse inside each transaction, not cross-transaction caching or GPU search.
+
+Dispatch cache insertion now updates ordered maps under short read/write locks instead of copying every prior entry.
+Positional hits borrow the argument slice for lookup and retain the shared method-result slice.
+Concurrent publication tests preserve independent keys and previously returned results.
+Kernel, runtime, and VM library tests pass, including dispatch replacement and conflict coverage. Kernel clippy passes.
+This removes a quadratic insertion algorithm; pinned cold and warm measurements must establish its effect.

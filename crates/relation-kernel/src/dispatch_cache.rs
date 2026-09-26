@@ -12,27 +12,24 @@
 // with this program. If not, see <https://www.gnu.org/licenses/>.
 
 use crate::{ApplicableMethodCall, DispatchRelations};
-use arc_swap::ArcSwap;
 use mica_var::Value;
 use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, RwLock};
 
 #[derive(Clone, Debug)]
 pub(crate) struct DispatchCache {
-    entries: Arc<ArcSwap<BTreeMap<DispatchCacheKey, Arc<[ApplicableMethodCall]>>>>,
-    positional_entries: Arc<ArcSwap<PositionalDispatchEntries>>,
-    publish_lock: Arc<Mutex<()>>,
+    entries: Arc<RwLock<BTreeMap<DispatchCacheKey, Arc<[ApplicableMethodCall]>>>>,
+    positional_entries: Arc<RwLock<PositionalDispatchEntries>>,
 }
 
 type PositionalDispatchEntries =
-    BTreeMap<DispatchRelationsKey, Arc<[PositionalDispatchCacheEntry]>>;
+    BTreeMap<DispatchRelationsKey, BTreeMap<Value, BTreeMap<Vec<Value>, Arc<[Value]>>>>;
 
 impl DispatchCache {
     pub(crate) fn new() -> Self {
         Self {
-            entries: Arc::new(ArcSwap::from_pointee(BTreeMap::new())),
-            positional_entries: Arc::new(ArcSwap::from_pointee(BTreeMap::new())),
-            publish_lock: Arc::new(Mutex::new(())),
+            entries: Arc::new(RwLock::new(BTreeMap::new())),
+            positional_entries: Arc::new(RwLock::new(BTreeMap::new())),
         }
     }
 
@@ -57,7 +54,7 @@ impl DispatchCache {
     }
 
     fn get_key(&self, key: &DispatchCacheKey) -> Option<Vec<ApplicableMethodCall>> {
-        let entries = self.entries.load();
+        let entries = self.entries.read().unwrap();
         entries.get(key).map(|methods| methods.to_vec())
     }
 
@@ -89,12 +86,12 @@ impl DispatchCache {
         selector: &Value,
         args: &[Value],
     ) -> Option<Arc<[Value]>> {
-        let entries = self.positional_entries.load();
-        let entries = entries.get(&DispatchRelationsKey::from(relations))?;
-        let index = entries
-            .binary_search_by(|entry| entry.compare_key(selector, args))
-            .ok()?;
-        Some(Arc::clone(&entries[index].methods))
+        let entries = self.positional_entries.read().unwrap();
+        entries
+            .get(&DispatchRelationsKey::from(relations))?
+            .get(selector)?
+            .get(args)
+            .cloned()
     }
 
     pub(crate) fn insert_positional(
@@ -104,40 +101,22 @@ impl DispatchCache {
         args: &[Value],
         methods: Arc<[Value]>,
     ) {
-        let relations = DispatchRelationsKey::from(relations);
-        let _guard = self.publish_lock.lock().unwrap();
-        let entries = self.positional_entries.load_full();
-        let mut relation_entries = entries
-            .get(&relations)
-            .map_or_else(Vec::new, |entries| entries.to_vec());
-        let index =
-            match relation_entries.binary_search_by(|entry| entry.compare_key(selector, args)) {
-                Ok(_) => return,
-                Err(index) => index,
-            };
-        relation_entries.insert(
-            index,
-            PositionalDispatchCacheEntry {
-                selector: selector.clone(),
-                args: args.to_vec(),
-                methods,
-            },
-        );
-        let mut next = (*entries).clone();
-        next.insert(relations, Arc::from(relation_entries));
-        self.positional_entries.store(Arc::new(next));
+        let mut entries = self.positional_entries.write().unwrap();
+        entries
+            .entry(DispatchRelationsKey::from(relations))
+            .or_default()
+            .entry(selector.clone())
+            .or_default()
+            .entry(args.to_vec())
+            .or_insert(methods);
     }
 
     fn insert_key(&self, key: DispatchCacheKey, methods: Vec<ApplicableMethodCall>) {
-        let _guard = self.publish_lock.lock().unwrap();
-        let entries = self.entries.load_full();
-        if entries.contains_key(&key) {
-            return;
-        }
-        let methods = Arc::<[ApplicableMethodCall]>::from(methods);
-        let mut next = (*entries).clone();
-        next.insert(key, methods);
-        self.entries.store(Arc::new(next));
+        self.entries
+            .write()
+            .unwrap()
+            .entry(key)
+            .or_insert_with(|| methods.into());
     }
 }
 
@@ -179,21 +158,6 @@ impl DispatchCacheKey {
             selector: selector.clone(),
             roles,
         }
-    }
-}
-
-#[derive(Clone, Debug)]
-struct PositionalDispatchCacheEntry {
-    selector: Value,
-    args: Vec<Value>,
-    methods: Arc<[Value]>,
-}
-
-impl PositionalDispatchCacheEntry {
-    fn compare_key(&self, selector: &Value, args: &[Value]) -> std::cmp::Ordering {
-        self.selector
-            .cmp(selector)
-            .then_with(|| self.args.as_slice().cmp(args))
     }
 }
 
@@ -245,5 +209,67 @@ mod tests {
         let second = cache.get_positional(relations, &selector, &args).unwrap();
         assert!(Arc::ptr_eq(&methods, &first));
         assert!(Arc::ptr_eq(&first, &second));
+    }
+    #[test]
+    fn concurrent_cache_publication_preserves_entries_and_owned_results() {
+        let cache = DispatchCache::new();
+        let relations = DispatchRelations {
+            method_selector: relation(1),
+            param: relation(2),
+            delegates: relation(3),
+        };
+        let selector = value(4);
+        let stable = Arc::<[Value]>::from([value(9)]);
+        cache.insert_positional(relations, &selector, &[], Arc::clone(&stable));
+        std::thread::scope(|scope| {
+            for worker in 0..4 {
+                let cache = &cache;
+                let selector = &selector;
+                let stable = &stable;
+                scope.spawn(move || {
+                    for item in 0..512 {
+                        let argument = value(worker * 512 + item);
+                        let methods = Arc::<[Value]>::from([argument.clone()]);
+                        cache.insert_positional(
+                            relations,
+                            selector,
+                            std::slice::from_ref(&argument),
+                            Arc::clone(&methods),
+                        );
+                        assert!(Arc::ptr_eq(
+                            &methods,
+                            &cache
+                                .get_positional(
+                                    relations,
+                                    selector,
+                                    std::slice::from_ref(&argument)
+                                )
+                                .unwrap()
+                        ));
+                        assert!(Arc::ptr_eq(
+                            stable,
+                            &cache.get_positional(relations, selector, &[]).unwrap()
+                        ));
+                        let roles = [(value(1), argument.clone())];
+                        let call = ApplicableMethodCall {
+                            method: argument,
+                            args: None,
+                        };
+                        cache.insert(relations, selector, &roles, vec![call.clone()]);
+                        assert_eq!(cache.get(relations, selector, &roles), Some(vec![call]));
+                    }
+                });
+            }
+        });
+        for item in 0..2048 {
+            let argument = value(item);
+            assert_eq!(
+                &*cache
+                    .get_positional(relations, &selector, std::slice::from_ref(&argument))
+                    .unwrap(),
+                &[argument]
+            );
+        }
+        assert_eq!(&*stable, &[value(9)]);
     }
 }
