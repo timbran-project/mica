@@ -347,7 +347,7 @@ The resolver supplies that proof. Selectors with any restricted candidate retain
 This prevents unrestricted calls from retaining every changing parser and emitter state in the snapshot cache.
 Regressions cover restricted overloads, arity differences, transaction-local catalogue changes, and retained snapshots.
 Workspace tests and clippy pass. The full compiler bootstrap also passes after the cache change.
-A fixed-work timing capture remains pending for this change.
+The fixed-work timing capture is recorded below.
 
 The Rust assembly interface now includes kind checks and task aborts.
 The Mica emitter produces separate entry and method artifacts, with catalogue dispatch for forward and recursive calls.
@@ -357,3 +357,10 @@ The bootstrap compiles the lexer, parser, and emitter, installs the emitted meth
 All six compiler tests pass in 117.7 seconds in the debug build. The test process tree peaks at 107,476 KiB.
 Assembly validation tests and runtime clippy pass. These checks do not establish compiler performance parity.
 Relation operations, closures, exceptions, broader parameter and pattern support, and public module installation remain pending.
+
+The arity-cache capture at `3d5c166` passes all 18 processes across shared calls and the Mica frontend.
+Shared-call latency falls from 13.54 ms to 0.67 ms, approximately 20 times faster. Odin measures 0.34 ms.
+Rust RSS stays near 21 MiB. This leaves an approximately two-times timing gap on the shared-call workload.
+The frontend constructs and lexes 200 Unicode declarations, then parses them into AST rows with checked counts and source positions.
+Rust measures 36.1 ms and approximately 26.3 MiB peak RSS. Odin measures 37.1 ms and approximately 19.0 MiB.
+The frontend result excludes emission and installation. Each implementation loads its own pinned Mica sources, with hashes in the manifest.

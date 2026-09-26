@@ -1,0 +1,98 @@
+[
+  {
+    "case": "language_call_shared_list",
+    "variant": "rust-interpreter",
+    "status": "passed",
+    "median_ns": 671121.0,
+    "process_median_range_ns": [
+      612465.0,
+      683137.0
+    ],
+    "p95_sample_ns": 720593.0,
+    "peak_rss_kib": [
+      21196,
+      21356,
+      21356
+    ]
+  },
+  {
+    "case": "language_call_shared_list",
+    "variant": "odin",
+    "status": "passed",
+    "median_ns": 344176.0,
+    "process_median_range_ns": [
+      324688.0,
+      347792.0
+    ],
+    "p95_sample_ns": 356240.0,
+    "peak_rss_kib": [
+      5400,
+      5400,
+      5388
+    ]
+  },
+  {
+    "case": "language_call_shared_list",
+    "variant": "rust-native",
+    "status": "passed",
+    "median_ns": 681713.0,
+    "process_median_range_ns": [
+      679121.0,
+      686721.0
+    ],
+    "p95_sample_ns": 696017.0,
+    "peak_rss_kib": [
+      21436,
+      21344,
+      21440
+    ]
+  },
+  {
+    "case": "compiler_frontend",
+    "variant": "rust-interpreter",
+    "status": "passed",
+    "median_ns": 36111812.0,
+    "process_median_range_ns": [
+      36065157.0,
+      36127829.0
+    ],
+    "p95_sample_ns": 36237573.0,
+    "peak_rss_kib": [
+      26896,
+      26836,
+      26916
+    ]
+  },
+  {
+    "case": "compiler_frontend",
+    "variant": "odin",
+    "status": "passed",
+    "median_ns": 37059120.0,
+    "process_median_range_ns": [
+      37027408.0,
+      37137760.0
+    ],
+    "p95_sample_ns": 37181104.0,
+    "peak_rss_kib": [
+      19468,
+      19468,
+      19456
+    ]
+  },
+  {
+    "case": "compiler_frontend",
+    "variant": "rust-native",
+    "status": "passed",
+    "median_ns": 36285813.0,
+    "process_median_range_ns": [
+      36166132.0,
+      36305365.0
+    ],
+    "p95_sample_ns": 36368869.0,
+    "peak_rss_kib": [
+      26836,
+      26832,
+      26824
+    ]
+  }
+]
