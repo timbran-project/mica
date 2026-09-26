@@ -26,7 +26,7 @@ use crate::{Value, ValueKind};
 use std::cmp::Ordering;
 use std::mem::ManuallyDrop;
 
-pub const VALUE_ABI_VERSION: u32 = 3;
+pub const VALUE_ABI_VERSION: u32 = crate::VALUE_ABI_VERSION;
 pub const VALUE_WORD_BYTES: usize = size_of::<Value>();
 pub const VALUE_TAG_SHIFT: u64 = TAG_SHIFT;
 pub const VALUE_PAYLOAD_MASK: u64 = PAYLOAD_MASK;

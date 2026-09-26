@@ -62,3 +62,10 @@ All Odin fixtures passed. Six Rust fixtures fail across both tiers and all three
 The failures require `len`, `string_append`, loop destructuring, or comprehensions.
 The release helper-call fixture passes; its earlier debug timeout was not a conformance failure.
 Raw samples, metadata, and failures are in `benchmarks/parity/results/2026-09-26-baseline`.
+
+String and basic collection support now includes `len`, scalar indexing and iteration, `string_append`, `string_span`, and `string_find_any`.
+String storage retains immutable prefixes, caches scalar counts, and lazily samples Unicode offsets.
+The string header fits within the existing heap enum footprint. The process-local value ABI is version 4; durable encoding is unchanged.
+Tests cover Unicode boundaries, aliases, concurrent append and index publication, closures, exceptions, suspension, and codec round trips.
+Workspace tests and clippy pass. Three storage tests pass under Miri with strict provenance enabled.
+Performance capture for this change remains pending. Loop patterns, comprehensions, and call allocation remain open.

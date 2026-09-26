@@ -5143,6 +5143,21 @@ fn index_or_builtin(
         return Ok(collection.map_get(index).unwrap_or_else(|| default.clone()));
     }
 
+    if collection.kind() == ValueKind::String {
+        let Some(index) = index.as_int().and_then(|index| usize::try_from(index).ok()) else {
+            return Err(invalid_builtin_call(
+                "index_or",
+                "string indexes must be non-negative integers",
+            ));
+        };
+        return Ok(collection
+            .string_scalar_at(index)
+            .map(|scalar| {
+                Value::int(i64::from(u32::from(scalar))).expect("Unicode scalar fits Mica integer")
+            })
+            .unwrap_or_else(|| default.clone()));
+    }
+
     if collection.list_len().is_some() {
         let Some(index) = index.as_int().and_then(|index| usize::try_from(index).ok()) else {
             return Err(invalid_builtin_call(
@@ -5180,7 +5195,7 @@ fn index_or_builtin(
 
     Err(invalid_builtin_call(
         "index_or",
-        "expected a list, map, or relation collection",
+        "expected a string, list, map, or relation collection",
     ))
 }
 
@@ -7515,6 +7530,10 @@ fn is_safe_read_only_builtin(name: &str) -> bool {
             | "dom_diff"
             | "dom_snapshot_payload"
             | "sync_signature"
+            | "len"
+            | "string_append"
+            | "string_span"
+            | "string_find_any"
             | "string_len"
             | "string_chars"
             | "string_slice"

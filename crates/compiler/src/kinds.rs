@@ -92,7 +92,7 @@ pub(crate) fn iteration_binding_kinds(
             return (KindSet::ALL, None);
         }
         let mut item = KindSet::EMPTY;
-        if may_be(ValueKind::Range) {
+        if may_be(ValueKind::Range) || may_be(ValueKind::String) {
             item = item.union(int);
         }
         if may_be(ValueKind::Relation) {
@@ -103,7 +103,11 @@ pub(crate) fn iteration_binding_kinds(
 
     let key = if may_be(ValueKind::Map) {
         KindSet::ALL
-    } else if may_be(ValueKind::Range) || may_be(ValueKind::List) || may_be(ValueKind::Relation) {
+    } else if may_be(ValueKind::Range)
+        || may_be(ValueKind::String)
+        || may_be(ValueKind::List)
+        || may_be(ValueKind::Relation)
+    {
         int
     } else {
         KindSet::EMPTY
@@ -112,7 +116,7 @@ pub(crate) fn iteration_binding_kinds(
         KindSet::ALL
     } else {
         let mut value = KindSet::EMPTY;
-        if may_be(ValueKind::Range) {
+        if may_be(ValueKind::Range) || may_be(ValueKind::String) {
             value = value.union(int);
         }
         if may_be(ValueKind::Relation) {

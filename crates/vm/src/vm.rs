@@ -3325,11 +3325,15 @@ fn index_value(collection: &Value, index: &Value) -> Result<Value, Value> {
     }
     if let Some(index) = index.as_int()
         && index >= 0
-        && let Some(value) = collection.list_get(index as usize).or_else(|| {
-            collection
-                .with_relation(|relation| relation_row_value(relation, index as usize))
-                .flatten()
-        })
+        && let Some(value) = collection
+            .string_scalar_at(index as usize)
+            .and_then(|scalar| Value::int(i64::from(u32::from(scalar))).ok())
+            .or_else(|| collection.list_get(index as usize))
+            .or_else(|| {
+                collection
+                    .with_relation(|relation| relation_row_value(relation, index as usize))
+                    .flatten()
+            })
     {
         return Ok(value);
     }
@@ -3403,6 +3407,7 @@ fn collection_len(collection: &Value) -> Value {
     let len = collection
         .list_len()
         .or_else(|| collection.map_len())
+        .or_else(|| collection.string_len())
         .or_else(|| collection.with_relation(RelationValue::len))
         .or_else(|| {
             collection.with_range(|start, end| {
@@ -3486,7 +3491,9 @@ fn collection_key_at(collection: &Value, index: &Value) -> Value {
     let Some(index) = ordinal_index(index) else {
         return Value::empty_relation();
     };
-    if collection.list_len().is_some() || collection.kind() == ValueKind::Relation {
+    if collection.list_len().is_some()
+        || matches!(collection.kind(), ValueKind::Relation | ValueKind::String)
+    {
         return i64::try_from(index)
             .ok()
             .and_then(|index| Value::int(index).ok())
@@ -3510,6 +3517,11 @@ fn collection_value_at(collection: &Value, index: &Value) -> Value {
     };
     collection
         .list_get(index)
+        .or_else(|| {
+            collection
+                .string_scalar_at(index)
+                .and_then(|scalar| Value::int(i64::from(u32::from(scalar))).ok())
+        })
         .or_else(|| {
             collection
                 .with_relation(|relation| relation_row_value(relation, index))

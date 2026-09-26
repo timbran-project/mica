@@ -7994,3 +7994,100 @@ fn float_source_literal_round_trips() {
         }
     }
 }
+
+#[test]
+fn runner_string_scalars_iteration_and_scanning() {
+    for interpreter_only in [true, false] {
+        let mut runner = SourceRunner::new_empty().with_interpreter_only(interpreter_only);
+        for (source, expected) in [
+            ("return len(\"aé🦀\")", Value::int(3).unwrap()),
+            ("return index_or(\"é\", 0, 7)", Value::int(233).unwrap()),
+            ("return index_or(\"é\", 1, 7)", Value::int(7).unwrap()),
+            ("return len([1, 2, 3])", Value::int(3).unwrap()),
+            ("return len({:x -> 1, :y -> 2})", Value::int(2).unwrap()),
+            ("return len([:x] { [10], [20] })", Value::int(2).unwrap()),
+            ("return \"aé🦀\"[2]", Value::int(129408).unwrap()),
+            (
+                "let sum = 0\nfor scalar in \"aé🦀\"\nsum = sum + scalar\nend\nreturn sum",
+                Value::int(129738).unwrap(),
+            ),
+            (
+                "let sum = 0\nfor index, scalar in \"aé🦀\"\nsum = sum + index + scalar\nend\nreturn sum",
+                Value::int(129741).unwrap(),
+            ),
+            (
+                "return string_span(\"éabc!\", 1, \"abc\")",
+                Value::int(4).unwrap(),
+            ),
+            (
+                "return string_span(\"abé\", 0, \"abé\")",
+                Value::int(2).unwrap(),
+            ),
+            (
+                "return string_find_any(\"éab🦀!\", 1, \"!\")",
+                Value::int(4).unwrap(),
+            ),
+            (
+                "return string_find_any(\"éab🦀!\", 2, \"é🦀\")",
+                Value::int(5).unwrap(),
+            ),
+            (
+                "return string_span(\"é🦀\", 3, \"x\")",
+                Value::int(2).unwrap(),
+            ),
+            (
+                "return string_find_any(\"é🦀\", 99, \"x\")",
+                Value::int(2).unwrap(),
+            ),
+            ("return string_append(\"é\", \"🦀\")", Value::string("é🦀")),
+        ] {
+            assert_completed_value(&runner.run_source(source).unwrap(), expected);
+        }
+        for operation in [
+            "\"é\"[-1]",
+            "\"é\"[1]",
+            "string_span(\"é\", -1, \"x\")",
+            "string_find_any(\"é\", -1, \"x\")",
+        ] {
+            let source = format!("try\nreturn {operation}\ncatch E_INDEX\nreturn 42\nend");
+            assert_completed_value(
+                &runner.run_source(&source).unwrap(),
+                Value::int(42).unwrap(),
+            );
+        }
+    }
+}
+
+#[test]
+fn string_aliases_survive_closures_exceptions_and_suspension() {
+    let mut runner = SourceRunner::new_empty();
+    let report = runner
+        .run_source(
+            "let text = string_append(\"é\", \"a\")
+         let original = text
+         let snapshot = fn() => original
+         text = string_concat(text, \"b\")
+         try
+           text = string_append(text, \"c\")
+           let invalid = text[99]
+         catch E_INDEX
+           text = string_append(text, \"d\")
+         end
+         suspend()
+         text = string_append(text, \"e\")
+         return [snapshot(), original, text]",
+        )
+        .unwrap();
+    assert!(matches!(report.outcome, TaskOutcome::Suspended { .. }));
+    let outcome = runner
+        .resume_task(TaskRequest {
+            input: TaskInput::Continuation {
+                task_id: report.task_id,
+                value: Value::unit(),
+            },
+            ..SourceRunner::root_source_request("")
+        })
+        .unwrap();
+    assert!(matches!(outcome, TaskOutcome::Complete { value, .. }
+        if value == Value::list([Value::string("éa"), Value::string("éa"), Value::string("éabcde")])));
+}

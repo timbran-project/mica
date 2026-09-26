@@ -20,6 +20,7 @@
 
 mod codec;
 mod heap;
+mod string;
 mod symbol;
 mod traits;
 mod tuple;

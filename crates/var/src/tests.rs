@@ -36,7 +36,7 @@ fn value_is_one_word() {
 
 #[test]
 fn process_local_value_abi_matches_value_layout() {
-    assert_eq!(VALUE_ABI_VERSION, 3);
+    assert_eq!(VALUE_ABI_VERSION, 4);
     assert_eq!(VALUE_TAG_SHIFT, 56);
     assert_eq!(VALUE_PAYLOAD_MASK, 0x00ff_ffff_ffff_ffff);
     assert_eq!(VALUE_INT_MIN, INT_MIN);
@@ -1420,4 +1420,77 @@ fn float_zero_canonicalizes_through_codec() {
     let encoded = word.to_le_bytes();
     let decoded = decode_value(&encoded).unwrap().0;
     assert_eq!(decoded, Value::float(0.0).unwrap());
+}
+
+#[test]
+fn string_scalar_offsets_match_utf8_at_sample_boundaries() {
+    for text in ["".to_owned(), "ascii".repeat(40), "aé🦀\u{301}".repeat(40)] {
+        let value = Value::string(&text);
+        let chars = text.chars().collect::<Vec<_>>();
+        assert_eq!(value.string_len(), Some(chars.len()));
+        for start in 0..=chars.len() {
+            assert_eq!(value.string_scalar_at(start), chars.get(start).copied());
+            for end in start..=chars.len() {
+                let expected = chars[start..end].iter().collect::<String>();
+                assert_eq!(
+                    value.string_slice(start, end),
+                    Some(Value::string(expected))
+                );
+            }
+        }
+        assert!(value.string_slice(1, 0).is_none());
+        assert!(value.string_slice(0, chars.len() + 1).is_none());
+    }
+}
+
+#[test]
+fn string_append_preserves_borrowed_prefixes_and_branch_aliases() {
+    let seed = Value::string("é").string_append("🦀").unwrap();
+    seed.with_str(|borrowed| {
+        let mut text = seed.clone();
+        let mut snapshots = Vec::new();
+        for index in 0..1024 {
+            snapshots.push(text.clone());
+            text = text.string_append("x").unwrap();
+            assert_eq!(text.string_len(), Some(index + 3));
+        }
+        assert_eq!(borrowed, "é🦀");
+        for (index, snapshot) in snapshots.iter().enumerate() {
+            let expected = format!("é🦀{}", "x".repeat(index));
+            assert_eq!(*snapshot, Value::string(&expected));
+            assert_eq!(
+                snapshot.string_append("z"),
+                Some(Value::string(format!("{expected}z")))
+            );
+            let mut encoded = Vec::new();
+            encode_value(snapshot, &mut encoded).unwrap();
+            assert_eq!(decode_value_exact(&encoded).unwrap(), *snapshot);
+        }
+        assert_eq!(seed.string_append(borrowed), Some(Value::string("é🦀é🦀")));
+    })
+    .unwrap();
+}
+
+#[test]
+fn concurrent_string_appends_do_not_change_shared_aliases() {
+    let seed = Value::string("").string_append("é").unwrap();
+    std::thread::scope(|scope| {
+        let threads = (0..8)
+            .map(|index| {
+                let seed = &seed;
+                scope.spawn(move || {
+                    let suffix = format!("{index}🦀");
+                    let mut value = seed.clone();
+                    for _ in 0..128 {
+                        value = value.string_append(&suffix).unwrap();
+                    }
+                    assert_eq!(value, Value::string(format!("é{}", suffix.repeat(128))));
+                })
+            })
+            .collect::<Vec<_>>();
+        for thread in threads {
+            thread.join().unwrap();
+        }
+    });
+    assert_eq!(seed, Value::string("é"));
 }

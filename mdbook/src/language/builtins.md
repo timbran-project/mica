@@ -10,6 +10,10 @@ expected failure as ordinary values.
 
 | Function                                   | Result                                               |
 | ------------------------------------------ | ---------------------------------------------------- |
+| `len(collection)`                         | string scalar count, list length, map size, or relation row count |
+| `string_append(text, suffix)`              | concatenated string; preserves both inputs            |
+| `string_span(text, start, members)`        | end of an ASCII member run                            |
+| `string_find_any(text, start, members)`    | first ASCII member position, or string length         |
 | `string_len(text)`                         | number of Unicode scalar values                      |
 | `string_chars(text)`                       | list of one-character strings                        |
 | `string_slice(text, start, end)`           | end-exclusive character slice                        |
@@ -32,7 +36,7 @@ expected failure as ordinary values.
 | `to_literal(value)`                        | parseable Mica value text                            |
 | `from_literal(text)`                       | `result<dynamic>`                                    |
 | `map_pairs(map)`                           | list of two-item key/value lists                     |
-| `index_or(collection, index, default)`     | list, map, or relation lookup with a default         |
+| `index_or(collection, index, default)`     | string, list, map, or relation lookup with a default         |
 | `json_encode(value)` / `json_decode(text)` | JSON conversion                                      |
 | `json_null()`                              | explicit JSON null value                             |
 | `os_getenv(name)`                          | `option<string>`                                     |
@@ -48,6 +52,33 @@ String positions count Unicode scalar values. An accented character such as `é`
 position regardless of its UTF-8 byte length. A letter followed by a combining accent occupies two
 positions. Use these operations for character-based text processing; a host that lays out text may
 group several scalars into one displayed character.
+
+Indexing a string returns the integer Unicode scalar value at that position.
+A `for` loop over a string yields those integers. Two loop bindings receive the scalar position and value.
+`string_chars` returns one-scalar strings instead.
+
+```mica,eval
+require "AéB"[1] == 233
+let sum = 0
+for scalar in "AB"
+  sum = sum + scalar
+end
+require sum == 131
+```
+
+`string_span` advances while scalars belong to its ASCII member set.
+`string_find_any` advances until a scalar belongs to that set.
+Both return scalar positions and clamp starts beyond the string to its length.
+A negative start raises `E_INDEX`. Non-ASCII scalars never belong to the member set.
+
+```mica,eval
+require string_span("éabc!", 1, "abc") == 4
+require string_find_any("éabc!", 1, "!") == 4
+require string_find_any("éabc", 0, "!") == 4
+require string_append("é", "abc") == "éabc"
+```
+
+Append operations preserve all earlier values, including values captured by closures or retained across suspension.
 
 `string_slice` uses an exclusive end position and accepts an empty interval. A list range such as
 `items[1..3]` includes position 3. Write the bounds for the operation being called:

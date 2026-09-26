@@ -12,6 +12,7 @@
 // with this program. If not, see <https://www.gnu.org/licenses/>.
 
 use crate::heap::HeapValue;
+use crate::string::HeapString;
 use crate::symbol::Symbol;
 use crate::tuple::empty_relation;
 use crate::{RelationValue, RelationValueError, Tuple};
@@ -47,8 +48,8 @@ pub(crate) const MAX_PAYLOAD: u64 = PAYLOAD_MASK;
 /// or invariants of `Value` change so that native code generators and external
 /// processes can detect compatibility.
 ///
-/// Version 3: the immediate zero word denotes the zero-column empty relation.
-pub const VALUE_ABI_VERSION: u32 = 3;
+/// Version 4: heap strings use immutable views over appendable UTF-8 storage.
+pub const VALUE_ABI_VERSION: u32 = 4;
 
 /// A compact Mica value.
 ///
@@ -419,7 +420,7 @@ impl Value {
     }
 
     pub fn string(value: impl AsRef<str>) -> Self {
-        Self::heap(HeapValue::String(value.as_ref().into()))
+        Self::heap(HeapValue::String(HeapString::new(value.as_ref())))
     }
 
     pub fn bytes(value: impl AsRef<[u8]>) -> Self {
@@ -620,7 +621,49 @@ impl Value {
 
     pub fn with_str<R>(&self, f: impl FnOnce(&str) -> R) -> Option<R> {
         self.with_heap(|heap| match heap {
-            HeapValue::String(value) => Some(f(value)),
+            HeapValue::String(value) => Some(f(value.as_str())),
+            _ => None,
+        })?
+    }
+
+    pub fn string_len(&self) -> Option<usize> {
+        self.with_heap(|heap| match heap {
+            HeapValue::String(value) => Some(value.len()),
+            _ => None,
+        })?
+    }
+
+    pub fn string_scalar_at(&self, index: usize) -> Option<char> {
+        self.with_heap(|heap| match heap {
+            HeapValue::String(value) => value.scalar_at(index),
+            _ => None,
+        })?
+    }
+
+    pub fn string_slice(&self, start: usize, end_exclusive: usize) -> Option<Self> {
+        self.with_heap(|heap| match heap {
+            HeapValue::String(value) => value.slice(start, end_exclusive).map(Self::string),
+            _ => None,
+        })?
+    }
+
+    /// Scans ASCII membership from a scalar position, clamping starts beyond the end.
+    pub fn string_scan_ascii(
+        &self,
+        start: usize,
+        members: &[bool; 128],
+        span: bool,
+    ) -> Option<usize> {
+        self.with_heap(|heap| match heap {
+            HeapValue::String(value) => Some(value.scan_ascii(start, members, span)),
+            _ => None,
+        })?
+    }
+
+    /// Appends without changing any earlier view, including aliases on other threads.
+    pub fn string_append(&self, suffix: &str) -> Option<Self> {
+        self.with_heap(|heap| match heap {
+            HeapValue::String(value) => Some(Self::heap(HeapValue::String(value.append(suffix)))),
             _ => None,
         })?
     }

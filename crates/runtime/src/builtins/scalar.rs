@@ -8,6 +8,22 @@ use mica_vm::TypeContract;
 
 pub(crate) fn install(registry: BuiltinRegistry) -> BuiltinRegistry {
     registry
+        .with_builtin("len", BuiltinResultKind::Exact(ValueKind::Int), len_builtin)
+        .with_builtin(
+            "string_append",
+            BuiltinResultKind::Exact(ValueKind::String),
+            string_append_builtin,
+        )
+        .with_builtin(
+            "string_span",
+            BuiltinResultKind::Exact(ValueKind::Int),
+            string_span_builtin,
+        )
+        .with_builtin(
+            "string_find_any",
+            BuiltinResultKind::Exact(ValueKind::Int),
+            string_find_any_builtin,
+        )
         .with_builtin(
             "string_len",
             BuiltinResultKind::Exact(ValueKind::Int),
@@ -95,6 +111,85 @@ pub(crate) fn install(registry: BuiltinRegistry) -> BuiltinRegistry {
         )
 }
 
+fn len_builtin(
+    _context: &mut BuiltinContext<'_, '_>,
+    args: &[Value],
+) -> Result<Value, RuntimeError> {
+    let [value] = args else {
+        return Err(invalid_builtin_call("len", "expected len(collection)"));
+    };
+    let len = value
+        .string_len()
+        .or_else(|| value.list_len())
+        .or_else(|| value.map_len())
+        .or_else(|| value.with_relation(|relation| relation.len()))
+        .ok_or_else(|| invalid_builtin_call("len", "expected string, list, map, or relation"))?;
+    Value::int(len as i64)
+        .map_err(|_| invalid_builtin_call("len", "collection length is out of range"))
+}
+
+fn string_append_builtin(
+    _context: &mut BuiltinContext<'_, '_>,
+    args: &[Value],
+) -> Result<Value, RuntimeError> {
+    let [text, suffix] = args else {
+        return Err(invalid_builtin_call(
+            "string_append",
+            "expected string_append(text, suffix)",
+        ));
+    };
+    suffix
+        .with_str(|suffix| text.string_append(suffix))
+        .flatten()
+        .ok_or_else(|| invalid_builtin_call("string_append", "expected two strings"))
+}
+
+fn string_span_builtin(
+    _context: &mut BuiltinContext<'_, '_>,
+    args: &[Value],
+) -> Result<Value, RuntimeError> {
+    string_scan(args, "string_span", true)
+}
+
+fn string_find_any_builtin(
+    _context: &mut BuiltinContext<'_, '_>,
+    args: &[Value],
+) -> Result<Value, RuntimeError> {
+    string_scan(args, "string_find_any", false)
+}
+
+fn string_scan(args: &[Value], name: &str, span: bool) -> Result<Value, RuntimeError> {
+    let [text, start, members] = args else {
+        return Err(invalid_builtin_call(
+            name,
+            "expected text, scalar start position, and ASCII member string",
+        ));
+    };
+    let start = start
+        .as_int()
+        .ok_or_else(|| invalid_builtin_call(name, "expected integer start position"))?;
+    if start < 0 {
+        return Err(raised_builtin_error(
+            "E_INDEX",
+            format!("{name} start is out of range"),
+            Some(Value::list(args.iter().cloned())),
+        ));
+    }
+    let mut ascii = [false; 128];
+    members
+        .with_str(|members| {
+            for byte in members.bytes().filter(u8::is_ascii) {
+                ascii[usize::from(byte)] = true;
+            }
+        })
+        .ok_or_else(|| invalid_builtin_call(name, "expected ASCII member string"))?;
+    let position = text
+        .string_scan_ascii(start as usize, &ascii, span)
+        .ok_or_else(|| invalid_builtin_call(name, "expected string as first argument"))?;
+    Value::int(position as i64)
+        .map_err(|_| invalid_builtin_call(name, "string position is out of range"))
+}
+
 fn string_len_builtin(
     _context: &mut BuiltinContext<'_, '_>,
     args: &[Value],
@@ -105,8 +200,10 @@ fn string_len_builtin(
             "expected string_len(text)",
         ));
     }
-    let value = builtin_string_arg("string_len", args, 0)?;
-    Value::int(value.chars().count() as i64)
+    let len = args[0]
+        .string_len()
+        .ok_or_else(|| invalid_builtin_call("string_len", "argument 1 is not a string"))?;
+    Value::int(len as i64)
         .map_err(|_| invalid_builtin_call("string_len", "string length is out of range"))
 }
 
@@ -136,14 +233,15 @@ fn string_slice_builtin(
             "expected string_slice(text, start, end)",
         ));
     }
-    let value = builtin_string_arg("string_slice", args, 0)?;
+    let char_len = args[0]
+        .string_len()
+        .ok_or_else(|| invalid_builtin_call("string_slice", "argument 1 is not a string"))?;
     let start = args[1]
         .as_int()
         .ok_or_else(|| invalid_builtin_call("string_slice", "expected integer start position"))?;
     let end = args[2]
         .as_int()
         .ok_or_else(|| invalid_builtin_call("string_slice", "expected integer end position"))?;
-    let char_len = value.chars().count();
     if start < 0 || start > end || !usize::try_from(end).is_ok_and(|end| end <= char_len) {
         return Err(raised_builtin_error(
             "E_INDEX",
@@ -153,11 +251,9 @@ fn string_slice_builtin(
             Some(Value::list(args.iter().cloned())),
         ));
     }
-    Ok(Value::string(string_slice_chars(
-        &value,
-        start as usize,
-        end as usize,
-    )))
+    Ok(args[0]
+        .string_slice(start as usize, end as usize)
+        .expect("validated scalar bounds"))
 }
 
 fn string_from_chars_builtin(
@@ -178,16 +274,27 @@ fn string_concat_builtin(
     _context: &mut BuiltinContext<'_, '_>,
     args: &[Value],
 ) -> Result<Value, RuntimeError> {
-    let mut out = String::new();
-    for (index, value) in args.iter().enumerate() {
-        let Some(()) = value.with_str(|value| out.push_str(value)) else {
-            return Err(invalid_builtin_call(
-                "string_concat",
-                format!("argument {} is not a string", index + 1),
-            ));
-        };
+    let Some(first) = args.first() else {
+        return Ok(Value::string(""));
+    };
+    if first.kind() != ValueKind::String {
+        return Err(invalid_builtin_call(
+            "string_concat",
+            "argument 1 is not a string",
+        ));
     }
-    Ok(Value::string(out))
+    let mut out = first.clone();
+    for (index, value) in args.iter().enumerate().skip(1) {
+        out = value
+            .with_str(|suffix| out.string_append(suffix).expect("string accumulator"))
+            .ok_or_else(|| {
+                invalid_builtin_call(
+                    "string_concat",
+                    format!("argument {} is not a string", index + 1),
+                )
+            })?;
+    }
+    Ok(out)
 }
 
 fn string_join_builtin(
@@ -557,20 +664,6 @@ fn simple_ordinal_value(value: &str) -> Option<i64> {
         "ninety" | "ninetieth" => Some(90),
         _ => None,
     }
-}
-
-fn string_slice_chars(value: &str, start: usize, end: usize) -> &str {
-    let start_byte = value
-        .char_indices()
-        .nth(start)
-        .map(|(index, _)| index)
-        .unwrap_or(value.len());
-    let end_byte = value
-        .char_indices()
-        .nth(end)
-        .map(|(index, _)| index)
-        .unwrap_or(value.len());
-    &value[start_byte..end_byte]
 }
 
 fn hex_digit(nibble: u8) -> char {

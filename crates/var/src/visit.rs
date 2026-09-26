@@ -171,7 +171,7 @@ impl Value {
     #[inline(always)]
     fn heap_value_ref(&self) -> ValueRef<'_> {
         match self.heap_ref().unwrap() {
-            HeapValue::String(value) => ValueRef::String(value),
+            HeapValue::String(value) => ValueRef::String(value.as_str()),
             HeapValue::Bytes(value) => ValueRef::Bytes(value),
             HeapValue::List(values) => ValueRef::List(values),
             HeapValue::Map(entries) => ValueRef::Map(entries),

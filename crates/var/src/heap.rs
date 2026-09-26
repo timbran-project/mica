@@ -12,13 +12,14 @@
 // with this program. If not, see <https://www.gnu.org/licenses/>.
 
 use crate::RelationValue;
+use crate::string::HeapString;
 use crate::value::{
     ErrorValue, FrobValue, TAG_BYTES, TAG_ERROR, TAG_FROB, TAG_LIST, TAG_MAP, TAG_RANGE,
     TAG_RELATION, TAG_STRING, Value,
 };
 
 pub(crate) enum HeapValue {
-    String(Box<str>),
+    String(HeapString),
     Bytes(Box<[u8]>),
     List(Box<[Value]>),
     Map(Box<[(Value, Value)]>),
