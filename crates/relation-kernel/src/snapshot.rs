@@ -579,15 +579,16 @@ impl Snapshot {
             return Ok(methods);
         }
 
-        let methods = crate::dispatch::applicable_positional_methods(
-            self,
+        let resolved =
+            crate::dispatch::resolve_positional_methods(self, relations, selector.clone(), args)?;
+        let methods = Arc::from(resolved.methods);
+        self.dispatch_cache.insert_positional(
             relations,
-            selector.clone(),
+            selector,
             args,
-        )?;
-        let methods = Arc::from(methods);
-        self.dispatch_cache
-            .insert_positional(relations, selector, args, Arc::clone(&methods));
+            Arc::clone(&methods),
+            resolved.argument_independent,
+        );
         Ok(methods)
     }
 

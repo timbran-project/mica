@@ -22,8 +22,13 @@ pub(crate) struct DispatchCache {
     positional_entries: Arc<RwLock<PositionalDispatchEntries>>,
 }
 
-type PositionalDispatchEntries =
-    BTreeMap<DispatchRelationsKey, BTreeMap<Value, BTreeMap<Vec<Value>, Arc<[Value]>>>>;
+type PositionalDispatchEntries = BTreeMap<DispatchRelationsKey, BTreeMap<Value, PositionalMethods>>;
+
+#[derive(Debug, Default)]
+struct PositionalMethods {
+    by_arity: BTreeMap<usize, Arc<[Value]>>,
+    by_values: BTreeMap<Vec<Value>, Arc<[Value]>>,
+}
 
 impl DispatchCache {
     pub(crate) fn new() -> Self {
@@ -87,10 +92,13 @@ impl DispatchCache {
         args: &[Value],
     ) -> Option<Arc<[Value]>> {
         let entries = self.positional_entries.read().unwrap();
-        entries
+        let methods = entries
             .get(&DispatchRelationsKey::from(relations))?
-            .get(selector)?
-            .get(args)
+            .get(selector)?;
+        methods
+            .by_arity
+            .get(&args.len())
+            .or_else(|| methods.by_values.get(args))
             .cloned()
     }
 
@@ -100,15 +108,19 @@ impl DispatchCache {
         selector: &Value,
         args: &[Value],
         methods: Arc<[Value]>,
+        argument_independent: bool,
     ) {
         let mut entries = self.positional_entries.write().unwrap();
-        entries
+        let entry = entries
             .entry(DispatchRelationsKey::from(relations))
             .or_default()
             .entry(selector.clone())
-            .or_default()
-            .entry(args.to_vec())
-            .or_insert(methods);
+            .or_default();
+        if argument_independent {
+            entry.by_arity.entry(args.len()).or_insert(methods);
+            return;
+        }
+        entry.by_values.entry(args.to_vec()).or_insert(methods);
     }
 
     fn insert_key(&self, key: DispatchCacheKey, methods: Vec<ApplicableMethodCall>) {
@@ -203,12 +215,24 @@ mod tests {
         let args = [value(5), value(6)];
         let methods = Arc::<[Value]>::from([value(7), value(8)]);
 
-        cache.insert_positional(relations, &selector, &args, Arc::clone(&methods));
+        cache.insert_positional(relations, &selector, &args, Arc::clone(&methods), true);
 
         let first = cache.get_positional(relations, &selector, &args).unwrap();
         let second = cache.get_positional(relations, &selector, &args).unwrap();
         assert!(Arc::ptr_eq(&methods, &first));
         assert!(Arc::ptr_eq(&first, &second));
+        let changed = [Value::list([value(99)]), Value::string("different")];
+        assert!(Arc::ptr_eq(
+            &first,
+            &cache
+                .get_positional(relations, &selector, &changed)
+                .unwrap()
+        ));
+        assert!(
+            cache
+                .get_positional(relations, &selector, &changed[..1])
+                .is_none()
+        );
     }
     #[test]
     fn concurrent_cache_publication_preserves_entries_and_owned_results() {
@@ -220,7 +244,7 @@ mod tests {
         };
         let selector = value(4);
         let stable = Arc::<[Value]>::from([value(9)]);
-        cache.insert_positional(relations, &selector, &[], Arc::clone(&stable));
+        cache.insert_positional(relations, &selector, &[], Arc::clone(&stable), false);
         std::thread::scope(|scope| {
             for worker in 0..4 {
                 let cache = &cache;
@@ -235,6 +259,7 @@ mod tests {
                             selector,
                             std::slice::from_ref(&argument),
                             Arc::clone(&methods),
+                            false,
                         );
                         assert!(Arc::ptr_eq(
                             &methods,

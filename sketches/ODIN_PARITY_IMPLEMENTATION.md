@@ -341,3 +341,10 @@ The Mica emitter and self-hosted bootstrap remain pending.
 The shared-list call captures pass all 18 before/after processes at `59c39a2` and `0ad9d57`.
 The 400-call workload improves from 21.49 ms to 13.54 ms with essentially unchanged RSS near 21 MiB.
 Odin takes 0.35 ms after the change, leaving a substantial gap. Separate but equal lists still require structural comparisons.
+
+Positional dispatch now caches by arity when every candidate parameter has an unrestricted dispatch restriction.
+The resolver supplies that proof. Selectors with any restricted candidate retain value-based keys.
+This prevents unrestricted calls from retaining every changing parser and emitter state in the snapshot cache.
+Regressions cover restricted overloads, arity differences, transaction-local catalogue changes, and retained snapshots.
+Workspace tests and clippy pass. The full compiler bootstrap also passes after the cache change.
+A fixed-work timing capture remains pending for this change.

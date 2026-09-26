@@ -212,7 +212,22 @@ pub fn applicable_positional_methods(
     selector: Value,
     args: &[Value],
 ) -> Result<Vec<Value>, KernelError> {
+    resolve_positional_methods(reader, relations, selector, args).map(|resolved| resolved.methods)
+}
+
+pub(crate) struct PositionalResolution {
+    pub(crate) methods: Vec<Value>,
+    pub(crate) argument_independent: bool,
+}
+
+pub(crate) fn resolve_positional_methods(
+    reader: &impl RelationRead,
+    relations: DispatchRelations,
+    selector: Value,
+    args: &[Value],
+) -> Result<PositionalResolution, KernelError> {
     let mut methods = Vec::new();
+    let mut argument_independent = true;
 
     reader.visit_relation(
         relations.method_selector,
@@ -228,6 +243,9 @@ pub fn applicable_positional_methods(
                     Ok(ScanControl::Continue)
                 },
             )?;
+            argument_independent &= params
+                .iter()
+                .all(|param| &param.values()[2] == unrestricted_marker());
             if positional_params_match(reader, relations.delegates, args, &params)? {
                 methods.push(ApplicableMethod { method, params });
             }
@@ -237,12 +255,13 @@ pub fn applicable_positional_methods(
 
     methods.sort_by(|left, right| left.method.cmp(&right.method));
     methods.dedup_by(|left, right| left.method == right.method);
-    Ok(
-        prune_positional_methods(reader, relations.delegates, methods)?
+    Ok(PositionalResolution {
+        methods: prune_positional_methods(reader, relations.delegates, methods)?
             .into_iter()
             .map(|entry| entry.method)
             .collect(),
-    )
+        argument_independent,
+    })
 }
 
 pub fn applicable_positional_methods_cached(

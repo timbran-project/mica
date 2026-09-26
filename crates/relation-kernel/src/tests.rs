@@ -1267,6 +1267,107 @@ fn transaction_method_program_cache_tracks_computed_relation_writes() {
 }
 
 #[test]
+fn positional_arity_cache_preserves_restrictions_overlays_and_snapshots() {
+    let kernel = RelationKernel::new();
+    for (id, name, arity) in [
+        (1, "MethodSelector", 2),
+        (2, "Param", 4),
+        (3, "Delegates", 3),
+    ] {
+        kernel
+            .create_relation(RelationMetadata::new(rel(id), Symbol::intern(name), arity))
+            .unwrap();
+    }
+    let relations = DispatchRelations {
+        method_selector: rel(1),
+        param: rel(2),
+        delegates: rel(3),
+    };
+    let selector = Value::symbol(Symbol::intern("choose"));
+    let generic = Value::identity(rel(10));
+    let specific = Value::identity(rel(11));
+    let role = Value::symbol(Symbol::intern("input"));
+    let unrestricted = Tuple::from([
+        generic.clone(),
+        role.clone(),
+        crate::unrestricted_dispatch_restriction(),
+        int(0),
+    ]);
+    let mut tx = kernel.begin();
+    tx.assert(rel(1), Tuple::from([generic.clone(), selector.clone()]))
+        .unwrap();
+    tx.assert(rel(2), unrestricted.clone()).unwrap();
+    tx.commit().unwrap();
+    let retained = kernel.snapshot();
+    let first = retained
+        .cached_applicable_positional_methods(relations, &selector, &[int(1)])
+        .unwrap();
+    let changed = retained
+        .cached_applicable_positional_methods(
+            relations,
+            &selector,
+            &[Value::list([Value::string("different")])],
+        )
+        .unwrap();
+    assert!(Arc::ptr_eq(&first, &changed));
+    assert_eq!(&*changed, std::slice::from_ref(&generic));
+    assert!(
+        retained
+            .cached_applicable_positional_methods(relations, &selector, &[])
+            .unwrap()
+            .is_empty()
+    );
+
+    let mut tx = kernel.begin();
+    tx.assert(rel(1), Tuple::from([specific.clone(), selector.clone()]))
+        .unwrap();
+    tx.assert(
+        rel(2),
+        Tuple::from([specific.clone(), role.clone(), int(7), int(0)]),
+    )
+    .unwrap();
+    tx.commit().unwrap();
+    let restricted = kernel.snapshot();
+    for (argument, expected) in [(7, &specific), (8, &generic), (7, &specific)] {
+        assert_eq!(
+            &*restricted
+                .cached_applicable_positional_methods(relations, &selector, &[int(argument)])
+                .unwrap(),
+            std::slice::from_ref(expected)
+        );
+    }
+    assert_eq!(
+        &*retained
+            .cached_applicable_positional_methods(relations, &selector, &[int(7)])
+            .unwrap(),
+        std::slice::from_ref(&generic)
+    );
+
+    let mut tx = kernel.begin();
+    tx.retract(rel(2), unrestricted).unwrap();
+    tx.assert(rel(2), Tuple::from([generic.clone(), role, int(8), int(0)]))
+        .unwrap();
+    assert!(
+        applicable_positional_methods_cached(&tx, relations, selector.clone(), &[int(9)])
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        &*applicable_positional_methods_cached(&tx, relations, selector.clone(), &[int(8)])
+            .unwrap(),
+        std::slice::from_ref(&generic)
+    );
+    drop(tx);
+    assert_eq!(
+        &*kernel
+            .snapshot()
+            .cached_applicable_positional_methods(relations, &selector, &[int(9)])
+            .unwrap(),
+        std::slice::from_ref(&generic)
+    );
+}
+
+#[test]
 fn projected_store_applies_server_commits_without_provider() {
     let kernel = RelationKernel::new();
     let name = RelationMetadata::new(rel(73), Symbol::intern("Name"), 2)
