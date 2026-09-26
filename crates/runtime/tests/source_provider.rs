@@ -667,17 +667,13 @@ mod tests {
         let mut runner = new_source_runner();
         load_source_relations(&mut runner);
 
-        let repo = runner.named_identity(Symbol::intern("repo")).unwrap();
-        let error = runner
+        let report = runner
             .run_source(
                 "assert source/FileContentHash(#repo, #rev, \"Cargo.toml\", \"x\", \"local-worktree\", \"version\")",
             )
-            .unwrap_err();
-        assert!(format!("{error:?}").contains("ReadOnlyRelation"));
-        assert!(
-            format!("{error:?}").contains(&format!("{repo:?}"))
-                || format!("{error:?}").contains("ReadOnlyRelation")
-        );
+            .unwrap();
+        assert!(matches!(report.outcome, TaskOutcome::Aborted { error, .. }
+            if error.error_code_symbol() == Some(Symbol::intern("E_READ_ONLY"))));
     }
 
     #[test]

@@ -566,6 +566,7 @@ impl RelationWorkspace for VmHostContext<'_, '_> {
         relation: mica_relation_kernel::RelationId,
         bindings: &[Option<Value>],
     ) -> Result<(), mica_relation_kernel::KernelError> {
+        self.tx.require_writable_relation(relation)?;
         let tuples = self.scan_relation(relation, bindings)?;
         for tuple in tuples {
             self.retract_tuple(relation, tuple)?;
@@ -1986,31 +1987,28 @@ impl RegisterVm {
             Opcode::Assert { relation, values } => {
                 let relation = program.relation(*relation);
                 require_write(host.authority(), relation)?;
-                host.assert_tuple(
+                let result = host.assert_tuple(
                     relation,
                     self.resolve_tuple(program, program.operands(*values)),
-                )?;
-                self.advance_ip_unchecked();
-                Ok(VmHostResponse::Continue)
+                );
+                self.finish_relation_write(result)
             }
             Opcode::Retract { relation, values } => {
                 let relation = program.relation(*relation);
                 require_write(host.authority(), relation)?;
-                host.retract_tuple(
+                let result = host.retract_tuple(
                     relation,
                     self.resolve_tuple(program, program.operands(*values)),
-                )?;
-                self.advance_ip_unchecked();
-                Ok(VmHostResponse::Continue)
+                );
+                self.finish_relation_write(result)
             }
             Opcode::RetractWhere { relation, bindings } => {
                 let relation = program.relation(*relation);
                 require_read(host.authority(), relation)?;
                 require_write(host.authority(), relation)?;
                 let bindings = self.resolve_bindings(program, program.bindings(*bindings));
-                host.retract_matching(relation, &bindings)?;
-                self.advance_ip_unchecked();
-                Ok(VmHostResponse::Continue)
+                let result = host.retract_matching(relation, &bindings);
+                self.finish_relation_write(result)
             }
             Opcode::ScanDynamic {
                 dst,
@@ -2037,38 +2035,35 @@ impl RegisterVm {
             Opcode::AssertDynamic { relation, args } => {
                 let relation = program.relation(*relation);
                 require_write(host.authority(), relation)?;
-                host.assert_tuple(
+                let result = host.assert_tuple(
                     relation,
                     Tuple::new(
                         self.resolve_relation_values(program, program.relation_args(*args))?,
                     ),
-                )?;
-                self.advance_ip_unchecked();
-                Ok(VmHostResponse::Continue)
+                );
+                self.finish_relation_write(result)
             }
             Opcode::RetractDynamic { relation, args } => {
                 let relation = program.relation(*relation);
                 require_write(host.authority(), relation)?;
                 let (bindings, _) =
                     self.resolve_relation_bindings(program, program.relation_args(*args))?;
-                if bindings.iter().any(Option::is_none) {
+                let result = if bindings.iter().any(Option::is_none) {
                     require_read(host.authority(), relation)?;
-                    host.retract_matching(relation, &bindings)?;
+                    host.retract_matching(relation, &bindings)
                 } else {
-                    host.retract_tuple(relation, Tuple::new(bindings.into_iter().flatten()))?;
-                }
-                self.advance_ip_unchecked();
-                Ok(VmHostResponse::Continue)
+                    host.retract_tuple(relation, Tuple::new(bindings.into_iter().flatten()))
+                };
+                self.finish_relation_write(result)
             }
             Opcode::ReplaceFunctional { relation, values } => {
                 let relation = program.relation(*relation);
                 require_write(host.authority(), relation)?;
-                host.replace_functional_tuple(
+                let result = host.replace_functional_tuple(
                     relation,
                     self.resolve_tuple(program, program.operands(*values)),
-                )?;
-                self.advance_ip_unchecked();
-                Ok(VmHostResponse::Continue)
+                );
+                self.finish_relation_write(result)
             }
             Opcode::Jump { target } => self.jump_to(target.0 as usize),
             Opcode::EnterTry {
@@ -2725,6 +2720,25 @@ impl RegisterVm {
 
     fn advance_ip_unchecked(&mut self) {
         self.current_frame_mut_unchecked().ip += 1;
+    }
+
+    fn finish_relation_write(
+        &mut self,
+        result: Result<(), mica_relation_kernel::KernelError>,
+    ) -> Result<VmHostResponse, RuntimeError> {
+        match result {
+            Ok(()) => {
+                self.advance_ip_unchecked();
+                Ok(VmHostResponse::Continue)
+            }
+            Err(error @ mica_relation_kernel::KernelError::ReadOnlyRelation(_)) => self
+                .begin_raise(Value::error(
+                    Symbol::intern("E_READ_ONLY"),
+                    Some(format!("{error:?}")),
+                    None,
+                )),
+            Err(error) => Err(error.into()),
+        }
     }
 
     /// Convert a KernelError into a raised Mica error value so that

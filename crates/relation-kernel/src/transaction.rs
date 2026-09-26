@@ -470,11 +470,23 @@ impl<'a> Transaction<'a> {
         self.apply_local_change(relation, tuple, LocalChange::Retract)
     }
 
+    pub fn require_writable_relation(
+        &self,
+        relation: RelationId,
+    ) -> Result<&crate::RelationMetadata, KernelError> {
+        let metadata = self.base.relation(relation)?.metadata();
+        if self.base.computed_relations.is_computed_relation(metadata) {
+            return Err(KernelError::ReadOnlyRelation(relation));
+        }
+        Ok(metadata)
+    }
+
     pub fn replace_functional(
         &mut self,
         relation: RelationId,
         tuple: Tuple,
     ) -> Result<(), KernelError> {
+        self.require_writable_relation(relation)?;
         self.base.relation(relation)?.validate_tuple(&tuple)?;
         let ConflictPolicy::Functional { .. } =
             self.base.relation(relation)?.metadata().conflict_policy()
@@ -983,10 +995,7 @@ impl<'a> Transaction<'a> {
         tuple: Tuple,
         change: LocalChange,
     ) -> Result<(), KernelError> {
-        let metadata = self.base.relation(relation)?.metadata();
-        if self.base.computed_relations.is_computed_relation(metadata) {
-            return Err(KernelError::ReadOnlyRelation(relation));
-        }
+        let metadata = self.require_writable_relation(relation)?;
         self.base.relation(relation)?.validate_tuple(&tuple)?;
         if matches!(change, LocalChange::Assert)
             && matches!(

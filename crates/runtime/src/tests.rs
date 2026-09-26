@@ -1,3 +1,4 @@
+use super::relation_name_relation;
 use super::{
     AuthorityContext, BuiltinResultKind, CompileError, Emission, Instruction, Operand, Program,
     RuntimeError, SYSTEM_ENDPOINT, SourceTaskError, SpawnRequest, SpawnTarget,
@@ -6,7 +7,6 @@ use super::{
     param_relation,
 };
 use super::{FileinMode, SourceRunner, TaskInput, TaskRequest};
-use super::{relation_name_relation, subject_fact_relation};
 use mica_relation_kernel::RelationDurability;
 use mica_var::{Identity, Symbol, Tuple, Value, ValueKind};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -6052,13 +6052,12 @@ fn runner_rejects_writes_to_system_relations() {
     let mut runner = SourceRunner::new_empty();
     runner.run_source("make_identity(:thing)").unwrap();
 
-    let error = runner
+    let report = runner
         .run_source("assert SubjectFact(#thing, :bogus, [])")
-        .unwrap_err();
+        .unwrap();
 
-    assert!(
-        format!("{error:?}").contains(&format!("ReadOnlyRelation({:?})", subject_fact_relation()))
-    );
+    assert!(matches!(report.outcome, TaskOutcome::Aborted { error, .. }
+            if error.error_code_symbol() == Some(Symbol::intern("E_READ_ONLY"))));
 }
 
 #[test]
@@ -8394,5 +8393,32 @@ fn read_only_comprehensions_validate_every_clause() {
             accepted,
             "{source}"
         );
+    }
+}
+
+#[test]
+fn computed_relation_writes_raise_catchable_read_only_errors() {
+    for interpreter_only in [true, false] {
+        let mut runner = SourceRunner::new_empty().with_interpreter_only(interpreter_only);
+        runner.run_source("make_identity(:thing)").unwrap();
+        for statement in [
+            "assert SubjectFact(#thing, :bogus, [])",
+            "retract SubjectFact(#thing, :bogus, [])",
+            "retract SubjectFact(#thing, _, _)",
+            "let args = [#thing, :bogus, []]\nassert SubjectFact(@args)",
+            "let args = [#thing, :bogus, []]\nretract SubjectFact(@args)",
+            "let args = [#thing]\nretract SubjectFact(@args, _, _)",
+        ] {
+            let source =
+                format!("try\n{statement}\ncatch E_READ_ONLY\nreturn true\nend\nreturn false");
+            let report = runner
+                .run_source(&source)
+                .unwrap_or_else(|error| panic!("{statement}: {error:?}"));
+            assert!(
+                matches!(&report.outcome, TaskOutcome::Complete { value, .. } if *value == Value::bool(true)),
+                "{statement}: {}",
+                report.render()
+            );
+        }
     }
 }

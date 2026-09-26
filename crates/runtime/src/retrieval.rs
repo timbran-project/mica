@@ -424,10 +424,11 @@ mod tests {
             .unwrap();
         runner.run_source("make_identity(:main_index)").unwrap();
 
-        let error = runner
+        let report = runner
             .run_source("assert NearestEmbedding(#main_index, [1.0], 1, #main_index, 1.0, 0)")
-            .unwrap_err();
-        assert!(format!("{error:?}").contains("ReadOnlyRelation"));
+            .unwrap();
+        assert!(matches!(report.outcome, TaskOutcome::Aborted { error, .. }
+            if error.error_code_symbol() == Some(Symbol::intern("E_READ_ONLY"))));
     }
 
     #[test]
