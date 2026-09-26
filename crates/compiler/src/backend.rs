@@ -1062,6 +1062,9 @@ fn compile_rule_term(
     expr: &HirExpr,
 ) -> Result<Term, CompileError> {
     match expr {
+        // Each positive-body hole is an independent existential variable. The prefix
+        // cannot occur in a source identifier, including user-named query variables.
+        HirExpr::Hole { id } => Ok(Term::Var(Symbol::intern(&format!("\0hole:{}", id.0)))),
         HirExpr::ExternalRef { name, .. } | HirExpr::QueryVar { name, .. } => {
             Ok(Term::Var(Symbol::intern(name)))
         }
@@ -5898,6 +5901,48 @@ mod tests {
 
     fn id(raw: u64) -> Identity {
         Identity::new(raw).unwrap()
+    }
+
+    #[test]
+    fn positive_rule_holes_are_independent_and_preserve_incremental_support() {
+        let kernel = RelationKernel::new();
+        let mut context = CompileContext::new();
+        for (raw, name, arity) in [(1, "Left", 3), (2, "Right", 3), (3, "Found", 1)] {
+            kernel
+                .create_relation(RelationMetadata::new(id(raw), Symbol::intern(name), arity))
+                .unwrap();
+            context = context.with_relation(name, id(raw));
+        }
+        install_rules_from_source(
+            "Found(x) :- Left(x, _, _), Right(x, _, _)",
+            &context,
+            &kernel,
+        )
+        .unwrap();
+        let tuple = |values: &[i64]| Tuple::new(values.iter().map(|n| Value::int(*n).unwrap()));
+        let mut tx = kernel.begin();
+        tx.assert(id(1), tuple(&[1, 2, 3])).unwrap();
+        tx.assert(id(1), tuple(&[1, 6, 7])).unwrap();
+        tx.assert(id(2), tuple(&[1, 4, 5])).unwrap();
+        tx.commit().unwrap();
+        assert!(kernel.snapshot().contains(id(3), &tuple(&[1])).unwrap());
+        let mut tx = kernel.begin();
+        tx.retract(id(1), tuple(&[1, 2, 3])).unwrap();
+        tx.commit().unwrap();
+        assert!(kernel.snapshot().contains(id(3), &tuple(&[1])).unwrap());
+        let mut tx = kernel.begin();
+        tx.retract(id(1), tuple(&[1, 6, 7])).unwrap();
+        tx.commit().unwrap();
+        assert!(!kernel.snapshot().contains(id(3), &tuple(&[1])).unwrap());
+        for source in [
+            "Found(_) :- Left(x, _, _)",
+            "Found(x) :- Left(x, _, _), not Right(x, _, _)",
+        ] {
+            assert!(
+                install_rules_from_source(source, &context, &kernel).is_err(),
+                "{source}"
+            );
+        }
     }
 
     fn count_kind_checks(program: &Program) -> usize {

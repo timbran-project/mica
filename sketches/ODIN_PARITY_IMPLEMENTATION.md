@@ -205,3 +205,7 @@ Authority contexts compile read grants once and share them with transactions. Bu
 Restricted computed reads bypass shared derived and packed caches. Providers declare authority dependence, so ordinary worlds retain existing cache paths.
 Six focused runtime tests pass, covering Unicode, cancelled edits, rule visibility, rollback, output bindings, marker writes, authority changes, and suspension.
 Workspace tests and clippy pass for computed buffer views. The imported application scenarios remain under separate validation.
+
+The shared marker corpus requires holes in positive rule bodies. The compiler now lowers each hole to an independent anonymous variable.
+A focused test checks independent holes and incremental support after retractions. Heads, negated predicates, and guards retain their existing hole restrictions.
+The 29 pinned buffer scenarios pass with both interpreter-only and native-enabled execution. Marker scenarios exposed an uncaught read-only write error; that VM path remains under repair.

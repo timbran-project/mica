@@ -441,7 +441,12 @@ impl<'a> Analyzer<'a> {
                     for item in body {
                         match item {
                             HirRuleBodyItem::Atom(atom) => {
-                                self.validate_relation_atom_support(atom, true, false, false);
+                                self.validate_relation_atom_support(
+                                    atom,
+                                    true,
+                                    !atom.negated,
+                                    false,
+                                );
                             }
                             HirRuleBodyItem::Guard(guard) => {
                                 self.validate_supported_surface_expr(&guard.left, false);

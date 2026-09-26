@@ -22,6 +22,14 @@ return ReadyForReview(#alice, ?change)
 The compiler also accepts `?name` in rule atoms, but bare names are the preferred rule style. A
 relation with both asserted facts and rule heads reads as the union of stored and derived facts.
 
+In a positive body predicate, `_` matches any value independently of other holes:
+
+```mica
+CurrentLength(buffer, length) :- WatchedBuffer(buffer), BufferStat(buffer, length, _, _)
+```
+
+Holes do not appear in the derived result. Rule heads, negated predicates, and comparison guards cannot contain holes.
+
 ## Reading a Rule as a Query
 
 Each positive body predicate supplies candidate values. A name shared between predicates joins their
