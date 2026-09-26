@@ -293,6 +293,26 @@ mod tests {
                 .await,
                 Value::bool(true)
             );
+            assert_eq!(
+                evaluate(&owner, &mut pump, r#"
+                    editor/file_visit(:file/session, 1, 1, "created")
+                    let buffer = editor/window_buffer(:file/session, 1)
+                    require editor/file_stamp(buffer) == none
+                    buffer_insert(buffer, 0, "new é🦀")
+                    return true
+                "#).await,
+                Value::bool(true)
+            );
+            assert_eq!(
+                evaluate(&owner, &mut pump, r#"
+                    let buffer = editor/window_buffer(:file/session, 1)
+                    let result = editor/save_buffer_command(:file/session, 1, 1, buffer, 0, none, none, {})
+                    require string_starts_with(result[:message], "Wrote ")
+                    return not editor/buffer_modified(buffer)
+                "#).await,
+                Value::bool(true)
+            );
+            assert_eq!(fs::read_to_string(workspace.0.join("created")).unwrap(), "new é🦀");
             owner.shutdown(&mut pump, |_| {}).await.unwrap();
         });
     }

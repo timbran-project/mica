@@ -463,7 +463,7 @@ fn stamp(bytes: &[u8], metadata: &Metadata) -> Result<Value, Failure> {
 fn optional_stamp(contents: &Option<(Vec<u8>, Metadata)>) -> Result<Value, Failure> {
     contents
         .as_ref()
-        .map_or(Ok(Value::empty_relation()), |(bytes, metadata)| {
+        .map_or(Ok(Value::option_none()), |(bytes, metadata)| {
             stamp(bytes, metadata)
         })
 }
@@ -582,7 +582,7 @@ mod tests {
         let saved = request(
             &files,
             "editor_file_write_atomic",
-            save("fresh", "created", Value::empty_relation(), "lf"),
+            save("fresh", "created", Value::option_none(), "lf"),
             "ok",
         );
         let before = field(&saved, "stamp").unwrap();
@@ -605,14 +605,11 @@ mod tests {
             save("fresh", "mine", current, "lf"),
             "changed",
         );
-        assert_eq!(
-            field(&changed, "current_stamp"),
-            Some(Value::empty_relation())
-        );
+        assert_eq!(field(&changed, "current_stamp"), Some(Value::option_none()));
         request(
             &files,
             "editor_file_write_atomic",
-            save("fresh", "confirmed", Value::empty_relation(), "lf"),
+            save("fresh", "confirmed", Value::option_none(), "lf"),
             "ok",
         );
     }
@@ -699,7 +696,7 @@ mod tests {
             save(
                 "large",
                 &"a".repeat(MAX_BYTES + 1),
-                Value::empty_relation(),
+                Value::option_none(),
                 "lf",
             ),
             "error",
@@ -727,7 +724,7 @@ mod tests {
             request(
                 &files,
                 "editor_file_write_atomic",
-                save(path, "overwrite", Value::empty_relation(), "lf"),
+                save(path, "overwrite", Value::option_none(), "lf"),
                 "denied",
             );
         }
@@ -759,7 +756,7 @@ mod tests {
         request(
             &files,
             "editor_file_write_atomic",
-            save("pipe", "text", Value::empty_relation(), "lf"),
+            save("pipe", "text", Value::option_none(), "lf"),
             "error",
         );
     }
