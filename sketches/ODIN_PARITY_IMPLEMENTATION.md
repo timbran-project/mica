@@ -133,3 +133,9 @@ This removes a quadratic insertion algorithm; pinned cold and warm measurements 
 Cold helper-call captures pass all 18 processes. Rust interpreter latency falls from 29.14 seconds to 27.6 ms after dispatch insertion stops copying prior entries.
 The full warmed capture passes all 207 processes across 23 fixtures. Warm helper calls take 10.80 ms versus the earlier 13.14 ms; Odin takes 1.20 ms.
 Other original fixtures remain within five percent of the comprehension capture. Cache contention across multiple task workers is not measured yet.
+
+The buffer text core now uses immutable UTF-8 chunks and persistent AVL nodes with scalar, byte, and newline counts.
+Splices retain unchanged chunks. Bounded search streams across chunks; line coordinates use subtree counts.
+Provenance deltas distinguish edits to equal text at different positions. Normalization, disjoint transforms, and marker rebasing have explicit work limits.
+Ten focused tests pass, including generated Unicode edits, fragmented-base normalization, and commuting disjoint edits. Kernel clippy passes.
+This core is not yet connected to transactions or persistence. Atomic publication, recovery, runtime operations, client results, and editor integration remain required.

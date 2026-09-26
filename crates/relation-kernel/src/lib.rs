@@ -20,6 +20,7 @@
 //! transaction shape while keeping physical index storage narrow and replaceable.
 
 mod batch;
+pub mod buffer;
 mod catalog;
 mod closure;
 mod computed;
