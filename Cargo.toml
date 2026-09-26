@@ -32,6 +32,7 @@ license = "AGPL-3.0-only"
 rust-version = "1.96"
 
 [workspace.dependencies]
+cap-std = { version = "4.0.3", default-features = false }
 mica-auth = { path = "crates/auth" }
 mica-compiler = { path = "crates/compiler" }
 mica-driver = { path = "crates/driver" }
@@ -80,6 +81,7 @@ rayon = "1.12"
 rcgen = "0.14"
 rustls-pemfile = "2.2"
 rustls-pki-types = "1.13"
+rustix = { version = "1.1", features = ["fs"] }
 rusty_paseto = { version = "0.10", default-features = false, features = ["batteries_included", "v4_local"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

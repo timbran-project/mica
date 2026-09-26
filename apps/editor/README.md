@@ -12,7 +12,27 @@ cargo test -p mica-runtime --test editor
 The harness loads the shared host and buffer libraries, then the editor files in dependency order.
 It runs 45 scenarios from omica and one additional keymap regression in both interpreter-only and native-enabled modes.
 Each scenario commits separately. The harness resumes explicit commit boundaries to check tagged acknowledgements after publication.
-It also renders the page shell. Browser transport and host file-service integration remain pending.
+It also renders the page shell. Browser transport remains pending.
+
+The daemon exposes fixed file services when started with one or more `--editor-root DIR` arguments.
+Relative paths start at the first root. Absolute paths must resolve within a configured root.
+Directory capabilities confine reads and replacements. Completion skips symbolic links and returns at most 100 entries.
+Reads and saves accept UTF-8 text up to 8 MiB, including encoded CRLF bytes on save.
+
+File stamps contain a byte count, a nanosecond timestamp string, and a SHA-256 content hash.
+The application treats stamps as opaque values. It compares the expected stamp before replacement and requests confirmation after an external change.
+Saves preserve file permissions, flush a temporary file, replace the destination, and flush the parent directory.
+Saves through one host are serialized. Uncoordinated external writers can still change a file between the final stamp check and replacement.
+An error after replacement reports that the file changed but directory durability could not be confirmed.
+
+Run the file-service and application integration checks:
+
+```sh
+cargo test -p mica-web-host --lib editor_files
+cargo test -p mica-daemon editor_visits_saves
+```
+
+The application test uses the real driver and external-request handler to visit, edit, save, detect a disk change, and confirm replacement.
 
 The source comes from omica revision `bfb368c0b7586ab98c3915c0ae7cd3b46843fc8f`.
 The Rust port makes these adaptations:

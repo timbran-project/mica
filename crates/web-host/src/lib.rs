@@ -18,6 +18,7 @@ use std::sync::Arc;
 pub mod codec;
 
 pub mod auth;
+pub mod editor_files;
 pub mod metrics;
 mod request;
 mod response;

@@ -52,7 +52,7 @@ use std::thread::{self, JoinHandle as ThreadJoinHandle};
 use std::time::{Duration, Instant};
 use tracing_subscriber::EnvFilter;
 
-mod external_http;
+mod external_requests;
 mod metrics;
 #[allow(dead_code)]
 mod rpc;
@@ -77,6 +77,8 @@ struct Cli {
     embedding_provider: EmbeddingProviderMode,
     #[arg(long = "source-root", value_name = "DIR")]
     source_roots: Vec<PathBuf>,
+    #[arg(long = "editor-root", value_name = "DIR")]
+    editor_roots: Vec<PathBuf>,
     #[arg(long = "source-index", value_name = "FILE")]
     source_index: Option<PathBuf>,
     #[arg(long = "rust-analyzer", value_name = "BINARY")]
@@ -357,10 +359,13 @@ async fn run_async(cli: Cli) -> Result<(), String> {
     });
     let mut resources = DriverResources::new(worker_count);
     resources.relation_acceleration = mica_driver::RelationAcceleration::Automatic;
+    let editor_files = Arc::new(mica_web_host::editor_files::EditorFiles::new(
+        cli.editor_roots.clone(),
+    )?);
     let mut owner = DriverOwner::builder(resources)
         .source_runner(runner)
-        .external_request_handler(external_http::handler())
-        .external_stream_request_handler(external_http::stream_handler())
+        .external_request_handler(external_requests::handler(editor_files))
+        .external_stream_request_handler(external_requests::stream_handler())
         .build()
         .map_err(format_driver_error)?;
     metrics::metrics().drivers_started.inc();

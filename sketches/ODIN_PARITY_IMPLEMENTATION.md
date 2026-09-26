@@ -269,3 +269,13 @@ Buffer creation now accepts a `:make_buffer` invoke grant, including role grants
 Only newly created buffers receive temporary read/write capabilities. Re-declaring an existing buffer confers no access.
 Focused tests cover private-buffer denial, computed reads, later policy grants, and authority refresh after suspension in both execution modes.
 Runtime tests and workspace clippy pass. Application ownership policy and host wiring remain separate work.
+
+The daemon now routes four fixed editor file services through its external-request handler, with configured `--editor-root` directories.
+Directory capabilities confine paths. Blocking file work runs outside the I/O executor; reads and encoded saves are limited to 8 MiB.
+Saves compare opaque stamps, preserve permissions, flush temporary text, replace the destination, and flush the directory.
+The host serializes its saves. External writers remain able to race the final stamp check; the documentation states that limit.
+`cap-std` adds directory confinement at the host boundary, with 11 additional locked packages and no default features.
+The host reuses `sha2` for content stamps and `rustix` for nonblocking file opens that reject named pipes without waiting.
+Seven real-filesystem tests cover revisions, concurrent saves, Unicode/CRLF, limits, completion, symlink escapes, and named pipes.
+The real driver integration test visits, edits, saves, detects an external change, and confirms replacement through Mica file commands.
+Web-host and daemon tests and workspace clippy pass. Browser session transport and editor measurements remain pending.
