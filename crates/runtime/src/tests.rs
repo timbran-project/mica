@@ -8091,3 +8091,56 @@ fn string_aliases_survive_closures_exceptions_and_suspension() {
     assert!(matches!(outcome, TaskOutcome::Complete { value, .. }
         if value == Value::list([Value::string("éa"), Value::string("éa"), Value::string("éabcde")])));
 }
+
+#[test]
+fn repeated_calls_preserve_closure_captures_and_unwind_after_suspension() {
+    for interpreter_only in [true, false] {
+        let mut runner = SourceRunner::new_empty().with_interpreter_only(interpreter_only);
+        let report = runner
+            .run_source(
+                "fn capture(value)
+               let items = [value, string_concat(\"value:\", to_literal(value))]
+               return fn() => items
+             end
+             fn fail(value)
+               try
+                 raise E_FAIL, \"failed\", [value]
+               finally
+                 let cleaned = string_concat(\"clean:\", to_literal(value))
+               end
+             end
+             let original = capture(7)
+             let values = []
+             let index = 0
+             while index < 20
+               let discarded = capture(index)
+               try
+                 fail(index)
+               catch E_FAIL as err
+                 values = [@values, err.value]
+               end
+               index = index + 1
+             end
+             suspend()
+             let later = capture(42)
+             return [original(), later(), len(values)]",
+            )
+            .unwrap();
+        assert!(matches!(report.outcome, TaskOutcome::Suspended { .. }));
+        let outcome = runner
+            .resume_task(TaskRequest {
+                input: TaskInput::Continuation {
+                    task_id: report.task_id,
+                    value: Value::unit(),
+                },
+                ..SourceRunner::root_source_request("")
+            })
+            .unwrap();
+        assert!(matches!(outcome, TaskOutcome::Complete { value, .. }
+        if value == Value::list([
+            Value::list([Value::int(7).unwrap(), Value::string("value:7")]),
+            Value::list([Value::int(42).unwrap(), Value::string("value:42")]),
+            Value::int(20).unwrap(),
+        ])));
+    }
+}

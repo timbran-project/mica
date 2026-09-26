@@ -87,14 +87,22 @@ enum ExpandedRelationArg {
 
 impl Frame {
     fn root(program: usize, register_count: usize) -> Self {
-        Self::new(program, register_count, None, Vec::new()).expect("root frame has no arguments")
+        Self::new(
+            program,
+            register_count,
+            None,
+            std::iter::empty(),
+            Vec::new(),
+        )
+        .expect("root frame has no arguments")
     }
 
     fn new(
         program: usize,
         register_count: usize,
         return_register: Option<Register>,
-        args: Vec<Value>,
+        args: impl ExactSizeIterator<Item = Value>,
+        mut registers: Vec<Value>,
     ) -> Result<Self, RuntimeError> {
         if args.len() > register_count {
             return Err(RuntimeError::InvalidCallArity {
@@ -104,10 +112,10 @@ impl Frame {
             });
         }
 
-        let mut registers = vec![Value::empty_relation(); register_count];
-        for (slot, arg) in registers.iter_mut().zip(args) {
-            *slot = arg;
-        }
+        debug_assert!(registers.is_empty());
+        registers.reserve(register_count);
+        registers.extend(args);
+        registers.resize(register_count, Value::empty_relation());
         Ok(Self {
             program,
             ip: 0,
@@ -1024,6 +1032,9 @@ fn opcode_name(opcode: &Opcode) -> &'static str {
 #[derive(Clone, Debug)]
 pub struct RegisterVm {
     state: VmState,
+    // Empty buffers retain capacity without retaining values or checkpointed authority.
+    register_buffers: Vec<Vec<Value>>,
+    call_arguments: Vec<Value>,
     type_check_cache: BTreeMap<usize, (Value, BTreeSet<TypeContract>)>,
     #[cfg(feature = "cranelift")]
     native_execution: bool,
@@ -1065,6 +1076,8 @@ impl RegisterVm {
                 frames: vec![Frame::root(0, register_count)],
                 pending_resume: None,
             },
+            register_buffers: Vec::new(),
+            call_arguments: Vec::new(),
             type_check_cache: BTreeMap::new(),
             #[cfg(feature = "cranelift")]
             native_execution: true,
@@ -1099,6 +1112,8 @@ impl RegisterVm {
     pub fn from_state(state: VmState) -> Self {
         Self {
             state,
+            register_buffers: Vec::new(),
+            call_arguments: Vec::new(),
             type_check_cache: BTreeMap::new(),
             #[cfg(feature = "cranelift")]
             native_execution: true,
@@ -1113,6 +1128,8 @@ impl RegisterVm {
 
     pub fn restore_state(&mut self, state: &VmState) {
         self.state = state.clone();
+        self.register_buffers.clear();
+        self.call_arguments.clear();
         self.type_check_cache.clear();
         #[cfg(feature = "cranelift")]
         self.native_side_exits.clear();
@@ -1332,14 +1349,12 @@ impl RegisterVm {
                         max_depth: max_call_depth,
                     });
                 }
-                let args = self.resolve_operands(program, program.operands(*args));
+                let args = self.resolve_call_arguments(program, program.operands(*args));
                 let callee = program.program(*callee);
                 let callee_id = self.intern_program(Arc::clone(callee));
                 let register_count = callee.register_count();
                 self.advance_ip_unchecked();
-                self.state
-                    .frames
-                    .push(Frame::new(callee_id, register_count, Some(*dst), args)?);
+                self.push_frame(callee_id, register_count, *dst, args)?;
                 Ok(VmStep::single(VmHostResponse::Continue))
             }
             Opcode::BuiltinCall {
@@ -1348,8 +1363,10 @@ impl RegisterVm {
                 result_kind,
                 args,
             } => {
-                let args = self.resolve_operands(program, program.operands(*args));
-                let value = match host.call_builtin(*name, &args) {
+                let args = self.resolve_call_arguments(program, program.operands(*args));
+                let result = host.call_builtin(*name, &args);
+                self.recycle_call_arguments(args);
+                let value = match result {
                     Ok(value) => value,
                     Err(RuntimeError::Raised(error)) => {
                         return self.begin_raise(error).map(VmStep::single);
@@ -2102,7 +2119,7 @@ impl RegisterVm {
             }
             Opcode::CallValue { dst, callee, args } => {
                 let callee = self.resolve_operand_ref(program, *callee);
-                let user_args = self.resolve_operands(program, program.operands(*args));
+                let user_args = self.resolve_call_arguments(program, program.operands(*args));
                 self.call_function_value(*dst, callee, user_args, max_call_depth)?;
                 Ok(VmHostResponse::Continue)
             }
@@ -2119,7 +2136,9 @@ impl RegisterVm {
                 args,
             } => {
                 let args = self.resolve_list_items(program, program.list_items(*args))?;
-                let value = match host.call_builtin(*name, &args) {
+                let result = host.call_builtin(*name, &args);
+                self.recycle_call_arguments(args);
+                let value = match result {
                     Ok(value) => value,
                     Err(RuntimeError::Raised(error)) => return self.begin_raise(error),
                     Err(error) => return Err(error),
@@ -2172,9 +2191,7 @@ impl RegisterVm {
                     RuntimeError::ProgramArtifact("method parameter position is invalid".to_owned())
                 })?;
                 self.advance_ip_unchecked();
-                self.state
-                    .frames
-                    .push(Frame::new(callee_id, register_count, Some(*dst), args)?);
+                self.push_frame(callee_id, register_count, *dst, args)?;
                 Ok(VmHostResponse::Continue)
             }
             Opcode::DynamicDispatch {
@@ -2212,9 +2229,7 @@ impl RegisterVm {
                     RuntimeError::ProgramArtifact("method parameter position is invalid".to_owned())
                 })?;
                 self.advance_ip_unchecked();
-                self.state
-                    .frames
-                    .push(Frame::new(callee_id, register_count, Some(*dst), args)?);
+                self.push_frame(callee_id, register_count, *dst, args)?;
                 Ok(VmHostResponse::Continue)
             }
             Opcode::PositionalDispatch {
@@ -2229,7 +2244,7 @@ impl RegisterVm {
                     });
                 }
                 let selector = self.resolve_operand_ref(program, *selector);
-                let args = self.resolve_operands(program, program.operands(*args));
+                let args = self.resolve_call_arguments(program, program.operands(*args));
                 let spec = program.dispatch_spec(*spec);
                 let methods = applicable_positional_methods_cached(
                     host,
@@ -2246,9 +2261,7 @@ impl RegisterVm {
                 let callee_id = self.resolve_program_id(host, spec.program_bytes, &program_id)?;
                 let register_count = self.program_unchecked(callee_id).register_count();
                 self.advance_ip_unchecked();
-                self.state
-                    .frames
-                    .push(Frame::new(callee_id, register_count, Some(*dst), args)?);
+                self.push_frame(callee_id, register_count, *dst, args)?;
                 Ok(VmHostResponse::Continue)
             }
             Opcode::PositionalDispatchDynamic {
@@ -2280,9 +2293,7 @@ impl RegisterVm {
                 let callee_id = self.resolve_program_id(host, spec.program_bytes, &program_id)?;
                 let register_count = self.program_unchecked(callee_id).register_count();
                 self.advance_ip_unchecked();
-                self.state
-                    .frames
-                    .push(Frame::new(callee_id, register_count, Some(*dst), args)?);
+                self.push_frame(callee_id, register_count, *dst, args)?;
                 Ok(VmHostResponse::Continue)
             }
             Opcode::SpawnDispatch {
@@ -2361,7 +2372,7 @@ impl RegisterVm {
                 let selector_symbol = selector
                     .as_symbol()
                     .ok_or_else(|| RuntimeError::InvalidSpawnSelector(selector.clone()))?;
-                let args = self.resolve_operands(program, program.operands(*args));
+                let args = self.resolve_call_arguments(program, program.operands(*args));
                 let delay_millis = delay
                     .map(|delay| {
                         self.suspend_duration(self.resolve_operand_ref(program, delay))
@@ -2575,7 +2586,9 @@ impl RegisterVm {
             .frames
             .pop()
             .ok_or(RuntimeError::EmptyCallStack)?;
-        let Some(return_register) = frame.return_register else {
+        let return_register = frame.return_register;
+        self.recycle_frame(frame);
+        let Some(return_register) = return_register else {
             return Ok(VmHostResponse::Complete(value));
         };
         self.write_register_unchecked(return_register, value);
@@ -2649,8 +2662,55 @@ impl RegisterVm {
                 }
             }
 
-            self.state.frames.pop();
+            let frame = self
+                .state
+                .frames
+                .pop()
+                .expect("active frame was checked above");
+            self.recycle_frame(frame);
         }
+    }
+
+    fn push_frame(
+        &mut self,
+        program: usize,
+        register_count: usize,
+        return_register: Register,
+        mut args: Vec<Value>,
+    ) -> Result<(), RuntimeError> {
+        let registers = self.register_buffers.pop().unwrap_or_default();
+        let frame = Frame::new(
+            program,
+            register_count,
+            Some(return_register),
+            args.drain(..),
+            registers,
+        );
+        self.recycle_call_arguments(args);
+        self.state.frames.push(frame?);
+        Ok(())
+    }
+
+    fn recycle_frame(&mut self, mut frame: Frame) {
+        frame.registers.clear();
+        self.register_buffers.push(frame.registers);
+    }
+
+    fn recycle_call_arguments(&mut self, mut args: Vec<Value>) {
+        args.clear();
+        if args.capacity() > self.call_arguments.capacity() {
+            self.call_arguments = args;
+        }
+    }
+
+    fn resolve_call_arguments(&mut self, program: &Program, operands: &[OperandRef]) -> Vec<Value> {
+        let mut args = std::mem::take(&mut self.call_arguments);
+        args.extend(
+            operands
+                .iter()
+                .map(|operand| self.resolve_operand_ref(program, *operand)),
+        );
+        args
     }
 
     fn advance_ip_unchecked(&mut self) {
@@ -2749,12 +2809,7 @@ impl RegisterVm {
         let mut args = callable.captures;
         args.push(Value::list(user_args));
         self.advance_ip_unchecked();
-        self.state.frames.push(Frame::new(
-            callable.program,
-            register_count,
-            Some(dst),
-            args,
-        )?);
+        self.push_frame(callable.program, register_count, dst, args)?;
         Ok(())
     }
 
@@ -2876,11 +2931,11 @@ impl RegisterVm {
     }
 
     fn resolve_list_items(
-        &self,
+        &mut self,
         program: &Program,
         items: &[CompactListItem],
     ) -> Result<Vec<Value>, RuntimeError> {
-        let mut values = Vec::new();
+        let mut values = std::mem::take(&mut self.call_arguments);
         for item in items {
             match item {
                 CompactListItem::Value(operand) => {
@@ -3896,5 +3951,56 @@ mod structural_type_cache_tests {
         assert!(value_matches_type(&relation, &contract, &mut cache));
         assert_eq!(cache.len(), 1);
         assert_eq!(cache.values().next().unwrap().1.len(), cached_contracts);
+    }
+}
+
+#[cfg(test)]
+mod call_storage_tests {
+    use super::*;
+    use crate::{Instruction, Operand};
+
+    #[test]
+    fn recycled_frames_drop_values_and_reset_registers() {
+        let program = Arc::new(
+            Program::new(
+                1,
+                [Instruction::Return {
+                    value: Operand::Value(Value::unit()),
+                }],
+            )
+            .unwrap(),
+        );
+        let mut vm = RegisterVm::new(program);
+        let saved = Value::list([Value::string("retained outside frame")]);
+        vm.push_frame(0, 64, Register(0), vec![saved.clone()])
+            .unwrap();
+        let frame = vm.state.frames.last_mut().unwrap();
+        frame.registers[63] = Value::string("must not survive reuse");
+        let pointer = frame.registers.as_ptr();
+        vm.return_from_frame(saved.clone()).unwrap();
+        assert!(vm.register_buffers.iter().all(Vec::is_empty));
+        assert!(vm.call_arguments.is_empty());
+
+        vm.push_frame(0, 8, Register(0), vec![Value::int(42).unwrap()])
+            .unwrap();
+        let frame = vm.state.frames.last().unwrap();
+        assert_eq!(frame.registers.as_ptr(), pointer);
+        assert_eq!(frame.registers[0], Value::int(42).unwrap());
+        assert!(
+            frame.registers[1..]
+                .iter()
+                .all(|value| *value == Value::empty_relation())
+        );
+        assert_eq!(
+            saved,
+            Value::list([Value::string("retained outside frame")])
+        );
+        let checkpoint = vm.snapshot_state();
+        vm.begin_raise(Value::error_code(Symbol::intern("E_FAIL")))
+            .unwrap();
+        assert!(vm.register_buffers.iter().all(Vec::is_empty));
+        vm.restore_state(&checkpoint);
+        assert!(vm.register_buffers.is_empty());
+        assert_eq!(vm.state, checkpoint);
     }
 }

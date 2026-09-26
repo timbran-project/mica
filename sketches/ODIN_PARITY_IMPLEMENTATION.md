@@ -72,3 +72,10 @@ The pinned string capture passes 192 of 198 processes. Only loop-pattern and com
 String construction improves from 304 to 264 microseconds; short-string slicing is essentially unchanged.
 The newly runnable list-building fixture takes 4.51 milliseconds versus Odin's 0.27 milliseconds.
 Loop patterns, comprehensions, list construction, and call allocation remain open.
+
+Call storage now reuses cleared argument and register buffers within each VM.
+Returned and unwound frames release their values before entering the buffer pool.
+Checkpoint restoration clears the pool; checkpoints retain only active frames.
+Focused tests cover register reset, checkpoint restoration, closure captures, exceptions, and suspension.
+VM and runtime library tests pass, including existing conflict-retry and authority-refresh coverage. Relevant clippy checks pass.
+The call-storage performance capture remains pending.
