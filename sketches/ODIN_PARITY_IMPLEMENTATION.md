@@ -305,3 +305,9 @@ A profile traced substantial update cost to unindexed full joins during recursiv
 Reusing maintained join indexes reduces the Rust update workload to 212.9 ms; all 18 follow-up processes pass.
 Workspace tests and clippy pass, including randomized recursion, negation, deletion, and retained-snapshot coverage.
 Rust remains approximately 14 times slower on updates. Initial derivation is essentially unchanged and remains a separate gap.
+
+Maintained rule collections now reuse the existing persistent tuple store rather than copying large ordered sets in every recursive round.
+The capture at `15cd6ff` passes all 18 processes and reduces the 16-update workload from 212.9 ms to 166.5 ms.
+Initial derivation rises from 27.2 ms to 28.9 ms, and update RSS rises by roughly 2 MiB.
+This measured tradeoff favours repeated updates. It does not close the performance gap with Odin.
+Tests cover compact/radix ordering, promotion, retained branches, and recursive retractions across both storage sizes.
