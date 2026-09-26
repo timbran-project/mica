@@ -11,6 +11,7 @@
 // You should have received a copy of the GNU Affero General Public License along
 // with this program. If not, see <https://www.gnu.org/licenses/>.
 
+mod buffers;
 mod builtins;
 mod embedding;
 pub mod json;
@@ -3918,6 +3919,13 @@ fn ensure_declared_relation(
 
     let mut next_relation_id = next_generated_relation_id(kernel);
     loop {
+        if kernel.snapshot().buffer_named(name).is_some() {
+            return Err(unsupported_runner_error(
+                NodeId(0),
+                None,
+                "relation name is reserved by a buffer",
+            ));
+        }
         let Some(relation) = (next_relation_id < EPHEMERAL_HOST_IDENTITY_START)
             .then(|| Identity::new(next_relation_id))
             .flatten()
@@ -4031,10 +4039,15 @@ fn next_generated_identity_id(kernel: &RelationKernel) -> u64 {
 }
 
 fn next_generated_relation_id(kernel: &RelationKernel) -> u64 {
-    kernel
-        .snapshot()
+    let snapshot = kernel.snapshot();
+    snapshot
         .relation_metadata()
         .map(|metadata| metadata.id().raw())
+        .chain(
+            snapshot
+                .buffer_catalog()
+                .map(|buffer| buffer.metadata().id.raw()),
+        )
         .filter(|raw| *raw >= GENERATED_RELATION_ID_START && *raw < EPHEMERAL_HOST_IDENTITY_START)
         .max()
         .and_then(|raw| raw.checked_add(1))
@@ -4547,7 +4560,7 @@ fn default_builtins(embedding_provider: Arc<dyn embedding::EmbeddingProvider>) -
             BuiltinResultKind::Exact(ValueKind::Int),
             sync_signature_builtin,
         );
-    builtins::install_scalar_builtins(registry).with_builtin(
+    buffers::install(builtins::install_scalar_builtins(registry)).with_builtin(
         "embed_text",
         BuiltinResultKind::Exact(ValueKind::List),
         embedding::EmbedTextBuiltin::new(embedding_provider),
@@ -6290,6 +6303,22 @@ fn require_admin_builtin(
     })
 }
 
+fn reject_buffer_relation_name(
+    context: &mut BuiltinContext<'_, '_>,
+    name: Symbol,
+    builtin: &str,
+) -> Result<(), RuntimeError> {
+    if context.tx().buffer_named(name).is_some()
+        || context.kernel().snapshot().buffer_named(name).is_some()
+    {
+        return Err(invalid_builtin_call(
+            builtin,
+            "relation name is reserved by a buffer",
+        ));
+    }
+    Ok(())
+}
+
 struct MakeRelationBuiltin {
     next_relation_id: AtomicU64,
 }
@@ -6343,6 +6372,8 @@ impl Builtin for MakeRelationBuiltin {
         let durability = builtin_relation_durability_arg("make_relation", args, 2)?;
         require_admin_builtin(context, "make_relation")?;
 
+        reject_buffer_relation_name(context, name, "make_relation")?;
+
         if let Some(metadata) = relation_metadata_named(context.kernel(), name) {
             if metadata.arity() == arity
                 && metadata.conflict_policy() == &ConflictPolicy::Set
@@ -6357,6 +6388,7 @@ impl Builtin for MakeRelationBuiltin {
         }
 
         loop {
+            reject_buffer_relation_name(context, name, "make_relation")?;
             let raw = self.next_relation_id.fetch_add(1, Ordering::Relaxed);
             let Some(relation) = (raw < EPHEMERAL_HOST_IDENTITY_START)
                 .then(|| Identity::new(raw))
@@ -6367,6 +6399,9 @@ impl Builtin for MakeRelationBuiltin {
                     "generated relation identity exhausted",
                 ));
             };
+            if context.tx().buffer_identity_reserved(relation) {
+                continue;
+            }
             let metadata = RelationMetadata::new(relation, name, arity).with_durability(durability);
             match context.kernel().create_relation(metadata) {
                 Ok(_) => return Ok(Value::identity(relation)),
@@ -6395,6 +6430,8 @@ impl Builtin for MakeFunctionalRelationBuiltin {
         let durability = builtin_relation_durability_arg("make_functional_relation", args, 3)?;
         require_admin_builtin(context, "make_functional_relation")?;
 
+        reject_buffer_relation_name(context, name, "make_functional_relation")?;
+
         if let Some(metadata) = relation_metadata_named(context.kernel(), name) {
             if metadata.arity() == arity
                 && metadata.conflict_policy()
@@ -6412,6 +6449,7 @@ impl Builtin for MakeFunctionalRelationBuiltin {
         }
 
         loop {
+            reject_buffer_relation_name(context, name, "make_functional_relation")?;
             let raw = self.next_relation_id.fetch_add(1, Ordering::Relaxed);
             let Some(relation) = (raw < EPHEMERAL_HOST_IDENTITY_START)
                 .then(|| Identity::new(raw))
@@ -6422,6 +6460,9 @@ impl Builtin for MakeFunctionalRelationBuiltin {
                     "generated relation identity exhausted",
                 ));
             };
+            if context.tx().buffer_identity_reserved(relation) {
+                continue;
+            }
             let metadata = RelationMetadata::new(relation, name, arity)
                 .with_conflict_policy(ConflictPolicy::Functional {
                     key_positions: key_positions.clone(),
@@ -6497,6 +6538,12 @@ fn relation_name_index(snapshot: &Snapshot) -> BTreeMap<Symbol, (Identity, u16)>
     snapshot
         .relation_metadata()
         .map(|metadata| (metadata.name(), (metadata.id(), metadata.arity())))
+        .chain(
+            snapshot
+                .buffer_catalog()
+                .filter(|buffer| !buffer.is_deleted())
+                .map(|buffer| (buffer.metadata().name, (buffer.metadata().id, 0))),
+        )
         .collect()
 }
 
@@ -7532,6 +7579,17 @@ fn is_safe_read_only_builtin(name: &str) -> bool {
             | "dom_snapshot_payload"
             | "sync_signature"
             | "len"
+            | "buffer_len"
+            | "buffer_line_count"
+            | "buffer_revision"
+            | "buffer_text"
+            | "buffer_slice"
+            | "buffer_find"
+            | "buffer_lines"
+            | "buffer_viewport"
+            | "buffer_line_span"
+            | "buffer_position_line_column"
+            | "buffer_line_column_offset"
             | "string_append"
             | "string_span"
             | "string_find_any"

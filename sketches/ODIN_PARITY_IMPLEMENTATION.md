@@ -170,3 +170,10 @@ At 32,768 edits, strict time is 31.7 s versus 29.6 s and recovery is 420 ms vers
 These costs remain in the results. Bounded buffer replay does not bound Fjall journal recovery or retained commit history.
 Provider startup now validates format markers on its open database instead of opening and recovering the database twice.
 Format rejection and all five Fjall recovery tests pass. A pinned capture must measure the startup change.
+
+Runtime buffer builtins now provide creation, Unicode edits, retirement, slices, search, bounded lines, viewports, and line/column navigation.
+Reads and writes use the existing authority context. Policy names resolve active buffers at task boundaries, and suspension refreshes authority.
+The runtime prevents pending buffer identities and names from colliding with tuple relation creation.
+Seven focused tests pass, including rollback, retirement, actor grants, authority revocation during suspension, and read-only validation.
+Workspace tests and clippy pass for the runtime buffer API.
+Client applies/results, history, compaction, computed relations, markers, and editor integration remain pending.

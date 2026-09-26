@@ -4,7 +4,40 @@ The relation kernel stores buffers beside relation state in each immutable snaps
 A buffer has an identity, a unique name, a durability policy, a conflict policy, and a revision.
 Buffer names share the relation namespace. Deleted buffers retain tombstones that reserve their identities and names.
 
-The current interface is the Rust kernel API. Language builtins and editor integration remain pending.
+Language builtins use the current task transaction and its authority context.
+Client revision results, computed buffer relations, history, and editor integration remain pending.
+
+## Language interface
+
+`make_buffer(:name, :durable | :volatile[, :reject | :span | :whole])` stages an empty buffer and returns `true`.
+Creation requires grant authority, like relation creation. Repeating the declaration adopts a buffer only when its metadata matches.
+The default conflict policy is `:reject`. A retired name raises `E_KILLED`.
+
+| Builtin | Result |
+| --- | --- |
+| `buffer_insert(name, at, text)` | Insert text at a scalar position. |
+| `buffer_delete(name, at, count)` | Remove a scalar count. |
+| `buffer_replace(name, start, stop, text)` | Replace the half-open scalar range. |
+| `kill_buffer(name)` | Retire the buffer, its identity, and its name. |
+| `buffer_len(name)` | Scalar count. |
+| `buffer_line_count(name)` | Logical line count, including a final empty line after a newline. |
+| `buffer_revision(name)` | Committed base revision, or zero during creation. |
+| `buffer_text(name)` | Complete transaction text. |
+| `buffer_slice(name, start, stop)` | Text in the half-open scalar range. |
+| `buffer_find(name, pattern, from, limit)` | First scalar position, or `none`. Zero limit searches the remaining text. |
+| `buffer_lines(name, first, count)` | Bounded relation with `buffer`, `line`, `start`, `stop`, and `text` columns. |
+| `buffer_viewport(name, first, count, budget)` | Bounded lines with a total scalar budget and an additional `complete` column. |
+| `buffer_line_span(name, line)` | Map with `start` and `stop`, or `none` past the final line. |
+| `buffer_position_line_column(name, offset)` | Map with `line` and `column`. Oversized offsets clamp to the text end. |
+| `buffer_line_column_offset(name, line, column)` | Scalar offset. Oversized columns clamp to the line end. |
+
+Mutations return `true` after staging. They become visible after the task commits, including at suspension boundaries.
+Line spans exclude the trailing newline. Viewport reads stop after the first incomplete row and never materialize text outside their scalar budget.
+Empty search patterns return `none`.
+
+Read operations require a read grant for the buffer identity. Mutations require a write grant.
+The existing `GrantRead`, `GrantWrite`, and derived policy relations resolve active buffer names when the runtime builds authority.
+Suspended tasks resume with fresh authority. Buffer reads are available to read-only queries, and mutations are rejected.
 
 ## Transaction interface
 

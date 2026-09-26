@@ -250,6 +250,10 @@ impl Snapshot {
 }
 
 impl Transaction<'_> {
+    pub fn buffer_identity_reserved(&self, id: Identity) -> bool {
+        self.buffer_writes.contains_key(&id) || self.base.buffers.get(id).is_some()
+    }
+
     pub fn create_buffer(&mut self, metadata: BufferMetadata) -> Result<(), KernelError> {
         let id = metadata.id;
         if self.base.buffers.get(id).is_some()
