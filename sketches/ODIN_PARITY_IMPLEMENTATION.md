@@ -121,3 +121,6 @@ Batch calls share preparation even when their reader has no persistent cache. Es
 Tests verify one preparation for repeated queries, exact ties, best-per-subject ranking, post-top-k filters, local writes, rollback, suspension, invalid vectors, and denied relation access.
 Workspace tests pass. Seventeen focused retrieval tests pass, including the additional suspension and invalid-vector cases.
 The shared retrieval workload has an independent checksum and score assertions. Pinned before/after capture remains required.
+The pinned retrieval captures pass all 18 processes. Rust interpreter latency improves from 52.90 ms to 2.78 ms for 32 searches over 512 vectors.
+Odin takes 6.54 ms in the after capture. Fixed-work Rust RSS remains approximately 22 MiB.
+The result measures exact CPU search with preparation reuse inside each transaction, not cross-transaction caching or GPU search.
