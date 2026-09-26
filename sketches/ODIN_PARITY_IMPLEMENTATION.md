@@ -68,4 +68,7 @@ String storage retains immutable prefixes, caches scalar counts, and lazily samp
 The string header fits within the existing heap enum footprint. The process-local value ABI is version 4; durable encoding is unchanged.
 Tests cover Unicode boundaries, aliases, concurrent append and index publication, closures, exceptions, suspension, and codec round trips.
 Workspace tests and clippy pass. Three storage tests pass under Miri with strict provenance enabled.
-Performance capture for this change remains pending. Loop patterns, comprehensions, and call allocation remain open.
+The pinned string capture passes 192 of 198 processes. Only loop-pattern and comprehension fixtures still fail.
+String construction improves from 304 to 264 microseconds; short-string slicing is essentially unchanged.
+The newly runnable list-building fixture takes 4.51 milliseconds versus Odin's 0.27 milliseconds.
+Loop patterns, comprehensions, list construction, and call allocation remain open.

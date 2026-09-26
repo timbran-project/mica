@@ -50,7 +50,7 @@
       "rust_gap": null,
       "source_sha256": "4981f25c3432b5075f7474b1bd7ce3224f203e8bb9441decc52a8c34942f507c",
       "sha256": "4981f25c3432b5075f7474b1bd7ce3224f203e8bb9441decc52a8c34942f507c",
-      "measurement": "Same-source helper calls; Rust currently resolves them through positional dispatch. Debug smoke exceeded 40 seconds; no speed ratio is inferred."
+      "measurement": "Same-source helper calls; Rust currently resolves them through positional dispatch. The pinned release baseline passes."
     },
     {
       "name": "language_for_pattern",
@@ -76,7 +76,7 @@
       "file": "mica/language_list_build.mica",
       "expected": "2000",
       "setup": false,
-      "rust_gap": "len is absent.",
+      "rust_gap": null,
       "source_sha256": "f97a66ed16ad8fe28c0acb8a66a305e7d9cf6973cf324898150a8eee0e4805ff",
       "sha256": "f97a66ed16ad8fe28c0acb8a66a305e7d9cf6973cf324898150a8eee0e4805ff"
     },
@@ -103,7 +103,7 @@
       "file": "mica/language_sort.mica",
       "expected": "8192",
       "setup": true,
-      "rust_gap": "len is absent.",
+      "rust_gap": null,
       "source_sha256": "c2677f18e07d52ec6ae38f1972a9b6135cc97ec2dec7d79b378af0d571d5f0b1",
       "sha256": "c2677f18e07d52ec6ae38f1972a9b6135cc97ec2dec7d79b378af0d571d5f0b1"
     },
@@ -121,7 +121,7 @@
       "file": "mica/language_string_append.mica",
       "expected": "1000",
       "setup": false,
-      "rust_gap": "string_append is absent.",
+      "rust_gap": null,
       "source_sha256": "ca6716aae161c8f4985efb2811dddc8d89950e605ecc0897a56d73bdfe7584d9",
       "sha256": "ca6716aae161c8f4985efb2811dddc8d89950e605ecc0897a56d73bdfe7584d9"
     },
@@ -158,7 +158,7 @@
       "file": "mica/relation_rule_closure.mica",
       "expected": "820",
       "setup": true,
-      "rust_gap": "len is absent.",
+      "rust_gap": null,
       "source_sha256": "58312d0215ce87b3a58a2a1cce51d8a499bdf1b1caf24968ac85f3f6d415b083",
       "sha256": "58312d0215ce87b3a58a2a1cce51d8a499bdf1b1caf24968ac85f3f6d415b083",
       "measurement": "Warm cached derived scan after warmup. This fixture does not measure initial derivation or incremental maintenance."
@@ -177,7 +177,7 @@
       "file": "mica/relation_scan_large.mica",
       "expected": "5000",
       "setup": true,
-      "rust_gap": "len is absent.",
+      "rust_gap": null,
       "source_sha256": "50502cd6ae8dc3093a0564c7671f214e681153179501172710412e6a2f996a12",
       "sha256": "50502cd6ae8dc3093a0564c7671f214e681153179501172710412e6a2f996a12"
     },
