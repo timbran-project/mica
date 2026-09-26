@@ -1,0 +1,232 @@
+// In-Mica scenarios for the marker and annotation layer.
+//
+// These load `apps/shared/buffers.mica` first, so the world relations and verbs
+// are the ones an application would use. The rebase cases run end to end: a
+// token-tagged apply commits a change, and the marker table is moved by the
+// authoritative delta the change produced, not by a hand-written one.
+
+verb test/assert_equal(actual, expected, label @ #string)
+  if actual != expected
+    raise E_INVARG, string_concat(label, " failed")
+  end
+
+  return true
+end
+
+verb test/assert_true(value, label @ #string)
+  if value != true
+    raise E_INVARG, string_concat(label, " failed")
+  end
+
+  return true
+end
+
+make_relation(:WatchedBuffer, 1)
+make_relation(:CurrentBufferLength, 2)
+
+CurrentBufferLength(buffer, length) :-
+  WatchedBuffer(buffer),
+  BufferStat(buffer, length, _, _)
+
+// --- The rebase step, as a pure function ------------------------------------
+
+// Text inserted at a marker's position lands according to the insertion type.
+verb test/marker_rebase_insertion_types()
+  let edits = [{:at -> 3, :remove -> 0, :text -> "!!"}]
+
+  test/assert_equal(buffer_marker_rebase(edits, 3, :stick_after), 5, "after moves past")
+  test/assert_equal(buffer_marker_rebase(edits, 3, :stick_before), 3, "before stays put")
+
+  return true
+end
+
+// Edits before the marker shift it; a deletion that covers it collapses it.
+verb test/marker_rebase_shifts_and_collapses()
+  // Base "abcdef": insert "XY" at 1.
+  let insertion = [{:at -> 1, :remove -> 0, :text -> "XY"}]
+  test/assert_equal(buffer_marker_rebase(insertion, 5, :stick_before), 7, "shifted right")
+
+  // Base "abcdef": delete [0, 2).
+  let deletion = [{:at -> 0, :remove -> 2, :text -> ""}]
+  test/assert_equal(buffer_marker_rebase(deletion, 4, :stick_before), 2, "shifted left")
+
+  // Base "abcdef": delete [2, 5), which covers position 3.
+  let covering = [{:at -> 2, :remove -> 3, :text -> ""}]
+  test/assert_equal(buffer_marker_rebase(covering, 3, :stick_before), 2, "collapsed to the deletion")
+  test/assert_equal(buffer_marker_rebase(covering, 5, :stick_before), 2, "collapsed from the end")
+  test/assert_equal(buffer_marker_rebase(covering, 1, :stick_before), 1, "unmoved before the deletion")
+
+  // An empty delta changes nothing.
+  test/assert_equal(buffer_marker_rebase([], 4, :stick_after), 4, "empty delta")
+
+  return true
+end
+
+// --- Markers and annotations over a real buffer -----------------------------
+
+verb test/marker_seed()
+  make_buffer(:notes, :durable)
+  buffer_insert(:notes, 0, "hello world")
+  assert WatchedBuffer(:notes)
+
+  return true
+end
+
+verb test/buffer_computed_stat_and_lines()
+  let exactly {:length -> length, :lines -> lines, :revision -> revision} = BufferStat(:notes, ?length, ?lines, ?revision)
+  test/assert_equal(length, 11, "computed buffer length")
+  test/assert_equal(lines, 1, "computed line count")
+  test/assert_equal(revision, 1, "computed buffer revision")
+
+  let exactly {:length -> derived_length} = CurrentBufferLength(:notes, ?length)
+  test/assert_equal(derived_length, 11, "computed relation is rule-visible")
+
+  let exactly {:line -> line, :start -> start, :stop -> stop, :text -> text} = BufferLine(:notes, 0, 1, ?line, ?start, ?stop, ?text)
+  test/assert_equal(line, 0, "computed line index")
+  test/assert_equal(start, 0, "computed line start")
+  test/assert_equal(stop, 11, "computed line stop")
+  test/assert_equal(text, "hello world", "computed line text")
+
+  let rejected = try
+    BufferLine(:notes, ?first, 1, ?line, _, _, ?text)
+    false
+  catch E_DB
+    true
+  end
+  test/assert_true(rejected, "computed line requires a bounded range")
+
+  let read_only = try
+    assert BufferStat(:notes, 11, 1, 1)
+    false
+  catch E_READ_ONLY
+    true
+  end
+  test/assert_true(read_only, "computed relations are read-only")
+  return true
+end
+
+verb test/buffer_computed_lines_are_bounded()
+  make_buffer(:line_notes, :volatile)
+  buffer_insert(:line_notes, 0, "alpha\nbeta\ngamma")
+
+  let lines = BufferLine(:line_notes, 1, 2, ?line, ?start, ?stop, ?text)
+  test/assert_equal(len(lines), 2, "bounded line count")
+  let exactly {:start -> beta_start, :stop -> beta_stop, :text -> beta} = BufferLine(:line_notes, 1, 2, 1, ?start, ?stop, ?text)
+  test/assert_equal(beta_start, 6, "second line start")
+  test/assert_equal(beta_stop, 10, "second line stop excludes newline")
+  test/assert_equal(beta, "beta", "second line text excludes newline")
+  let exactly {:start -> gamma_start, :stop -> gamma_stop, :text -> gamma} = BufferLine(:line_notes, 1, 2, 2, ?start, ?stop, ?text)
+  test/assert_equal(gamma_start, 11, "third line start")
+  test/assert_equal(gamma_stop, 16, "third line stop")
+  test/assert_equal(gamma, "gamma", "third line text")
+
+  return true
+end
+
+verb test/marker_create_at_committed_revision()
+  buffers/marker_create(:mb, :notes, 5, 1, :stick_before)
+  buffers/marker_create(:ma, :notes, 5, 1, :stick_after)
+  buffers/annotation_create(:a1, :notes, :mb, :ma, :comment, "the space")
+
+  test/assert_equal(buffers/marker_position(:mb), 5, "seeded marker")
+  test/assert_equal(buffers/marker_position(:ma), 5, "seeded marker")
+  test/assert_equal(buffers/annotation_view(:a1)[:start], 5, "seeded annotation start")
+  test/assert_equal(buffers/annotation_view(:a1)[:stop], 5, "seeded annotation stop")
+
+  let markers = BufferMarkers(:notes, 0, 6, ?marker, ?start, ?stop)
+  test/assert_equal(len(markers), 2, "computed marker window")
+  let exactly {:start -> marker_start, :stop -> marker_stop} = BufferMarkers(:notes, 0, 6, :mb, ?start, ?stop)
+  test/assert_equal(marker_start, 5, "computed marker start")
+  test/assert_equal(marker_stop, 5, "computed marker stop")
+
+  test/assert_equal(len(BufferMarkers(:notes, 0, 5, ?marker, _, _)), 0, "marker window excludes its end")
+  test/assert_equal(len(BufferMarkers(:notes, 5, 6, ?marker, _, _)), 2, "marker window includes its start")
+
+  // A stale coordinate is not projected against newer text.
+  assert Marker(:stale)
+  assert MarkerBuffer(:stale, :notes)
+  assert MarkerPosition(:stale, 1)
+  assert MarkerInsertionType(:stale, :stick_before)
+  assert MarkerRevision(:stale, 0)
+  test/assert_equal(len(BufferMarkers(:notes, 0, 6, ?marker, _, _)), 2, "stale marker is omitted")
+
+  return true
+end
+
+// One task, one transaction: the buffer edit stages under a token. The next
+// verb reads the committed change back and moves the markers by it.
+verb test/marker_apply_with_token()
+  let staged = buffer_apply(:notes, 1, [{:at -> 5, :remove -> 0, :text -> " big"}], 777)
+  test/assert_equal(staged, :staged, "token apply")
+  test/assert_equal(buffer_text(:notes), "hello big world", "view after the apply")
+
+  return true
+end
+
+// The authoritative delta is what moves the markers, and the insertion type is
+// the only thing that decides the tie.
+verb test/marker_rebases_from_the_recorded_delta()
+  let result = buffer_apply_result(777)
+  test/assert_equal(result[:status], :ok, "completion")
+  test/assert_equal(result[:revision], 2, "committed revision")
+
+  let edits = result[:applied]
+  test/assert_equal(len(edits), 1, "one authoritative replacement")
+
+  let moved = buffers/markers_rebase(:notes, 1, 2, edits)
+  test/assert_equal(moved, 2, "both markers rebased")
+  test/assert_equal(buffers/markers_rebase(:notes, 1, 2, edits), 0, "repeat delivery is ignored")
+  // :stick_before stays at the insertion point; :stick_after moves past the inserted text.
+  test/assert_equal(buffers/marker_position(:mb), 5, "before marker")
+  test/assert_equal(buffers/marker_position(:ma), 9, "after marker")
+
+  return true
+end
+
+// The annotation follows its markers without being rewritten.
+verb test/annotation_follows_its_markers()
+  // Both endpoints can be the same marker. The rebase must move it once.
+  buffers/marker_create(:shared, :notes, 5, 2, :stick_after)
+  buffers/annotation_create(:point, :notes, :shared, :shared, :cursor, "point")
+
+  let view = buffers/annotation_view(:a1)
+  test/assert_equal(view[:start], 5, "annotation start")
+  test/assert_equal(view[:stop], 9, "annotation stop")
+  test/assert_equal(view[:text], "the space", "annotation text")
+
+  // Commit the same delta as the markers, so text and coordinates advance
+  // atomically from revision 2 to revision 3.
+  let edits = [{:at -> 0, :remove -> 0, :text -> ">> "}]
+  test/assert_equal(buffer_apply(:notes, 2, edits), :staged, "annotation edit")
+  let span = buffers/annotation_rebase(:a1, 2, 3, edits)
+  test/assert_equal(span[0], 8, "rebased start")
+  test/assert_equal(span[1], 12, "rebased stop")
+  let point = buffers/annotation_rebase(:point, 2, 3, edits)
+  test/assert_equal(point[0], 8, "shared marker moved once")
+  test/assert_equal(point[1], 8, "shared marker endpoints agree")
+
+  return true
+end
+
+// A span that collapses can be dropped; the caller decides, so it is a separate
+// step from rebasing.
+verb test/annotation_drop_collapsed()
+  buffers/marker_create(:c1, :notes, 0, 3, :stick_before)
+  buffers/marker_create(:c2, :notes, 0, 3, :stick_after)
+  buffers/annotation_create(:gone, :notes, :c1, :c2, :comment, "empty")
+
+  // Deleting [0, 3) collapses both markers onto the deletion point.
+  let edits = [{:at -> 0, :remove -> 3, :text -> ""}]
+  test/assert_equal(buffer_apply(:notes, 3, edits), :staged, "collapse edit")
+  let span = buffers/annotation_rebase(:gone, 3, 4, edits)
+  test/assert_equal(span[0], 0, "collapsed start")
+  test/assert_equal(span[1], 0, "collapsed stop")
+
+  let dropped = buffers/annotation_drop_collapsed(:notes)
+  test/assert_equal(dropped, 2, "collapsed annotations dropped")
+
+  // The annotation that still spans text survives the sweep.
+  test/assert_equal(buffers/annotation_view(:a1)[:text], "the space", "live annotation kept")
+
+  return true
+end

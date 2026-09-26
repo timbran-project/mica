@@ -17,8 +17,8 @@ Passing an early workstream does not complete this plan.
 | Strings and collections | Unicode indexing and iteration, efficient scanning and construction, and preservation of aliased values | Implemented; general nested-list construction still needs measurement |
 | Calls | Reduced allocation with exception, suspension, closure, and retry regressions | Implemented; dispatch and interpreter performance remain open |
 | Computed scans | CPU batches and cached retrieval preparation with unchanged authority, transaction visibility, output bindings, and exact ranking | Implemented for positive rule steps and equality probes; exact retrieval measured |
-| Transactional buffers | Atomic fact/text commits, conflict handling, durable recovery, marker rebasing, and client revision results | Kernel, persistence, and basic runtime complete; client protocol in verification; history and computed views pending |
-| Editor | Shared buffer library and programmable editor running through Rust host services | Pending |
+| Transactional buffers | Atomic fact/text commits, conflict handling, durable recovery, marker rebasing, and client revision results | Implemented, including client results, history, compaction, and computed views; editor integration and comparative measurements remain |
+| Editor | Shared buffer library and programmable editor running through Rust host services | Shared library and 39 source scenarios pass; editor port pending |
 | Query and storage execution | Measured columnar/storage improvements that preserve incremental maintenance | Pending |
 | Query measurements | Separate initial derivation and small-update maintenance workloads | Pending |
 | Mica compiler | Ported compiler with an intentional Rust assembly interface and bootstrap conformance | Pending |
@@ -209,3 +209,10 @@ Workspace tests and clippy pass for computed buffer views. The imported applicat
 The shared marker corpus requires holes in positive rule bodies. The compiler now lowers each hole to an independent anonymous variable.
 A focused test checks independent holes and incremental support after retractions. Heads, negated predicates, and guards retain their existing hole restrictions.
 The 29 pinned buffer scenarios pass with both interpreter-only and native-enabled execution. Marker scenarios exposed an uncaught read-only write error; that VM path remains under repair.
+
+
+Read-only tuple writes now raise catchable `E_READ_ONLY` errors, including ordinary, spliced, and wildcard operations.
+Wildcard retraction checks writability before scanning, including an empty match. Other write failures retain their existing runtime error behaviour.
+The shared buffer library and 39 pinned Mica scenarios now pass in interpreter-only and native-enabled runs.
+The port corrects the annotation retirement arity and projects each endpoint accessor to its exact binding heading.
+Workspace tests and clippy pass for this application boundary.

@@ -1,0 +1,581 @@
+// Buffer conformance scenarios ported from omica bfb368c.
+// Each invocation commits one task. Later scenarios inspect retained results and revisions.
+
+verb test/assert_equal(actual, expected, label @ #string)
+  if actual != expected
+    raise E_INVARG, string_concat(label, " failed")
+  end
+
+  return true
+end
+
+verb test/assert_true(value, label @ #string)
+  if value != true
+    raise E_INVARG, string_concat(label, " failed")
+  end
+
+  return true
+end
+
+verb test/buffer_insert_read_and_measure()
+  test/assert_true(make_buffer(:notes, :durable), "make_buffer")
+
+  // A newly created buffer is empty.
+  test/assert_equal(buffer_text(:notes), "", "new buffer is empty")
+  test/assert_equal(buffer_len(:notes), 0, "new buffer length")
+  test/assert_equal(buffer_line_count(:notes), 1, "an empty buffer has one line")
+
+  test/assert_true(buffer_insert(:notes, 0, "hello"), "insert head")
+  test/assert_equal(buffer_text(:notes), "hello", "inserted text")
+  test/assert_equal(buffer_len(:notes), 5, "length after insert")
+
+  test/assert_true(buffer_insert(:notes, 5, " world"), "append")
+  test/assert_equal(buffer_text(:notes), "hello world", "appended text")
+  test/assert_equal(buffer_len(:notes), 11, "length after append")
+
+  // Slices are scalar ranges, and the ends are exclusive.
+  test/assert_equal(buffer_slice(:notes, 0, 5), "hello", "slice head")
+  test/assert_equal(buffer_slice(:notes, 6, 11), "world", "slice tail")
+  test/assert_equal(buffer_slice(:notes, 5, 5), "", "empty slice")
+
+  return true
+end
+
+// Offsets address the transaction view, so an offset can be valid here and
+// invalid against the base version.
+verb test/buffer_offsets_are_view_relative()
+  make_buffer(:scratch, :durable)
+
+  test/assert_true(buffer_insert(:scratch, 0, "abc"), "seed")
+  // Offset 3 exists only because of the first edit.
+  test/assert_true(buffer_insert(:scratch, 3, "X"), "view-relative append")
+  test/assert_equal(buffer_text(:scratch), "abcX", "view-relative result")
+
+  // An edit against text inserted in this same transaction.
+  test/assert_true(buffer_replace(:scratch, 0, 3, "AB"), "replace inserted text")
+  test/assert_equal(buffer_text(:scratch), "ABX", "replaced inserted text")
+
+  return true
+end
+
+verb test/buffer_replace_and_delete()
+  make_buffer(:draft, :durable)
+  buffer_insert(:draft, 0, "the quick brown fox")
+
+  test/assert_true(buffer_replace(:draft, 4, 9, "slow"), "replace word")
+  test/assert_equal(buffer_text(:draft), "the slow brown fox", "replaced word")
+
+  test/assert_true(buffer_delete(:draft, 0, 4), "delete prefix")
+  test/assert_equal(buffer_text(:draft), "slow brown fox", "deleted prefix")
+  test/assert_equal(buffer_len(:draft), 14, "length after delete")
+
+  // Deleting to the end.
+  test/assert_true(buffer_delete(:draft, 4, 10), "delete suffix")
+  test/assert_equal(buffer_text(:draft), "slow", "deleted suffix")
+
+  return true
+end
+
+verb test/buffer_line_accounting()
+  make_buffer(:log, :durable)
+  buffer_insert(:log, 0, "first\nsecond\nthird")
+
+  test/assert_equal(buffer_line_count(:log), 3, "three lines")
+  test/assert_equal(buffer_len(:log), 18, "newlines count as scalars")
+  test/assert_equal(buffer_slice(:log, 6, 12), "second", "middle line")
+  test/assert_equal(buffer_slice(:log, 0, 5), "first", "first line")
+
+  // A replacement spanning a newline can change the line count: scalars
+  // [5, 13) are "\nsecond\n", so replacing them joins the outer lines.
+  buffer_replace(:log, 5, 13, " ")
+  test/assert_equal(buffer_text(:log), "first third", "joined lines")
+  test/assert_equal(buffer_line_count(:log), 1, "one line after join")
+
+  return true
+end
+
+verb test/buffer_scalars_not_bytes()
+  make_buffer(:unicode, :durable)
+  // h + e-acute + l + l + o + arrow: six scalars, nine bytes.
+  buffer_insert(:unicode, 0, "héllo→")
+
+  test/assert_equal(buffer_len(:unicode), 6, "scalar count")
+  test/assert_equal(buffer_text(:unicode), "héllo→", "round trip")
+  test/assert_equal(buffer_slice(:unicode, 1, 3), "él", "multi-byte slice")
+
+  return true
+end
+
+verb test/buffers_are_independent()
+  make_buffer(:alpha, :durable)
+  make_buffer(:beta, :durable)
+
+  buffer_insert(:alpha, 0, "alpha")
+  buffer_insert(:beta, 0, "beta")
+  test/assert_equal(buffer_text(:alpha), "alpha", "first buffer")
+  test/assert_equal(buffer_text(:beta), "beta", "second buffer")
+
+  buffer_delete(:alpha, 0, 5)
+  test/assert_equal(buffer_text(:alpha), "", "first buffer emptied")
+  test/assert_equal(buffer_text(:beta), "beta", "second buffer untouched")
+
+  return true
+end
+
+// Re-declaring a buffer adopts it rather than failing, so a durable world can
+// re-run its fileins on boot.
+verb test/make_buffer_is_idempotent()
+  make_buffer(:repeat, :durable)
+  buffer_insert(:repeat, 0, "value")
+  test/assert_true(make_buffer(:repeat, :durable), "re-declare")
+  test/assert_equal(buffer_text(:repeat), "value", "content survived redeclaration")
+
+  return true
+end
+
+verb test/buffer_unknown_name_is_rejected()
+  let rejected = try
+    buffer_insert(:no_such_buffer, 0, "x")
+    false
+  catch E_INVARG
+    true
+  end
+  test/assert_true(rejected, "unknown buffer is rejected")
+
+  return true
+end
+
+verb test/buffer_revision_starts_at_zero_before_commit()
+  make_buffer(:versioned, :durable)
+  // Nothing has been published yet, so the revision is still the base's.
+  test/assert_equal(buffer_revision(:versioned), 0, "uncommitted revision")
+  buffer_insert(:versioned, 0, "x")
+  test/assert_equal(buffer_revision(:versioned), 0, "staged edit does not bump")
+
+  return true
+end
+
+// Compaction is a maintenance operation: it rewrites the buffer's text into
+// fresh chunks without changing what the text is. A buffer created in this
+// transaction has nothing superseded, so compaction is accepted and does
+// nothing.
+verb test/buffer_compaction_is_accepted()
+  make_buffer(:compactable, :durable)
+  buffer_insert(:compactable, 0, "keep me")
+
+  test/assert_true(buffer_compact(:compactable), "compact")
+  test/assert_equal(buffer_text(:compactable), "keep me", "content survives compaction")
+  test/assert_equal(buffer_len(:compactable), 7, "length survives compaction")
+  test/assert_equal(buffer_line_count(:compactable), 1, "line count survives compaction")
+
+  buffer_insert(:compactable, 7, "!")
+  test/assert_equal(buffer_text(:compactable), "keep me!", "editable after compaction")
+
+  return true
+end
+
+// Revision-checked staging. A client's offsets are only meaningful against the
+// revision it read, so a mismatch is refused before any offset is interpreted,
+// and the buffer must not have been touched in this transaction first.
+verb test/buffer_apply_checks_revision_and_order()
+  make_buffer(:applied, :durable)
+
+  test/assert_equal(
+    buffer_apply(:applied, 99, [{:at -> 0, :remove -> 0, :text -> "nope"}]),
+    :stale,
+    "stale revision is refused"
+  )
+  test/assert_equal(buffer_text(:applied), "", "stale apply staged nothing")
+
+  test/assert_equal(
+    buffer_apply(:applied, 0, [{:at -> 0, :remove -> 0, :text -> "abc"}]),
+    :staged,
+    "matching revision stages"
+  )
+  test/assert_equal(buffer_text(:applied), "abc", "apply staged the edits")
+
+  let second = try
+    buffer_apply(:applied, 0, [{:at -> 0, :remove -> 0, :text -> "again"}])
+    false
+  catch E_STATE
+    true
+  end
+  test/assert_true(second, "a second apply is rejected")
+
+  let bare = try
+    buffer_insert(:applied, 0, "bare")
+    false
+  catch E_STATE
+    true
+  end
+  test/assert_true(bare, "a bare mutation after an apply is rejected")
+
+  return true
+end
+
+// A buffer's conflict policy is chosen at creation. The default is the
+// conservative one; a shared document can opt into provenance merging, or into
+// last-writer-wins for scratch content.
+verb test/buffer_conflict_policy_is_selectable()
+  make_buffer(:merged, :durable, :span)
+  buffer_insert(:merged, 0, "abc")
+  buffer_replace(:merged, 0, 1, "A")
+  test/assert_equal(buffer_text(:merged), "Abc", "span buffer edits normally")
+  test/assert_equal(buffer_len(:merged), 3, "span buffer length")
+
+  make_buffer(:lastwrite, :volatile, :whole)
+  buffer_insert(:lastwrite, 0, "one")
+  buffer_replace(:lastwrite, 0, 3, "two")
+  test/assert_equal(buffer_text(:lastwrite), "two", "whole buffer edits normally")
+
+  return true
+end
+
+// Killing retires an entry. Its id and name are never reused, so every
+// outstanding reference fails cleanly instead of pointing at something new.
+verb test/kill_buffer_retires_the_name()
+  make_buffer(:doomed, :durable)
+  buffer_insert(:doomed, 0, "bye")
+  test/assert_true(kill_buffer(:doomed), "kill")
+
+  let read = try
+    buffer_text(:doomed)
+    false
+  catch E_KILLED
+    true
+  end
+  test/assert_true(read, "reading a killed buffer is refused")
+
+  let write = try
+    buffer_insert(:doomed, 0, "x")
+    false
+  catch E_KILLED
+    true
+  end
+  test/assert_true(write, "writing a killed buffer is refused")
+
+  let revive = try
+    make_buffer(:doomed, :durable)
+    false
+  catch E_KILLED
+    true
+  end
+  test/assert_true(revive, "a retired name is not reused")
+
+  return true
+end
+
+// A completion result is read on a later turn: nothing is knowable while the
+// edits are only staged, so the server records the outcome when it is known.
+// This scenario stages with a token; the next one reads it.
+//
+// A tagged apply is the buffer's first mutation in its transaction, because the
+// client's offsets are relative to the revision it read. For a buffer created in
+// this transaction that revision is 0, the empty buffer.
+verb test/buffer_apply_records_completion()
+  make_buffer(:completed, :durable)
+
+  test/assert_equal(
+    buffer_apply(:completed, 0, [{:at -> 0, :remove -> 0, :text -> "base!"}], 4242),
+    :staged,
+    "apply with a token"
+  )
+
+  return true
+end
+
+verb test/buffer_apply_completion_is_readable()
+  let result = buffer_apply_result(4242)
+  test/assert_equal(result[:status], :ok, "completion status")
+  test/assert_equal(result[:revision], 1, "committed revision")
+  // The authoritative delta is the transaction's net change relative to the
+  // client's baseline. Here the baseline is the buffer as the client found it,
+  // which was empty, so the whole content is the change.
+  test/assert_equal(len(result[:applied]), 1, "one authoritative replacement")
+  test/assert_equal(result[:applied][0][:at], 0, "replacement offset")
+  test/assert_equal(result[:applied][0][:text], "base!", "replacement text")
+
+  // An unknown token has not settled yet.
+  test/assert_equal(buffer_apply_result(999999), :pending, "unknown token is pending")
+
+  return true
+end
+
+// --- Reversion --------------------------------------------------------------
+//
+// Reversion needs committed history, and each verb is its own transaction, so
+// these run in order: the first three publish revisions 1, 2, and 3, the fourth
+// reverts, and the fifth checks the settled state on a later turn.
+
+verb test/buffer_revert_seed()
+  make_buffer(:reverted, :durable)
+  buffer_insert(:reverted, 0, "one")
+
+  return true
+end
+
+verb test/buffer_revert_second_version()
+  buffer_replace(:reverted, 0, 3, "two")
+
+  return true
+end
+
+verb test/buffer_revert_third_version()
+  buffer_replace(:reverted, 0, 3, "three")
+
+  return true
+end
+
+// The transaction reads revision 3 and splices revision 1 back in. The restored
+// text is visible immediately, but the published revision is still the one it
+// read until the task commits.
+verb test/buffer_revert_restores_an_earlier_revision()
+  test/assert_equal(buffer_revision(:reverted), 3, "revision before revert")
+  test/assert_equal(buffer_revert(:reverted, 1, 3), :staged, "revert stages")
+  test/assert_equal(buffer_text(:reverted), "one", "reverted text")
+  test/assert_equal(buffer_revision(:reverted), 3, "a staged revert does not bump")
+
+  return true
+end
+
+// A reversion is destructive, so its revision check is mandatory and a target
+// outside the retained window is refused rather than guessed at.
+verb test/buffer_revert_reports_status()
+  // The reversion above committed, so the buffer is at revision 4 holding
+  // "one".
+  test/assert_equal(buffer_revision(:reverted), 4, "revision after revert")
+  test/assert_equal(buffer_text(:reverted), "one", "reverted content on a later turn")
+
+  let stale = buffer_revert(:reverted, 1, 3)
+  let unknown = buffer_revert(:reverted, 77, 4)
+  // Reverting to the version in hand changes nothing, so it succeeds without
+  // burning a revision.
+  let noop = buffer_revert(:reverted, 4, 4)
+
+  return {
+    :stale -> stale,
+    :unknown -> unknown,
+    :noop -> noop,
+    :text -> buffer_text(:reverted),
+    :revision -> buffer_revision(:reverted)
+  }
+end
+
+// --- Compaction and view sealing --------------------------------------------
+//
+// Compaction rewrites committed content, so it may not share a transaction with
+// a content change: it either discards the change or publishes it under the
+// revision compaction preserves. These verbs run in order to reach committed
+// state.
+
+verb test/buffer_compaction_seed()
+  make_buffer(:settled, :durable)
+  buffer_insert(:settled, 0, "abc")
+
+  return true
+end
+
+// Edited first, then compacted: the compaction is refused with `E_STATE` rather
+// than silently discarding the edit, and the edit commits normally.
+verb test/buffer_compaction_refuses_a_moved_view()
+  buffer_insert(:settled, 3, "d")
+
+  let late = try
+    buffer_compact(:settled)
+    false
+  catch E_STATE
+    true
+  end
+  test/assert_true(late, "compaction after an edit is refused")
+
+  return true
+end
+
+// Compacted first: the view is sealed, so a later edit is refused, the content
+// and revision are unchanged, and only the structure epoch moves.
+verb test/buffer_compaction_seals_the_view()
+  test/assert_equal(buffer_revision(:settled), 2, "revision after the edit")
+  test/assert_true(buffer_compact(:settled), "compaction of committed content")
+
+  let moved = try
+    buffer_insert(:settled, 4, "!")
+    false
+  catch E_STATE
+    true
+  end
+  test/assert_true(moved, "an edit after compaction is refused")
+  test/assert_equal(buffer_text(:settled), "abcd", "content is unchanged")
+
+  return true
+end
+
+// --- Search and the line projection -----------------------------------------
+
+verb test/buffer_find_locates_and_windows()
+  make_buffer(:searchable, :durable)
+  buffer_insert(:searchable, 0, "the quick brown fox")
+
+  test/assert_equal(buffer_find(:searchable, "quick", 0, 0), 4, "first occurrence")
+  test/assert_equal(buffer_find(:searchable, "o", 0, 0), 12, "single scalar")
+
+  // `from` skips earlier occurrences.
+  test/assert_equal(buffer_find(:searchable, "the", 1, 0), none, "from past the match")
+
+  // A window that does not contain the whole match finds nothing.
+  test/assert_equal(buffer_find(:searchable, "fox", 0, 18), none, "window too small")
+  test/assert_equal(buffer_find(:searchable, "fox", 0, 19), 16, "window just big enough")
+
+  return true
+end
+
+verb test/buffer_lines_projects_spans()
+  make_buffer(:paged, :durable)
+  buffer_insert(:paged, 0, "alpha\nbeta\ngamma")
+
+  let lines = buffer_lines(:paged, 0, 3)
+  test/assert_equal(len(lines), 3, "three lines")
+  test/assert_equal(lines[0][:text], "alpha", "first line")
+  test/assert_equal(lines[0][:start], 0, "first start")
+  test/assert_equal(lines[0][:stop], 5, "first end excludes the newline")
+  test/assert_equal(lines[1][:text], "beta", "second line")
+  test/assert_equal(lines[2][:text], "gamma", "third line")
+  test/assert_equal(lines[2][:stop], 16, "last line ends at the buffer end")
+
+  // The read is bounded: a caller asks for a specific slice of lines.
+  let tail = buffer_lines(:paged, 1, 1)
+  test/assert_equal(len(tail), 1, "one line")
+  test/assert_equal(tail[0][:text], "beta", "the requested line")
+  test/assert_equal(tail[0][:line], 1, "line index")
+
+  // Past the end is an empty relation, not an error.
+  test/assert_equal(len(buffer_lines(:paged, 9, 4)), 0, "past the end is empty")
+
+  return true
+end
+
+// --- Navigation -------------------------------------------------------------
+//
+// Cursor movement and viewport rendering need line and column arithmetic
+// without materializing whole lines.
+
+verb test/buffer_line_spans_address_lines()
+  make_buffer(:addressed, :durable)
+  buffer_insert(:addressed, 0, "alpha\nbeta\ngamma")
+
+  let first = buffer_line_span(:addressed, 0)
+  test/assert_equal(first[:start], 0, "first line start")
+  test/assert_equal(first[:stop], 5, "first line stop excludes the newline")
+
+  let middle = buffer_line_span(:addressed, 1)
+  test/assert_equal(middle[:start], 6, "middle line start")
+  test/assert_equal(middle[:stop], 10, "middle line stop")
+
+  let last = buffer_line_span(:addressed, 2)
+  test/assert_equal(last[:start], 11, "last line start")
+  test/assert_equal(last[:stop], 16, "last line stop at the buffer end")
+
+  test/assert_equal(buffer_line_span(:addressed, 3), none, "past the end is none")
+
+  // A trailing newline creates a final empty line.
+  make_buffer(:trailing, :durable)
+  buffer_insert(:trailing, 0, "one\n")
+  test/assert_equal(buffer_line_count(:trailing), 2, "trailing newline line count")
+  let empty = buffer_line_span(:trailing, 1)
+  test/assert_equal(empty[:start], 4, "empty last line start")
+  test/assert_equal(empty[:stop], 4, "empty last line stop")
+
+  return true
+end
+
+verb test/buffer_positions_convert_to_lines_and_columns()
+  make_buffer(:placed, :durable)
+  buffer_insert(:placed, 0, "alpha\nbeta\ngamma")
+
+  let start = buffer_position_line_column(:placed, 0)
+  test/assert_equal(start[:line], 0, "buffer start line")
+  test/assert_equal(start[:column], 0, "buffer start column")
+
+  // Offset 5 is the newline itself: still the end of line 0.
+  let newline = buffer_position_line_column(:placed, 5)
+  test/assert_equal(newline[:line], 0, "the newline stays on its line")
+  test/assert_equal(newline[:column], 5, "newline column")
+
+  let second = buffer_position_line_column(:placed, 6)
+  test/assert_equal(second[:line], 1, "second line")
+  test/assert_equal(second[:column], 0, "second line start")
+
+  let finish = buffer_position_line_column(:placed, 16)
+  test/assert_equal(finish[:line], 2, "buffer end line")
+  test/assert_equal(finish[:column], 5, "buffer end column")
+
+  // Past the end clamps.
+  let clamped = buffer_position_line_column(:placed, 99)
+  test/assert_equal(clamped[:line], 2, "clamped line")
+  test/assert_equal(clamped[:column], 5, "clamped column")
+
+  return true
+end
+
+verb test/buffer_line_columns_convert_to_offsets()
+  make_buffer(:locatable, :durable)
+  buffer_insert(:locatable, 0, "alpha\nbeta\ngamma")
+
+  test/assert_equal(buffer_line_column_offset(:locatable, 0, 2), 2, "inside the first line")
+  test/assert_equal(buffer_line_column_offset(:locatable, 1, 0), 6, "start of the second line")
+
+  // The column clamps to the logical line, not to the buffer.
+  test/assert_equal(buffer_line_column_offset(:locatable, 1, 99), 10, "clamped to the line end")
+  test/assert_equal(buffer_line_column_offset(:locatable, 2, 99), 16, "clamped at the buffer end")
+  test/assert_equal(buffer_line_column_offset(:locatable, 9, 0), 16, "a line past the end clamps")
+
+  return true
+end
+
+verb test/buffer_viewport_is_bounded()
+  make_buffer(:windowed, :durable)
+  buffer_insert(:windowed, 0, "alpha\nbeta\ngamma")
+
+  let whole = buffer_viewport(:windowed, 0, 3, 100)
+  test/assert_equal(len(whole), 3, "three rows")
+  test/assert_equal(whole[0][:line], 0, "first row line")
+  test/assert_equal(whole[0][:text], "alpha", "first row text")
+  test/assert_equal(whole[0][:start], 0, "first row start")
+  test/assert_equal(whole[0][:stop], 5, "first row stop")
+  test/assert_equal(whole[0][:complete], true, "first row complete")
+  test/assert_equal(whole[2][:text], "gamma", "last row text")
+
+  // The line count bounds the read.
+  let portion = buffer_viewport(:windowed, 1, 2, 100)
+  test/assert_equal(len(portion), 2, "two rows")
+  test/assert_equal(portion[0][:line], 1, "requested first line")
+
+  // The scalar budget truncates the row it reaches and marks it.
+  let cut = buffer_viewport(:windowed, 0, 1, 3)
+  test/assert_equal(len(cut), 1, "one truncated row")
+  test/assert_equal(cut[0][:text], "alp", "truncated fragment")
+  test/assert_equal(cut[0][:stop], 3, "truncated stop")
+  test/assert_equal(cut[0][:complete], false, "truncation is marked")
+
+  // A row that fits the budget is complete.
+  let fits = buffer_viewport(:windowed, 0, 1, 5)
+  test/assert_equal(fits[0][:text], "alpha", "complete fragment")
+  test/assert_equal(fits[0][:complete], true, "a complete row is marked")
+
+  // A longer read spans lines until the budget runs out; the row the budget
+  // cut is the second line, cut two scalars in.
+  let spanned = buffer_viewport(:windowed, 0, 10, 7)
+  test/assert_equal(len(spanned), 2, "budget stops the read")
+  test/assert_equal(buffer_viewport(:windowed, 1, 1, 2)[0][:text], "be", "cut fragment")
+  test/assert_equal(buffer_viewport(:windowed, 1, 1, 2)[0][:stop], 8, "cut at the budget")
+
+  // An exhausted budget still reports where the text stops.
+  let empty = buffer_viewport(:windowed, 0, 10, 0)
+  test/assert_equal(len(empty), 1, "one marker row")
+  test/assert_equal(empty[0][:text], "", "marker row has no text")
+  test/assert_equal(empty[0][:complete], false, "marker row is incomplete")
+
+  // Past the end is an empty relation.
+  test/assert_equal(len(buffer_viewport(:windowed, 9, 4, 100)), 0, "past the end is empty")
+
+  return true
+end
