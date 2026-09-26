@@ -643,12 +643,7 @@ impl<'a> Transaction<'a> {
         #[cfg(test)]
         self.differential_overlay_work
             .replace(Some(maintained.work().clone()));
-        Ok(Some(
-            maintained
-                .build_derived_relations(&overlay)?
-                .into_iter()
-                .collect(),
-        ))
+        Ok(Some(maintained.derived_relations().into_iter().collect()))
     }
 
     fn build_overlay_snapshot(&self) -> Result<(Snapshot, Vec<FactChange>), KernelError> {
@@ -1189,7 +1184,7 @@ impl<'a> Transaction<'a> {
             let maintenance_start = Instant::now();
             let maintained =
                 maintained.advance(current, &next, &changes, &self.execution_context)?;
-            let derived = maintained.build_derived_relations(&next)?;
+            let derived = maintained.derived_relations();
             crate::metrics::record_differential_maintenance(
                 maintenance_start.elapsed(),
                 maintained.work(),

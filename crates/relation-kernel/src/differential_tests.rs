@@ -173,8 +173,7 @@ fn derived_rows(snapshot: &crate::Snapshot, relation: RelationId, arity: usize) 
     snapshot
         .maintained_state()
         .expect("snapshot should retain eligible maintained state")
-        .build_derived_relations(snapshot)
-        .unwrap()
+        .derived_relations()
         .get(&relation)
         .map(|state| state.scan(&vec![None; arity]).unwrap())
         .unwrap_or_default()
@@ -660,6 +659,81 @@ fn nonrecursive_maintenance_preserves_multiple_and_extensional_supports() {
                 change.relation == rel(412) && change.kind == FactChangeKind::Retract
             })
     );
+}
+
+#[test]
+fn maintained_derived_indexes_follow_support_changes_and_retain_snapshots() {
+    let kernel = RelationKernel::new();
+    create_relations(&kernel, &[(413, "Input", 2), (415, "Unrelated", 1)]);
+    kernel
+        .create_relation(
+            RelationMetadata::new(rel(414), Symbol::intern("Output"), 2).with_index([1]),
+        )
+        .unwrap();
+    kernel
+        .install_rule(
+            Rule::new(
+                rel(414),
+                [var("left"), var("right")],
+                [Atom::positive(rel(413), [var("left"), var("right")])],
+            ),
+            "Output(left, right) :- Input(left, right)",
+        )
+        .unwrap();
+    assert_rows(&kernel, rel(413), &[(1, 7), (2, 7), (3, 8)]);
+    assert_rows(&kernel, rel(414), &[(1, 7)]);
+    let retained = kernel.snapshot();
+    assert_eq!(
+        retained
+            .scan(rel(414), &[None, Some(int(7))])
+            .unwrap()
+            .len(),
+        2
+    );
+    let retained_derived = retained.maintained_state().unwrap().derived_relations();
+
+    let mut tx = kernel.begin();
+    tx.retract(rel(413), Tuple::from([int(1), int(7)])).unwrap();
+    tx.retract(rel(413), Tuple::from([int(2), int(7)])).unwrap();
+    tx.assert(rel(413), Tuple::from([int(4), int(7)])).unwrap();
+    tx.commit().unwrap();
+    let updated = kernel.snapshot();
+    assert_maintained_matches_complete(&updated, &[(rel(414), 2)]);
+    let updated_derived = updated.maintained_state().unwrap().derived_relations();
+    assert_eq!(
+        updated_derived[&rel(414)]
+            .scan(&[None, Some(int(7))])
+            .unwrap(),
+        vec![Tuple::from([int(4), int(7)])]
+    );
+    assert_eq!(
+        updated.scan(rel(414), &[None, Some(int(7))]).unwrap(),
+        vec![Tuple::from([int(1), int(7)]), Tuple::from([int(4), int(7)])]
+    );
+    assert_eq!(
+        retained_derived[&rel(414)]
+            .scan(&[None, Some(int(7))])
+            .unwrap(),
+        vec![Tuple::from([int(1), int(7)]), Tuple::from([int(2), int(7)])]
+    );
+
+    let mut tx = kernel.begin();
+    tx.assert(rel(415), Tuple::from([int(9)])).unwrap();
+    tx.commit().unwrap();
+    let unrelated = kernel.snapshot();
+    assert_eq!(
+        unrelated
+            .maintained_state()
+            .unwrap()
+            .work()
+            .affected_components,
+        0
+    );
+    assert_eq!(
+        unrelated.scan(rel(414), &[None, Some(int(7))]).unwrap(),
+        updated.scan(rel(414), &[None, Some(int(7))]).unwrap()
+    );
+    assert_maintained_matches_complete(&unrelated, &[(rel(414), 2)]);
 }
 
 #[test]

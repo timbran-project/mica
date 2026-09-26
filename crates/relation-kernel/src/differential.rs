@@ -256,6 +256,7 @@ pub(crate) struct MaintainedState {
     requested_targets: BTreeSet<RelationId>,
     collections: Collections,
     derived_support: BTreeMap<RelationId, WeightedRows>,
+    derived_relations: BTreeMap<RelationId, RelationState>,
     negated_rules: BTreeMap<(usize, usize), NegatedRuleState>,
     negative_key_counts: BTreeMap<RelationId, BTreeMap<Tuple, usize>>,
     arrangements: BTreeMap<ArrangementSpec, Arc<Arrangement>>,
@@ -350,12 +351,24 @@ impl MaintainedState {
             .iter()
             .map(|(relation, rows)| (*relation, Trace::initialize(snapshot.version(), rows)))
             .collect();
+        let derived_relations = program
+            .targets
+            .iter()
+            .map(|relation| {
+                let state = match complete.get(relation) {
+                    Some(state) => state.clone(),
+                    None => RelationState::empty(snapshot.relation(*relation)?.metadata().clone())?,
+                };
+                Ok((*relation, state))
+            })
+            .collect::<Result<_, KernelError>>()?;
         Ok(Some(Arc::new(Self {
             version: snapshot.version(),
             program,
             requested_targets,
             collections,
             derived_support,
+            derived_relations,
             negated_rules,
             negative_key_counts,
             arrangements,
@@ -380,6 +393,7 @@ impl MaintainedState {
         };
         let mut collections = self.collections.clone();
         let mut derived_support = self.derived_support.clone();
+        let mut affected_targets = BTreeSet::new();
         let mut negated_rules = self.negated_rules.clone();
         let mut negative_key_counts = self.negative_key_counts.clone();
         let mut arrangements = self.arrangements.clone();
@@ -430,6 +444,7 @@ impl MaintainedState {
                 continue;
             }
             work.affected_components += 1;
+            affected_targets.extend(component.targets.iter().copied());
 
             if component.recursive {
                 advance_recursive_component(
@@ -566,6 +581,36 @@ impl MaintainedState {
             })
             .collect::<Vec<_>>();
         work.visible_changes = visible_changes.len();
+        let mut derived_relations = self.derived_relations.clone();
+        for (relation, state) in &mut derived_relations {
+            let metadata = next.relation(*relation)?.metadata();
+            let support = &derived_support[relation];
+            if state.metadata() != metadata {
+                *state = RelationState::empty(metadata.clone())?;
+                state.apply_ordered_asserts_to_empty(
+                    support
+                        .iter()
+                        .filter(|(_, difference)| **difference > 0)
+                        .map(|(tuple, _)| tuple),
+                    |_, _| {},
+                );
+                continue;
+            }
+            if !affected_targets.contains(relation) {
+                continue;
+            }
+            let previous_support = &self.derived_support[relation];
+            for (tuple, difference) in previous_support {
+                if *difference > 0 && !support_is_positive(Some(support), tuple) {
+                    state.remove(tuple);
+                }
+            }
+            for (tuple, difference) in support {
+                if *difference > 0 && !support_is_positive(Some(previous_support), tuple) {
+                    state.insert(tuple.clone());
+                }
+            }
+        }
 
         Ok(Arc::new(Self {
             version,
@@ -573,6 +618,7 @@ impl MaintainedState {
             requested_targets: self.requested_targets.clone(),
             collections,
             derived_support,
+            derived_relations,
             negated_rules,
             negative_key_counts,
             arrangements,
@@ -582,16 +628,8 @@ impl MaintainedState {
         }))
     }
 
-    pub(crate) fn build_derived_relations(
-        &self,
-        snapshot: &Snapshot,
-    ) -> Result<BTreeMap<RelationId, RelationState>, KernelError> {
-        let derived = self
-            .derived_support
-            .iter()
-            .map(|(relation, support)| (*relation, positive_rows(support).into_iter().collect()))
-            .collect();
-        crate::snapshot::build_derived_relations(&snapshot.relations, derived)
+    pub(crate) fn derived_relations(&self) -> BTreeMap<RelationId, RelationState> {
+        self.derived_relations.clone()
     }
 
     #[cfg(test)]
