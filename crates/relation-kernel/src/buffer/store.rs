@@ -69,6 +69,7 @@ pub struct BufferChange {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum BufferError {
     Unknown,
+    Deleted,
     AlreadyExists,
     MetadataMismatch,
     Conflict { expected: u64, actual: u64 },
@@ -120,9 +121,7 @@ impl BufferStates {
     fn insert(&mut self, state: BufferState) {
         let id = state.metadata.id;
         let name = state.metadata.name;
-        if state.deleted && self.names.get(&name) == Some(&id) {
-            Arc::make_mut(&mut self.names).remove(&name);
-        } else if !state.deleted && self.names.get(&name) != Some(&id) {
+        if self.names.get(&name) != Some(&id) {
             Arc::make_mut(&mut self.names).insert(name, id);
         }
         self.entries.insert(id.raw(), Arc::new(state));
@@ -135,7 +134,7 @@ impl BufferStates {
             if record.revision == 0
                 || (record.deleted && !record.text.is_empty())
                 || states.get(id).is_some()
-                || (!record.deleted && states.named(record.metadata.name).is_some())
+                || states.named(record.metadata.name).is_some()
             {
                 return Err(error(id, BufferError::InvalidRecovery));
             }
@@ -199,7 +198,7 @@ impl BufferStates {
     ) -> Result<(), KernelError> {
         for state in self.values() {
             if relations.contains_key(&state.metadata.id)
-                || (!state.deleted && relations.get_named(state.metadata.name).is_some())
+                || relations.get_named(state.metadata.name).is_some()
             {
                 return Err(error(state.metadata.id, BufferError::MetadataMismatch));
             }
@@ -239,11 +238,14 @@ impl Snapshot {
     }
 
     pub fn buffer(&self, id: Identity) -> Result<&BufferState, KernelError> {
-        self.buffers
+        let state = self
+            .buffers
             .get(id)
-            .filter(|state| !state.deleted)
-            .map(Arc::as_ref)
-            .ok_or_else(|| error(id, BufferError::Unknown))
+            .ok_or_else(|| error(id, BufferError::Unknown))?;
+        if state.deleted {
+            return Err(error(id, BufferError::Deleted));
+        }
+        Ok(state.as_ref())
     }
 }
 
@@ -275,25 +277,17 @@ impl Transaction<'_> {
         if let Some((id, _)) = self
             .buffer_writes
             .iter()
-            .find(|(_, pending)| pending.metadata.name == name && !pending.deleted)
+            .find(|(_, pending)| pending.metadata.name == name)
         {
             return Some(*id);
         }
-        self.base
-            .buffers
-            .named(name)
-            .filter(|state| {
-                self.buffer_writes
-                    .get(&state.metadata.id)
-                    .is_none_or(|pending| !pending.deleted)
-            })
-            .map(|state| state.metadata.id)
+        self.base.buffers.named(name).map(|state| state.metadata.id)
     }
 
     pub fn buffer_metadata(&self, id: Identity) -> Result<&BufferMetadata, KernelError> {
         if let Some(pending) = self.buffer_writes.get(&id) {
             if pending.deleted {
-                return Err(error(id, BufferError::Unknown));
+                return Err(error(id, BufferError::Deleted));
             }
             return Ok(&pending.metadata);
         }
@@ -303,7 +297,7 @@ impl Transaction<'_> {
     pub fn buffer_text(&self, id: Identity) -> Result<&Text, KernelError> {
         if let Some(pending) = self.buffer_writes.get(&id) {
             if pending.deleted {
-                return Err(error(id, BufferError::Unknown));
+                return Err(error(id, BufferError::Deleted));
             }
             return Ok(&pending.text);
         }
@@ -365,16 +359,7 @@ impl Transaction<'_> {
         let mut states = current.buffers.clone();
         let mut changes = Vec::new();
         let mut rebase_budget = DeltaBudget::default();
-        for (&id, pending) in self
-            .buffer_writes
-            .iter()
-            .filter(|(_, pending)| pending.deleted)
-            .chain(
-                self.buffer_writes
-                    .iter()
-                    .filter(|(_, pending)| !pending.deleted),
-            )
-        {
+        for (&id, pending) in &self.buffer_writes {
             let (text, base_revision, delta) = match &pending.base {
                 None => {
                     if states.get(id).is_some()
@@ -502,7 +487,7 @@ pub(crate) fn staged_changes(
         if previous.is_some_and(|previous| {
             previous.metadata != state.metadata || previous.revision > state.revision
         }) || staged.relations.contains_key(&id)
-            || (!state.deleted && staged.relations.get_named(state.metadata.name).is_some())
+            || staged.relations.get_named(state.metadata.name).is_some()
         {
             return Err(error(id, BufferError::MetadataMismatch));
         }
@@ -522,7 +507,6 @@ pub(crate) fn staged_changes(
             deleted: state.deleted,
         });
     }
-    changes.sort_by_key(|change| (!change.deleted, change.metadata.id));
     Ok(changes)
 }
 
@@ -765,15 +749,16 @@ mod tests {
     }
 
     #[test]
-    fn tombstones_reserve_ids_and_allow_name_reuse_in_the_same_commit() {
+    fn tombstones_reserve_ids_and_names_across_transactions_and_recovery() {
         let provider = Arc::new(InMemoryCommitProvider::new());
         let kernel = RelationKernel::with_provider(provider.clone());
         seed(&kernel, BufferConflictPolicy::Reject);
         let mut tx = kernel.begin();
         tx.delete_buffer(id(10)).unwrap();
-        tx.create_buffer(metadata(2, "notes", BufferConflictPolicy::Span))
-            .unwrap();
-        tx.replace_buffer(id(2), 0..0, "replacement").unwrap();
+        assert!(
+            tx.create_buffer(metadata(2, "notes", BufferConflictPolicy::Span))
+                .is_err()
+        );
         tx.commit().unwrap();
         let restored = RelationKernel::load_from_commit_log(
             provider.commits(),
@@ -787,17 +772,30 @@ mod tests {
                     .unwrap()
                     .metadata
                     .id,
-                id(2)
+                id(10)
             );
             assert!(snapshot.buffer(id(10)).is_err());
-            assert_eq!(snapshot.buffer_catalog().count(), 2);
+            assert_eq!(snapshot.buffer_catalog().count(), 1);
         }
-        assert!(
-            kernel
-                .begin()
-                .create_buffer(metadata(10, "other", BufferConflictPolicy::Reject))
-                .is_err()
-        );
+        for kernel in [&kernel, &restored] {
+            assert!(
+                kernel
+                    .begin()
+                    .create_buffer(metadata(2, "notes", BufferConflictPolicy::Reject))
+                    .is_err()
+            );
+            assert!(
+                kernel
+                    .create_relation(RelationMetadata::new(id(2), Symbol::intern("notes"), 1))
+                    .is_err()
+            );
+            assert!(
+                kernel
+                    .begin()
+                    .create_buffer(metadata(10, "other", BufferConflictPolicy::Reject))
+                    .is_err()
+            );
+        }
     }
 
     #[test]
@@ -825,7 +823,7 @@ mod tests {
         let staged = kernel.fork_in_memory();
         let mut tx = staged.begin();
         tx.delete_buffer(id(10)).unwrap();
-        tx.create_buffer(metadata(2, "notes", BufferConflictPolicy::Span))
+        tx.create_buffer(metadata(2, "replacement", BufferConflictPolicy::Span))
             .unwrap();
         tx.replace_buffer(id(2), 0..0, "replacement").unwrap();
         tx.commit().unwrap();
