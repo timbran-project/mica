@@ -80,6 +80,10 @@ pub(super) fn check_format(path: impl AsRef<Path>) -> Result<FjallFormatStatus, 
         .open()
         .map_err(|error| format!("failed to open fjall database for format check: {error}"))?;
     let keyspaces = FjallKeyspaces::open(&database)?;
+    format_status(&keyspaces)
+}
+
+pub(super) fn format_status(keyspaces: &FjallKeyspaces) -> Result<FjallFormatStatus, String> {
     let stored_version = read_marker(&keyspaces.metadata, FORMAT_VERSION_KEY)?;
     let stored_shape = read_marker(&keyspaces.metadata, SHAPE_KEY)?;
 

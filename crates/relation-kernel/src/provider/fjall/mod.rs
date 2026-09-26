@@ -18,7 +18,7 @@ mod loader;
 mod writer;
 
 pub use self::layout::FjallFormatStatus;
-use self::layout::{FjallKeyspaces, check_format, write_format_markers};
+use self::layout::{FjallKeyspaces, check_format, format_status, write_format_markers};
 use self::loader::{load_commits, load_last_commit_version, load_state, load_state_version};
 use self::writer::FjallCommitWriter;
 use super::{CommitProvider, PersistedKernelState};
@@ -51,7 +51,11 @@ impl FjallStateProvider {
         durability: FjallDurabilityMode,
     ) -> Result<Self, String> {
         let path = path.as_ref();
-        match Self::check_format(path)? {
+        let database = Database::builder(path)
+            .open()
+            .map_err(|error| format!("failed to open fjall database: {error}"))?;
+        let keyspaces = FjallKeyspaces::open(&database)?;
+        match format_status(&keyspaces)? {
             FjallFormatStatus::Fresh
             | FjallFormatStatus::Uninitialized
             | FjallFormatStatus::Current => {}
@@ -68,10 +72,6 @@ impl FjallStateProvider {
             }
         }
 
-        let database = Database::builder(path)
-            .open()
-            .map_err(|error| format!("failed to open fjall database: {error}"))?;
-        let keyspaces = FjallKeyspaces::open(&database)?;
         write_format_markers(&keyspaces.metadata)?;
         let initial_version = match load_state_version(&keyspaces.metadata)? {
             Some(version) => version,

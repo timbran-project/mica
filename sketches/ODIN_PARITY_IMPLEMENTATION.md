@@ -163,3 +163,10 @@ The pinned Odin buffer tests require retired names to remain reserved. Kernel to
 Reads distinguish deleted buffers from unknown buffers. Recovery and staged publication retain retirement, so earlier name-based grants cannot resolve to replacement buffers.
 The larger checkpoint test exposed recursive destruction of retained commit history. History nodes now release iteratively.
 A regression test releases 100,000 shared commits on 64 KiB thread stacks and verifies that retained snapshots still expose their history.
+
+The 4,096-delta interval passes all 24 processes across 4,096-edit and 32,768-edit captures.
+At 4,096 edits, strict time is 2.60 s versus 2.37 s and recovery is 54 ms versus 43 ms.
+At 32,768 edits, strict time is 31.7 s versus 29.6 s and recovery is 420 ms versus 325 ms.
+These costs remain in the results. Bounded buffer replay does not bound Fjall journal recovery or retained commit history.
+Provider startup now validates format markers on its open database instead of opening and recovering the database twice.
+Format rejection and all five Fjall recovery tests pass. A pinned capture must measure the startup change.
