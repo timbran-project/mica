@@ -86,6 +86,18 @@ struct CommitHistoryNode {
     previous: Option<Arc<CommitHistoryNode>>,
 }
 
+impl Drop for CommitHistoryNode {
+    fn drop(&mut self) {
+        let mut previous = self.previous.take();
+        while let Some(node) = previous {
+            let Some(mut node) = Arc::into_inner(node) else {
+                break;
+            };
+            previous = node.previous.take();
+        }
+    }
+}
+
 impl CommitHistory {
     pub(crate) fn empty() -> Self {
         Self::default()
@@ -982,5 +994,52 @@ impl crate::RelationRead for ExtensionalSnapshotReader<'_> {
             right_bindings,
             right_positions,
         )
+    }
+}
+
+#[cfg(test)]
+mod history_tests {
+    use super::*;
+
+    fn commit(version: u64) -> Commit {
+        Commit {
+            version,
+            buffer_changes: Arc::from([]),
+            catalog_changes: Arc::from([]),
+            changes: Arc::from([]),
+            relation_changes: Arc::from([]),
+            settled_relation_changes_available: false,
+        }
+    }
+
+    #[test]
+    fn long_shared_commit_histories_release_on_small_stacks() {
+        let history = CommitHistory::from_commits((1..=100_000).map(commit));
+        let later = history.append(commit(100_001));
+        let shared = later.clone();
+        let first = std::thread::Builder::new()
+            .stack_size(64 * 1024)
+            .spawn(move || drop(history))
+            .unwrap();
+        let second = std::thread::Builder::new()
+            .stack_size(64 * 1024)
+            .spawn(move || drop(later))
+            .unwrap();
+        first.join().unwrap();
+        second.join().unwrap();
+        assert_eq!(
+            shared
+                .since(99_999)
+                .iter()
+                .map(Commit::version)
+                .collect::<Vec<_>>(),
+            vec![100_000, 100_001]
+        );
+        std::thread::Builder::new()
+            .stack_size(64 * 1024)
+            .spawn(move || drop(shared))
+            .unwrap()
+            .join()
+            .unwrap();
     }
 }
