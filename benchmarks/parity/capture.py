@@ -91,6 +91,22 @@ def fixture_protocol(protocol, fixture):
     return selected
 
 
+def prepare_fixture(output, fixture, source, implementation):
+    workload = output / "harness" / fixture["file"]
+    preludes = fixture.get("prelude", [])
+    if not preludes:
+        return workload, {"path": str(workload), "sha256": digest(workload)}
+    inputs = [source / name for name in preludes]
+    bundle = output / "fixtures" / f"{fixture['name']}-{implementation}.mica"
+    bundle.parent.mkdir(exist_ok=True)
+    bundle.write_text("\n".join(path.read_text() for path in [*inputs, workload]))
+    return bundle, {
+        "path": str(bundle), "sha256": digest(bundle),
+        "prelude_sha256": {name: digest(path) for name, path in zip(preludes, inputs)},
+        "workload_sha256": digest(workload),
+    }
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("output", type=Path)
@@ -157,12 +173,19 @@ def main():
             subprocess.run(command, cwd=cwd, stdout=handle, stderr=subprocess.STDOUT, check=True)
     rust = rust_source / "target/release/mica"
     manifest["binaries"] = {"rust": digest(rust), "odin": digest(output / "odin-bench")}
+    paths = {}
+    manifest["fixture_inputs"] = {}
+    for fixture in fixtures:
+        for implementation, source in [("rust", rust_source), ("odin", odin_source)]:
+            path, provenance = prepare_fixture(output, fixture, source, implementation)
+            paths[(fixture["name"], implementation)] = path
+            manifest["fixture_inputs"][f"{fixture['name']}-{implementation}"] = provenance
     variants = [("rust-interpreter", "rust", "interpreter"), ("odin", "odin", "interpreter"), ("rust-native", "rust", "native-enabled")]
     for repetition in range(args.runs):
         for fixture in fixtures[repetition % len(fixtures):] + fixtures[:repetition % len(fixtures)]:
             selected_protocol = fixture_protocol(protocol, fixture)
             for label, implementation, tier in variants[repetition % 3:] + variants[:repetition % 3]:
-                path = output / "harness" / fixture["file"]
+                path = paths[(fixture["name"], implementation)]
                 if implementation == "rust":
                     command = [str(rust), "bench", str(path), "--expected", fixture["expected"],
                                "--samples", str(selected_protocol["samples"]), "--iterations", str(selected_protocol["iterations"]),

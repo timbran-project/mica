@@ -1,10 +1,36 @@
 import copy
+from pathlib import Path
+import tempfile
 import unittest
 
-from capture import fixture_protocol, validate_report
+from capture import digest, fixture_protocol, prepare_fixture, validate_report
 
 
 class CaptureContract(unittest.TestCase):
+    def test_application_preludes_use_each_export_and_record_exact_inputs(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            (output / "harness").mkdir()
+            workload = output / "harness" / "workload.mica"
+            workload.write_text("return 42\n")
+            fixture = {"name": "application", "file": "workload.mica", "prelude": ["app.mica"]}
+            hashes = []
+            for implementation in ["rust", "odin"]:
+                source = output / implementation
+                source.mkdir()
+                prelude = source / "app.mica"
+                prelude.write_text(f"// {implementation} export\n")
+                path, provenance = prepare_fixture(output, fixture, source, implementation)
+                self.assertEqual(path.read_text(), prelude.read_text() + "\n" + workload.read_text())
+                self.assertEqual(provenance["workload_sha256"], digest(workload))
+                self.assertEqual(provenance["prelude_sha256"], {"app.mica": digest(prelude)})
+                hashes.append(provenance["sha256"])
+            self.assertNotEqual(*hashes)
+            fixture.pop("prelude")
+            path, provenance = prepare_fixture(output, fixture, source, "rust")
+            self.assertEqual(path, workload)
+            self.assertEqual(provenance["sha256"], digest(workload))
+
     def setUp(self):
         self.fixture = {"expected": "42"}
         self.protocol = {"workers": 1, "warmup": 2, "samples": 2, "iterations": 3}

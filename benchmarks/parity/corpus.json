@@ -251,6 +251,19 @@
       "sha256": "a65b7f844f9207adeb303bf1555f45c7b2c8dcb366c29f6fafdabe9650230d78",
       "measurement": "Whole invocation builds 2048 scalar values and makes 400 calls with fresh outer state lists sharing that input. Checks retained input and an independent checksum.",
       "adaptation": "Shared parser-call acceptance fixture; no donor source."
+    },
+    {
+      "name": "compiler_frontend",
+      "file": "mica/compiler_frontend.mica",
+      "expected": "1201",
+      "setup": false,
+      "rust_gap": null,
+      "sha256": "5ced05846e8cf32c9d131ec6d87ae2652e43f9be4364d7e4c1cd1909bcdcbb7e",
+      "prelude": [
+        "apps/compiler/lex.mica",
+        "apps/compiler/parse.mica"
+      ],
+      "adaptation": "Shared application workload. Load the lexer and parser from each pinned source revision. Build and lex 200 Unicode declarations, parse the same source, and verify token and binding counts inside each timed invocation."
     }
   ],
   "excluded": {

@@ -90,3 +90,9 @@ cargo test -p mica-runner --test bench
 `language_call_shared_list` builds 2,048 scalar values and makes 400 calls with fresh outer state lists that share that input.
 Its expected result is `400 * 2048 + sum(0..399) = 899000`.
 The repeated protocol includes equal inputs retained from preceding invocations in the same process.
+
+`compiler_frontend` builds 200 declarations with Unicode string literals, lexes the source, then parses it into AST rows.
+The timed invocation checks 1,001 tokens, source positions, zero diagnostics, and 200 binding nodes. Its result is 1,201.
+Its `prelude` lists the lexer and parser paths. The launcher loads those files from each implementation's pinned source export.
+The generated fixture hashes and individual prelude hashes appear in `fixture_inputs` in the manifest.
+Prelude loading occurs before timing and remains included in process peak RSS.
