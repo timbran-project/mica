@@ -1,0 +1,2271 @@
+// Mica parser, written in Mica.
+//
+// Stage two of the self-hosting path (#79). Consumes the token stream from
+// `lex.mica` and produces a relational AST: a relation value with heading
+// [:node, :role, :target, :ordinal]. `:node` is an integer node id, `:role`
+// names a field or edge, and `:target` is a scalar attribute or the node id of
+// a child. `:ordinal` orders repeated roles.
+//
+// State is a list `[tokens, pos, next, facts, errors, source]` threaded
+// through every helper, because Mica values are immutable. Each helper returns
+// `[result, state]`. `parse(source)` returns
+// `{:root -> id, :nodes -> relation, :errors -> list}`.
+//
+// Naming rules for this file, forced by the lexer: a symbol whose spelling is a
+// lowercase keyword (`:not`, `:for`) or an identifier that is a keyword
+// (`body`, `value`, `name`) cannot be written. Role symbols here are all safe
+// spellings, and locals use suffixed names (`body_list`, `value_node`).
+//
+// The node roles retain the pinned Odin parser vocabulary.
+
+make_identity(:parser)
+
+// --- Entry -------------------------------------------------------------------
+
+verb parse(source) -> map
+  let [tokens, lex_errors] = lex(source)
+  let state = [tokens, 0, 1, [], lex_errors, source]
+  let [root, done] = parse_program(state)
+  let rows = done[3]
+  let nodes = relation_from_rows([:node, :role, :target, :ordinal], rows)
+  return {:root -> root, :nodes -> nodes, :errors -> done[4]}
+end
+
+// Same parse, but the fact rows stay a plain list of
+// [node, role, target, ordinal] lists for consumers (like emit.mica) that
+// scan facts without relation operations.
+verb parse_rows(source) -> map
+  let [tokens, lex_errors] = lex(source)
+  let state = [tokens, 0, 1, [], lex_errors, source]
+  let [root, done] = parse_program(state)
+  return {:root -> root, :rows -> done[3], :errors -> done[4]}
+end
+
+// --- State accessors ---------------------------------------------------------
+
+verb tok(state)
+  let tokens = state[0]
+  if state[1] >= len(tokens)
+    return {:kind -> :Eof, :text -> "", :offset -> 0, :line -> 1, :column -> 1}
+  end
+  return tokens[state[1]]
+end
+
+verb tok_at(state, offset)
+  let tokens = state[0]
+  let index = state[1] + offset
+  if index >= len(tokens)
+    return {:kind -> :Eof, :text -> "", :offset -> 0, :line -> 1, :column -> 1}
+  end
+  return tokens[index]
+end
+
+verb at(state, kind)
+  return tok(state)[:kind] == kind
+end
+
+verb at_any(state, kinds)
+  return in_list(kinds, tok(state)[:kind])
+end
+
+verb in_list(items, item)
+  for entry in items
+    if entry == item
+      return true
+    end
+  end
+  return false
+end
+
+verb bump(input_state)
+  let state = input_state
+  if tok(state)[:kind] != :Eof
+    state[1] = state[1] + 1
+  end
+  return state
+end
+
+verb at_separator(state)
+  let k = tok(state)[:kind]
+  return k == :Newline || k == :Semi
+end
+
+verb skip_separators(input_state)
+  let state = input_state
+  while at_separator(state)
+    state = bump(state)
+  end
+  return state
+end
+
+verb skip_newlines(input_state)
+  let state = input_state
+  while at(state, :Newline)
+    state = bump(state)
+  end
+  return state
+end
+
+verb expect(input_state, kind, message)
+  let state = input_state
+  if at(state, kind)
+    let token = tok(state)
+    return [token, bump(state)]
+  end
+  state = error_here(state, message)
+  return [tok(state), state]
+end
+
+verb error_here(input_state, message)
+  let state = input_state
+  let token = tok(state)
+  state[4] = [@state[4], {:message -> message, :line -> token[:line], :column -> token[:column]}]
+  return state
+end
+
+verb is_contextual(state, text)
+  let token = tok(state)
+  return token[:kind] == :Ident && token[:text] == text
+end
+
+verb tokens_adjacent(left, right)
+  return left[:line] == right[:line] && left[:column] + string_len(left[:text]) == right[:column]
+end
+
+verb source_text(state)
+  return state[5]
+end
+
+// --- Fact emission -----------------------------------------------------------
+
+// Reserves a fresh node id; returns [id, state].
+verb new_id(input_state)
+  let state = input_state
+  let id = state[2]
+  state[2] = id + 1
+  return [id, state]
+end
+
+verb fact(input_state, node, role, target, ordinal)
+  let state = input_state
+  state[3] = [@state[3], [node, role, target, ordinal]]
+  return state
+end
+
+// Creates a node with a `:kind` attribute; returns [id, state].
+verb make_node(input_state, kind)
+  let state = input_state
+  let [id, next_state] = new_id(state)
+  state = next_state
+  state = fact(state, id, :kind, kind, 0)
+  return [id, state]
+end
+
+// --- Program -----------------------------------------------------------------
+
+verb parse_program(input_state)
+  let state = input_state
+  let [root, next_state] = make_node(state, :Program)
+  state = next_state
+  state = skip_separators(state)
+  let item_index = 0
+  while !at(state, :Eof)
+    let [item, after_item] = parse_item(state)
+    state = after_item
+    state = fact(state, root, :item, item, item_index)
+    item_index = item_index + 1
+    if at(state, :Eof)
+      break
+    end
+    if !at_separator(state)
+      state = error_here(state, "expected newline or semicolon after item")
+      while !at(state, :Eof) && !at_separator(state)
+        state = bump(state)
+      end
+    end
+    state = skip_separators(state)
+  end
+  return [root, state]
+end
+
+verb parse_item(input_state)
+  let state = input_state
+  let kind = tok(state)[:kind]
+  if kind == :Verb || kind == :Method
+    return parse_verb(state)
+  end
+  let after_grant = tok_at(state, 1)
+  if is_contextual(state, "grant") && (after_grant[:kind] == :Hash || (after_grant[:kind] == :Ident && after_grant[:text] == "role"))
+    return parse_grant(state)
+  end
+  let head_start = tok(state)[:offset]
+  let [head, after_head] = parse_expression(state)
+  state = after_head
+  if at(state, :Colon_Dash)
+    state = bump(state)
+    let [rule_body, after_body] = parse_rule_body(state)
+    state = after_body
+    let rule_source = rule_source_text(state, head_start)
+    let [rule_item, after_item] = make_node(state, :RuleItem)
+    state = after_item
+    state = fact(state, rule_item, :head, head, 0)
+    let body_index = 0
+    for part in rule_body
+      state = fact(state, rule_item, :body, part, body_index)
+      body_index = body_index + 1
+    end
+    state = fact(state, rule_item, :source, rule_source, 0)
+    return [rule_item, state]
+  end
+  let [item, after_item] = make_node(state, :ExprItem)
+  state = after_item
+  state = fact(state, item, :expr, head, 0)
+  return [item, state]
+end
+
+// The rule source span, from the head offset to the current token, trimmed.
+verb rule_source_text(state, start)
+  let finish = tok(state)[:offset]
+  if start >= 0 && start < finish
+    return trim_space(string_slice(source_text(state), start, finish))
+  end
+  return ""
+end
+
+verb trim_space(text)
+  let first = 0
+  let last = string_len(text)
+  while first < last
+    let c = text[first]
+    if c != 32 && c != 9 && c != 10 && c != 13
+      break
+    end
+    first = first + 1
+  end
+  while last > first
+    let c = text[last - 1]
+    if c != 32 && c != 9 && c != 10 && c != 13
+      break
+    end
+    last = last - 1
+  end
+  return string_slice(text, first, last)
+end
+
+// --- Verb --------------------------------------------------------------------
+
+verb parse_verb(input_state)
+  let state = input_state
+  state = bump(state)
+  let [name_token, after_name] = expect(state, :Ident, "expected verb name")
+  state = after_name
+  let [verb_name, after_qualified] = parse_qualified_name(state, name_token)
+  state = after_qualified
+  let [_, after_lparen] = expect(state, :LParen, "expected '(' after verb name")
+  state = after_lparen
+  let [param_list, after_params] = parse_params(state)
+  state = after_params
+  let [_, after_rparen] = expect(state, :RParen, "expected ')' after verb parameters")
+  state = after_rparen
+  let result_type = ""
+  if at(state, :Arrow)
+    state = bump(state)
+    let [type_text, after_type] = parse_type_text(state)
+    result_type = type_text
+    state = after_type
+  end
+  state = skip_separators(state)
+  let [body_list, after_body] = parse_block_until(state, [:End, :Newline])
+  state = after_body
+  let [_, after_end] = expect(state, :End, "expected 'end' to close verb")
+  state = after_end
+  let [verb_node, after_verb] = make_node(state, :VerbItem)
+  state = after_verb
+  state = fact(state, verb_node, :name, verb_name, 0)
+  let param_index = 0
+  for param in param_list
+    state = fact(state, verb_node, :param, param, param_index)
+    param_index = param_index + 1
+  end
+  state = fact(state, verb_node, :result, result_type, 0)
+  let body_index = 0
+  for expr in body_list
+    state = fact(state, verb_node, :body, expr, body_index)
+    body_index = body_index + 1
+  end
+  return [verb_node, state]
+end
+
+verb parse_params(input_state)
+  let state = input_state
+  let param_list = []
+  state = skip_newlines(state)
+  while !at(state, :RParen) && !at(state, :Eof)
+    let [param, after_param] = make_node(state, :Param)
+    state = after_param
+    let mode = :req
+    if at(state, :Question)
+      state = bump(state)
+      mode = :opt
+    elseif at(state, :At)
+      state = bump(state)
+      mode = :rest
+    end
+    let [name_token, after_name] = expect(state, :Ident, "expected parameter name")
+    state = after_name
+    state = fact(state, param, :name, name_token[:text], 0)
+    if mode == :opt && at(state, :Eq)
+      state = bump(state)
+      let [default_node, after_default] = parse_expression(state)
+      state = after_default
+      state = fact(state, param, :default, default_node, 0)
+    end
+    if at(state, :At) && mode != :rest
+      state = bump(state)
+      let [restriction, after_restriction] = parse_unary(state)
+      state = after_restriction
+      state = fact(state, param, :restrict, restriction, 0)
+    end
+    if at(state, :Colon)
+      state = bump(state)
+      let [annotation, after_annotation] = parse_type_text(state)
+      state = after_annotation
+      state = fact(state, param, :annotation, annotation, 0)
+    end
+    state = fact(state, param, :mode, mode, 0)
+    param_list = [@param_list, param]
+    if at(state, :Comma)
+      state = bump(state)
+      state = skip_newlines(state)
+      continue
+    end
+    break
+  end
+  return [param_list, state]
+end
+
+// Parses expressions until one of `stops` or end of input.
+verb parse_block_until(input_state, stops)
+  let state = input_state
+  let body_list = []
+  state = skip_separators(state)
+  while !at(state, :Eof)
+    if at_any(state, stops)
+      break
+    end
+    let [expr, after_expr] = parse_expression(state)
+    state = after_expr
+    body_list = [@body_list, expr]
+    if !at_separator(state) && !at_any(state, stops) && !at(state, :Eof)
+      state = error_here(state, "expected newline or a block terminator")
+      while !at(state, :Eof) && !at_separator(state)
+        state = bump(state)
+      end
+    end
+    state = skip_separators(state)
+  end
+  return [body_list, state]
+end
+
+// --- Grant -------------------------------------------------------------------
+
+verb at_grant_section(state)
+  if !at(state, :Ident)
+    return false
+  end
+  let text = tok(state)[:text]
+  if text == "read" || text == "write" || text == "invoke"
+    return tok_at(state, 1)[:kind] == :Colon
+  end
+  return text == "effect"
+end
+
+verb parse_grant(input_state)
+  let state = input_state
+  state = bump(state)
+  let is_role = is_contextual(state, "role")
+  if is_role
+    state = bump(state)
+  end
+  let [principal, after_principal] = parse_unary(state)
+  state = after_principal
+  state = skip_separators(state)
+  let [grant, after_grant] = make_node(state, :GrantItem)
+  state = after_grant
+  state = fact(state, grant, :principal, principal, 0)
+  if is_role
+    state = fact(state, grant, :role_principal, true, 0)
+  end
+  let section_index = 0
+  while !at(state, :Eof) && !at(state, :End)
+    if !at_grant_section(state)
+      state = error_here(state, "expected a grant section")
+      while !at(state, :Eof) && !at_separator(state) && !at(state, :End)
+        state = bump(state)
+      end
+      state = skip_separators(state)
+      continue
+    end
+    let section_kind = :read
+    let section_text = tok(state)[:text]
+    if section_text == "write"
+      section_kind = :write
+    elseif section_text == "invoke"
+      section_kind = :invoke
+    elseif section_text == "effect"
+      section_kind = :effect
+    end
+    state = bump(state)
+    if section_kind != :effect
+      let [_, after_colon] = expect(state, :Colon, "expected ':' after the section name")
+      state = after_colon
+    end
+    let [section, after_section] = make_node(state, :GrantSection)
+    state = after_section
+    state = fact(state, section, :section_kind, section_kind, 0)
+    state = skip_separators(state)
+    let entry_index = 0
+    while !at(state, :Eof) && !at(state, :End) && !at_grant_section(state)
+      let [entry, after_entry] = parse_expression(state)
+      state = after_entry
+      state = fact(state, section, :entry, entry, entry_index)
+      entry_index = entry_index + 1
+      if !at_separator(state) && !at(state, :End) && !at_grant_section(state)
+        state = error_here(state, "expected newline after a grant entry")
+        while !at(state, :Eof) && !at_separator(state)
+          state = bump(state)
+        end
+      end
+      state = skip_separators(state)
+    end
+    state = fact(state, grant, :section, section, section_index)
+    section_index = section_index + 1
+  end
+  let [_, after_end] = expect(state, :End, "expected 'end' to close grant")
+  state = after_end
+  return [grant, state]
+end
+
+verb parse_rule_body(input_state)
+  let state = input_state
+  let items = []
+  state = skip_newlines(state)
+  while !at_separator(state) && !at(state, :Eof)
+    let [expr, after_expr] = parse_expression(state)
+    state = after_expr
+    items = [@items, expr]
+    if at(state, :Comma)
+      state = bump(state)
+      state = skip_newlines(state)
+      continue
+    end
+    break
+  end
+  return [items, state]
+end
+
+// --- Expressions -------------------------------------------------------------
+
+verb parse_expression(input_state)
+  let state = input_state
+  if is_contextual(state, "match")
+    let next_kind = tok_at(state, 1)[:kind]
+    if next_kind != :LParen && next_kind != :Eq && next_kind != :Dot && next_kind != :LBracket && next_kind != :Colon && next_kind != :Slash && next_kind != :Colon_Dash
+      return parse_match(state)
+    end
+  end
+  let kind = tok(state)[:kind]
+  if kind == :Let
+    return parse_binding(state, false)
+  end
+  if kind == :Const
+    return parse_binding(state, true)
+  end
+  if kind == :If
+    return parse_if(state)
+  end
+  if kind == :While
+    return parse_while(state)
+  end
+  if kind == :For
+    return parse_for(state)
+  end
+  if kind == :Begin
+    return parse_begin(state)
+  end
+  if kind == :Return
+    return parse_return(state)
+  end
+  if kind == :Break
+    state = bump(state)
+    return make_node(state, :Break)
+  end
+  if kind == :Continue
+    state = bump(state)
+    return make_node(state, :Continue)
+  end
+  if kind == :Assert
+    state = bump(state)
+    let [atom, after_atom] = parse_expression(state)
+    state = after_atom
+    let [assert_node, after_assert] = make_node(state, :Assert)
+    state = after_assert
+    state = fact(state, assert_node, :atom, atom, 0)
+    return [assert_node, state]
+  end
+  if kind == :Retract
+    state = bump(state)
+    let [atom, after_atom] = parse_expression(state)
+    state = after_atom
+    let [retract_node, after_retract] = make_node(state, :Retract)
+    state = after_retract
+    state = fact(state, retract_node, :atom, atom, 0)
+    return [retract_node, state]
+  end
+  if kind == :Require
+    state = bump(state)
+    let [condition, after_condition] = parse_expression(state)
+    state = after_condition
+    let [require_node, after_require] = make_node(state, :Require)
+    state = after_require
+    state = fact(state, require_node, :condition, condition, 0)
+    return [require_node, state]
+  end
+  if kind == :Raise
+    return parse_raise(state)
+  end
+  if kind == :Fn
+    return parse_fn_literal(state)
+  end
+  return parse_assignment(state)
+end
+
+verb parse_binding(input_state, is_const)
+  let state = input_state
+  state = bump(state)
+  let is_exact = false
+  if is_contextual(state, "exactly")
+    let next_kind = tok_at(state, 1)[:kind]
+    if next_kind == :LBrace || next_kind == :LBracket
+      state = bump(state)
+      is_exact = true
+    end
+  end
+  let [pattern_node, after_pattern] = parse_pattern(state)
+  state = after_pattern
+  let [binding_node, after_binding] = make_node(state, :Binding)
+  state = after_binding
+  if is_const
+    state = fact(state, binding_node, :is_const, true, 0)
+  end
+  if is_exact
+    state = fact(state, binding_node, :is_exactly, true, 0)
+  end
+  state = fact(state, binding_node, :pattern, pattern_node, 0)
+  if at(state, :Colon)
+    state = bump(state)
+    let [annotation, after_annotation] = parse_type_text(state)
+    state = after_annotation
+    state = fact(state, binding_node, :annotation, annotation, 0)
+  end
+  if at(state, :Eq)
+    state = bump(state)
+    let [value_node, after_value] = parse_expression(state)
+    state = after_value
+    state = fact(state, binding_node, :value, value_node, 0)
+  end
+  return [binding_node, state]
+end
+
+// --- Patterns ----------------------------------------------------------------
+
+verb parse_pattern(input_state)
+  let state = input_state
+  let kind = tok(state)[:kind]
+  if kind == :Underscore
+    state = bump(state)
+    return make_node(state, :Wildcard_Pattern)
+  end
+  if kind == :At
+    state = bump(state)
+    let [name_token, after_name] = expect(state, :Ident, "expected name after '@'")
+    state = after_name
+    let [rest_node, after_rest] = make_node(state, :Rest_Pattern)
+    state = after_rest
+    state = fact(state, rest_node, :name, name_token[:text], 0)
+    return [rest_node, state]
+  end
+  if kind == :Question
+    state = bump(state)
+    let [name_token, after_name] = expect(state, :Ident, "expected name after '?'")
+    state = after_name
+    let [optional_node, after_optional] = make_node(state, :Optional_Pattern)
+    state = after_optional
+    state = fact(state, optional_node, :name, name_token[:text], 0)
+    if at(state, :Eq)
+      state = bump(state)
+      let [default_node, after_default] = parse_expression(state)
+      state = after_default
+      state = fact(state, optional_node, :default, default_node, 0)
+    end
+    return [optional_node, state]
+  end
+  if kind == :LBracket
+    return parse_list_pattern(state)
+  end
+  if kind == :LBrace
+    return parse_map_pattern(state)
+  end
+  if kind == :Ident
+    let name_text = tok(state)[:text]
+    state = bump(state)
+    if at(state, :LParen)
+      return parse_call_pattern(state, name_text)
+    end
+    let [bind_pattern, after_bind] = make_node(state, :Binding_Pattern)
+    state = after_bind
+    state = fact(state, bind_pattern, :name, name_text, 0)
+    return [bind_pattern, state]
+  end
+  if kind == :Int || kind == :Float || kind == :String || kind == :Bytes || kind == :True || kind == :False || kind == :Error_Code || kind == :Hash || kind == :Colon
+    let [literal, after_literal] = parse_primary(state)
+    state = after_literal
+    let [literal_pattern, after_pattern] = make_node(state, :Literal_Pattern)
+    state = after_pattern
+    state = fact(state, literal_pattern, :value, literal, 0)
+    return [literal_pattern, state]
+  end
+  state = error_here(state, "expected a pattern")
+  return make_node(state, :Wildcard_Pattern)
+end
+
+verb parse_call_pattern(input_state, name_text)
+  let state = input_state
+  let [_, after_lparen] = expect(state, :LParen, "expected '('")
+  state = after_lparen
+  let [call_pattern, after_pattern] = make_node(state, :Call_Pattern)
+  state = after_pattern
+  state = fact(state, call_pattern, :name, name_text, 0)
+  state = skip_newlines(state)
+  let arg_index = 0
+  while !at(state, :RParen) && !at(state, :Eof)
+    let [arg, after_arg] = parse_pattern(state)
+    state = after_arg
+    state = fact(state, call_pattern, :arg, arg, arg_index)
+    arg_index = arg_index + 1
+    state = skip_newlines(state)
+    if at(state, :Comma)
+      state = bump(state)
+      state = skip_newlines(state)
+      continue
+    end
+    break
+  end
+  let [_, after_rparen] = expect(state, :RParen, "expected ')' after pattern arguments")
+  state = after_rparen
+  return [call_pattern, state]
+end
+
+verb parse_list_pattern(input_state)
+  let state = input_state
+  let [_, after_lbracket] = expect(state, :LBracket, "expected '['")
+  state = after_lbracket
+  let [list_pattern, after_pattern] = make_node(state, :List_Pattern)
+  state = after_pattern
+  state = skip_newlines(state)
+  let element_index = 0
+  while !at(state, :RBracket) && !at(state, :Eof)
+    let [element, after_element] = parse_pattern(state)
+    state = after_element
+    state = fact(state, list_pattern, :element, element, element_index)
+    element_index = element_index + 1
+    state = skip_newlines(state)
+    if at(state, :Comma)
+      state = bump(state)
+      state = skip_newlines(state)
+      continue
+    end
+    break
+  end
+  let [_, after_rbracket] = expect(state, :RBracket, "expected ']' after list pattern")
+  state = after_rbracket
+  return [list_pattern, state]
+end
+
+verb parse_map_pattern(input_state)
+  let state = input_state
+  let [_, after_lbrace] = expect(state, :LBrace, "expected '{'")
+  state = after_lbrace
+  let [map_pattern, after_pattern] = make_node(state, :Map_Pattern)
+  state = after_pattern
+  state = skip_newlines(state)
+  let entry_index = 0
+  while !at(state, :RBrace) && !at(state, :Eof)
+    let [entry, after_entry] = parse_map_pattern_entry(state)
+    state = after_entry
+    state = fact(state, map_pattern, :entry, entry, entry_index)
+    entry_index = entry_index + 1
+    state = skip_newlines(state)
+    if at(state, :Comma)
+      state = bump(state)
+      state = skip_newlines(state)
+      continue
+    end
+    break
+  end
+  let [_, after_rbrace] = expect(state, :RBrace, "expected '}' after map pattern")
+  state = after_rbrace
+  return [map_pattern, state]
+end
+
+verb parse_map_pattern_entry(input_state)
+  let state = input_state
+  let entry_kind = tok(state)[:kind]
+  if entry_kind == :Colon || entry_kind == :Ident
+    let key_text = ""
+    if entry_kind == :Colon
+      state = bump(state)
+      key_text = tok(state)[:text]
+      state = bump(state)
+    else
+      key_text = tok(state)[:text]
+      state = bump(state)
+    end
+    let [entry, after_entry] = make_node(state, :MapPatternEntry)
+    state = after_entry
+    let [key_node, after_key] = make_node(state, :Symbol_Literal)
+    state = after_key
+    state = fact(state, key_node, :name, key_text, 0)
+    state = fact(state, entry, :key, key_node, 0)
+    if at(state, :Arrow)
+      state = bump(state)
+      let [pattern_node, after_pattern] = parse_pattern(state)
+      state = after_pattern
+      state = fact(state, entry, :pattern, pattern_node, 0)
+    else
+      state = fact(state, entry, :shorthand, true, 0)
+      let [bind_pattern, after_bind] = make_node(state, :Binding_Pattern)
+      state = after_bind
+      state = fact(state, bind_pattern, :name, key_text, 0)
+      state = fact(state, entry, :pattern, bind_pattern, 0)
+    end
+    return [entry, state]
+  end
+  state = error_here(state, "expected a map pattern entry")
+  while !at(state, :Eof) && !at(state, :Comma) && !at(state, :RBrace)
+    state = bump(state)
+  end
+  return make_node(state, :MapPatternEntry)
+end
+
+// --- Match -------------------------------------------------------------------
+
+verb parse_match(input_state)
+  let state = input_state
+  state = bump(state)
+  let [subject, after_subject] = parse_expression(state)
+  state = after_subject
+  state = skip_separators(state)
+  let [match_node, after_match] = make_node(state, :Match)
+  state = after_match
+  state = fact(state, match_node, :value, subject, 0)
+  let case_index = 0
+  while is_contextual(state, "case")
+    state = bump(state)
+    let [pattern_node, after_pattern] = parse_pattern(state)
+    state = after_pattern
+    let [case_node, after_case] = make_node(state, :MatchCase)
+    state = after_case
+    state = fact(state, case_node, :pattern, pattern_node, 0)
+    if at(state, :If)
+      state = bump(state)
+      let [guard, after_guard] = parse_expression(state)
+      state = after_guard
+      state = fact(state, case_node, :has_guard, true, 0)
+      state = fact(state, case_node, :guard, guard, 0)
+    end
+    state = skip_separators(state)
+    let [case_body, after_body] = parse_case_body(state)
+    state = after_body
+    let body_index = 0
+    for expr in case_body
+      state = fact(state, case_node, :body, expr, body_index)
+      body_index = body_index + 1
+    end
+    state = fact(state, match_node, :case, case_node, case_index)
+    case_index = case_index + 1
+  end
+  let [_, after_end] = expect(state, :End, "expected 'end' to close match")
+  state = after_end
+  return [match_node, state]
+end
+
+verb parse_case_body(input_state)
+  let state = input_state
+  let body_list = []
+  state = skip_separators(state)
+  while !at(state, :Eof) && !at(state, :End) && !is_contextual(state, "case")
+    let [expr, after_expr] = parse_expression(state)
+    state = after_expr
+    body_list = [@body_list, expr]
+    if !at_separator(state) && !at(state, :End) && !is_contextual(state, "case")
+      state = error_here(state, "expected newline or 'case'")
+      while !at(state, :Eof) && !at_separator(state)
+        state = bump(state)
+      end
+    end
+    state = skip_separators(state)
+  end
+  return [body_list, state]
+end
+
+// --- Control forms -----------------------------------------------------------
+
+verb parse_if(input_state)
+  let state = input_state
+  state = bump(state)
+  let [if_node, after_if] = make_node(state, :If)
+  state = after_if
+  let [condition, after_condition] = parse_expression(state)
+  state = after_condition
+  state = skip_separators(state)
+  let [first_body, after_body] = parse_block_until(state, [:Elseif, :Else, :End, :Newline])
+  state = after_body
+  let [first_branch, after_branch] = make_node(state, :IfBranch)
+  state = after_branch
+  state = fact(state, first_branch, :condition, condition, 0)
+  let body_index = 0
+  for expr in first_body
+    state = fact(state, first_branch, :body, expr, body_index)
+    body_index = body_index + 1
+  end
+  state = fact(state, if_node, :branch, first_branch, 0)
+  let branch_index = 1
+  while at(state, :Elseif)
+    state = bump(state)
+    let [elseif_condition, after_elseif_condition] = parse_expression(state)
+    state = after_elseif_condition
+    state = skip_separators(state)
+    let [elseif_body, after_elseif_body] = parse_block_until(state, [:Elseif, :Else, :End, :Newline])
+    state = after_elseif_body
+    let [elseif_branch, after_elseif_branch] = make_node(state, :IfBranch)
+    state = after_elseif_branch
+    state = fact(state, elseif_branch, :condition, elseif_condition, 0)
+    let inner_index = 0
+    for expr in elseif_body
+      state = fact(state, elseif_branch, :body, expr, inner_index)
+      inner_index = inner_index + 1
+    end
+    state = fact(state, if_node, :branch, elseif_branch, branch_index)
+    branch_index = branch_index + 1
+  end
+  if at(state, :Else)
+    state = bump(state)
+    let [else_body, after_else] = parse_block_until(state, [:End, :Newline])
+    state = after_else
+    state = fact(state, if_node, :has_else, true, 0)
+    let else_index = 0
+    for expr in else_body
+      state = fact(state, if_node, :else_body, expr, else_index)
+      else_index = else_index + 1
+    end
+  end
+  let [_, after_end] = expect(state, :End, "expected 'end' to close if")
+  state = after_end
+  return [if_node, state]
+end
+
+verb parse_while(input_state)
+  let state = input_state
+  state = bump(state)
+  let [condition, after_condition] = parse_expression(state)
+  state = after_condition
+  state = skip_separators(state)
+  let [body_list, after_body] = parse_block_until(state, [:End, :Newline])
+  state = after_body
+  let [_, after_end] = expect(state, :End, "expected 'end' to close while")
+  state = after_end
+  let [while_node, after_while] = make_node(state, :While)
+  state = after_while
+  state = fact(state, while_node, :condition, condition, 0)
+  let body_index = 0
+  for expr in body_list
+    state = fact(state, while_node, :body, expr, body_index)
+    body_index = body_index + 1
+  end
+  return [while_node, state]
+end
+
+verb parse_for(input_state)
+  let state = input_state
+  state = bump(state)
+  let [for_node, after_for] = make_node(state, :For)
+  state = after_for
+  let head_kind = tok(state)[:kind]
+  if head_kind == :LBracket || head_kind == :LBrace || head_kind == :Underscore
+    // Destructuring headers bind each item against a list, map, or
+    // wildcard pattern; anything else stays an error.
+    let [pattern_node, after_pattern] = parse_pattern(state)
+    state = after_pattern
+    let pattern_kind = node_kind(state, pattern_node)
+    if pattern_kind != :List_Pattern && pattern_kind != :Map_Pattern && pattern_kind != :Wildcard_Pattern
+      state = error_here(state, "for loop pattern must be a list, map, or wildcard")
+    else
+      state = fact(state, for_node, :pattern, pattern_node, 0)
+    end
+  else
+    let name_index = 0
+    while true
+      let [name_token, after_name] = expect(state, :Ident, "expected loop name")
+      state = after_name
+      let [name_node, after_name_node] = make_node(state, :LoopName)
+      state = after_name_node
+      state = fact(state, name_node, :name, name_token[:text], 0)
+      if at(state, :Colon)
+        state = bump(state)
+        let [annotation, after_annotation] = parse_type_text(state)
+        state = after_annotation
+        state = fact(state, name_node, :annotation, annotation, 0)
+      end
+      state = fact(state, for_node, :name, name_node, name_index)
+      name_index = name_index + 1
+      if at(state, :Comma)
+        state = bump(state)
+        continue
+      end
+      break
+    end
+  end
+  let [_, after_in] = expect(state, :In, "expected 'in' in for loop")
+  state = after_in
+  let [iterable, after_iterable] = parse_expression(state)
+  state = after_iterable
+  state = skip_separators(state)
+  let [body_list, after_body] = parse_block_until(state, [:End, :Newline])
+  state = after_body
+  let [_, after_end] = expect(state, :End, "expected 'end' to close for")
+  state = after_end
+  state = fact(state, for_node, :iterable, iterable, 0)
+  let body_index = 0
+  for expr in body_list
+    state = fact(state, for_node, :body, expr, body_index)
+    body_index = body_index + 1
+  end
+  return [for_node, state]
+end
+
+verb parse_begin(input_state)
+  let state = input_state
+  state = bump(state)
+  let [body_list, after_body] = parse_block_until(state, [:End, :Newline])
+  state = after_body
+  let [_, after_end] = expect(state, :End, "expected 'end' to close begin")
+  state = after_end
+  let [begin_node, after_begin] = make_node(state, :Begin)
+  state = after_begin
+  let body_index = 0
+  for expr in body_list
+    state = fact(state, begin_node, :body, expr, body_index)
+    body_index = body_index + 1
+  end
+  return [begin_node, state]
+end
+
+verb parse_return(input_state)
+  let state = input_state
+  state = bump(state)
+  let [return_node, after_return] = make_node(state, :Return)
+  state = after_return
+  if !at_separator(state) && !at(state, :Eof) && !at_any(state, [:End, :Elseif, :Else])
+    let [value_node, after_value] = parse_expression(state)
+    state = after_value
+    state = fact(state, return_node, :value, value_node, 0)
+  end
+  return [return_node, state]
+end
+
+verb parse_raise(input_state)
+  let state = input_state
+  state = bump(state)
+  let [raise_node, after_raise] = make_node(state, :Raise)
+  state = after_raise
+  let part_index = 0
+  while true
+    let [part, after_part] = parse_expression(state)
+    state = after_part
+    state = fact(state, raise_node, :part, part, part_index)
+    part_index = part_index + 1
+    if at(state, :Comma)
+      state = bump(state)
+      continue
+    end
+    break
+  end
+  return [raise_node, state]
+end
+
+verb parse_fn_literal(input_state)
+  let state = input_state
+  state = bump(state)
+  let name_text = ""
+  if at(state, :Ident) && tok_at(state, 1)[:kind] == :LParen
+    name_text = tok(state)[:text]
+    state = bump(state)
+  end
+  let [_, after_lparen] = expect(state, :LParen, "expected '(' after 'fn'")
+  state = after_lparen
+  let [param_list, after_params] = parse_params(state)
+  state = after_params
+  let [_, after_rparen] = expect(state, :RParen, "expected ')' after parameters")
+  state = after_rparen
+  let [fn_node, after_fn] = make_node(state, :Fn)
+  state = after_fn
+  let param_index = 0
+  for param in param_list
+    state = fact(state, fn_node, :param, param, param_index)
+    param_index = param_index + 1
+  end
+  if at(state, :Fat_Arrow)
+    state = bump(state)
+    let [expression_body, after_expression] = parse_expression(state)
+    state = after_expression
+    state = fact(state, fn_node, :has_expression_body, true, 0)
+    state = fact(state, fn_node, :expression_body, expression_body, 0)
+  else
+    state = skip_separators(state)
+    let [body_list, after_body] = parse_block_until(state, [:End, :Newline])
+    state = after_body
+    let [_, after_end] = expect(state, :End, "expected 'end' to close fn")
+    state = after_end
+    let body_index = 0
+    for expr in body_list
+      state = fact(state, fn_node, :body, expr, body_index)
+      body_index = body_index + 1
+    end
+  end
+  if name_text == ""
+    return [fn_node, state]
+  end
+  // A named fn is a self-recursive binding.
+  let [pattern_node, after_pattern] = make_node(state, :Binding_Pattern)
+  state = after_pattern
+  state = fact(state, pattern_node, :name, name_text, 0)
+  let [binding_node, after_binding] = make_node(state, :Binding)
+  state = after_binding
+  state = fact(state, binding_node, :pattern, pattern_node, 0)
+  state = fact(state, binding_node, :value, fn_node, 0)
+  return [binding_node, state]
+end
+
+// --- Expression precedence ---------------------------------------------------
+
+verb parse_assignment(input_state)
+  let state = input_state
+  let [left, after_left] = parse_or(state)
+  state = after_left
+  if at(state, :Eq)
+    state = bump(state)
+    let [value_node, after_value] = parse_assignment(state)
+    state = after_value
+    let [assign_node, after_assign] = make_node(state, :Assignment)
+    state = after_assign
+    state = fact(state, assign_node, :target, left, 0)
+    state = fact(state, assign_node, :value, value_node, 0)
+    return [assign_node, state]
+  end
+  return [left, state]
+end
+
+verb make_binary(input_state, op_symbol, left, right)
+  let state = input_state
+  let [binary_node, after_binary] = make_node(state, :Binary)
+  state = after_binary
+  state = fact(state, binary_node, :op, op_symbol, 0)
+  state = fact(state, binary_node, :left, left, 0)
+  state = fact(state, binary_node, :right, right, 0)
+  return [binary_node, state]
+end
+
+verb parse_or(input_state)
+  let state = input_state
+  let [left, after_left] = parse_and(state)
+  state = after_left
+  while at(state, :Pipe_Pipe)
+    state = bump(state)
+    let [right, after_right] = parse_and(state)
+    state = after_right
+    let [binary_node, after_binary] = make_binary(state, :or, left, right)
+    state = after_binary
+    left = binary_node
+  end
+  return [left, state]
+end
+
+verb parse_and(input_state)
+  let state = input_state
+  let [left, after_left] = parse_equality(state)
+  state = after_left
+  while at(state, :Amp_Amp)
+    state = bump(state)
+    let [right, after_right] = parse_equality(state)
+    state = after_right
+    let [binary_node, after_binary] = make_binary(state, :and, left, right)
+    state = after_binary
+    left = binary_node
+  end
+  return [left, state]
+end
+
+verb parse_equality(input_state)
+  let state = input_state
+  let [left, after_left] = parse_comparison(state)
+  state = after_left
+  while true
+    let op_symbol = :eq
+    let k = tok(state)[:kind]
+    if k == :Eq_Eq
+      op_symbol = :eq
+    elseif k == :Bang_Eq
+      op_symbol = :ne
+    else
+      return [left, state]
+    end
+    state = bump(state)
+    let [right, after_right] = parse_comparison(state)
+    state = after_right
+    let [binary_node, after_binary] = make_binary(state, op_symbol, left, right)
+    state = after_binary
+    left = binary_node
+  end
+  return [left, state]
+end
+
+verb parse_comparison(input_state)
+  let state = input_state
+  let [left, after_left] = parse_range(state)
+  state = after_left
+  while true
+    let op_symbol = :lt
+    let k = tok(state)[:kind]
+    if k == :Lt
+      op_symbol = :lt
+    elseif k == :Lt_Eq
+      op_symbol = :le
+    elseif k == :Gt
+      op_symbol = :gt
+    elseif k == :Gt_Eq
+      op_symbol = :ge
+    else
+      return [left, state]
+    end
+    state = bump(state)
+    let [right, after_right] = parse_range(state)
+    state = after_right
+    let [binary_node, after_binary] = make_binary(state, op_symbol, left, right)
+    state = after_binary
+    left = binary_node
+  end
+  return [left, state]
+end
+
+verb parse_range(input_state)
+  let state = input_state
+  let [left, after_left] = parse_additive(state)
+  state = after_left
+  if at(state, :DotDot)
+    state = bump(state)
+    if at(state, :Underscore)
+      state = bump(state)
+      let [range_node, after_range] = make_node(state, :Range_Literal)
+      state = after_range
+      state = fact(state, range_node, :start, left, 0)
+      return [range_node, state]
+    end
+    let [right, after_right] = parse_additive(state)
+    state = after_right
+    let [range_node, after_range] = make_node(state, :Range_Literal)
+    state = after_range
+    state = fact(state, range_node, :start, left, 0)
+    state = fact(state, range_node, :range_end, right, 0)
+    return [range_node, state]
+  end
+  return [left, state]
+end
+
+verb parse_additive(input_state)
+  let state = input_state
+  let [left, after_left] = parse_multiplicative(state)
+  state = after_left
+  while true
+    let op_symbol = :add
+    let k = tok(state)[:kind]
+    if k == :Plus
+      op_symbol = :add
+    elseif k == :Minus
+      op_symbol = :sub
+    else
+      return [left, state]
+    end
+    state = bump(state)
+    let [right, after_right] = parse_multiplicative(state)
+    state = after_right
+    let [binary_node, after_binary] = make_binary(state, op_symbol, left, right)
+    state = after_binary
+    left = binary_node
+  end
+  return [left, state]
+end
+
+verb parse_multiplicative(input_state)
+  let state = input_state
+  let [left, after_left] = parse_unary(state)
+  state = after_left
+  while true
+    let op_symbol = :mul
+    let k = tok(state)[:kind]
+    if k == :Star
+      op_symbol = :mul
+    elseif k == :Slash
+      op_symbol = :div
+    elseif k == :Percent
+      op_symbol = :rem
+    else
+      return [left, state]
+    end
+    state = bump(state)
+    let [right, after_right] = parse_unary(state)
+    state = after_right
+    let [binary_node, after_binary] = make_binary(state, op_symbol, left, right)
+    state = after_binary
+    left = binary_node
+  end
+  return [left, state]
+end
+
+verb parse_unary(input_state)
+  let state = input_state
+  let k = tok(state)[:kind]
+  if k == :Minus
+    state = bump(state)
+    let [operand, after_operand] = parse_unary(state)
+    state = after_operand
+    return make_unary(state, :neg, operand)
+  end
+  if k == :Bang || k == :Not
+    state = bump(state)
+    let [operand, after_operand] = parse_unary(state)
+    state = after_operand
+    return make_unary(state, :not_op, operand)
+  end
+  return parse_postfix(state)
+end
+
+verb make_unary(input_state, op_symbol, operand)
+  let state = input_state
+  let [unary_node, after_unary] = make_node(state, :Unary)
+  state = after_unary
+  state = fact(state, unary_node, :op, op_symbol, 0)
+  state = fact(state, unary_node, :operand, operand, 0)
+  return [unary_node, state]
+end
+
+verb parse_postfix(input_state)
+  let state = input_state
+  let [current, after_primary] = parse_primary(state)
+  state = after_primary
+  while true
+    let k = tok(state)[:kind]
+    if k == :LParen
+      let [args, after_args] = parse_call_arguments(state)
+      state = after_args
+      let [call_node, after_call] = make_node(state, :Call)
+      state = after_call
+      state = fact(state, call_node, :callee, current, 0)
+      let arg_index = 0
+      for arg in args
+        state = fact(state, call_node, :arg, arg, arg_index)
+        arg_index = arg_index + 1
+      end
+      current = call_node
+      continue
+    end
+    if k == :LBracket
+      state = bump(state)
+      let [key, after_key] = parse_expression(state)
+      state = after_key
+      let [_, after_rbracket] = expect(state, :RBracket, "expected ']' after index")
+      state = after_rbracket
+      let [index_node, after_index] = make_node(state, :Index)
+      state = after_index
+      state = fact(state, index_node, :collection, current, 0)
+      state = fact(state, index_node, :key, key, 0)
+      current = index_node
+      continue
+    end
+    if k == :Dot
+      state = bump(state)
+      let [name_token, after_name] = expect(state, :Ident, "expected field name after '.'")
+      state = after_name
+      let [field_node, after_field] = make_node(state, :Field)
+      state = after_field
+      state = fact(state, field_node, :receiver, current, 0)
+      let [field_name, after_field_name] = parse_qualified_name(state, name_token)
+      state = after_field_name
+      state = fact(state, field_node, :name, field_name, 0)
+      current = field_node
+      continue
+    end
+    if k == :Colon
+      let next_kind = tok_at(state, 1)[:kind]
+      let after_kind = tok_at(state, 2)[:kind]
+      if next_kind != :Ident || after_kind != :LParen
+        return [current, state]
+      end
+      state = bump(state)
+      let selector_token = tok(state)
+      state = bump(state)
+      let [args, after_args] = parse_call_arguments(state)
+      state = after_args
+      let [receiver_node, after_receiver] = make_node(state, :Receiver_Call)
+      state = after_receiver
+      state = fact(state, receiver_node, :receiver, current, 0)
+      state = fact(state, receiver_node, :selector, selector_token[:text], 0)
+      let arg_index = 0
+      for arg in args
+        state = fact(state, receiver_node, :arg, arg, arg_index)
+        arg_index = arg_index + 1
+      end
+      current = receiver_node
+      continue
+    end
+    if k == :Lt
+      let previous = state[0][state[1] - 1]
+      if tokens_adjacent(previous, tok(state)) && is_structural_head(state, current)
+        let [structural, after_structural] = parse_structural_literal(state, current)
+        state = after_structural
+        current = structural
+        continue
+      end
+      return [current, state]
+    end
+    return [current, state]
+  end
+  return [current, state]
+end
+
+verb node_kind(state, node_id)
+  for row in state[3]
+    if row[0] == node_id && row[1] == :kind
+      return row[2]
+    end
+  end
+  return :Unknown
+end
+
+verb is_structural_head(state, node_id)
+  let kind = node_kind(state, node_id)
+  return kind == :Identity_Literal || kind == :Name || kind == :Symbol_Literal
+end
+
+verb parse_structural_literal(input_state, head)
+  let state = input_state
+  state = bump(state)
+  let [structural_node, after_structural] = make_node(state, :Structural_Literal)
+  state = after_structural
+  state = fact(state, structural_node, :head, head, 0)
+  let named = false
+  let k = tok(state)[:kind]
+  if k == :LBracket
+    state = bump(state)
+    state = skip_newlines(state)
+    let cell_index = 0
+    while !at(state, :RBracket) && !at(state, :Eof)
+      let [cell, after_cell] = make_node(state, :StructuralCell)
+      state = after_cell
+      let [cell_value, after_value] = parse_expression(state)
+      state = after_value
+      state = fact(state, cell, :value, cell_value, 0)
+      state = fact(state, structural_node, :cell, cell, cell_index)
+      cell_index = cell_index + 1
+      state = skip_newlines(state)
+      if at(state, :Comma)
+        state = bump(state)
+        state = skip_newlines(state)
+        continue
+      end
+      break
+    end
+    let [_, after_rbracket] = expect(state, :RBracket, "expected ']' after structural cells")
+    state = after_rbracket
+  elseif k == :LBrace
+    named = true
+    state = bump(state)
+    state = skip_newlines(state)
+    let cell_index = 0
+    while !at(state, :RBrace) && !at(state, :Eof)
+      let [cell, after_cell] = make_node(state, :StructuralCell)
+      state = after_cell
+      let [cell_name, after_name] = parse_expression(state)
+      state = after_name
+      let [_, after_arrow] = expect(state, :Arrow, "expected '->' in structural fields")
+      state = after_arrow
+      let [cell_value, after_value] = parse_expression(state)
+      state = after_value
+      state = fact(state, cell, :name, cell_name, 0)
+      state = fact(state, cell, :value, cell_value, 0)
+      state = fact(state, structural_node, :cell, cell, cell_index)
+      cell_index = cell_index + 1
+      state = skip_newlines(state)
+      if at(state, :Comma)
+        state = bump(state)
+        state = skip_newlines(state)
+        continue
+      end
+      break
+    end
+    let [_, after_rbrace] = expect(state, :RBrace, "expected '}' after structural fields")
+    state = after_rbrace
+  else
+    let cell_index = 0
+    while !at(state, :Gt) && !at(state, :Eof)
+      let [cell, after_cell] = make_node(state, :StructuralCell)
+      state = after_cell
+      let [cell_value, after_value] = parse_unary(state)
+      state = after_value
+      state = fact(state, cell, :value, cell_value, 0)
+      state = fact(state, structural_node, :cell, cell, cell_index)
+      cell_index = cell_index + 1
+      state = skip_newlines(state)
+      if at(state, :Comma)
+        state = bump(state)
+        state = skip_newlines(state)
+        continue
+      end
+      break
+    end
+  end
+  if named
+    state = fact(state, structural_node, :named, true, 0)
+  end
+  let [_, after_gt] = expect(state, :Gt, "expected '>' after structural cells")
+  state = after_gt
+  return [structural_node, state]
+end
+
+verb parse_type_text(input_state)
+  let state = input_state
+  let start_token = tok(state)
+  if start_token[:kind] != :Ident
+    state = error_here(state, "expected a kind")
+    return ["", state]
+  end
+  let start = start_token[:offset]
+  let finish = start
+  let depth = 0
+  let done = false
+  while !done && !at(state, :Eof)
+    let k = tok(state)[:kind]
+    if k == :Ident
+      if depth == 0 && finish > start
+        done = true
+        continue
+      end
+      let last = tok(state)
+      state = bump(state)
+      finish = last[:offset] + string_len(last[:text])
+    elseif k == :Lt
+      depth = depth + 1
+      let last = tok(state)
+      state = bump(state)
+      finish = last[:offset] + string_len(last[:text])
+    elseif k == :Gt
+      if depth == 0
+        done = true
+        continue
+      end
+      depth = depth - 1
+      let last = tok(state)
+      state = bump(state)
+      finish = last[:offset] + string_len(last[:text])
+    elseif k == :Slash || k == :Dot
+      let last = tok(state)
+      state = bump(state)
+      finish = last[:offset] + string_len(last[:text])
+    else
+      done = true
+    end
+  end
+  return [trim_space(string_slice(source_text(state), start, finish)), state]
+end
+
+verb parse_qualified_name(input_state, first)
+  let state = input_state
+  if !at(state, :Slash)
+    return [first[:text], state]
+  end
+  let result = first[:text]
+  let last = first
+  while at(state, :Slash)
+    let slash = tok(state)
+    let next = tok_at(state, 1)
+    if next[:kind] != :Ident || !tokens_adjacent(last, slash) || !tokens_adjacent(slash, next)
+      break
+    end
+    state = bump(state)
+    last = tok(state)
+    state = bump(state)
+    result = string_concat(result, "/", last[:text])
+  end
+  return [result, state]
+end
+
+verb parse_call_arguments(input_state)
+  let state = input_state
+  let [_, after_lparen] = expect(state, :LParen, "expected '('")
+  state = after_lparen
+  let args = []
+  state = skip_newlines(state)
+  while !at(state, :RParen) && !at(state, :Eof)
+    let [arg, after_arg] = make_node(state, :Arg)
+    state = after_arg
+    if at(state, :Ident) && tok_at(state, 1)[:kind] == :Colon
+      let role_token = tok(state)
+      state = bump(state)
+      state = bump(state)
+      state = fact(state, arg, :role, role_token[:text], 0)
+    end
+    if at(state, :At)
+      state = bump(state)
+      let [spliced, after_spliced] = parse_unary(state)
+      state = after_spliced
+      let [splice_node, after_splice] = make_node(state, :Splice)
+      state = after_splice
+      state = fact(state, splice_node, :value, spliced, 0)
+      state = fact(state, arg, :expr, splice_node, 0)
+    else
+      let [argument, after_argument] = parse_expression(state)
+      state = after_argument
+      state = fact(state, arg, :expr, argument, 0)
+    end
+    args = [@args, arg]
+    state = skip_newlines(state)
+    if at(state, :Comma)
+      state = bump(state)
+      state = skip_newlines(state)
+      continue
+    end
+    break
+  end
+  let [_, after_rparen] = expect(state, :RParen, "expected ')' after arguments")
+  state = after_rparen
+  return [args, state]
+end
+
+verb parse_list_literal(input_state)
+  let state = input_state
+  let elements = []
+  state = skip_newlines(state)
+  let first_item = true
+  while !at(state, :RBracket) && !at(state, :Eof)
+    if at(state, :At)
+      state = bump(state)
+      let [spliced, after_spliced] = parse_unary(state)
+      state = after_spliced
+      let [splice_node, after_splice] = make_node(state, :Splice)
+      state = after_splice
+      state = fact(state, splice_node, :value, spliced, 0)
+      elements = [@elements, splice_node]
+    else
+      let [element, after_element] = parse_expression(state)
+      state = after_element
+      elements = [@elements, element]
+      // `[body for pattern in iterable if condition sort key]`. `for`
+      // cannot continue any expression, so it unambiguously opens a
+      // comprehension after a single leading element.
+      if first_item
+        state = skip_newlines(state)
+        if at(state, :For)
+          return parse_comprehension(state, element)
+        end
+      end
+    end
+    first_item = false
+    state = skip_newlines(state)
+    if at(state, :Comma)
+      state = bump(state)
+      state = skip_newlines(state)
+      continue
+    end
+    break
+  end
+  let [_, after_rbracket] = expect(state, :RBracket, "expected ']' after list elements")
+  state = after_rbracket
+  if at(state, :LBrace)
+    state = bump(state)
+    let [relation_node, after_relation] = make_node(state, :Relation_Literal)
+    state = after_relation
+    let heading_index = 0
+    for element in elements
+      state = fact(state, relation_node, :heading, element, heading_index)
+      heading_index = heading_index + 1
+    end
+    let row_index = 0
+    state = skip_newlines(state)
+    while !at(state, :RBrace) && !at(state, :Eof)
+      let [row, after_row] = parse_expression(state)
+      state = after_row
+      state = fact(state, relation_node, :row, row, row_index)
+      row_index = row_index + 1
+      state = skip_newlines(state)
+      if at(state, :Comma)
+        state = bump(state)
+        state = skip_newlines(state)
+        continue
+      end
+      break
+    end
+    let [_, after_rbrace] = expect(state, :RBrace, "expected '}' after relation literal rows")
+    state = after_rbrace
+    return [relation_node, state]
+  end
+  let [list_node, after_list] = make_node(state, :List_Literal)
+  state = after_list
+  let element_index = 0
+  for element in elements
+    state = fact(state, list_node, :element, element, element_index)
+    element_index = element_index + 1
+  end
+  return [list_node, state]
+end
+
+// Parses the tail of a comprehension once the leading body element is
+// parsed and `for` is current: a binding pattern (or single name), the
+// iterable, and optional `if` and `sort` clauses.
+verb parse_comprehension(input_state, body_expr)
+  let state = input_state
+  let [_, after_for] = expect(state, :For, "expected 'for'")
+  state = after_for
+  let pattern_node = 0
+  if at(state, :Ident) && tok_at(state, 1)[:kind] != :LParen
+    let name_token = tok(state)
+    state = bump(state)
+    let [bind_pattern, after_bind] = make_node(state, :Binding_Pattern)
+    state = after_bind
+    state = fact(state, bind_pattern, :name, name_token[:text], 0)
+    pattern_node = bind_pattern
+  else
+    let [parsed, after_parsed] = parse_pattern(state)
+    state = after_parsed
+    let parsed_kind = node_kind(state, parsed)
+    if parsed_kind != :List_Pattern && parsed_kind != :Map_Pattern && parsed_kind != :Wildcard_Pattern
+      state = error_here(state, "comprehension pattern must be a name, list, map, or wildcard")
+      let [wild, after_wild] = make_node(state, :Wildcard_Pattern)
+      state = after_wild
+      pattern_node = wild
+    else
+      pattern_node = parsed
+    end
+  end
+  let [comp_node, after_comp] = make_node(state, :Comprehension)
+  state = after_comp
+  state = fact(state, comp_node, :body, body_expr, 0)
+  state = fact(state, comp_node, :pattern, pattern_node, 0)
+  let [_, after_in] = expect(state, :In, "expected 'in' in comprehension")
+  state = after_in
+  let [iterable, after_iterable] = parse_expression(state)
+  state = after_iterable
+  state = fact(state, comp_node, :iterable, iterable, 0)
+  if at(state, :If)
+    state = bump(state)
+    let [condition, after_condition] = parse_expression(state)
+    state = after_condition
+    state = fact(state, comp_node, :condition, condition, 0)
+  end
+  if is_contextual(state, "sort")
+    state = bump(state)
+    if at(state, :RBracket)
+      state = fact(state, comp_node, :sort_bare, true, 0)
+    else
+      let [key, after_key] = parse_expression(state)
+      state = after_key
+      state = fact(state, comp_node, :key, key, 0)
+    end
+  end
+  state = skip_newlines(state)
+  let [_, after_rbracket] = expect(state, :RBracket, "expected ']' to close comprehension")
+  state = after_rbracket
+  return [comp_node, state]
+end
+
+verb parse_map_literal(input_state)
+  let state = input_state
+  let [map_node, after_map] = make_node(state, :Map_Literal)
+  state = after_map
+  state = skip_newlines(state)
+  let entry_index = 0
+  while !at(state, :RBrace) && !at(state, :Eof)
+    let [key_node, after_key] = parse_expression(state)
+    state = after_key
+    let [_, after_arrow] = expect(state, :Arrow, "expected '->' in map entry")
+    state = after_arrow
+    let [value_node, after_value] = parse_expression(state)
+    state = after_value
+    let [entry, after_entry] = make_node(state, :MapEntry)
+    state = after_entry
+    state = fact(state, entry, :key, key_node, 0)
+    state = fact(state, entry, :value, value_node, 0)
+    state = fact(state, map_node, :entry, entry, entry_index)
+    entry_index = entry_index + 1
+    state = skip_newlines(state)
+    if at(state, :Comma)
+      state = bump(state)
+      state = skip_newlines(state)
+      continue
+    end
+    break
+  end
+  let [_, after_rbrace] = expect(state, :RBrace, "expected '}' after map entries")
+  state = after_rbrace
+  return [map_node, state]
+end
+
+verb parse_primary(input_state)
+  let state = input_state
+  if is_contextual(state, "match")
+    let next_kind = tok_at(state, 1)[:kind]
+    if next_kind != :LParen && next_kind != :Eq && next_kind != :Dot && next_kind != :LBracket && next_kind != :Colon && next_kind != :Slash && next_kind != :Colon_Dash
+      return parse_match(state)
+    end
+  end
+  let kind = tok(state)[:kind]
+  if kind == :Return
+    return parse_return(state)
+  end
+  if kind == :Break
+    state = bump(state)
+    return make_node(state, :Break)
+  end
+  if kind == :Continue
+    state = bump(state)
+    return make_node(state, :Continue)
+  end
+  if kind == :Raise
+    return parse_raise(state)
+  end
+  if kind == :Assert
+    state = bump(state)
+    let [atom, after_atom] = parse_expression(state)
+    state = after_atom
+    let [assert_node, after_assert] = make_node(state, :Assert)
+    state = after_assert
+    state = fact(state, assert_node, :atom, atom, 0)
+    return [assert_node, state]
+  end
+  if kind == :Retract
+    state = bump(state)
+    let [atom, after_atom] = parse_expression(state)
+    state = after_atom
+    let [retract_node, after_retract] = make_node(state, :Retract)
+    state = after_retract
+    state = fact(state, retract_node, :atom, atom, 0)
+    return [retract_node, state]
+  end
+  if kind == :Require
+    state = bump(state)
+    let [condition, after_condition] = parse_expression(state)
+    state = after_condition
+    let [require_node, after_require] = make_node(state, :Require)
+    state = after_require
+    state = fact(state, require_node, :condition, condition, 0)
+    return [require_node, state]
+  end
+  if kind == :Let
+    return parse_binding(state, false)
+  end
+  if kind == :Const
+    return parse_binding(state, true)
+  end
+  if kind == :If
+    return parse_if(state)
+  end
+  if kind == :While
+    return parse_while(state)
+  end
+  if kind == :For
+    return parse_for(state)
+  end
+  if kind == :Begin
+    return parse_begin(state)
+  end
+  if kind == :Try
+    return parse_try(state)
+  end
+  if kind == :Spawn
+    return parse_spawn(state)
+  end
+  if kind == :Fn
+    return parse_fn_literal(state)
+  end
+  if is_contextual(state, "dom")
+    let next_kind = tok_at(state, 1)[:kind]
+    let third_kind = tok_at(state, 2)[:kind]
+    if next_kind == :Lt && third_kind == :Ident
+      return parse_dom(state)
+    end
+  end
+  let token = tok(state)
+  state = bump(state)
+  return parse_primary_token(state, token)
+end
+
+verb parse_primary_token(input_state, token)
+  let state = input_state
+  let kind = token[:kind]
+  if kind == :Int
+    return make_text_literal(state, :Int_Literal, token[:text])
+  end
+  if kind == :Float
+    return make_text_literal(state, :Float_Literal, token[:text])
+  end
+  if kind == :String
+    return make_text_literal(state, :String_Literal, token[:text])
+  end
+  if kind == :Bytes
+    return make_text_literal(state, :Bytes_Literal, token[:text])
+  end
+  if kind == :True
+    let [bool_node, after_bool] = make_node(state, :Bool_Literal)
+    state = after_bool
+    state = fact(state, bool_node, :value, true, 0)
+    return [bool_node, state]
+  end
+  if kind == :False
+    let [bool_node, after_bool] = make_node(state, :Bool_Literal)
+    state = after_bool
+    state = fact(state, bool_node, :value, false, 0)
+    return [bool_node, state]
+  end
+  if kind == :Error_Code
+    return make_text_literal(state, :Error_Code_Literal, token[:text])
+  end
+  if kind == :Underscore
+    return make_node(state, :Wildcard)
+  end
+  if kind == :Question
+    let [name_token, after_name] = expect(state, :Ident, "expected name after '?'")
+    state = after_name
+    let [query_node, after_query] = make_node(state, :Query_Variable)
+    state = after_query
+    state = fact(state, query_node, :name, name_token[:text], 0)
+    return [query_node, state]
+  end
+  if kind == :Hash
+    let next = tok(state)
+    state = bump(state)
+    if next[:kind] == :Int
+      let [identity_node, after_identity] = make_node(state, :Identity_Literal)
+      state = after_identity
+      state = fact(state, identity_node, :name, next[:text], 0)
+      return [identity_node, state]
+    end
+    if next[:kind] == :Ident
+      let [qualified, after_qualified] = parse_qualified_name(state, next)
+      state = after_qualified
+      let [identity_node, after_identity] = make_node(state, :Identity_Literal)
+      state = after_identity
+      state = fact(state, identity_node, :name, qualified, 0)
+      return [identity_node, state]
+    end
+    state = error_here(state, "expected identity name after '#'")
+    return make_node(state, :Wildcard)
+  end
+  if kind == :Colon
+    let next = tok(state)
+    state = bump(state)
+    if next[:kind] == :Ident
+      let [qualified, after_qualified] = parse_qualified_name(state, next)
+      state = after_qualified
+      let [symbol_node, after_symbol] = make_node(state, :Symbol_Literal)
+      state = after_symbol
+      state = fact(state, symbol_node, :name, qualified, 0)
+      return [symbol_node, state]
+    end
+    if next[:kind] == :String
+      let [symbol_node, after_symbol] = make_node(state, :Symbol_Literal)
+      state = after_symbol
+      state = fact(state, symbol_node, :name, next[:text], 0)
+      return [symbol_node, state]
+    end
+    state = error_here(state, "expected symbol name after ':'")
+    return make_node(state, :Wildcard)
+  end
+  if kind == :At
+    let [spliced, after_spliced] = parse_unary(state)
+    state = after_spliced
+    let [splice_node, after_splice] = make_node(state, :Splice)
+    state = after_splice
+    state = fact(state, splice_node, :value, spliced, 0)
+    return [splice_node, state]
+  end
+  if kind == :Ident
+    let [name_text, after_qualified] = parse_qualified_name(state, token)
+    state = after_qualified
+    let [name_node, after_name] = make_node(state, :Name)
+    state = after_name
+    let part_index = 0
+    for part in make_name_parts(name_text)
+      state = fact(state, name_node, :part, part, part_index)
+      part_index = part_index + 1
+    end
+    return [name_node, state]
+  end
+  if kind == :LParen
+    state = skip_newlines(state)
+    let [inner, after_inner] = parse_expression(state)
+    state = after_inner
+    state = skip_newlines(state)
+    let [_, after_rparen] = expect(state, :RParen, "expected ')' after expression")
+    state = after_rparen
+    return [inner, state]
+  end
+  if kind == :LBracket
+    return parse_list_literal(state)
+  end
+  if kind == :LBrace
+    return parse_map_literal(state)
+  end
+  state = error_here(state, "expected an expression")
+  return make_node(state, :Wildcard)
+end
+
+verb make_text_literal(input_state, kind, text)
+  let state = input_state
+  let [literal_node, after_literal] = make_node(state, kind)
+  state = after_literal
+  state = fact(state, literal_node, :text, text, 0)
+  return [literal_node, state]
+end
+
+verb make_name_parts(name_text)
+  let parts = []
+  let start = 0
+  let index = 0
+  let length = string_len(name_text)
+  while index <= length
+    if index == length || name_text[index] == 47
+      parts = [@parts, string_slice(name_text, start, index)]
+      start = index + 1
+    end
+    index = index + 1
+  end
+  return parts
+end
+
+// --- Try and spawn -----------------------------------------------------------
+
+verb parse_try(input_state)
+  let state = input_state
+  state = bump(state)
+  let [try_node, after_try] = make_node(state, :Try)
+  state = after_try
+  state = skip_separators(state)
+  let [body_list, after_body] = parse_block_until(state, [:Catch, :Finally, :End, :Newline])
+  state = after_body
+  let body_index = 0
+  for expr in body_list
+    state = fact(state, try_node, :body, expr, body_index)
+    body_index = body_index + 1
+  end
+  let catch_index = 0
+  while at(state, :Catch)
+    state = bump(state)
+    let [clause, after_clause] = make_node(state, :Catch)
+    state = after_clause
+    if at(state, :Error_Code)
+      let code_token = tok(state)
+      state = bump(state)
+      state = fact(state, clause, :has_code, true, 0)
+      state = fact(state, clause, :code, code_token[:text], 0)
+    end
+    if at(state, :As)
+      state = bump(state)
+      let [name_token, after_name] = expect(state, :Ident, "expected a name after 'as'")
+      state = after_name
+      state = fact(state, clause, :has_name, true, 0)
+      state = fact(state, clause, :name, name_token[:text], 0)
+    elseif at(state, :Ident)
+      let name_token = tok(state)
+      state = bump(state)
+      state = fact(state, clause, :has_name, true, 0)
+      state = fact(state, clause, :name, name_token[:text], 0)
+    end
+    state = skip_separators(state)
+    let [catch_body, after_catch_body] = parse_block_until(state, [:Catch, :Finally, :End, :Newline])
+    state = after_catch_body
+    let catch_body_index = 0
+    for expr in catch_body
+      state = fact(state, clause, :body, expr, catch_body_index)
+      catch_body_index = catch_body_index + 1
+    end
+    state = fact(state, try_node, :catch_clause, clause, catch_index)
+    catch_index = catch_index + 1
+  end
+  if at(state, :Finally)
+    state = bump(state)
+    state = skip_separators(state)
+    let [finally_body, after_finally] = parse_block_until(state, [:End, :Newline])
+    state = after_finally
+    state = fact(state, try_node, :has_finally, true, 0)
+    let finally_index = 0
+    for expr in finally_body
+      state = fact(state, try_node, :finally_body, expr, finally_index)
+      finally_index = finally_index + 1
+    end
+  end
+  let [_, after_end] = expect(state, :End, "expected 'end' to close try")
+  state = after_end
+  return [try_node, state]
+end
+
+verb parse_spawn(input_state)
+  let state = input_state
+  state = bump(state)
+  let [call, after_call] = parse_unary(state)
+  state = after_call
+  let [spawn_node, after_spawn] = make_node(state, :Spawn)
+  state = after_spawn
+  state = fact(state, spawn_node, :call, call, 0)
+  if at(state, :After)
+    state = bump(state)
+    let [delay_node, after_delay] = parse_unary(state)
+    state = after_delay
+    state = fact(state, spawn_node, :has_delay, true, 0)
+    state = fact(state, spawn_node, :delay, delay_node, 0)
+  end
+  return [spawn_node, state]
+end
+
+// --- DOM ---------------------------------------------------------------------
+
+verb token_is_name(token)
+  if token[:kind] == :Ident
+    return true
+  end
+  let text = token[:text]
+  if string_len(text) == 0
+    return false
+  end
+  if !is_ident_start_char(text[0])
+    return false
+  end
+  let index = 1
+  while index < string_len(text)
+    if !is_ident_continue_char(text[index])
+      return false
+    end
+    index = index + 1
+  end
+  return true
+end
+
+verb is_ident_start_char(c)
+  return (c >= 97 && c <= 122) || (c >= 65 && c <= 90)
+end
+
+verb is_ident_continue_char(c)
+  return is_ident_start_char(c) || (c >= 48 && c <= 57) || c == 95
+end
+
+verb parse_dom(input_state)
+  let state = input_state
+  state = bump(state)
+  let [_, after_lt] = expect(state, :Lt, "expected '<' after 'dom'")
+  state = after_lt
+  return parse_dom_element(state)
+end
+
+verb parse_dom_element(input_state)
+  let state = input_state
+  let [element, after_element] = make_node(state, :Dom_Element)
+  state = after_element
+  if !token_is_name(tok(state))
+    state = error_here(state, "expected a tag name")
+    while !at(state, :Gt) && !at(state, :Eof)
+      state = bump(state)
+    end
+    if at(state, :Gt)
+      state = bump(state)
+    end
+    return [element, state]
+  end
+  let tag_token = tok(state)
+  state = bump(state)
+  let [tag_text, after_tag] = parse_dom_name_segments(state, tag_token)
+  state = after_tag
+  state = fact(state, element, :tag, tag_text, 0)
+  let [attribute_list, after_attributes] = parse_dom_attributes(state)
+  state = after_attributes
+  let attribute_index = 0
+  for attribute in attribute_list
+    state = fact(state, element, :attribute, attribute, attribute_index)
+    attribute_index = attribute_index + 1
+  end
+  if at(state, :Slash) && tok_at(state, 1)[:kind] == :Gt
+    state = bump(state)
+    state = bump(state)
+    state = fact(state, element, :self_closing, true, 0)
+    return [element, state]
+  end
+  let [_, after_gt] = expect(state, :Gt, "expected '>' after attributes")
+  state = after_gt
+  let [child_list, after_children] = parse_dom_children(state, tag_text)
+  state = after_children
+  let child_index = 0
+  for child in child_list
+    state = fact(state, element, :child, child, child_index)
+    child_index = child_index + 1
+  end
+  return [element, state]
+end
+
+verb parse_dom_name_segments(input_state, first)
+  let state = input_state
+  let result = first[:text]
+  let last = first
+  while at(state, :Minus) || at(state, :Colon)
+    let separator = tok(state)
+    let next = tok_at(state, 1)
+    if !token_is_name(next) || !tokens_adjacent(last, separator) || !tokens_adjacent(separator, next)
+      break
+    end
+    state = bump(state)
+    last = tok(state)
+    state = bump(state)
+    result = string_concat(result, separator[:text], last[:text])
+  end
+  return [result, state]
+end
+
+verb parse_dom_attributes(input_state)
+  let state = input_state
+  let attribute_list = []
+  state = skip_newlines(state)
+  while !at(state, :Gt) && !at(state, :Eof)
+    if at(state, :Slash) && tok_at(state, 1)[:kind] == :Gt
+      break
+    end
+    if !token_is_name(tok(state))
+      state = error_here(state, "expected an attribute name")
+      state = bump(state)
+      state = skip_newlines(state)
+      continue
+    end
+    let first = tok(state)
+    state = bump(state)
+    let [name_text, after_name_segments] = parse_dom_name_segments(state, first)
+    state = after_name_segments
+    let [attribute, after_attribute] = make_node(state, :DomAttribute)
+    state = after_attribute
+    state = fact(state, attribute, :name, name_text, 0)
+    if at(state, :Eq)
+      state = bump(state)
+      if at(state, :LBrace)
+        state = bump(state)
+        let [attribute_value, after_value] = parse_expression(state)
+        state = after_value
+        state = fact(state, attribute, :value, attribute_value, 0)
+        let [_, after_rbrace] = expect(state, :RBrace, "expected '}' after attribute value")
+        state = after_rbrace
+      elseif at(state, :String)
+        let token = tok(state)
+        state = bump(state)
+        let [string_node, after_string] = make_node(state, :String_Literal)
+        state = after_string
+        state = fact(state, string_node, :text, token[:text], 0)
+        state = fact(state, attribute, :value, string_node, 0)
+      else
+        state = error_here(state, "expected an attribute value")
+      end
+    end
+    attribute_list = [@attribute_list, attribute]
+    state = skip_newlines(state)
+  end
+  return [attribute_list, state]
+end
+
+verb parse_dom_children(input_state, tag_text)
+  let state = input_state
+  let child_list = []
+  let text_start = tok(state)[:offset]
+  while !at(state, :Eof)
+    if at(state, :Lt)
+      let text = dom_text_between(state, text_start)
+      if text != ""
+        let [text_node, after_text] = make_node(state, :Dom_Text)
+        state = after_text
+        state = fact(state, text_node, :text, text, 0)
+        child_list = [@child_list, text_node]
+      end
+      if tok_at(state, 1)[:kind] == :Slash
+        state = bump(state)
+        state = bump(state)
+        if !token_is_name(tok(state))
+          state = error_here(state, "expected a closing tag name")
+        else
+          let closing = tok(state)
+          state = bump(state)
+          if closing[:text] != tag_text
+            state = error_here(state, "closing tag does not match the opening tag")
+          end
+        end
+        let [_, after_gt] = expect(state, :Gt, "expected '>' after the closing tag")
+        state = after_gt
+        return [child_list, state]
+      end
+      state = bump(state)
+      let [child, after_child] = parse_dom_element(state)
+      state = after_child
+      child_list = [@child_list, child]
+      text_start = tok(state)[:offset]
+      continue
+    end
+    if at(state, :LBrace)
+      let text = dom_text_between(state, text_start)
+      if text != ""
+        let [text_node, after_text] = make_node(state, :Dom_Text)
+        state = after_text
+        state = fact(state, text_node, :text, text, 0)
+        child_list = [@child_list, text_node]
+      end
+      state = bump(state)
+      if at(state, :At)
+        state = bump(state)
+        let [spliced, after_spliced] = parse_expression(state)
+        state = after_spliced
+        let [splice_node, after_splice] = make_node(state, :Splice)
+        state = after_splice
+        state = fact(state, splice_node, :value, spliced, 0)
+        child_list = [@child_list, splice_node]
+      else
+        let [child_expr, after_child_expr] = parse_expression(state)
+        state = after_child_expr
+        child_list = [@child_list, child_expr]
+      end
+      let [_, after_rbrace] = expect(state, :RBrace, "expected '}' after a DOM child expression")
+      state = after_rbrace
+      text_start = tok(state)[:offset]
+      continue
+    end
+    state = bump(state)
+  end
+  state = error_here(state, "unterminated DOM element")
+  return [child_list, state]
+end
+
+verb dom_text_between(state, start)
+  let finish = tok(state)[:offset]
+  if start >= finish || string_len(source_text(state)) == 0
+    return ""
+  end
+  return trim_space(string_slice(source_text(state), start, finish))
+end

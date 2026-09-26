@@ -1,0 +1,380 @@
+// Mica lexer, written in Mica.
+//
+// Stage one of the self-hosting path (#80): a lexer over the scalar string
+// scanning surface (`text[i]`, `len(text)`, `string_slice`). Token kinds and
+// their spelling retain the pinned Odin lexer vocabulary.
+//
+// The lexer is byte-free: it indexes scalar positions, so multi-byte UTF-8 is
+// handled by the runtime and never appears here. It produces significant
+// tokens only; whitespace and `//` comments are skipped and runs of newlines
+// collapse to one `:Newline`. Punctuation that can extend a name (`#`, `?`,
+// `@`, `:`, `/`, `.`) is emitted as its own token and assembled by the parser,
+// matching the Odin lexer.
+//
+// Token shape: a map per token with `:kind` (symbol), `:text` (string, empty
+// for punctuation/newline), `:offset` (scalar position of the first character),
+// `:line`, and `:column`. `:offset` is a scalar position, not a byte offset.
+//
+// The inner scan loops only advance `pos`. A token's column is derived at the
+// token start as `start - line_start + 1`, where `line_start` is the scalar
+// position just after the last line break; tracking a column per byte would add
+// an update to every iteration of every inner loop. Inner loops exit with
+// `break` on the first non-matching scalar rather than re-testing a boolean
+// each iteration. A verb call per scalar is the whole cost of an interpreted
+// lexer, so the loops are kept to integer comparisons.
+
+make_identity(:lexer)
+
+// Lexes `source` and returns `[tokens, errors]`. Each token is a map with
+// `:kind`, `:text`, `:offset` (a scalar position), `:line`, and `:column`.
+// Each error is a map with `:message`, `:line`, and `:column`, matching the
+// Odin lexer's separate diagnostic list. Scatter the pair at the call site.
+verb lex(source) -> list
+  // A keyword spelling table built for this run of the lexer. A chain of 31
+  // string comparisons per identifier costs several times a single
+  // canonicalized map probe; building the table is a small fraction of a lex.
+  let keywords = {
+    "let" -> :Let, "const" -> :Const, "if" -> :If, "elseif" -> :Elseif,
+    "else" -> :Else, "end" -> :End, "begin" -> :Begin, "for" -> :For,
+    "in" -> :In, "while" -> :While, "return" -> :Return, "raise" -> :Raise,
+    "recover" -> :Recover, "spawn" -> :Spawn, "after" -> :After,
+    "not" -> :Not, "break" -> :Break, "continue" -> :Continue, "try" -> :Try,
+    "catch" -> :Catch, "as" -> :As, "finally" -> :Finally, "fn" -> :Fn,
+    "method" -> :Method, "verb" -> :Verb, "do" -> :Do, "assert" -> :Assert,
+    "retract" -> :Retract, "require" -> :Require, "true" -> :True,
+    "false" -> :False,
+  }
+
+  let tokens = []
+  let errors = []
+  let pos = 0
+  let line = 1
+  let line_start = 0
+  let length = len(source)
+
+  while pos < length
+    let start = pos
+    let start_line = line
+    let start_column = start - line_start + 1
+    let code = source[pos]
+
+    // A run of spaces and tabs, skipped without touching the line.
+    if code == 32 || code == 9
+      pos = string_span(source, pos, " \t")
+      continue
+    end
+
+    // A run of line breaks collapses to one `:Newline` token. `\r\n`, `\n`,
+    // and a lone `\r` each count as one break.
+    if code == 10 || code == 13
+      while pos < length
+        let c = source[pos]
+        if c == 13
+          pos = pos + 1
+          if pos < length && source[pos] == 10
+            pos = pos + 1
+          end
+          line = line + 1
+        elseif c == 10
+          pos = pos + 1
+          line = line + 1
+        else
+          break
+        end
+      end
+      line_start = pos
+      tokens = [@tokens, {:kind -> :Newline, :text -> string_slice(source, start, pos), :offset -> start, :line -> start_line, :column -> start_column}]
+      continue
+    end
+
+    // `//` line comment: skipped, not tokenized. Scan to the next line break.
+    if code == 47 && pos + 1 < length && source[pos + 1] == 47
+      pos = string_find_any(source, pos, "\r\n")
+      continue
+    end
+
+    // String literal. A backslash escapes the next scalar; the literal may
+    // span lines, tracking them, and an unterminated one becomes `:Error`.
+    if code == 34
+      pos = pos + 1
+      let terminated = false
+      while pos < length
+        // Skip the run of ordinary characters up to the next quote, backslash,
+        // or line break in one call.
+        pos = string_find_any(source, pos, "\"\\\r\n")
+        if pos >= length
+          break
+        end
+        let current = source[pos]
+        if current == 92
+          // An escape consumes the backslash and one more scalar, clamped at
+          // the end so an unterminated literal cannot run past the source.
+          pos = pos + 1
+          if pos < length
+            let escaped = source[pos]
+            if escaped == 13
+              pos = pos + 1
+              if pos < length && source[pos] == 10
+                pos = pos + 1
+              end
+              line = line + 1
+              line_start = pos
+            elseif escaped == 10
+              pos = pos + 1
+              line = line + 1
+              line_start = pos
+            else
+              pos = pos + 1
+            end
+          end
+          continue
+        end
+        if current == 34
+          pos = pos + 1
+          terminated = true
+          break
+        end
+        // A line break inside the literal: consume `\r\n` as one break.
+        if current == 13
+          pos = pos + 1
+          if pos < length && source[pos] == 10
+            pos = pos + 1
+          end
+          line = line + 1
+          line_start = pos
+          continue
+        end
+        pos = pos + 1
+        line = line + 1
+        line_start = pos
+      end
+      let kind = :Error
+      if terminated
+        kind = :String
+      else
+        errors = [@errors, {:message -> "unterminated string", :line -> start_line, :column -> start_column}]
+      end
+      tokens = [@tokens, {:kind -> kind, :text -> string_slice(source, start, pos), :offset -> start, :line -> start_line, :column -> start_column}]
+      continue
+    end
+
+    // Byte-string literal: `b"..."`. No escapes, matching the Odin lexer.
+    if code == 98 && pos + 1 < length && source[pos + 1] == 34
+      pos = pos + 2
+      let terminated = false
+      while pos < length
+        pos = string_find_any(source, pos, "\"\r\n")
+        if pos >= length
+          break
+        end
+        let current = source[pos]
+        if current == 34
+          pos = pos + 1
+          terminated = true
+          break
+        end
+        if current == 13
+          pos = pos + 1
+          if pos < length && source[pos] == 10
+            pos = pos + 1
+          end
+          line = line + 1
+          line_start = pos
+          continue
+        end
+        pos = pos + 1
+        line = line + 1
+        line_start = pos
+      end
+      let kind = :Error
+      if terminated
+        kind = :Bytes
+      else
+        errors = [@errors, {:message -> "unterminated bytes literal", :line -> start_line, :column -> start_column}]
+      end
+      tokens = [@tokens, {:kind -> kind, :text -> string_slice(source, start, pos), :offset -> start, :line -> start_line, :column -> start_column}]
+      continue
+    end
+
+    // Number: digits, an optional fractional part, and an optional exponent.
+    if code >= 48 && code <= 57
+      let is_float = false
+      pos = string_span(source, pos, "0123456789")
+      if pos + 1 < length && source[pos] == 46 && source[pos + 1] != 46 && source[pos + 1] >= 48 && source[pos + 1] <= 57
+        pos = pos + 1
+        while pos < length
+          let c = source[pos]
+          if c < 48 || c > 57
+            break
+          end
+          pos = pos + 1
+        end
+        is_float = true
+      end
+      if pos < length && (source[pos] == 101 || source[pos] == 69)
+        let next = pos + 1
+        if next < length && (source[next] == 43 || source[next] == 45)
+          next = next + 1
+        end
+        if next < length && source[next] >= 48 && source[next] <= 57
+          while pos < next
+            pos = pos + 1
+          end
+          while pos < length
+            let c = source[pos]
+            if c < 48 || c > 57
+              break
+            end
+            pos = pos + 1
+          end
+          is_float = true
+        end
+      end
+      let kind = :Int
+      if is_float
+        kind = :Float
+      end
+      tokens = [@tokens, {:kind -> kind, :text -> string_slice(source, start, pos), :offset -> start, :line -> start_line, :column -> start_column}]
+      continue
+    end
+
+    // Identifier, keyword, or `E_` error-code spelling. ASCII letters, digits,
+    // and underscore only, matching the Odin lexer.
+    if (code >= 97 && code <= 122) || (code >= 65 && code <= 90)
+      pos = string_span(source, pos, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_")
+      let text = string_slice(source, start, pos)
+      let kind = :Ident
+      if pos - start > 2 && text[0] == 69 && text[1] == 95
+        kind = :Error_Code
+      else
+        kind = index_or(keywords, text, :Ident)
+      end
+      tokens = [@tokens, {:kind -> kind, :text -> text, :offset -> start, :line -> start_line, :column -> start_column}]
+      continue
+    end
+
+    // A lone underscore is the wildcard; `_x` is an identifier.
+    if code == 95
+      pos = pos + 1
+      let kind = :Underscore
+      pos = string_span(source, pos, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_")
+      if pos - start > 1
+        kind = :Ident
+      end
+      tokens = [@tokens, {:kind -> kind, :text -> string_slice(source, start, pos), :offset -> start, :line -> start_line, :column -> start_column}]
+      continue
+    end
+
+    // Punctuation, longest match first. `kind` and `width` are set by the
+    // matching branch; the default is an `:Error` token of one scalar.
+    let next = 0
+    if pos + 1 < length
+      next = source[pos + 1]
+    end
+    let kind = :Error
+    let width = 1
+
+    // Two-scalar forms.
+    if code == 46 && next == 46
+      kind = :DotDot
+      width = 2
+    elseif code == 58 && next == 45
+      kind = :Colon_Dash
+      width = 2
+    elseif code == 61 && next == 61
+      kind = :Eq_Eq
+      width = 2
+    elseif code == 61 && next == 62
+      kind = :Fat_Arrow
+      width = 2
+    elseif code == 33 && next == 61
+      kind = :Bang_Eq
+      width = 2
+    elseif code == 60 && next == 61
+      kind = :Lt_Eq
+      width = 2
+    elseif code == 62 && next == 61
+      kind = :Gt_Eq
+      width = 2
+    elseif code == 38 && next == 38
+      kind = :Amp_Amp
+      width = 2
+    elseif code == 124 && next == 124
+      kind = :Pipe_Pipe
+      width = 2
+    elseif code == 45 && next == 62
+      kind = :Arrow
+      width = 2
+    // One-scalar forms.
+    elseif code == 40
+      kind = :LParen
+    elseif code == 41
+      kind = :RParen
+    elseif code == 91
+      kind = :LBracket
+    elseif code == 93
+      kind = :RBracket
+    elseif code == 123
+      kind = :LBrace
+    elseif code == 125
+      kind = :RBrace
+    elseif code == 44
+      kind = :Comma
+    elseif code == 59
+      kind = :Semi
+    elseif code == 35
+      kind = :Hash
+    elseif code == 64
+      kind = :At
+    elseif code == 63
+      kind = :Question
+    elseif code == 46
+      kind = :Dot
+    elseif code == 58
+      kind = :Colon
+    elseif code == 61
+      kind = :Eq
+    elseif code == 33
+      kind = :Bang
+    elseif code == 60
+      kind = :Lt
+    elseif code == 62
+      kind = :Gt
+    elseif code == 38
+      kind = :Error
+    elseif code == 124
+      kind = :Pipe
+    elseif code == 45
+      kind = :Minus
+    elseif code == 43
+      kind = :Plus
+    elseif code == 42
+      kind = :Star
+    elseif code == 47
+      kind = :Slash
+    elseif code == 37
+      kind = :Percent
+    elseif code == 8712
+      // U+2208, the membership operator.
+      kind = :Membership
+    end
+
+    // A stray ASCII scalar that began no token is a diagnostic. `&` alone is
+    // the only named case; non-ASCII is deliberately not diagnosed because it
+    // can appear as raw text inside DOM markup, matching the Odin lexer.
+    if kind == :Error && code < 128
+      let message = "unexpected character"
+      if code == 38
+        message = "unexpected '&'"
+      end
+      errors = [@errors, {:message -> message, :line -> start_line, :column -> start_column}]
+    end
+
+    pos = pos + width
+    tokens = [@tokens, {:kind -> kind, :text -> string_slice(source, start, pos), :offset -> start, :line -> start_line, :column -> start_column}]
+  end
+
+  let end_column = length - line_start + 1
+  tokens = [@tokens, {:kind -> :Eof, :text -> "", :offset -> length, :line -> line, :column -> end_column}]
+  return [tokens, errors]
+end

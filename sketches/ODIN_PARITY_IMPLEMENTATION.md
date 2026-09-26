@@ -329,3 +329,11 @@ It validates operands, registers, targets, nested function frames, and serializa
 Assembly neither installs code nor grants execution authority. The format uses absolute local targets and explicit constant/register operands.
 Six focused tests cover malformed input, bounded nesting, Unicode control flow, closures, errors, commit continuation, and denied writes.
 Runtime tests and workspace clippy pass. The compiler emitter still needs conversion to this interface.
+
+The pinned Mica lexer and parser now run in Rust, including Unicode scalar positions and relation-valued AST output.
+The frontend parses every shared benchmark fixture and reports malformed input in both execution modes.
+Its port uses mutable local parser state and the public `relation_from_rows` constructor.
+The corpus test exposed repeated deep comparisons of shared token lists during dispatch-cache lookup.
+Value equality and ordering now check identical value words before traversing immutable payloads.
+Workspace tests and clippy pass, including shared graphs, retained list views, and the frontend corpus.
+The Mica emitter and self-hosted bootstrap remain pending.
