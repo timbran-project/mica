@@ -78,4 +78,6 @@ Returned and unwound frames release their values before entering the buffer pool
 Checkpoint restoration clears the pool; checkpoints retain only active frames.
 Focused tests cover register reset, checkpoint restoration, closure captures, exceptions, and suspension.
 VM and runtime library tests pass, including existing conflict-retry and authority-refresh coverage. Relevant clippy checks pass.
-The call-storage performance capture remains pending.
+The call-storage capture passes all 54 processes across six selected fixtures.
+Helper calls improve from 13.66 to 13.14 milliseconds; the other changes are small.
+Dispatch and interpreter overhead remain substantial. This change does not establish general call-performance parity.
