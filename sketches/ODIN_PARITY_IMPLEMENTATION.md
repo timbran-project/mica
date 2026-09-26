@@ -18,7 +18,7 @@ Passing an early workstream does not complete this plan.
 | Calls | Reduced allocation with exception, suspension, closure, and retry regressions | Implemented; dispatch and interpreter performance remain open |
 | Computed scans | CPU batches and cached retrieval preparation with unchanged authority, transaction visibility, output bindings, and exact ranking | Implemented for positive rule steps and equality probes; exact retrieval measured |
 | Transactional buffers | Atomic fact/text commits, conflict handling, durable recovery, marker rebasing, and client revision results | Implemented, including client results, history, compaction, and computed views; editor integration and comparative measurements remain |
-| Editor | Shared buffer library and programmable editor running through Rust host services | Shared library and 39 source scenarios pass; editor port pending |
+| Editor | Shared buffer library and programmable editor running through Rust host services | Shared library and editor source scenarios pass; browser transport and file services pending |
 | Query and storage execution | Measured columnar/storage improvements that preserve incremental maintenance | Pending |
 | Query measurements | Separate initial derivation and small-update maintenance workloads | Pending |
 | Mica compiler | Ported compiler with an intentional Rust assembly interface and bootstrap conformance | Pending |
@@ -256,3 +256,11 @@ Odin can advance a revision for such writes; exact no-op revision parity is not 
 JSON conversion failures now raise catchable language errors. Malformed or unrepresentable values raise `E_INVARG`; non-string decoder input raises `E_TYPE`.
 Eight focused JSON tests, all runtime tests, and workspace clippy pass.
 The editor reaches session cleanup after this fix; application arity corrections remain in the separate editor port.
+
+The editor fileins now load and pass 45 pinned scenarios plus a stale-keymap regression in both execution modes.
+The port uses local mutable bindings, keyed comprehensions, and an indexed traversal queue.
+It corrects `SearchMatch` cleanup arity and the `selected_window` call used for keymap refresh.
+The harness renders the page shell and resumes explicit commits to verify final tagged results.
+Workspace tests and clippy pass. Browser transport and actual filesystem requests remain unimplemented.
+Host wiring exposed a creation-authority gap: ordinary actors cannot create buffers without administrative grant authority.
+The next runtime boundary is a specific creation grant with transaction-local access to newly created buffers and fresh policy checks afterwards.

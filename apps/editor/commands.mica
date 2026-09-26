@@ -1,0 +1,722 @@
+// Commands: registration, dispatch, the edit-staging path, and the editing
+// commands themselves.
+//
+// A command is a stable identity with an `M-x` name, a Mica selector, and
+// metadata. Every command receives the same roles:
+//
+//   session, frame, window, buffer, point, mark, prefix_argument, input
+//
+// An editing command computes its complete edit list and stages it through
+// `editor/apply_edits`; it never calls a raw buffer mutation builtin. A command
+// returns `{:status, :message, :browser_operations, :barrier}`.
+
+verb editor/command_define(name, selector, predictor, barrier, repeatable)
+  let command = to_symbol(name)
+  assert editor/Command(command)
+  assert editor/CommandName(command, name)
+  let live = editor/LiveCommandName(name, ?existing)
+  if live
+    let exactly {:existing -> existing} = live
+    if existing != command
+      raise E_STATE, "an M-x name must have one command"
+    end
+  else
+    assert editor/LiveCommandName(name, command)
+  end
+  assert editor/CommandSelector(command, selector)
+  assert editor/CommandPredictor(command, predictor)
+  assert editor/CommandBarrier(command, barrier)
+  assert editor/CommandRepeatable(command, repeatable)
+  return command
+end
+
+verb editor/command_by_name(name)
+  let found = editor/LiveCommandName(name, ?command)
+  if not found
+    return none
+  end
+  let exactly {:command -> command} = found
+  return command
+end
+
+verb editor/command_name(command)
+  let exactly {:name -> name} = editor/CommandName(command, ?name)
+  return name
+end
+
+verb editor/command_barrier(command)
+  let exactly {:barrier -> barrier} = editor/CommandBarrier(command, ?barrier)
+  return barrier
+end
+
+verb editor/token(input)
+  return index_or(input, :client_token, 0)
+end
+
+// --- Edit staging -----------------------------------------------------------
+
+// Stages a revision-checked edit batch and rebases editor markers through it.
+//
+// The result is the staging outcome: `:staged` with the predicted revision,
+// or `:resync` when the caller's revision is not the transaction's. The commit
+// has not happened yet; the host reads the authoritative delta later through
+// `buffer_apply_result`.
+verb editor/stage_edits(session, frame, window, buffer, expected_revision, edits, token)
+  if editor/buffer_read_only(buffer)
+    raise E_PERMISSION, "buffer is read-only"
+  end
+  let revision = buffer_revision(buffer)
+  if revision != expected_revision
+    return {:status -> :resync, :revision -> revision}
+  end
+  let staged = buffer_apply(buffer, expected_revision, edits, token)
+  if staged == :stale
+    return {:status -> :resync, :revision -> buffer_revision(buffer)}
+  end
+  let new_revision = revision + 1
+  buffers/markers_rebase(buffer, revision, new_revision, edits)
+  return {:status -> :staged, :revision -> new_revision, :edits -> edits}
+end
+
+// Reads the inverse edit, stages the forward edit, and records one undo group.
+// The core commands each produce one edit; a batch of view-relative edits needs
+// the general inverse-position mapping the design describes.
+verb editor/apply_edits(session, frame, window, buffer, expected_revision, edits, token)
+  if len(edits) != 1
+    raise E_INVARG, "editor/apply_edits supports one edit per command"
+  end
+  let edit = edits[0]
+  let at = edit[:at]
+  let remove = edit[:remove]
+  let text = index_or(edit, :text, "")
+  if at < 0 || remove < 0 || at + remove > buffer_len(buffer)
+    raise E_INVARG, "edit is outside the buffer"
+  end
+  let revision = buffer_revision(buffer)
+  if revision != expected_revision
+    return {:status -> :resync, :revision -> revision}
+  end
+  let removed = buffer_slice(buffer, at, at + remove)
+  let inverse = [{:at -> at, :remove -> string_len(text), :text -> removed}]
+  let outcome = editor/stage_edits(session, frame, window, buffer, revision, edits, token)
+  if outcome[:status] != :staged
+    return outcome
+  end
+  editor/undo_record(
+    session,
+    buffer,
+    revision,
+    outcome[:revision],
+    edits,
+    inverse,
+    editor/edit_kind(remove, text)
+  )
+  return outcome
+end
+
+verb editor/edit_kind(remove, text)
+  if remove == 0
+    return :insert
+  end
+  if string_len(text) == 0
+    return :delete
+  end
+  return :replace
+end
+
+// --- Dispatch ---------------------------------------------------------------
+
+// Invokes one command's selector with the fixed roles. Application errors
+// propagate to the caller, which turns them into a `rejected` result.
+verb editor/command_run(session, frame, window, buffer, command, input, prefix_argument)
+  let exactly {:selector -> selector} = editor/CommandSelector(command, ?selector)
+  let roles = {
+    :session -> session,
+    :frame -> frame,
+    :window -> window,
+    :buffer -> buffer,
+    :point -> editor/window_point(session, window),
+    :mark -> editor/mark_position(session, buffer),
+    :prefix_argument -> prefix_argument,
+    :input -> input
+  }
+  return invoke(selector, roles)
+end
+
+// --- Shared command helpers -------------------------------------------------
+
+verb editor/movement_step(prefix_argument)
+  if prefix_argument == none
+    return 1
+  end
+  if prefix_argument == -1
+    return -1
+  end
+  return prefix_argument
+end
+
+verb editor/deactivate_mark(session, buffer)
+  if editor/mark_active(session, buffer)
+    editor/mark_deactivate(session, buffer)
+  end
+  return true
+end
+
+// A coarse word predicate for fundamental mode: ASCII letters, digits, and
+// underscore. Non-ASCII uppercase letters are also accepted by `lower`.
+verb editor/word_char(ch)
+  if string_contains("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_", ch)
+    return true
+  end
+  return lower(ch) != ch
+end
+
+verb editor/word_forward_from(buffer, from)
+  let length = buffer_len(buffer)
+  let index = from
+  while index < length
+    let ch = buffer_slice(buffer, index, index + 1)
+    if editor/word_char(ch)
+      break
+    end
+    index = index + 1
+  end
+  while index < length
+    let ch = buffer_slice(buffer, index, index + 1)
+    if not editor/word_char(ch)
+      break
+    end
+    index = index + 1
+  end
+  return index
+end
+
+verb editor/word_backward_from(buffer, from)
+  let index = from
+  while index > 0
+    let ch = buffer_slice(buffer, index - 1, index)
+    if editor/word_char(ch)
+      break
+    end
+    index = index - 1
+  end
+  while index > 0
+    let ch = buffer_slice(buffer, index - 1, index)
+    if not editor/word_char(ch)
+      break
+    end
+    index = index - 1
+  end
+  return index
+end
+
+// --- Character movement -----------------------------------------------------
+
+verb editor/forward_char(session, frame, window, buffer, point, mark, prefix_argument, input)
+  let step = editor/movement_step(prefix_argument)
+  editor/window_set_point(session, window, point + step)
+  editor/window_clear_goal_column(session, window)
+  return {:status -> :ok}
+end
+
+verb editor/backward_char(session, frame, window, buffer, point, mark, prefix_argument, input)
+  let step = editor/movement_step(prefix_argument)
+  editor/window_set_point(session, window, point - step)
+  editor/window_clear_goal_column(session, window)
+  return {:status -> :ok}
+end
+
+// --- Line movement ----------------------------------------------------------
+
+// Vertical movement remembers the initial column in the window and clamps it
+// on shorter lines, so repeated movement keeps a stable column.
+verb editor/vertical_move(session, window, buffer, point, step)
+  let placed = buffer_position_line_column(buffer, point)
+  let goal = editor/window_goal_column(session, window)
+  let column = goal
+  if goal < 0
+    column = placed[:column]
+    editor/window_set_goal_column(session, window, column)
+  end
+  let target_line = placed[:line] + step
+  if target_line < 0
+    target_line = 0
+  end
+  let offset = buffer_line_column_offset(buffer, target_line, column)
+  return editor/window_set_point(session, window, offset)
+end
+
+verb editor/next_line(session, frame, window, buffer, point, mark, prefix_argument, input)
+  let step = editor/movement_step(prefix_argument)
+  editor/vertical_move(session, window, buffer, point, step)
+  return {:status -> :ok}
+end
+
+verb editor/previous_line(session, frame, window, buffer, point, mark, prefix_argument, input)
+  let step = editor/movement_step(prefix_argument)
+  editor/vertical_move(session, window, buffer, point, 0 - step)
+  return {:status -> :ok}
+end
+
+verb editor/beginning_of_line(session, frame, window, buffer, point, mark, prefix_argument, input)
+  let placed = buffer_position_line_column(buffer, point)
+  editor/window_set_point(session, window, buffer_line_column_offset(buffer, placed[:line], 0))
+  editor/window_clear_goal_column(session, window)
+  return {:status -> :ok}
+end
+
+verb editor/end_of_line(session, frame, window, buffer, point, mark, prefix_argument, input)
+  let placed = buffer_position_line_column(buffer, point)
+  let span = buffer_line_span(buffer, placed[:line])
+  let stop = point
+  if span != none
+    stop = index_or(span, :stop, point)
+  end
+  editor/window_set_point(session, window, stop)
+  editor/window_clear_goal_column(session, window)
+  return {:status -> :ok}
+end
+
+verb editor/beginning_of_buffer(session, frame, window, buffer, point, mark, prefix_argument, input)
+  editor/window_set_point(session, window, 0)
+  editor/window_clear_goal_column(session, window)
+  return {:status -> :ok}
+end
+
+verb editor/end_of_buffer(session, frame, window, buffer, point, mark, prefix_argument, input)
+  editor/window_set_point(session, window, buffer_len(buffer))
+  editor/window_clear_goal_column(session, window)
+  return {:status -> :ok}
+end
+
+// --- Word movement ----------------------------------------------------------
+
+verb editor/forward_word(session, frame, window, buffer, point, mark, prefix_argument, input)
+  let step = editor/movement_step(prefix_argument)
+  let target = point
+  if step >= 0
+    let count = step
+    while count > 0
+      target = editor/word_forward_from(buffer, target)
+      count = count - 1
+    end
+  else
+    let count = 0 - step
+    while count > 0
+      target = editor/word_backward_from(buffer, target)
+      count = count - 1
+    end
+  end
+  editor/window_set_point(session, window, target)
+  editor/window_clear_goal_column(session, window)
+  return {:status -> :ok}
+end
+
+verb editor/backward_word(session, frame, window, buffer, point, mark, prefix_argument, input)
+  let step = editor/movement_step(prefix_argument)
+  let target = point
+  if step >= 0
+    let count = step
+    while count > 0
+      target = editor/word_backward_from(buffer, target)
+      count = count - 1
+    end
+  else
+    let count = 0 - step
+    while count > 0
+      target = editor/word_forward_from(buffer, target)
+      count = count - 1
+    end
+  end
+  editor/window_set_point(session, window, target)
+  editor/window_clear_goal_column(session, window)
+  return {:status -> :ok}
+end
+
+// --- Insertion and deletion -------------------------------------------------
+
+verb editor/repeat_text(text, count)
+  let out = ""
+  let index = 0
+  while index < count
+    out = string_concat(out, text)
+    index = index + 1
+  end
+  return out
+end
+
+verb editor/self_insert_command(session, frame, window, buffer, point, mark, prefix_argument, input)
+  let text = index_or(input, :text, "")
+  if text == ""
+    return {:status -> :ok}
+  end
+  let count = prefix_argument
+  if count == none
+    count = 1
+  end
+  if count <= 0
+    raise E_INVARG, "self-insert-command needs a positive argument"
+  end
+  let inserted = editor/repeat_text(text, count)
+  let outcome = editor/apply_edits(
+    session,
+    frame,
+    window,
+    buffer,
+    buffer_revision(buffer),
+    [{:at -> point, :remove -> 0, :text -> inserted}],
+    editor/token(input)
+  )
+  if outcome[:status] != :staged
+    return outcome
+  end
+  editor/window_set_point(session, window, point + string_len(inserted))
+  editor/window_clear_goal_column(session, window)
+  editor/deactivate_mark(session, buffer)
+  return {:status -> :ok, :edits -> outcome[:edits], :revision -> outcome[:revision]}
+end
+
+verb editor/newline_command(session, frame, window, buffer, point, mark, prefix_argument, input)
+  let outcome = editor/apply_edits(
+    session,
+    frame,
+    window,
+    buffer,
+    buffer_revision(buffer),
+    [{:at -> point, :remove -> 0, :text -> "\n"}],
+    editor/token(input)
+  )
+  if outcome[:status] != :staged
+    return outcome
+  end
+  editor/window_set_point(session, window, point + 1)
+  editor/window_clear_goal_column(session, window)
+  editor/deactivate_mark(session, buffer)
+  return {:status -> :ok, :edits -> outcome[:edits], :revision -> outcome[:revision]}
+end
+
+verb editor/delete_forward_char(session, frame, window, buffer, point, mark, prefix_argument, input)
+  let step = editor/movement_step(prefix_argument)
+  let count = step
+  if count < 0
+    count = 0 - count
+  end
+  if point >= buffer_len(buffer)
+    return {:status -> :ok, :message -> "end of buffer"}
+  end
+  let available = buffer_len(buffer) - point
+  if count > available
+    count = available
+  end
+  let outcome = editor/apply_edits(
+    session,
+    frame,
+    window,
+    buffer,
+    buffer_revision(buffer),
+    [{:at -> point, :remove -> count, :text -> ""}],
+    editor/token(input)
+  )
+  if outcome[:status] != :staged
+    return outcome
+  end
+  editor/window_clear_goal_column(session, window)
+  editor/deactivate_mark(session, buffer)
+  return {:status -> :ok, :edits -> outcome[:edits], :revision -> outcome[:revision]}
+end
+
+verb editor/delete_backward_char(session, frame, window, buffer, point, mark, prefix_argument, input)
+  let step = editor/movement_step(prefix_argument)
+  let count = step
+  if count < 0
+    count = 0 - count
+  end
+  if point <= 0
+    return {:status -> :ok, :message -> "beginning of buffer"}
+  end
+  if count > point
+    count = point
+  end
+  let outcome = editor/apply_edits(
+    session,
+    frame,
+    window,
+    buffer,
+    buffer_revision(buffer),
+    [{:at -> point - count, :remove -> count, :text -> ""}],
+    editor/token(input)
+  )
+  if outcome[:status] != :staged
+    return outcome
+  end
+  editor/window_set_point(session, window, point - count)
+  editor/window_clear_goal_column(session, window)
+  editor/deactivate_mark(session, buffer)
+  return {:status -> :ok, :edits -> outcome[:edits], :revision -> outcome[:revision]}
+end
+
+// --- Mark and region --------------------------------------------------------
+
+verb editor/set_mark_command(session, frame, window, buffer, point, mark, prefix_argument, input)
+  editor/mark_set(session, buffer, point)
+  return {:status -> :ok}
+end
+
+verb editor/exchange_point_and_mark(session, frame, window, buffer, point, mark, prefix_argument, input)
+  let stored = editor/mark_position(session, buffer)
+  editor/mark_set(session, buffer, point)
+  editor/window_set_point(session, window, stored)
+  return {:status -> :ok}
+end
+
+// --- Undo -------------------------------------------------------------------
+
+verb editor/undo_command(session, frame, window, buffer, point, mark, prefix_argument, input)
+  let target = editor/undo_target(buffer)
+  if target == none
+    return {:status -> :ok, :message -> "no further undo information"}
+  end
+  let group = target
+  if not editor/undo_direction_valid(buffer, group, :inverse)
+    return {:status -> :resync, :message -> "buffer changed since the edit"}
+  end
+  let outcome = editor/undo_apply(session, frame, window, buffer, group, :inverse, editor/token(input))
+  if outcome[:status] != :staged
+    return outcome
+  end
+  let edits = editor/undo_group_edits(buffer, group, :inverse)
+  let at = edits[0][:at]
+  editor/window_set_point(session, window, at)
+  editor/window_clear_goal_column(session, window)
+  return {:status -> :ok, :edits -> outcome[:edits], :revision -> outcome[:revision]}
+end
+
+verb editor/redo_command(session, frame, window, buffer, point, mark, prefix_argument, input)
+  let target = editor/redo_target(buffer)
+  if target == none
+    return {:status -> :ok, :message -> "no further redo information"}
+  end
+  let group = target
+  if not editor/undo_direction_valid(buffer, group, :forward)
+    return {:status -> :resync, :message -> "buffer changed since the undo"}
+  end
+  let outcome = editor/undo_apply(session, frame, window, buffer, group, :forward, editor/token(input))
+  if outcome[:status] != :staged
+    return outcome
+  end
+  let edits = editor/undo_group_edits(buffer, group, :forward)
+  let last = edits[len(edits) - 1]
+  editor/window_set_point(session, window, last[:at] + string_len(index_or(last, :text, "")))
+  editor/window_clear_goal_column(session, window)
+  return {:status -> :ok, :edits -> outcome[:edits], :revision -> outcome[:revision]}
+end
+
+// --- Scrolling --------------------------------------------------------------
+
+verb editor/window_height(session, window)
+  let exactly {:height -> height} = editor/WindowHeightLines(session, window, ?height)
+  return height
+end
+
+verb editor/scroll_lines(session, window, buffer, lines)
+  let placed = buffer_position_line_column(buffer, editor/window_start(session, window))
+  let target_line = placed[:line] + lines
+  if target_line < 0
+    target_line = 0
+  end
+  let offset = buffer_line_column_offset(buffer, target_line, 0)
+  return editor/window_set_start(session, window, offset)
+end
+
+verb editor/scroll_up_command(session, frame, window, buffer, point, mark, prefix_argument, input)
+  let step = prefix_argument
+  if step == none
+    step = editor/window_height(session, window)
+  end
+  editor/scroll_lines(session, window, buffer, step)
+  return {:status -> :ok, :snapshot_required -> true}
+end
+
+verb editor/scroll_down_command(session, frame, window, buffer, point, mark, prefix_argument, input)
+  let step = prefix_argument
+  if step == none
+    step = editor/window_height(session, window)
+  end
+  editor/scroll_lines(session, window, buffer, 0 - step)
+  return {:status -> :ok, :snapshot_required -> true}
+end
+
+verb editor/recenter_command(session, frame, window, buffer, point, mark, prefix_argument, input)
+  let placed = buffer_position_line_column(buffer, point)
+  let half = editor/window_height(session, window) / 2
+  let target_line = placed[:line] - half
+  if target_line < 0
+    target_line = 0
+  end
+  editor/window_set_start(session, window, buffer_line_column_offset(buffer, target_line, 0))
+  return {:status -> :ok, :snapshot_required -> true}
+end
+
+// --- Numeric arguments ------------------------------------------------------
+
+verb editor/prefix_value(session)
+  let rows = editor/PrefixArgument(session, ?state)
+  if not rows
+    return none
+  end
+  let exactly {:state -> state} = rows
+  if state[:kind] == :negative
+    return -1
+  end
+  return state[:value]
+end
+
+verb editor/set_prefix_value(session, value)
+  retract editor/PrefixArgument(session, _)
+  assert editor/PrefixArgument(session, {:kind -> :digits, :value -> value})
+  return value
+end
+
+verb editor/clear_prefix(session)
+  retract editor/PrefixArgument(session, _)
+  return true
+end
+
+verb editor/universal_argument(session, frame, window, buffer, point, mark, prefix_argument, input)
+  let current = editor/prefix_value(session)
+  let next = 4
+  if current != none
+    if current == -1
+      next = -4
+    else
+      next = current * 4
+    end
+  end
+  retract editor/PrefixArgument(session, _)
+  assert editor/PrefixArgument(session, {:kind -> :universal, :value -> next})
+  return {:status -> :ok}
+end
+
+verb editor/negative_argument(session, frame, window, buffer, point, mark, prefix_argument, input)
+  let current = editor/prefix_value(session)
+  if current != none && current != -1
+    editor/set_prefix_value(session, 0 - current)
+    return {:status -> :ok}
+  end
+  retract editor/PrefixArgument(session, _)
+  assert editor/PrefixArgument(session, {:kind -> :negative, :value -> -1})
+  return {:status -> :ok}
+end
+
+verb editor/digit_argument(session, frame, window, buffer, point, mark, prefix_argument, input)
+  let key = index_or(input, :key, "M-0")
+  let last = string_slice(key, string_len(key) - 1, string_len(key))
+  let digit = parse_int(last)
+  let rows = editor/PrefixArgument(session, ?state)
+  retract editor/PrefixArgument(session, _)
+  if not rows
+    assert editor/PrefixArgument(session, {:kind -> :digits, :value -> digit})
+    return {:status -> :ok}
+  end
+  let exactly {:state -> state} = rows
+  if state[:kind] == :universal
+    assert editor/PrefixArgument(session, {:kind -> :digits, :value -> digit})
+    return {:status -> :ok}
+  end
+  if state[:kind] == :negative
+    assert editor/PrefixArgument(session, {:kind -> :digits, :value -> 0 - digit})
+    return {:status -> :ok}
+  end
+  assert editor/PrefixArgument(session, {:kind -> :digits, :value -> state[:value] * 10 + digit})
+  return {:status -> :ok}
+end
+
+// --- Window commands --------------------------------------------------------
+
+verb editor/split_window_below_command(session, frame, window, buffer, point, mark, prefix_argument, input)
+  let fresh = editor/window_split(session, frame, window, :horizontal)
+  editor/window_select(session, frame, fresh)
+  return {:status -> :ok, :snapshot_required -> true}
+end
+
+verb editor/split_window_right_command(session, frame, window, buffer, point, mark, prefix_argument, input)
+  let fresh = editor/window_split(session, frame, window, :vertical)
+  editor/window_select(session, frame, fresh)
+  return {:status -> :ok, :snapshot_required -> true}
+end
+
+verb editor/delete_window_command(session, frame, window, buffer, point, mark, prefix_argument, input)
+  editor/window_delete(session, frame, window)
+  return {:status -> :ok, :snapshot_required -> true}
+end
+
+// C-x 1: keep only the selected window.
+verb editor/delete_other_windows_command(session, frame, window, buffer, point, mark, prefix_argument, input)
+  let done = false
+  while done == false
+    let leaves = editor/window_leaves(session, frame)
+    if len(leaves) <= 1
+      done = true
+    else
+      let victim = none
+      for leaf in leaves
+        if leaf != window
+          victim = leaf
+        end
+      end
+      editor/window_delete(session, frame, victim)
+    end
+  end
+  return {:status -> :ok, :snapshot_required -> true}
+end
+
+verb editor/other_window_command(session, frame, window, buffer, point, mark, prefix_argument, input)
+  let step = editor/movement_step(prefix_argument)
+  let target = editor/window_other(session, frame, step)
+  editor/window_select(session, frame, target)
+  return {:status -> :ok, :snapshot_required -> true}
+end
+
+// --- Minibuffer entry point -------------------------------------------------
+
+verb editor/execute_extended_command(session, frame, window, buffer, point, mark, prefix_argument, input)
+  if editor/minibuffer_active(session)
+    return {:status -> :ok, :message -> "minibuffer is already active"}
+  end
+  editor/picker_begin(
+    session,
+    frame,
+    window,
+    "M-x ",
+    :command,
+    :editor/minibuffer_accept_command
+  )
+  return {:status -> :ok, :snapshot_required -> true}
+end
+
+verb editor/switch_to_buffer_command(session, frame, window, buffer, point, mark, prefix_argument, input)
+  if editor/minibuffer_active(session)
+    return {:status -> :ok, :message -> "minibuffer is already active"}
+  end
+  editor/picker_begin(
+    session,
+    frame,
+    window,
+    "Switch to buffer: ",
+    :buffer,
+    :editor/minibuffer_accept_buffer
+  )
+  return {:status -> :ok, :snapshot_required -> true}
+end
+
+// --- Quit -------------------------------------------------------------------
+
+// C-g: always available. It clears pending keys, the numeric argument, the
+// transient keymap, and the active mark; it never changes buffer text.
+verb editor/keyboard_quit(session, frame, window, buffer, point, mark, prefix_argument, input)
+  editor/clear_prefix(session)
+  retract editor/PendingKeys(session, _)
+  retract editor/TransientKeymap(session, _)
+  editor/mark_deactivate(session, buffer)
+  return {:status -> :ok, :message -> "quit"}
+end

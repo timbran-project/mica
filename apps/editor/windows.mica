@@ -1,0 +1,569 @@
+// Frames, windows, point, and viewport state.
+//
+// A frame is a binary split tree: internal nodes are splits and leaves are
+// windows. Node ids are session-local, allocated from a counter. Every
+// structural command validates the proposed tree before it publishes it, so a
+// rejected command leaves the previous tree intact.
+//
+// Point and viewport start are markers in the shared region layer
+// (`apps/shared/buffers.mica`), keyed structurally as `[session, local_id]` so
+// sessions cannot collide without interning unbounded symbols.
+
+// --- Nodes ------------------------------------------------------------------
+
+verb editor/frame_root(session, frame)
+  let exactly {:root -> root} = editor/FrameRoot(session, frame, ?root)
+  return root
+end
+
+verb editor/frame_node_alloc(session, frame)
+  let next = 1
+  let rows = editor/FrameNodeCounter(session, frame, ?next)
+  if rows
+    let exactly {:next -> value} = rows
+    next = value
+  end
+  retract editor/FrameNodeCounter(session, frame, _)
+  assert editor/FrameNodeCounter(session, frame, next + 1)
+  return next
+end
+
+verb editor/frame_generation(session, frame)
+  let rows = editor/FrameGeneration(session, frame, ?generation)
+  if not rows
+    return 0
+  end
+  let exactly {:generation -> generation} = rows
+  return generation
+end
+
+// Bumps the frame generation after a published tree or layout change.
+verb editor/frame_bump(session, frame)
+  let next = editor/frame_generation(session, frame) + 1
+  retract editor/FrameGeneration(session, frame, _)
+  assert editor/FrameGeneration(session, frame, next)
+  return next
+end
+
+// The parent split of `node`, or `none` when `node` is the root.
+verb editor/node_parent(session, node)
+  for row in editor/SplitFirst(session, ?parent, ?child)
+    if row[:child] == node
+      return row[:parent]
+    end
+  end
+  for row in editor/SplitSecond(session, ?parent, ?child)
+    if row[:child] == node
+      return row[:parent]
+    end
+  end
+  return none
+end
+
+// Replaces one child link with `new`. The frame root link is replaced in place
+// when `old` was the root.
+verb editor/node_replace(session, frame, old, new)
+  if editor/frame_root(session, frame) == old
+    retract editor/FrameRoot(session, frame, _)
+    assert editor/FrameRoot(session, frame, new)
+    return new
+  end
+  let parent = editor/node_parent(session, old)
+  if parent == none
+    raise E_STATE, "node is not in the frame tree"
+  end
+  let first = editor/SplitFirst(session, parent, ?child)
+  if first
+    let exactly {:child -> child} = first
+    if child == old
+      retract editor/SplitFirst(session, parent, _)
+      assert editor/SplitFirst(session, parent, new)
+      return new
+    end
+  end
+  retract editor/SplitSecond(session, parent, _)
+  assert editor/SplitSecond(session, parent, new)
+  return new
+end
+
+verb editor/node_remove(session, node)
+  retract editor/NodeKind(session, node, _)
+  retract editor/SplitAxis(session, node, _)
+  retract editor/SplitRatio(session, node, _)
+  retract editor/SplitFirst(session, node, _)
+  retract editor/SplitSecond(session, node, _)
+  return true
+end
+
+verb editor/window_remove(session, node)
+  editor/marker_drop(editor/window_point_marker(session, node))
+  editor/marker_drop(editor/window_start_marker(session, node))
+  retract editor/NodeKind(session, node, _)
+  retract editor/WindowBuffer(session, node, _)
+  retract editor/WindowPointMarker(session, node, _)
+  retract editor/WindowStartMarker(session, node, _)
+  retract editor/WindowHorizontalOffset(session, node, _)
+  retract editor/WindowHeightLines(session, node, _)
+  retract editor/WindowWidthColumns(session, node, _)
+  retract editor/WindowWrapMode(session, node, _)
+  retract editor/WindowGoalColumn(session, node, _)
+  return true
+end
+
+// True when every relation one leaf window requires is present.
+verb editor/window_complete(session, node)
+  if not editor/WindowBuffer(session, node, ?buffer)
+    return false
+  end
+  if not editor/WindowPointMarker(session, node, ?point)
+    return false
+  end
+  if not editor/WindowStartMarker(session, node, ?start)
+    return false
+  end
+  return true
+end
+
+// Walks the split tree from the root and checks every structural invariant:
+// one root, one kind per node, two different children per split, one parent per
+// child, no cycles, complete leaves, and at least one window.
+verb editor/frame_valid(session, frame)
+  let root = editor/frame_root(session, frame)
+  let visiting = [root]
+  let seen = []
+  let leaves = 0
+  let next = 0
+  while next < len(visiting)
+    let node = visiting[next]
+    next = next + 1
+    if editor/list_contains(seen, node)
+      return false
+    end
+    seen = [@seen, node]
+    let kinds = editor/NodeKind(session, node, ?kind)
+    if not kinds
+      return false
+    end
+    let exactly {:kind -> kind} = kinds
+    if kind == :split
+      let first = editor/SplitFirst(session, node, ?left)
+      let second = editor/SplitSecond(session, node, ?right)
+      if not first || not second
+        return false
+      end
+      let exactly {:left -> left} = first
+      let exactly {:right -> right} = second
+      if left == right
+        return false
+      end
+      if editor/node_parent(session, left) != node
+        return false
+      end
+      if editor/node_parent(session, right) != node
+        return false
+      end
+      visiting = [@visiting, left]
+      visiting = [@visiting, right]
+    elseif kind == :window
+      leaves = leaves + 1
+      if not editor/window_complete(session, node)
+        return false
+      end
+    else
+      return false
+    end
+  end
+  // Every live node must be reachable from the root.
+  for row in editor/NodeKind(session, ?node, ?kind)
+    if not editor/list_contains(seen, row[:node])
+      return false
+    end
+  end
+  return leaves >= 1
+end
+
+verb editor/list_contains(items, value)
+  for item in items
+    if item == value
+      return true
+    end
+  end
+  return false
+end
+
+// Depth-first leaf order, stable across layout changes.
+verb editor/window_leaves(session, frame)
+  let out = []
+  return editor/collect_leaves(session, editor/frame_root(session, frame), out)
+end
+
+verb editor/collect_leaves(session, node, out)
+  let exactly {:kind -> kind} = editor/NodeKind(session, node, ?kind)
+  if kind == :window
+    return [@out, node]
+  end
+  let exactly {:left -> left} = editor/SplitFirst(session, node, ?left)
+  let exactly {:right -> right} = editor/SplitSecond(session, node, ?right)
+  let grown = editor/collect_leaves(session, left, out)
+  return editor/collect_leaves(session, right, grown)
+end
+
+// --- Markers ----------------------------------------------------------------
+
+// Allocates a session-local marker id and anchors it in `buffer`.
+verb editor/marker_new(session, buffer, position, insertion_type)
+  let next = 0
+  let rows = editor/MarkerCounter(session, ?next)
+  if rows
+    let exactly {:next -> value} = rows
+    next = value
+  end
+  retract editor/MarkerCounter(session, _)
+  assert editor/MarkerCounter(session, next + 1)
+  let marker = [session, next]
+  buffers/marker_create(marker, buffer, position, buffer_revision(buffer), insertion_type)
+  return marker
+end
+
+verb editor/marker_drop(marker)
+  retract Marker(marker)
+  retract MarkerBuffer(marker, _)
+  retract MarkerPosition(marker, _)
+  retract MarkerInsertionType(marker, _)
+  retract MarkerRevision(marker, _)
+  return true
+end
+
+verb editor/marker_move(marker, position)
+  retract MarkerPosition(marker, _)
+  assert MarkerPosition(marker, position)
+  return position
+end
+
+// --- Windows ----------------------------------------------------------------
+
+verb editor/window_init(session, frame, node, buffer)
+  assert editor/NodeKind(session, node, :window)
+  assert editor/WindowBuffer(session, node, buffer)
+  let point = editor/marker_new(session, buffer, 0, :stick_after)
+  let start = editor/marker_new(session, buffer, 0, :stick_before)
+  assert editor/WindowPointMarker(session, node, point)
+  assert editor/WindowStartMarker(session, node, start)
+  assert editor/WindowHorizontalOffset(session, node, 0)
+  assert editor/WindowHeightLines(session, node, 24)
+  assert editor/WindowWidthColumns(session, node, 80)
+  assert editor/WindowWrapMode(session, node, :truncate)
+  // -1 means "no goal column yet"; 0 is a valid column.
+  assert editor/WindowGoalColumn(session, node, -1)
+  editor/frame_bump(session, frame)
+  return node
+end
+
+// Creates the session's single frame with one window on `buffer`.
+verb editor/frame_create(session, buffer)
+  assert editor/Frame(session, 1)
+  assert editor/FrameRoot(session, 1, 1)
+  editor/window_init(session, 1, 1, buffer)
+  assert editor/SelectedWindow(session, 1)
+  assert editor/SessionFrame(session, 1)
+  return 1
+end
+
+verb editor/window_buffer(session, window)
+  let exactly {:buffer -> buffer} = editor/WindowBuffer(session, window, ?buffer)
+  return buffer
+end
+
+verb editor/window_point_marker(session, window)
+  let exactly {:marker -> marker} = editor/WindowPointMarker(session, window, ?marker)
+  return marker
+end
+
+verb editor/window_start_marker(session, window)
+  let exactly {:marker -> marker} = editor/WindowStartMarker(session, window, ?marker)
+  return marker
+end
+
+verb editor/window_point(session, window)
+  return buffers/marker_position(editor/window_point_marker(session, window))
+end
+
+verb editor/window_start(session, window)
+  return buffers/marker_position(editor/window_start_marker(session, window))
+end
+
+verb editor/window_set_point(session, window, position)
+  let buffer = editor/window_buffer(session, window)
+  let length = buffer_len(buffer)
+  let clamped = position
+  if clamped < 0
+    clamped = 0
+  end
+  if clamped > length
+    clamped = length
+  end
+  editor/marker_move(editor/window_point_marker(session, window), clamped)
+  return clamped
+end
+
+verb editor/window_set_start(session, window, position)
+  let buffer = editor/window_buffer(session, window)
+  let length = buffer_len(buffer)
+  let clamped = position
+  if clamped < 0
+    clamped = 0
+  end
+  if clamped > length
+    clamped = length
+  end
+  editor/marker_move(editor/window_start_marker(session, window), clamped)
+  return clamped
+end
+
+verb editor/window_horizontal_offset(session, window)
+  let exactly {:offset -> offset} = editor/WindowHorizontalOffset(session, window, ?offset)
+  return offset
+end
+
+verb editor/window_goal_column(session, window)
+  let exactly {:column -> column} = editor/WindowGoalColumn(session, window, ?column)
+  return column
+end
+
+verb editor/window_set_goal_column(session, window, column)
+  retract editor/WindowGoalColumn(session, window, _)
+  assert editor/WindowGoalColumn(session, window, column)
+  return column
+end
+
+verb editor/window_clear_goal_column(session, window)
+  return editor/window_set_goal_column(session, window, -1)
+end
+
+verb editor/window_set_size(session, window, height, width)
+  retract editor/WindowHeightLines(session, window, _)
+  assert editor/WindowHeightLines(session, window, height)
+  retract editor/WindowWidthColumns(session, window, _)
+  assert editor/WindowWidthColumns(session, window, width)
+  return true
+end
+
+verb editor/window_width(session, window)
+  let exactly {:width -> width} = editor/WindowWidthColumns(session, window, ?width)
+  return width
+end
+
+// Changes one split ratio after a browser divider drag. The ratio uses the
+// same 1 through 999 range as frame snapshots.
+verb editor/split_set_ratio(session, frame, split, ratio)
+  let kinds = editor/NodeKind(session, split, ?kind)
+  if not kinds
+    raise E_STATE, "not a live frame node"
+  end
+  let exactly {:kind -> kind} = kinds
+  if kind != :split
+    raise E_INVARG, "the frame node is not a split"
+  end
+  let clamped = ratio
+  if clamped < 1
+    clamped = 1
+  end
+  if clamped > 999
+    clamped = 999
+  end
+  retract editor/SplitRatio(session, split, _)
+  assert editor/SplitRatio(session, split, clamped)
+  editor/frame_bump(session, frame)
+  return clamped
+end
+
+verb editor/selected_window(session)
+  let exactly {:window -> window} = editor/SelectedWindow(session, ?window)
+  return window
+end
+
+verb editor/session_frame(session)
+  let exactly {:frame -> frame} = editor/SessionFrame(session, ?frame)
+  return frame
+end
+
+verb editor/window_select(session, frame, window)
+  if not editor/window_complete(session, window)
+    raise E_STATE, "not a live window"
+  end
+  retract editor/SelectedWindow(session, _)
+  assert editor/SelectedWindow(session, window)
+  editor/frame_bump(session, frame)
+  return window
+end
+
+// Shows `buffer` in `window` with fresh point and viewport markers.
+verb editor/window_show(session, window, buffer)
+  if editor/window_complete(session, window)
+    editor/marker_drop(editor/window_point_marker(session, window))
+    editor/marker_drop(editor/window_start_marker(session, window))
+  end
+  retract editor/WindowBuffer(session, window, _)
+  assert editor/WindowBuffer(session, window, buffer)
+  let point = editor/marker_new(session, buffer, 0, :stick_after)
+  let start = editor/marker_new(session, buffer, 0, :stick_before)
+  retract editor/WindowPointMarker(session, window, _)
+  retract editor/WindowStartMarker(session, window, _)
+  assert editor/WindowPointMarker(session, window, point)
+  assert editor/WindowStartMarker(session, window, start)
+  editor/window_clear_goal_column(session, window)
+  return buffer
+end
+
+// --- Structural commands ----------------------------------------------------
+
+// Splits `window` along `axis`. The old leaf becomes the first child; the new
+// leaf shows the same buffer with independent markers.
+verb editor/window_split(session, frame, window, axis)
+  if axis != :horizontal && axis != :vertical
+    raise E_INVARG, "split axis is :horizontal or :vertical"
+  end
+  if not editor/window_complete(session, window)
+    raise E_STATE, "not a live window"
+  end
+  let buffer = editor/window_buffer(session, window)
+  let split = editor/frame_node_alloc(session, frame)
+  let fresh = editor/frame_node_alloc(session, frame)
+  assert editor/NodeKind(session, split, :split)
+  assert editor/SplitAxis(session, split, axis)
+  assert editor/SplitRatio(session, split, 500)
+  // Replace the leaf before the new split's child links exist: adding them
+  // first would make the old leaf report the new split as its parent.
+  editor/node_replace(session, frame, window, split)
+  assert editor/SplitFirst(session, split, window)
+  assert editor/SplitSecond(session, split, fresh)
+  editor/window_init(session, frame, fresh, buffer)
+  editor/frame_bump(session, frame)
+  return fresh
+end
+
+// Deletes `window`, replacing its parent split with the sibling subtree.
+verb editor/window_delete(session, frame, window)
+  if not editor/window_complete(session, window)
+    raise E_STATE, "not a live window"
+  end
+  let parent = editor/node_parent(session, window)
+  if parent == none
+    raise E_STATE, "cannot delete the only window"
+  end
+  let first = editor/SplitFirst(session, parent, ?left)
+  let sibling = none
+  if first
+    let exactly {:left -> left} = first
+    if left == window
+      let exactly {:right -> right} = editor/SplitSecond(session, parent, ?right)
+      sibling = right
+    else
+      sibling = left
+    end
+  else
+    raise E_STATE, "split has no children"
+  end
+  editor/node_replace(session, frame, parent, sibling)
+  editor/node_remove(session, parent)
+  editor/window_remove(session, window)
+  if editor/selected_window(session) == window
+    retract editor/SelectedWindow(session, _)
+    // The sibling may be a split, so select its first leaf: the selected
+    // window must always be a leaf.
+    assert editor/SelectedWindow(session, editor/first_leaf(session, sibling))
+  end
+  editor/frame_bump(session, frame)
+  return sibling
+end
+
+// The first leaf in a subtree, in depth-first order.
+verb editor/first_leaf(session, node)
+  let exactly {:kind -> kind} = editor/NodeKind(session, node, ?kind)
+  if kind == :window
+    return node
+  end
+  let exactly {:left -> left} = editor/SplitFirst(session, node, ?left)
+  return editor/first_leaf(session, left)
+end
+
+// Walks leaves in stable depth-first order; `step` may be negative.
+verb editor/window_other(session, frame, step)
+  let leaves = editor/window_leaves(session, frame)
+  let count = len(leaves)
+  if count == 0
+    raise E_STATE, "the frame has no windows"
+  end
+  let current = editor/selected_window(session)
+  let index = 0
+  let seen = false
+  for leaf in leaves
+    if leaf == current
+      seen = true
+    elseif seen == false
+      index = index + 1
+    end
+  end
+  let target = index + step
+  while target < 0
+    target = target + count
+  end
+  while target >= count
+    target = target - count
+  end
+  return leaves[target]
+end
+
+// --- Marks ------------------------------------------------------------------
+
+verb editor/mark_marker(session, buffer)
+  let found = editor/BufferMarkMarker(session, buffer, ?marker)
+  if not found
+    let marker = editor/marker_new(session, buffer, 0, :stick_after)
+    assert editor/BufferMarkMarker(session, buffer, marker)
+    assert editor/BufferMarkActive(session, buffer, false)
+    return marker
+  end
+  let exactly {:marker -> marker} = found
+  return marker
+end
+
+verb editor/mark_position(session, buffer)
+  return buffers/marker_position(editor/mark_marker(session, buffer))
+end
+
+verb editor/mark_active(session, buffer)
+  let found = editor/BufferMarkActive(session, buffer, ?active)
+  if not found
+    return false
+  end
+  let exactly {:active -> active} = found
+  return active
+end
+
+verb editor/mark_set(session, buffer, position)
+  let marker = editor/mark_marker(session, buffer)
+  editor/marker_move(marker, position)
+  retract editor/BufferMarkActive(session, buffer, _)
+  assert editor/BufferMarkActive(session, buffer, true)
+  return position
+end
+
+verb editor/mark_deactivate(session, buffer)
+  retract editor/BufferMarkActive(session, buffer, _)
+  assert editor/BufferMarkActive(session, buffer, false)
+  return false
+end
+
+// The region when the mark is active: `[start, stop]`, else `none`.
+verb editor/region(session, buffer)
+  if not editor/mark_active(session, buffer)
+    return none
+  end
+  let point = buffers/marker_position(editor/window_point_marker(session, editor/selected_window(session)))
+  let mark = editor/mark_position(session, buffer)
+  if mark <= point
+    return [mark, point]
+  end
+  return [point, mark]
+end

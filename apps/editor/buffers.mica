@@ -1,0 +1,184 @@
+// Buffer lifecycle: internal names, display names, creation, and retirement.
+//
+// A buffer's catalogue name is internal and never shown to a user:
+//
+//   editor/buffer/<world-counter>
+//
+// The counter is durable and monotonic, and a killed name is never reused. The
+// display name lives in relations, so it can change, repeat, and be
+// disambiguated with `<2>`, `<3>`, and later suffixes.
+
+verb editor/buffer_durability(kind)
+  if kind == :process || kind == :search || kind == :completion || kind == :minibuffer
+    return :volatile
+  end
+  return :durable
+end
+
+// Returns a display name no live buffer currently holds.
+verb editor/buffer_unique_name(name)
+  let candidate = name
+  let suffix = 2
+  let live = editor/LiveBufferName(candidate, ?holder)
+  while live
+    candidate = string_concat(name, string_concat("<", string_concat(to_literal(suffix), ">")))
+    suffix = suffix + 1
+    live = editor/LiveBufferName(candidate, ?holder)
+  end
+  return candidate
+end
+
+// Creates a buffer and returns its internal symbol. Display names are
+// disambiguated; the internal name is not affected by later renames.
+verb editor/buffer_create(actor, kind, display_name, text)
+  let number = 1
+  let counters = editor/BufferCounter(:world, ?next)
+  if counters
+    let exactly {:next -> next} = counters
+    number = next
+  end
+  retract editor/BufferCounter(:world, _)
+  assert editor/BufferCounter(:world, number + 1)
+
+  let internal = to_symbol(string_concat("editor/buffer/", to_literal(number)))
+  make_buffer(internal, editor/buffer_durability(kind), :reject)
+  if text != ""
+    buffer_insert(internal, 0, text)
+  end
+
+  let name = editor/buffer_unique_name(display_name)
+  assert editor/Buffer(internal)
+  assert editor/BufferName(internal, name)
+  assert editor/LiveBufferName(name, internal)
+  assert editor/BufferOwner(internal, actor)
+  assert editor/BufferKind(internal, kind)
+  assert editor/BufferMajorMode(internal, :fundamental)
+  assert editor/BufferReadOnly(internal, false)
+  assert editor/BufferSavedRevision(internal, 0)
+  return internal
+end
+
+verb editor/buffer_by_name(name)
+  let found = editor/LiveBufferName(name, ?buffer)
+  if not found
+    return none
+  end
+  let exactly {:buffer -> buffer} = found
+  return buffer
+end
+
+verb editor/buffer_display_name(buffer)
+  let exactly {:name -> name} = editor/BufferName(buffer, ?name)
+  return name
+end
+
+verb editor/buffer_kind(buffer)
+  let exactly {:kind -> kind} = editor/BufferKind(buffer, ?kind)
+  return kind
+end
+
+verb editor/buffer_owner(buffer)
+  let exactly {:owner -> owner} = editor/BufferOwner(buffer, ?owner)
+  return owner
+end
+
+verb editor/buffer_read_only(buffer)
+  let exactly {:read_only -> read_only} = editor/BufferReadOnly(buffer, ?read_only)
+  return read_only
+end
+
+verb editor/buffer_set_read_only(buffer, value)
+  retract editor/BufferReadOnly(buffer, _)
+  assert editor/BufferReadOnly(buffer, value)
+  return value
+end
+
+verb editor/buffer_saved_revision(buffer)
+  let exactly {:revision -> revision} = editor/BufferSavedRevision(buffer, ?revision)
+  return revision
+end
+
+// Notes that the current revision is the one on disk.
+verb editor/buffer_mark_saved(buffer)
+  let revision = buffer_revision(buffer)
+  retract editor/BufferSavedRevision(buffer, _)
+  assert editor/BufferSavedRevision(buffer, revision)
+  return revision
+end
+
+verb editor/buffer_modified(buffer)
+  return buffer_revision(buffer) != editor/buffer_saved_revision(buffer)
+end
+
+// Another live buffer, or `none` when this is the only one.
+verb editor/buffer_other_than(buffer)
+  for row in editor/Buffer(?other)
+    if row[:other] != buffer
+      return row[:other]
+    end
+  end
+  return none
+end
+
+// Retires a buffer: metadata, markers, and the catalogue entry.
+//
+// A read-only buffer, the active minibuffer, or a modified file buffer is
+// refused unless `force` is true. Every window that shows the buffer first
+// moves to another live buffer, so no window is left pointing at a tombstone.
+verb editor/buffer_kill(session, buffer, force)
+  if force == false
+    if editor/buffer_read_only(buffer)
+      raise E_PERMISSION, "buffer is read-only"
+    end
+    if editor/ActiveMinibuffer(session, ?request)
+      raise E_STATE, "cannot kill the active minibuffer"
+    end
+    if editor/buffer_kind(buffer) == :file && editor/buffer_modified(buffer)
+      raise E_STATE, "file buffer has unsaved changes"
+    end
+  end
+
+  let windows = editor/WindowBuffer(session, ?window, buffer)
+  if windows
+    let replacement = editor/buffer_other_than(buffer)
+    if replacement == none
+      raise E_STATE, "cannot kill the only buffer"
+    end
+    for row in windows
+      editor/window_show(session, row[:window], replacement)
+    end
+  end
+
+  let name = editor/buffer_display_name(buffer)
+  let owner = editor/buffer_owner(buffer)
+  let file_path = none
+  let paths = editor/BufferFilePath(buffer, ?path)
+  if paths
+    let exactly {:path -> path} = paths
+    file_path = path
+  end
+
+  for found in MarkerBuffer(?marker, buffer)
+    editor/marker_drop(found[:marker])
+  end
+  editor/undo_clear(buffer)
+
+  retract editor/Buffer(buffer)
+  retract editor/BufferName(buffer, _)
+  retract editor/LiveBufferName(name, _)
+  retract editor/BufferOwner(buffer, _)
+  retract editor/BufferKind(buffer, _)
+  retract editor/BufferMajorMode(buffer, _)
+  retract editor/BufferReadOnly(buffer, _)
+  retract editor/BufferSavedRevision(buffer, _)
+  retract editor/BufferFilePath(buffer, _)
+  retract editor/BufferFileStamp(buffer, _)
+  retract editor/BufferFileEncoding(buffer, _)
+  retract editor/BufferLineEnding(buffer, _)
+  retract editor/PendingFileWriteConfirmation(_, buffer, _, _)
+  if file_path != none
+    retract editor/LiveFileBuffer([owner, file_path], _)
+  end
+  kill_buffer(buffer)
+  return true
+end

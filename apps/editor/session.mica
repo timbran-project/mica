@@ -1,0 +1,622 @@
+// Sessions and the editor input loop.
+//
+// A session is one authenticated editor connection. Session state is volatile:
+// after a host restart, no session remains, and the first input creates a new
+// one. Session creation is idempotent so a reconnecting client is safe.
+//
+// `editor_input` is the fixed selector the web host calls once per normalized
+// input item. It resolves keys through Mica keymaps, runs the command, and
+// returns the authoritative result. `editor_input_result` is the second call:
+// it reads a staged buffer apply's completion after the task commits and turns
+// it into the authoritative editor result.
+//
+// The host interns the item's enum strings into symbols: `:key`, `:text`,
+// `:input`, and `:paste` for kinds, and `:insertText`, `:insertLineBreak`,
+// `:deleteContentBackward`, `:deleteContentForward`, and
+// `:insertCompositionText` for browser edit intents.
+
+verb editor/session_actor(session)
+  let exactly {:actor -> actor} = editor/SessionActor(session, ?actor)
+  return actor
+end
+
+verb editor/session_create(session, actor, platform)
+  if editor/Session(session)
+    if editor/session_actor(session) != actor
+      raise E_PERM, "editor session belongs to a different actor"
+    end
+    return session
+  end
+  assert editor/Session(session)
+  assert editor/SessionActor(session, actor)
+  assert editor/SessionPlatformProfile(session, platform)
+  assert editor/KeymapGeneration(session, 0)
+  assert editor/MarkerCounter(session, 0)
+  // Node 1 is the first window; the next allocated node is 2.
+  assert editor/FrameNodeCounter(session, 1, 2)
+  assert editor/FrameGeneration(session, 1, 0)
+  editor/frame_create(session, editor/scratch_buffer(actor))
+  return session
+end
+
+verb editor/scratch_buffer(actor)
+  let found = editor/buffer_by_name("*scratch*")
+  if found != none
+    return found
+  end
+  return editor/buffer_create(actor, :scratch, "*scratch*", "")
+end
+
+// Retracts every volatile session fact. User buffers are not retired.
+verb editor/session_cleanup(session)
+  let frame = editor/session_frame(session)
+  if editor/picker_active(session)
+    editor/picker_clear(session, frame)
+  end
+  for row in editor/WindowBuffer(session, ?window, ?buffer)
+    editor/window_remove(session, row[:window])
+  end
+  retract editor/Frame(session, frame)
+  retract editor/FrameRoot(session, frame, _)
+  retract editor/FrameGeneration(session, frame, _)
+  retract editor/FrameNodeCounter(session, frame, _)
+  retract editor/SessionFrame(session, _)
+  retract editor/SelectedWindow(session, _)
+
+  for row in editor/BufferMarkMarker(session, ?buffer, ?marker)
+    editor/marker_drop(row[:marker])
+    retract editor/BufferMarkMarker(session, row[:buffer], _)
+    retract editor/BufferMarkActive(session, row[:buffer], _)
+  end
+  // Any remaining session-owned marker: the counter bounds the id space.
+  let counters = editor/MarkerCounter(session, ?count)
+  if counters
+    let exactly {:count -> count} = counters
+    let index = 0
+    while index < count
+      let marker = [session, index]
+      if Marker(marker)
+        editor/marker_drop(marker)
+      end
+      index = index + 1
+    end
+  end
+
+  for row in editor/PendingApply(session, ?token, ?buffer)
+    retract editor/PendingApply(session, row[:token], _)
+  end
+  retract editor/PendingFileWriteConfirmation(session, _, _, _)
+  retract editor/PendingKeys(session, _)
+  retract editor/PrefixArgument(session, _)
+  retract editor/LastCommand(session, _)
+  retract editor/ThisCommand(session, _)
+  retract editor/KeymapGeneration(session, _)
+  retract editor/TransientKeymap(session, _)
+  retract editor/ActiveMinibuffer(session, _)
+  retract editor/MinibufferRequest(session, _)
+  retract editor/SearchBuffer(session, _)
+  retract editor/SearchQuery(session, _)
+  retract editor/SearchDirection(session, _)
+  retract editor/SearchOrigin(session, _)
+  retract editor/SearchMatch(session, _, _)
+  retract editor/SessionActor(session, _)
+  retract editor/SessionPlatformProfile(session, _)
+  retract editor/Session(session)
+  return true
+end
+
+// --- Pending keys -----------------------------------------------------------
+
+verb editor/pending_keys(session)
+  let rows = editor/PendingKeys(session, ?sequence)
+  if not rows
+    return ""
+  end
+  let exactly {:sequence -> sequence} = rows
+  return sequence
+end
+
+verb editor/set_pending_keys(session, sequence)
+  retract editor/PendingKeys(session, _)
+  if sequence != ""
+    assert editor/PendingKeys(session, sequence)
+  end
+  return sequence
+end
+
+// --- Result building --------------------------------------------------------
+
+verb editor/window_first_line(session, window)
+  let buffer = editor/window_buffer(session, window)
+  let placed = buffer_position_line_column(buffer, editor/window_start(session, window))
+  return placed[:line]
+end
+
+verb editor/browser_op(name)
+  return {:op -> name}
+end
+
+// Finds a window showing `buffer`, preferring the selected one.
+verb editor/window_for_buffer(session, buffer)
+  let selected = editor/selected_window(session)
+  if editor/window_buffer(session, selected) == buffer
+    return selected
+  end
+  for row in editor/WindowBuffer(session, ?window, ?shown)
+    if row[:shown] == buffer
+      return row[:window]
+    end
+  end
+  return selected
+end
+
+// Compact state for one visible window. Text rows stay in the browser's
+// replica; an edit delta updates every window that shows the changed buffer.
+verb editor/window_result_state(session, window)
+  let buffer = editor/window_buffer(session, window)
+  let point = editor/window_point(session, window)
+  let placed = buffer_position_line_column(buffer, point)
+  return {
+    :window -> window,
+    :buffer -> buffer,
+    :revision -> buffer_revision(buffer),
+    :point -> point,
+    :point_line -> placed[:line],
+    :point_column -> placed[:column],
+    :first_line -> editor/window_first_line(session, window),
+    :buffer_name -> editor/buffer_display_name(buffer),
+    :modified -> editor/buffer_modified(buffer),
+    :mark -> editor/mark_position(session, buffer),
+    :mark_active -> editor/mark_active(session, buffer)
+  }
+end
+
+verb editor/frame_window_result_states(session, frame)
+  let states = []
+  for window in editor/window_leaves(session, frame)
+    states = [@states, editor/window_result_state(session, window)]
+  end
+  return states
+end
+
+verb editor/result(status, session, frame, window, extra)
+  // Panel state follows the current selection: a command may have moved it.
+  let current = editor/selected_window(session)
+  let buffer = editor/window_buffer(session, current)
+  let point = editor/window_point(session, current)
+  let placed = buffer_position_line_column(buffer, point)
+  let mark = editor/mark_position(session, buffer)
+  let mark_line = json_null()
+  let mark_column = json_null()
+  if editor/mark_active(session, buffer)
+    let marked = buffer_position_line_column(buffer, mark)
+    mark_line = marked[:line]
+    mark_column = marked[:column]
+  end
+  let base = {
+    :status -> status,
+    :session -> session,
+    :frame -> frame,
+    :window -> current,
+    :selected_window -> current,
+    :buffer -> buffer,
+    :revision -> buffer_revision(buffer),
+    :point -> point,
+    :point_line -> placed[:line],
+    :point_column -> placed[:column],
+    :mark -> mark,
+    :mark_line -> mark_line,
+    :mark_column -> mark_column,
+    :mark_active -> editor/mark_active(session, buffer),
+    :first_line -> editor/window_first_line(session, current),
+    :buffer_name -> editor/buffer_display_name(buffer),
+    :modified -> editor/buffer_modified(buffer),
+    :frame_generation -> editor/frame_generation(session, frame),
+    :pending -> editor/pending_keys(session),
+    :prefix_argument -> editor/prefix_value(session),
+    :keymap_generation -> editor/keymap_generation(session),
+    :message -> none,
+    :edits -> [],
+    :browser_operations -> [],
+    :barrier -> false,
+    :snapshot_required -> false,
+    :minibuffer_active -> editor/minibuffer_active(session),
+    :minibuffer_prompt -> editor/minibuffer_prompt_or_empty(session),
+    :minibuffer_text -> editor/minibuffer_text(session)
+  }
+  for pair in map_pairs(extra)
+    base[pair[0]] = pair[1]
+  end
+  if base[:edits] != []
+    base[:windows] = editor/frame_window_result_states(session, frame)
+  end
+  // JSON cannot encode an absent option; the browser reads null instead.
+  if base[:message] == none
+    base[:message] = json_null()
+  end
+  if base[:prefix_argument] == none
+    base[:prefix_argument] = json_null()
+  end
+  return base
+end
+
+verb editor/outcome_extras(command, outcome)
+  let extras = {
+    :message -> index_or(outcome, :message, none),
+    :browser_operations -> index_or(outcome, :browser_operations, []),
+    :barrier -> editor/command_barrier(command),
+    :edits -> index_or(outcome, :edits, []),
+    :snapshot_required -> index_or(outcome, :snapshot_required, false)
+  }
+  let revision = index_or(outcome, :revision, none)
+  if revision != none
+    extras[:revision] = revision
+  end
+  return extras
+end
+
+// --- Input dispatch ---------------------------------------------------------
+
+verb editor/argument_command(command)
+  let name = editor/command_name(command)
+  if name == "universal-argument" || name == "negative-argument" || name == "digit-argument"
+    return true
+  end
+  return false
+end
+
+// Runs one resolved command with the fixed roles and builds the result. An
+// application error becomes `rejected`; a revision mismatch becomes `resync`.
+verb editor/input_command(session, frame, window, buffer, command, input)
+  if command == none
+    return editor/result(
+      :undefined,
+      session,
+      frame,
+      window,
+      {:browser_operations -> [editor/browser_op(:ring_bell)]}
+    )
+  end
+  let argument = editor/prefix_value(session)
+  retract editor/ThisCommand(session, _)
+  assert editor/ThisCommand(session, command)
+
+  let outcome = none
+  let failed = false
+  let error_text = ""
+  try
+    outcome = editor/command_run(session, frame, window, buffer, command, input, argument)
+  catch err
+    failed = true
+    error_text = to_literal(err)
+  end
+
+  if failed
+    editor/clear_prefix(session)
+    return editor/result(
+      :rejected,
+      session,
+      frame,
+      window,
+      {:error -> :command_error, :message -> error_text}
+    )
+  end
+
+  let status = index_or(outcome, :status, :ok)
+  if status == :resync
+    return editor/result(:resync, session, frame, window, {:message -> index_or(outcome, :message, none)})
+  end
+  if status != :ok
+    return editor/result(:rejected, session, frame, window, {:error -> status})
+  end
+
+  // A numeric argument persists until a command that consumes it.
+  if not editor/argument_command(command)
+    editor/clear_prefix(session)
+  end
+  retract editor/LastCommand(session, _)
+  assert editor/LastCommand(session, command)
+  retract editor/ThisCommand(session, _)
+
+  // Register the staged apply so the finalizer can find its buffer, and tell
+  // the host whether it must read the completion in a later task.
+  let token = editor/token(input)
+  let needs_finalize = false
+  if token != 0 && index_or(outcome, :edits, []) != []
+    assert editor/PendingApply(session, token, buffer)
+    needs_finalize = true
+  end
+  let extras = editor/outcome_extras(command, outcome)
+  extras[:needs_finalize] = needs_finalize
+  return editor/result(:ok, session, frame, window, extras)
+end
+
+// --- JSON bridge ------------------------------------------------------------
+
+// Decodes one browser input item and runs it. The host passes the raw item
+// JSON and never builds a Mica item itself, so keymap policy stays in Mica.
+verb editor_input_json(endpoint, session, actor, frame, text, client_token, known_keymap_generation)
+  // The first request may arrive before the page's snapshot, so create the
+  // session here too.
+  editor/session_create(session, actor, :default)
+  let item = editor/json_item(json_decode(text))
+  let result = editor_input(endpoint, session, frame, item, client_token)
+  // A tagged edit must publish before its authoritative delta is known.
+  // Continue in this task after the commit instead of making the host submit
+  // a second Mica task for every editing command.
+  if index_or(result, :needs_finalize, false)
+    commit()
+    result = editor_input_result(endpoint, session, client_token)
+  end
+
+  // Keymap plans are large and change rarely. Return a plan only when the
+  // browser's generation is not the generation used for this command.
+  if index_or(result, :keymap_generation, 0) != known_keymap_generation
+    let window = editor/selected_window(session)
+    let buffer = editor/window_buffer(session, window)
+    result[:keymap_plan] = editor/keymap_plan(session, buffer)
+  end
+  return result
+end
+
+// JSON strings arrive as strings; the item enum fields are symbols in Mica.
+verb editor/json_item(item)
+  let normalized = item
+  normalized[:kind] = to_symbol(index_or(item, :kind, "key"))
+  let intent = index_or(item, :input_type, none)
+  if intent != none
+    normalized[:input_type] = to_symbol(intent)
+  end
+  return normalized
+end
+
+verb editor/input_key(session, frame, window, buffer, input)
+  let key = index_or(input, :key, "")
+  if key == ""
+    return editor/result(:rejected, session, frame, window, {:error -> :bad_item})
+  end
+  let pending = editor/pending_keys(session)
+  let sequence = key
+  if pending != ""
+    sequence = string_concat(pending, string_concat(" ", key))
+  end
+  let resolution = editor/keymap_resolve(session, buffer, sequence)
+  if resolution[:status] == :prefix
+    editor/set_pending_keys(session, sequence)
+    return editor/result(:prefix, session, frame, window, {:pending -> sequence})
+  end
+  if resolution[:status] != :command
+    editor/set_pending_keys(session, "")
+    return editor/result(
+      :undefined,
+      session,
+      frame,
+      window,
+      {
+        :pending -> sequence,
+        :browser_operations -> [editor/browser_op(:ring_bell)],
+        :message -> "undefined key sequence"
+      }
+    )
+  end
+  editor/set_pending_keys(session, "")
+  let command = resolution[:command]
+  return editor/input_command(session, frame, window, buffer, command, input)
+end
+
+verb editor/input_intent(session, frame, window, buffer, input)
+  let intent = index_or(input, :input_type, "")
+  let name = ""
+  if intent == :insertText || intent == :insertCompositionText
+    name = "self-insert-command"
+  elseif intent == :insertLineBreak
+    name = "newline-command"
+  elseif intent == :deleteContentBackward
+    name = "delete-backward-char"
+  elseif intent == :deleteContentForward
+    name = "delete-forward-char"
+  else
+    return editor/result(:rejected, session, frame, window, {:error -> :unsupported_intent})
+  end
+  return editor/input_command(
+    session,
+    frame,
+    window,
+    buffer,
+    editor/command_by_name(name),
+    input
+  )
+end
+
+// A pointer click: move point to the scalar offset. With `extend`, the old
+// point becomes the mark first, so a shift-click extends the region. The
+// client converts the click's UTF-16 offset to a scalar offset; Mica never
+// sees a UTF-16 position.
+verb editor/input_pointer(session, frame, window, buffer, input)
+  let offset = index_or(input, :scalar_offset, 0)
+  if index_or(input, :extend, false)
+    editor/mark_set(session, buffer, editor/window_point(session, window))
+  end
+  editor/window_set_point(session, window, offset)
+  editor/window_clear_goal_column(session, window)
+  return editor/result(:ok, session, frame, window, {:barrier -> true})
+end
+
+verb editor/input_resize_split(session, frame, window, input)
+  let split = index_or(input, :split, 0)
+  let ratio = index_or(input, :ratio, 500)
+  editor/split_set_ratio(session, frame, split, ratio)
+  return editor/result(
+    :ok,
+    session,
+    frame,
+    window,
+    {:barrier -> true, :snapshot_required -> true}
+  )
+end
+
+verb editor/input_viewport(session, frame, window, input)
+  let target = index_or(input, :window, window)
+  if not editor/window_complete(session, target)
+    return editor/result(
+      :rejected,
+      session,
+      frame,
+      window,
+      {:error -> :bad_window, :message -> "viewport window is not live"}
+    )
+  end
+  let height = index_or(input, :height, index_or(input, :line_count, editor/window_height(session, target)))
+  let width = index_or(input, :width, editor/window_width(session, target))
+  if height < 1
+    height = 1
+  end
+  if height > 1000
+    height = 1000
+  end
+  if width < 1
+    width = 1
+  end
+  if width > 1000
+    width = 1000
+  end
+  editor/window_set_size(session, target, height, width)
+  let snapshot_required = false
+  if editor/picker_window_active(session, target)
+    editor/picker_render(session)
+    snapshot_required = true
+  end
+  return editor/result(
+    :ok,
+    session,
+    frame,
+    window,
+    {:barrier -> false, :snapshot_required -> snapshot_required}
+  )
+end
+
+// The host calls this once per admitted item. It never sends a command
+// selector; Mica resolves the item against the active keymaps.
+verb editor_input(endpoint, session, frame, item, client_token)
+  let frame_id = frame
+  if not editor/Session(session)
+    return {:status -> :rejected, :session -> session, :error -> :no_session}
+  end
+  if frame_id == none
+    frame_id = editor/session_frame(session)
+  end
+  let window = editor/selected_window(session)
+  let buffer = editor/window_buffer(session, window)
+  let input = item
+  input[:client_token] = client_token
+  let kind = index_or(input, :kind, :key)
+  if kind == :pointer
+    let target_window = index_or(input, :window, window)
+    if editor/picker_window_active(session, target_window)
+      return editor/picker_pointer(session, frame_id, window, input)
+    end
+  end
+  // A pointer or window-selection item names its window because one frame_id can
+  // display many buffers. Select that window before interpreting the item.
+  if kind == :pointer || kind == :select_window
+    let target_window = index_or(input, :window, window)
+    if target_window != window
+      editor/window_select(session, frame_id, target_window)
+      window = target_window
+      buffer = editor/window_buffer(session, window)
+    end
+  end
+  if kind == :select_window
+    return editor/result(:ok, session, frame_id, window, {:barrier -> true})
+  end
+  if editor/minibuffer_active(session) && kind != :viewport && kind != :focus && kind != :resize_split
+    return editor/minibuffer_input(session, frame_id, window, input)
+  end
+  // A text or paste item is never a chord. If a stale prefix is still pending
+  // (an older client, a disconnected one), drop it rather than letting it
+  // swallow every later key.
+  if kind != :key && kind != :pointer && kind != :viewport && kind != :focus && kind != :resize_split
+    if editor/pending_keys(session) != ""
+      editor/set_pending_keys(session, "")
+    end
+  end
+  if kind == :key
+    return editor/input_key(session, frame_id, window, buffer, input)
+  end
+  if kind == :text
+    return editor/input_command(
+      session,
+      frame_id,
+      window,
+      buffer,
+      editor/command_by_name("self-insert-command"),
+      input
+    )
+  end
+  if kind == :paste
+    return editor/input_command(
+      session,
+      frame_id,
+      window,
+      buffer,
+      editor/command_by_name("clipboard-yank-command"),
+      input
+    )
+  end
+  if kind == :input
+    return editor/input_intent(session, frame_id, window, buffer, input)
+  end
+  if kind == :pointer
+    return editor/input_pointer(session, frame_id, window, buffer, input)
+  end
+  if kind == :viewport
+    return editor/input_viewport(session, frame_id, window, input)
+  end
+  if kind == :resize_split
+    return editor/input_resize_split(session, frame_id, window, input)
+  end
+  return editor/result(
+    :rejected,
+    session,
+    frame_id,
+    window,
+    {:error -> :bad_item, :message -> "unknown input kind"}
+  )
+end
+
+// The authoritative half of a staged text change. The host calls this after the
+// task reaches a terminal outcome; the completion is then readable.
+verb editor_input_result(endpoint, session, client_token)
+  let rows = editor/PendingApply(session, client_token, ?buffer)
+  if not rows
+    return {:status -> :rejected, :session -> session, :error -> :unknown_token}
+  end
+  let exactly {:buffer -> buffer} = rows
+  let window = editor/window_for_buffer(session, buffer)
+  let frame = editor/session_frame(session)
+  let result = buffer_apply_result(client_token)
+  let status = index_or(result, :status, :pending)
+  if status != :pending
+    retract editor/PendingApply(session, client_token, _)
+  end
+  if status == :ok
+    return editor/result(
+      :ok,
+      session,
+      frame,
+      window,
+      {
+        :buffer -> buffer,
+        :revision -> result[:revision],
+        :edits -> index_or(result, :applied, [])
+      }
+    )
+  end
+  if status == :resync || status == :conflict
+    return editor/result(:resync, session, frame, window, {:buffer -> buffer, :error -> status})
+  end
+  if status == :aborted
+    return editor/result(:rejected, session, frame, window, {:buffer -> buffer, :error -> status})
+  end
+  return editor/result(:rejected, session, frame, window, {:buffer -> buffer, :error -> :unknown_outcome})
+end

@@ -1,0 +1,34 @@
+// HTTP document route: the editor page shell.
+//
+// The client script is a static host route (`/editor-client.js`). The shell
+// and its style come from Mica; the viewport text arrives through the editor
+// input endpoint as bounded snapshots, and the browser only paints them.
+
+verb http_request(request)
+  let exactly {:m -> http_method} = RequestMethod(request, ?m)
+  let exactly {:path -> path} = RequestPath(request, ?path)
+
+  if http_method == "GET" && (path == "/" || path == "/editor" || string_starts_with(path, "/editor?"))
+    return http_html(200, editor/document())
+  end
+
+  return http_text(404, "not found")
+end
+
+verb editor/document()
+  let head = dom <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Mica Editor</title>
+    <style>{dom_raw(editor/document_style())}</style>
+  </head>
+  let body = dom <body>
+    <div id="mica-editor"></div>
+    <script type="module" src="/editor-client.js"></script>
+  </body>
+  return to_xml([dom_raw("<!doctype html>"), dom <html lang="en">{head}{body}</html>])
+end
+
+verb editor/document_style()
+  return ":root { color-scheme: dark; } html, body { margin: 0; height: 100%; background: #101014; color: #d8d8e0; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; } #mica-editor { position: relative; display: flex; flex-direction: column; height: 100vh; } .editor-frame, .editor-split, .editor-window { min-width: 0; min-height: 0; } .editor-frame { display: flex; flex: 1 1 auto; } .editor-split { display: flex; flex: 1 1 auto; background: #384052; } .editor-split.horizontal { flex-direction: column; } .editor-split.vertical { flex-direction: row; } .editor-divider { flex: 0 0 5px; background: #384052; } .editor-divider.horizontal { cursor: row-resize; } .editor-divider.vertical { cursor: col-resize; } .editor-divider:hover { background: #66758d; } .editor-window { display: flex; flex-direction: column; flex: 1 1 0; background: #101014; } .editor-window.selected { outline: 1px solid #52657d; outline-offset: -1px; } .editor-viewport { flex: 1 1 auto; margin: 0; padding: 8px 12px; overflow: auto; white-space: pre; font-size: 14px; line-height: 1.45; outline: none; cursor: text; } .editor-line { min-height: 1.45em; } .editor-caret { display: inline-block; width: 2px; height: 1.15em; margin: 0 -1px; background: #7fd1ff; vertical-align: text-bottom; } .editor-input { position: absolute; width: 2px; height: 1.45em; padding: 0; border: 0; margin: 0; opacity: 0.01; resize: none; overflow: hidden; background: transparent; color: transparent; caret-color: transparent; } .editor-modeline { flex: 0 0 auto; padding: 3px 12px; background: #1f2430; color: #a8b3c7; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; } .editor-window.selected .editor-modeline { background: #293244; color: #d3dbea; } .editor-modeline .modified { color: #ffd479; } .editor-echo { flex: 0 0 auto; padding: 3px 12px; min-height: 1.4em; color: #9aa7bd; font-size: 13px; } .editor-echo .pending { color: #ffd479; } .editor-echo .editor-note { color: #9aa7bd; } .editor-echo.error { color: #ff8f8f; }"
+end

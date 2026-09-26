@@ -1,0 +1,177 @@
+// Default Emacs-style command definitions and bindings.
+//
+// Every default binding is Mica data: JavaScript holds no command table. The
+// families the current core provides are bound here; the kill ring, files,
+// search, help, and session exit arrive with their commands.
+//
+// The browser compatibility document must list reserved keys and the
+// Mica-owned alternative for each supported platform profile. The default map
+// binds the chords the design lists; a platform profile can rebind or add
+// alternatives without JavaScript policy.
+
+verb editor/define_default_commands()
+  // Character movement
+  editor/command_define("forward-char", :editor/forward_char, :move_forward_scalar, false, true)
+  editor/command_define("backward-char", :editor/backward_char, :move_backward_scalar, false, true)
+  // Line movement
+  editor/command_define("next-line", :editor/next_line, :move_logical_line_down, false, true)
+  editor/command_define("previous-line", :editor/previous_line, :move_logical_line_up, false, true)
+  editor/command_define("beginning-of-line", :editor/beginning_of_line, :move_line_start, false, true)
+  editor/command_define("end-of-line", :editor/end_of_line, :move_line_end, false, true)
+  // Word and buffer movement
+  editor/command_define("forward-word", :editor/forward_word, :none, true, true)
+  editor/command_define("backward-word", :editor/backward_word, :none, true, true)
+  editor/command_define("beginning-of-buffer", :editor/beginning_of_buffer, :none, true, true)
+  editor/command_define("end-of-buffer", :editor/end_of_buffer, :none, true, true)
+  // Scrolling
+  editor/command_define("scroll-up-command", :editor/scroll_up_command, :scroll_lines, true, true)
+  editor/command_define("scroll-down-command", :editor/scroll_down_command, :scroll_lines, true, true)
+  editor/command_define("recenter-command", :editor/recenter_command, :scroll_lines, true, true)
+  // Insertion and deletion
+  editor/command_define("self-insert-command", :editor/self_insert_command, :insert_text, false, true)
+  editor/command_define("newline-command", :editor/newline_command, :insert_text, false, true)
+  // A paste inserts its text; the kill-ring version of this command arrives
+  // with the ring itself (its relations are already declared).
+  editor/command_define(
+    "clipboard-yank-command",
+    :editor/self_insert_command,
+    :insert_text,
+    false,
+    true
+  )
+  editor/command_define(
+    "delete-forward-char",
+    :editor/delete_forward_char,
+    :delete_forward_scalar,
+    false,
+    true
+  )
+  editor/command_define(
+    "delete-backward-char",
+    :editor/delete_backward_char,
+    :delete_backward_scalar,
+    false,
+    true
+  )
+  // Mark
+  editor/command_define("set-mark-command", :editor/set_mark_command, :set_mark, false, false)
+  editor/command_define(
+    "exchange-point-and-mark",
+    :editor/exchange_point_and_mark,
+    :exchange_point_mark,
+    false,
+    false
+  )
+  // Undo
+  editor/command_define("undo-command", :editor/undo_command, :none, false, true)
+  editor/command_define("redo-command", :editor/redo_command, :none, false, true)
+  // Numeric arguments and quit
+  editor/command_define("universal-argument", :editor/universal_argument, :none, false, false)
+  editor/command_define("negative-argument", :editor/negative_argument, :none, false, false)
+  editor/command_define("digit-argument", :editor/digit_argument, :none, false, false)
+  editor/command_define("keyboard-quit", :editor/keyboard_quit, :none, false, false)
+  // Windows
+  editor/command_define("split-window-below", :editor/split_window_below_command, :none, true, false)
+  editor/command_define("split-window-right", :editor/split_window_right_command, :none, true, false)
+  editor/command_define("delete-window", :editor/delete_window_command, :none, true, false)
+  editor/command_define(
+    "delete-other-windows",
+    :editor/delete_other_windows_command,
+    :none,
+    true,
+    false
+  )
+  editor/command_define("other-window", :editor/other_window_command, :none, true, false)
+  // Buffers
+  editor/command_define("switch-to-buffer", :editor/switch_to_buffer_command, :none, true, false)
+  // Files
+  editor/command_define("find-file", :editor/find_file_command, :none, true, false)
+  editor/command_define("save-buffer", :editor/save_buffer_command, :none, true, false)
+  // Minibuffer
+  editor/command_define(
+    "execute-extended-command",
+    :editor/execute_extended_command,
+    :none,
+    true,
+    false
+  )
+  return true
+end
+
+verb editor/install_default_keymaps()
+  editor/keymap_create(:editor/global)
+  editor/keymap_create(:editor/fundamental)
+  assert editor/GlobalKeymap(:default, :editor/global)
+  assert editor/MajorMode(:fundamental)
+  assert editor/ModeKeymap(:fundamental, :editor/fundamental)
+
+  editor/keymap_bind_named(:editor/global, "C-f", "forward-char")
+  editor/keymap_bind_named(:editor/global, "<right>", "forward-char")
+  editor/keymap_bind_named(:editor/global, "C-b", "backward-char")
+  editor/keymap_bind_named(:editor/global, "<left>", "backward-char")
+
+  editor/keymap_bind_named(:editor/global, "C-n", "next-line")
+  editor/keymap_bind_named(:editor/global, "<down>", "next-line")
+  editor/keymap_bind_named(:editor/global, "C-p", "previous-line")
+  editor/keymap_bind_named(:editor/global, "<up>", "previous-line")
+
+  editor/keymap_bind_named(:editor/global, "C-a", "beginning-of-line")
+  editor/keymap_bind_named(:editor/global, "<home>", "beginning-of-line")
+  editor/keymap_bind_named(:editor/global, "C-e", "end-of-line")
+  editor/keymap_bind_named(:editor/global, "<end>", "end-of-line")
+
+  editor/keymap_bind_named(:editor/global, "M-f", "forward-word")
+  editor/keymap_bind_named(:editor/global, "M-b", "backward-word")
+  editor/keymap_bind_named(:editor/global, "M-<", "beginning-of-buffer")
+  editor/keymap_bind_named(:editor/global, "M->", "end-of-buffer")
+
+  editor/keymap_bind_named(:editor/global, "C-v", "scroll-up-command")
+  editor/keymap_bind_named(:editor/global, "M-v", "scroll-down-command")
+  editor/keymap_bind_named(:editor/global, "C-l", "recenter-command")
+
+  editor/keymap_bind_named(:editor/global, "C-d", "delete-forward-char")
+  editor/keymap_bind_named(:editor/global, "<delete>", "delete-forward-char")
+  editor/keymap_bind_named(:editor/global, "<backspace>", "delete-backward-char")
+
+  editor/keymap_bind_named(:editor/global, "C-<space>", "set-mark-command")
+  editor/keymap_bind_named(:editor/global, "C-x C-x", "exchange-point-and-mark")
+
+  editor/keymap_bind_named(:editor/global, "C-/", "undo-command")
+  editor/keymap_bind_named(:editor/global, "C-_", "undo-command")
+  editor/keymap_bind_named(:editor/global, "C-x u", "undo-command")
+  editor/keymap_bind_named(:editor/global, "C-x C-/", "redo-command")
+
+  editor/keymap_bind_named(:editor/global, "C-j", "newline-command")
+  editor/keymap_bind_named(:editor/global, "C-m", "newline-command")
+  editor/keymap_bind_named(:editor/global, "<return>", "newline-command")
+
+  editor/keymap_bind_named(:editor/global, "C-g", "keyboard-quit")
+  editor/keymap_bind_named(:editor/global, "C-u", "universal-argument")
+  editor/keymap_bind_named(:editor/global, "M--", "negative-argument")
+  editor/keymap_bind_named(:editor/global, "M-0", "digit-argument")
+  editor/keymap_bind_named(:editor/global, "M-1", "digit-argument")
+  editor/keymap_bind_named(:editor/global, "M-2", "digit-argument")
+  editor/keymap_bind_named(:editor/global, "M-3", "digit-argument")
+  editor/keymap_bind_named(:editor/global, "M-4", "digit-argument")
+  editor/keymap_bind_named(:editor/global, "M-5", "digit-argument")
+  editor/keymap_bind_named(:editor/global, "M-6", "digit-argument")
+  editor/keymap_bind_named(:editor/global, "M-7", "digit-argument")
+  editor/keymap_bind_named(:editor/global, "M-8", "digit-argument")
+  editor/keymap_bind_named(:editor/global, "M-9", "digit-argument")
+
+  editor/keymap_bind_named(:editor/global, "C-x 0", "delete-window")
+  editor/keymap_bind_named(:editor/global, "C-x 1", "delete-other-windows")
+  editor/keymap_bind_named(:editor/global, "C-x 2", "split-window-below")
+  editor/keymap_bind_named(:editor/global, "C-x 3", "split-window-right")
+  editor/keymap_bind_named(:editor/global, "C-x o", "other-window")
+
+  editor/keymap_bind_named(:editor/global, "C-x b", "switch-to-buffer")
+  editor/keymap_bind_named(:editor/global, "C-x C-f", "find-file")
+  editor/keymap_bind_named(:editor/global, "C-x C-s", "save-buffer")
+
+  editor/keymap_bind_named(:editor/global, "M-x", "execute-extended-command")
+  return true
+end
+
+editor/define_default_commands()
+editor/install_default_keymaps()

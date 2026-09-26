@@ -1,0 +1,137 @@
+// Editor chrome and the viewport payload the browser paints.
+//
+// The full design splits chrome (the synchronized DOM path) from text (the
+// editor path). This host bridge is the first step of the text path: one
+// bounded JSON snapshot per input, and the client paints the visible lines.
+// The read is bounded by `lines` and `max_scalars`, exactly like
+// `buffer_viewport`.
+
+// Defaults are useful to headless examples. The web host supplies its
+// authenticated actor and a numeric, per-tab session id.
+verb editor/default_session()
+  return :editor/default
+end
+
+verb editor/default_actor()
+  return :editor/user
+end
+
+verb editor/ensure_default_session()
+  return editor/session_create(editor/default_session(), editor/default_actor(), :default)
+end
+
+verb editor/minibuffer_prompt_or_empty(session)
+  let requests = editor/ActiveMinibuffer(session, ?request)
+  if requests
+    let exactly {:request -> request} = requests
+    let prompts = editor/MinibufferPrompt(session, request, ?prompt)
+    if prompts
+      let exactly {:prompt -> prompt} = prompts
+      return prompt
+    end
+  end
+  return ""
+end
+
+verb editor/minibuffer_text(session)
+  let buffer = editor/minibuffer_buffer_or_none(session)
+  if buffer == none
+    return ""
+  end
+  return buffer_text(buffer)
+end
+
+verb editor/window_snapshot(session, window, lines, max_scalars)
+  let buffer = editor/window_buffer(session, window)
+  let first = editor/window_first_line(session, window)
+  let viewport = buffer_viewport(buffer, first, lines, max_scalars)
+  let rows = []
+  for row in viewport
+    rows = [@rows, {
+      :line -> row[:line],
+      :start -> row[:start],
+      :stop -> row[:stop],
+      :text -> row[:text],
+      :complete -> row[:complete]
+    }]
+  end
+  // Relation row order is canonical, so a truncated row could sort away from
+  // its logical position. The viewport is small and bounded; order it by line.
+  let ordered = [row for row in rows sort row[:line]]
+
+  let point = editor/window_point(session, window)
+  let placed = buffer_position_line_column(buffer, point)
+  let mark = json_null()
+  if editor/mark_active(session, buffer)
+    mark = buffer_position_line_column(buffer, editor/mark_position(session, buffer))
+  end
+  return {
+    :window -> window,
+    :buffer -> buffer,
+    :buffer_name -> editor/buffer_display_name(buffer),
+    :modified -> editor/buffer_modified(buffer),
+    :revision -> buffer_revision(buffer),
+    :first_line -> first,
+    :rows -> ordered,
+    :point -> point,
+    :point_line -> placed[:line],
+    :point_column -> placed[:column],
+    :mark -> mark,
+    :mark_active -> editor/mark_active(session, buffer),
+    :picker -> editor/picker_window_active(session, window)
+  }
+end
+
+verb editor/frame_snapshot_node(session, node)
+  let exactly {:kind -> kind} = editor/NodeKind(session, node, ?kind)
+  if kind == :window
+    return {:kind -> :window, :window -> node}
+  end
+  let exactly {:axis -> axis} = editor/SplitAxis(session, node, ?axis)
+  let exactly {:ratio -> ratio} = editor/SplitRatio(session, node, ?ratio)
+  let exactly {:first -> first} = editor/SplitFirst(session, node, ?first)
+  let exactly {:second -> second} = editor/SplitSecond(session, node, ?second)
+  return {
+    :kind -> :split,
+    :node -> node,
+    :axis -> axis,
+    :ratio -> ratio,
+    :first -> editor/frame_snapshot_node(session, first),
+    :second -> editor/frame_snapshot_node(session, second)
+  }
+end
+
+// A bounded snapshot of the complete visible frame. The selected-window
+// fields remain at the top level for simple clients and provisional replay.
+verb editor/snapshot(session, lines, max_scalars)
+  let frame = editor/session_frame(session)
+  let selected = editor/selected_window(session)
+  let current = editor/window_snapshot(session, selected, lines, max_scalars)
+  let windows = []
+  for window in editor/window_leaves(session, frame)
+    windows = [@windows, editor/window_snapshot(session, window, lines, max_scalars)]
+  end
+  let prefix = editor/prefix_value(session)
+  if prefix == none
+    prefix = json_null()
+  end
+  current[:session] = session
+  current[:frame] = frame
+  current[:selected_window] = selected
+  current[:frame_generation] = editor/frame_generation(session, frame)
+  current[:frame_tree] = editor/frame_snapshot_node(session, editor/frame_root(session, frame))
+  current[:windows] = windows
+  current[:pending] = editor/pending_keys(session)
+  current[:prefix_argument] = prefix
+  current[:keymap_generation] = editor/keymap_generation(session)
+  current[:keymap_plan] = editor/keymap_plan(session, current[:buffer])
+  current[:minibuffer_active] = editor/minibuffer_active(session)
+  current[:minibuffer_prompt] = editor/minibuffer_prompt_or_empty(session)
+  current[:minibuffer_text] = editor/minibuffer_text(session)
+  return current
+end
+
+verb editor/snapshot_json(session, actor, lines, max_scalars)
+  editor/session_create(session, actor, :default)
+  return json_encode(editor/snapshot(session, lines, max_scalars))
+end

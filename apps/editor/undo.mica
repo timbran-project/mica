@@ -1,0 +1,216 @@
+// The undo journal: per-buffer groups of forward and inverse edits.
+//
+// Whole-buffer reversion is a separate buffer-layer feature; editor undo is a
+// command journal. Each group records the revision pair it spans, the edits in
+// both directions, the author, and its kind. `UndoCursor(buffer, next)` is the
+// next group number: groups below the cursor are applied history, groups at or
+// above it are the redo tail.
+//
+// Adjacent self-insert commands from one session coalesce into one group; any
+// other command closes the open group. A new ordinary edit after undo removes
+// the redo tail.
+
+verb editor/undo_cursor(buffer)
+  let rows = editor/UndoCursor(buffer, ?next)
+  if not rows
+    return 1
+  end
+  let exactly {:next -> next} = rows
+  return next
+end
+
+verb editor/undo_set_cursor(buffer, next)
+  retract editor/UndoCursor(buffer, _)
+  assert editor/UndoCursor(buffer, next)
+  return next
+end
+
+verb editor/undo_group_edits(buffer, group, direction)
+  if direction == :forward
+    let exactly {:edits -> edits} = editor/UndoForwardEdits(buffer, group, ?edits)
+    return edits
+  end
+  let exactly {:edits -> edits} = editor/UndoInverseEdits(buffer, group, ?edits)
+  return edits
+end
+
+verb editor/undo_group_new_revision(buffer, group)
+  let exactly {:revision -> revision} = editor/UndoNewRevision(buffer, group, ?revision)
+  return revision
+end
+
+verb editor/undo_group_base_revision(buffer, group)
+  let exactly {:revision -> revision} = editor/UndoBaseRevision(buffer, group, ?revision)
+  return revision
+end
+
+verb editor/undo_remove_group(buffer, group)
+  retract editor/UndoGroup(buffer, group)
+  retract editor/UndoAuthor(buffer, group, _)
+  retract editor/UndoBaseRevision(buffer, group, _)
+  retract editor/UndoNewRevision(buffer, group, _)
+  retract editor/UndoForwardEdits(buffer, group, _)
+  retract editor/UndoInverseEdits(buffer, group, _)
+  retract editor/UndoKind(buffer, group, _)
+  return true
+end
+
+// Removes every group at or above the cursor: the redo tail.
+verb editor/undo_drop_from(buffer, cursor)
+  for row in editor/UndoGroup(buffer, ?group)
+    if row[:group] >= cursor
+      editor/undo_remove_group(buffer, row[:group])
+    end
+  end
+  return true
+end
+
+verb editor/undo_clear(buffer)
+  for row in editor/UndoGroup(buffer, ?group)
+    editor/undo_remove_group(buffer, row[:group])
+  end
+  retract editor/UndoCursor(buffer, _)
+  return true
+end
+
+// True when the newest group is an insertion by this session that ends exactly
+// where the new insertion starts.
+verb editor/undo_can_coalesce(session, buffer, group, base_revision, forward)
+  let authors = editor/UndoAuthor(buffer, group, ?author)
+  if not authors
+    return false
+  end
+  let exactly {:author -> author} = authors
+  if author != session
+    return false
+  end
+  let kinds = editor/UndoKind(buffer, group, ?kind)
+  if not kinds
+    return false
+  end
+  let exactly {:kind -> kind} = kinds
+  if kind != :insert
+    return false
+  end
+  if editor/undo_group_new_revision(buffer, group) != base_revision
+    return false
+  end
+  let exactly {:edits -> old_forward} = editor/UndoForwardEdits(buffer, group, ?edits)
+  let old_edit = old_forward[0]
+  let new_edit = forward[0]
+  if old_edit[:remove] != 0
+    return false
+  end
+  return old_edit[:at] + string_len(old_edit[:text]) == new_edit[:at]
+end
+
+verb editor/undo_extend(buffer, group, forward, new_revision)
+  let exactly {:edits -> old_forward} = editor/UndoForwardEdits(buffer, group, ?edits)
+  let exactly {:edits -> old_inverse} = editor/UndoInverseEdits(buffer, group, ?edits)
+  let added = forward[0]
+  let merged = string_concat(old_forward[0][:text], added[:text])
+  let forward_edit = [{:at -> old_forward[0][:at], :remove -> 0, :text -> merged}]
+  let inverse_edit = [{:at -> old_inverse[0][:at], :remove -> string_len(merged), :text -> ""}]
+  retract editor/UndoForwardEdits(buffer, group, _)
+  assert editor/UndoForwardEdits(buffer, group, forward_edit)
+  retract editor/UndoInverseEdits(buffer, group, _)
+  assert editor/UndoInverseEdits(buffer, group, inverse_edit)
+  retract editor/UndoNewRevision(buffer, group, _)
+  assert editor/UndoNewRevision(buffer, group, new_revision)
+  return group
+end
+
+// True when this edit continues the newest group: a contiguous insertion from
+// the same session at the cursor's edge.
+verb editor/undo_coalesces(session, buffer, cursor, base_revision, forward, kind)
+  if kind != :insert
+    return false
+  end
+  if cursor <= 1
+    return false
+  end
+  return editor/undo_can_coalesce(session, buffer, cursor - 1, base_revision, forward)
+end
+
+// Records one published edit as an undo group, coalescing a contiguous
+// insertion from the same session.
+verb editor/undo_record(session, buffer, base_revision, new_revision, forward, inverse, kind)
+  let cursor = editor/undo_cursor(buffer)
+  editor/undo_drop_from(buffer, cursor)
+  if editor/undo_coalesces(session, buffer, cursor, base_revision, forward, kind)
+    editor/undo_extend(buffer, cursor - 1, forward, new_revision)
+    return cursor - 1
+  end
+  let group = cursor
+  assert editor/UndoGroup(buffer, group)
+  assert editor/UndoAuthor(buffer, group, session)
+  assert editor/UndoBaseRevision(buffer, group, base_revision)
+  assert editor/UndoNewRevision(buffer, group, new_revision)
+  assert editor/UndoForwardEdits(buffer, group, forward)
+  assert editor/UndoInverseEdits(buffer, group, inverse)
+  assert editor/UndoKind(buffer, group, kind)
+  editor/undo_set_cursor(buffer, group + 1)
+  return group
+end
+
+// True when the buffer holds the text this direction expects to replace, so an
+// incremental undo or redo is safe. To apply one direction is to put the
+// *other* direction's text back, so the opposite edit's text is what must be
+// present. The `:reject` policy catches a concurrent edit that changed the
+// revision; this check catches a moved position that a later revision produced.
+verb editor/undo_direction_valid(buffer, group, direction)
+  let checked = :forward
+  if direction == :forward
+    checked = :inverse
+  end
+  let edits = editor/undo_group_edits(buffer, group, checked)
+  let edit = edits[0]
+  let text = index_or(edit, :text, "")
+  if string_len(text) == 0
+    return true
+  end
+  if edit[:at] + string_len(text) > buffer_len(buffer)
+    return false
+  end
+  return buffer_slice(buffer, edit[:at], edit[:at] + string_len(text)) == text
+end
+
+verb editor/undo_target(buffer)
+  let cursor = editor/undo_cursor(buffer)
+  if cursor <= 1
+    return none
+  end
+  return cursor - 1
+end
+
+verb editor/redo_target(buffer)
+  let cursor = editor/undo_cursor(buffer)
+  if editor/UndoGroup(buffer, cursor)
+    return cursor
+  end
+  return none
+end
+
+// Applies one stored group in one direction and moves the cursor. Undo and redo
+// share this path; neither records a new group.
+verb editor/undo_apply(session, frame, window, buffer, group, direction, token)
+  let edits = editor/undo_group_edits(buffer, group, direction)
+  let outcome = editor/stage_edits(
+    session,
+    frame,
+    window,
+    buffer,
+    buffer_revision(buffer),
+    edits,
+    token
+  )
+  if outcome[:status] != :staged
+    return outcome
+  end
+  if direction == :inverse
+    editor/undo_set_cursor(buffer, group)
+  else
+    editor/undo_set_cursor(buffer, group + 1)
+  end
+  return outcome
+end

@@ -1,0 +1,962 @@
+// In-Mica scenarios for the editor core.
+//
+// Each verb is its own task, and therefore its own transaction. Cross-commit
+// behavior (revision movement, conflict, recovery) is covered by the kernel and
+// store suites; these scenarios drive the command loop the way the web host
+// will, one input item at a time, and assert the editor's own state.
+//
+// Order matters where a scenario needs committed history; the runtime suite and
+// the conformance tool list the verbs in that order.
+
+verb test/assert_equal(actual, expected, label @ #string)
+  if actual != expected
+    raise E_INVARG, string_concat(label, " failed")
+  end
+
+  return true
+end
+
+verb test/assert_true(value, label @ #string)
+  if value != true
+    raise E_INVARG, string_concat(label, " failed")
+  end
+
+  return true
+end
+
+verb test/editor_input(endpoint, session, frame, item)
+  return editor_input(endpoint, session, frame, item, 0)
+end
+
+// --- Sessions and buffers ---------------------------------------------------
+
+verb test/editor_session_seeds_a_frame()
+  editor/session_create(:editor/test/session, :editor/test/actor, :default)
+
+  test/assert_true(editor/Session(:editor/test/session), "session exists")
+  test/assert_equal(editor/selected_window(:editor/test/session), 1, "one selected window")
+  test/assert_equal(editor/session_frame(:editor/test/session), 1, "one frame")
+  test/assert_true(editor/frame_valid(:editor/test/session, 1), "the frame is valid")
+
+  let buffer = editor/window_buffer(:editor/test/session, 1)
+  test/assert_equal(editor/buffer_display_name(buffer), "*scratch*", "a scratch buffer is shown")
+
+  return true
+end
+
+// Re-declaring a session is safe for a reconnecting client.
+verb test/editor_session_create_is_idempotent()
+  editor/session_create(:editor/test/session, :editor/test/actor, :default)
+  editor/session_create(:editor/test/session, :editor/test/actor, :default)
+
+  test/assert_equal(editor/window_leaves(:editor/test/session, 1), [1], "still one window")
+
+  return true
+end
+
+verb test/editor_session_rejects_a_different_actor()
+  let rejected = try
+    editor/session_create(:editor/test/session, :editor/test/intruder, :default)
+    false
+  catch E_PERM
+    true
+  end
+  test/assert_true(rejected, "session actor mismatch is rejected")
+  return true
+end
+
+verb test/editor_word_and_keymap_invariants()
+  test/assert_true(editor/word_char("h"), "lowercase ASCII is a word character")
+  test/assert_true(editor/word_char("H"), "uppercase ASCII is a word character")
+
+  editor/keymap_create(:editor/test/keymap)
+  editor/keymap_bind_named(:editor/test/keymap, "C-c", "forward-char")
+  let conflict = try
+    editor/keymap_bind_named(:editor/test/keymap, "C-c a", "backward-char")
+    false
+  catch E_INVARG
+    true
+  end
+  test/assert_true(conflict, "a binding cannot also be a prefix")
+
+  editor/keymap_create(:editor/test/pruned_keymap)
+  editor/keymap_bind_named(:editor/test/pruned_keymap, "C-c a", "forward-char")
+  test/assert_true(editor/keymap_prefix(:editor/test/pruned_keymap, "C-c"), "prefix exists")
+  editor/keymap_unbind(:editor/test/pruned_keymap, "C-c a")
+  test/assert_equal(
+    editor/keymap_prefix(:editor/test/pruned_keymap, "C-c"),
+    false,
+    "unused prefix is removed"
+  )
+  return true
+end
+
+verb test/editor_display_names_are_disambiguated()
+  let first = editor/buffer_create(:editor/test/actor, :scratch, "*notes*", "")
+  let second = editor/buffer_create(:editor/test/actor, :scratch, "*notes*", "")
+
+  test/assert_equal(editor/buffer_display_name(first), "*notes*", "first display name")
+  test/assert_equal(editor/buffer_display_name(second), "*notes*<2>", "suffixed display name")
+  test/assert_true(first != second, "internal names differ")
+  test/assert_equal(editor/buffer_by_name("*notes*"), first, "lookup by name")
+  test/assert_equal(editor/buffer_by_name("*notes*<2>"), second, "lookup by suffix")
+
+  return true
+end
+
+// Retirement removes the display name but never reuses the internal one.
+verb test/editor_retirement_keeps_internal_names_distinct()
+  let doomed = editor/buffer_create(:editor/test/actor, :scratch, "*doomed*", "text")
+  test/assert_true(
+    editor/buffer_kill(:editor/test/session, doomed, false),
+    "retire an unmodified scratch buffer"
+  )
+  test/assert_equal(editor/buffer_by_name("*doomed*"), none, "the display name is free again")
+
+  let fresh = editor/buffer_create(:editor/test/actor, :scratch, "*doomed*", "")
+  test/assert_true(fresh != doomed, "a fresh internal name")
+
+  let refused = try
+    buffer_insert(doomed, 0, "x")
+    false
+  catch E_KILLED
+    true
+  end
+  test/assert_true(refused, "the retired symbol stays retired")
+
+  return true
+end
+
+// --- Typing, keys, movement -------------------------------------------------
+
+verb test/editor_typing_inserts_at_point()
+  editor/session_create(:editor/test/typing, :editor/test/actor, :default)
+  let result = test/editor_input(
+    :editor/test/endpoint,
+    :editor/test/typing,
+    1,
+    {:kind -> :text, :text -> "hello"}
+  )
+  test/assert_equal(result[:status], :ok, "text is accepted")
+
+  let buffer = editor/window_buffer(:editor/test/typing, 1)
+  test/assert_equal(buffer_text(buffer), "hello", "inserted text")
+  test/assert_equal(editor/window_point(:editor/test/typing, 1), 5, "point follows the insert")
+  test/assert_equal(result[:edits][0][:text], "hello", "the result carries the edit")
+
+  return true
+end
+
+// Each call runs in a separate transaction. This matches a browser session
+// that types text and then sends Return twice.
+verb test/editor_consecutive_returns_seed()
+  editor/session_create(:editor/test/returns, :editor/test/actor, :default)
+  let notes = editor/buffer_create(:editor/test/actor, :scratch, "*returns*", "")
+  editor/window_show(:editor/test/returns, 1, notes)
+  test/editor_input(
+    :editor/test/endpoint,
+    :editor/test/returns,
+    1,
+    {:kind -> :text, :text -> "ab"}
+  )
+
+  return true
+end
+
+verb test/editor_consecutive_returns_first()
+  test/editor_input(
+    :editor/test/endpoint,
+    :editor/test/returns,
+    1,
+    {:kind -> :key, :key -> "<return>"}
+  )
+
+  let payload = editor/snapshot(:editor/test/returns, 10, 4096)
+  test/assert_equal(len(payload[:rows]), 2, "first Return creates two lines")
+  test/assert_equal(payload[:rows][0][:text], "ab", "typed line remains visible")
+  test/assert_equal(payload[:rows][1][:text], "", "new empty line is visible")
+  test/assert_equal(payload[:point_line], 1, "point moves to the new line")
+  test/assert_equal(payload[:point_column], 0, "point moves to column zero")
+
+  return true
+end
+
+verb test/editor_consecutive_returns_second()
+  test/editor_input(
+    :editor/test/endpoint,
+    :editor/test/returns,
+    1,
+    {:kind -> :key, :key -> "<return>"}
+  )
+
+  let payload = editor/snapshot(:editor/test/returns, 10, 4096)
+  test/assert_equal(len(payload[:rows]), 3, "second Return creates three lines")
+  test/assert_equal(payload[:rows][0][:text], "ab", "typed line remains visible")
+  test/assert_equal(payload[:rows][1][:text], "", "first empty line is visible")
+  test/assert_equal(payload[:rows][2][:text], "", "second empty line is visible")
+  test/assert_equal(payload[:point_line], 2, "point moves to the last line")
+  test/assert_equal(payload[:point_column], 0, "point remains at column zero")
+
+  return true
+end
+
+verb test/editor_prefix_and_undefined_keys()
+  editor/session_create(:editor/test/keys, :editor/test/actor, :default)
+
+  let prefix = test/editor_input(:editor/test/endpoint, :editor/test/keys, 1, {:kind -> :key, :key -> "C-x"})
+  test/assert_equal(prefix[:status], :prefix, "C-x is a prefix")
+  test/assert_equal(prefix[:pending], "C-x", "the prefix is pending")
+
+  let completed = test/editor_input(:editor/test/endpoint, :editor/test/keys, 1, {:kind -> :key, :key -> "u"})
+  test/assert_equal(completed[:status], :ok, "C-x u completes")
+  test/assert_equal(editor/pending_keys(:editor/test/keys), "", "the pending sequence is cleared")
+
+  let unknown = test/editor_input(:editor/test/endpoint, :editor/test/keys, 1, {:kind -> :key, :key -> "C-z"})
+  test/assert_equal(unknown[:status], :undefined, "an unbound sequence is undefined")
+  test/assert_equal(len(unknown[:browser_operations]), 1, "an undefined sequence rings the bell")
+  test/assert_equal(unknown[:browser_operations][0][:op], :ring_bell, "the bell operation")
+
+  return true
+end
+
+// Vertical movement remembers the initial column and clamps it on short lines.
+verb test/editor_movement_keeps_a_goal_column()
+  editor/session_create(:editor/test/move, :editor/test/actor, :default)
+  let notes = editor/buffer_create(:editor/test/actor, :scratch, "*move*", "abcdef\nxy\nabcdef")
+  editor/window_show(:editor/test/move, 1, notes)
+
+  let home = test/editor_input(:editor/test/endpoint, :editor/test/move, 1, {:kind -> :key, :key -> "M-<"})
+  test/assert_equal(home[:point], 0, "beginning of buffer")
+
+  let fives = test/editor_input(:editor/test/endpoint, :editor/test/move, 1, {:kind -> :key, :key -> "C-f"})
+  test/assert_equal(fives[:point], 1, "one step")
+  test/editor_input(:editor/test/endpoint, :editor/test/move, 1, {:kind -> :key, :key -> "C-f"})
+  test/editor_input(:editor/test/endpoint, :editor/test/move, 1, {:kind -> :key, :key -> "C-f"})
+  let five = test/editor_input(:editor/test/endpoint, :editor/test/move, 1, {:kind -> :key, :key -> "C-f"})
+  test/editor_input(:editor/test/endpoint, :editor/test/move, 1, {:kind -> :key, :key -> "C-f"})
+  test/assert_equal(editor/window_point(:editor/test/move, 1), 5, "the fifth column")
+
+  // The short line clamps, and the next line restores the remembered column.
+  let clamped = test/editor_input(:editor/test/endpoint, :editor/test/move, 1, {:kind -> :key, :key -> "C-n"})
+  test/assert_equal(clamped[:point], 9, "clamped to the short line")
+  let restored = test/editor_input(:editor/test/endpoint, :editor/test/move, 1, {:kind -> :key, :key -> "C-n"})
+  test/assert_equal(restored[:point], 15, "the goal column is restored")
+  let up = test/editor_input(:editor/test/endpoint, :editor/test/move, 1, {:kind -> :key, :key -> "C-p"})
+  test/assert_equal(up[:point], 9, "clamped on the way back")
+
+  return true
+end
+
+verb test/editor_numeric_arguments()
+  editor/session_create(:editor/test/args, :editor/test/actor, :default)
+  let notes = editor/buffer_create(:editor/test/actor, :scratch, "*args*", "abcdefghij")
+  editor/window_show(:editor/test/args, 1, notes)
+
+  let three = test/editor_input(:editor/test/endpoint, :editor/test/args, 1, {:kind -> :key, :key -> "M-3"})
+  test/assert_equal(three[:prefix_argument], 3, "a digit argument")
+  let forward = test/editor_input(:editor/test/endpoint, :editor/test/args, 1, {:kind -> :key, :key -> "C-f"})
+  test/assert_equal(forward[:point], 3, "three steps forward")
+
+  test/editor_input(:editor/test/endpoint, :editor/test/args, 1, {:kind -> :key, :key -> "C-u"})
+  let four = test/editor_input(:editor/test/endpoint, :editor/test/args, 1, {:kind -> :key, :key -> "C-f"})
+  test/assert_equal(four[:point], 7, "four more steps")
+
+  test/editor_input(:editor/test/endpoint, :editor/test/args, 1, {:kind -> :key, :key -> "M--"})
+  let back = test/editor_input(:editor/test/endpoint, :editor/test/args, 1, {:kind -> :key, :key -> "C-f"})
+  test/assert_equal(back[:point], 6, "a negative argument reverses")
+
+  // A digit replaces the initial C-u value and extends itself.
+  test/editor_input(:editor/test/endpoint, :editor/test/args, 1, {:kind -> :key, :key -> "M-<"})
+  test/editor_input(:editor/test/endpoint, :editor/test/args, 1, {:kind -> :key, :key -> "C-u"})
+  test/editor_input(:editor/test/endpoint, :editor/test/args, 1, {:kind -> :key, :key -> "M-2"})
+  let replaced = test/editor_input(:editor/test/endpoint, :editor/test/args, 1, {:kind -> :key, :key -> "C-f"})
+  test/assert_equal(replaced[:point], 2, "the digit replaced C-u")
+
+  test/editor_input(:editor/test/endpoint, :editor/test/args, 1, {:kind -> :key, :key -> "M-1"})
+  test/editor_input(:editor/test/endpoint, :editor/test/args, 1, {:kind -> :key, :key -> "M-2"})
+  let extended = test/editor_input(:editor/test/endpoint, :editor/test/args, 1, {:kind -> :key, :key -> "C-f"})
+  test/assert_equal(extended[:point], 10, "digits extend and clamp")
+
+  return true
+end
+
+// A text item is never a chord. A stale prefix (an older client, a disconnect)
+// must not swallow every later key.
+verb test/editor_text_clears_a_stale_prefix()
+  editor/session_create(:editor/test/keys, :editor/test/actor, :default)
+  let notes = editor/buffer_create(:editor/test/actor, :scratch, "*stale-prefix*", "")
+  editor/window_show(:editor/test/keys, 1, notes)
+
+  let prefix = test/editor_input(
+    :editor/test/endpoint,
+    :editor/test/keys,
+    1,
+    {:kind -> :key, :key -> "C-x"}
+  )
+  test/assert_equal(prefix[:status], :prefix, "a prefix is pending")
+
+  let typed = test/editor_input(
+    :editor/test/endpoint,
+    :editor/test/keys,
+    1,
+    {:kind -> :text, :text -> "x"}
+  )
+  test/assert_equal(typed[:status], :ok, "text is accepted")
+  test/assert_equal(editor/pending_keys(:editor/test/keys), "", "the stale prefix is dropped")
+  test/assert_equal(buffer_text(notes), "x", "the text landed")
+
+  return true
+end
+
+// --- Undo, redo, and coalescing ---------------------------------------------
+
+verb test/editor_undo_seed()
+  editor/session_create(:editor/test/undo, :editor/test/actor, :default)
+  test/editor_input(:editor/test/endpoint, :editor/test/undo, 1, {:kind -> :text, :text -> "a"})
+  test/assert_equal(editor/undo_cursor(editor/window_buffer(:editor/test/undo, 1)), 2, "one group")
+
+  return true
+end
+
+verb test/editor_undo_types_b()
+  test/editor_input(:editor/test/endpoint, :editor/test/undo, 1, {:kind -> :text, :text -> "b"})
+  test/assert_equal(editor/undo_cursor(editor/window_buffer(:editor/test/undo, 1)), 2, "still one group")
+
+  return true
+end
+
+verb test/editor_undo_types_c()
+  test/editor_input(:editor/test/endpoint, :editor/test/undo, 1, {:kind -> :text, :text -> "c"})
+  let buffer = editor/window_buffer(:editor/test/undo, 1)
+  test/assert_equal(buffer_text(buffer), "abc", "three typed characters")
+
+  return true
+end
+
+verb test/editor_undo_reverts_one_group()
+  let undone = test/editor_input(:editor/test/endpoint, :editor/test/undo, 1, {:kind -> :key, :key -> "C-/"})
+  test/assert_equal(undone[:status], :ok, "undo completes")
+  let buffer = editor/window_buffer(:editor/test/undo, 1)
+  test/assert_equal(buffer_text(buffer), "", "the whole coalesced group is undone")
+  test/assert_equal(editor/window_point(:editor/test/undo, 1), 0, "point returns to the edit")
+
+  return true
+end
+
+verb test/editor_undo_reports_nothing_left()
+  let again = test/editor_input(:editor/test/endpoint, :editor/test/undo, 1, {:kind -> :key, :key -> "C-/"})
+  test/assert_equal(again[:message], "no further undo information", "nothing left to undo")
+
+  return true
+end
+
+verb test/editor_redo_reapplies_the_group()
+  let redone = test/editor_input(:editor/test/endpoint, :editor/test/undo, 1, {:kind -> :key, :key -> "C-x"})
+  let completed = test/editor_input(:editor/test/endpoint, :editor/test/undo, 1, {:kind -> :key, :key -> "C-/"})
+  test/assert_equal(completed[:status], :ok, "redo completes")
+  let buffer = editor/window_buffer(:editor/test/undo, 1)
+  test/assert_equal(buffer_text(buffer), "abc", "the group is reapplied")
+
+  return true
+end
+
+verb test/editor_redo_tail_undo()
+  test/editor_input(:editor/test/endpoint, :editor/test/undo, 1, {:kind -> :key, :key -> "C-/"})
+  let buffer = editor/window_buffer(:editor/test/undo, 1)
+  test/assert_equal(buffer_text(buffer), "", "undone again")
+
+  return true
+end
+
+verb test/editor_redo_tail_type()
+  test/editor_input(:editor/test/endpoint, :editor/test/undo, 1, {:kind -> :text, :text -> "d"})
+  let buffer = editor/window_buffer(:editor/test/undo, 1)
+  test/assert_equal(buffer_text(buffer), "d", "new text after undo")
+
+  return true
+end
+
+verb test/editor_redo_tail_is_gone()
+  let stale = test/editor_input(:editor/test/endpoint, :editor/test/undo, 1, {:kind -> :key, :key -> "C-x"})
+  let redone = test/editor_input(:editor/test/endpoint, :editor/test/undo, 1, {:kind -> :key, :key -> "C-/"})
+  test/assert_equal(redone[:message], "no further redo information", "the redo tail was dropped")
+  let buffer = editor/window_buffer(:editor/test/undo, 1)
+  test/assert_equal(buffer_text(buffer), "d", "the new text survives")
+
+  return true
+end
+
+// --- Read-only policy -------------------------------------------------------
+
+verb test/editor_read_only_rejects_edits()
+  editor/session_create(:editor/test/readonly, :editor/test/actor, :default)
+  let notes = editor/buffer_create(:editor/test/actor, :scratch, "*readonly*", "x")
+  editor/window_show(:editor/test/readonly, 1, notes)
+  editor/buffer_set_read_only(notes, true)
+
+  let rejected = test/editor_input(:editor/test/endpoint, :editor/test/readonly, 1, {:kind -> :text, :text -> "y"})
+  test/assert_equal(rejected[:status], :rejected, "a read-only edit is rejected")
+  test/assert_equal(buffer_text(notes), "x", "the text is unchanged")
+  test/assert_equal(editor/window_point(:editor/test/readonly, 1), 0, "point is unchanged")
+
+  editor/buffer_set_read_only(notes, false)
+  return true
+end
+
+// --- Windows ----------------------------------------------------------------
+
+verb test/editor_windows_seed()
+  editor/session_create(:editor/test/windows, :editor/test/actor, :default)
+  let notes = editor/buffer_create(:editor/test/actor, :scratch, "*windows*", "hello world")
+  editor/window_show(:editor/test/windows, 1, notes)
+
+  return true
+end
+
+verb test/editor_windows_split_and_points()
+  let second = test/editor_input(:editor/test/endpoint, :editor/test/windows, 1, {:kind -> :key, :key -> "C-x"})
+  let split = test/editor_input(:editor/test/endpoint, :editor/test/windows, 1, {:kind -> :key, :key -> "2"})
+  test/assert_equal(split[:status], :ok, "C-x 2 splits")
+
+  let leaves = editor/window_leaves(:editor/test/windows, 1)
+  test/assert_equal(len(leaves), 2, "two windows")
+  let fresh = leaves[1]
+  test/assert_equal(editor/selected_window(:editor/test/windows), fresh, "the new window is selected")
+  test/assert_true(editor/frame_valid(:editor/test/windows, 1), "the frame stays valid")
+
+  let root = editor/frame_root(:editor/test/windows, 1)
+  let generation = editor/frame_generation(:editor/test/windows, 1)
+  let resized = test/editor_input(
+    :editor/test/endpoint,
+    :editor/test/windows,
+    1,
+    {:kind -> :resize_split, :split -> root, :ratio -> 700}
+  )
+  test/assert_equal(resized[:status], :ok, "a divider drag resizes the split")
+  test/assert_equal(resized[:snapshot_required], true, "a resize returns the frame")
+  let exactly {:ratio -> stored_ratio} = editor/SplitRatio(:editor/test/windows, root, ?ratio)
+  test/assert_equal(stored_ratio, 700, "the ratio is stored")
+  test/assert_equal(editor/frame_generation(:editor/test/windows, 1), generation + 1, "resize bumps the frame")
+
+  // Point in the new window, then back in the first.
+  let eol = test/editor_input(:editor/test/endpoint, :editor/test/windows, 1, {:kind -> :key, :key -> "C-e"})
+  test/assert_equal(eol[:point], 11, "end of the buffer in the new window")
+
+  test/editor_input(:editor/test/endpoint, :editor/test/windows, 1, {:kind -> :key, :key -> "C-x"})
+  let other = test/editor_input(:editor/test/endpoint, :editor/test/windows, 1, {:kind -> :key, :key -> "o"})
+  test/assert_equal(other[:window], 1, "C-x o selects the first window")
+  test/editor_input(:editor/test/endpoint, :editor/test/windows, 1, {:kind -> :key, :key -> "C-f"})
+  test/editor_input(:editor/test/endpoint, :editor/test/windows, 1, {:kind -> :key, :key -> "C-f"})
+  let moved = test/editor_input(:editor/test/endpoint, :editor/test/windows, 1, {:kind -> :key, :key -> "C-f"})
+  test/assert_equal(moved[:point], 3, "point in the first window")
+  test/assert_equal(editor/window_point(:editor/test/windows, fresh), 11, "the new window keeps its point")
+
+  let focused = test/editor_input(
+    :editor/test/endpoint,
+    :editor/test/windows,
+    1,
+    {:kind -> :select_window, :window -> fresh}
+  )
+  test/assert_equal(focused[:window], fresh, "a window click selects its window")
+  test/assert_equal(focused[:point], 11, "a window click does not move point")
+
+  let clicked = test/editor_input(
+    :editor/test/endpoint,
+    :editor/test/windows,
+    1,
+    {:kind -> :pointer, :window -> fresh, :scalar_offset -> 5, :extend -> false}
+  )
+  test/assert_equal(clicked[:window], fresh, "a pointer item selects its window")
+  test/assert_equal(clicked[:point], 5, "the pointer moves that window's point")
+  test/editor_input(
+    :editor/test/endpoint,
+    :editor/test/windows,
+    1,
+    {:kind -> :pointer, :window -> fresh, :scalar_offset -> 11, :extend -> false}
+  )
+  test/editor_input(
+    :editor/test/endpoint,
+    :editor/test/windows,
+    1,
+    {:kind -> :pointer, :window -> 1, :scalar_offset -> 3, :extend -> false}
+  )
+
+  return true
+end
+
+// An edit in one window rebases both windows' markers.
+verb test/editor_windows_edit_rebases_both()
+  let leaves = editor/window_leaves(:editor/test/windows, 1)
+  // The first window is selected and sits at column 3.
+  let typed = test/editor_input(:editor/test/endpoint, :editor/test/windows, 1, {:kind -> :text, :text -> "!"})
+  test/assert_equal(typed[:status], :ok, "typing at point")
+
+  let buffer = editor/window_buffer(:editor/test/windows, leaves[0])
+  test/assert_equal(buffer_text(buffer), "hel!lo world", "the edit landed")
+  test/assert_equal(editor/window_point(:editor/test/windows, leaves[0]), 4, "the edited window advances")
+  test/assert_equal(editor/window_point(:editor/test/windows, leaves[1]), 12, "the other window's point sticks after")
+  test/assert_equal(len(typed[:windows]), 2, "the edit reports both visible windows")
+  test/assert_equal(typed[:windows][1][:point], 12, "the other point is authoritative")
+
+  return true
+end
+
+verb test/editor_window_tree_commands()
+  // Collapse to one window, then build a tree and walk it.
+  test/editor_input(:editor/test/endpoint, :editor/test/windows, 1, {:kind -> :key, :key -> "C-x"})
+  let only = test/editor_input(:editor/test/endpoint, :editor/test/windows, 1, {:kind -> :key, :key -> "1"})
+  test/assert_equal(only[:status], :ok, "C-x 1")
+  test/assert_equal(len(editor/window_leaves(:editor/test/windows, 1)), 1, "one window remains")
+
+  test/editor_input(:editor/test/endpoint, :editor/test/windows, 1, {:kind -> :key, :key -> "C-x"})
+  test/editor_input(:editor/test/endpoint, :editor/test/windows, 1, {:kind -> :key, :key -> "2"})
+  test/editor_input(:editor/test/endpoint, :editor/test/windows, 1, {:kind -> :key, :key -> "C-x"})
+  test/editor_input(:editor/test/endpoint, :editor/test/windows, 1, {:kind -> :key, :key -> "3"})
+  let leaves = editor/window_leaves(:editor/test/windows, 1)
+  test/assert_equal(len(leaves), 3, "three windows")
+  test/assert_true(editor/frame_valid(:editor/test/windows, 1), "the tree is valid")
+
+  let before = editor/selected_window(:editor/test/windows)
+  test/editor_input(:editor/test/endpoint, :editor/test/windows, 1, {:kind -> :key, :key -> "C-x"})
+  let cycled = test/editor_input(:editor/test/endpoint, :editor/test/windows, 1, {:kind -> :key, :key -> "o"})
+  test/assert_true(cycled[:window] != before, "other-window moves")
+  test/assert_true(editor/list_contains(leaves, cycled[:window]), "to a live window")
+
+  test/editor_input(:editor/test/endpoint, :editor/test/windows, 1, {:kind -> :key, :key -> "C-x"})
+  test/editor_input(:editor/test/endpoint, :editor/test/windows, 1, {:kind -> :key, :key -> "0"})
+  test/assert_equal(len(editor/window_leaves(:editor/test/windows, 1)), 2, "delete-window")
+  test/assert_true(editor/frame_valid(:editor/test/windows, 1), "the tree stays valid")
+
+  return true
+end
+
+// --- Marks and regions ------------------------------------------------------
+
+verb test/editor_marks_seed()
+  editor/session_create(:editor/test/marks, :editor/test/actor, :default)
+  let notes = editor/buffer_create(:editor/test/actor, :scratch, "*marks*", "abcdef")
+  editor/window_show(:editor/test/marks, 1, notes)
+
+  return true
+end
+
+verb test/editor_marks_and_region()
+  let notes = editor/window_buffer(:editor/test/marks, 1)
+
+  test/editor_input(:editor/test/endpoint, :editor/test/marks, 1, {:kind -> :key, :key -> "C-<space>"})
+  test/editor_input(:editor/test/endpoint, :editor/test/marks, 1, {:kind -> :key, :key -> "C-f"})
+  test/editor_input(:editor/test/endpoint, :editor/test/marks, 1, {:kind -> :key, :key -> "C-f"})
+  test/editor_input(:editor/test/endpoint, :editor/test/marks, 1, {:kind -> :key, :key -> "C-f"})
+
+  test/assert_equal(editor/mark_active(:editor/test/marks, notes), true, "the mark is active")
+  test/assert_equal(editor/region(:editor/test/marks, notes), [0, 3], "the region")
+
+  test/editor_input(:editor/test/endpoint, :editor/test/marks, 1, {:kind -> :key, :key -> "C-x"})
+  let exchanged = test/editor_input(:editor/test/endpoint, :editor/test/marks, 1, {:kind -> :key, :key -> "C-x"})
+  test/assert_equal(exchanged[:point], 0, "point exchanged")
+  test/assert_equal(editor/mark_position(:editor/test/marks, notes), 3, "mark exchanged")
+
+  // A text command deactivates the mark.
+  test/editor_input(:editor/test/endpoint, :editor/test/marks, 1, {:kind -> :text, :text -> "X"})
+  test/assert_equal(editor/mark_active(:editor/test/marks, notes), false, "the mark deactivates")
+  test/assert_equal(editor/region(:editor/test/marks, notes), none, "no active region")
+
+  return true
+end
+
+// --- M-x --------------------------------------------------------------------
+
+verb test/editor_max_runs_a_registered_command()
+  editor/session_create(:editor/test/max, :editor/test/actor, :default)
+  let notes = editor/buffer_create(:editor/test/actor, :scratch, "*max*", "abc")
+  editor/window_show(:editor/test/max, 1, notes)
+
+  let opened = test/editor_input(:editor/test/endpoint, :editor/test/max, 1, {:kind -> :key, :key -> "M-x"})
+  test/assert_equal(opened[:status], :ok, "M-x opens the minibuffer")
+  test/assert_true(editor/minibuffer_active(:editor/test/max), "the minibuffer is active")
+  test/assert_equal(editor/minibuffer_prompt(:editor/test/max), "M-x ", "the prompt")
+
+  test/editor_input(:editor/test/endpoint, :editor/test/max, 1, {:kind -> :text, :text -> "end-of-line"})
+  let accepted = test/editor_input(:editor/test/endpoint, :editor/test/max, 1, {:kind -> :key, :key -> "<return>"})
+  test/assert_equal(accepted[:status], :ok, "return accepts")
+  test/assert_equal(accepted[:snapshot_required], true, "acceptance removes the picker window")
+  test/assert_equal(accepted[:point], 3, "the command ran")
+  test/assert_equal(editor/minibuffer_active(:editor/test/max), false, "the prompt is closed")
+  test/assert_equal(len(editor/window_leaves(:editor/test/max, 1)), 1, "the picker window is gone")
+
+  return true
+end
+
+verb test/editor_max_rejects_unknown_names()
+  test/editor_input(:editor/test/endpoint, :editor/test/max, 1, {:kind -> :key, :key -> "M-x"})
+  test/editor_input(:editor/test/endpoint, :editor/test/max, 1, {:kind -> :text, :text -> "no-such-command"})
+  let refused = test/editor_input(:editor/test/endpoint, :editor/test/max, 1, {:kind -> :key, :key -> "<return>"})
+  test/assert_true(
+    string_starts_with(refused[:message], "No match"),
+    "an unknown name is refused"
+  )
+  test/assert_true(editor/minibuffer_active(:editor/test/max), "the prompt stays open")
+
+  let cancelled = test/editor_input(:editor/test/endpoint, :editor/test/max, 1, {:kind -> :key, :key -> "C-g"})
+  test/assert_equal(cancelled[:message], "Quit", "C-g cancels")
+  test/assert_equal(cancelled[:snapshot_required], true, "C-g removes the picker window")
+  test/assert_equal(editor/minibuffer_active(:editor/test/max), false, "the prompt is closed")
+  test/assert_equal(len(editor/window_leaves(:editor/test/max, 1)), 1, "the picker window is gone")
+
+  return true
+end
+
+verb test/editor_picker_navigation_and_buffer_switch()
+  editor/session_create(:editor/test/picker, :editor/test/actor, :default)
+  let source = editor/buffer_create(:editor/test/actor, :scratch, "*picker-source*", "source")
+  let target = editor/buffer_create(:editor/test/actor, :scratch, "*picker-target-unique*", "target")
+  editor/window_show(:editor/test/picker, 1, source)
+
+  test/editor_input(:editor/test/endpoint, :editor/test/picker, 1, {:kind -> :key, :key -> "C-x"})
+  let opened = test/editor_input(
+    :editor/test/endpoint,
+    :editor/test/picker,
+    1,
+    {:kind -> :key, :key -> "b"}
+  )
+  test/assert_equal(opened[:snapshot_required], true, "the picker changes the frame")
+  test/assert_true(editor/picker_active(:editor/test/picker), "the picker is active")
+  test/assert_equal(editor/selected_window(:editor/test/picker), 1, "the origin stays selected")
+  test/assert_equal(
+    editor/buffer_kind(editor/picker_buffer(:editor/test/picker)),
+    :completion,
+    "the picker uses a completion buffer"
+  )
+  test/assert_equal(
+    editor/buffer_read_only(editor/picker_buffer(:editor/test/picker)),
+    true,
+    "the completion buffer is read-only"
+  )
+
+  let first = editor/picker_selected_candidate(:editor/test/picker)
+  test/assert_true(first != none, "the picker has a selected candidate")
+  test/editor_input(:editor/test/endpoint, :editor/test/picker, 1, {:kind -> :key, :key -> "C-n"})
+  let second = editor/picker_selected_candidate(:editor/test/picker)
+  test/assert_true(second != none, "C-n keeps a candidate selected")
+  test/assert_true(second[:key] != first[:key], "C-n selects the next candidate")
+
+  let picker_window = editor/picker_window(:editor/test/picker)
+  let picker_buffer = editor/picker_buffer(:editor/test/picker)
+  test/editor_input(
+    :editor/test/endpoint,
+    :editor/test/picker,
+    1,
+    {:kind -> :viewport, :window -> picker_window, :height -> 2, :width -> 80}
+  )
+  test/editor_input(:editor/test/endpoint, :editor/test/picker, 1, {:kind -> :key, :key -> "C-n"})
+  test/assert_equal(
+    editor/window_first_line(:editor/test/picker, picker_window),
+    1,
+    "the picker scrolls at its measured height"
+  )
+  let clicked = test/editor_input(
+    :editor/test/endpoint,
+    :editor/test/picker,
+    1,
+    {
+      :kind -> :pointer,
+      :window -> picker_window,
+      :scalar_offset -> buffer_line_column_offset(picker_buffer, 0, 0),
+      :extend -> false
+    }
+  )
+  test/assert_equal(clicked[:snapshot_required], true, "a picker click updates its view")
+  test/assert_equal(editor/picker_selected_index(:editor/test/picker), 0, "the click selects its row")
+  test/assert_equal(editor/selected_window(:editor/test/picker), 1, "a picker click keeps the origin selected")
+
+  test/editor_input(:editor/test/endpoint, :editor/test/picker, 1, {:kind -> :key, :key -> "C-u"})
+  test/editor_input(
+    :editor/test/endpoint,
+    :editor/test/picker,
+    1,
+    {:kind -> :text, :text -> "*picker-target-unique*"}
+  )
+  test/assert_equal(editor/picker_candidate_count(:editor/test/picker), 1, "the query filters candidates")
+  let accepted = test/editor_input(
+    :editor/test/endpoint,
+    :editor/test/picker,
+    1,
+    {:kind -> :key, :key -> "<return>"}
+  )
+  test/assert_equal(accepted[:status], :ok, "return accepts the buffer")
+  test/assert_equal(editor/window_buffer(:editor/test/picker, 1), target, "the origin shows the buffer")
+  test/assert_equal(editor/picker_active(:editor/test/picker), false, "acceptance closes the picker")
+  test/assert_equal(len(editor/window_leaves(:editor/test/picker, 1)), 1, "acceptance removes its window")
+
+  return true
+end
+
+// --- Staged results and finalization ----------------------------------------
+
+verb test/editor_staged_result_has_a_token()
+  editor/session_create(:editor/test/token, :editor/test/actor, :default)
+  let notes = editor/buffer_create(:editor/test/actor, :scratch, "*token*", "")
+  editor/window_show(:editor/test/token, 1, notes)
+  let result = editor_input(
+    :editor/test/endpoint,
+    :editor/test/token,
+    1,
+    {:kind -> :text, :text -> "x"},
+    7777
+  )
+  test/assert_equal(result[:status], :ok, "staged text")
+  let pending = editor/PendingApply(:editor/test/token, 7777, ?buffer)
+  test/assert_equal(len(pending), 1, "the apply is pending")
+
+  return true
+end
+
+verb test/editor_result_finalizes()
+  let result = editor_input_result(:editor/test/endpoint, :editor/test/token, 7777)
+  test/assert_equal(result[:status], :ok, "the apply committed")
+  test/assert_equal(result[:revision], 1, "the committed revision")
+  test/assert_equal(result[:edits][0][:text], "x", "the authoritative delta")
+
+  let buffer = editor/window_buffer(:editor/test/token, 1)
+  test/assert_equal(buffer_text(buffer), "x", "the committed text")
+  test/assert_true(
+    not editor/PendingApply(:editor/test/token, 7777, ?pending_buffer),
+    "the completed token is removed"
+  )
+
+  return true
+end
+
+// --- The minibuffer ---------------------------------------------------------
+
+verb test/editor_minibuffer_editing()
+  editor/session_create(:editor/test/mini, :editor/test/actor, :default)
+
+  test/editor_input(:editor/test/endpoint, :editor/test/mini, 1, {:kind -> :key, :key -> "M-x"})
+  test/assert_equal(editor/minibuffer_active(:editor/test/mini), true, "the prompt opened")
+
+  test/editor_input(:editor/test/endpoint, :editor/test/mini, 1, {:kind -> :text, :text -> "bogus"})
+  test/assert_equal(editor/minibuffer_text(:editor/test/mini), "bogus", "the prompt took text")
+
+  test/editor_input(:editor/test/endpoint, :editor/test/mini, 1, {:kind -> :key, :key -> "<backspace>"})
+  test/assert_equal(editor/minibuffer_text(:editor/test/mini), "bogu", "backspace edits the prompt")
+
+  let cleared = test/editor_input(:editor/test/endpoint, :editor/test/mini, 1, {:kind -> :key, :key -> "C-u"})
+  test/assert_equal(cleared[:status], :ok, "C-u is accepted")
+  test/assert_equal(editor/minibuffer_text(:editor/test/mini), "", "C-u clears the prompt")
+
+  test/editor_input(:editor/test/endpoint, :editor/test/mini, 1, {:kind -> :text, :text -> "end-of-line"})
+  let accepted = test/editor_input(:editor/test/endpoint, :editor/test/mini, 1, {:kind -> :key, :key -> "<return>"})
+  test/assert_equal(accepted[:status], :ok, "return accepts")
+  test/assert_equal(editor/minibuffer_active(:editor/test/mini), false, "the prompt closed")
+
+  // Escape cancels as well as C-g.
+  test/editor_input(:editor/test/endpoint, :editor/test/mini, 1, {:kind -> :key, :key -> "M-x"})
+  test/assert_equal(editor/minibuffer_active(:editor/test/mini), true, "the prompt reopened")
+  let escaped = test/editor_input(:editor/test/endpoint, :editor/test/mini, 1, {:kind -> :key, :key -> "<escape>"})
+  test/assert_equal(escaped[:message], "Quit", "escape quits")
+  test/assert_equal(editor/minibuffer_active(:editor/test/mini), false, "escape closed the prompt")
+
+  return true
+end
+
+// A prompt whose facts are half-missing must still have a way out: C-g and
+// Return clear it instead of raising.
+verb test/editor_minibuffer_survives_a_broken_prompt()
+  editor/session_create(:editor/test/mini2, :editor/test/actor, :default)
+  editor/minibuffer_begin(:editor/test/mini2, "M-x ", :command, :editor/minibuffer_accept_command)
+  retract editor/MinibufferBuffer(:editor/test/mini2, 1, _)
+  retract editor/MinibufferCompletionKind(:editor/test/mini2, 1, _)
+  retract editor/MinibufferContinuation(:editor/test/mini2, 1, _)
+
+  let quit = test/editor_input(:editor/test/endpoint, :editor/test/mini2, 1, {:kind -> :key, :key -> "C-g"})
+  test/assert_equal(quit[:message], "Quit", "a broken prompt still cancels")
+  test/assert_equal(editor/minibuffer_active(:editor/test/mini2), false, "the broken prompt is gone")
+
+  // The same for accepting with Return.
+  editor/minibuffer_begin(:editor/test/mini2, "M-x ", :command, :editor/minibuffer_accept_command)
+  retract editor/MinibufferBuffer(:editor/test/mini2, 1, _)
+  let accepted = test/editor_input(:editor/test/endpoint, :editor/test/mini2, 1, {:kind -> :key, :key -> "<return>"})
+  test/assert_equal(accepted[:status], :ok, "return on a broken prompt is accepted")
+  test/assert_equal(editor/minibuffer_active(:editor/test/mini2), false, "the broken prompt is gone")
+
+  return true
+end
+
+// --- The host bridge --------------------------------------------------------
+
+verb test/editor_snapshot_seed()
+  editor/session_create(:editor/test/snapshot, :editor/test/actor, :default)
+  let notes = editor/buffer_create(:editor/test/actor, :scratch, "*snapshot*", "alpha\nbeta")
+  editor/window_show(:editor/test/snapshot, 1, notes)
+
+  return true
+end
+
+verb test/editor_snapshot_reports_the_viewport()
+  let payload = editor/snapshot(:editor/test/snapshot, 10, 4096)
+  test/assert_equal(payload[:buffer_name], "*snapshot*", "buffer name")
+  test/assert_equal(payload[:revision], 1, "revision")
+  test/assert_equal(len(payload[:rows]), 2, "two rows")
+  test/assert_equal(payload[:rows][0][:text], "alpha", "first row")
+  test/assert_equal(payload[:rows][1][:text], "beta", "second row")
+  test/assert_equal(payload[:point_line], 0, "point line")
+  test/assert_equal(payload[:point_column], 0, "point column")
+  test/assert_equal(payload[:minibuffer_active], false, "no minibuffer")
+
+  test/assert_equal(len(payload[:windows]), 1, "one visible window")
+  test/assert_equal(payload[:frame_tree][:kind], :window, "a leaf frame tree")
+  test/assert_true(len(payload[:keymap_plan]) > 0, "the browser receives a keymap plan")
+
+  let encoded = editor/snapshot_json(:editor/test/snapshot, :editor/test/actor, 10, 4096)
+  test/assert_true(string_contains(encoded, "\"buffer_name\":\"*snapshot*\""), "encoded name")
+
+  return true
+end
+
+verb test/editor_json_bridge_seed()
+  editor/session_create(:editor/test/jsbridge, :editor/test/actor, :default)
+  let notes = editor/buffer_create(:editor/test/actor, :scratch, "*jsbridge*", "")
+  editor/window_show(:editor/test/jsbridge, 1, notes)
+
+  return true
+end
+
+// The host posts the raw item JSON; Mica decodes it and never receives a
+// selector from the browser.
+verb test/editor_json_bridge_runs_items()
+  let result = editor_input_json(
+    :editor/test/endpoint,
+    :editor/test/jsbridge,
+    :editor/test/actor,
+    1,
+    "{\"kind\":\"text\",\"text\":\"hey\"}",
+    0,
+    0
+  )
+  test/assert_equal(result[:status], :ok, "decoded item runs")
+  test/assert_equal(result[:needs_finalize], false, "an untagged item needs no finalizer")
+  let notes = editor/window_buffer(:editor/test/jsbridge, 1)
+  test/assert_equal(buffer_text(notes), "hey", "text landed")
+
+  return true
+end
+
+verb test/editor_json_bridge_commits_tagged_items_in_one_call()
+  let result = editor_input_json(
+    :editor/test/endpoint,
+    :editor/test/jsbridge,
+    :editor/test/actor,
+    1,
+    "{\"kind\":\"text\",\"text\":\"!\"}",
+    8888,
+    0
+  )
+  test/assert_equal(result[:status], :ok, "the tagged item commits")
+  test/assert_equal(result[:revision], 2, "the committed revision is returned")
+  test/assert_equal(result[:edits][0][:text], "!", "the committed delta is returned")
+  test/assert_equal(result[:point_line], 0, "the compact result has a point line")
+  test/assert_equal(result[:point_column], 4, "the compact result has a point column")
+  test/assert_true(
+    not editor/PendingApply(:editor/test/jsbridge, 8888, ?pending_buffer),
+    "the wrapper consumes the completion"
+  )
+
+  return true
+end
+
+verb test/editor_json_bridge_rejects_bad_json()
+  let rejected = try
+    editor_input_json(
+      :editor/test/endpoint,
+      :editor/test/jsbridge,
+      :editor/test/actor,
+      1,
+      "not json",
+      0,
+      0
+    )
+    false
+  catch
+    true
+  end
+  test/assert_true(rejected, "malformed JSON is refused")
+
+  return true
+end
+
+verb test/editor_json_bridge_refreshes_stale_keymap_plan()
+  let generation = editor/keymaps_changed(:editor/test/jsbridge)
+  let result = editor_input_json(
+    :editor/test/endpoint,
+    :editor/test/jsbridge,
+    :editor/test/actor,
+    1,
+    "{\"kind\":\"pointer\",\"scalar_offset\":0,\"extend\":false}",
+    0,
+    generation - 1
+  )
+  test/assert_equal(result[:status], :ok, "the stale plan does not block input")
+  test/assert_equal(result[:keymap_generation], generation, "the current generation is returned")
+  test/assert_true(len(result[:keymap_plan]) > 0, "the stale plan is replaced")
+  return true
+end
+
+// A click carries a scalar offset; shift-click extends the region. The browser
+// converts its UTF-16 click offset before it sends the item.
+verb test/editor_pointer_items_move_point()
+  // The snapshot session's buffer is "alpha\nbeta".
+  let first = editor_input_json(
+    :editor/test/endpoint,
+    :editor/test/snapshot,
+    :editor/test/actor,
+    1,
+    "{\"kind\":\"pointer\",\"scalar_offset\":2,\"extend\":false}",
+    0,
+    0
+  )
+  test/assert_equal(first[:point], 2, "pointer moves point")
+
+  let second = editor_input_json(
+    :editor/test/endpoint,
+    :editor/test/snapshot,
+    :editor/test/actor,
+    1,
+    "{\"kind\":\"pointer\",\"scalar_offset\":7,\"extend\":true}",
+    0,
+    0
+  )
+  test/assert_equal(second[:point], 7, "shift-click moves point")
+  test/assert_equal(second[:mark], 2, "shift-click keeps the old point as mark")
+  test/assert_equal(second[:mark_active], true, "the region is active")
+
+  // An offset past the end clamps to the buffer end.
+  let clamped = editor_input_json(
+    :editor/test/endpoint,
+    :editor/test/snapshot,
+    :editor/test/actor,
+    1,
+    "{\"kind\":\"pointer\",\"scalar_offset\":999,\"extend\":false}",
+    0,
+    0
+  )
+  test/assert_equal(clamped[:point], 10, "pointer clamps to the end")
+
+  return true
+end
+
+// --- Cleanup ----------------------------------------------------------------
+
+verb test/editor_session_cleanup_removes_state()
+  editor/session_create(:editor/test/cleanup, :editor/test/actor, :default)
+  let scratch = editor/window_buffer(:editor/test/cleanup, 1)
+  assert editor/SearchMatch(:editor/test/cleanup, 0, 3)
+  test/assert_true(editor/session_cleanup(:editor/test/cleanup), "cleanup")
+  test/assert_equal(editor/Session(:editor/test/cleanup), false, "no session left")
+  test/assert_equal(editor/SearchMatch(:editor/test/cleanup, _, _), false, "no search matches left")
+  let windows = editor/WindowBuffer(:editor/test/cleanup, ?window, ?buffer)
+  test/assert_equal(len(windows), 0, "no windows left")
+  test/assert_true(editor/Buffer(scratch), "user buffers survive cleanup")
+
+  return true
+end

@@ -1,0 +1,211 @@
+// File buffers and the host filesystem boundary.
+//
+// Mica owns file prompts, buffer identity, saved revisions, and conflict
+// policy. The host resolves and checks paths, reads files, and performs atomic
+// writes. Browser input never selects a filesystem service.
+
+verb editor/file_stamp(buffer)
+  let rows = editor/BufferFileStamp(buffer, ?stamp)
+  if not rows
+    return none
+  end
+  let exactly {:stamp -> stamp} = rows
+  return stamp
+end
+
+verb editor/file_path(buffer)
+  let rows = editor/BufferFilePath(buffer, ?path)
+  if not rows
+    return none
+  end
+  let exactly {:path -> path} = rows
+  return path
+end
+
+verb editor/file_line_ending(buffer)
+  let rows = editor/BufferLineEnding(buffer, ?line_ending)
+  if not rows
+    return :lf
+  end
+  let exactly {:line_ending -> line_ending} = rows
+  return line_ending
+end
+
+verb editor/file_candidates(session, window, query, limit)
+  let response = external_request(
+    :editor_file_list,
+    {:query -> query, :limit -> limit}
+  )
+  if index_or(response, :status, :error) != :ok
+    return []
+  end
+  return index_or(response, :candidates, [])
+end
+
+verb editor/file_bind(actor, buffer, response)
+  let path = response[:path]
+  assert editor/BufferFilePath(buffer, path)
+  assert editor/LiveFileBuffer([actor, path], buffer)
+  if index_or(response, :status, :error) == :ok
+    assert editor/BufferFileStamp(buffer, response[:stamp])
+  end
+  assert editor/BufferFileEncoding(buffer, "utf-8")
+  assert editor/BufferLineEnding(buffer, index_or(response, :line_ending, :lf))
+  return path
+end
+
+verb editor/file_mark_initial_text_saved(buffer, text)
+  // A non-empty initial insertion becomes revision 1 when this transaction
+  // commits. Record that revision now so a newly visited file is clean.
+  if text != ""
+    retract editor/BufferSavedRevision(buffer, _)
+    assert editor/BufferSavedRevision(buffer, 1)
+  end
+  return true
+end
+
+verb editor/file_visit(session, frame, window, value)
+  let response = external_request(:editor_file_read, {:path -> value})
+  let status = index_or(response, :status, :error)
+  if status != :ok && status != :missing
+    return editor/result(
+      :rejected,
+      session,
+      frame,
+      window,
+      {
+        :error -> status,
+        :message -> index_or(response, :message, "Cannot visit file"),
+        :barrier -> true,
+        :snapshot_required -> true
+      }
+    )
+  end
+
+  let actor = editor/session_actor(session)
+  let path = response[:path]
+  let live = editor/LiveFileBuffer([actor, path], ?existing)
+  if live
+    let exactly {:existing -> existing} = live
+    if editor/window_buffer(session, window) != existing
+      editor/window_show(session, window, existing)
+      editor/frame_bump(session, frame)
+    end
+    return editor/result(
+      :ok,
+      session,
+      frame,
+      window,
+      {:message -> path, :barrier -> true, :snapshot_required -> true}
+    )
+  end
+
+  let text = index_or(response, :text, "")
+  let buffer = editor/buffer_create(actor, :file, response[:name], text)
+  editor/file_mark_initial_text_saved(buffer, text)
+  editor/file_bind(actor, buffer, response)
+  editor/window_show(session, window, buffer)
+  editor/frame_bump(session, frame)
+  let message = path
+  if status == :missing
+    message = string_concat("(New file) ", path)
+  end
+  return editor/result(
+    :ok,
+    session,
+    frame,
+    window,
+    {:message -> message, :barrier -> true, :snapshot_required -> true}
+  )
+end
+
+verb editor/minibuffer_accept_file(session, frame, window, input, value)
+  return editor/file_visit(session, frame, window, value)
+end
+
+verb editor/find_file_command(session, frame, window, buffer, point, mark, prefix_argument, input)
+  if editor/minibuffer_active(session)
+    return {:status -> :ok, :message -> "minibuffer is already active"}
+  end
+  editor/picker_begin(
+    session,
+    frame,
+    window,
+    "Find file: ",
+    :file,
+    :editor/minibuffer_accept_file
+  )
+  return {:status -> :ok, :snapshot_required -> true}
+end
+
+verb editor/file_pending_confirmation(session, buffer)
+  let rows = editor/PendingFileWriteConfirmation(session, buffer, ?stamp, ?revision)
+  if not rows
+    return none
+  end
+  let exactly {:stamp -> stamp, :revision -> revision} = rows
+  if revision != buffer_revision(buffer)
+    retract editor/PendingFileWriteConfirmation(session, buffer, _, _)
+    return none
+  end
+  // The stamp itself can be none when the file was deleted.
+  return {:stamp -> stamp}
+end
+
+verb editor/save_buffer_command(session, frame, window, buffer, point, mark, prefix_argument, input)
+  let path = editor/file_path(buffer)
+  if path == none
+    return {:status -> :ok, :message -> "Buffer is not visiting a file"}
+  end
+  if not editor/buffer_modified(buffer)
+    return {:status -> :ok, :message -> "No changes need to be saved"}
+  end
+
+  let expected = editor/file_stamp(buffer)
+  let confirmed = editor/file_pending_confirmation(session, buffer)
+  if confirmed != none
+    expected = confirmed[:stamp]
+  end
+  // external_request commits and suspends this transaction. Another session
+  // can edit the shared buffer before the response arrives.
+  let saved_revision = buffer_revision(buffer)
+  let response = external_request(
+    :editor_file_write_atomic,
+    {
+      :path -> path,
+      :text -> buffer_text(buffer),
+      :expected_stamp -> expected,
+      :line_ending -> editor/file_line_ending(buffer)
+    }
+  )
+  let status = index_or(response, :status, :error)
+  if status == :changed
+    retract editor/PendingFileWriteConfirmation(session, buffer, _, _)
+    assert editor/PendingFileWriteConfirmation(
+      session,
+      buffer,
+      response[:current_stamp],
+      saved_revision
+    )
+    return {
+      :status -> :ok,
+      :message -> "File changed on disk; repeat C-x C-s to overwrite"
+    }
+  end
+  if status != :ok
+    retract editor/PendingFileWriteConfirmation(session, buffer, _, _)
+    return {
+      :status -> :ok,
+      :message -> index_or(response, :message, "Cannot save file")
+    }
+  end
+
+  retract editor/PendingFileWriteConfirmation(session, buffer, _, _)
+  retract editor/BufferFileStamp(buffer, _)
+  assert editor/BufferFileStamp(buffer, response[:stamp])
+  retract editor/BufferSavedRevision(buffer, _)
+  assert editor/BufferSavedRevision(buffer, saved_revision)
+  return {:status -> :ok, :message -> string_concat("Wrote ", path)}
+end
+
+assert editor/PickerProvider(:file, :editor/file_candidates)

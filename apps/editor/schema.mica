@@ -1,0 +1,179 @@
+// Editor schema: identities, relations, and the authority surface.
+//
+// This is the data contract of docs/mica-emacs-design.md. Mica owns every
+// editor semantic; the web host transports values and the browser owns only
+// platform input and provisional display.
+//
+// Durable relations hold user-visible editor state (buffers, commands,
+// keymaps, undo, files, faces, bookmarks). `:volatile` relations hold one
+// connection's transient state (sessions, frames, windows, prompts, search);
+// a host restart drops them, and the next connection creates a fresh session.
+//
+// The region layer (`Marker`, `Annotation`, and the BufferStat/BufferLine/
+// BufferMarkers projections) comes from `apps/shared/buffers.mica`.
+
+// --- Buffers ----------------------------------------------------------------
+
+make_relation(:editor/Buffer, 1)
+make_functional_relation(:editor/BufferCounter, 2, [0])
+make_functional_relation(:editor/BufferName, 2, [0])
+make_functional_relation(:editor/LiveBufferName, 2, [0])
+make_functional_relation(:editor/BufferOwner, 2, [0])
+make_functional_relation(:editor/BufferKind, 2, [0])
+make_functional_relation(:editor/BufferMajorMode, 2, [0])
+make_functional_relation(:editor/BufferReadOnly, 2, [0])
+make_functional_relation(:editor/BufferSavedRevision, 2, [0])
+
+// --- Sessions ---------------------------------------------------------------
+
+make_relation(:editor/Session, 1, :volatile)
+make_functional_relation(:editor/SessionActor, 2, [0], :volatile)
+make_functional_relation(:editor/SessionFrame, 2, [0], :volatile)
+make_functional_relation(:editor/SelectedWindow, 2, [0], :volatile)
+make_functional_relation(:editor/PendingKeys, 2, [0], :volatile)
+make_functional_relation(:editor/PrefixArgument, 2, [0], :volatile)
+make_functional_relation(:editor/LastCommand, 2, [0], :volatile)
+make_functional_relation(:editor/ThisCommand, 2, [0], :volatile)
+make_functional_relation(:editor/KeymapGeneration, 2, [0], :volatile)
+make_functional_relation(:editor/FrameNodeCounter, 3, [0, 1], :volatile)
+make_functional_relation(:editor/FrameGeneration, 3, [0, 1], :volatile)
+make_functional_relation(:editor/MarkerCounter, 2, [0], :volatile)
+make_functional_relation(:editor/SessionPlatformProfile, 2, [0], :volatile)
+
+// --- Frames and windows -----------------------------------------------------
+
+make_relation(:editor/Frame, 2, :volatile)
+make_functional_relation(:editor/FrameRoot, 3, [0, 1], :volatile)
+
+make_functional_relation(:editor/NodeKind, 3, [0, 1], :volatile)
+make_functional_relation(:editor/SplitAxis, 3, [0, 1], :volatile)
+make_functional_relation(:editor/SplitRatio, 3, [0, 1], :volatile)
+make_functional_relation(:editor/SplitFirst, 3, [0, 1], :volatile)
+make_functional_relation(:editor/SplitSecond, 3, [0, 1], :volatile)
+
+make_functional_relation(:editor/WindowBuffer, 3, [0, 1], :volatile)
+make_functional_relation(:editor/WindowPointMarker, 3, [0, 1], :volatile)
+make_functional_relation(:editor/WindowStartMarker, 3, [0, 1], :volatile)
+make_functional_relation(:editor/WindowHorizontalOffset, 3, [0, 1], :volatile)
+make_functional_relation(:editor/WindowHeightLines, 3, [0, 1], :volatile)
+make_functional_relation(:editor/WindowWidthColumns, 3, [0, 1], :volatile)
+make_functional_relation(:editor/WindowWrapMode, 3, [0, 1], :volatile)
+make_functional_relation(:editor/WindowGoalColumn, 3, [0, 1], :volatile)
+
+// --- Point, mark, and regions ----------------------------------------------
+
+make_functional_relation(:editor/BufferMarkMarker, 3, [0, 1], :volatile)
+make_functional_relation(:editor/BufferMarkActive, 3, [0, 1], :volatile)
+
+// --- Commands ---------------------------------------------------------------
+
+make_relation(:editor/Command, 1)
+make_functional_relation(:editor/CommandName, 2, [0])
+make_functional_relation(:editor/LiveCommandName, 2, [0])
+make_functional_relation(:editor/CommandSelector, 2, [0])
+make_functional_relation(:editor/CommandPredictor, 2, [0])
+make_functional_relation(:editor/CommandBarrier, 2, [0])
+make_functional_relation(:editor/CommandRepeatable, 2, [0])
+
+// --- Keymaps ----------------------------------------------------------------
+
+make_relation(:editor/Keymap, 1)
+make_functional_relation(:editor/KeyBinding, 3, [0, 1])
+make_relation(:editor/KeyPrefix, 2)
+make_functional_relation(:editor/GlobalKeymap, 2, [0])
+make_functional_relation(:editor/BufferMinorMode, 3, [0, 1])
+make_functional_relation(:editor/TransientKeymap, 2, [0], :volatile)
+make_relation(:editor/PlatformReservedKey, 2)
+make_functional_relation(:editor/CommandAlternative, 3, [0, 1])
+make_functional_relation(:editor/InputCommand, 2, [0])
+
+// --- Undo -------------------------------------------------------------------
+
+make_relation(:editor/UndoGroup, 2)
+make_functional_relation(:editor/UndoAuthor, 3, [0, 1])
+make_functional_relation(:editor/UndoBaseRevision, 3, [0, 1])
+make_functional_relation(:editor/UndoNewRevision, 3, [0, 1])
+make_functional_relation(:editor/UndoForwardEdits, 3, [0, 1])
+make_functional_relation(:editor/UndoInverseEdits, 3, [0, 1])
+make_functional_relation(:editor/UndoKind, 3, [0, 1])
+make_functional_relation(:editor/UndoCursor, 2, [0])
+
+// --- Minibuffer -------------------------------------------------------------
+
+make_relation(:editor/MinibufferRequest, 2, :volatile)
+make_functional_relation(:editor/MinibufferPrompt, 3, [0, 1], :volatile)
+make_functional_relation(:editor/MinibufferBuffer, 3, [0, 1], :volatile)
+make_functional_relation(:editor/MinibufferContinuation, 3, [0, 1], :volatile)
+make_functional_relation(:editor/MinibufferCompletionKind, 3, [0, 1], :volatile)
+make_functional_relation(:editor/ActiveMinibuffer, 2, [0], :volatile)
+make_functional_relation(:editor/HistoryEntry, 4, [0, 1, 2], :volatile)
+make_functional_relation(:editor/HistoryHead, 3, [0, 1], :volatile)
+
+// --- Pickers ----------------------------------------------------------------
+
+make_functional_relation(:editor/PickerProvider, 2, [0])
+make_relation(:editor/Picker, 2, :volatile)
+make_functional_relation(:editor/PickerOriginWindow, 3, [0, 1], :volatile)
+make_functional_relation(:editor/PickerWindow, 3, [0, 1], :volatile)
+make_functional_relation(:editor/PickerBuffer, 3, [0, 1], :volatile)
+make_functional_relation(:editor/PickerCandidate, 4, [0, 1, 2], :volatile)
+make_functional_relation(:editor/PickerSelectedIndex, 3, [0, 1], :volatile)
+make_functional_relation(:editor/PickerSelectedKey, 3, [0, 1], :volatile)
+make_functional_relation(:editor/PickerGeneration, 3, [0, 1], :volatile)
+
+// --- Modes and local values -------------------------------------------------
+
+make_relation(:editor/MajorMode, 1)
+make_relation(:editor/MinorMode, 1)
+make_functional_relation(:editor/ModeName, 2, [0])
+make_functional_relation(:editor/ModeParent, 2, [0])
+make_functional_relation(:editor/ModeKeymap, 2, [0])
+make_relation(:editor/ModeHook, 3)
+make_functional_relation(:editor/BufferLocalValue, 3, [0, 1])
+make_functional_relation(:editor/SessionLocalValue, 3, [0, 1], :volatile)
+
+// --- Files ------------------------------------------------------------------
+
+make_functional_relation(:editor/BufferFilePath, 2, [0])
+make_functional_relation(:editor/LiveFileBuffer, 2, [0])
+make_functional_relation(:editor/BufferFileStamp, 2, [0])
+make_functional_relation(:editor/BufferFileEncoding, 2, [0])
+make_functional_relation(:editor/BufferLineEnding, 2, [0])
+make_functional_relation(:editor/CleanShutdown, 2, [0])
+make_functional_relation(:editor/PendingFileWriteConfirmation, 4, [0, 1], :volatile)
+
+// Editor-internal: remembers which buffer a staged client-tagged apply belongs
+// to, so the finalizer can name it after the commit.
+make_functional_relation(:editor/PendingApply, 3, [0, 1], :volatile)
+
+// --- Kill ring, registers, and bookmarks ------------------------------------
+
+make_functional_relation(:editor/KillEntry, 3, [0, 1], :volatile)
+make_functional_relation(:editor/KillHead, 2, [0], :volatile)
+make_functional_relation(:editor/Register, 3, [0, 1])
+make_relation(:editor/Bookmark, 1)
+make_functional_relation(:editor/BookmarkOwner, 2, [0])
+make_functional_relation(:editor/BookmarkName, 2, [0])
+make_functional_relation(:editor/LiveBookmarkName, 3, [0, 1])
+make_functional_relation(:editor/BookmarkBuffer, 2, [0])
+make_functional_relation(:editor/BookmarkFilePath, 2, [0])
+make_functional_relation(:editor/BookmarkMarker, 2, [0])
+
+// --- Faces and overlays -----------------------------------------------------
+
+make_relation(:editor/Face, 1)
+make_functional_relation(:editor/FaceClass, 2, [0])
+make_relation(:editor/Overlay, 1)
+make_functional_relation(:editor/OverlayBuffer, 2, [0])
+make_functional_relation(:editor/OverlayStartMarker, 2, [0])
+make_functional_relation(:editor/OverlayStopMarker, 2, [0])
+make_functional_relation(:editor/OverlayFace, 2, [0])
+make_functional_relation(:editor/OverlayPriority, 2, [0])
+
+// --- Search -----------------------------------------------------------------
+
+make_functional_relation(:editor/SearchBuffer, 2, [0], :volatile)
+make_functional_relation(:editor/SearchQuery, 2, [0], :volatile)
+make_functional_relation(:editor/SearchDirection, 2, [0], :volatile)
+make_functional_relation(:editor/SearchOrigin, 2, [0], :volatile)
+make_functional_relation(:editor/SearchMatch, 3, [0, 1], :volatile)

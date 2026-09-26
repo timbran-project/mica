@@ -1,0 +1,363 @@
+// Keymaps in Mica data: bindings, prefixes, precedence, and generations.
+//
+// A normalized key chord is a string such as `a`, `C-a`, `M-x`, `C-M-f`,
+// `S-<left>`, or `<escape>`. A sequence is one or more chords separated by
+// spaces, at most sixteen. Printable text never enters through this path; it
+// arrives as a `text` or `input` item.
+//
+// The active maps, in precedence order:
+//
+//   1. the session transient keymap
+//   2. active minor-mode maps, by explicit priority
+//   3. the selected buffer's major-mode map
+//   4. the global map
+//
+// The browser may predict only a binding named in the current plan; the server
+// resolves the raw sequence again. A generation mismatch disables prediction.
+
+// --- Sequence syntax --------------------------------------------------------
+
+verb editor/strip_modifier(chord, modifier)
+  if string_starts_with(chord, modifier)
+    return string_slice(chord, string_len(modifier), string_len(chord))
+  end
+  return chord
+end
+
+verb editor/chord_valid(chord)
+  if chord == "" || string_contains(chord, " ")
+    return false
+  end
+  let rest = chord
+  rest = editor/strip_modifier(rest, "C-")
+  rest = editor/strip_modifier(rest, "M-")
+  rest = editor/strip_modifier(rest, "S-")
+  rest = editor/strip_modifier(rest, "s-")
+  if rest == ""
+    return false
+  end
+  if string_len(rest) == 1
+    return true
+  end
+  if string_starts_with(rest, "<")
+    if string_len(rest) < 3
+      return false
+    end
+    return string_slice(rest, string_len(rest) - 1, string_len(rest)) == ">"
+  end
+  if string_starts_with(rest, "C-")
+    return false
+  end
+  if string_starts_with(rest, "M-")
+    return false
+  end
+  if string_starts_with(rest, "S-")
+    return false
+  end
+  if string_starts_with(rest, "s-")
+    return false
+  end
+  return false
+end
+
+verb editor/split_chords(sequence)
+  let out = []
+  let current = []
+  for ch in string_chars(sequence)
+    if ch == " "
+      if current != []
+        out = [@out, string_from_chars(current)]
+        current = []
+      end
+    else
+      current = [@current, ch]
+    end
+  end
+  if current != []
+    out = [@out, string_from_chars(current)]
+  end
+  return out
+end
+
+verb editor/join_chords(chords, count)
+  let out = ""
+  let index = 0
+  while index < count
+    if index > 0
+      out = string_concat(out, " ")
+    end
+    out = string_concat(out, chords[index])
+    index = index + 1
+  end
+  return out
+end
+
+// Rejects an empty sequence, a sequence over sixteen chords, and any invalid
+// chord. The full sequence is returned for chaining.
+verb editor/keymap_validate_sequence(sequence)
+  let chords = editor/split_chords(sequence)
+  if len(chords) == 0 || len(chords) > 16
+    raise E_INVARG, "a key sequence needs one to sixteen chords"
+  end
+  for chord in chords
+    if not editor/chord_valid(chord)
+      raise E_INVARG, string_concat("invalid key chord: ", chord)
+    end
+  end
+  return sequence
+end
+
+// --- Binding ----------------------------------------------------------------
+
+verb editor/keymap_create(keymap)
+  assert editor/Keymap(keymap)
+  return keymap
+end
+
+verb editor/keymap_prefix(keymap, sequence)
+  if not editor/KeyPrefix(keymap, sequence)
+    return false
+  end
+  return true
+end
+
+// Registers every proper prefix of `sequence` as a prefix key.
+verb editor/keymap_add_prefixes(keymap, sequence)
+  let chords = editor/split_chords(sequence)
+  let index = 1
+  while index < len(chords)
+    let prefix = editor/join_chords(chords, index)
+    if editor/KeyBinding(keymap, prefix, ?command)
+      raise E_INVARG, "a key sequence prefix is already bound to a command"
+    end
+    if not editor/keymap_prefix(keymap, prefix)
+      assert editor/KeyPrefix(keymap, prefix)
+    end
+    index = index + 1
+  end
+  return true
+end
+
+verb editor/keymap_prefix_used(keymap, prefix)
+  let start = string_concat(prefix, " ")
+  for row in editor/KeyBinding(keymap, ?sequence, ?command)
+    if string_starts_with(row[:sequence], start)
+      return true
+    end
+  end
+  return false
+end
+
+// Removes prefix rows that no remaining binding uses.
+verb editor/keymap_prune_prefixes(keymap)
+  for row in editor/KeyPrefix(keymap, ?prefix)
+    if not editor/keymap_prefix_used(keymap, row[:prefix])
+      retract editor/KeyPrefix(keymap, row[:prefix])
+    end
+  end
+  return true
+end
+
+// Binds one complete sequence to one command.
+//
+// Errors: an invalid sequence, an unknown command, a sequence that is already a
+// prefix, and a sequence already bound to a different command.
+verb editor/keymap_bind(keymap, sequence, command)
+  editor/keymap_validate_sequence(sequence)
+  if not editor/Command(command)
+    raise E_INVARG, "cannot bind a sequence to an unknown command"
+  end
+  if editor/keymap_prefix(keymap, sequence)
+    raise E_INVARG, "sequence is already a prefix in this keymap"
+  end
+  let existing = editor/KeyBinding(keymap, sequence, ?bound)
+  if existing
+    let exactly {:bound -> bound} = existing
+    if bound != command
+      raise E_STATE, "sequence is already bound to a different command"
+    end
+    return command
+  end
+  assert editor/KeyBinding(keymap, sequence, command)
+  editor/keymap_add_prefixes(keymap, sequence)
+  return command
+end
+
+verb editor/keymap_unbind(keymap, sequence)
+  retract editor/KeyBinding(keymap, sequence, _)
+  editor/keymap_prune_prefixes(keymap)
+  return sequence
+end
+
+// Binds by M-x name. Command identities are interned from names that may
+// contain characters a symbol literal cannot spell (such as `-`).
+verb editor/keymap_bind_named(keymap, sequence, name)
+  let command = editor/command_by_name(name)
+  if command == none
+    raise E_INVARG, string_concat("unknown command: ", name)
+  end
+  return editor/keymap_bind(keymap, sequence, command)
+end
+
+// --- Resolution -------------------------------------------------------------
+
+// One map's answer for a sequence: a command, a prefix, or nothing.
+verb editor/keymap_lookup(keymap, sequence)
+  let binding = editor/KeyBinding(keymap, sequence, ?command)
+  if binding
+    let exactly {:command -> command} = binding
+    return {:status -> :command, :command -> command, :keymap -> keymap}
+  end
+  if editor/keymap_prefix(keymap, sequence)
+    return {:status -> :prefix, :keymap -> keymap}
+  end
+  return {:status -> :undefined}
+end
+
+verb editor/mode_keymap(mode)
+  let found = editor/ModeKeymap(mode, ?keymap)
+  if not found
+    return none
+  end
+  let exactly {:keymap -> keymap} = found
+  return keymap
+end
+
+// Resolves a raw sequence through the active maps in precedence order. The
+// first map that knows the sequence as a binding or a prefix wins.
+verb editor/keymap_resolve(session, buffer, sequence)
+  let transient = editor/TransientKeymap(session, ?keymap)
+  if transient
+    let exactly {:keymap -> keymap} = transient
+    let result = editor/keymap_lookup(keymap, sequence)
+    if result[:status] != :undefined
+      return result
+    end
+  end
+
+  // Minor modes: highest priority with an answer wins; a tie keeps the first.
+  let minor_answer = none
+  let minor_priority = 0
+  for row in editor/BufferMinorMode(buffer, ?mode, ?priority)
+    let mode = row[:mode]
+    let mode_map = editor/mode_keymap(mode)
+    if mode_map != none
+      let result = editor/keymap_lookup(mode_map, sequence)
+      if result[:status] != :undefined
+        if minor_answer == none || row[:priority] > minor_priority
+          minor_answer = result
+          minor_priority = row[:priority]
+        end
+      end
+    end
+  end
+  if minor_answer != none
+    return minor_answer
+  end
+
+  let major = editor/ModeKeymap(editor/buffer_major_mode(buffer), ?major_map)
+  if major
+    let exactly {:major_map -> major_map} = major
+    let result = editor/keymap_lookup(major_map, sequence)
+    if result[:status] != :undefined
+      return result
+    end
+  end
+
+  let global = editor/GlobalKeymap(:default, ?global_map)
+  if global
+    let exactly {:global_map -> global_map} = global
+    return editor/keymap_lookup(global_map, sequence)
+  end
+  return {:status -> :undefined}
+end
+
+verb editor/buffer_major_mode(buffer)
+  let found = editor/BufferMajorMode(buffer, ?mode)
+  if not found
+    return :fundamental
+  end
+  let exactly {:mode -> mode} = found
+  return mode
+end
+
+// The active maps in precedence order, for plan building and tests.
+verb editor/active_keymaps(session, buffer)
+  let out = []
+  let transient = editor/TransientKeymap(session, ?keymap)
+  if transient
+    let exactly {:keymap -> keymap} = transient
+    out = [@out, keymap]
+  end
+  let minor_rows = editor/BufferMinorMode(buffer, ?mode, ?priority)
+  let ordered = [row for row in minor_rows sort -row[:priority]]
+  for row in ordered
+    let mode_map = editor/mode_keymap(row[:mode])
+    if mode_map != none
+      out = [@out, mode_map]
+    end
+  end
+  let major = editor/mode_keymap(editor/buffer_major_mode(buffer))
+  if major != none
+    out = [@out, major]
+  end
+  let global = editor/GlobalKeymap(:default, ?global_map)
+  if global
+    let exactly {:global_map -> global_map} = global
+    out = [@out, global_map]
+  end
+  return out
+end
+
+// --- Generations ------------------------------------------------------------
+
+verb editor/keymap_generation(session)
+  let rows = editor/KeymapGeneration(session, ?generation)
+  if not rows
+    return 0
+  end
+  let exactly {:generation -> generation} = rows
+  return generation
+end
+
+// Called after any change that affects the active maps. The next result carries
+// the new generation, so a stale browser plan cannot predict.
+verb editor/keymaps_changed(session)
+  let next = editor/keymap_generation(session) + 1
+  retract editor/KeymapGeneration(session, _)
+  assert editor/KeymapGeneration(session, next)
+  return next
+end
+
+// --- Plan -------------------------------------------------------------------
+
+// The browser plan: every binding of the active maps, with the command's
+// predictor and barrier, deduplicated by sequence in precedence order.
+verb editor/keymap_plan(session, buffer)
+  let maps = editor/active_keymaps(session, buffer)
+  let seen = []
+  let plan = []
+  for keymap in maps
+    for row in editor/KeyBinding(keymap, ?sequence, ?command)
+      let sequence = row[:sequence]
+      if not editor/list_contains(seen, sequence)
+        seen = [@seen, sequence]
+        plan = [@plan, editor/command_plan_row(row[:command], sequence)]
+      end
+    end
+  end
+  return plan
+end
+
+verb editor/command_plan_row(command, sequence)
+  let exactly {:name -> name} = editor/CommandName(command, ?name)
+  let exactly {:predictor -> predictor} = editor/CommandPredictor(command, ?predictor)
+  let exactly {:barrier -> barrier} = editor/CommandBarrier(command, ?barrier)
+  return {
+    :sequence -> sequence,
+    :command -> command,
+    :name -> name,
+    :predictor -> predictor,
+    :barrier -> barrier
+  }
+end

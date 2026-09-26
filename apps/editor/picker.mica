@@ -1,0 +1,357 @@
+// Bounded, Mica-owned candidate pickers.
+//
+// A picker keeps its query in the minibuffer and shows candidates in a
+// volatile, read-only completion buffer. The browser paints ordinary editor
+// windows and sends scalar pointer offsets. Candidate identity, filtering,
+// selection, acceptance, and cancellation stay in Mica.
+
+verb editor/picker_active(session)
+  return len(editor/Picker(session, ?request)) > 0
+end
+
+verb editor/picker_request(session)
+  let exactly {:request -> request} = editor/Picker(session, ?request)
+  return request
+end
+
+verb editor/picker_origin_window(session)
+  let request = editor/picker_request(session)
+  let exactly {:window -> window} = editor/PickerOriginWindow(session, request, ?window)
+  return window
+end
+
+verb editor/picker_window(session)
+  let request = editor/picker_request(session)
+  let exactly {:window -> window} = editor/PickerWindow(session, request, ?window)
+  return window
+end
+
+verb editor/picker_buffer(session)
+  let request = editor/picker_request(session)
+  let exactly {:buffer -> buffer} = editor/PickerBuffer(session, request, ?buffer)
+  return buffer
+end
+
+verb editor/picker_window_active(session, window)
+  if not editor/picker_active(session)
+    return false
+  end
+  return editor/picker_window(session) == window
+end
+
+verb editor/picker_buffer_visible(buffer)
+  let kind = editor/buffer_kind(buffer)
+  return kind != :minibuffer && kind != :completion && kind != :search && kind != :process
+end
+
+// Candidate providers return bounded records with stable keys. The displayed
+// label is not used as identity.
+verb editor/picker_command_candidates(session, window, query, limit)
+  let candidates = []
+  let needle = lower(query)
+  for row in editor/CommandName(?command, ?name)
+    if len(candidates) < limit && string_contains(lower(row[:name]), needle)
+      candidates = [@candidates, {
+        :key -> row[:command],
+        :value -> row[:name],
+        :label -> row[:name],
+        :annotation -> ""
+      }]
+    end
+  end
+  return candidates
+end
+
+verb editor/picker_buffer_candidate(buffer, query)
+  if not editor/picker_buffer_visible(buffer)
+    return none
+  end
+  let name = editor/buffer_display_name(buffer)
+  if not string_contains(lower(name), lower(query))
+    return none
+  end
+  return {
+    :key -> buffer,
+    :value -> buffer,
+    :label -> name,
+    :annotation -> to_literal(editor/buffer_kind(buffer))
+  }
+end
+
+// Put buffers other than the current one first. This matches the useful
+// default for switch-to-buffer without making the label the buffer identity.
+verb editor/picker_buffer_candidates(session, window, query, limit)
+  let candidates = []
+  let current = editor/window_buffer(session, window)
+  let actor = editor/session_actor(session)
+  for row in editor/Buffer(?buffer)
+    if len(candidates) < limit && row[:buffer] != current && editor/buffer_owner(row[:buffer]) == actor
+      let candidate = editor/picker_buffer_candidate(row[:buffer], query)
+      if candidate != none
+        candidates = [@candidates, candidate]
+      end
+    end
+  end
+  if len(candidates) < limit
+    let current_candidate = editor/picker_buffer_candidate(current, query)
+    if current_candidate != none
+      candidates = [@candidates, current_candidate]
+    end
+  end
+  return candidates
+end
+
+verb editor/picker_selected_index(session)
+  let request = editor/picker_request(session)
+  let rows = editor/PickerSelectedIndex(session, request, ?index)
+  if not rows
+    return none
+  end
+  let exactly {:index -> index} = rows
+  return index
+end
+
+verb editor/picker_selected_candidate(session)
+  let index = editor/picker_selected_index(session)
+  if index == none
+    return none
+  end
+  let request = editor/picker_request(session)
+  let rows = editor/PickerCandidate(session, request, index, ?candidate)
+  if not rows
+    return none
+  end
+  let exactly {:candidate -> candidate} = rows
+  return candidate
+end
+
+verb editor/picker_candidate_count(session)
+  let request = editor/picker_request(session)
+  let count = 0
+  for row in editor/PickerCandidate(session, request, ?index, ?candidate)
+    count = count + 1
+  end
+  return count
+end
+
+verb editor/picker_render(session)
+  let request = editor/picker_request(session)
+  let buffer = editor/picker_buffer(session)
+  let window = editor/picker_window(session)
+  let selected = editor/picker_selected_index(session)
+  let count = editor/picker_candidate_count(session)
+  let text = ""
+  let index = 0
+  while index < count
+    let exactly {:candidate -> candidate} = editor/PickerCandidate(
+      session,
+      request,
+      index,
+      ?candidate
+    )
+    if index > 0
+      text = string_concat(text, "\n")
+    end
+    if index == selected
+      text = string_concat(text, "> ")
+    else
+      text = string_concat(text, "  ")
+    end
+    text = string_concat(text, candidate[:label])
+    let annotation = index_or(candidate, :annotation, "")
+    if annotation != ""
+      text = string_concat(text, string_concat("  ", annotation))
+    end
+    index = index + 1
+  end
+
+  buffer_replace(buffer, 0, buffer_len(buffer), text)
+  editor/buffer_mark_saved(buffer)
+  if selected != none
+    let point = buffer_line_column_offset(buffer, selected, 2)
+    editor/window_set_point(session, window, point)
+    let first = editor/window_first_line(session, window)
+    let height = editor/window_height(session, window)
+    let target_first = first
+    if selected < first
+      target_first = selected
+    elseif selected >= first + height
+      target_first = selected - height + 1
+    end
+    editor/window_set_start(session, window, buffer_line_column_offset(buffer, target_first, 0))
+  else
+    editor/window_set_point(session, window, 0)
+    editor/window_set_start(session, window, 0)
+  end
+  return text
+end
+
+verb editor/picker_refresh(session)
+  let request = editor/picker_request(session)
+  let old_key = none
+  let selected = editor/PickerSelectedKey(session, request, ?key)
+  if selected
+    let exactly {:key -> key} = selected
+    old_key = key
+  end
+
+  for row in editor/PickerCandidate(session, request, ?index, ?candidate)
+    retract editor/PickerCandidate(session, request, row[:index], _)
+  end
+  retract editor/PickerSelectedIndex(session, request, _)
+  retract editor/PickerSelectedKey(session, request, _)
+
+  let exactly {:kind -> kind} = editor/MinibufferCompletionKind(session, request, ?kind)
+  let exactly {:selector -> selector} = editor/PickerProvider(kind, ?selector)
+  let candidates = invoke(selector, {
+    :session -> session,
+    :window -> editor/picker_origin_window(session),
+    :query -> editor/minibuffer_text(session),
+    :limit -> 100
+  })
+
+  let chosen = 0
+  let found_old = false
+  let index = 0
+  for candidate in candidates
+    assert editor/PickerCandidate(session, request, index, candidate)
+    if old_key != none && candidate[:key] == old_key
+      chosen = index
+      found_old = true
+    end
+    index = index + 1
+  end
+  if len(candidates) > 0
+    if old_key != none && found_old == false
+      chosen = 0
+    end
+    let candidate = candidates[chosen]
+    assert editor/PickerSelectedIndex(session, request, chosen)
+    assert editor/PickerSelectedKey(session, request, candidate[:key])
+  end
+
+  let generation = 1
+  let generations = editor/PickerGeneration(session, request, ?current)
+  if generations
+    let exactly {:current -> current} = generations
+    generation = current + 1
+  end
+  retract editor/PickerGeneration(session, request, _)
+  assert editor/PickerGeneration(session, request, generation)
+  editor/picker_render(session)
+  return len(candidates)
+end
+
+verb editor/picker_select_index(session, index)
+  let request = editor/picker_request(session)
+  let count = editor/picker_candidate_count(session)
+  if count == 0
+    return none
+  end
+  let selected = index
+  if selected < 0
+    selected = 0
+  end
+  if selected >= count
+    selected = count - 1
+  end
+  let exactly {:candidate -> candidate} = editor/PickerCandidate(
+    session,
+    request,
+    selected,
+    ?candidate
+  )
+  retract editor/PickerSelectedIndex(session, request, _)
+  retract editor/PickerSelectedKey(session, request, _)
+  assert editor/PickerSelectedIndex(session, request, selected)
+  assert editor/PickerSelectedKey(session, request, candidate[:key])
+  editor/picker_render(session)
+  return candidate
+end
+
+verb editor/picker_move(session, frame, window, amount)
+  let selected = editor/picker_selected_index(session)
+  if selected == none
+    selected = 0
+  end
+  editor/picker_select_index(session, selected + amount)
+  return editor/result(
+    :ok,
+    session,
+    frame,
+    window,
+    {:barrier -> true, :snapshot_required -> true}
+  )
+end
+
+verb editor/picker_pointer(session, frame, window, input)
+  let buffer = editor/picker_buffer(session)
+  let offset = index_or(input, :scalar_offset, 0)
+  let placed = buffer_position_line_column(buffer, offset)
+  editor/picker_select_index(session, placed[:line])
+  return editor/result(
+    :ok,
+    session,
+    frame,
+    editor/picker_origin_window(session),
+    {:barrier -> true, :snapshot_required -> true}
+  )
+end
+
+verb editor/picker_begin(session, frame, window, prompt, kind, continuation)
+  if editor/picker_active(session) || editor/minibuffer_active(session)
+    raise E_STATE, "a picker or minibuffer is already active"
+  end
+  editor/minibuffer_begin(session, prompt, kind, continuation)
+  let request = editor/minibuffer_request(session)
+  let buffer = editor/buffer_create(
+    editor/session_actor(session),
+    :completion,
+    "*Completions*",
+    ""
+  )
+  editor/buffer_set_read_only(buffer, true)
+  let picker_window = editor/window_split(session, frame, window, :horizontal)
+  editor/window_show(session, picker_window, buffer)
+  let split = editor/node_parent(session, picker_window)
+  editor/split_set_ratio(session, frame, split, 700)
+
+  assert editor/Picker(session, request)
+  assert editor/PickerOriginWindow(session, request, window)
+  assert editor/PickerWindow(session, request, picker_window)
+  assert editor/PickerBuffer(session, request, buffer)
+  assert editor/PickerGeneration(session, request, 0)
+  editor/picker_refresh(session)
+  return picker_window
+end
+
+// Removes the candidate window and its volatile buffer. The minibuffer owns
+// its own buffer and clears it separately.
+verb editor/picker_clear(session, frame)
+  if not editor/picker_active(session)
+    return false
+  end
+  let request = editor/picker_request(session)
+  let picker_window = editor/picker_window(session)
+  let buffer = editor/picker_buffer(session)
+  if editor/window_complete(session, picker_window)
+    editor/window_delete(session, frame, picker_window)
+  end
+  for row in editor/PickerCandidate(session, request, ?index, ?candidate)
+    retract editor/PickerCandidate(session, request, row[:index], _)
+  end
+  retract editor/PickerSelectedIndex(session, request, _)
+  retract editor/PickerSelectedKey(session, request, _)
+  retract editor/PickerGeneration(session, request, _)
+  retract editor/PickerOriginWindow(session, request, _)
+  retract editor/PickerWindow(session, request, _)
+  retract editor/PickerBuffer(session, request, _)
+  retract editor/Picker(session, request)
+  if editor/Buffer(buffer)
+    editor/buffer_kill(session, buffer, true)
+  end
+  return true
+end
+
+assert editor/PickerProvider(:command, :editor/picker_command_candidates)
+assert editor/PickerProvider(:buffer, :editor/picker_buffer_candidates)

@@ -1,0 +1,374 @@
+// The minibuffer: one active prompt per session.
+//
+// A request is data, not a suspended VM stack, so a disconnect can remove a
+// prompt without retaining a task. While a prompt is active, text and control
+// input route to it instead of the keymaps; accepting runs the stored
+// continuation with the accepted value. M-x resolves only registered command
+// identities.
+//
+// The prompt is editable: Backspace and Delete remove the last scalar, and
+// C-u clears it. C-g or Escape cancels. Every read is tolerant of a
+// half-created prompt, because a prompt with no buffer, kind, or continuation
+// must never leave the session with no way out.
+
+verb editor/minibuffer_active(session)
+  let rows = editor/ActiveMinibuffer(session, ?request)
+  return len(rows) > 0
+end
+
+verb editor/minibuffer_request_or_none(session)
+  let rows = editor/ActiveMinibuffer(session, ?request)
+  if not rows
+    return none
+  end
+  let exactly {:request -> request} = rows
+  return request
+end
+
+verb editor/minibuffer_buffer_or_none(session)
+  let request = editor/minibuffer_request_or_none(session)
+  if request == none
+    return none
+  end
+  let rows = editor/MinibufferBuffer(session, request, ?buffer)
+  if not rows
+    return none
+  end
+  let exactly {:buffer -> buffer} = rows
+  return buffer
+end
+
+// Kept for callers that expect a live prompt; raises only after a cancellation
+// was attempted, so a broken prompt still has a way out.
+verb editor/minibuffer_request(session)
+  let request = editor/minibuffer_request_or_none(session)
+  if request == none
+    raise E_STATE, "there is no active minibuffer"
+  end
+  return request
+end
+
+verb editor/minibuffer_buffer(session)
+  let buffer = editor/minibuffer_buffer_or_none(session)
+  if buffer == none
+    raise E_STATE, "the minibuffer has no buffer"
+  end
+  return buffer
+end
+
+verb editor/minibuffer_prompt(session)
+  let request = editor/minibuffer_request(session)
+  let exactly {:prompt -> prompt} = editor/MinibufferPrompt(session, request, ?prompt)
+  return prompt
+end
+
+verb editor/minibuffer_begin(session, prompt, kind, continuation)
+  let request = 1
+  let actor = editor/session_actor(session)
+  let buffer = editor/buffer_create(actor, :minibuffer, "*minibuffer*", "")
+  assert editor/MinibufferRequest(session, request)
+  assert editor/MinibufferPrompt(session, request, prompt)
+  assert editor/MinibufferBuffer(session, request, buffer)
+  assert editor/MinibufferCompletionKind(session, request, kind)
+  assert editor/MinibufferContinuation(session, request, continuation)
+  assert editor/ActiveMinibuffer(session, request)
+  return buffer
+end
+
+// Retracts the prompt and retires its buffer. Tolerant of missing facts.
+verb editor/minibuffer_clear(session)
+  if editor/picker_active(session)
+    editor/picker_clear(session, editor/session_frame(session))
+  end
+  let request = 1
+  let requests = editor/ActiveMinibuffer(session, ?r)
+  if requests
+    let exactly {:r -> r} = requests
+    request = r
+  end
+  let buffer = editor/minibuffer_buffer_or_none(session)
+  retract editor/MinibufferRequest(session, request)
+  retract editor/MinibufferPrompt(session, request, _)
+  retract editor/MinibufferBuffer(session, request, _)
+  retract editor/MinibufferCompletionKind(session, request, _)
+  retract editor/MinibufferContinuation(session, request, _)
+  retract editor/ActiveMinibuffer(session, _)
+  if buffer != none
+    try
+      editor/buffer_kill(session, buffer, true)
+    catch
+      // A half-created prompt must not trap the session.
+    end
+  end
+  return buffer
+end
+
+verb editor/trim(text)
+  let chars = string_chars(text)
+  let start = 0
+  let stop = string_len(text)
+  while start < stop && chars[start] == " "
+    start = start + 1
+  end
+  while stop > start && chars[stop - 1] == " "
+    stop = stop - 1
+  end
+  return string_slice(text, start, stop)
+end
+
+// Accepts the current input. A command completion that names no registered
+// command keeps the prompt and reports it; any other continuation is cleared
+// and invoked with the accepted value.
+verb editor/minibuffer_accept(session, frame, window, input)
+  let buffer = editor/minibuffer_buffer_or_none(session)
+  if buffer == none
+    editor/minibuffer_clear(session)
+    return editor/result(:ok, session, frame, window, {:message -> "Quit", :barrier -> true})
+  end
+  let value = editor/trim(buffer_text(buffer))
+  let request = editor/minibuffer_request_or_none(session)
+
+  let had_picker = editor/picker_active(session)
+  let accept_window = window
+  if had_picker
+    accept_window = editor/picker_origin_window(session)
+    let candidate = editor/picker_selected_candidate(session)
+    if candidate == none
+      return editor/result(
+        :ok,
+        session,
+        frame,
+        window,
+        {:message -> "No match (C-g or Esc cancels)", :barrier -> true}
+      )
+    end
+    value = candidate[:value]
+  end
+
+  let kind = :command
+  if request != none
+    let kinds = editor/MinibufferCompletionKind(session, request, ?k)
+    if kinds
+      let exactly {:k -> k} = kinds
+      kind = k
+    end
+  end
+  if kind == :command && editor/command_by_name(value) == none
+    return editor/result(
+      :ok,
+      session,
+      frame,
+      window,
+      {
+        :message -> string_concat("No match: ", string_concat(value, " (C-g or Esc cancels)")),
+        :barrier -> true
+      }
+    )
+  end
+
+  // A directory candidate continues the same file prompt. It does not visit
+  // a directory as if it were a file.
+  if had_picker && kind == :file
+    let candidate = editor/picker_selected_candidate(session)
+    if candidate != none && index_or(candidate, :annotation, "") == "directory"
+      buffer_replace(buffer, 0, buffer_len(buffer), candidate[:value])
+      editor/picker_refresh(session)
+      return editor/result(
+        :ok,
+        session,
+        frame,
+        accept_window,
+        {:barrier -> true, :snapshot_required -> true}
+      )
+    end
+  end
+
+  let continuation = none
+  if request != none
+    let continuations = editor/MinibufferContinuation(session, request, ?c)
+    if continuations
+      let exactly {:c -> c} = continuations
+      continuation = c
+    end
+  end
+  editor/minibuffer_clear(session)
+  if continuation == none
+    return editor/result(:ok, session, frame, window, {:message -> "No match", :barrier -> true})
+  end
+  let accepted = invoke(
+    continuation,
+    {
+      :session -> session,
+      :frame -> frame,
+      :window -> accept_window,
+      :input -> input,
+      :value -> value
+    }
+  )
+  if had_picker
+    accepted[:snapshot_required] = true
+  end
+  return accepted
+end
+
+// The M-x continuation: dispatch a registered command by name.
+verb editor/minibuffer_accept_command(session, frame, window, input, value)
+  let command = editor/command_by_name(value)
+  if command == none
+    return editor/result(:ok, session, frame, window, {:message -> "No match", :barrier -> true})
+  end
+  return editor/input_command(session, frame, window, editor/window_buffer(session, window), command, input)
+end
+
+// The buffer-picker continuation changes only its origin window. Candidate
+// values are internal buffer identities, not browser-supplied display names.
+verb editor/minibuffer_accept_buffer(session, frame, window, input, value)
+  if not editor/Buffer(value)
+    return editor/result(:ok, session, frame, window, {:message -> "No match", :barrier -> true})
+  end
+  if editor/window_buffer(session, window) != value
+    editor/window_show(session, window, value)
+    editor/frame_bump(session, frame)
+  end
+  return editor/result(
+    :ok,
+    session,
+    frame,
+    window,
+    {:barrier -> true, :snapshot_required -> true}
+  )
+end
+
+// Removes the last scalar of the prompt. There is no prompt cursor yet, so
+// Backspace and Delete both edit at the end.
+verb editor/minibuffer_backspace(session, frame, window)
+  let buffer = editor/minibuffer_buffer_or_none(session)
+  if buffer == none
+    editor/minibuffer_clear(session)
+    return editor/result(:ok, session, frame, window, {:message -> "Quit", :barrier -> true})
+  end
+  let length = buffer_len(buffer)
+  if length > 0
+    buffer_delete(buffer, length - 1, 1)
+  end
+  let snapshot_required = false
+  if editor/picker_active(session)
+    editor/picker_refresh(session)
+    snapshot_required = true
+  end
+  return editor/result(
+    :ok,
+    session,
+    frame,
+    window,
+    {:barrier -> false, :snapshot_required -> snapshot_required}
+  )
+end
+
+verb editor/minibuffer_clear_input(session, frame, window)
+  let buffer = editor/minibuffer_buffer_or_none(session)
+  if buffer != none
+    let length = buffer_len(buffer)
+    if length > 0
+      buffer_delete(buffer, 0, length)
+    end
+  end
+  let snapshot_required = false
+  if editor/picker_active(session)
+    editor/picker_refresh(session)
+    snapshot_required = true
+  end
+  return editor/result(
+    :ok,
+    session,
+    frame,
+    window,
+    {:barrier -> false, :snapshot_required -> snapshot_required}
+  )
+end
+
+verb editor/minibuffer_cancel(session, frame, window)
+  let had_picker = editor/picker_active(session)
+  editor/minibuffer_clear(session)
+  return editor/result(
+    :ok,
+    session,
+    frame,
+    window,
+    {:message -> "Quit", :barrier -> true, :snapshot_required -> had_picker}
+  )
+end
+
+// Routes one input item while a prompt is active. C-g and Escape cancel,
+// Return accepts, Backspace/Delete/C-u edit, text appends, and anything else
+// is ignored.
+verb editor/minibuffer_input(session, frame, window, input)
+  let kind = index_or(input, :kind, :key)
+  if kind == :key
+    let key = index_or(input, :key, "")
+    if key == "<return>" || key == "C-m"
+      return editor/minibuffer_accept(session, frame, window, input)
+    end
+    if key == "C-g" || key == "<escape>"
+      return editor/minibuffer_cancel(session, frame, window)
+    end
+    if key == "<backspace>" || key == "<delete>"
+      return editor/minibuffer_backspace(session, frame, window)
+    end
+    if key == "C-u"
+      return editor/minibuffer_clear_input(session, frame, window)
+    end
+    if editor/picker_active(session)
+      if key == "C-n" || key == "<down>"
+        return editor/picker_move(session, frame, window, 1)
+      end
+      if key == "C-p" || key == "<up>"
+        return editor/picker_move(session, frame, window, -1)
+      end
+      if key == "C-v" || key == "<pagedown>"
+        return editor/picker_move(
+          session,
+          frame,
+          window,
+          editor/window_height(session, editor/picker_window(session))
+        )
+      end
+      if key == "M-v" || key == "<pageup>"
+        return editor/picker_move(
+          session,
+          frame,
+          window,
+          0 - editor/window_height(session, editor/picker_window(session))
+        )
+      end
+    end
+    return editor/result(:ok, session, frame, window, {:barrier -> false})
+  end
+
+  let intent = index_or(input, :input_type, none)
+  if intent == :deleteContentBackward || intent == :deleteContentForward
+    return editor/minibuffer_backspace(session, frame, window)
+  end
+
+  let buffer = editor/minibuffer_buffer_or_none(session)
+  if buffer == none
+    editor/minibuffer_clear(session)
+    return editor/result(:ok, session, frame, window, {:message -> "Quit", :barrier -> true})
+  end
+  let text = index_or(input, :text, "")
+  if text != ""
+    buffer_insert(buffer, buffer_len(buffer), text)
+  end
+  let snapshot_required = false
+  if editor/picker_active(session)
+    editor/picker_refresh(session)
+    snapshot_required = true
+  end
+  return editor/result(
+    :ok,
+    session,
+    frame,
+    window,
+    {:barrier -> false, :snapshot_required -> snapshot_required}
+  )
+end
