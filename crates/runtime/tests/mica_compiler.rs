@@ -320,6 +320,121 @@ fn compiler_emission_workload_produces_executable_artifacts() {
 }
 
 #[test]
+fn mica_emitter_dom_and_structural_literals_agree_with_rust_execution() {
+    for interpreter_only in [true, false] {
+        let mut runner = compiler(interpreter_only);
+        runner.run_filein(INSTALL_EMITTED).unwrap();
+        runner.run_source("make_identity(:compiler_tag)").unwrap();
+        for source in [
+            "return dom_html(dom <button disabled title=\"é🦀\">Send go</button>)",
+            "let label = \"Send & go\"\nlet extra = [dom <span class=\"note\">!</span>]\nreturn dom_html(dom <button id=\"send\">{label}{@extra}</button>)",
+            "return dom_html(dom <div> before <br/> after </div>)",
+            "return dom_html(dom <span aria-label=\"é\">ok</span>)",
+            "let order = 0\nlet node = dom <p data-a={(order = order * 10 + 1)} data-b={(order = order * 10 + 2)}>{to_literal(order = order * 10 + 3)}</p>\nreturn [dom_html(node), order]",
+            "return [frob_value(#compiler_tag<[]>), frob_value(#compiler_tag<[7]>), frob_value(#compiler_tag<[7, 8]>)]",
+            "let rest = [2, 3]\nreturn frob_value(#compiler_tag<[1, @rest]>)",
+            "return [frob_value(#compiler_tag<7>), frob_value(#compiler_tag<\"é🦀\">)]",
+            "return frob_value(#compiler_tag<{:label -> \"é🦀\", :number -> 7}>)",
+            "let order = 0\nlet value = #compiler_tag<{:a -> (order = order * 10 + 1), :b -> (order = order * 10 + 2)}>\nreturn [frob_value(value), order]",
+        ] {
+            assert_emitted_agrees(&mut runner, source);
+        }
+    }
+}
+
+#[test]
+fn mica_emitter_invoke_and_mailbox_receive_use_runtime_instructions() {
+    for interpreter_only in [true, false] {
+        let mut runner = compiler(interpreter_only);
+        runner.run_filein(INSTALL_EMITTED).unwrap();
+        runner
+            .run_filein("verb compiler_pair(left, right)\nreturn [left, right]\nend")
+            .unwrap();
+        for source in [
+            "return invoke(:compiler_pair, {:left -> 1, :right -> 2})",
+            "let args = [:compiler_pair, {:left -> 1, :right -> 2}]\nreturn invoke(@args)",
+            "let order = 0\nlet value = invoke(begin\norder = 1\n:compiler_pair\nend, {:left -> (order = order * 10 + 2), :right -> (order = order * 10 + 3)})\nreturn [value, order]",
+            "let invoke = fn(value) => value + 1\nreturn invoke(7)",
+            "let mailbox_recv = fn(value) => value + 2\nreturn mailbox_recv(7)",
+        ] {
+            assert_emitted_agrees(&mut runner, source);
+        }
+        for call in [
+            "mailbox_recv([caps[0]])",
+            "mailbox_recv([caps[0]], 0.25)",
+            "mailbox_recv(@[[caps[0]]])",
+            "mailbox_recv(@[[caps[0]], 0.25])",
+        ] {
+            let source = format!(
+                "let saved = [7, 8]\nlet caps = mailbox()\nlet result = {call}\nreturn [saved, result]"
+            );
+            let module = invoke(&mut runner, "emit_source", &source);
+            install_emitted(&mut runner, module);
+            for input in [source.as_str(), "return :compiler_test_entry()"] {
+                let report = runner.run_source(input).unwrap();
+                let TaskOutcome::Suspended {
+                    kind: SuspendKind::MailboxRecv(request),
+                    ..
+                } = report.outcome
+                else {
+                    panic!("{source}: {}", report.render());
+                };
+                assert_eq!(request.receivers.len(), 1);
+                assert_eq!(request.timeout_millis, call.contains("0.25").then_some(250));
+                runner.mailbox_for_receiver(&request.receivers[0]).unwrap();
+                let outcome = runner
+                    .resume_task(TaskRequest {
+                        input: TaskInput::Continuation {
+                            task_id: report.task_id,
+                            value: Value::string("received"),
+                        },
+                        ..SourceRunner::root_source_request("")
+                    })
+                    .unwrap();
+                assert!(matches!(outcome, TaskOutcome::Complete { value, .. }
+                if value == Value::list([
+                    Value::list([Value::int(7).unwrap(), Value::int(8).unwrap()]),
+                    Value::string("received"),
+                ])));
+            }
+        }
+        for source in [
+            "return invoke(:compiler_pair)",
+            "return invoke(:compiler_pair, {}, 3)",
+            "return mailbox_recv()",
+            "return mailbox_recv([], 1, 2)",
+        ] {
+            let module = invoke(&mut runner, "emit_source", source);
+            assert_eq!(
+                module.map_get(&Value::symbol(Symbol::intern("ok"))),
+                Some(Value::bool(false)),
+                "{source}: {module}"
+            );
+        }
+        for source in [
+            "return invoke(@[])",
+            "return invoke(@[:compiler_pair, {}, 3])",
+            "return mailbox_recv(@[])",
+            "return mailbox_recv(@[[], 1, 2])",
+        ] {
+            let expected = runner.run_source(source).unwrap();
+            let module = invoke(&mut runner, "emit_source", source);
+            install_emitted(&mut runner, module);
+            let actual = runner.run_source("return :compiler_test_entry()").unwrap();
+            let TaskOutcome::Aborted {
+                error: expected, ..
+            } = expected.outcome
+            else {
+                panic!("{source}: {}", expected.render());
+            };
+            assert!(
+                matches!(actual.outcome, TaskOutcome::Aborted { error, .. } if error == expected)
+            );
+        }
+    }
+}
+
+#[test]
 fn mica_emitter_dispatch_preserves_receivers_roles_and_evaluation_order() {
     for interpreter_only in [true, false] {
         let mut runner = compiler(interpreter_only);
@@ -369,6 +484,8 @@ fn mica_emitter_dispatch_preserves_receivers_roles_and_evaluation_order() {
         for source in [
             "return (1):compiler_pair(2)",
             "return (1):compiler_pair(argument: 2, @{})",
+            "return invoke(:compiler_pair, {:receiver -> 1, :argument -> 2})",
+            "return invoke(@[:compiler_pair, {:receiver -> 1, :argument -> 2}])",
         ] {
             let module = invoke(&mut runner, "emit_source", source);
             install_emitted(&mut runner, module);

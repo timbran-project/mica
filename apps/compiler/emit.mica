@@ -339,6 +339,12 @@ verb emit_expr(rows, node, input_state)
     let [dst, allocated] = emit_register(state)
     return [dst, emit_append(allocated, [:BuildMap, dst, entries])]
   end
+  if kind == :Dom_Element || kind == :Dom_Text
+    return emit_dom(rows, node, state)
+  end
+  if kind == :Structural_Literal
+    return emit_frob(rows, node, state)
+  end
   if kind == :Index
     let [_, collection_node] = ast_attr(rows, node, :collection)
     let [_, key_node] = ast_attr(rows, node, :key)
@@ -836,7 +842,7 @@ verb emit_call(rows, node, input_state)
       return emit_relation_call(rows, node, target, :ScanDynamic, state)
     end
     builtin = is_builtin(to_symbol(name_text))
-    if !builtin && name_text != "commit" && name_text != "suspend"
+    if !builtin && name_text != "commit" && name_text != "suspend" && name_text != "invoke" && name_text != "mailbox_recv"
       return emit_dispatch_arguments(rows, node, none, [:Constant, to_symbol(name_text)], false, 0, state)
     end
   end
@@ -855,6 +861,9 @@ verb emit_call(rows, node, input_state)
   state = allocated
   if is_function
     return [dst, emit_append(state, [:CallValue, dst, [:Register, callee_reg], args])]
+  end
+  if name_text == "invoke" || name_text == "mailbox_recv"
+    return emit_special_call(name_text, dst, args, state)
   end
   if callee_kind == :Name && name_text == "commit"
     if len(args) != 0
@@ -876,6 +885,145 @@ verb emit_call(rows, node, input_state)
     return [dst, emit_append(state, [:BuiltinCall, dst, to_symbol(name_text), args])]
   end
   return [dst, emit_append(state, [:PositionalDispatch, dst, [:Constant, to_symbol(name_text)], args])]
+end
+
+verb emit_special_instruction(name, dst, args, input_state)
+  if name == "invoke"
+    return emit_append(input_state, [:DynamicDispatch, dst, args[0], args[1]])
+  end
+  let timeout = none
+  if len(args) == 2
+    timeout = args[1]
+  end
+  return emit_append(input_state, [:MailboxRecv, dst, args[0], timeout])
+end
+
+verb emit_special_call(name, dst, args, input_state)
+  let minimum = 1
+  let message = "mailbox_recv expects a receive-cap list and optional timeout"
+  if name == "invoke"
+    minimum = 2
+    message = "invoke expects selector and role map"
+  end
+  let spliced = false
+  for arg in args
+    spliced = spliced || arg[0] == :Splice
+  end
+  if !spliced
+    if len(args) < minimum || len(args) > 2
+      return emit_error(input_state, message)
+    end
+    return [dst, emit_special_instruction(name, dst, args, input_state)]
+  end
+  let [actuals, allocated] = emit_register(input_state)
+  let state = emit_append(allocated, [:BuildList, actuals, args])
+  let [length, after_length] = emit_register(state)
+  state = emit_append(after_length, [:CollectionLen, length, actuals])
+  for boundary in [[:Lt, minimum], [:Gt, 2]]
+    let [limit, loaded] = emit_constant(state, boundary[1])
+    let [invalid, after_invalid] = emit_register(loaded)
+    state = emit_append(after_invalid, [:Binary, invalid, boundary[0], length, limit])
+    let position = len(state[:code])
+    state = emit_append(state, [:Branch, invalid, position + 1, position + 2])
+    state = emit_append(state, [:Abort, [:Constant, message]])
+  end
+  let operands = []
+  let index = 0
+  while index < minimum
+    let [reg, after_reg] = emit_register(state)
+    state = emit_append(after_reg, [:Index, reg, actuals, [:Constant, index]])
+    operands = [@operands, [:Register, reg]]
+    index = index + 1
+  end
+  if minimum == 2
+    return [dst, emit_special_instruction(name, dst, operands, state)]
+  end
+  let [one, loaded] = emit_constant(state, 1)
+  let [omitted, after_omitted] = emit_register(loaded)
+  state = emit_append(after_omitted, [:Binary, omitted, :Eq, length, one])
+  let branch = len(state[:code])
+  state = emit_append(state, [:Branch, omitted, 0, 0])
+  state = emit_special_instruction(name, dst, operands, state)
+  let jump = len(state[:code])
+  state = emit_append(state, [:Jump, 0])
+  let supplied = len(state[:code])
+  let [timeout, after_timeout] = emit_register(state)
+  state = emit_append(after_timeout, [:Index, timeout, actuals, [:Constant, 1]])
+  state = emit_special_instruction(name, dst, [@operands, [:Register, timeout]], state)
+  state = emit_patch(state, branch, [:Branch, omitted, branch + 1, supplied])
+  state = emit_patch(state, jump, [:Jump, len(state[:code])])
+  return [dst, state]
+end
+
+verb emit_dom(rows, node, input_state)
+  let state = input_state
+  if ast_kind(rows, node) == :Dom_Text
+    let [_, text] = ast_attr(rows, node, :text)
+    let [dst, allocated] = emit_register(state)
+    return [dst, emit_append(allocated, [:BuiltinCall, dst, :dom_text, [[:Constant, text]]])]
+  end
+  let [_, tag] = ast_attr(rows, node, :tag)
+  let attributes = []
+  for attribute in ast_children(rows, node, :attribute)
+    let [_, name] = ast_attr(rows, attribute, :name)
+    let [has_value, value_node] = ast_attr(rows, attribute, :value)
+    let value = [:Constant, true]
+    if has_value
+      let [reg, emitted] = emit_expr(rows, value_node, state)
+      state = emitted
+      value = [:Register, reg]
+    end
+    attributes = [@attributes, [[:Constant, name], value]]
+  end
+  let [attrs, after_attrs] = emit_register(state)
+  state = emit_append(after_attrs, [:BuildMap, attrs, attributes])
+  let [children, emitted] = emit_items(rows, ast_children(rows, node, :child), state)
+  let [items, after_items] = emit_register(emitted)
+  state = emit_append(after_items, [:BuildList, items, children])
+  let [dst, allocated] = emit_register(state)
+  return [dst, emit_append(allocated, [:BuiltinCall, dst, :dom_element, [[:Constant, tag], [:Register, attrs], [:Register, items]]])]
+end
+
+verb emit_frob(rows, node, input_state)
+  let [_, head] = ast_attr(rows, node, :head)
+  if ast_kind(rows, head) != :Identity_Literal
+    return emit_error(input_state, "a structural literal head must be an identity")
+  end
+  let [delegate, state] = emit_expr(rows, head, input_state)
+  let cells = ast_children(rows, node, :cell)
+  let [named, _] = ast_attr(rows, node, :named)
+  let [listed, _] = ast_attr(rows, node, :list)
+  let values = []
+  for cell in cells
+    let [_, value_node] = ast_attr(rows, cell, :value)
+    values = [@values, value_node]
+  end
+  let payload = 0
+  if named
+    let entries = []
+    for cell in cells
+      let [_, name_node] = ast_attr(rows, cell, :name)
+      let [_, value_node] = ast_attr(rows, cell, :value)
+      let [key, after_key] = emit_expr(rows, name_node, state)
+      let [value, after_value] = emit_expr(rows, value_node, after_key)
+      state = after_value
+      entries = [@entries, [[:Register, key], [:Register, value]]]
+    end
+    let [reg, allocated] = emit_register(state)
+    payload = reg
+    state = emit_append(allocated, [:BuildMap, payload, entries])
+  elseif !listed && len(values) == 1
+    let [reg, emitted] = emit_expr(rows, values[0], state)
+    payload = reg
+    state = emitted
+  else
+    let [items, emitted] = emit_items(rows, values, state)
+    let [reg, allocated] = emit_register(emitted)
+    payload = reg
+    state = emit_append(allocated, [:BuildList, payload, items])
+  end
+  let [dst, allocated] = emit_register(state)
+  return [dst, emit_append(allocated, [:BuiltinCall, dst, :frob, [[:Register, delegate], [:Register, payload]]])]
 end
 
 verb emit_dispatch(rows, node, spawning, delay_node, input_state)

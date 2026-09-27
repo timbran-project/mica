@@ -21,11 +21,16 @@ A parse or emission diagnostic returns `{:ok -> false, :errors -> diagnostics}`.
 
 The current emitter covers literals, local bindings, list destructuring, collection construction, indexing, assignment, calls, conditionals, loops, and required verb parameters.
 Calls include builtins, explicit selectors, named roles, and local function values.
+`invoke` and `mailbox_recv` use runtime instructions, including spliced argument lists and arity checks.
+Mailbox receive retains local values across suspension and resumes with the delivered value.
 Receiver calls support positional arguments, named roles, splices, and dynamic selectors.
 Static role lists preserve duplicate roles. Spliced role maps use ordinary map replacement semantics.
 Spawn emission preserves receiver, selector, argument, and delay evaluation order, followed by the parent continuation.
 The spawn tests compare task requests and parent results. They do not execute the child through the driver.
 Forward calls and recursive verbs resolve through the runtime method catalogue.
+DOM emission supports attributes, text, nested elements, interpolation, and child splices for the runtime's supported tags.
+The lexer rejects bare `&` in DOM text. Interpolation supports text that contains ampersands.
+Structural literals retain scalar, list, and map payloads, including singleton lists and splices.
 List destructuring supports optional defaults and one rest binding. Range values support list slicing.
 Exact row bindings require a singleton relation with the stated heading and raise `E_CARDINALITY` otherwise.
 Row iteration requires an exact relation heading; maps in a collection can have additional keys.

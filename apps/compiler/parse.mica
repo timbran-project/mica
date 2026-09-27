@@ -1433,6 +1433,7 @@ verb parse_structural_literal(input_state, head)
   let named = false
   let k = tok(state)[:kind]
   if k == :LBracket
+    state = fact(state, structural_node, :list, true, 0)
     state = bump(state)
     state = skip_newlines(state)
     let cell_index = 0
@@ -2243,7 +2244,7 @@ end
 verb parse_dom_children(input_state, tag_text)
   let state = input_state
   let child_list = []
-  let text_start = tok(state)[:offset]
+  let text_start = tok_at(state, -1)[:offset] + 1
   while !at(state, :Eof)
     if at(state, :Lt)
       let text = dom_text_between(state, text_start)
@@ -2273,7 +2274,7 @@ verb parse_dom_children(input_state, tag_text)
       let [child, after_child] = parse_dom_element(state)
       state = after_child
       child_list = [@child_list, child]
-      text_start = tok(state)[:offset]
+      text_start = tok_at(state, -1)[:offset] + 1
       continue
     end
     if at(state, :LBrace)
@@ -2300,7 +2301,7 @@ verb parse_dom_children(input_state, tag_text)
       end
       let [_, after_rbrace] = expect(state, :RBrace, "expected '}' after a DOM child expression")
       state = after_rbrace
-      text_start = tok(state)[:offset]
+      text_start = tok_at(state, -1)[:offset] + 1
       continue
     end
     state = bump(state)
@@ -2314,5 +2315,9 @@ verb dom_text_between(state, start)
   if start >= finish || string_len(source_text(state)) == 0
     return ""
   end
-  return trim_space(string_slice(source_text(state), start, finish))
+  let text = string_slice(source_text(state), start, finish)
+  if trim_space(text) == ""
+    return ""
+  end
+  return text
 end
