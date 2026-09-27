@@ -172,9 +172,59 @@ verb native/c_declarations(state, index)
   return lines
 end
 
+// C pointer stars belong to each declarator. Keep pointee const qualifiers
+// with the base type or the appropriate pointer level when grouping names.
+verb native/c_declarator(type_id) -> list
+  if !native/is_pointer(type_id)
+    return [native/c_type(type_id), ""]
+  end
+  let [base: string, prefix: string] = native/c_declarator(type_id[1])
+  if type_id[2] == :Const
+    if prefix == ""
+      base = string_concat(base, " const")
+    else
+      prefix = string_concat(prefix, " const ")
+    end
+  end
+  return [base, string_concat(prefix, "*")]
+end
+
+verb native/c_local_declarations(index: map, locals: list) -> list
+  let groups: map = {}
+  let lines: list = []
+  for row in locals
+    let notes: list = native/c_notes(index, row[0], "  ")
+    if len(notes) > 0
+      lines = [@lines, @notes, string_concat("  ", native/c_type(row[3]), " v_", row[2], ";")]
+    else
+      let spelling: string = native/c_type(row[3])
+      if !map_contains_key(groups, spelling)
+        groups[spelling] = [row[3], []]
+      end
+      let group: list = groups[spelling]
+      group[1] = [@group[1], row[2]]
+      groups[spelling] = group
+    end
+  end
+  for spelling in sort([name for name, group in groups])
+    let group: list = groups[spelling]
+    let [base: string, prefix: string] = native/c_declarator(group[0])
+    let names: list = [string_concat(prefix, "v_", name) for name in group[1]]
+    lines = [@lines, string_concat("  ", base, " ", string_join(names, ", "), ";")]
+  end
+  return lines
+end
+
 verb native/c_definitions(state, index)
   let functions = native/ordered(state[:functions], 1)
-  let lines = native/c_globals(state, index, false)
+  let lines = [@native/c_globals(state, index, false),
+    "/* Lowering can retain unused locals and parameters. Scope these warnings to generated definitions. */",
+    "#if defined(__GNUC__) || defined(__clang__)",
+    "#pragma GCC diagnostic push",
+    "#pragma GCC diagnostic ignored \"-Wunused-variable\"",
+    "#pragma GCC diagnostic ignored \"-Wunused-but-set-variable\"",
+    "#pragma GCC diagnostic ignored \"-Wunused-parameter\"",
+    "#endif"]
   for fn_row in functions
     let fn_id = fn_row[0]
     if map_contains_key(index[:foreign], fn_id)
@@ -182,16 +232,7 @@ verb native/c_definitions(state, index)
     end
     lines = [@lines, "", @native/c_notes(index, fn_id, ""), @native/c_contract_notes(state, index, fn_id), string_concat(native/c_signature(state, index, fn_row), " {")]
     let locals = native/ordered(native/owned(state[:locals], 1, fn_id), 2)
-    for row in locals
-      lines = [@lines, @native/c_notes(index, row[0], "  "), string_concat("  ", native/c_type(row[3]), " v_", row[2], ";")]
-    end
-    // Taking an address suppresses unused warnings without reading a local.
-    for row in native/ordered(native/owned(state[:parameters], 1, fn_id), 2)
-      lines = [@lines, string_concat("  (void)&v_", row[3], ";")]
-    end
-    for row in locals
-      lines = [@lines, string_concat("  (void)&v_", row[2], ";")]
-    end
+    lines = [@lines, @native/c_local_declarations(index, locals)]
     let blocks = native/ordered(native/owned(state[:blocks], 1, fn_id), 2)
     for block in blocks
       if block[3]
@@ -222,7 +263,7 @@ verb native/c_definitions(state, index)
     end
     lines = [@lines, "}"]
   end
-  return lines
+  return [@lines, "#if defined(__GNUC__) || defined(__clang__)", "#pragma GCC diagnostic pop", "#endif"]
 end
 
 verb native/c_function(index, id)
