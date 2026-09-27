@@ -3,6 +3,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "value.c"
 #include "allocation.c"
+#include "mutex.c"
 #include <stdio.h>
 #include <time.h>
 
@@ -238,7 +239,64 @@ static uint64_t now(void) {
     struct timespec t; if(clock_gettime(CLOCK_MONOTONIC,&t)!=0) fail("clock failed");
     return (uint64_t)t.tv_sec*UINT64_C(1000000000)+(uint64_t)t.tv_nsec;
 }
+// Symbol samples have independent process lifetimes. Insertion visits each
+// prepared name once; hit and reverse-lookup samples pre-intern before timing.
+static int symbol_driver(const char *mode, uint64_t rounds) {
+    uint64_t count = read_number(8);
+    uint8_t **names = allocate_array(count, sizeof(*names));
+    uint64_t *lengths = allocate_array(count, sizeof(*lengths));
+    struct mica_IdResult *ids = allocate_array(count, sizeof(*ids));
+    struct mica_SymbolTable table = {0};
+    if (!mica_value_symbol_table_init(&table)) fail("symbol table initialization failed");
+    for (uint64_t i = 0; i < count; ++i) names[i] = read_bytes(&lengths[i]);
+    bool check = strcmp(mode, "check") == 0;
+    bool insert = strcmp(mode, "insert") == 0;
+    bool lookup = strcmp(mode, "lookup") == 0;
+    if (!check && !insert && !lookup && strcmp(mode, "hit") != 0) fail("unknown symbol mode");
+    if (!insert) for (uint64_t i = 0; i < count; ++i)
+        ids[i] = mica_value_symbol_intern(&table, names[i], lengths[i]);
+    if (check) {
+        for (uint64_t i = 0; i < count; ++i) {
+            write_number(ids[i].f_ok, 1);
+            if (!ids[i].f_ok) continue;
+            struct mica_SymbolText text = mica_value_symbol_text(&table, (uint32_t)ids[i].f_number);
+            if (!text.f_ok) fail("interned symbol has no text");
+            write_number(ids[i].f_number, 8);
+            write_bytes(text.f_data, text.f_length);
+            write_number(text.f_scalars, 8);
+            write_number(text.f_ascii, 1);
+        }
+    } else {
+        if (count == 0 || rounds == 0 || (insert && rounds != 1)) fail("invalid symbol sample size");
+        if (!insert) for (uint64_t i = 0; i < count; ++i) if (!ids[i].f_ok) fail("invalid benchmark name");
+        uint64_t digest = 0, start = now();
+        for (uint64_t round = 0; round < rounds; ++round) for (uint64_t i = 0; i < count; ++i) {
+            uint64_t observed;
+            if (lookup) {
+                struct mica_SymbolText text = mica_value_symbol_text(&table, (uint32_t)ids[i].f_number);
+                if (!text.f_ok) fail("symbol lookup failed");
+                observed = text.f_length + text.f_scalars + text.f_ascii;
+                if (text.f_length != 0) observed += text.f_data[0] + text.f_data[text.f_length - 1];
+            } else {
+                struct mica_IdResult id = mica_value_symbol_intern(&table, names[i], lengths[i]);
+                if (!id.f_ok) fail("symbol intern failed");
+                observed = id.f_number;
+            }
+            __asm__ volatile("" : "+r"(observed) : : "memory");
+            digest += observed;
+        }
+        uint64_t elapsed = now() - start;
+        printf("%llu %llu\n", (unsigned long long)elapsed, (unsigned long long)digest);
+    }
+    mica_value_symbol_table_release(&table);
+    for (uint64_t i = 0; i < count; ++i) free(names[i]);
+    free(names); free(lengths); free(ids);
+    return ferror(stdout) ? 2 : 0;
+}
+
 int main(int argc, char **argv) {
+    if (argc == 4 && strcmp(argv[1], "symbols") == 0)
+        return symbol_driver(argv[2], strtoull(argv[3], NULL, 10));
     uint64_t rounds=argc==2 ? strtoull(argv[1],NULL,10) : 0;
     struct mica_ValueArena inputs={0};
     uint64_t count=read_number(8);

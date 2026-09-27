@@ -948,6 +948,11 @@ state = native/block_body(state, v["entry"], [[:PackPointer, v["word"], [v["inpu
 
 #[test]
 fn native_value_layer_executes_on_both_mica_tiers() {
+    let sanitizer = if std::env::var_os("MICA_NATIVE_THREAD_SANITIZER").is_some() {
+        "-fsanitize=thread"
+    } else {
+        "-fsanitize=address,undefined,float-cast-overflow"
+    };
     let mut previous = None;
     for interpreter_only in [true, false] {
         let mut runner = runner(interpreter_only);
@@ -959,6 +964,7 @@ fn native_value_layer_executes_on_both_mica_tiers() {
             include_str!("../../../apps/native/value/heap.mica"),
             include_str!("../../../apps/native/value/utf8.mica"),
             include_str!("../../../apps/native/value/strings.mica"),
+            include_str!("../../../apps/native/value/symbols.mica"),
             include_str!("../../../apps/native/value/string_append.mica"),
             include_str!("../../../apps/native/value/string_search.mica"),
             include_str!("../../../apps/native/value/compare.mica"),
@@ -999,8 +1005,9 @@ return native/emit_c(state)
         fs::write(
             &source,
             format!(
-                "{generated}\n#define mica_foreign_allocate native_test_allocate\n#define mica_foreign_release native_test_release\n{}\n#undef mica_foreign_allocate\n#undef mica_foreign_release\n{}",
+                "{generated}\n#define mica_foreign_allocate native_test_allocate\n#define mica_foreign_release native_test_release\n{}\n#undef mica_foreign_allocate\n#undef mica_foreign_release\n{}\n{}",
                 include_str!("../../../native/platform/allocation.c"),
+                include_str!("../../../native/platform/mutex.c"),
                 include_str!("../../../apps/native/value/tests.c")
             ),
         )
@@ -1008,6 +1015,7 @@ return native/emit_c(state)
         let compiled = Command::new(std::env::var_os("CC").unwrap_or_else(|| "cc".into()))
             .args([
                 "-std=c11",
+                "-pthread",
                 "-O2",
                 "-g",
                 "-Wall",
@@ -1016,7 +1024,7 @@ return native/emit_c(state)
                 "-pedantic",
                 "-ffp-contract=off",
                 "-fno-fast-math",
-                "-fsanitize=address,undefined,float-cast-overflow",
+                sanitizer,
                 "-fno-sanitize-recover=all",
                 "-fno-omit-frame-pointer",
             ])
@@ -1032,6 +1040,7 @@ return native/emit_c(state)
         );
         let executed = Command::new(binary)
             .env("ASAN_OPTIONS", "detect_leaks=1:halt_on_error=1")
+            .env("TSAN_OPTIONS", "halt_on_error=1")
             .output()
             .unwrap();
         assert!(executed.status.success(), "{executed:?}");

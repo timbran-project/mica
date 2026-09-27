@@ -304,6 +304,7 @@ apps/native/value/numbers.mica
 apps/native/value/arena.mica
 apps/native/value/utf8.mica
 apps/native/value/strings.mica
+apps/native/value/symbols.mica
 apps/native/value/string_append.mica
 apps/native/value/string_search.mica
 apps/native/value/heap.mica
@@ -312,7 +313,8 @@ apps/native/value/maps.mica
 ```
 
 `native_value/program()` returns its IR. `native/emit_module(native_value/program(), "value")` returns the C artifacts.
-The platform boundary remains the allocation and release wrappers in `native/platform/allocation.c`.
+The platform boundary uses [allocation wrappers](../../native/platform/allocation.c) and [POSIX mutex wrappers](../../native/platform/mutex.c).
+Link the value module with both shims and `-pthread`.
 
 Implemented behaviour includes:
 
@@ -376,7 +378,49 @@ Serialize mutation of an arena and its string backings, including append. This m
 All views become invalid when their owning arena is released. Allocation errors can retain temporary storage until release.
 The allocation and index-building helpers are internal construction steps; callers must not publish incomplete headers.
 
-This module is in progress. Relations, recursive hash/copy, symbol interning, display, codecs, and list operations beyond construction and comparison remain unimplemented.
+The [symbol table](value/symbols.mica) interns UTF-8 names into stable 32-bit IDs.
+Start with a zero-initialized `struct mica_SymbolTable`, then call `value_symbol_table_init` before sharing it.
+Its API uses these generated functions:
+
+| Function after `mica_` | Result |
+| --- | --- |
+| `value_symbol_table_init(table)` | Boolean success; allocates and initializes the table mutex |
+| `value_symbol_intern(table, bytes, length)` | `IdResult { ok, number }`; successful IDs fit `uint32_t` |
+| `value_symbol_text(table, id)` | `SymbolText { ok, data, length, scalars, ascii }` |
+| `value_symbol_table_release(table)` | Releases storage and resets the table |
+
+Names are case-sensitive byte sequences. Empty names, embedded NUL bytes, and all Unicode scalars are valid.
+Interning rejects malformed UTF-8, null pointers with nonzero lengths, allocation failure, and exhausted IDs with `ok = false`.
+Reverse lookup returns `ok = false` for unknown IDs. Names are not NUL-terminated.
+Use `value_symbol((uint32_t)id.number)` to construct a symbol value, or `value_error_code` for an error code.
+IDs are local to one table and start at zero. Values from different tables must not share a symbol namespace.
+
+The table copies new names and caches their byte length, scalar count, and ASCII flag.
+Repeated interning does not allocate. Text addresses and IDs stay valid through table growth.
+FNV-1a hashes select buckets with linear probing. Matching hashes still require equal bytes.
+At most half the buckets contain entries. Reverse lookup indexes entries directly.
+The arena retains earlier table arrays until release. Geometric growth keeps their total size below twice the current array size.
+Allocation failure preserves published names and IDs, but can retain unused capacity until release.
+
+Interning and reverse lookup acquire the table's mutex internally. Concurrent calls share one namespace and cannot publish duplicate IDs for equal names.
+Returned text is immutable and stays valid after unlock, including during concurrent insertion and growth.
+The `symbol_*_locked` helpers require the caller to hold that mutex. Application code uses the `value_symbol_*` functions.
+
+Initialization and release require exclusive ownership. Do not copy an initialized table.
+Finish all calls and borrowed text reads before release.
+Initialization returns false on allocation or mutex initialization failure, or when the table is already initialized.
+Interning and lookup fail on an uninitialized table. Failed initialization permits retry.
+Release destroys the mutex, frees storage, and resets the table. Reinitialize the reset table before reuse.
+After release, all borrowed text and table-local IDs are invalid. Reinitialization starts IDs at zero.
+
+The native tests run eight threads through shared-name interning, distinct-name insertion, reverse lookup, and growth.
+To run these tests with ThreadSanitizer instead of address and undefined-behaviour sanitizers:
+
+```sh
+MICA_NATIVE_THREAD_SANITIZER=1 CC=clang cargo test -p mica-runtime --test native_codegen native_value_layer_executes_on_both_mica_tiers
+```
+
+This module is in progress. Relations, recursive hash/copy, display, codecs, and list operations beyond construction and comparison remain unimplemented.
 Comparison supports the empty relation sentinel; other relation comparisons remain unimplemented and return `ok = false`.
 Heap layouts are local to this implementation. Matching immediate tags does not make heap pointers interchangeable with Odin or Rust.
 
@@ -386,7 +430,11 @@ The [comparison harness](../../crates/testing/value-comparison/src/main.rs) cons
 It compares complete semantic results through a test protocol. It does not exchange heap pointers or use the persistence codec.
 The harness covers implemented constructors, recursive comparison, mixed numeric comparison, arithmetic, map lookup, and map construction.
 String checks cover malformed bytes, Unicode scalars, indexing, slicing, search, concatenation, and append chains.
-Symbol tests use matching numeric IDs; they do not test symbol interning. Nonempty relations, hashing, and codecs remain outside its coverage.
+Symbol sequences compare interning, deduplication, reverse lookup, and cached metadata against Rust `Symbol`.
+The comparison normalizes Rust IDs by first occurrence because IDs belong to their table.
+These checks read every name after the complete sequence, including growth, and include malformed UTF-8 and repeated names.
+Use `--symbol-case` to replay the JSON byte arrays from a failed sequence.
+Nonempty relations, value hashing, and codecs remain outside its coverage.
 
 Run fixed boundary cases and a seeded corpus with shrinking:
 
@@ -411,7 +459,8 @@ Use the string corpus to exercise this module independently of arithmetic discre
 cargo run --release -p mica-value-comparison -- --strings --cases 2048 --seed 17 --sanitize
 ```
 
-`--strings` selects generated string and Unicode cases. Fixed cases and benchmark correctness checks still cover all implemented operations.
+`--strings` selects generated string and Unicode cases. Symbol sequences run independently with the same seed and case count.
+Fixed cases and benchmark correctness checks still cover all implemented operations.
 
 Run performance measurements for workloads that pass their own full result checks:
 
@@ -426,7 +475,13 @@ Measurements cover integer addition, mixed numeric comparison, nested comparison
 String workloads cover ASCII and Unicode length, indexing, slicing, search, construction from bytes, and 64-part append chains.
 String inputs contain 4 KiB of bytes. Index workloads reuse cached metadata; construction workloads include validation and metadata creation.
 The Rust search reference uses standard string search and scalar-offset conversion; it is not a runtime substring-search builtin.
-The harness calibrates repetitions toward the requested sample duration and alternates implementation order.
+Symbol workloads measure one repeated name, 1,024 existing names, reverse lookup, and 65,536 distinct insertions.
+Each symbol sample runs in a fresh process. Insertion visits each prepared name once, without warmup or duration calibration.
+Other symbol samples pre-intern names before timing. Reverse lookup reads text and cached metadata through each implementation's public API.
+C table initialization and cleanup stay outside timed intervals. Rust creates its global table on first use and retains names until process exit.
+Both implementations include synchronization in the measured operations. These samples measure uncontended calls from one thread.
+Rust uses a global read-write lock and a thread-local cache. Generated C uses a mutex per table.
+The harness calibrates other workloads toward the requested sample duration and alternates implementation order.
 It prints JSON lines with compiler details, all samples, median nanoseconds per operation, and C/Rust ratios. Ratios below one favour C.
 Samples include operation dispatch and result consumption, so very small operation timings also include harness costs.
 These are workload measurements, not isolated instruction costs or whole-runtime benchmarks.

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 mod cases;
+mod symbols;
 
 use std::error::Error;
 use std::fs;
@@ -48,6 +49,11 @@ struct Options {
     /// Replay one JSON case printed by a failed property check.
     #[arg(long)]
     case: Option<String>,
+    /// Replay a JSON array of byte strings from a failed symbol sequence.
+    #[arg(long)]
+    symbol_case: Option<String>,
+    #[arg(long, hide = true)]
+    symbol_worker: Option<String>,
     /// Save the generated standalone C source at this path.
     #[arg(long)]
     emit_c: Option<PathBuf>,
@@ -101,6 +107,7 @@ impl Native {
             "value/heap",
             "value/utf8",
             "value/strings",
+            "value/symbols",
             "value/string_append",
             "value/string_search",
             "value/compare",
@@ -134,6 +141,10 @@ impl Native {
             root.join("native/platform/allocation.c"),
             scratch.0.join("allocation.c"),
         )?;
+        fs::copy(
+            root.join("native/platform/mutex.c"),
+            scratch.0.join("mutex.c"),
+        )?;
         fs::write(scratch.0.join("driver.c"), include_str!("driver.c"))?;
         let cc = std::env::var_os("CC").unwrap_or_else(|| "cc".into());
         let version = Command::new(&cc).arg("--version").output()?;
@@ -148,6 +159,7 @@ impl Native {
         let mut command = Command::new(&cc);
         command.current_dir(&scratch.0).args([
             "-std=c11",
+            "-pthread",
             "-O3",
             "-Wall",
             "-Wextra",
@@ -309,7 +321,7 @@ fn benchmark(native: &Native, samples: u32, minimum_rounds: u64, sample_ms: u32)
     println!(
         "{}",
         json!({"metadata": {"c_compiler":native.compiler,"rust_compiler":String::from_utf8_lossy(&rustc.stdout).trim(),
-        "c_flags":"-std=c11 -O3 -ffp-contract=off -fno-fast-math", "rust_profile":"release",
+        "c_flags":"-std=c11 -pthread -O3 -ffp-contract=off -fno-fast-math", "rust_profile":"release",
         "os":std::env::consts::OS,"arch":std::env::consts::ARCH,"samples":samples,"minimum_rounds":minimum_rounds,"target_sample_ms":sample_ms,
         "rustflags":std::env::var("RUSTFLAGS").unwrap_or_default(),
         "timing":"monotonic wall time; input preparation and subprocess startup excluded; alternating implementation order"}})
@@ -369,10 +381,18 @@ fn benchmark(native: &Native, samples: u32, minimum_rounds: u64, sample_ms: u32)
 
 fn run() -> Result<()> {
     let options = Options::parse();
+    if let Some(mode) = &options.symbol_worker {
+        return symbols::worker(mode, options.iterations.get());
+    }
     if options.bench && cfg!(debug_assertions) {
         return Err("benchmarking requires cargo run --release".into());
     }
     let native = Native::build(options.sanitize, options.emit_c.as_deref())?;
+    if let Some(case) = &options.symbol_case {
+        symbols::replay(&native, case)?;
+        println!("{}", json!({"symbol_replay":"passed"}));
+        return Ok(());
+    }
     if let Some(case) = options.case {
         native.check(&[serde_json::from_str(&case)?])?;
         println!("{}", json!({"replay":"passed"}));
@@ -387,15 +407,22 @@ fn run() -> Result<()> {
             .map_err(|e| format!("{e}\ncase={}", serde_json::to_string(case).unwrap()))?;
     }
     check_generated(&native, options.cases, options.seed, options.strings)?;
+    symbols::check(&native, options.cases, options.seed)?;
     for (_, cases) in cases::workloads() {
         native.check(&cases)?;
     }
     println!(
         "{}",
-        json!({"correctness":"passed","fixed_cases":fixed.len(),"generated_cases":options.cases,"string_corpus":options.strings,"seed":options.seed,"sanitizers":options.sanitize})
+        json!({"correctness":"passed","fixed_cases":fixed.len(),"generated_cases":options.cases,"string_corpus":options.strings,"symbol_sequences":options.cases,"seed":options.seed,"sanitizers":options.sanitize})
     );
     if options.bench {
         benchmark(
+            &native,
+            options.samples.get(),
+            options.iterations.get(),
+            options.sample_ms.get(),
+        )?;
+        symbols::benchmark(
             &native,
             options.samples.get(),
             options.iterations.get(),
@@ -425,6 +452,7 @@ mod tests {
         native.check(&cases::fixed_cases())?;
         check_generated(&native, 64, 1, false)?;
         check_generated(&native, 128, 1, true)?;
+        symbols::check(&native, 128, 1)?;
         let mismatch = Case {
             op: cases::Operation::Remainder,
             left: cases::Input::Float(636431709),

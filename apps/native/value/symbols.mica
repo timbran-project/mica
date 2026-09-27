@@ -1,0 +1,260 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+// Table-local IDs index entries; open-addressed buckets contain ID + 1.
+// The arena owns names and geometric table allocations until table release.
+verb native_value/symbols(input: map) -> map
+  let context: map = input
+  let entry: list = [:Record, "SymbolEntry"]
+  let bytes: list = [:Pointer, :U8, :Const]
+  let state: map = context[:state]
+  state = native/record_type(state, "SymbolEntry", [["data", bytes], ["length", :U64],
+    ["scalars", :U64], ["hash", :U64], ["ascii", :Bool]])[1]
+  state = native/record_type(state, "SymbolTable", [["mutex", [:Pointer, :U8, :Mutable]], ["arena", [:Record, "ValueArena"]],
+    ["entries", [:Pointer, entry, :Mutable]], ["buckets", [:Pointer, :U64, :Mutable]],
+    ["count", :U64], ["capacity", :U64]])[1]
+  state = native/record_type(state, "SymbolText", [["ok", :Bool], ["data", bytes],
+    ["length", :U64], ["scalars", :U64], ["ascii", :Bool]])[1]
+  let [constants: map, next: map] = native/constants(state, [
+    ["symbol_initial_capacity", :U64, "0000000000000010"],
+    ["symbol_id_limit", :U64, "0000000100000000"],
+    ["symbol_two", :U64, "0000000000000002"],
+    ["symbol_hash_basis", :U64, "cbf29ce484222325"],
+    ["symbol_hash_prime", :U64, "00000100000001b3"]])
+  let all: map = context[:constants]
+  for name, id in constants
+    all[name] = id
+  end
+  context[:constants] = all
+  context[:state] = next
+  context = native_value/symbol_synchronization(context)
+  context = native_value/symbol_lookup(context)
+  context = native_value/symbol_grow(context)
+  context = native_value/symbol_intern(context)
+  context = native_value/symbol_access(context)
+  context = native_value/symbol_synchronized_access(context)
+  return context
+end
+
+verb native_value/symbol_lookup(input: map) -> map
+  let context: map = input
+  let bytes: list = [:Pointer, :U8, :Const]
+  let table: list = [:Record, "SymbolTable"]
+  let entry: list = [:Record, "SymbolEntry"]
+  context = native_value/function(context, "symbol_hash", :U64,
+    [["source", bytes, :Borrow], ["length", :U64, :Value]], [], [:ReadMemory], :Value, "")
+  context = native_value/body(context, "symbol_hash", [
+    [:Let, "hash", :U64, "symbol_hash_basis"], [:Let, "position", :U64, "zero"],
+    [:While, [:Less, "position", "length"], [
+      [:Let, "byte", :U8, [:Load, [:Expr, bytes, [:Offset, "source", "position"]]]],
+      [:Set, "hash", [:BitXor, "hash", [:Expr, :U64, [:Convert, "byte"]]]],
+      [:Set, "hash", [:Multiply, "hash", "symbol_hash_prime"]],
+      [:Set, "position", [:Add, "position", "one"]]]], [:Return, "hash"]])
+  context = native_value/function(context, "symbol_slot", :U64,
+    [["table", [:Pointer, table, :Mutable], :Borrow], ["source", bytes, :Borrow],
+     ["length", :U64, :Value], ["hash", :U64, :Value]], [], [:ReadMemory], :Value, "")
+  context = native_value/body(context, "symbol_slot", [
+    [:Note, :Invariant, "Capacity is nonzero; at least half the buckets are empty."],
+    [:Let, "header", table, [:Load, "table"]],
+    [:Let, "entries", [:Pointer, entry, :Mutable], [:Field, "header", "entries"]],
+    [:Let, "buckets", [:Pointer, :U64, :Mutable], [:Field, "header", "buckets"]],
+    [:Let, "mask", :U64, [:Multiply, [:Expr, :U64, [:Field, "header", "capacity"]], "symbol_two"]],
+    [:Set, "mask", [:Subtract, "mask", "one"]],
+    [:Let, "slot", :U64, [:BitAnd, "hash", "mask"]],
+    [:While, "true", [
+      [:Let, "id", :U64, [:Load, [:Expr, [:Pointer, :U64, :Mutable], [:Offset, "buckets", "slot"]]]],
+      [:If, [:Equal, "id", "zero"], [[:Return, "slot"]], []],
+      [:Let, "candidate", entry, [:Load, [:Expr, [:Pointer, entry, :Mutable],
+        [:Offset, "entries", [:Expr, :U64, [:Subtract, "id", "one"]]]]]],
+      [:If, [:Equal, "hash", [:Expr, :U64, [:Field, "candidate", "hash"]]], [
+        [:If, [:Equal, "length", [:Expr, :U64, [:Field, "candidate", "length"]]], [
+          [:Let, "data", bytes, [:Field, "candidate", "data"]],
+          [:Let, "position", :U64, "zero"],
+          [:While, [:Less, "position", "length"], [
+            [:Let, "left_byte", :U8, [:Load, [:Expr, bytes, [:Offset, "source", "position"]]]],
+            [:Let, "right_byte", :U8, [:Load, [:Expr, bytes, [:Offset, "data", "position"]]]],
+            [:If, [:Equal, "left_byte", "right_byte"], [], [[:Break]]],
+            [:Set, "position", [:Add, "position", "one"]]]],
+          [:If, [:Equal, "position", "length"], [[:Return, "slot"]], []]] , []]], []],
+      [:Set, "slot", [:BitAnd, [:Expr, :U64, [:Add, "slot", "one"]], "mask"]]]],
+    [:Return, "zero"]])
+  return context
+end
+
+verb native_value/symbol_grow(input: map) -> map
+  let context: map = input
+  let table: list = [:Record, "SymbolTable"]
+  let entry: list = [:Record, "SymbolEntry"]
+  let entries: list = [:Pointer, entry, :Mutable]
+  let buckets: list = [:Pointer, :U64, :Mutable]
+  let bytes: list = [:Pointer, :U8, :Mutable]
+  context = native_value/function(context, "symbol_grow", :Bool,
+    [["table", [:Pointer, table, :Mutable], :Borrow]], [], [:ReadMemory, :WriteMemory, :Allocate], :Value, "")
+  context = native_value/body(context, "symbol_grow", [
+    [:Let, "header", table, [:Load, "table"]],
+    [:Let, "capacity", :U64, [:Field, "header", "capacity"]],
+    [:If, [:Less, "capacity", "symbol_id_limit"], [], [[:Return, "false"]]],
+    [:Set, "capacity", [:Multiply, "capacity", "symbol_two"]],
+    [:If, [:Equal, "capacity", "zero"], [[:Set, "capacity", "symbol_initial_capacity"]], []],
+    [:Let, "count", :U64, [:Field, "header", "count"]],
+    [:Let, "entry_size", :U64, [:SizeOf, entry]],
+    [:Let, "entry_bytes", :U64, [:Multiply, "capacity", "entry_size"]],
+    [:Let, "bucket_count", :U64, [:Multiply, "capacity", "symbol_two"]],
+    [:Let, "bucket_bytes", :U64, [:Multiply, "bucket_count", [:Expr, :U64, [:SizeOf, :U64]]]],
+    [:Let, "arena", [:Pointer, [:Record, "ValueArena"], :Mutable], [:FieldPointer, "table", "arena"]],
+    [:Let, "allocation", bytes, [:Call, "value_arena_allocate", "arena", [:Expr, :U64, [:Add, "entry_bytes", "bucket_bytes"]]]],
+    [:If, [:Equal, "allocation", "null_bytes"], [[:Return, "false"]], []],
+    [:Let, "new_entries", entries, [:PointerCast, "allocation"]],
+    [:Let, "new_buckets", buckets, [:PointerCast, [:Expr, bytes, [:Offset, "allocation", "entry_bytes"]]]],
+    [:Let, "position", :U64, "zero"],
+    [:While, [:Less, "position", "bucket_count"], [
+      [:Do, [:Store, [:Expr, buckets, [:Offset, "new_buckets", "position"]], "zero"]],
+      [:Set, "position", [:Add, "position", "one"]]]],
+    [:If, [:Equal, "count", "zero"], [], [
+      [:Let, "previous", entries, [:Field, "header", "entries"]],
+      [:Do, [:CopyBytes, "allocation", [:Expr, bytes, [:PointerCast, "previous"]], [:Expr, :U64, [:Multiply, "count", "entry_size"]]]]]],
+    [:Let, "mask", :U64, [:Subtract, "bucket_count", "one"]],
+    [:Set, "position", "zero"],
+    [:While, [:Less, "position", "count"], [
+      [:Let, "item", entry, [:Load, [:Expr, entries, [:Offset, "new_entries", "position"]]]],
+      [:Let, "slot", :U64, [:BitAnd, [:Expr, :U64, [:Field, "item", "hash"]], "mask"]],
+      [:While, "true", [
+        [:Let, "occupied", :U64, [:Load, [:Expr, buckets, [:Offset, "new_buckets", "slot"]]]],
+        [:If, [:Equal, "occupied", "zero"], [[:Break]], []],
+        [:Set, "slot", [:BitAnd, [:Expr, :U64, [:Add, "slot", "one"]], "mask"]]]],
+      [:Do, [:Store, [:Expr, buckets, [:Offset, "new_buckets", "slot"]], [:Expr, :U64, [:Add, "position", "one"]]]],
+      [:Set, "position", [:Add, "position", "one"]]]],
+    [:Note, :Purpose, "Publish rebuilt tables only after allocation and rehashing succeed."],
+    [:Do, [:Store, [:Expr, [:Pointer, entries, :Mutable], [:FieldPointer, "table", "entries"]], "new_entries"]],
+    [:Do, [:Store, [:Expr, [:Pointer, buckets, :Mutable], [:FieldPointer, "table", "buckets"]], "new_buckets"]],
+    [:Do, [:Store, [:Expr, buckets, [:FieldPointer, "table", "capacity"]], "capacity"]],
+    [:Return, "true"]])
+  return context
+end
+
+verb native_value/symbol_intern(input: map) -> map
+  let context: map = input
+  let table: list = [:Record, "SymbolTable"]
+  let entry: list = [:Record, "SymbolEntry"]
+  let bytes: list = [:Pointer, :U8, :Const]
+  let mutable_bytes: list = [:Pointer, :U8, :Mutable]
+  let buckets: list = [:Pointer, :U64, :Mutable]
+  let result: list = [:Record, "IdResult"]
+  context = native_value/function(context, "symbol_intern_locked", result,
+    [["table", [:Pointer, table, :Mutable], :Borrow], ["source", bytes, :Borrow],
+     ["length", :U64, :Value]], [], [:ReadMemory, :WriteMemory, :Allocate], :Value, "")
+  context = native_value/body(context, "symbol_intern_locked", [
+    [:If, [:Less, "allocation_limit", "length"], [[:Return, [:Zero]]], []],
+    [:If, [:Equal, "length", "zero"], [], [
+      [:If, [:Equal, "source", [:Expr, bytes, [:Zero]]], [[:Return, [:Zero]]], []]]],
+    [:Let, "hash", :U64, [:Call, "symbol_hash", "source", "length"]],
+    [:Let, "header", table, [:Load, "table"]],
+    [:Let, "capacity", :U64, [:Field, "header", "capacity"]],
+    [:Let, "count", :U64, [:Field, "header", "count"]],
+    [:Let, "slot", :U64, "zero"],
+    [:If, [:Equal, "capacity", "zero"], [], [
+      [:Set, "slot", [:Call, "symbol_slot", "table", "source", "length", "hash"]],
+      [:Let, "existing_buckets", buckets, [:Field, "header", "buckets"]],
+      [:Let, "existing", :U64, [:Load, [:Expr, buckets, [:Offset, "existing_buckets", "slot"]]]],
+      [:If, [:Equal, "existing", "zero"], [], [
+        [:Return, [:Record, "true", [:Expr, :U64, [:Subtract, "existing", "one"]]]]]]]],
+    [:If, [:Less, "count", "symbol_id_limit"], [], [[:Return, [:Zero]]]],
+    [:Let, "scan", [:Record, "Utf8Scan"], [:Call, "utf8_scan", "source", "length"]],
+    [:If, [:Field, "scan", "ok"], [], [[:Return, [:Zero]]]],
+    [:If, [:Equal, "count", "capacity"], [
+      [:If, [:Call, "symbol_grow", "table"], [], [[:Return, [:Zero]]]],
+      [:Set, "header", [:Load, "table"]],
+      [:Set, "slot", [:Call, "symbol_slot", "table", "source", "length", "hash"]]], []],
+    [:Let, "arena", [:Pointer, [:Record, "ValueArena"], :Mutable], [:FieldPointer, "table", "arena"]],
+    [:Let, "size", :U64, "length"],
+    [:If, [:Equal, "size", "zero"], [[:Set, "size", "one"]], []],
+    [:Let, "data", mutable_bytes, [:Call, "value_arena_allocate", "arena", "size"]],
+    [:If, [:Equal, "data", "null_bytes"], [[:Return, [:Zero]]], []],
+    [:If, [:Equal, "length", "zero"], [], [[:Do, [:CopyBytes, "data", "source", "length"]]]],
+    [:Let, "item", entry, [:Record, [:Expr, bytes, [:Freeze, "data"]], "length",
+      [:Expr, :U64, [:Field, "scan", "scalars"]], "hash", [:Expr, :Bool, [:Field, "scan", "ascii"]]]],
+    [:Let, "entries", [:Pointer, entry, :Mutable], [:Field, "header", "entries"]],
+    [:Do, [:Store, [:Expr, [:Pointer, entry, :Mutable], [:Offset, "entries", "count"]], "item"]],
+    [:Let, "buckets", buckets, [:Field, "header", "buckets"]],
+    [:Let, "next_count", :U64, [:Add, "count", "one"]],
+    [:Do, [:Store, [:Expr, buckets, [:Offset, "buckets", "slot"]], "next_count"]],
+    [:Do, [:Store, [:Expr, buckets, [:FieldPointer, "table", "count"]], "next_count"]],
+    [:Return, [:Record, "true", "count"]]])
+  return context
+end
+
+verb native_value/symbol_access(input: map) -> map
+  let context: map = input
+  let table: list = [:Record, "SymbolTable"]
+  let entry: list = [:Record, "SymbolEntry"]
+  let pointer: list = [:Pointer, table, :Mutable]
+  context = native_value/function(context, "symbol_text_locked", [:Record, "SymbolText"],
+    [["table", pointer, :Borrow], ["id", :U32, :Value]], [], [:ReadMemory], :Borrow, "table")
+  context = native_value/body(context, "symbol_text_locked", [
+    [:Let, "header", table, [:Load, "table"]],
+    [:Let, "index", :U64, [:Convert, "id"]],
+    [:If, [:Less, "index", [:Expr, :U64, [:Field, "header", "count"]]], [], [[:Return, [:Zero]]]],
+    [:Let, "entries", [:Pointer, entry, :Mutable], [:Field, "header", "entries"]],
+    [:Let, "item", entry, [:Load, [:Expr, [:Pointer, entry, :Mutable], [:Offset, "entries", "index"]]]],
+    [:Return, [:Record, "true", [:Expr, [:Pointer, :U8, :Const], [:Field, "item", "data"]],
+      [:Expr, :U64, [:Field, "item", "length"]], [:Expr, :U64, [:Field, "item", "scalars"]],
+      [:Expr, :Bool, [:Field, "item", "ascii"]]]]])
+  context = native_value/function(context, "value_symbol_table_release", :Void,
+    [["table", pointer, :Consume]], [], [:ReadMemory, :WriteMemory, :Release], :Value, "")
+  context = native_value/body(context, "value_symbol_table_release", [
+    [:Let, "arena", [:Pointer, [:Record, "ValueArena"], :Mutable], [:FieldPointer, "table", "arena"]],
+    [:Do, [:Call, "value_arena_release", "arena"]],
+    [:Let, "mutex", [:Pointer, :U8, :Mutable], [:Load,
+      [:Expr, [:Pointer, [:Pointer, :U8, :Mutable], :Mutable], [:FieldPointer, "table", "mutex"]]]],
+    [:If, [:Equal, "mutex", "null_bytes"], [], [[:Do, [:Call, "mutex_destroy", "mutex"]]]],
+    [:Do, [:Store, "table", [:Expr, table, [:Zero]]]], [:Return]])
+  return context
+end
+
+// Initialization and release require exclusive ownership. The mutex remains
+// immutable throughout the table's shared lifetime.
+verb native_value/symbol_synchronization(input: map) -> map
+  let context: map = input
+  let bytes: list = [:Pointer, :U8, :Mutable]
+  let pointer: list = [:Pointer, [:Record, "SymbolTable"], :Mutable]
+  context = native_value/function(context, "mutex_create", bytes, [], [], [:Allocate, :Release, :WriteMemory], :Owned, "")
+  context[:state] = native/foreign(context[:state], context[:functions]["mutex_create"])
+  for spec in [["mutex_lock", :Borrow, [:ReadMemory, :WriteMemory, :Block]],
+               ["mutex_unlock", :Borrow, [:ReadMemory, :WriteMemory]],
+               ["mutex_destroy", :Consume, [:ReadMemory, :WriteMemory, :Release]]]
+    context = native_value/function(context, spec[0], :Void, [["mutex", bytes, spec[1]]], [], spec[2], :Value, "")
+    context[:state] = native/foreign(context[:state], context[:functions][spec[0]])
+  end
+  context = native_value/function(context, "value_symbol_table_init", :Bool,
+    [["table", pointer, :Borrow]], [], [:ReadMemory, :WriteMemory, :Allocate, :Release], :Value, "")
+  context = native_value/body(context, "value_symbol_table_init", [
+    [:Let, "slot", [:Pointer, bytes, :Mutable], [:FieldPointer, "table", "mutex"]],
+    [:Let, "existing", bytes, [:Load, "slot"]],
+    [:If, [:Equal, "existing", "null_bytes"], [], [[:Return, "false"]]],
+    [:Let, "owned", bytes, [:Call, "mutex_create"]],
+    [:If, [:Equal, "owned", "null_bytes"], [[:Return, "false"]], []],
+    [:Let, "adopted", bytes, [:Adopt, "slot", "owned"]], [:Return, "true"]])
+  return context
+end
+
+// Every exit from a locked helper returns through the matching unlock.
+verb native_value/symbol_synchronized_access(input: map) -> map
+  let context: map = input
+  let bytes: list = [:Pointer, :U8, :Mutable]
+  let pointer: list = [:Pointer, [:Record, "SymbolTable"], :Mutable]
+  for spec in [
+      ["value_symbol_intern", "symbol_intern_locked", [:Record, "IdResult"],
+       [["source", [:Pointer, :U8, :Const], :Borrow], ["length", :U64, :Value]],
+       ["source", "length"], [:ReadMemory, :WriteMemory, :Allocate, :Block], :Value, ""],
+      ["value_symbol_text", "symbol_text_locked", [:Record, "SymbolText"],
+       [["id", :U32, :Value]], ["id"], [:ReadMemory, :WriteMemory, :Block], :Borrow, "table"]]
+    context = native_value/function(context, spec[0], spec[2], [["table", pointer, :Borrow], @spec[3]], [], spec[5], spec[6], spec[7])
+    context = native_value/body(context, spec[0], [
+      [:Let, "mutex", bytes, [:Load, [:Expr, [:Pointer, bytes, :Mutable], [:FieldPointer, "table", "mutex"]]]],
+      [:If, [:Equal, "mutex", "null_bytes"], [[:Return, [:Zero]]], []],
+      [:Do, [:Call, "mutex_lock", "mutex"]],
+      [:Let, "result", spec[2], [:Call, spec[1], "table", @spec[4]]],
+      [:Do, [:Call, "mutex_unlock", "mutex"]], [:Return, "result"]])
+  end
+  return context
+end
