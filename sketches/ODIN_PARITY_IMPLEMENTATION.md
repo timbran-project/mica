@@ -463,3 +463,8 @@ Source-to-artifact compilation takes 23.4 ms in Rust versus 9.0 ms in Odin, leav
 Emission peak RSS is approximately 31.7 MiB versus 34.1 MiB. Rust native-enabled execution remains near its interpreter result.
 The frontend control measures 36.0 ms versus 37.6 ms. Different input sizes prevent subtracting these timings to isolate emitter cost.
 A separate profile finds substantial reference-count traffic and frame cleanup. Nested instruction-list growth is a candidate for bounded application-level improvement.
+
+The emitter now accumulates instructions in 64-entry chunks and flattens them once per assembly description.
+Jump patches update one chunk. A stored instruction count supplies absolute targets without traversing chunks.
+All eleven compiler application tests pass, including bootstrap artifact equality, generated-program execution, exception exits, and suspension.
+This bounds instruction-prefix copying within the emitter. A pinned comparison must establish its throughput effect before it is accepted as a performance improvement.
