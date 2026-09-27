@@ -101,6 +101,23 @@ verb native/c_tree_labels(nodes: list, input: map) -> map
   return labels
 end
 
+// Count executable syntax, not source notes or label spelling. Normalized
+// compound nodes cache their size so parents need not traverse them again.
+verb native/c_tree_size(nodes: list) -> int
+  let size: int = 0
+  for node in nodes
+    if node[:kind] == :Label || (node[:kind] == :Text && string_len(node[:text]) >= 2 && string_slice(node[:text], 0, 2) == "/*")
+      continue
+    end
+    if map_contains_key(node, :size)
+      size = size + node[:size]
+    else
+      size = size + 1
+    end
+  end
+  return size
+end
+
 // Normalize before assigning lexical scopes. Rendering must not move nodes
 // across braces after declaration placement.
 verb native/c_normalize_tree(nodes: list, labels: map) -> list
@@ -114,17 +131,28 @@ verb native/c_normalize_tree(nodes: list, labels: map) -> list
     if kind == :If
       let yes: list = native/c_normalize_tree(node[:yes], labels)
       let no: list = native/c_normalize_tree(node[:no], labels)
-      if (!native/c_tree_exits(yes) && native/c_tree_exits(no)) || (len(yes) == 0 && len(no) > 0)
+      let yes_exits: bool = native/c_tree_exits(yes)
+      let no_exits: bool = native/c_tree_exits(no)
+      let yes_size: int = native/c_tree_size(yes)
+      let no_size: int = native/c_tree_size(no)
+      // When both arms exit, prefer the smaller guard. Otherwise a complete
+      // function body can remain nested above a one-line alternative return.
+      if (no_exits && (!yes_exits || no_size < yes_size)) || (len(yes) == 0 && len(no) > 0)
         node[:condition] = string_concat("!(", node[:condition], ")")
         let saved: list = yes
         yes = no
         no = saved
+        let saved_size: int = yes_size
+        yes_size = no_size
+        no_size = saved_size
       end
       node[:yes] = yes
       node[:no] = no
+      node[:size] = 1 + yes_size + no_size
       // The continuing arm of a guard belongs to the enclosing C scope.
       if native/c_tree_exits(yes)
         node[:no] = []
+        node[:size] = 1 + yes_size
         result = [@result, node, @no]
         continue
       end
@@ -170,14 +198,19 @@ verb native/c_normalize_tree(nodes: list, labels: map) -> list
       end
       node[:condition] = condition
       node[:body] = native/c_normalize_tree(body, labels)
+      node[:size] = 1 + native/c_tree_size(node[:body])
     end
     if kind == :Switch
       let cases: list = []
+      let size: int = 1
       for arm in node[:cases]
-        cases = [@cases, native/c_case(arm[:value], native/c_normalize_tree(arm[:body], labels))]
+        let body: list = native/c_normalize_tree(arm[:body], labels)
+        size = size + native/c_tree_size(body)
+        cases = [@cases, native/c_case(arm[:value], body)]
       end
       node[:cases] = cases
       node[:fallback] = native/c_normalize_tree(node[:fallback], labels)
+      node[:size] = size + native/c_tree_size(node[:fallback])
     end
     result = [@result, node]
   end

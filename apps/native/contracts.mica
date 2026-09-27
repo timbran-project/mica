@@ -75,7 +75,7 @@ verb native/check_contracts(state, input_index)
   let c_names = []
   for fn_row in state[:functions]
     let spelling = native/c_function(index, fn_row[0])
-    native/ensure(spelling != "mica_internal_f32_bits", "reserved C helper name")
+    native/ensure(!native/contains(["mica_internal_f32_bits", "mica_internal_word_payload", "mica_internal_word_tag"], spelling), "reserved C helper name")
     native/ensure(!native/contains(c_names, spelling), "duplicate emitted function name")
     c_names = [@c_names, spelling]
   end

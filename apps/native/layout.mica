@@ -211,20 +211,58 @@ verb native/c_layout_statement(index, row)
       expression = string_concat("(uint64_t)(uintptr_t)", arg)
       guard = string_concat("!(", heap, ") || p == 0 || ")
     end
-    return string_concat("{ uint64_t p = ", expression, "; if (", guard, "p > UINT64_C(0x00ffffffffffffff)) { abort(); } ", dst,
+    return string_concat("{ uint64_t p = ", expression, "; if (", guard, "p > MICA_INTERNAL_WORD_PAYLOAD_MASK) { abort(); } ", dst,
       " = p | ((uint64_t)", native/c_value(index, args[1]), " << 56); }")
   end
   if op == :UnpackPointer
     let tagged = native/value_type(index, index[:blocks][row[1]][1], args[0])
-    let heap = native/c_heap_tag(tagged, string_concat("(", arg, " >> 56)"))
-    return string_concat("{ uintptr_t p = (uintptr_t)(", arg, " & UINT64_C(0x00ffffffffffffff)); if (!(", heap, ") || p == 0 || p % _Alignof(", native/c_type(type_id[1]), ") != 0) { abort(); } ", dst, " = (", native/c_type(type_id), ")p; }")
+    let heap = native/c_heap_tag(tagged, string_concat("mica_internal_word_tag(", arg, ")"))
+    return string_concat("{ uintptr_t p = (uintptr_t)mica_internal_word_payload(", arg, "); if (!(", heap, ") || p == 0 || p % _Alignof(", native/c_type(type_id[1]), ") != 0) { abort(); } ", dst, " = (", native/c_type(type_id), ")p; }")
   end
   if op == :Tag
-    return string_concat(dst, " = (uint8_t)(", arg, " >> 56);")
+    return string_concat(dst, " = mica_internal_word_tag(", arg, ");")
   end
   let tagged = native/value_type(index, index[:blocks][row[1]][1], args[0])
-  let heap = native/c_heap_tag(tagged, string_concat("(", arg, " >> 56)"))
-  return string_concat("if (", heap, ") { abort(); } ", dst, " = ", arg, " & UINT64_C(0x00ffffffffffffff);")
+  let heap = native/c_heap_tag(tagged, string_concat("mica_internal_word_tag(", arg, ")"))
+  return string_concat("if (", heap, ") { abort(); } ", dst, " = mica_internal_word_payload(", arg, ");")
+end
+
+// Emit only helpers used by this module. Each guard also permits headers
+// from separate generated modules to share the same C translation unit.
+verb native/c_word_helpers(state: map, index: map) -> list
+  let payload: bool = false
+  let tag: bool = false
+  let mask: bool = false
+  for row in state[:instructions]
+    if native/contains([:PackPointer, :PackImmediate], row[3])
+      mask = true
+    end
+    if row[3] == :Tag
+      tag = true
+    end
+    if native/contains([:Payload, :UnpackPointer], row[3])
+      payload = true
+      mask = true
+      let type_id: list = native/value_type(index, index[:blocks][row[1]][1], row[5][0])
+      tag = tag || len(type_id[3]) > 0
+    end
+  end
+  let lines: list = []
+  if mask || tag
+    lines = ["/* Tagged words: high 8 bits hold the tag; low 56 bits hold the payload. */"]
+  end
+  if mask
+    lines = [@lines, "#ifndef MICA_INTERNAL_WORD_PAYLOAD_MASK", "#define MICA_INTERNAL_WORD_PAYLOAD_MASK UINT64_C(0x00ffffffffffffff)", "#endif"]
+  end
+  if payload
+    lines = [@lines, "#ifndef MICA_INTERNAL_WORD_PAYLOAD_DEFINED", "#define MICA_INTERNAL_WORD_PAYLOAD_DEFINED",
+      "static inline uint64_t mica_internal_word_payload(uint64_t word) { return word & MICA_INTERNAL_WORD_PAYLOAD_MASK; }", "#endif"]
+  end
+  if tag
+    lines = [@lines, "#ifndef MICA_INTERNAL_WORD_TAG_DEFINED", "#define MICA_INTERNAL_WORD_TAG_DEFINED",
+      "static inline uint8_t mica_internal_word_tag(uint64_t word) { return (uint8_t)(word >> 56); }", "#endif"]
+  end
+  return lines
 end
 
 // Immediate payload extraction cannot erase a heap pointer's borrow origin.

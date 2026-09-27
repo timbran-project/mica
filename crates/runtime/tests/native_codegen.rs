@@ -621,6 +621,9 @@ return expected == native/emit_module(state, "surface")
         previous = Some(generated.clone());
         let scratch = Scratch::new();
         fs::write(scratch.0.join("surface.h"), header).unwrap();
+        assert!(generated.contains("mica_internal_word_payload(v_value)"));
+        assert!(generated.contains("mica_internal_word_tag(v_value)"));
+        assert!(!generated.contains("& UINT64_C(0x00ffffffffffffff)"));
         let source = scratch.0.join("surface.c");
         let harness = scratch.0.join("harness.c");
         let binary = scratch.0.join("surface");
@@ -688,6 +691,105 @@ return expected == native/emit_module(state, "surface")
             assert!(!rejected.status.success());
             assert!(rejected.stderr.is_empty(), "{rejected:?}");
         }
+    }
+}
+
+#[test]
+fn tagged_helpers_support_separate_modules_and_immediate_only_words() {
+    let mut runner = runner(true);
+    let scratch = Scratch::new();
+    for (name, operation, result, heap_tags) in [
+        ("payload", "Payload", "U64", "[7]"),
+        ("tag", "Tag", "U8", "[]"),
+        ("immediate_payload", "Payload", "U64", "[]"),
+    ] {
+        let emitted = eval(
+            &mut runner,
+            &format!(
+                r#"
+let word = [:Tagged, "{name}", :Const, {heap_tags}]
+let [id, names, state] = native/function_scope(native/program(), "{name}", :{result},
+  [["word", word, :Borrow]], [["result", :{result}]], ["entry"])
+state = native/block_body(state, names["entry"], [[:{operation}, names["result"], [names["word"]]]], :Return, [names["result"]])
+let module = native/emit_module(state, "{name}")
+return [module[:header], module[:source]]
+"#
+            ),
+        );
+        emitted
+            .with_list(|parts| {
+                for (part, extension) in parts.iter().zip(["h", "c"]) {
+                    fs::write(
+                        scratch.0.join(format!("{name}.{extension}")),
+                        part.with_str(str::to_owned).unwrap(),
+                    )
+                    .unwrap();
+                }
+            })
+            .unwrap();
+    }
+    fs::write(
+        scratch.0.join("main.c"),
+        r#"
+#include "payload.h"
+#include "tag.h"
+#include "immediate_payload.h"
+#include <assert.h>
+int main(void) {
+    uint64_t word = UINT64_C(0xabfedcba98765432);
+    assert(mica_payload(word) == UINT64_C(0x00fedcba98765432));
+    assert(mica_tag(word) == 0xab);
+    assert(mica_immediate_payload(UINT64_MAX) == UINT64_C(0x00ffffffffffffff));
+    assert(mica_internal_word_payload(word++) == UINT64_C(0x00fedcba98765432));
+    assert(word == UINT64_C(0xabfedcba98765433));
+    return 0;
+}
+"#,
+    )
+    .unwrap();
+    let binary = scratch.0.join("helpers");
+    let compiled = Command::new(std::env::var_os("CC").unwrap_or_else(|| "cc".into()))
+        .current_dir(&scratch.0)
+        .args([
+            "-std=c11",
+            "-O2",
+            "-Wall",
+            "-Wextra",
+            "-Werror",
+            "-pedantic",
+            "payload.c",
+            "tag.c",
+            "immediate_payload.c",
+            "main.c",
+            "-o",
+        ])
+        .arg(&binary)
+        .output()
+        .unwrap();
+    assert!(
+        compiled.status.success(),
+        "{}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+    let executed = Command::new(binary).output().unwrap();
+    assert!(executed.status.success(), "{executed:?}");
+    assert!(executed.stderr.is_empty(), "{executed:?}");
+    for name in ["internal_word_payload", "internal_word_tag"] {
+        let report = runner
+            .run_source(&format!(
+                r#"
+let [id, names, state] = native/function_scope(native/program(), "{name}", :Void, [], [], ["entry"])
+state = native/terminate(state, names["entry"], :Return, [])
+return native/emit_c(state)
+"#
+            ))
+            .unwrap();
+        assert!(
+            matches!(report.outcome, TaskOutcome::Aborted { .. })
+                && report.render().contains("reserved C helper name"),
+            "{}",
+            report.render()
+        );
     }
 }
 
@@ -1011,6 +1113,16 @@ return native/emit_c(state)
 "#)
             .with_str(str::to_owned)
             .unwrap();
+        let sort_columns = generated
+            .split("bool mica_relation_sort_columns(")
+            .nth(1)
+            .unwrap()
+            .split_once(" {\n")
+            .unwrap()
+            .1;
+        assert!(sort_columns.starts_with(
+            "  if (!(UINT64_C(0x0000000000000001) < v_length)) {\n    return true;\n  }\n  uint64_t v_size = "
+        ));
         if let Some(previous) = &previous {
             assert_eq!(&generated, previous);
         }
@@ -1122,6 +1234,28 @@ fn structured_builders_preserve_control_flow_and_notes() {
                 .unwrap()
         };
         let branch = body("scoped_branch");
+        let guards = body("structured_guards");
+        assert!(
+            guards.starts_with("  if (!(UINT64_C(0x0000000000000001) < v_limit)) {"),
+            "{guards}"
+        );
+        assert!(
+            guards.contains("\n  if (!(UINT64_C(0x0000000000000002) < v_limit)) {"),
+            "{guards}"
+        );
+        assert!(guards.contains("\n  uint64_t v_first = "), "{guards}");
+        assert!(!guards.contains("\n    if ("), "{guards}");
+        let guard_effects = body("structured_guard_effects");
+        assert!(
+            guard_effects.starts_with("  if (!(v_choice)) {"),
+            "{guard_effects}"
+        );
+        assert_eq!(
+            guard_effects
+                .matches("mica_foreign_structured_tick()")
+                .count(),
+            4
+        );
         assert!(
             branch.starts_with("  uint64_t v_result;\n  if (v_choice) {"),
             "{branch}"
@@ -1149,7 +1283,9 @@ fn structured_builders_preserve_control_flow_and_notes() {
         assert_eq!(header.matches("mica_foreign_structured_tick()").count(), 1);
         let irreducible = body("irreducible");
         assert!(
-            irreducible.contains("\n  bool v_condition;\n  if (v_choice) {"),
+            irreducible
+                .lines()
+                .any(|line| line.starts_with("  bool v_condition")),
             "{irreducible}"
         );
         let nested = body("structured_nested");
@@ -1248,6 +1384,15 @@ int main(void) {{
     assert(mica_structured_shared_tail(3) == 12 && calls == 2);
     calls = 0;
     assert(mica_scoped_header() == 2 && calls == 3);
+    calls = 0;
+    assert(mica_structured_guards(0) == 0 && calls == 0);
+    assert(mica_structured_guards(1) == 0 && calls == 0);
+    assert(mica_structured_guards(2) == 1 && calls == 0);
+    assert(mica_structured_guards(3) == 3 && calls == 2);
+    calls = 0;
+    assert(mica_structured_guard_effects(false) == 1 && calls == 1);
+    calls = 0;
+    assert(mica_structured_guard_effects(true) == 0 && calls == 3);
     return 0;
 }}
 "#

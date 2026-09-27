@@ -133,6 +133,7 @@ verb native/c_declarations(state, index, public: bool)
   if native/c_uses_float_constants(state, index)
     lines = [@lines, "static inline float mica_internal_f32_bits(uint32_t bits) { float result; memcpy(&result, &bits, sizeof(result)); return result; }"]
   end
+  lines = [@lines, @native/c_word_helpers(state, index)]
   for type_id in index[:type_order]
     if native/is_scalar(type_id)
       lines = [@lines, native/c_comment(string_concat("Nominal scalar: ", type_id[1], "; representation: ", to_literal(type_id[2])))]

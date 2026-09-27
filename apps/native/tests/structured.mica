@@ -105,6 +105,18 @@ verb native/control_examples(state: map, constants: map, tick: int) -> map
         native/case_arm("two", [native/set_statement("total", native/binary_expression(:Add, "total", "ten"))]),
         native/case_arm("three", [[:Break]])], [native/set_statement("total", native/binary_expression(:Add, "total", "one"))]),
       native/set_statement("total", native/binary_expression(:Add, "total", "one"))]), native/return_value("total")])
+  context = native/declare_function(context, "structured_guards", :U64, [["limit", :U64, :Value]], [], [:WriteMemory], :Value, "")
+  context = native/define_function(context, "structured_guards", [
+    [:If, [:Less, "one", "limit"], [
+      [:If, [:Less, "two", "limit"], [
+        [:Let, "first", :U64, [:Call, "tick"]], [:Let, "second", :U64, [:Call, "tick"]],
+        [:Return, [:Add, "first", "second"]]], [[:Return, "one"]]]], [[:Return, "zero"]]]])
+  context = native/declare_function(context, "structured_guard_effects", :U64, [["choice", :Bool, :Value]], [], [:WriteMemory], :Value, "")
+  context = native/define_function(context, "structured_guard_effects", [
+    [:If, "choice", [
+      [:Let, "first", :U64, [:Call, "tick"]], [:Let, "second", :U64, [:Call, "tick"]],
+      [:Let, "third", :U64, [:Call, "tick"]], [:Return, [:Subtract, "third", [:Expr, :U64, [:Add, "first", "second"]]]]],
+      [[:Return, [:Call, "tick"]]]]])
   for name in ["cycle_a", "cycle_b"]
     context = native/declare_function(context, name, :U64, [["n", :U64, :Value]], [], [], :Value, "")
   end

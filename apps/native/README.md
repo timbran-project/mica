@@ -170,6 +170,8 @@ Record and array definitions follow their layout dependencies; pointer fields ca
 The emitter analyzes the checked control-flow graph, including bodies built directly from blocks.
 Dominators identify natural loops; postdominators identify shared branch continuations.
 The resulting C syntax tree uses `if`, `else`, `while`, `break`, `continue`, and early returns.
+When both branches exit, the emitter puts the smaller branch first and moves the larger branch after the guard.
+Branch size counts executable syntax, including nested blocks. Comments do not affect this choice.
 Integer equality chains become switches when intermediate blocks contain no effects or outside entries.
 Pure loop comparisons become `while (condition)`; headers with computations remain inside `while (true)`.
 Calls retain their original execution order and count. Only direct returns and zero-result exits may be duplicated.
@@ -180,6 +182,9 @@ Declarations precede the first use in that scope. Simple assignments become init
 Locals whose addresses are taken retain function lifetime because aliases can outlive their last direct use.
 Transfers into nested blocks can also require wider scopes to preserve values across block exits and re-entry.
 Locals removed by comparison folding need no declaration.
+
+Tagged-word operations use inline helpers for the high 8-bit tag and the low 56-bit payload.
+The helpers evaluate each argument once. Heap-tag, pointer-alignment, null-pointer, and payload-range checks remain at their operation sites.
 
 The constructors in `c_syntax.mica` own the syntax-map schema and rendering rules.
 Control-flow analysis builds nodes through these helpers instead of assembling C braces and indentation itself.
