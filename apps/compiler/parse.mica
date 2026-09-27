@@ -723,19 +723,20 @@ verb parse_map_pattern_entry(input_state)
   let entry_kind = tok(state)[:kind]
   if entry_kind == :Colon || entry_kind == :Ident
     let key_text = ""
+    let key_node = 0
     if entry_kind == :Colon
-      state = bump(state)
-      key_text = tok(state)[:text]
-      state = bump(state)
+      let [key, after_key] = parse_primary(state)
+      state = after_key
+      key_node = key
     else
       key_text = tok(state)[:text]
       state = bump(state)
+      let [key, after_key] = make_node(state, :Symbol_Literal)
+      state = fact(after_key, key, :name, key_text, 0)
+      key_node = key
     end
     let [entry, after_entry] = make_node(state, :MapPatternEntry)
     state = after_entry
-    let [key_node, after_key] = make_node(state, :Symbol_Literal)
-    state = after_key
-    state = fact(state, key_node, :name, key_text, 0)
     state = fact(state, entry, :key, key_node, 0)
     if at(state, :Arrow)
       state = bump(state)
@@ -743,6 +744,9 @@ verb parse_map_pattern_entry(input_state)
       state = after_pattern
       state = fact(state, entry, :pattern, pattern_node, 0)
     else
+      if entry_kind == :Colon
+        state = error_here(state, "expected '->' after a row column symbol")
+      end
       state = fact(state, entry, :shorthand, true, 0)
       let [bind_pattern, after_bind] = make_node(state, :Binding_Pattern)
       state = after_bind
@@ -896,28 +900,29 @@ verb parse_while(input_state)
   return [while_node, state]
 end
 
-verb parse_for(input_state)
+verb parse_iteration_bindings(input_state, node)
   let state = input_state
-  state = bump(state)
-  let [for_node, after_for] = make_node(state, :For)
-  state = after_for
   let head_kind = tok(state)[:kind]
-  if head_kind == :LBracket || head_kind == :LBrace || head_kind == :Underscore
-    // Destructuring headers bind each item against a list, map, or
-    // wildcard pattern; anything else stays an error.
+  if head_kind == :LBracket || head_kind == :LBrace
     let [pattern_node, after_pattern] = parse_pattern(state)
     state = after_pattern
     let pattern_kind = node_kind(state, pattern_node)
-    if pattern_kind != :List_Pattern && pattern_kind != :Map_Pattern && pattern_kind != :Wildcard_Pattern
-      state = error_here(state, "for loop pattern must be a list, map, or wildcard")
+    if pattern_kind != :List_Pattern && pattern_kind != :Map_Pattern
+      state = error_here(state, "iteration pattern must be a list or row")
     else
-      state = fact(state, for_node, :pattern, pattern_node, 0)
+      state = fact(state, node, :pattern, pattern_node, 0)
     end
   else
     let name_index = 0
     while true
-      let [name_token, after_name] = expect(state, :Ident, "expected loop name")
-      state = after_name
+      let name_token = tok(state)
+      if at(state, :Underscore)
+        state = bump(state)
+      else
+        let [token, after_name] = expect(state, :Ident, "expected loop name")
+        name_token = token
+        state = after_name
+      end
       let [name_node, after_name_node] = make_node(state, :LoopName)
       state = after_name_node
       state = fact(state, name_node, :name, name_token[:text], 0)
@@ -927,15 +932,24 @@ verb parse_for(input_state)
         state = after_annotation
         state = fact(state, name_node, :annotation, annotation, 0)
       end
-      state = fact(state, for_node, :name, name_node, name_index)
+      state = fact(state, node, :name, name_node, name_index)
       name_index = name_index + 1
-      if at(state, :Comma)
+      if name_index < 2 && at(state, :Comma)
         state = bump(state)
         continue
       end
       break
     end
   end
+  return state
+end
+
+verb parse_for(input_state)
+  let state = input_state
+  state = bump(state)
+  let [for_node, after_for] = make_node(state, :For)
+  state = after_for
+  state = parse_iteration_bindings(state, for_node)
   let [_, after_in] = expect(state, :In, "expected 'in' in for loop")
   state = after_in
   let [iterable, after_iterable] = parse_expression(state)
@@ -1651,44 +1665,26 @@ verb parse_comprehension(input_state, body_expr)
   let state = input_state
   let [_, after_for] = expect(state, :For, "expected 'for'")
   state = after_for
-  let pattern_node = 0
-  if at(state, :Ident) && tok_at(state, 1)[:kind] != :LParen
-    let name_token = tok(state)
-    state = bump(state)
-    let [bind_pattern, after_bind] = make_node(state, :Binding_Pattern)
-    state = after_bind
-    state = fact(state, bind_pattern, :name, name_token[:text], 0)
-    pattern_node = bind_pattern
-  else
-    let [parsed, after_parsed] = parse_pattern(state)
-    state = after_parsed
-    let parsed_kind = node_kind(state, parsed)
-    if parsed_kind != :List_Pattern && parsed_kind != :Map_Pattern && parsed_kind != :Wildcard_Pattern
-      state = error_here(state, "comprehension pattern must be a name, list, map, or wildcard")
-      let [wild, after_wild] = make_node(state, :Wildcard_Pattern)
-      state = after_wild
-      pattern_node = wild
-    else
-      pattern_node = parsed
-    end
-  end
   let [comp_node, after_comp] = make_node(state, :Comprehension)
   state = after_comp
   state = fact(state, comp_node, :body, body_expr, 0)
-  state = fact(state, comp_node, :pattern, pattern_node, 0)
+  state = parse_iteration_bindings(state, comp_node)
   let [_, after_in] = expect(state, :In, "expected 'in' in comprehension")
   state = after_in
   let [iterable, after_iterable] = parse_expression(state)
   state = after_iterable
   state = fact(state, comp_node, :iterable, iterable, 0)
+  state = skip_newlines(state)
   if at(state, :If)
     state = bump(state)
     let [condition, after_condition] = parse_expression(state)
     state = after_condition
     state = fact(state, comp_node, :condition, condition, 0)
   end
+  state = skip_newlines(state)
   if is_contextual(state, "sort")
     state = bump(state)
+    state = skip_newlines(state)
     if at(state, :RBracket)
       state = fact(state, comp_node, :sort_bare, true, 0)
     else

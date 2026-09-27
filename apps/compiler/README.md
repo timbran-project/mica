@@ -23,6 +23,11 @@ The current emitter covers literals, local bindings, list destructuring, collect
 Calls include builtins, explicit selectors, named roles, and local function values.
 Forward calls and recursive verbs resolve through the runtime method catalogue.
 List destructuring supports optional defaults and one rest binding. Range values support list slicing.
+Exact row bindings require a singleton relation with the stated heading and raise `E_CARDINALITY` otherwise.
+Row iteration requires an exact relation heading; maps in a collection can have additional keys.
+Loops and comprehensions support list and row patterns, one or two names, typed names, and wildcards.
+Comprehensions support lazy filters, value sorting, and keyed sorting. Sort keys run before body expressions; equal keys sort by body value.
+The accumulator and captured iteration values survive suspension. Loop exits retain ordinary `finally` handling.
 `raise` and `try` support error-code catches, error bindings, and `finally`. Error fields retain Rust's option-valued message and payload.
 Local functions support nested closures, typed parameters, dependent optional defaults, and rest arguments.
 Closures capture referenced outer names at creation time. A shadowed name can add an unused capture, but unrelated locals are excluded.
@@ -49,4 +54,3 @@ cargo run --bin mica -- eval \
   --filein apps/compiler/emit.mica \
   'return emit_source("return 2 + 3")[:ok]'
 ```
-

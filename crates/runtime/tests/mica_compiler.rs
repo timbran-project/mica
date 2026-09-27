@@ -3,6 +3,7 @@
 
 use mica_runtime::{
     SourceRunner, SourceTaskError, TaskError, TaskInput, TaskLimits, TaskManagerError, TaskOutcome,
+    TaskRequest,
 };
 use mica_var::{Symbol, Value};
 use mica_vm::{AuthorityContext, CapabilityGrant, RuntimeError};
@@ -170,6 +171,126 @@ fn install_emitted(runner: &mut SourceRunner, module: Value) {
     );
 }
 
+fn assert_emitted_agrees(runner: &mut SourceRunner, source: &str) {
+    let expected = runner
+        .run_source(source)
+        .unwrap_or_else(|error| panic!("{source}: {error:?}"));
+    let module = invoke(runner, "emit_source", source);
+    assert_eq!(
+        module.map_get(&Value::symbol(Symbol::intern("ok"))),
+        Some(Value::bool(true)),
+        "{source}: {module}"
+    );
+    install_emitted(runner, module);
+    let actual = runner.run_source("return :compiler_test_entry()").unwrap();
+    let TaskOutcome::Complete {
+        value: expected, ..
+    } = expected.outcome
+    else {
+        panic!("{source}: {}", expected.render());
+    };
+    let TaskOutcome::Complete { value: actual, .. } = actual.outcome else {
+        panic!("{source}: {}", actual.render());
+    };
+    assert_eq!(actual, expected, "{source}");
+}
+
+#[test]
+fn mica_emitter_rows_and_comprehensions_agree_with_rust_execution() {
+    for interpreter_only in [true, false] {
+        let mut runner = compiler(interpreter_only);
+        runner.run_filein(INSTALL_EMITTED).unwrap();
+        for source in [
+            "let exactly {:path/field -> x, :\"é🦀\" -> y} = [:path/field, :\"é🦀\"] {[1, 2]}\nreturn [x, y]",
+            "let exactly {b, :a -> first} = [:a, :b] {[2, 3]}\nreturn first + b",
+            "let exactly {a} = [:a] {[1]}\na = 3\nreturn a",
+            "return begin\n let exactly {a} = [:a] {[7]}\nend",
+            "let exactly {} = [] {[]}\nreturn true",
+            "let total = 0\nfor {:b -> second, a} in [:a, :b] {[1, 2], [3, 4]}\n total = total + a + second\nend\nreturn total",
+            "let total = 0\nfor {a} in [{:a -> 1}, {:a -> 2, :extra -> 3}]\n total = total + a\nend\nreturn total",
+            "try\n let exactly {a} = [:a] {}\ncatch E_CARDINALITY as problem\n return [problem.code, problem.message, problem.value]\nend",
+            "try\n let exactly {a} = [:a] {[1], [2]}\ncatch E_CARDINALITY\n return true\nend",
+            "try\n let exactly {a} = [:a, :extra] {[1, 2]}\ncatch E_CARDINALITY\n return true\nend",
+            "try\n let exactly {a} = {:a -> 1}\ncatch E_CARDINALITY\n return true\nend",
+            "try\n for {a} in [:a, :extra] {[1, 2]}\n end\ncatch E_MATCH as problem\n return [problem.message, problem.value]\nend",
+            "try\n for {a} in [{:wrong -> 1}]\n end\ncatch E_MATCH\n return true\nend",
+            "return [x * 2 for x in [3, 1, 2] if x != 1]",
+            "return [x for x in [] sort 0]",
+            "return [x for x in [] sort]",
+            "fn sort(items) => [99]\nreturn [x for x in [3, 1, 2] sort]",
+            "let items = [1, 2]\nreturn [(items = [9])[0] + x for x in items]",
+            "return [x for x in [3, 1, 2] sort]",
+            "return [x for x in [3, 1, 2] sort -x]",
+            "return [x for x in [3, 1, 2] sort 0]",
+            "return [[key, item] for key: int, item: string in [\"é\", \"🦀\"]]",
+            "return [[key, item] for key, item in {:b -> 2, :a -> 1}]",
+            "return [ch for ch in \"é🦀\"]",
+            "return [x for x in 1..4]",
+            "return [a + b for {:b -> b, a} in [:a, :b] {[1, 2], [3, 4]}]",
+            "return [a for {a} in [{:a -> 2}, {:a -> 1, :extra -> true}] sort]",
+            "return [[a, b, rest] for [a, ?b = a + 1, @rest] in [[1], [2, 3, 4]]]",
+            "return [42 for _, _ in [1, 2]]",
+            "let total = 0\nfor _, value in [1, 2]\n total = total + value\nend\nreturn total",
+            "let x = 10\nlet items = [[x + y for y in [1, 2]] for x in [3, 4]]\nreturn [items, x]",
+            "let calls = 0\nlet items = [(calls = calls + 1) for x in [1, 2] if false sort (calls = calls + 10)]\nreturn [items, calls]",
+            "let calls = 0\nlet items = [(calls = calls + 1) for x in [1, 2] sort (calls = calls + 10)]\nreturn [items, calls]",
+            "let callbacks = [fn() => a for {a} in [{:a -> 1}, {:a -> 2}]]\nreturn [callbacks[0](), callbacks[1]()]",
+            "let items = [begin\n if x == 2\n continue\n end\n if x == 4\n break\n end\n x\nend for x in [1, 2, 3, 4, 5]]\nreturn items",
+            "let total = 0\nlet items = [try\n if x == 2\n continue\n end\n if x == 4\n break\n end\n x\nfinally\n total = total + x\nend for x in [1, 2, 3, 4, 5]]\nreturn [items, total]",
+            "return [x for x in [3, 1, 2]\nif x > 1\nsort\n]",
+            "return [x for x in [1, 2, 3] if begin\n if x == 2\n continue\n end\n true\nend]",
+            "return [x for x in [1, 2, 3] sort begin\n if x == 2\n break\n end\n x\nend]",
+        ] {
+            assert_emitted_agrees(&mut runner, source);
+        }
+        for source in [
+            "let exactly {a}",
+            "let exactly {a, :a -> b} = [:a] {[1]}",
+            "const exactly {a} = [:a] {[1]}\na = 3",
+            "return [a for {a, :a -> b} in [:a] {[1]}]",
+            "return [x for x, y, z in [1]]",
+            "return [x for x in [1]]\nreturn x",
+        ] {
+            let module = invoke(&mut runner, "emit_source", source);
+            assert_eq!(
+                module.map_get(&Value::symbol(Symbol::intern("ok"))),
+                Some(Value::bool(false)),
+                "{source}: {module}"
+            );
+        }
+    }
+}
+
+#[test]
+fn mica_emitter_comprehension_captures_and_accumulator_survive_suspension() {
+    const SOURCE: &str = "let callbacks = [begin\n let callback = fn() => a\n if a == 2\n suspend()\n end\n callback\nend for {a} in [{:a -> 3}, {:a -> 2}, {:a -> 1}] sort a]\nreturn [f() for f in callbacks]";
+    for interpreter_only in [true, false] {
+        let mut runner = compiler(interpreter_only);
+        runner.run_filein(INSTALL_EMITTED).unwrap();
+        let module = invoke(&mut runner, "emit_source", SOURCE);
+        install_emitted(&mut runner, module);
+        for source in [SOURCE, "return :compiler_test_entry()"] {
+            let report = runner.run_source(source).unwrap();
+            assert!(
+                matches!(report.outcome, TaskOutcome::Suspended { .. }),
+                "{}",
+                report.render()
+            );
+            let outcome = runner
+                .resume_task(TaskRequest {
+                    input: TaskInput::Continuation {
+                        task_id: report.task_id,
+                        value: Value::unit(),
+                    },
+                    ..SourceRunner::root_source_request("")
+                })
+                .unwrap();
+            assert!(matches!(outcome, TaskOutcome::Complete { value, .. }
+                if value == Value::list([Value::int(1).unwrap(), Value::int(2).unwrap(), Value::int(3).unwrap()])));
+        }
+    }
+}
+
 #[test]
 fn mica_emitter_artifacts_agree_with_rust_execution() {
     for interpreter_only in [true, false] {
@@ -217,22 +338,7 @@ fn mica_emitter_artifacts_agree_with_rust_execution() {
             "try\n try\n raise E_TEST, \"payload\", 17\n catch as inner\n raise inner\n end\ncatch E_TEST as outer\n return outer.value\nend",
             "return [:a, :b] {[2, 1], [1, 3]}",
         ] {
-            let expected = runner
-                .run_source(source)
-                .unwrap_or_else(|error| panic!("{source}: {error:?}"));
-            let module = invoke(&mut runner, "emit_source", source);
-            install_emitted(&mut runner, module);
-            let actual = runner.run_source("return :compiler_test_entry()").unwrap();
-            let TaskOutcome::Complete {
-                value: expected, ..
-            } = expected.outcome
-            else {
-                panic!("{source}: {}", expected.render());
-            };
-            let TaskOutcome::Complete { value: actual, .. } = actual.outcome else {
-                panic!("{source}: {}", actual.render());
-            };
-            assert_eq!(actual, expected, "{source}");
+            assert_emitted_agrees(&mut runner, source);
         }
     }
 }
@@ -325,7 +431,9 @@ fn mica_compiler_bootstrap_preserves_artifacts_and_execution() {
         end
         let adjust = fn(base) => fn(value, ?extra = base, @rest) => value + extra + len(rest)
         let finish = adjust(2)
-        return finish(factorial(5) + total + len("é🦀"))
+        let exactly {adjustment} = [:adjustment] {[2]}
+        let values = [a for {a} in [{:a -> 3}, {:a -> 1}] sort -a]
+        return finish(factorial(5) + total + len("é🦀") + adjustment + values[0])
     "#;
     for interpreter_only in [true, false] {
         let mut runner = compiler(interpreter_only).with_task_limits(TaskLimits {
@@ -347,7 +455,7 @@ fn mica_compiler_bootstrap_preserves_artifacts_and_execution() {
         install_emitted(&mut runner, actual);
         let report = runner.run_source("return :compiler_test_entry()").unwrap();
         assert!(
-            matches!(report.outcome, TaskOutcome::Complete { ref value, .. } if *value == Value::int(138).unwrap()),
+            matches!(report.outcome, TaskOutcome::Complete { ref value, .. } if *value == Value::int(143).unwrap()),
             "{}",
             report.render()
         );

@@ -444,3 +444,10 @@ The assembly interface now exposes the existing relation-pattern, first-row cell
 These operations retain exact relation headings, row-count checks, first-row equalities, and catchable missing-field errors.
 Map iteration still permits additional keys. Assembly tests cover both successful reads and invalid descriptions; runtime clippy passes.
 This closes an assembly gap required by the Mica emitter's row-pattern and comprehension work.
+
+The emitter now compiles exact row bindings, row iteration, and filtered or sorted comprehensions.
+Loops and comprehensions share binding code, including two names, typed names, and wildcards.
+Comparisons preserve exact relation headings, catchable cardinality errors, lazy filters, sort-key evaluation order, and value ordering for equal keys.
+Suspension retains the accumulator and captured row values. Break and continue still run intervening finally handlers.
+All ten compiler application tests pass in the workspace run. The bootstrap reproduces artifacts containing rows and keyed comprehensions in both execution modes.
+Workspace clippy passes. These checks establish capability coverage; source-to-artifact performance remains a separate measurement.
