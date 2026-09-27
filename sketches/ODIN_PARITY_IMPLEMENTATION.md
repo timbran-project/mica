@@ -439,3 +439,8 @@ For 10,001 subjects and 20,001 facts, the identity-value index reduces Rust's me
 Peak RSS increases by approximately 2.2 MiB. Odin remains near 61.8 ms, leaving a roughly 3.8-times gap at this size.
 This improvement applies to fresh catalogues. The separate census control passes with overlapping Rust process timing ranges.
 Further OWL execution costs, rule derivation, resumed large stores, and concurrent ingestion remain separate measurement questions.
+
+The assembly interface now exposes the existing relation-pattern, first-row cell, and collection-field instructions.
+These operations retain exact relation headings, row-count checks, first-row equalities, and catchable missing-field errors.
+Map iteration still permits additional keys. Assembly tests cover both successful reads and invalid descriptions; runtime clippy passes.
+This closes an assembly gap required by the Mica emitter's row-pattern and comprehension work.

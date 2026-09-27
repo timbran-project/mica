@@ -48,12 +48,15 @@ An `items` list contains operands or `[:Splice, operand]` entries.
 | `[:BuildList, dst, items]` | Build a list, including spliced lists. |
 | `[:BuildMap, dst, entries]` | Build a map from `[key_operand, value_operand]` pairs and `[:Splice, operand]` entries. |
 | `[:BuildRelation, dst, heading, cells, row_count]` | Build a relation from a symbol heading and row-major cell operands. |
+| `[:RelationPattern, dst, relation, heading, row_count, equalities]` | Test an exact relation heading and row count, with optional first-row equalities. |
+| `[:RelationCell, dst, relation, column]` | Read a column from the first row; raise `E_MATCH` if absent. |
 | `[:BuildRange, dst, start_operand, end_operand]` | Build a range. The end can be `none`. |
 | `[:Index, dst, collection, key_operand]` | Read a collection element. |
 | `[:SetIndex, dst, collection, key_operand, value_operand]` | Produce an updated collection. |
 | `[:CollectionLen, dst, collection]` | Read the collection length. |
 | `[:CollectionKeyAt, dst, collection, index_reg]` | Read an iteration key. |
 | `[:CollectionValueAt, dst, collection, index_reg]` | Read an iteration value. |
+| `[:CollectionFieldAt, dst, collection, index_reg, heading, column]` | Read a field from an iteration row; raise `E_MATCH` if the row does not match. |
 | `[:Branch, condition, true_target, false_target]` | Branch on the condition register. |
 | `[:Jump, target]` | Jump to an instruction. |
 | `[:BuiltinCall, dst, name, items]` | Call the builtin named by a symbol. |
@@ -81,6 +84,13 @@ An `items` list contains operands or `[:Splice, operand]` entries.
 
 Dynamic relation arguments accept ordinary operands, `[:Splice, operand]`, `[:Query, symbol]`, and `[:Hole]`.
 Runtime relation operations retain their normal arity and binding checks.
+
+Row-pattern headings contain symbols in canonical sorted order. A relation must have exactly that heading.
+`RelationPattern` equalities are `[column_symbol, constant_value]` pairs checked against the first row.
+The instruction returns `false` for other value kinds or a failed match.
+`RelationCell` does not check cardinality; use `RelationPattern` first when a singleton is required.
+For non-relation collections, `CollectionFieldAt` reads the named key from the map at the iteration position.
+Those maps can contain additional keys. The relation form requires the exact heading.
 
 Each catch entry is `[error_code, binding_register, target]`. The code and binding can be `none`.
 The finally target can be `none`. Exception targets belong to the containing program.

@@ -326,6 +326,34 @@ fn instruction(
             cells: operands(cells)?,
             row_count: integer(rows)? as u16,
         },
+        (Some("RelationPattern"), [dst, relation, heading, rows, equalities]) => {
+            Instruction::RelationPattern {
+                dst: register(dst)?,
+                relation: register(relation)?,
+                heading: list(heading)?
+                    .iter()
+                    .map(symbol)
+                    .collect::<Result<_, _>>()?,
+                row_count: integer(rows)? as u16,
+                equalities: list(equalities)?
+                    .iter()
+                    .map(|entry| {
+                        let fields = list(entry)?;
+                        let [column, value] = fields.as_slice() else {
+                            return Err(invalid(
+                                "relation equality must contain a column and value",
+                            ));
+                        };
+                        Ok((symbol(column)?, value.clone()))
+                    })
+                    .collect::<Result<_, _>>()?,
+            }
+        }
+        (Some("RelationCell"), [dst, relation, column]) => Instruction::RelationCell {
+            dst: register(dst)?,
+            relation: register(relation)?,
+            column: symbol(column)?,
+        },
         (Some("BuildRange"), [dst, start, end]) => Instruction::BuildRange {
             dst: register(dst)?,
             start: operand(start)?,
@@ -356,6 +384,18 @@ fn instruction(
             collection: register(collection)?,
             index: register(index)?,
         },
+        (Some("CollectionFieldAt"), [dst, collection, index, heading, column]) => {
+            Instruction::CollectionFieldAt {
+                dst: register(dst)?,
+                collection: register(collection)?,
+                index: register(index)?,
+                heading: list(heading)?
+                    .iter()
+                    .map(symbol)
+                    .collect::<Result<_, _>>()?,
+                column: symbol(column)?,
+            }
+        }
         (Some("Branch"), [condition, if_true, if_false]) => Instruction::Branch {
             condition: register(condition)?,
             if_true: integer(if_true)?,
@@ -651,6 +691,74 @@ mod tests {
     }
 
     #[test]
+    fn assembly_matches_exact_relation_rows_and_reads_cells() {
+        for (relation, expected) in [
+            ("[:a, :b] {[42, \"é🦀\"]}", true),
+            ("[:a, :b] {[41, \"é🦀\"]}", false),
+            ("[:a, :b] {}", false),
+            ("[:a, :b] {[42, \"é🦀\"], [43, \"x\"]}", false),
+            ("[:a] {[42]}", false),
+            ("[:a, :b, :c] {[42, \"é🦀\", 0]}", false),
+            ("{:a -> 42, :b -> \"é🦀\"}", false),
+        ] {
+            let program = assembled(&format!(
+                r#"return assemble({{:registers -> 3, :code -> [
+                  [:Load, 0, {relation}],
+                  [:RelationPattern, 1, 0, [:a, :b], 1, [[:a, 42]]],
+                  [:Branch, 1, 3, 5],
+                  [:RelationCell, 2, 0, :b], [:Return, [:Register, 2]],
+                  [:Return, [:Constant, false]]
+                ]}})"#,
+            ));
+            assert_eq!(
+                execute(program),
+                if expected {
+                    Value::string("é🦀")
+                } else {
+                    Value::bool(false)
+                },
+                "{relation}",
+            );
+        }
+        for relation in ["[:a] {}", "[:b] {[42]}", "42"] {
+            let program = assembled(&format!(
+                r#"return assemble({{:registers -> 2, :code -> [
+                  [:Load, 0, {relation}], [:EnterTry, [[E_MATCH, none, 4]], none, 5],
+                  [:RelationCell, 1, 0, :a], [:Return, [:Constant, false]],
+                  [:Return, [:Constant, true]], [:Return, [:Constant, false]]
+                ]}})"#,
+            ));
+            assert_eq!(execute(program), Value::bool(true), "{relation}");
+        }
+    }
+
+    #[test]
+    fn assembly_iteration_fields_require_exact_relation_headings() {
+        for (collection, index, expected) in [
+            ("[:a] {[41], [42]}", 1, 42),
+            ("[{:a -> 41}, {:a -> 42, :extra -> true}]", 1, 42),
+            ("[:a, :extra] {[42, true]}", 0, -1),
+            ("[{:wrong -> 42}]", 0, -1),
+            ("[:a] {[42]}", -1, -1),
+            ("[:a] {[42]}", 1, -1),
+        ] {
+            let program = assembled(&format!(
+                r#"return assemble({{:registers -> 3, :code -> [
+                  [:Load, 0, {collection}], [:Load, 1, {index}],
+                  [:EnterTry, [[E_MATCH, none, 5]], none, 6],
+                  [:CollectionFieldAt, 2, 0, 1, [:a], :a], [:Return, [:Register, 2]],
+                  [:Return, [:Constant, -1]], [:Return, [:Constant, false]]
+                ]}})"#,
+            ));
+            assert_eq!(
+                execute(program),
+                Value::int(expected).unwrap(),
+                "{collection}"
+            );
+        }
+    }
+
+    #[test]
     fn assembly_rejects_invalid_shapes_registers_targets_and_artifacts() {
         let mut runner = SourceRunner::new_empty();
         for description in [
@@ -670,6 +778,16 @@ mod tests {
             "{:registers -> 1, :code -> [[:CheckKind, 0, :int, :Missing, :x]]}",
             "{:registers -> 1, :code -> [[:CheckKind, 1, :int, :Binding, :x]]}",
             "{:registers -> 1, :code -> [[:BuildRelation, 0, [:a], [], 1]]}",
+            "{:registers -> 1, :code -> [[:RelationPattern, 0, 1, [:a], 1, []]]}",
+            "{:registers -> 1, :code -> [[:RelationPattern, 0, 0, [1], 1, []]]}",
+            "{:registers -> 1, :code -> [[:RelationPattern, 0, 0, [:a], -1, []]]}",
+            "{:registers -> 1, :code -> [[:RelationPattern, 0, 0, [:a], 1, [[:a]]]]}",
+            "{:registers -> 1, :code -> [[:RelationPattern, 0, 0, [:a], 1, [[1, 42]]]]}",
+            "{:registers -> 1, :code -> [[:RelationPattern, 0, 0, [:a], 1, [[:a, fn() => 1]]]]}",
+            "{:registers -> 1, :code -> [[:RelationCell, 0, 0, 1]]}",
+            "{:registers -> 1, :code -> [[:RelationCell, 1, 0, :a]]}",
+            "{:registers -> 1, :code -> [[:CollectionFieldAt, 0, 0, 1, [:a], :a]]}",
+            "{:registers -> 1, :code -> [[:CollectionFieldAt, 0, 0, 0, [1], :a]]}",
             "{:registers -> 1, :code -> [[:Load, 0, fn() => 1]]}",
             "{:registers -> 1, :code -> [[:LoadFunction, 0, {:registers -> 1, :code -> [[:Return, [:Constant, true]]]}, [], 2, 1]]}",
             "{:registers -> 1, :code -> [[:LoadFunction, 0, {:registers -> 0, :code -> [[:Return, [:Constant, true]]]}, [], 0, 0]]}",
