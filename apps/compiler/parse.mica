@@ -6,7 +6,7 @@
 // names a field or edge, and `:target` is a scalar attribute or the node id of
 // a child. `:ordinal` orders repeated roles.
 //
-// State is a list `[tokens, pos, next, facts, errors, source]` threaded
+// State is a list `[tokens, pos, next, fact_chunks, errors, source]` threaded
 // through every helper, because Mica values are immutable. Each helper returns
 // `[result, state]`. `parse(source)` returns
 // `{:root -> id, :nodes -> relation, :errors -> list}`.
@@ -26,7 +26,7 @@ verb parse(source) -> map
   let [tokens, lex_errors] = lex(source)
   let state = [tokens, 0, 1, [], lex_errors, source]
   let [root, done] = parse_program(state)
-  let rows = done[3]
+  let rows = parse_fact_rows(done)
   let nodes = relation_from_rows([:node, :role, :target, :ordinal], rows)
   return {:root -> root, :nodes -> nodes, :errors -> done[4]}
 end
@@ -38,7 +38,7 @@ verb parse_rows(source) -> map
   let [tokens, lex_errors] = lex(source)
   let state = [tokens, 0, 1, [], lex_errors, source]
   let [root, done] = parse_program(state)
-  return {:root -> root, :rows -> done[3], :errors -> done[4]}
+  return {:root -> root, :rows -> parse_fact_rows(done), :errors -> done[4]}
 end
 
 // --- State accessors ---------------------------------------------------------
@@ -148,8 +148,26 @@ end
 
 verb fact(input_state, node, role, target, ordinal)
   let state = input_state
-  state[3] = [@state[3], [node, role, target, ordinal]]
+  let chunks = state[3]
+  let row = [node, role, target, ordinal]
+  let last = len(chunks) - 1
+  if last < 0 || len(chunks[last]) == 64
+    chunks = [@chunks, [row]]
+  else
+    chunks[last] = [@chunks[last], row]
+  end
+  state[3] = chunks
   return state
+end
+
+// Flatten once at the public boundary; each fact append copies at most one chunk
+// plus the list of chunks instead of every preceding AST row.
+verb parse_fact_rows(state)
+  let rows = []
+  for chunk in state[3]
+    rows = [@rows, @chunk]
+  end
+  return rows
 end
 
 // Creates a node with a `:kind` attribute; returns [id, state].
@@ -1374,9 +1392,11 @@ verb parse_postfix(input_state)
 end
 
 verb node_kind(state, node_id)
-  for row in state[3]
-    if row[0] == node_id && row[1] == :kind
-      return row[2]
+  for chunk in state[3]
+    for row in chunk
+      if row[0] == node_id && row[1] == :kind
+        return row[2]
+      end
     end
   end
   return :Unknown

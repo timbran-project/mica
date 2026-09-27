@@ -472,3 +472,8 @@ This bounds instruction-prefix copying within the emitter. A pinned comparison m
 The instruction-chunk capture passes all 18 processes but shows no material gain: Rust emission changes from 23.400 ms to 23.301 ms.
 Native-enabled timing and peak RSS also remain similar. The added bookkeeping is reverted; the measurement remains in the evidence.
 Parser fact-row accumulation is a separate candidate because it builds a substantially larger nested list.
+
+The parser accumulates AST facts in 64-row chunks and flattens them at its public return boundary.
+Node-kind lookup traverses the chunks. Row order, AST identities, diagnostics, and the public relation/list results retain their existing representation.
+All eleven compiler application tests and workspace clippy pass. The bootstrap still produces byte-identical target artifacts in both modes.
+The debug test run falls from roughly 182 seconds to 52 seconds, but a pinned capture must measure the throughput change independently.
