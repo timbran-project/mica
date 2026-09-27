@@ -166,17 +166,19 @@ static void write_value(mica_type_Value v) {
 struct Prepared {
     unsigned op; struct mica_ValueResult left, right;
     struct mica_ValueMapEntry *entries; uint64_t count;
+    struct mica_ValueArena copy_source;
 };
-struct Outcome { bool order; bool ok; int64_t comparison; mica_type_Value value; };
+enum OutcomeKind { OUTCOME_VALUE, OUTCOME_ORDER, OUTCOME_HASH };
+struct Outcome { enum OutcomeKind kind; bool ok; int64_t comparison; mica_type_Value value; };
 static struct Outcome run(const struct Prepared *p, struct mica_ValueArena *arena) {
-    if (!p->left.f_ok || !p->right.f_ok) return (struct Outcome){false,false,0,0};
+    if (!p->left.f_ok || !p->right.f_ok) return (struct Outcome){OUTCOME_VALUE,false,0,0};
     mica_type_Value a=p->left.f_value,b=p->right.f_value;
     struct mica_ValueResult result = {false,0};
     switch (p->op) {
     case 0: result=p->left; break;
     case 1: case 2: {
         struct mica_IntResult c=p->op==1 ? mica_value_compare(a,b) : mica_value_language_compare(a,b);
-        return (struct Outcome){true,c.f_ok,c.f_number,0};
+        return (struct Outcome){OUTCOME_ORDER,c.f_ok,c.f_number,0};
     }
     case 3: result=mica_value_checked_add(a,b); break;
     case 4: result=mica_value_checked_sub(a,b); break;
@@ -307,13 +309,19 @@ static struct Outcome run(const struct Prepared *p, struct mica_ValueArena *aren
         if(view.f_ok) result=mica_value_relation(arena,view.f_relation.f_heading,view.f_relation.f_arity,view.f_relation.f_rows,view.f_relation.f_length);
         break;
     }
+    case 35: {
+        struct mica_IdResult hash=mica_value_hash(a);
+        return (struct Outcome){OUTCOME_HASH,hash.f_ok,0,hash.f_number};
+    }
+    case 36: result=mica_value_copy(arena,a); break;
     default: fail("unknown operation");
     }
-    return (struct Outcome){false,result.f_ok,0,result.f_value};
+    return (struct Outcome){OUTCOME_VALUE,result.f_ok,0,result.f_value};
 }
 static uint64_t checksum(struct Outcome r) {
     if (!r.ok) return 0;
-    if (r.order) return (uint64_t)r.comparison;
+    if (r.kind==OUTCOME_HASH) return r.value;
+    if (r.kind==OUTCOME_ORDER) return (uint64_t)r.comparison;
     switch(mica_value_tag(r.value)) {
     case 7: return 7 ^ mica_value_as_string(r.value).f_header->f_length;
     case 8: return 8 ^ mica_value_as_bytes(r.value).f_header->f_length;
@@ -368,7 +376,9 @@ int main(int argc, char **argv) {
     struct Prepared *cases=allocate_array(count,sizeof(*cases));
     for(uint64_t i=0;i<count;++i) {
         struct Prepared *p=&cases[i];
-        p->op=(unsigned)read_number(1); p->left=read_value(&inputs); p->right=read_value(&inputs);
+        p->op=(unsigned)read_number(1);
+        struct mica_ValueArena *source=p->op==36 ? &p->copy_source : &inputs;
+        p->left=read_value(source); p->right=read_value(source);
         if(p->op==9 && p->left.f_ok) {
             struct mica_HeapListResult list=mica_value_as_list(p->left.f_value);
             if(!list.f_ok || list.f_header->f_length%2!=0) { p->left.f_ok=false; continue; }
@@ -379,8 +389,14 @@ int main(int argc, char **argv) {
     if(rounds==0) {
         for(uint64_t i=0;i<count;++i) {
             struct mica_ValueArena output={0}; struct Outcome r=run(&cases[i],&output);
-            write_number(!r.ok ? 0 : r.order ? 2 : 1,1);
-            if(r.ok) { if(r.order) write_number((uint64_t)r.comparison,8); else write_value(r.value); }
+            // Copies must survive release of the actual decoded source arena.
+            mica_value_arena_release(&cases[i].copy_source);
+            write_number(!r.ok ? 0 : r.kind==OUTCOME_HASH ? 3 : r.kind==OUTCOME_ORDER ? 2 : 1,1);
+            if(r.ok) {
+                if(r.kind==OUTCOME_ORDER) write_number((uint64_t)r.comparison,8);
+                else if(r.kind==OUTCOME_HASH) write_number(r.value,8);
+                else write_value(r.value);
+            }
             mica_value_arena_release(&output);
         }
     } else {
@@ -399,7 +415,7 @@ int main(int argc, char **argv) {
         uint64_t elapsed=now()-start;
         printf("%llu %llu\n",(unsigned long long)elapsed,(unsigned long long)digest);
     }
-    for(uint64_t i=0;i<count;++i) free(cases[i].entries);
+    for(uint64_t i=0;i<count;++i) { free(cases[i].entries); mica_value_arena_release(&cases[i].copy_source); }
     free(cases); mica_value_arena_release(&inputs);
     return ferror(stdout) ? 2 : 0;
 }

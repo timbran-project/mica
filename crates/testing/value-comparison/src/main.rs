@@ -4,6 +4,7 @@
 mod cases;
 mod symbol_loads;
 mod symbols;
+mod traversal;
 
 use std::error::Error;
 use std::fs;
@@ -39,6 +40,9 @@ struct Options {
     /// Generate only relation property cases.
     #[arg(long, conflicts_with_all = ["strings", "collections", "symbol_loads"])]
     relations: bool,
+    /// Generate only recursive hash and copy property cases.
+    #[arg(long, conflicts_with_all = ["strings", "collections", "relations", "symbol_loads"])]
+    traversal: bool,
     /// Run paired timings after correctness checks. Requires a release build.
     #[arg(long)]
     bench: bool,
@@ -142,6 +146,8 @@ impl Native {
             "value/maps",
             "value/collections",
             "value/relations",
+            "value/hash",
+            "value/copy",
         ] {
             let text = fs::read_to_string(root.join(format!("apps/native/{source}.mica")))?;
             let reports = runner
@@ -294,14 +300,16 @@ impl Native {
     }
 }
 
-fn check_generated(
-    native: &Native,
-    count: u32,
-    seed: u64,
-    strings: bool,
-    collections: bool,
-    relations: bool,
-) -> Result<()> {
+#[derive(Clone, Copy)]
+enum Corpus {
+    General,
+    Strings,
+    Collections,
+    Relations,
+    Traversal,
+}
+
+fn check_generated(native: &Native, count: u32, seed: u64, corpus: Corpus) -> Result<()> {
     let mut runner = TestRunner::new(Config {
         cases: count,
         rng_seed: RngSeed::Fixed(seed),
@@ -309,14 +317,12 @@ fn check_generated(
         max_shrink_iters: 2048,
         ..Config::default()
     });
-    let strategy = if relations {
-        cases::relation_strategy()
-    } else if collections {
-        cases::collection_strategy()
-    } else if strings {
-        cases::string_strategy()
-    } else {
-        cases::strategy()
+    let strategy = match corpus {
+        Corpus::General => cases::strategy(),
+        Corpus::Strings => cases::string_strategy(),
+        Corpus::Collections => cases::collection_strategy(),
+        Corpus::Relations => cases::relation_strategy(),
+        Corpus::Traversal => cases::traversal_strategy(),
     };
     match runner.run(&strategy, |case| {
         native
@@ -515,14 +521,18 @@ fn run() -> Result<()> {
             .check(std::slice::from_ref(case))
             .map_err(|e| format!("{e}\ncase={}", serde_json::to_string(case).unwrap()))?;
     }
-    check_generated(
-        &native,
-        options.cases,
-        options.seed,
-        options.strings,
-        options.collections,
-        options.relations,
-    )?;
+    let corpus = if options.traversal {
+        Corpus::Traversal
+    } else if options.relations {
+        Corpus::Relations
+    } else if options.collections {
+        Corpus::Collections
+    } else if options.strings {
+        Corpus::Strings
+    } else {
+        Corpus::General
+    };
+    check_generated(&native, options.cases, options.seed, corpus)?;
     symbols::check(&native, options.cases, options.seed)?;
     symbol_loads::check(&native, options.cases, options.seed, &threads)?;
     for (_, cases) in cases::workloads() {
@@ -530,7 +540,7 @@ fn run() -> Result<()> {
     }
     println!(
         "{}",
-        json!({"correctness":"passed","fixed_cases":fixed.len(),"generated_cases":options.cases,"string_corpus":options.strings,"collection_corpus":options.collections,"relation_corpus":options.relations,"symbol_sequences":options.cases,"symbol_load_cases":options.cases,"symbol_threads":threads,"seed":options.seed,"sanitizers":options.sanitize,"thread_sanitizer":options.thread_sanitize})
+        json!({"correctness":"passed","fixed_cases":fixed.len(),"generated_cases":options.cases,"string_corpus":options.strings,"collection_corpus":options.collections,"relation_corpus":options.relations,"traversal_corpus":options.traversal,"symbol_sequences":options.cases,"symbol_load_cases":options.cases,"symbol_threads":threads,"seed":options.seed,"sanitizers":options.sanitize,"thread_sanitizer":options.thread_sanitize})
     );
     if options.bench {
         benchmark(
@@ -569,10 +579,11 @@ mod tests {
     fn checks_shared_values_and_collections() -> Result<()> {
         let native = Native::build(Sanitizer::Address, None)?;
         native.check(&cases::fixed_cases())?;
-        check_generated(&native, 64, 1, false, false, false)?;
-        check_generated(&native, 256, 41, false, false, true)?;
-        check_generated(&native, 256, 17, false, true, false)?;
-        check_generated(&native, 128, 1, true, false, false)?;
+        check_generated(&native, 64, 1, Corpus::General)?;
+        check_generated(&native, 256, 7, Corpus::Traversal)?;
+        check_generated(&native, 256, 41, Corpus::Relations)?;
+        check_generated(&native, 256, 17, Corpus::Collections)?;
+        check_generated(&native, 128, 1, Corpus::Strings)?;
         symbols::check(&native, 128, 1)?;
         symbol_loads::check(&native, 16, 1, &[1, 2, 4, 8])?;
         symbol_loads::detects_incorrect_metadata(&native)?;

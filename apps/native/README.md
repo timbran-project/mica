@@ -312,6 +312,8 @@ apps/native/value/compare.mica
 apps/native/value/maps.mica
 apps/native/value/collections.mica
 apps/native/value/relations.mica
+apps/native/value/hash.mica
+apps/native/value/copy.mica
 ```
 
 `native_value/program()` returns its IR. `native/emit_module(native_value/program(), "value")` returns the C artifacts.
@@ -474,7 +476,21 @@ To run these tests with ThreadSanitizer instead of address and undefined-behavio
 MICA_NATIVE_THREAD_SANITIZER=1 CC=clang cargo test -p mica-runtime --test native_codegen native_value_layer_executes_on_both_mica_tiers
 ```
 
-This module is in progress. Recursive hash/copy, display, and codecs remain unimplemented.
+`value_hash(value)` and `value_tuple_hash(tuple)` return `IdResult { ok, number }` with a 64-bit hash.
+The hash follows Omica's canonical value algorithm. Equal values in one symbol namespace have equal hashes, regardless of their arena or backing storage.
+Integer and float kinds remain distinct. Absent optional fields do not contribute their stored contents.
+Hashes are neither cryptographic identifiers nor persistence encodings. Unknown tags return `ok = false`.
+
+`value_copy(arena, value)` and `value_tuple_copy(arena, tuple)` recursively copy visible heap storage into the destination arena.
+The result can outlive the source arena. Strings rebuild their scalar indexes, and lists receive independent append storage.
+Maps and relations retain canonical order without another sort. Absent optional fields become zero instead of retaining source pointers.
+Immediate IDs retain their original symbol, identity, capability, or function namespace.
+
+Copy returns `ValueResult` or `TupleResult`. Allocation failure returns `ok = false` and leaves the source unchanged.
+Partial allocations remain in the destination arena until release. The caller must serialize destination arena mutation.
+Traversal uses native recursion. Copy duplicates shared subtrees and does not preserve source aliasing or spare capacity.
+
+This module is in progress. Display and codecs remain unimplemented.
 Heap layouts are local to this implementation. Matching immediate tags does not make heap pointers interchangeable with Odin or Rust.
 
 ## Rust and generated C comparison
@@ -490,7 +506,11 @@ The comparison normalizes Rust IDs by first occurrence because IDs belong to the
 These checks read every name after the complete sequence, including growth, and include malformed UTF-8 and repeated names.
 Use `--symbol-case` to replay the JSON byte arrays from a failed sequence.
 Relation checks cover reordered columns, duplicate rows, nested values, empty relations, unit, accessors, and invalid headings or row widths.
-Use `--relations` to select relation property cases. Value hashing and codecs remain outside the harness coverage.
+Use `--relations` to select relation property cases. Codecs remain outside the harness coverage.
+`--traversal` selects hash and copy cases across all value kinds, including nested relations.
+Copy checks release the actual decoded source arena before they inspect the result under AddressSanitizer.
+The Rust hash reference implements Omica's algorithm over Rust values. It does not use Rust's unspecified standard hash algorithm.
+The Rust copy reference recursively reconstructs values. Copy benchmarks include this reconstruction and result destruction, rather than an `Arc` clone.
 
 Run fixed boundary cases and a seeded corpus with shrinking:
 

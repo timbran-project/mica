@@ -1,0 +1,153 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+// Hashes follow Omica's canonical value hash. They identify hash buckets within
+// one symbol namespace, not durable values or cryptographic content identities.
+verb native_value/hashing(input: map) -> map
+  let context: map = input
+  let word: list = native_value/word()
+  let result: list = [:Record, "IdResult"]
+  let [constants, state] = native/constants(context[:state], [
+    ["value_hash_basis", :U64, "cbf29ce484222325"], ["value_hash_prime", :U64, "00000100000001b3"]])
+  context[:state] = state
+  let bindings: map = context[:constants]
+  for name, id in constants
+    bindings[name] = id
+  end
+  context[:constants] = bindings
+  context = native_value/function(context, "value_hash_mix", :U64, [["hash", :U64, :Value], ["number", :U64, :Value]], [], [], :Value, "")
+  context = native_value/body(context, "value_hash_mix", [
+    [:Let, "mixed", :U64, [:BitXor, "hash", "number"]], [:Return, [:Multiply, "mixed", "value_hash_prime"]]])
+  context = native_value/function(context, "value_hash_bytes", :U64, [["hash", :U64, :Value],
+    ["data", [:Pointer, :U8, :Const], :Borrow], ["length", :U64, :Value]], [], [:ReadMemory], :Value, "")
+  context = native_value/body(context, "value_hash_bytes", [
+    [:Let, "result", :U64, "hash"], [:Let, "i", :U64, "zero"],
+    [:While, [:Less, "i", "length"], [
+      [:Let, "slot", [:Pointer, :U8, :Const], [:Offset, "data", "i"]],
+      [:Let, "byte", :U8, [:Load, "slot"]],
+      [:Set, "result", [:Call, "value_hash_mix", "result", [:Expr, :U64, [:Convert, "byte"]]]],
+      [:Set, "i", [:Add, "i", "one"]]]], [:Return, "result"]])
+  context = native_value/function(context, "value_hash", result, [["value", word, :Borrow]], [["child_hash", result]], [:ReadMemory], :Value, "")
+  context = native_value/function(context, "value_tuple_hash", result, [["tuple", [:Record, "ValueTuple"], :Borrow]], [["child_hash", result]], [:ReadMemory], :Value, "")
+  context = native_value/body(context, "value_tuple_hash", [
+    [:Let, "arity", :U64, [:Field, "tuple", "arity"]],
+    [:Let, "data", [:Pointer, word, :Mutable], [:Field, "tuple", "data"]],
+    [:Let, "hash", :U64, [:Call, "value_hash_mix", "value_hash_basis", "arity"]],
+    [:Let, "i", :U64, "zero"],
+    [:While, [:Less, "i", "arity"], [
+      [:Let, "slot", [:Pointer, word, :Mutable], [:Offset, "data", "i"]],
+      [:Let, "child", word, [:Load, "slot"]], @native_value/hash_child("child"),
+      [:Set, "i", [:Add, "i", "one"]]]], [:Return, [:Record, "true", "hash"]]])
+  let rows: list = [
+    [:Let, "kind", :U8, [:Call, "value_kind", "value"]],
+    [:Let, "hash", :U64, [:Call, "value_hash_mix", "value_hash_basis", [:Expr, :U64, [:Convert, "kind"]]]]]
+  for kind in native_value/kinds()
+    if !kind[2]
+      rows = [@rows, [:If, [:Equal, "kind", string_concat("tag_", kind[0])], [
+        [:Return, [:Record, "true", [:Expr, :U64, [:Call, "value_hash_mix", "hash", [:Expr, :U64, [:Payload, "value"]]]]]]], []]]
+    end
+  end
+  for spec in [["string", "HeapString", :U8], ["bytes", "HeapBytes", :U8],
+               ["list", "HeapList", word], ["map", "HeapMap", [:Record, "ValueMapEntry"]]]
+    let prefix: string = spec[0]
+    let header: string = string_concat(prefix, "_header")
+    let pointer: string = string_concat(prefix, "_pointer")
+    let data: string = string_concat(prefix, "_data")
+    let length: string = string_concat(prefix, "_length")
+    let body: list = [
+      [:Let, pointer, [:Pointer, [:Record, spec[1]], :Const], [:UnpackPointer, "value"]],
+      [:Let, header, [:Record, spec[1]], [:Load, pointer]],
+      [:Let, data, [:Pointer, spec[2], :Mutable], [:Field, header, "data"]],
+      [:Let, length, :U64, [:Field, header, "length"]]]
+    if spec[2] == :U8
+      body = [@body, [:Return, [:Record, "true", [:Expr, :U64, [:Call, "value_hash_bytes", "hash", [:Expr, [:Pointer, :U8, :Const], [:Freeze, data]], length]]]]]
+    else
+      let index: string = string_concat(prefix, "_i")
+      let slot: string = string_concat(prefix, "_slot")
+      let element: string = string_concat(prefix, "_element")
+      let children: list = []
+      if prefix == "list"
+        children = native_value/hash_child(element)
+      else
+        for field in ["key", "value"]
+          let child: string = string_concat(prefix, "_", field)
+          children = [@children, [:Let, child, word, [:Field, element, field]], @native_value/hash_child(child)]
+        end
+      end
+      body = [@body, [:Set, "hash", [:Call, "value_hash_mix", "hash", length]],
+        [:Let, index, :U64, "zero"], [:While, [:Less, index, length], [
+          [:Let, slot, [:Pointer, spec[2], :Mutable], [:Offset, data, index]],
+          [:Let, element, spec[2], [:Load, slot]], @children,
+          [:Set, index, [:Add, index, "one"]]]], [:Return, [:Record, "true", "hash"]]]
+    end
+    rows = [@rows, [:If, [:Equal, "kind", string_concat("tag_", prefix)], body, []]]
+  end
+  for spec in [["range", "HeapRange", [["start", word, ""], ["has_end", :Bool, ""], ["end", word, "has_end"]]],
+    ["error", "HeapError", [["code", :U32, ""], ["has_message", :Bool, ""], ["message", word, "has_message"], ["has_value", :Bool, ""], ["value", word, "has_value"]]],
+    ["frob", "HeapFrob", [["delegate", :U64, ""], ["value", word, ""]]]]
+    let pointer: string = string_concat(spec[0], "_pointer")
+    let header: string = string_concat(spec[0], "_header")
+    let body: list = [[:Let, pointer, [:Pointer, [:Record, spec[1]], :Const], [:UnpackPointer, "value"]],
+      [:Let, header, [:Record, spec[1]], [:Load, pointer]]]
+    for field in spec[2]
+      let local: string = string_concat(spec[0], "_", field[0])
+      body = [@body, [:Let, local, field[1], [:Field, header, field[0]]]]
+      let step: list = []
+      if field[1] == word
+        step = native_value/hash_child(local)
+        if field[0] == "message"
+          step = [
+            [:Let, "message_pointer", [:Pointer, [:Record, "HeapString"], :Const], [:UnpackPointer, local]],
+            [:Let, "message_header", [:Record, "HeapString"], [:Load, "message_pointer"]],
+            [:Let, "message_data", [:Pointer, :U8, :Mutable], [:Field, "message_header", "data"]],
+            [:Let, "message_length", :U64, [:Field, "message_header", "length"]],
+            [:Set, "hash", [:Call, "value_hash_bytes", "hash", [:Expr, [:Pointer, :U8, :Const], [:Freeze, "message_data"]], "message_length"]]]
+        end
+      elseif field[1] == :Bool
+        step = [[:If, local, [[:Set, "hash", [:Call, "value_hash_mix", "hash", "one"]]], [[:Set, "hash", [:Call, "value_hash_mix", "hash", "zero"]]]]]
+      elseif field[1] == :U64
+        step = [[:Set, "hash", [:Call, "value_hash_mix", "hash", local]]]
+      else
+        step = [[:Set, "hash", [:Call, "value_hash_mix", "hash", [:Expr, :U64, [:Convert, local]]]]]
+      end
+      if field[2] != ""
+        step = [[:If, string_concat(spec[0], "_", field[2]), step, []]]
+      end
+      body = [@body, @step]
+    end
+    rows = [@rows, [:If, [:Equal, "kind", string_concat("tag_", spec[0])], [@body, [:Return, [:Record, "true", "hash"]]], []]]
+  end
+  rows = [@rows, [:If, [:Equal, "kind", "tag_relation"], [
+    [:Let, "relation_checked", [:Record, "RelationResult"], [:Call, "value_relation_view", "value"]],
+    [:If, [:Field, "relation_checked", "ok"], [], [[:Return, [:Zero]]]],
+    [:Let, "relation", [:Record, "HeapRelation"], [:Field, "relation_checked", "relation"]],
+    [:Let, "heading", [:Pointer, :U32, :Mutable], [:Field, "relation", "heading"]],
+    [:Let, "arity", :U64, [:Field, "relation", "arity"]],
+    [:Set, "hash", [:Call, "value_hash_mix", "hash", "arity"]],
+    [:Let, "column", :U64, "zero"],
+    [:While, [:Less, "column", "arity"], [
+      [:Let, "column_slot", [:Pointer, :U32, :Mutable], [:Offset, "heading", "column"]],
+      [:Let, "symbol", :U32, [:Load, "column_slot"]],
+      [:Set, "hash", [:Call, "value_hash_mix", "hash", [:Expr, :U64, [:Convert, "symbol"]]]],
+      [:Set, "column", [:Add, "column", "one"]]]],
+    [:Let, "tuples", [:Pointer, [:Record, "ValueTuple"], :Mutable], [:Field, "relation", "rows"]],
+    [:Let, "length", :U64, [:Field, "relation", "length"]],
+    [:Set, "hash", [:Call, "value_hash_mix", "hash", "length"]],
+    [:Let, "row", :U64, "zero"],
+    [:While, [:Less, "row", "length"], [
+      [:Let, "row_slot", [:Pointer, [:Record, "ValueTuple"], :Mutable], [:Offset, "tuples", "row"]],
+      [:Set, "child_hash", [:Call, "value_tuple_hash", [:Expr, [:Record, "ValueTuple"], [:Load, "row_slot"]]]],
+      [:If, [:Field, "child_hash", "ok"], [], [[:Return, [:Zero]]]],
+      [:Set, "hash", [:Call, "value_hash_mix", "hash", [:Expr, :U64, [:Field, "child_hash", "number"]]]],
+      [:Set, "row", [:Add, "row", "one"]]]],
+    [:Return, [:Record, "true", "hash"]]
+  ], []], [:Return, [:Zero]]]
+  context = native_value/body(context, "value_hash", rows)
+  return context
+end
+
+verb native_value/hash_child(child: string) -> list
+  return [[:Set, "child_hash", [:Call, "value_hash", child]],
+    [:If, [:Field, "child_hash", "ok"], [], [[:Return, [:Zero]]]],
+    [:Set, "hash", [:Call, "value_hash_mix", "hash", [:Expr, :U64, [:Field, "child_hash", "number"]]]]]
+end

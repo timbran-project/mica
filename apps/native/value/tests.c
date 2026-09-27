@@ -779,7 +779,108 @@ static void relation_cases(void) {
     mica_value_arena_release(&arena);
 }
 
+static void traversal_cases(void) {
+    struct mica_ValueArena source={0}, destination={0};
+    mica_type_Value roots[20]={0};
+    roots[1]=mica_value_bool(true);
+    roots[2]=integer(-1234567);
+    roots[3]=floating(-0.25f);
+    roots[4]=mica_value_identity(123).f_value;
+    roots[5]=mica_value_symbol(42).f_value;
+    roots[6]=mica_value_error_code(7).f_value;
+    // Large strings exercise copying of bytes and scalar indexes across chunks.
+    uint8_t *text=malloc(70000); assert(text);
+    for(size_t i=0;i<70000;i+=2) { text[i]=0xc3; text[i+1]=0xa9; }
+    roots[7]=mica_value_string(&source,text,70000).f_value;
+    roots[7]=mica_value_string_slice(&source,roots[7],10,35000).f_value;
+    roots[8]=mica_value_bytes(&source,text,70000).f_value;
+    free(text);
+    roots[9]=mica_value_list(&source,roots,9).f_value;
+    roots[9]=mica_value_list_append(&source,roots[9],roots[9]).f_value;
+    struct mica_ValueMapEntry entries[]={{roots[7],roots[9]},{integer(1),roots[8]}};
+    roots[10]=mica_value_map(&source,entries,2).f_value;
+    roots[11]=mica_value_range(&source,roots[9],true,roots[10]).f_value;
+    roots[12]=mica_value_error(&source,7,true,roots[7],true,roots[11]).f_value;
+    roots[13]=mica_value_capability(9).f_value;
+    roots[14]=mica_value_frob(&source,123,roots[12]).f_value;
+    roots[15]=mica_value_function(9).f_value;
+    uint32_t heading[]={3,1};
+    mica_type_Value row_cells[]={roots[12],roots[10]};
+    struct mica_ValueTuple row={row_cells,2};
+    roots[16]=mica_value_relation(&source,heading,2,&row,1).f_value;
+    struct mica_ValueTuple empty={0};
+    roots[17]=mica_value_relation(&source,NULL,0,&empty,1).f_value;
+    // Optional storage can contain a value that is semantically absent. Copies
+    // must ignore it and clear the destination field, including error messages.
+    roots[18]=mica_value_range(&source,integer(0),false,roots[9]).f_value;
+    roots[19]=mica_value_error(&source,7,false,roots[7],false,roots[9]).f_value;
+    mica_type_Value absent_range=mica_value_range(&source,integer(0),false,integer(123)).f_value;
+    mica_type_Value absent_error=mica_value_error(&source,7,false,0,false,integer(123)).f_value;
+    assert(mica_value_hash(roots[18]).f_number==mica_value_hash(absent_range).f_number);
+    assert(mica_value_hash(roots[19]).f_number==mica_value_hash(absent_error).f_number);
+    struct mica_ValueResult aggregate=mica_value_list(&source,roots,20);
+    assert(aggregate.f_ok);
+    struct mica_IdResult expected=mica_value_hash(aggregate.f_value);
+    assert(expected.f_ok);
+    struct mica_ValueTuple source_tuple={roots,20};
+    struct mica_IdResult expected_tuple=mica_value_tuple_hash(source_tuple);
+    assert(expected_tuple.f_ok);
+    struct mica_TupleResult copied_tuple=mica_value_tuple_copy(&destination,source_tuple);
+    assert(copied_tuple.f_ok);
+    struct mica_ValueResult copied=mica_value_copy(&destination,aggregate.f_value);
+    assert(copied.f_ok && copied.f_value!=aggregate.f_value);
+    assert(mica_value_compare(copied.f_value,aggregate.f_value).f_number==0);
+    // Same-arena copies must also retain earlier values when allocation grows.
+    struct mica_ValueResult same_arena=mica_value_copy(&source,roots[16]);
+    assert(same_arena.f_ok && mica_value_compare(same_arena.f_value,roots[16]).f_number==0);
+    // Every allocator failure must return an unpublished failure. Releasing a
+    // partially populated destination must reclaim every recursive allocation.
+    bool succeeded=false;
+    for(size_t allowance=0;allowance<128;allowance++) {
+        struct mica_ValueArena failed={0};
+        allocation_allowance=allowance;
+        struct mica_ValueResult attempt=mica_value_copy(&failed,roots[16]);
+        allocation_allowance=SIZE_MAX;
+        assert(mica_value_hash(aggregate.f_value).f_number==expected.f_number);
+        if(attempt.f_ok) {
+            assert(mica_value_hash(attempt.f_value).f_number==mica_value_hash(roots[16]).f_number);
+            succeeded=true;
+        } else assert(attempt.f_value==0);
+        mica_value_arena_release(&failed);
+        if(succeeded) break;
+    }
+    assert(succeeded);
+    mica_value_arena_release(&source);
+    assert(mica_value_hash(copied.f_value).f_number==expected.f_number);
+    assert(mica_value_tuple_hash(copied_tuple.f_tuple).f_number==expected_tuple.f_number);
+    struct mica_ValueResult string=mica_value_list_get(copied.f_value,7);
+    assert(string.f_ok && mica_value_string_length(string.f_value).f_number==34990);
+    assert(mica_value_string_scalar_at(string.f_value,34989).f_rune==0xe9);
+    struct mica_ValueResult range=mica_value_list_get(copied.f_value,18);
+    assert(mica_value_as_range(range.f_value).f_header->f_end==0);
+    struct mica_ValueResult error=mica_value_list_get(copied.f_value,19);
+    assert(mica_value_as_error(error.f_value).f_header->f_message==0);
+    assert(mica_value_as_error(error.f_value).f_header->f_value==0);
+    // The copied list has its own append storage and accepts another view.
+    struct mica_ValueResult appended=mica_value_list_append(&destination,copied.f_value,integer(99));
+    assert(appended.f_ok && mica_value_list_length(copied.f_value).f_number==20);
+    assert(mica_value_list_get(appended.f_value,20).f_value==integer(99));
+    assert(!mica_value_hash(UINT64_C(255)<<56).f_ok);
+    assert(!mica_value_copy(&destination,UINT64_C(255)<<56).f_ok);
+    mica_value_arena_release(&destination);
+    // Deep nesting traverses child values rather than pointer bits.
+    struct mica_ValueArena deep_source={0},deep_destination={0};
+    mica_type_Value deep=integer(17);
+    for(unsigned i=0;i<256;i++) deep=mica_value_frob(&deep_source,1,deep).f_value;
+    uint64_t deep_hash=mica_value_hash(deep).f_number;
+    copied=mica_value_copy(&deep_destination,deep); assert(copied.f_ok);
+    mica_value_arena_release(&deep_source);
+    assert(mica_value_hash(copied.f_value).f_number==deep_hash);
+    mica_value_arena_release(&deep_destination);
+}
+
 int main(void) {
+    traversal_cases();
     relation_cases();
     collection_cases();
     const int64_t minimum = -(INT64_C(1) << 55);

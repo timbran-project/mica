@@ -975,6 +975,8 @@ fn native_value_layer_executes_on_both_mica_tiers() {
             include_str!("../../../apps/native/value/maps.mica"),
             include_str!("../../../apps/native/value/collections.mica"),
             include_str!("../../../apps/native/value/relations.mica"),
+            include_str!("../../../apps/native/value/hash.mica"),
+            include_str!("../../../apps/native/value/copy.mica"),
         ] {
             runner.run_filein(source).unwrap_or_else(|error| {
                 panic!("{}", runner.render_source_task_error(&error));

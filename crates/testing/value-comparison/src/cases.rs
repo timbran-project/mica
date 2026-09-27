@@ -209,6 +209,8 @@ pub enum Operation {
     RelationRow,
     IsUnit,
     RelationBuild,
+    Hash,
+    Copy,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -227,6 +229,7 @@ pub struct Prepared {
 pub enum Outcome {
     Value(Option<Value>),
     Order(Ordering),
+    Hash(u64),
 }
 
 impl Case {
@@ -284,6 +287,8 @@ impl Prepared {
                     Value::relation(r.heading().iter().copied(), r.rows().iter().cloned()).ok()
                 })
                 .flatten(),
+            Operation::Hash => return Outcome::Hash(crate::traversal::hash(left)),
+            Operation::Copy => Some(crate::traversal::copy(left)),
             Operation::Construct => Some(left.clone()),
             Operation::StringFromBytes => left
                 .with_bytes(|bytes| std::str::from_utf8(bytes).ok().map(Value::string))
@@ -440,6 +445,10 @@ impl Prepared {
 impl Outcome {
     pub fn encode(&self, out: &mut Vec<u8>) {
         match self {
+            Self::Hash(hash) => {
+                out.push(3);
+                out.extend(hash.to_le_bytes());
+            }
             Self::Order(order) => {
                 out.push(2);
                 out.extend((*order as i64).to_le_bytes());
@@ -455,6 +464,7 @@ impl Outcome {
     /// before timing. Heap addresses never enter cross-process checksums.
     pub fn checksum(&self) -> u64 {
         match self {
+            Self::Hash(hash) => *hash,
             Self::Order(order) => (*order as i64) as u64,
             Self::Value(None) => 0,
             Self::Value(Some(v)) => match v.as_value_ref() {
@@ -666,6 +676,7 @@ pub fn strategy() -> BoxedStrategy<Case> {
     prop_oneof![
         collection_strategy(),
         relation_strategy(),
+        traversal_strategy(),
         general,
         equal,
         construct,
@@ -710,6 +721,20 @@ pub fn collection_strategy() -> BoxedStrategy<Case> {
                 _ => Input::List(items),
             };
             Case { op, left, right }
+        })
+        .boxed()
+}
+
+pub fn traversal_strategy() -> BoxedStrategy<Case> {
+    (input_strategy(), any::<bool>())
+        .prop_map(|(left, copying)| Case {
+            op: if copying {
+                Operation::Copy
+            } else {
+                Operation::Hash
+            },
+            left,
+            right: Input::Empty,
         })
         .boxed()
 }
@@ -1112,6 +1137,20 @@ pub fn fixed_cases() -> Vec<Case> {
             });
         }
     }
+    let values: Vec<_> = cases
+        .iter()
+        .filter(|case| matches!(case.op, Operation::Construct))
+        .map(|case| case.left.clone())
+        .collect();
+    for value in values {
+        for op in [Operation::Hash, Operation::Copy] {
+            cases.push(Case {
+                op,
+                left: value.clone(),
+                right: Input::Empty,
+            });
+        }
+    }
     cases
 }
 
@@ -1244,6 +1283,31 @@ pub fn workloads() -> Vec<(String, Vec<Case>)> {
                     } else {
                         Input::Symbol(6)
                     },
+                })
+                .collect(),
+        ));
+    }
+    for (name, op) in [
+        ("value_hash", Operation::Hash),
+        ("value_deep_copy", Operation::Copy),
+    ] {
+        let child = Input::Map(vec![(
+            Input::String("é".repeat(32)),
+            Input::List((0..16).map(Input::Int).collect()),
+        )]);
+        let relation = Input::Relation(
+            vec![2, 1],
+            (0..16)
+                .map(|i| vec![Input::Int(i), child.clone()])
+                .collect(),
+        );
+        workloads.push((
+            name,
+            (0..8)
+                .map(|_| Case {
+                    op,
+                    left: relation.clone(),
+                    right: Input::Empty,
                 })
                 .collect(),
         ));
