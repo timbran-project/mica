@@ -4,8 +4,8 @@
 // Appending through the current tail can claim spare capacity. Earlier views
 // retain their lengths and offsets; a competing append from an earlier tail
 // receives another backing allocation. Arena mutation requires serialization.
-verb native_value/string_append(input)
-  let context = input
+verb native_value/string_append(input: map) -> map
+  let context: map = input
   let name = "value_string_append"
   let word = native_value/word()
   let header = [:Record, "HeapString"]
@@ -63,5 +63,6 @@ verb native_value/string_append(input)
   context = native_value/block(context, name, "entry", [[:Call, "checked", ["value_as_string", "right"]], [:Field, "condition", ["checked", "ok"]]], :Branch, ["condition", "append", "failure"])
   context = native_value/block(context, name, "append", [[:Field, "pointer", ["checked", "header"]], [:Load, "header", ["pointer"]], [:Field, "data", ["header", "data"]],
     [:Field, "length", ["header", "length"]], [:Freeze, "source", ["data"]], [:Call, "result", ["value_string_append", "arena", "left", "source", "length"]]], :Return, ["result"])
-  return native_value/block(context, name, "failure", [[:Zero, "result", []]], :Return, ["result"])
+  context = native_value/block(context, name, "failure", [[:Zero, "result", []]], :Return, ["result"])
+  return context
 end

@@ -3,8 +3,8 @@
 
 // A string view retains its backing allocation. Sampled offsets address the
 // backing from its first scalar, so slices can reuse the same immutable index.
-verb native_value/strings(input)
-  let context = input
+verb native_value/strings(input: map) -> map
+  let context: map = input
   let bytes = [:Pointer, :U8, :Mutable]
   let offsets = [:Pointer, :U64, :Mutable]
   let storage = [:Record, "StringStorage"]
@@ -16,7 +16,7 @@ verb native_value/strings(input)
   state = native/record_type(state, "StringAllocation", [["ok", :Bool], ["header", [:Pointer, header, :Mutable]]])[1]
   let [ids, next] = native/constants(state, [["string_stride", :U64, "0000000000000020"], ["string_index_min", :U64, "0000000000000080"],
     ["string_null_index", offsets, "null"], ["string_index_width", :U64, "0000000000000008"]])
-  let constants = context[:constants]
+  let constants: map = context[:constants]
   for name, id in ids
     constants[name] = id
   end
@@ -28,13 +28,14 @@ verb native_value/strings(input)
   context = native_value/heap_accessor(context, "string", header)
   context = native_value/string_access(context)
   context = native_value/string_append(context)
-  return native_value/string_search(context)
+  context = native_value/string_search(context)
+  return context
 end
 
 // Allocate headers, index, and byte capacity together, without publishing a
 // tagged value before its bytes and index are initialized.
-verb native_value/string_allocate(input)
-  let context = input
+verb native_value/string_allocate(input: map) -> map
+  let context: map = input
   let name = "value_string_allocate"
   let header = [:Record, "HeapString"]
   let storage = [:Record, "StringStorage"]
@@ -65,13 +66,14 @@ verb native_value/string_allocate(input)
   context = native_value/block(context, name, "publish", [[:Record, "storage", ["data", "capacity", "length", "index"]], [:Store, :Discard, ["backing", "storage"]],
     [:Record, "header", ["data", "length", "scalars", "ascii", "backing", "zero", "zero"]], [:Store, :Discard, ["pointer", "header"]],
     [:Record, "result", ["true", "pointer"]]], :Return, ["result"])
-  return native_value/block(context, name, "failure", [[:Zero, "result", []]], :Return, ["result"])
+  context = native_value/block(context, name, "failure", [[:Zero, "result", []]], :Return, ["result"])
+  return context
 end
 
 // Fill samples from a known scalar boundary. Appends can fill only their new
 // suffix, leaving every previously published offset unchanged.
-verb native_value/string_index(input)
-  let context = input
+verb native_value/string_index(input: map) -> map
+  let context: map = input
   let name = "value_string_index"
   let storage = [:Record, "StringStorage"]
   context = native_value/function(context, name, :Bool, [["storage", [:Pointer, storage, :Mutable], :Borrow], ["offset", :U64, :Value], ["scalar", :U64, :Value], ["length", :U64, :Value], ["ascii", :Bool, :Value]],
@@ -96,11 +98,12 @@ verb native_value/string_index(input)
   context = native_value/block(context, name, "decoded", [[:Field, "width", ["decoded", "width"]], [:Add, "position", ["position", "width"]], [:Add, "count", ["count", "one"]]], :Jump, ["loop"])
   context = native_value/block(context, name, "advance", [[:Add, "position", ["position", "width"]], [:Add, "count", ["count", "width"]]], :Jump, ["loop"])
   context = native_value/block(context, name, "success", [], :Return, ["true"])
-  return native_value/block(context, name, "failure", [], :Return, ["false"])
+  context = native_value/block(context, name, "failure", [], :Return, ["false"])
+  return context
 end
 
-verb native_value/string_constructor(input)
-  let context = input
+verb native_value/string_constructor(input: map) -> map
+  let context: map = input
   let name = "value_string"
   let header = [:Record, "HeapString"]
   let result = [:Record, "ValueResult"]
@@ -118,11 +121,12 @@ verb native_value/string_constructor(input)
     [:Field, "storage", ["header", "storage"]], [:CopyBytes, :Discard, ["data", "source", "length"]],
     [:Call, "condition", ["value_string_index", "storage", "zero", "zero", "length", "ascii"]]], :Branch, ["condition", "publish", "failure"])
   context = native_value/block(context, name, "publish", [[:PackPointer, "value", ["pointer", "tag_string"]], [:Record, "result", ["true", "value"]]], :Return, ["result"])
-  return native_value/block(context, name, "failure", [[:Zero, "result", []]], :Return, ["result"])
+  context = native_value/block(context, name, "failure", [[:Zero, "result", []]], :Return, ["result"])
+  return context
 end
 
-verb native_value/string_access(input)
-  let context = input
+verb native_value/string_access(input: map) -> map
+  let context: map = input
   let word = native_value/word()
   let header = [:Record, "HeapString"]
   let header_pointer = [:Pointer, header, :Const]
@@ -175,11 +179,12 @@ verb native_value/string_access(input)
     [:Subtract, "length", ["length", "offset"]], [:Call, "decoded", ["utf8_decode", "text", "length"]], [:Field, "condition", ["decoded", "ok"]]], :Branch, ["condition", "success", "failure"])
   context = native_value/block(context, name, "success", [[:Field, "rune", ["decoded", "rune"]], [:Record, "result", ["true", "rune"]]], :Return, ["result"])
   context = native_value/block(context, name, "failure", [[:Zero, "result", []]], :Return, ["result"])
-  return native_value/string_slice(context)
+  context = native_value/string_slice(context)
+  return context
 end
 
-verb native_value/string_slice(input)
-  let context = input
+verb native_value/string_slice(input: map) -> map
+  let context: map = input
   let name = "value_string_slice"
   let word = native_value/word()
   let header = [:Record, "HeapString"]
@@ -204,5 +209,6 @@ verb native_value/string_slice(input)
     [:Add, "scalar_start", ["scalar_start", "start"]], [:Subtract, "length", ["last", "first"]], [:Subtract, "scalars", ["end", "start"]], [:Equal, "ascii", ["length", "scalars"]],
     [:Record, "slice", ["data", "length", "scalars", "ascii", "storage", "byte_start", "scalar_start"]], [:Store, :Discard, ["target", "slice"]],
     [:PackPointer, "packed", ["target", "tag_string"]], [:Record, "result", ["true", "packed"]]], :Return, ["result"])
-  return native_value/block(context, name, "failure", [[:Zero, "result", []]], :Return, ["result"])
+  context = native_value/block(context, name, "failure", [[:Zero, "result", []]], :Return, ["result"])
+  return context
 end

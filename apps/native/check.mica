@@ -70,6 +70,7 @@ verb native/check(state)
   end
   let index = {:records -> records, :functions -> functions, :variables -> variables, :constants -> constants,
                :blocks -> blocks, :terms -> terms}
+  index[:annotations] = native/check_annotations(state, ids)
   index[:globals] = native/check_globals(state, index)
   index[:type_order] = native/check_layouts(state, index)
   index = native/check_contracts(state, index)

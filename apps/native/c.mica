@@ -1,6 +1,48 @@
 // Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
+// Escape text before placing it in a C comment. In particular, comment
+// delimiters, line splices, trigraphs, and embedded control bytes stay inert.
+verb native/c_comment(text)
+  let escaped = ""
+  for ch in string_chars(text)
+    if native/contains(["*", "?", "\\", "\n", "\r", "\t", "\0"], ch)
+      let encodings = {"*" -> "\\x2a", "?" -> "\\x3f", "\\" -> "\\x5c", "\n" -> "\\n", "\r" -> "\\r", "\t" -> "\\t", "\0" -> "\\0"}
+      escaped = string_concat(escaped, encodings[ch])
+    else
+      escaped = string_concat(escaped, ch)
+    end
+  end
+  return string_concat("/* ", escaped, " */")
+end
+
+verb native/c_notes(index, id, indent)
+  if !map_contains_key(index[:annotations], id)
+    return []
+  end
+  return [string_concat(indent, native/c_comment(string_concat(note[0], ": ", note[1]))) for note in sort([[to_literal(row[0]), row[1]] for row in index[:annotations][id]])]
+end
+
+verb native/c_contract_notes(state, index, fn_id)
+  let contract = index[:contracts][fn_id]
+  let result = to_literal(contract[2])
+  if contract[2] == :Borrow
+    result = string_concat(result, " from ", contract[3])
+  end
+  let lines = [native/c_comment(string_concat("Allowed effects: ", string_join(sort([to_literal(effect) for effect in contract[1]]), ", "), "; result: ", result))]
+  for parameter in native/ordered(native/owned(state[:parameters], 1, fn_id), 2)
+    lines = [@lines, @native/c_notes(index, parameter[0], "")]
+    if map_contains_key(index[:parameter_modes], parameter[0])
+      let mode = to_literal(index[:parameter_modes][parameter[0]])
+      if map_contains_key(index[:parameter_owners], parameter[0])
+        mode = string_concat(mode, " from ", index[:variables][index[:parameter_owners][parameter[0]]][1])
+      end
+      lines = [@lines, native/c_comment(string_concat("Parameter ", parameter[3], ": ", mode))]
+    end
+  end
+  return lines
+end
+
 verb native/c_value(index, id)
   if map_contains_key(index[:constants], id)
     let row = index[:constants][id]
@@ -63,6 +105,19 @@ verb native/c_expression(index, row)
   raise E_INVARG, "native: unsupported C expression"
 end
 
+verb native/c_uses_float_constants(state, index)
+  let operands = [native/reads(row) for row in state[:instructions]]
+  operands = [@operands, @[row[2] for row in state[:terminators]]]
+  for group in operands
+    for id in group
+      if map_contains_key(index[:constants], id) && index[:constants][id][1] == :F32
+        return true
+      end
+    end
+  end
+  return false
+end
+
 // Validation completes before any output is returned. Every operation becomes
 // a separate assignment; calls cannot acquire C's unspecified operand order.
 verb native/c_declarations(state, index)
@@ -74,8 +129,10 @@ verb native/c_declarations(state, index)
   lines = [@lines, "_Static_assert(sizeof(size_t) == 8, \"64-bit size_t required\");",
                    "_Static_assert(sizeof(void *) == 8, \"64-bit pointers required\");",
                    "_Static_assert(PTRDIFF_MAX == INT64_MAX, \"64-bit ptrdiff_t required\");"]
-  lines = [@lines, "#ifdef __FAST_MATH__", "#error Fast math is incompatible with Mica numeric semantics", "#endif",
-    "static inline float mica_internal_f32_bits(uint32_t bits) { float result; memcpy(&result, &bits, sizeof(result)); return result; }"]
+  lines = [@lines, "#ifdef __FAST_MATH__", "#error Fast math is incompatible with Mica numeric semantics", "#endif"]
+  if native/c_uses_float_constants(state, index)
+    lines = [@lines, "static inline float mica_internal_f32_bits(uint32_t bits) { float result; memcpy(&result, &bits, sizeof(result)); return result; }"]
+  end
   for type_id in index[:type_order]
     if native/is_record(type_id) || native/is_array(type_id)
       lines = [@lines, string_concat(native/c_type(type_id), ";")]
@@ -83,13 +140,16 @@ verb native/c_declarations(state, index)
   end
   for type_id in index[:type_order]
     if native/is_scalar(type_id)
+      lines = [@lines, native/c_comment(string_concat("Nominal scalar: ", type_id[1], "; representation: ", to_literal(type_id[2])))]
       lines = [@lines, string_concat("typedef ", native/c_type(type_id[2]), " ", native/c_type(type_id), ";")]
     end
     if native/is_tagged(type_id)
+      lines = [@lines, native/c_comment(string_concat("Tagged word: high 8 bits are the tag; low 56 bits are the payload; heap tags: ", to_literal(type_id[3]), "; pointer access: ", to_literal(type_id[2])))]
       lines = [@lines, string_concat("typedef uint64_t ", native/c_type(type_id), ";")]
     end
     if native/is_record(type_id)
-      lines = [@lines, string_concat(native/c_type(type_id), " {")]
+      let record = [row[0] for row in state[:records] if row[1] == type_id[1]][0]
+      lines = [@lines, @native/c_notes(index, record, ""), string_concat(native/c_type(type_id), " {")]
       for field in index[:records][type_id[1]]
         lines = [@lines, string_concat("  ", native/c_type(field[3]), " f_", field[2], ";")]
       end
@@ -99,8 +159,14 @@ verb native/c_declarations(state, index)
       lines = [@lines, string_concat(native/c_type(type_id), " { ", native/c_type(type_id[1]), " elements[", to_literal(type_id[2]), "]; };")]
     end
   end
+  // Constants are inlined, so retain their notes once in semantic order.
+  let constant_notes = []
+  for row in state[:constants]
+    constant_notes = [@constant_notes, @native/c_notes(index, row[0], "")]
+  end
+  lines = [@lines, @sort(constant_notes)]
   for fn_row in functions
-    lines = [@lines, string_concat(native/c_signature(state, index, fn_row), ";")]
+    lines = [@lines, @native/c_notes(index, fn_row[0], ""), @native/c_contract_notes(state, index, fn_row[0]), string_concat(native/c_signature(state, index, fn_row), ";")]
   end
   lines = [@lines, @native/c_globals(state, index, true)]
   return lines
@@ -114,10 +180,10 @@ verb native/c_definitions(state, index)
     if map_contains_key(index[:foreign], fn_id)
       continue
     end
-    lines = [@lines, "", string_concat(native/c_signature(state, index, fn_row), " {")]
+    lines = [@lines, "", @native/c_notes(index, fn_id, ""), @native/c_contract_notes(state, index, fn_id), string_concat(native/c_signature(state, index, fn_row), " {")]
     let locals = native/ordered(native/owned(state[:locals], 1, fn_id), 2)
     for row in locals
-      lines = [@lines, string_concat("  ", native/c_type(row[3]), " v_", row[2], ";")]
+      lines = [@lines, @native/c_notes(index, row[0], "  "), string_concat("  ", native/c_type(row[3]), " v_", row[2], ";")]
     end
     // Taking an address suppresses unused warnings without reading a local.
     for row in native/ordered(native/owned(state[:parameters], 1, fn_id), 2)
@@ -133,9 +199,9 @@ verb native/c_definitions(state, index)
       end
     end
     for block in blocks
-      lines = [@lines, string_concat("b_", block[2], ":")]
+      lines = [@lines, @native/c_notes(index, block[0], ""), string_concat("b_", block[2], ":")]
       for row in native/ordered(native/owned(state[:instructions], 1, block[0]), 2)
-        lines = [@lines, string_concat("  ", native/c_statement(index, row))]
+        lines = [@lines, @native/c_notes(index, row[0], "  "), string_concat("  ", native/c_statement(index, row))]
       end
       let term = index[:terms][block[0]]
       let args = term[2]

@@ -3,13 +3,13 @@
 
 // Canonical ordering distinguishes numeric kinds. Results are -1, 0, or 1;
 // an unsupported kind fails explicitly instead of comparing pointer payloads.
-verb native_value/comparison(input)
-  let context = input
+verb native_value/comparison(input: map) -> map
+  let context: map = input
   let word = native_value/word()
   let result = [:Record, "IntResult"]
-  let locals = [["left_kind", :U8], ["right_kind", :U8], ["condition", :Bool], ["result", result],
+  let locals: list = [["left_kind", :U8], ["right_kind", :U8], ["condition", :Bool], ["result", result],
     ["order", :I64], ["left_payload", :U64], ["right_payload", :U64]]
-  let blocks = ["entry", "kinds", "kind_order", "less", "equal", "greater", "failure", "return_order", "map_value_order", "map_value"]
+  let blocks: list = ["entry", "kinds", "kind_order", "less", "equal", "greater", "failure", "return_order", "map_value_order", "map_value"]
   let cases = ["int", "float", "string", "bytes", "list", "map", "range", "error", "frob"]
   for kind in cases
     blocks = [@blocks, string_concat("test_", kind), kind]
@@ -93,7 +93,7 @@ verb native_value/comparison(input)
     let l = string_concat(prefix, "_left")
     let r = string_concat(prefix, "_right")
     let i = string_concat(prefix, "_index")
-    let rows = []
+    let rows: list = []
     for side in [l, r]
       rows = [@rows, [:UnpackPointer, string_concat(side, "_pointer"), ["left"]]]
       if side == r
@@ -139,7 +139,7 @@ verb native_value/comparison(input)
   end
   context = native_value/block(context, name, "map_value_order", [[:Field, "order", ["result", "number"]], [:Equal, "condition", ["order", "int_zero"]]], :Branch, ["condition", "map_advance", "return_order"])
   for spec in records
-    let rows = []
+    let rows: list = []
     for side in ["left", "right"]
       let base = string_concat(spec[0], "_", side)
       rows = [@rows, [:UnpackPointer, string_concat(base, "_pointer"), [side]], [:Load, string_concat(base, "_header"), [string_concat(base, "_pointer")]]]
@@ -148,7 +148,7 @@ verb native_value/comparison(input)
       end
     end
     context = native_value/block(context, name, spec[0], rows, :Jump, [string_concat(spec[0], "_", spec[2][0][0])])
-    let position = 0
+    let position: int = 0
     for field in spec[2]
       let base = string_concat(spec[0], "_", field[0])
       let left = string_concat(spec[0], "_left_", field[0])
@@ -181,8 +181,8 @@ end
 
 // Guard the float-to-integer conversion before comparing the integer part and
 // fraction. Converting the integer to f32 first would lose significant bits.
-verb native_value/language_comparison(input)
-  let context = input
+verb native_value/language_comparison(input: map) -> map
+  let context: map = input
   let result = [:Record, "IntResult"]
   let name = "value_compare_int_float"
   context = native_value/function(context, name, result, [["integer", :I64, :Value], ["float", :F32, :Value]],

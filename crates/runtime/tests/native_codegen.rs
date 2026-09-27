@@ -13,6 +13,7 @@ use mica_var::Value;
 
 const SOURCES: &[&str] = &[
     include_str!("../../../apps/native/ir.mica"),
+    include_str!("../../../apps/native/builders.mica"),
     include_str!("../../../apps/native/types.mica"),
     include_str!("../../../apps/native/numeric.mica"),
     include_str!("../../../apps/native/layout.mica"),
@@ -508,6 +509,11 @@ fn value_example_emission_ignores_fact_and_symbol_insertion_order() {
             "Release",
             "Borrow",
             "CopyBytes",
+            "ReadMemory",
+            "WriteMemory",
+            "Source",
+            "Purpose",
+            "Invariant",
         ];
         if order == "reverse" {
             symbols.reverse();
@@ -520,9 +526,12 @@ fn value_example_emission_ignores_fact_and_symbol_insertion_order() {
             &mut runner,
             r#"
 let state = native/value_examples()
+state = native/annotate(state, state[:functions][0][0], :Source, "source note")
+state = native/annotate(state, state[:functions][0][0], :Purpose, "purpose note")
+state = native/annotate(state, state[:functions][0][0], :Invariant, "invariant note")
 let expected = native/emit_c(state)
 for table in [:functions, :parameters, :locals, :blocks, :instructions, :terminators, :constants,
-              :records, :fields, :foreign, :contracts, :parameter_contracts]
+              :records, :fields, :foreign, :contracts, :parameter_contracts, :annotations]
   let rows = []
   for row in state[table]
     rows = [row, @rows]
@@ -1027,5 +1036,172 @@ return native/emit_c(state)
             .unwrap();
         assert!(executed.status.success(), "{executed:?}");
         assert!(executed.stderr.is_empty(), "{executed:?}");
+    }
+}
+
+#[test]
+fn structured_builders_preserve_control_flow_and_notes() {
+    let mut previous = None;
+    for interpreter_only in [true, false] {
+        let mut runner = runner(interpreter_only);
+        runner
+            .run_filein(include_str!("../../../apps/native/tests/structured.mica"))
+            .unwrap();
+        let generated = eval(
+            &mut runner,
+            "return native/emit_c(native/structured_example(0))",
+        )
+        .with_str(str::to_owned)
+        .unwrap();
+        if let Some(previous) = &previous {
+            assert_eq!(&generated, previous);
+        }
+        previous = Some(generated.clone());
+        assert!(generated.contains("apps/native/tests/structured.mica: native/structured_example"));
+        assert!(generated.contains("Nested calls execute left to right."));
+        assert!(generated.contains("Allowed effects:"));
+        assert!(generated.contains("while_condition"));
+        assert!(!generated.contains("\n#error injected"));
+        let reordered = eval(
+            &mut runner,
+            r#"
+let state = native/structured_example(1000)
+for table in [:functions, :parameters, :locals, :blocks, :instructions, :terminators,
+              :constants, :records, :fields, :globals, :foreign, :contracts, :parameter_contracts, :annotations]
+  let rows = []
+  for row in state[table]
+    rows = [row, @rows]
+  end
+  state[table] = rows
+end
+let module = native/emit_module(state, "structured")
+return [native/emit_c(state), module[:header], module[:source]]
+"#,
+        );
+        reordered
+            .with_list(|items| {
+                assert_eq!(items[0].with_str(str::to_owned).unwrap(), generated);
+                assert!(
+                    items[1]
+                        .with_str(|s| s.contains("Skip three and stop before ten."))
+                        .unwrap()
+                );
+                assert!(
+                    items[2]
+                        .with_str(|s| s.contains("Nested calls execute left to right."))
+                        .unwrap()
+                );
+            })
+            .unwrap();
+        let scratch = Scratch::new();
+        let source = scratch.0.join("structured.c");
+        let binary = scratch.0.join("structured");
+        fs::write(
+            &source,
+            format!(
+                r#"{generated}
+#include <assert.h>
+static uint64_t calls;
+uint64_t mica_foreign_structured_tick(void) {{ return ++calls; }}
+int main(void) {{
+    for (uint64_t limit = 0; limit < 100; ++limit) {{
+        uint64_t sum = 0;
+        for (uint64_t i = 1; i <= limit && i < 10; ++i) if (i != 3) sum += i;
+        assert(mica_structured_sum(limit) == sum);
+        assert(mica_structured_nested(limit) == (limit >= 2 ? limit : 0));
+    }}
+    assert(mica_structured_choice(true) == 1);
+    assert(mica_structured_choice(false) == 2);
+    assert(mica_structured_order() == UINT64_MAX && calls == 2);
+    mica_structured_void();
+    return 0;
+}}
+"#
+            ),
+        )
+        .unwrap();
+        let compiled = Command::new(std::env::var_os("CC").unwrap_or_else(|| "cc".into()))
+            .args([
+                "-std=c11",
+                "-O2",
+                "-Wall",
+                "-Wextra",
+                "-Werror",
+                "-pedantic",
+                "-fsanitize=address,undefined",
+                "-fno-sanitize-recover=all",
+            ])
+            .arg(&source)
+            .arg("-o")
+            .arg(&binary)
+            .arg("-lm")
+            .output()
+            .unwrap();
+        assert!(
+            compiled.status.success(),
+            "{}",
+            String::from_utf8_lossy(&compiled.stderr)
+        );
+        let executed = Command::new(&binary).output().unwrap();
+        assert!(executed.status.success(), "{executed:?}");
+        assert!(executed.stderr.is_empty(), "{executed:?}");
+    }
+}
+
+#[test]
+fn structured_builders_reject_invalid_flow_and_annotations() {
+    let mut runner = runner(true);
+    let prefix = r#"
+let state = native/program()
+let [constants, with_constants] = native/constants(state, [["one", :U64, "0000000000000001"]])
+let [fn_id, names, declared] = native/function_scope(with_constants, "test", :U64, [["condition", :Bool, :Value]], [["value", :U64]], [])
+names["one"] = constants["one"]
+state = declared
+"#;
+    for (body, expected) in [
+        ("[[:Break]]", "loop control outside a loop"),
+        ("[[:Continue]]", "loop control outside a loop"),
+        (
+            "[[:Return, \"one\"], [:Return, \"one\"]]",
+            "statement after control flow terminates",
+        ),
+        ("[[:Set, \"value\", \"one\"]]", "fall through"),
+        (
+            "[[:If, \"condition\", [[:Set, \"value\", \"one\"]], []], [:Return, \"value\"]]",
+            "read before definite assignment",
+        ),
+        (
+            "[[:If, \"one\", [[:Return, \"one\"]], [[:Return, \"one\"]]]]",
+            "branch condition must be Bool",
+        ),
+        (
+            "[[:Let, \"body_reserved\", :U64, \"one\"], [:Return, \"one\"]]",
+            "names are reserved",
+        ),
+        (
+            "[[:Let, \"value\", :U64, \"one\"], [:Return, \"one\"]]",
+            "duplicate structured local",
+        ),
+        ("[[:Return, \"missing\"]]", "unknown structured operand"),
+    ] {
+        let source = format!(
+            "{prefix}\ntry\n state = native/function_body(state, fn_id, names, {body})\n native/emit_c(state)\n return \"accepted\"\ncatch E_INVARG as problem\n return native/error_message(problem)\nend"
+        );
+        let message = eval(&mut runner, &source).with_str(str::to_owned).unwrap();
+        assert!(message.contains(expected), "{body}: {message}");
+    }
+    for (annotation, expected) in [
+        ("[99999, :Purpose, \"missing\"]", "known node"),
+        (
+            "[fn_id, :Assume, \"not a proof\"]",
+            "unknown annotation kind",
+        ),
+        ("[fn_id, :Purpose, 1]", "text must be a string"),
+    ] {
+        let source = format!(
+            "{prefix}\nstate = native/function_body(state, fn_id, names, [[:Return, \"one\"]])\nstate = native/append(state, :annotations, {annotation})\ntry\n native/emit_c(state)\n return \"accepted\"\ncatch E_INVARG as problem\n return native/error_message(problem)\nend"
+        );
+        let message = eval(&mut runner, &source).with_str(str::to_owned).unwrap();
+        assert!(message.contains(expected), "{message}");
     }
 }

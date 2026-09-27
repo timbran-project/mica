@@ -1,0 +1,212 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+// Structured bodies lower to the same checked instructions and terminators.
+// Bindings map names to existing constants, functions, parameters, and locals.
+// A body's local names are function-wide; generated names reserve body_ prefix.
+verb native/function_body(state: map, fn_id: int, bindings: map, statements: list) -> map
+  let functions = native/owned(state[:functions], 0, fn_id)
+  native/ensure(len(functions) == 1, "body requires a declared function")
+  native/ensure(len(native/owned(state[:blocks], 1, fn_id)) == 0, "function already has a body")
+  for spelling, id in bindings
+    native/ensure(!(string_len(spelling) >= 5 && string_slice(spelling, 0, 5) == "body_"), "body_ names are reserved by structured builders")
+  end
+  let context: map = {:state -> state, :function -> fn_id, :result -> functions[0][2], :bindings -> bindings,
+    :serial -> 0, :block -> :Closed, :position -> 0, :loops -> []}
+  let [entry, opened] = native/body_block(context, "entry", true)
+  context = native/body_enter(opened, entry)
+  context = native/body_statements(context, statements)
+  native/ensure(context[:block] == :Closed, "structured body can fall through without returning")
+  let state_result: map = context[:state]
+  return state_result
+end
+
+verb native/body_name(input: map, suffix: string) -> list
+  let context: map = input
+  let spelling = string_concat("body_", to_literal(context[:serial]), "_", suffix)
+  context[:serial] = context[:serial] + 1
+  return [spelling, context]
+end
+
+verb native/body_block(input: map, role: string, entry: bool) -> list
+  let [spelling, context] = native/body_name(input, role)
+  let [id, state] = native/add_block(context[:state], context[:function], spelling, entry)
+  context[:state] = native/annotate(state, id, :Purpose, role)
+  return [id, context]
+end
+
+verb native/body_enter(input: map, block: int) -> map
+  let context: map = input
+  context[:block] = block
+  context[:position] = 0
+  return context
+end
+
+verb native/body_end(input: map, opcode: symbol, args: list) -> map
+  let context: map = input
+  native/ensure(context[:block] != :Closed, "statement after control flow terminates")
+  context[:state] = native/terminate(context[:state], context[:block], opcode, args)
+  context[:block] = :Closed
+  return context
+end
+
+verb native/body_binding(context: map, name: string) -> int
+  native/ensure(is_kind(name, :string) && map_contains_key(context[:bindings], name), string_concat("unknown structured operand ", to_literal(name)))
+  let node_id: int = context[:bindings][name]
+  return node_id
+end
+
+verb native/body_local(input: map, spelling: string, type_id) -> list
+  let context: map = input
+  native/ensure(!map_contains_key(context[:bindings], spelling), "duplicate structured local name")
+  let [id, state] = native/add_local(context[:state], context[:function], spelling, type_id)
+  let bindings: map = context[:bindings]
+  bindings[spelling] = id
+  context[:bindings] = bindings
+  context[:state] = state
+  return [id, context]
+end
+
+// Expressions used as conditions and returns have a known expected type.
+// Nested operands use [:Expr, type, expression] to retain their explicit type.
+verb native/body_value(input: map, type_id, expression) -> list
+  if is_kind(expression, :string)
+    return [native/body_binding(input, expression), input]
+  end
+  let [name, named] = native/body_name(input, "value")
+  let [id, context] = native/body_local(named, name, type_id)
+  return [id, native/body_expression(context, id, expression)]
+end
+
+verb native/body_expression(input: map, destination, input_expression) -> map
+  let context: map = input
+  let expression = input_expression
+  if is_kind(expression, :string)
+    expression = [:Copy, expression]
+  end
+  native/ensure(is_kind(expression, :list) && len(expression) > 0, "expected structured expression")
+  let op = expression[0]
+  let operands: list = []
+  let position: int = 1
+  while position < len(expression)
+    let operand = expression[position]
+    if op == :SizeOf || op == :AlignOf || ((op == :Field || op == :FieldPointer) && position == 2)
+      operands = [@operands, operand]
+    else
+      if is_kind(operand, :list)
+        native/ensure(len(operand) == 3 && operand[0] == :Expr && !(op == :Call && position == 1), "invalid nested expression")
+        let [id, next] = native/body_value(context, operand[1], operand[2])
+        context = next
+        operands = [@operands, id]
+      else
+        operands = [@operands, native/body_binding(context, operand)]
+      end
+    end
+    position = position + 1
+  end
+  let [id, state] = native/add_instruction(context[:state], context[:block], context[:position], op, destination, operands)
+  context[:state] = state
+  context[:position] = context[:position] + 1
+  return context
+end
+
+verb native/body_if(input: map, condition, yes: list, no: list) -> map
+  let [test, evaluated] = native/body_value(input, :Bool, condition)
+  let [yes_block, with_yes] = native/body_block(evaluated, "if_true", false)
+  let [no_block, opened] = native/body_block(with_yes, "if_false", false)
+  let context: map = native/body_end(opened, :Branch, [test, yes_block, no_block])
+  context = native/body_statements(native/body_enter(context, yes_block), yes)
+  let yes_end = context[:block]
+  context = native/body_statements(native/body_enter(context, no_block), no)
+  let no_end = context[:block]
+  if yes_end == :Closed && no_end == :Closed
+    return context
+  end
+  let [join, joined] = native/body_block(context, "if_end", false)
+  context = joined
+  // Each open arm has already emitted its instructions. Only its terminator
+  // is added here, so resetting the construction cursor cannot reorder them.
+  for block in [yes_end, no_end]
+    if block != :Closed
+      context = native/body_end(native/body_enter(context, block), :Jump, [join])
+    end
+  end
+  context = native/body_enter(context, join)
+  return context
+end
+
+verb native/body_while(input: map, condition, statements: list) -> map
+  let [header, with_header] = native/body_block(input, "while_condition", false)
+  let [body, with_body] = native/body_block(with_header, "while_body", false)
+  let [exit, opened] = native/body_block(with_body, "while_end", false)
+  let context: map = native/body_end(opened, :Jump, [header])
+  let [test, evaluated] = native/body_value(native/body_enter(context, header), :Bool, condition)
+  context = native/body_end(evaluated, :Branch, [test, body, exit])
+  let outer: list = context[:loops]
+  context[:loops] = [@outer, [exit, header]]
+  context = native/body_statements(native/body_enter(context, body), statements)
+  if context[:block] != :Closed
+    context = native/body_end(context, :Jump, [header])
+  end
+  context[:loops] = outer
+  context = native/body_enter(context, exit)
+  return context
+end
+
+verb native/body_statements(input: map, statements: list) -> map
+  let context: map = input
+  native/ensure(is_kind(statements, :list), "structured body must be a statement list")
+  for statement in statements
+    native/ensure(context[:block] != :Closed, "statement after control flow terminates")
+    native/ensure(is_kind(statement, :list) && len(statement) > 0, "invalid structured statement")
+    let op = statement[0]
+    let arities: map = {:Let -> 4, :Set -> 3, :Do -> 2, :If -> 4, :While -> 3, :Break -> 1, :Continue -> 1, :Note -> 3}
+    if op == :Return
+      let arity: int = 2
+      if context[:result] == :Void
+        arity = 1
+      end
+      native/ensure(len(statement) == arity, "structured Return operand count mismatch")
+      let args: list = []
+      if arity == 2
+        let [id, next] = native/body_value(context, context[:result], statement[1])
+        context = next
+        args = [id]
+      end
+      context = native/body_end(context, :Return, args)
+      continue
+    end
+    native/ensure(map_contains_key(arities, op), "unknown structured statement")
+    native/ensure(len(statement) == arities[op], "structured statement operand count mismatch")
+    if op == :Let
+      native/ensure(!(string_len(statement[1]) >= 5 && string_slice(statement[1], 0, 5) == "body_"), "body_ names are reserved by structured builders")
+      let [id, next] = native/body_local(context, statement[1], statement[2])
+      context = native/body_expression(next, id, statement[3])
+    end
+    if op == :Set
+      context = native/body_expression(context, native/body_binding(context, statement[1]), statement[2])
+    end
+    if op == :Do
+      context = native/body_expression(context, :Discard, statement[1])
+    end
+    if op == :If
+      context = native/body_if(context, statement[1], statement[2], statement[3])
+    end
+    if op == :While
+      context = native/body_while(context, statement[1], statement[2])
+    end
+    if op == :Break || op == :Continue
+      native/ensure(len(context[:loops]) > 0, "loop control outside a loop")
+      let loop = context[:loops][len(context[:loops]) - 1]
+      let target = loop[0]
+      if op == :Continue
+        target = loop[1]
+      end
+      context = native/body_end(context, :Jump, [target])
+    end
+    if op == :Note
+      context[:state] = native/annotate(context[:state], context[:block], statement[1], statement[2])
+    end
+  end
+  return context
+end

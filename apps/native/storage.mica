@@ -67,7 +67,7 @@ verb native/c_globals(state, index, declaration)
         end
       end
     end
-    lines = [@lines, string_concat(prefix, native/c_type(row[2]), qualifier, " mica_global_", row[1], initializer, ";")]
+    lines = [@lines, @native/c_notes(index, row[0], ""), string_concat(prefix, native/c_type(row[2]), qualifier, " mica_global_", row[1], initializer, ";")]
   end
   return lines
 end

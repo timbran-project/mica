@@ -86,6 +86,7 @@ impl Native {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..");
         for source in [
             "ir",
+            "builders",
             "types",
             "numeric",
             "layout",

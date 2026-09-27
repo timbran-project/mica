@@ -3,8 +3,8 @@
 
 // Eight-byte aligned bump allocation in linked chunks. Addresses remain
 // stable when the arena grows. The C host supplies only malloc/free wrappers.
-verb native_value/arena(input)
-  let context = input
+verb native_value/arena(input: map) -> map
+  let context: map = input
   let bytes = [:Pointer, :U8, :Mutable]
   let block = [:Record, "ValueArenaBlock"]
   let block_ptr = [:Pointer, block, :Mutable]
@@ -16,7 +16,7 @@ verb native_value/arena(input)
   let [constants, next] = native/constants(state, [["null_bytes", bytes, "null"], ["null_block", block_ptr, "null"],
     ["chunk_size", :U64, "0000000000010000"], ["alignment_mask", :U64, "fffffffffffffff8"],
     ["alignment_slack", :U64, "0000000000000007"], ["allocation_limit", :U64, "7fffffffffffffc0"]])
-  let all_constants = context[:constants]
+  let all_constants: map = context[:constants]
   for key, id in constants
     all_constants[key] = id
   end
@@ -27,39 +27,50 @@ verb native_value/arena(input)
   context = native_value/function(context, "release", :Void, [["allocation", bytes, :Consume]], [], [], [:Release], :Value, "")
   context[:state] = native/foreign(context[:state], context[:functions]["release"])
   context = native_value/function(context, "value_arena_allocate", bytes, [["arena", arena_ptr, :Borrow], ["size", :U64, :Value]],
-    [["condition", :Bool], ["header_size", :U64], ["head_slot", [:Pointer, block_ptr, :Mutable]], ["head", block_ptr],
-     ["header", block], ["used", :U64], ["aligned", :U64], ["capacity", :U64], ["remaining", :U64], ["total", :U64],
-     ["owned_bytes", bytes], ["owned_block", block_ptr], ["adopted", block_ptr], ["base", bytes], ["data", bytes],
-     ["result", bytes], ["used_slot", [:Pointer, :U64, :Mutable]]],
-    ["entry", "limit", "read_head", "space", "available", "fit", "grow", "default_capacity", "allocate", "adopt", "publish", "failure"],
-    [:ReadMemory, :WriteMemory, :Allocate], :Borrow, "arena")
-  let name = "value_arena_allocate"
-  context = native_value/block(context, name, "entry", [[:Equal, "condition", ["size", "zero"]]], :Branch, ["condition", "failure", "limit"])
-  context = native_value/block(context, name, "limit", [[:Less, "condition", ["allocation_limit", "size"]]], :Branch, ["condition", "failure", "read_head"])
-  context = native_value/block(context, name, "read_head", [[:SizeOf, "header_size", [block]], [:FieldPointer, "head_slot", ["arena", "head"]],
-    [:Load, "head", ["head_slot"]], [:Equal, "condition", ["head", "null_block"]]], :Branch, ["condition", "grow", "space"])
-  context = native_value/block(context, name, "space", [[:Load, "header", ["head"]], [:Field, "used", ["header", "used"]],
-    [:Field, "capacity", ["header", "capacity"]], [:Add, "aligned", ["used", "alignment_slack"]], [:BitAnd, "aligned", ["aligned", "alignment_mask"]],
-    [:Less, "condition", ["capacity", "aligned"]]], :Branch, ["condition", "grow", "available"])
-  context = native_value/block(context, name, "available", [[:Subtract, "remaining", ["capacity", "aligned"]], [:Less, "condition", ["remaining", "size"]]], :Branch, ["condition", "grow", "fit"])
-  context = native_value/block(context, name, "fit", [[:Copy, "adopted", ["head"]]], :Jump, ["publish"])
-  context = native_value/block(context, name, "grow", [[:Copy, "capacity", ["size"]], [:Less, "condition", ["size", "chunk_size"]]], :Branch, ["condition", "default_capacity", "allocate"])
-  context = native_value/block(context, name, "default_capacity", [[:Copy, "capacity", ["chunk_size"]]], :Jump, ["allocate"])
-  context = native_value/block(context, name, "allocate", [[:Add, "total", ["capacity", "header_size"]], [:Call, "owned_bytes", ["allocate", "total"]],
-    [:Equal, "condition", ["owned_bytes", "null_bytes"]]], :Branch, ["condition", "failure", "adopt"])
-  context = native_value/block(context, name, "adopt", [[:PointerCast, "owned_block", ["owned_bytes"]], [:Adopt, "adopted", ["head_slot", "owned_block"]],
-    [:Record, "header", ["head", "zero", "capacity"]], [:Store, :Discard, ["adopted", "header"]], [:Copy, "aligned", ["zero"]]], :Jump, ["publish"])
-  context = native_value/block(context, name, "publish", [[:PointerCast, "base", ["adopted"]], [:Offset, "data", ["base", "header_size"]],
-    [:Offset, "result", ["data", "aligned"]], [:Add, "used", ["aligned", "size"]], [:FieldPointer, "used_slot", ["adopted", "used"]],
-    [:Store, :Discard, ["used_slot", "used"]]], :Return, ["result"])
-  context = native_value/block(context, name, "failure", [], :Return, ["null_bytes"])
-  context = native_value/function(context, "value_arena_release", :Void, [["arena", arena_ptr, :Consume]],
-    [["head_slot", [:Pointer, block_ptr, :Mutable]], ["head", block_ptr], ["next", block_ptr], ["header", block],
-     ["bytes", bytes], ["condition", :Bool], ["empty", arena]], ["entry", "loop", "free", "done"],
+    [["adopted", block_ptr]], [], [:ReadMemory, :WriteMemory, :Allocate], :Borrow, "arena")
+  let failure: list = [[:Return, "null_bytes"]]
+  context = native_value/body(context, "value_arena_allocate", [
+    [:Note, :Invariant, "Arena allocations remain stable and are aligned to eight bytes."],
+    [:If, [:Equal, "size", "zero"], failure, []],
+    [:If, [:Less, "allocation_limit", "size"], failure, []],
+    [:Let, "header_size", :U64, [:SizeOf, block]],
+    [:Let, "head_slot", [:Pointer, block_ptr, :Mutable], [:FieldPointer, "arena", "head"]],
+    [:Let, "head", block_ptr, [:Load, "head_slot"]],
+    [:Let, "aligned", :U64, "zero"], [:Let, "fits", :Bool, "false"],
+    [:If, [:Equal, "head", "null_block"], [], [
+      [:Let, "existing", block, [:Load, "head"]],
+      [:Let, "used", :U64, [:Field, "existing", "used"]],
+      [:Let, "available", :U64, [:Field, "existing", "capacity"]],
+      [:Set, "aligned", [:Add, "used", "alignment_slack"]],
+      [:Set, "aligned", [:BitAnd, "aligned", "alignment_mask"]],
+      [:If, [:Less, "available", "aligned"], [], [
+        [:Let, "remaining", :U64, [:Subtract, "available", "aligned"]],
+        [:If, [:Less, "remaining", "size"], [], [[:Set, "fits", "true"]]]]]]],
+    [:If, "fits", [[:Set, "adopted", "head"]], [
+      [:Let, "capacity", :U64, "size"],
+      [:If, [:Less, "size", "chunk_size"], [[:Set, "capacity", "chunk_size"]], []],
+      [:Let, "total", :U64, [:Add, "capacity", "header_size"]],
+      [:Let, "owned_bytes", bytes, [:Call, "allocate", "total"]],
+      [:If, [:Equal, "owned_bytes", "null_bytes"], failure, []],
+      [:Let, "owned_block", block_ptr, [:PointerCast, "owned_bytes"]],
+      [:Set, "adopted", [:Adopt, "head_slot", "owned_block"]],
+      [:Let, "header", block, [:Record, "head", "zero", "capacity"]],
+      [:Do, [:Store, "adopted", "header"]], [:Set, "aligned", "zero"]]],
+    [:Let, "base", bytes, [:PointerCast, "adopted"]],
+    [:Let, "data", bytes, [:Offset, "base", "header_size"]],
+    [:Let, "next_used", :U64, [:Add, "aligned", "size"]],
+    [:Let, "used_slot", [:Pointer, :U64, :Mutable], [:FieldPointer, "adopted", "used"]],
+    [:Do, [:Store, "used_slot", "next_used"]], [:Return, [:Offset, "data", "aligned"]]])
+  context = native_value/function(context, "value_arena_release", :Void, [["arena", arena_ptr, :Consume]], [], [],
     [:ReadMemory, :WriteMemory, :Release], :Value, "")
-  context = native_value/block(context, "value_arena_release", "entry", [[:FieldPointer, "head_slot", ["arena", "head"]], [:Load, "head", ["head_slot"]]], :Jump, ["loop"])
-  context = native_value/block(context, "value_arena_release", "loop", [[:Equal, "condition", ["head", "null_block"]]], :Branch, ["condition", "done", "free"])
-  context = native_value/block(context, "value_arena_release", "free", [[:Load, "header", ["head"]], [:Field, "next", ["header", "next"]],
-    [:PointerCast, "bytes", ["head"]], [:Call, :Discard, ["release", "bytes"]], [:Copy, "head", ["next"]]], :Jump, ["loop"])
-  return native_value/block(context, "value_arena_release", "done", [[:Zero, "empty", []], [:Store, :Discard, ["arena", "empty"]]], :Return, [])
+  context = native_value/body(context, "value_arena_release", [
+    [:Let, "head_slot", [:Pointer, block_ptr, :Mutable], [:FieldPointer, "arena", "head"]],
+    [:Let, "head", block_ptr, [:Load, "head_slot"]],
+    [:While, "true", [
+      [:If, [:Equal, "head", "null_block"], [[:Break]], []],
+      [:Note, :Invariant, "Read the next block before releasing the current block."],
+      [:Let, "header", block, [:Load, "head"]], [:Let, "next", block_ptr, [:Field, "header", "next"]],
+      [:Let, "bytes", bytes, [:PointerCast, "head"]], [:Do, [:Call, "release", "bytes"]], [:Set, "head", "next"]]],
+    [:Let, "empty", arena, [:Zero]], [:Do, [:Store, "arena", "empty"]], [:Return]])
+  return context
 end

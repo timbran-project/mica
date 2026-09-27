@@ -4,8 +4,8 @@
 // Search valid UTF-8 by bytes, then return a scalar position. A complete match
 // starts at a scalar boundary because a valid needle cannot start with a
 // continuation byte. Longer needles use a stack-resident Horspool skip table.
-verb native_value/string_search(input)
-  let context = input
+verb native_value/string_search(input: map) -> map
+  let context: map = input
   let name = "value_string_find"
   let word = native_value/word()
   let header = [:Record, "HeapString"]
@@ -13,7 +13,7 @@ verb native_value/string_search(input)
   let table = [:Array, :U64, 256]
   let [constant, state] = native/add_constant(context[:state], :U64, "0000000000000100")
   context[:state] = state
-  let constants = context[:constants]
+  let constants: map = context[:constants]
   constants["byte_domain"] = constant
   context[:constants] = constants
   context = native_value/function(context, name, result, [["value", word, :Borrow], ["needle", word, :Borrow], ["start", :U64, :Value]],
@@ -58,5 +58,6 @@ verb native_value/string_search(input)
   context = native_value/block(context, name, "return_scalar", [[:Field, "candidate", ["scan", "scalars"]]], :Jump, ["return_ascii"])
   context = native_value/block(context, name, "return_ascii", [[:Record, "result", ["true", "candidate"]]], :Return, ["result"])
   context = native_value/block(context, name, "return_empty", [[:Record, "result", ["true", "start"]]], :Return, ["result"])
-  return native_value/block(context, name, "missing", [[:Zero, "result", []]], :Return, ["result"])
+  context = native_value/block(context, name, "missing", [[:Zero, "result", []]], :Return, ["result"])
+  return context
 end

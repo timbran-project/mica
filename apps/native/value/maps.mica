@@ -3,8 +3,8 @@
 
 // Bottom-up stable merge sort followed by compaction. Equal keys retain the
 // last input value. Both buffers belong to the arena; the input is never changed.
-verb native_value/maps(input)
-  let context = input
+verb native_value/maps(input: map) -> map
+  let context: map = input
   let word = native_value/word()
   let entry = [:Record, "ValueMapEntry"]
   let entries = [:Pointer, entry, :Mutable]
@@ -13,7 +13,7 @@ verb native_value/maps(input)
   let name = "value_map"
   let [null, ns] = native/add_constant(context[:state], [:Pointer, entry, :Const], "null")
   context[:state] = ns
-  let constants = context[:constants]
+  let constants: map = context[:constants]
   constants["null_map_entries"] = null
   context[:constants] = constants
   context = native_value/function(context, name, result,
@@ -79,18 +79,19 @@ verb native_value/maps(input)
   context = native_value/block(context, name, "publish", [[:Record, "header", ["src", "write"]], [:Store, :Discard, ["pointer", "header"]], [:PackPointer, "value", ["pointer", "tag_map"]], [:Record, "result", ["true", "value"]]], :Jump, ["return_result"])
   context = native_value/block(context, name, "return_result", [], :Return, ["result"])
   context = native_value/block(context, name, "failure", [[:Zero, "result", []]], :Return, ["result"])
-  return native_value/map_lookup(context)
+  context = native_value/map_lookup(context)
+  return context
 end
 
-verb native_value/map_lookup(input)
-  let context = input
+verb native_value/map_lookup(input: map) -> map
+  let context: map = input
   let word = native_value/word()
   let entry = [:Record, "ValueMapEntry"]
   let result = [:Record, "ValueResult"]
   let name = "value_map_get"
   let [two, s] = native/add_constant(context[:state], :U64, "0000000000000002")
   context[:state] = s
-  let constants = context[:constants]
+  let constants: map = context[:constants]
   constants["two"] = two
   context[:constants] = constants
   context = native_value/function(context, name, result, [["map", word, :Borrow], ["key", word, :Borrow]],
@@ -110,5 +111,6 @@ verb native_value/map_lookup(input)
   context = native_value/block(context, name, "lower", [[:Add, "low", ["middle", "one"]]], :Jump, ["loop"])
   context = native_value/block(context, name, "upper", [[:Copy, "high", ["middle"]]], :Jump, ["loop"])
   context = native_value/block(context, name, "found", [[:Field, "value", ["entry", "value"]], [:Record, "result", ["true", "value"]]], :Return, ["result"])
-  return native_value/block(context, name, "missing", [[:Zero, "result", []]], :Return, ["result"])
+  context = native_value/block(context, name, "missing", [[:Zero, "result", []]], :Return, ["result"])
+  return context
 end

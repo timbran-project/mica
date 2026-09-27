@@ -7,7 +7,7 @@
 verb native/program()
   return {:next -> 0, :functions -> [], :parameters -> [], :locals -> [],
           :blocks -> [], :instructions -> [], :terminators -> [], :constants -> [],
-          :records -> [], :fields -> [], :globals -> [], :foreign -> [], :contracts -> [], :parameter_contracts -> []}
+          :records -> [], :fields -> [], :globals -> [], :foreign -> [], :contracts -> [], :parameter_contracts -> [], :annotations -> []}
 end
 
 verb native/append(input_state, table, row)
@@ -58,6 +58,7 @@ end
 // The checker consumes the row batches, so duplicate keys remain diagnosable.
 verb native/relations(state)
   return {
+    :Annotation -> relation_from_rows([:node, :kind, :text], state[:annotations]),
     :Global -> relation_from_rows([:id, :spelling, :type_id, :storage, :initializer], state[:globals]),
     :Function -> relation_from_rows([:id, :spelling, :result_type], state[:functions]),
     :Parameter -> relation_from_rows([:id, :owner, :position, :spelling, :type_id], state[:parameters]),
@@ -208,4 +209,24 @@ verb native/constants(input_state, declarations)
     bindings[declaration[0]] = id
   end
   return [bindings, state]
+end
+
+// Notes describe source intent; they do not establish optimizer assumptions.
+verb native/annotate(state, node, kind, text)
+  return native/append(state, :annotations, [node, kind, text])
+end
+
+verb native/check_annotations(state, ids)
+  let annotations = {}
+  for row in state[:annotations]
+    native/ensure(len(row) == 3 && map_contains_key(ids, row[0]), "annotation requires a known node")
+    native/ensure(native/contains([:Source, :Purpose, :Invariant], row[1]), "unknown annotation kind")
+    native/ensure(is_kind(row[2], :string), "annotation text must be a string")
+    let notes = []
+    if map_contains_key(annotations, row[0])
+      notes = annotations[row[0]]
+    end
+    annotations[row[0]] = [@notes, [row[1], row[2]]]
+  end
+  return annotations
 end

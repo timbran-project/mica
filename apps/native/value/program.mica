@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 // Process-local tags follow Omica. Persistence is a separate value encoding.
-verb native_value/kinds()
+verb native_value/kinds() -> list
   return [["bool", 1, false], ["int", 2, false], ["float", 3, false],
     ["identity", 4, false], ["symbol", 5, false], ["error_code", 6, false],
     ["string", 7, true], ["bytes", 8, true], ["list", 9, true],
@@ -10,15 +10,15 @@ verb native_value/kinds()
     ["capability", 13, false], ["frob", 14, true], ["function", 15, false], ["relation", 16, true]]
 end
 
-verb native_value/word()
+verb native_value/word() -> list
   return [:Tagged, "Value", :Mutable, [row[1] for row in native_value/kinds() if row[2]]]
 end
 
-verb native_value/hex(number)
-  let digits = string_chars("0123456789abcdef")
-  let result = ""
-  let rest = number
-  let position = 0
+verb native_value/hex(number: int) -> string
+  let digits: list = string_chars("0123456789abcdef")
+  let result: string = ""
+  let rest: int = number
+  let position: int = 0
   while position < 16
     result = string_concat(digits[rest % 16], result)
     rest = (rest - rest % 16) / 16
@@ -27,7 +27,7 @@ verb native_value/hex(number)
   return result
 end
 
-verb native_value/context()
+verb native_value/context() -> map
   let state = native/program()
   let word = native_value/word()
   for spec in [["ValueResult", [["ok", :Bool], ["value", word]]],
@@ -37,7 +37,7 @@ verb native_value/context()
                ["IdResult", [["ok", :Bool], ["number", :U64]]]]
     state = native/record_type(state, spec[0], spec[1])[1]
   end
-  let declarations = [["false", :Bool, "false"], ["true", :Bool, "true"],
+  let declarations: list = [["false", :Bool, "false"], ["true", :Bool, "true"],
     ["zero", :U64, "0000000000000000"], ["one", :U64, "0000000000000001"],
     ["payload_mask", :U64, "00ffffffffffffff"], ["sign_bit", :U64, "0080000000000000"],
     ["int_min", :I64, "-0080000000000000"], ["int_max", :I64, "007fffffffffffff"],
@@ -54,39 +54,41 @@ end
 
 // Named operands keep the value algorithms readable. Native validation still
 // consumes the same typed IR and checks every instruction and call.
-verb native_value/function(input, name, result, parameters, locals, blocks, effects, mode, owner)
-  let context = input
+verb native_value/function(input: map, name: string, result, parameters: list, locals: list, blocks: list, effects: list, mode: symbol, owner: string) -> map
+  let context: map = input
   let [id, bindings, state] = native/function_scope(context[:state], name, result, parameters, locals, [string_concat("block_", block) for block in blocks])
   native/ensure(!map_contains_key(context[:functions], name), "duplicate value function")
   context[:state] = native/contract(state, id, effects, mode, owner)
-  let functions = context[:functions]
+  let functions: map = context[:functions]
   functions[name] = id
   context[:functions] = functions
-  let scopes = context[:bindings]
+  let scopes: map = context[:bindings]
   scopes[name] = bindings
   context[:bindings] = scopes
   return context
 end
 
-verb native_value/operand(context, bindings, spelling)
+verb native_value/operand(context: map, bindings: map, spelling: string) -> int
   if map_contains_key(bindings, spelling)
-    return bindings[spelling]
+    let bound_id: int = bindings[spelling]
+    return bound_id
   end
   native/ensure(map_contains_key(context[:constants], spelling), string_concat("unknown value operand ", spelling))
-  return context[:constants][spelling]
+  let constant_id: int = context[:constants][spelling]
+  return constant_id
 end
 
-verb native_value/block(input, name, block, instructions, terminator, operands)
-  let context = input
-  let bindings = context[:bindings][name]
-  let rows = []
+verb native_value/block(input: map, name: string, block: string, instructions: list, terminator: symbol, operands: list) -> map
+  let context: map = input
+  let bindings: map = context[:bindings][name]
+  let rows: list = []
   for row in instructions
     let destination = :Discard
     if row[1] != :Discard
       destination = bindings[row[1]]
     end
-    let args = []
-    let position = 0
+    let args: list = []
+    let position: int = 0
     for operand in row[2]
       if row[0] == :SizeOf || row[0] == :AlignOf || ((row[0] == :Field || row[0] == :FieldPointer) && position == 1)
         args = [@args, operand]
@@ -101,8 +103,8 @@ verb native_value/block(input, name, block, instructions, terminator, operands)
     end
     rows = [@rows, [row[0], destination, args]]
   end
-  let targets = []
-  let position = 0
+  let targets: list = []
+  let position: int = 0
   for operand in operands
     if terminator == :Jump || (terminator == :Branch && position > 0)
       targets = [@targets, bindings[string_concat("block_", operand)]]
@@ -115,8 +117,24 @@ verb native_value/block(input, name, block, instructions, terminator, operands)
   return context
 end
 
-verb native_value/program()
-  let context = native_value/context()
+// Structured value functions use the shared builder and the same symbol scope.
+verb native_value/body(input: map, name: string, statements: list) -> map
+  let context: map = input
+  let bindings: map = context[:constants]
+  for spelling, id in context[:functions]
+    native/ensure(!map_contains_key(bindings, spelling), "duplicate structured binding")
+    bindings[spelling] = id
+  end
+  for spelling, id in context[:bindings][name]
+    native/ensure(!map_contains_key(bindings, spelling), "duplicate structured binding")
+    bindings[spelling] = id
+  end
+  context[:state] = native/function_body(context[:state], context[:functions][name], bindings, statements)
+  return context
+end
+
+verb native_value/program() -> map
+  let context: map = native_value/context()
   context = native_value/immediates(context)
   context = native_value/numbers(context)
   context = native_value/arena(context)
@@ -126,5 +144,6 @@ verb native_value/program()
   context = native_value/comparison(context)
   context = native_value/language_comparison(context)
   context = native_value/maps(context)
-  return context[:state]
+  let state: map = context[:state]
+  return state
 end

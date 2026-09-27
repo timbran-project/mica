@@ -20,6 +20,7 @@ From the repository root, run:
 ```sh
 cargo run --bin mica -- eval \
   --filein apps/native/ir.mica \
+  --filein apps/native/builders.mica \
   --filein apps/native/types.mica \
   --filein apps/native/numeric.mica \
   --filein apps/native/layout.mica \
@@ -75,6 +76,69 @@ Builders batch rows without changing the world.
 
 `native/function_scope`, `native/block_body`, `native/record_type`, and `native/constants` batch common construction sequences.
 The examples show their argument shapes. These helpers produce the same rows as the individual builders.
+
+### Structured bodies
+
+Load [builders.mica](builders.mica) after `ir.mica` to construct bodies without naming blocks or branch targets.
+`native/function_body(state, function, bindings, statements)` returns the updated state.
+Declare the function with `native/function_scope`, with an empty block list.
+The bindings map contains parameter and local IDs, plus named constants and called functions.
+
+For example, this body sums unsigned integers in `[0, limit)`:
+
+```mica
+let [function, names, declared] = native/function_scope(state, "sum", :U64,
+  [["limit", :U64, :Value]], [], [])
+names["zero"] = constants["zero"]
+names["one"] = constants["one"]
+state = native/function_body(declared, function, names, [
+  [:Let, "total", :U64, "zero"],
+  [:Let, "i", :U64, "zero"],
+  [:While, [:Less, "i", "limit"], [
+    [:Set, "total", [:Add, "total", "i"]],
+    [:Set, "i", [:Add, "i", "one"]]]],
+  [:Return, "total"]])
+```
+
+Here, `constants` supplies U64 zero and one from `native/constants`.
+[The UTF-8 scanner](value/utf8.mica) uses the same builders for bounded reads, early returns, and loop continuation.
+
+| Statement | Behaviour |
+| --- | --- |
+| `[:Let, name, type, expression]` | Declare and initialize a function local |
+| `[:Set, name, expression]` | Assign an existing local |
+| `[:Do, expression]` | Emit an operation with no result |
+| `[:If, condition, yes, no]` | Select one statement list |
+| `[:While, condition, body]` | Re-evaluate the condition before each iteration |
+| `[:Break]`, `[:Continue]` | Exit or repeat the innermost loop |
+| `[:Return, expression]` | Return a value; use `[:Return]` for Void |
+| `[:Note, kind, text]` | Annotate the current block |
+
+An expression is a binding name or `[opcode, operand, ...]`.
+Nested operands use `[:Expr, type, expression]`. For example, `[:Expr, :U64, [:Call, "next"]]` supplies a typed call result.
+Operands evaluate once, from left to right. Each operation lowers to a separate instruction before C emission.
+Field names and the type operands of `SizeOf` and `AlignOf` retain their existing metadata forms.
+
+Local names are unique throughout the function. Branches do not introduce separate name scopes.
+The `body_` prefix is reserved for generated locals and blocks.
+Builders reject statements after a return or loop transfer, loop control outside loops, and bodies that can fall through.
+The existing checker still validates types, definite assignment, effects, and ownership after lowering.
+
+### Information retained in generated C
+
+`native/annotate(state, node, kind, text)` attaches a `:Source`, `:Purpose`, or `:Invariant` note to an existing node.
+`native/relations(state)[:Annotation]` exposes these notes for inspection.
+Notes survive lowering and appear beside the corresponding declaration, block, or instruction.
+Constants are inlined, so their notes appear together in the declarations section.
+Annotation text is escaped before C emission, including comment delimiters, line breaks, and trigraph characters.
+
+Function declarations and definitions include allowed effects, result ownership, and parameter borrow regions as comments.
+Nominal scalar names remain typedefs. Tagged types retain comments describing their tag bits, heap tags, and pointer access.
+Structured blocks retain their control-flow roles, such as loop condition and exit.
+Output ordering uses semantic names and annotation text, independent of node IDs or symbol insertion order.
+
+Invariant notes describe author intent. They are not proofs and do not remove checks or introduce optimizer assumptions.
+Comments do not affect C optimization. Existing types and operations continue to determine executable semantics.
 
 Each function has one entry block. Each block has one terminator.
 Positions start at zero and have no gaps.

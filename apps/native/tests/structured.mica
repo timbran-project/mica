@@ -1,0 +1,56 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+verb native/structured_example(first_id)
+  let state = native/program()
+  state[:next] = first_id
+  let [constants, with_constants] = native/constants(state, [
+    ["zero", :U64, "0000000000000000"], ["one", :U64, "0000000000000001"],
+    ["two", :U64, "0000000000000002"], ["three", :U64, "0000000000000003"],
+    ["ten", :U64, "000000000000000a"]])
+  let [sum, bindings, declared] = native/function_scope(with_constants, "structured_sum", :U64, [["limit", :U64, :Value]], [], [])
+  for name, id in constants
+    bindings[name] = id
+  end
+  state = native/annotate(declared, sum, :Source, "apps/native/tests/structured.mica: native/structured_example")
+  state = native/annotate(state, sum, :Purpose, "Skip three and stop before ten.")
+  state = native/function_body(state, sum, bindings, [
+    [:Let, "sum", :U64, "zero"], [:Let, "i", :U64, "zero"],
+    [:While, [:Less, "i", "limit"], [
+      [:Set, "i", [:Add, "i", "one"]],
+      [:If, [:Equal, "i", "three"], [[:Continue]], []],
+      [:If, [:Equal, "i", "ten"], [[:Break]], []],
+      [:Set, "sum", [:Add, "sum", "i"]]]],
+    [:Return, "sum"]])
+  let [nested, nested_names, nested_state] = native/function_scope(state, "structured_nested", :U64, [["limit", :U64, :Value]], [], [])
+  for name, id in constants
+    nested_names[name] = id
+  end
+  state = native/function_body(nested_state, nested, nested_names, [
+    [:Let, "sum", :U64, "zero"], [:Let, "i", :U64, "zero"],
+    [:While, [:Less, "i", "limit"], [
+      [:Set, "i", [:Add, "i", "one"]], [:Let, "j", :U64, "zero"],
+      [:While, [:Less, "j", "limit"], [
+        [:Set, "j", [:Add, "j", "one"]],
+        [:If, [:Equal, "j", "three"], [[:Break]], []],
+        [:If, [:Equal, "j", "one"], [[:Continue]], []],
+        [:Set, "sum", [:Add, "sum", "one"]]]]]], [:Return, "sum"]])
+  let [both, choice_names, choice_state] = native/function_scope(state, "structured_choice", :U64, [["choice", :Bool, :Value]], [], [])
+  for name, id in constants
+    choice_names[name] = id
+  end
+  state = native/function_body(choice_state, both, choice_names, [[:If, "choice", [[:Return, "one"]], [[:Return, "two"]]]])
+  let [tick, tick_state] = native/add_function(state, "structured_tick", :U64)
+  state = native/contract(native/foreign(tick_state, tick), tick, [:WriteMemory], :Value, "")
+  let [order, order_names, order_state] = native/function_scope(state, "structured_order", :U64, [], [], [])
+  order_names["tick"] = tick
+  state = native/contract(order_state, order, [:WriteMemory], :Value, "")
+  state = native/function_body(state, order, order_names, [
+    [:Note, :Invariant, "Nested calls execute left to right."],
+    [:Return, [:Subtract, [:Expr, :U64, [:Call, "tick"]], [:Expr, :U64, [:Call, "tick"]]]]])
+  let [empty, empty_names, empty_state] = native/function_scope(state, "structured_void", :Void, [], [], [])
+  state = native/function_body(empty_state, empty, empty_names, [[:Return]])
+  // This text must remain a comment, even after C preprocessing.
+  state = native/annotate(state, empty, :Purpose, "*/\n#error injected\n/* ??/\\\r\n\0")
+  return state
+end

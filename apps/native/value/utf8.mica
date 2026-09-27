@@ -3,8 +3,8 @@
 
 // Unicode scalars exclude surrogates. A decoder failure consumes no input;
 // callers can distinguish malformed or incomplete input from U+FFFD itself.
-verb native_value/utf8(input)
-  let context = input
+verb native_value/utf8(input: map) -> map
+  let context: map = input
   let rune = [:Scalar, "Rune", :U32]
   let bytes = [:Array, :U8, 4]
   let state = context[:state]
@@ -14,7 +14,7 @@ verb native_value/utf8(input)
                ["Utf8Scan", [["ok", :Bool], ["scalars", :U64], ["ascii", :Bool]]]]
     state = native/record_type(state, spec[0], spec[1])[1]
   end
-  let constants = []
+  let constants: list = []
   for number in [0, 1, 2, 3, 4, 6, 7, 15, 31, 63, 128, 192, 194, 224, 240, 245, 2048, 55296, 57344, 65536, 1114112]
     constants = [@constants, [string_concat("utf32_", to_literal(number)), :U32, native_value/hex(number)]]
   end
@@ -24,28 +24,30 @@ verb native_value/utf8(input)
   constants = [@constants, ["utf8_high_bits", :U64, "8080808080808080"]]
   constants = [@constants, ["utf8_null", [:Pointer, :U8, :Const], "null"]]
   let [ids, next] = native/constants(state, constants)
-  let all = context[:constants]
+  let all: map = context[:constants]
   for name, id in ids
     all[name] = id
   end
   context[:constants] = all
   context[:state] = next
   let name = "unicode_scalar"
-  context = native_value/function(context, name, [:Record, "RuneResult"], [["number", :U32, :Value]],
-    [["condition", :Bool], ["rune", rune], ["result", [:Record, "RuneResult"]]],
-    ["entry", "surrogate_lower", "surrogate_upper", "success", "failure"], [], :Value, "")
-  context = native_value/block(context, name, "entry", [[:Less, "condition", ["number", "utf32_1114112"]]], :Branch, ["condition", "surrogate_lower", "failure"])
-  context = native_value/block(context, name, "surrogate_lower", [[:Less, "condition", ["number", "utf32_55296"]]], :Branch, ["condition", "success", "surrogate_upper"])
-  context = native_value/block(context, name, "surrogate_upper", [[:Less, "condition", ["number", "utf32_57344"]]], :Branch, ["condition", "failure", "success"])
-  context = native_value/block(context, name, "success", [[:Wrap, "rune", ["number"]], [:Record, "result", ["true", "rune"]]], :Return, ["result"])
-  context = native_value/block(context, name, "failure", [[:Zero, "result", []]], :Return, ["result"])
+  context = native_value/function(context, name, [:Record, "RuneResult"], [["number", :U32, :Value]], [], [], [], :Value, "")
+  context[:state] = native/annotate(context[:state], context[:functions][name], :Source, "apps/native/value/utf8.mica: native_value/utf8")
+  context[:state] = native/annotate(context[:state], context[:functions][name], :Invariant, "A successful Rune is at most U+10FFFF and excludes U+D800 through U+DFFF.")
+  let failure: list = [[:Return, [:Zero]]]
+  context = native_value/body(context, name, [
+    [:If, [:Less, "number", "utf32_1114112"], [], failure],
+    [:If, [:Less, "number", "utf32_55296"], [], [
+      [:If, [:Less, "number", "utf32_57344"], failure, []]]],
+    [:Return, [:Record, "true", [:Expr, rune, [:Wrap, "number"]]]]])
   context = native_value/utf8_decode(context)
   context = native_value/utf8_encode(context)
-  return native_value/utf8_scan(context)
+  context = native_value/utf8_scan(context)
+  return context
 end
 
-verb native_value/utf8_decode(input)
-  let context = input
+verb native_value/utf8_decode(input: map) -> map
+  let context: map = input
   let name = "utf8_decode"
   let pointer = [:Pointer, :U8, :Const]
   let result = [:Record, "Utf8Decode"]
@@ -76,11 +78,12 @@ verb native_value/utf8_decode(input)
   context = native_value/block(context, name, "minimum", [[:Less, "condition", ["number", "minimum"]]], :Branch, ["condition", "failure", "scalar"])
   context = native_value/block(context, name, "scalar", [[:Call, "scalar", ["unicode_scalar", "number"]], [:Field, "condition", ["scalar", "ok"]]], :Branch, ["condition", "success", "failure"])
   context = native_value/block(context, name, "success", [[:Field, "rune", ["scalar", "rune"]], [:Record, "result", ["true", "rune", "width"]]], :Return, ["result"])
-  return native_value/block(context, name, "failure", [[:Zero, "result", []]], :Return, ["result"])
+  context = native_value/block(context, name, "failure", [[:Zero, "result", []]], :Return, ["result"])
+  return context
 end
 
-verb native_value/utf8_encode(input)
-  let context = input
+verb native_value/utf8_encode(input: map) -> map
+  let context: map = input
   let name = "utf8_encode"
   let bytes = [:Array, :U8, 4]
   let result = [:Record, "Utf8Encode"]
@@ -101,36 +104,48 @@ verb native_value/utf8_encode(input)
     [:ElementPointer, "slot", ["address", "index"]], [:Store, :Discard, ["slot", "byte"]], [:ShiftRight, "number", ["number", "utf32_6"]], [:Subtract, "index", ["index", "one"]]], :Jump, ["loop"])
   context = native_value/block(context, name, "first", [[:BitOr, "part", ["number", "prefix"]], [:Convert, "byte", ["part"]], [:ElementPointer, "slot", ["address", "zero"]],
     [:Store, :Discard, ["slot", "byte"]], [:Record, "result", ["true", "bytes", "width"]]], :Return, ["result"])
-  return native_value/block(context, name, "failure", [[:Zero, "result", []]], :Return, ["result"])
+  context = native_value/block(context, name, "failure", [[:Zero, "result", []]], :Return, ["result"])
+  return context
 end
 
-verb native_value/utf8_scan(input)
-  let context = input
+verb native_value/utf8_scan(input: map) -> map
+  let context: map = input
   let name = "utf8_scan"
   let pointer = [:Pointer, :U8, :Const]
   let result = [:Record, "Utf8Scan"]
-  context = native_value/function(context, name, result, [["source", pointer, :Borrow], ["length", :U64, :Value]],
-    [["chunk", :U64], ["chunk_address", [:Pointer, :U64, :Mutable]], ["chunk_bytes", [:Pointer, :U8, :Mutable]], ["high", :U64], ["offset", :U64], ["scalars", :U64], ["width", :U64], ["remaining", :U64], ["ascii", :Bool], ["condition", :Bool],
-     ["byte", :U8], ["first", :U32], ["slot", pointer], ["decoded", [:Record, "Utf8Decode"]], ["result", result]],
-    ["entry", "source", "initialize", "loop", "chunk_check", "chunk", "chunk_next", "read", "ascii_next", "decode", "advance", "non_ascii", "next", "success", "failure"], [:ReadMemory, :WriteMemory], :Value, "")
-  context = native_value/block(context, name, "entry", [[:Equal, "condition", ["length", "zero"]]], :Branch, ["condition", "initialize", "source"])
-  context = native_value/block(context, name, "source", [[:Equal, "condition", ["source", "utf8_null"]]], :Branch, ["condition", "failure", "initialize"])
-  context = native_value/block(context, name, "initialize", [[:Copy, "offset", ["zero"]], [:Copy, "scalars", ["zero"]], [:Copy, "ascii", ["true"]], [:Zero, "chunk", []], [:Address, "chunk_address", ["chunk"]], [:PointerCast, "chunk_bytes", ["chunk_address"]]], :Jump, ["loop"])
-  context = native_value/block(context, name, "loop", [[:Less, "condition", ["offset", "length"]]], :Branch, ["condition", "chunk_check", "success"])
-  // Copy to an aligned local: source alignment is unrestricted and no read
-  // extends beyond the caller's byte extent. The high-bit mask is endian neutral.
-  context = native_value/block(context, name, "chunk_check", [[:Subtract, "remaining", ["length", "offset"]], [:Less, "condition", ["remaining", "utf64_8"]]], :Branch, ["condition", "read", "chunk"])
-  context = native_value/block(context, name, "chunk", [[:Offset, "slot", ["source", "offset"]], [:CopyBytes, :Discard, ["chunk_bytes", "slot", "utf64_8"]], [:Load, "chunk", ["chunk_address"]],
-    [:BitAnd, "high", ["chunk", "utf8_high_bits"]], [:Equal, "condition", ["high", "zero"]]], :Branch, ["condition", "chunk_next", "read"])
-  context = native_value/block(context, name, "chunk_next", [[:Add, "offset", ["offset", "utf64_8"]], [:Add, "scalars", ["scalars", "utf64_8"]]], :Jump, ["loop"])
-  context = native_value/block(context, name, "read", [[:Offset, "slot", ["source", "offset"]], [:Load, "byte", ["slot"]],
-    [:Convert, "first", ["byte"]], [:Less, "condition", ["first", "utf32_128"]]], :Branch, ["condition", "ascii_next", "decode"])
-  context = native_value/block(context, name, "ascii_next", [[:Copy, "width", ["one"]]], :Jump, ["next"])
-  context = native_value/block(context, name, "decode", [[:Offset, "slot", ["source", "offset"]], [:Subtract, "remaining", ["length", "offset"]],
-    [:Call, "decoded", ["utf8_decode", "slot", "remaining"]], [:Field, "condition", ["decoded", "ok"]]], :Branch, ["condition", "advance", "failure"])
-  context = native_value/block(context, name, "advance", [[:Field, "width", ["decoded", "width"]], [:Equal, "condition", ["width", "one"]]], :Branch, ["condition", "next", "non_ascii"])
-  context = native_value/block(context, name, "non_ascii", [[:Copy, "ascii", ["false"]]], :Jump, ["next"])
-  context = native_value/block(context, name, "next", [[:Add, "offset", ["offset", "width"]], [:Add, "scalars", ["scalars", "one"]]], :Jump, ["loop"])
-  context = native_value/block(context, name, "success", [[:Record, "result", ["true", "scalars", "ascii"]]], :Return, ["result"])
-  return native_value/block(context, name, "failure", [[:Zero, "result", []]], :Return, ["result"])
+  context = native_value/function(context, name, result, [["source", pointer, :Borrow], ["length", :U64, :Value]], [], [], [:ReadMemory, :WriteMemory], :Value, "")
+  context[:state] = native/annotate(context[:state], context[:functions][name], :Source, "apps/native/value/utf8.mica: native_value/utf8_scan")
+  context[:state] = native/annotate(context[:state], context[:functions][name], :Purpose, "Validate UTF-8 and count Unicode scalars, with an eight-byte ASCII fast path.")
+  let failure: list = [[:Return, [:Zero]]]
+  context = native_value/body(context, name, [
+    [:If, [:Equal, "length", "zero"], [[:Return, [:Record, "true", "zero", "true"]]], []],
+    [:If, [:Equal, "source", "utf8_null"], failure, []],
+    [:Let, "offset", :U64, "zero"], [:Let, "scalars", :U64, "zero"], [:Let, "ascii", :Bool, "true"],
+    [:Let, "chunk", :U64, [:Zero]],
+    [:Let, "chunk_address", [:Pointer, :U64, :Mutable], [:Address, "chunk"]],
+    [:Let, "chunk_bytes", [:Pointer, :U8, :Mutable], [:PointerCast, "chunk_address"]],
+    [:While, [:Less, "offset", "length"], [
+      [:Note, :Invariant, "offset is a scalar boundary within the supplied byte extent."],
+      [:Let, "remaining", :U64, [:Subtract, "length", "offset"]],
+      [:Let, "slot", pointer, [:Offset, "source", "offset"]],
+      [:If, [:Less, "remaining", "utf64_8"], [], [
+        [:Note, :Purpose, "Copy eight readable bytes to an aligned local; the high-bit mask is endian neutral."],
+        [:Do, [:CopyBytes, "chunk_bytes", "slot", "utf64_8"]],
+        [:Set, "chunk", [:Load, "chunk_address"]],
+        [:Let, "high", :U64, [:BitAnd, "chunk", "utf8_high_bits"]],
+        [:If, [:Equal, "high", "zero"], [
+          [:Set, "offset", [:Add, "offset", "utf64_8"]],
+          [:Set, "scalars", [:Add, "scalars", "utf64_8"]], [:Continue]], []]]],
+      [:Let, "byte", :U8, [:Load, "slot"]],
+      [:Let, "first", :U32, [:Convert, "byte"]],
+      [:If, [:Less, "first", "utf32_128"], [
+        [:Set, "offset", [:Add, "offset", "one"]],
+        [:Set, "scalars", [:Add, "scalars", "one"]], [:Continue]], []],
+      [:Let, "decoded", [:Record, "Utf8Decode"], [:Call, "utf8_decode", "slot", "remaining"]],
+      [:If, [:Field, "decoded", "ok"], [], failure],
+      [:Let, "width", :U64, [:Field, "decoded", "width"]],
+      [:Set, "ascii", "false"], [:Set, "offset", [:Add, "offset", "width"]],
+      [:Set, "scalars", [:Add, "scalars", "one"]]]],
+    [:Return, [:Record, "true", "scalars", "ascii"]]])
+  return context
 end
