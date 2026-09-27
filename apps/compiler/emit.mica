@@ -98,7 +98,7 @@ verb emit_source(source) -> map
 end
 
 verb emit_state(relations, node_kinds)
-  return {:code -> [], :code_length -> 0, :next -> 0, :scopes -> [{}], :loops -> [], :errors -> [], :result_annotation -> "", :binding_types -> {}, :relations -> relations, :node_kinds -> node_kinds, :self_name -> ""}
+  return {:code -> [], :next -> 0, :scopes -> [{}], :loops -> [], :errors -> [], :result_annotation -> "", :binding_types -> {}, :relations -> relations, :node_kinds -> node_kinds, :self_name -> ""}
 end
 
 verb emit_program(raw_rows, root) -> map
@@ -161,11 +161,7 @@ verb emit_program(raw_rows, root) -> map
 end
 
 verb emit_description(state)
-  let code = []
-  for chunk in state[:code]
-    code = [@code, @chunk]
-  end
-  return {:registers -> state[:next], :code -> code}
+  return {:registers -> state[:next], :code -> state[:code]}
 end
 
 verb emit_register(input_state)
@@ -175,19 +171,9 @@ verb emit_register(input_state)
   return [reg, state]
 end
 
-// Bound nested-list copies while building code; assembly receives one flat list.
 verb emit_append(input_state, instruction)
   let state = input_state
-  let code = state[:code]
-  let length = state[:code_length]
-  if length % 64 == 0
-    code = [@code, [instruction]]
-  else
-    let last = len(code) - 1
-    code[last] = [@code[last], instruction]
-  end
-  state[:code] = code
-  state[:code_length] = length + 1
+  state[:code] = [@state[:code], instruction]
   return state
 end
 
@@ -255,11 +241,7 @@ end
 verb emit_patch(input_state, position, instruction)
   let state = input_state
   let code = state[:code]
-  let offset = position % 64
-  let index = (position - offset) / 64
-  let chunk = code[index]
-  chunk[offset] = instruction
-  code[index] = chunk
+  code[position] = instruction
   state[:code] = code
   return state
 end
@@ -449,7 +431,7 @@ verb emit_expr(rows, node, input_state)
     let [_, condition_node] = ast_attr(rows, node, :condition)
     let [condition, emitted] = emit_expr(rows, condition_node, state)
     state = emitted
-    let branch = state[:code_length]
+    let branch = len(state[:code])
     state = emit_append(state, [:Branch, condition, branch + 2, branch + 1])
     state = emit_append(state, [:Abort, [:Constant, "require failed"]])
     return emit_constant(state, true)
@@ -492,7 +474,7 @@ end
 
 verb emit_try(rows, node, input_state)
   let [result, state] = emit_constant(input_state, [] {[]})
-  let enter = state[:code_length]
+  let enter = len(state[:code])
   state = emit_append(state, [:EnterTry, [], none, 0])
   let [body_reg, emitted] = emit_block(rows, ast_children(rows, node, :body), emit_scope(state))
   state = emit_append(emit_unscope(emitted), [:Move, result, body_reg])
@@ -514,23 +496,23 @@ verb emit_try(rows, node, input_state)
       state = emit_declare(allocated, name_text, reg, true)
       binding = reg
     end
-    handlers = [@handlers, [code, binding, state[:code_length]]]
+    handlers = [@handlers, [code, binding, len(state[:code])]]
     let [catch_reg, after_catch] = emit_block(rows, ast_children(rows, clause, :body), state)
     state = emit_append(emit_unscope(after_catch), [:Move, result, catch_reg])
     if has_finally
       state = emit_append(state, [:ExitTry])
     else
-      exits = [@exits, state[:code_length]]
+      exits = [@exits, len(state[:code])]
       state = emit_append(state, [:Jump, 0])
     end
   end
   let finally_target = none
   if has_finally
-    finally_target = state[:code_length]
+    finally_target = len(state[:code])
     let [_, after_finally] = emit_block(rows, ast_children(rows, node, :finally_body), emit_scope(state))
     state = emit_append(emit_unscope(after_finally), [:EndFinally])
   end
-  let finish = state[:code_length]
+  let finish = len(state[:code])
   for position in exits
     state = emit_patch(state, position, [:Jump, finish])
   end
@@ -546,16 +528,16 @@ verb emit_binary(rows, node, input_state)
   let [dst, allocated] = emit_register(state)
   state = allocated
   if operation == :and || operation == :or
-    let branch = state[:code_length]
+    let branch = len(state[:code])
     state = emit_append(state, [:Branch, left, 0, 0])
-    let right_start = state[:code_length]
+    let right_start = len(state[:code])
     let [right, after_right] = emit_expr(rows, right_node, state)
     state = emit_append(after_right, [:Move, dst, right])
-    let jump = state[:code_length]
+    let jump = len(state[:code])
     state = emit_append(state, [:Jump, 0])
-    let short_start = state[:code_length]
+    let short_start = len(state[:code])
     state = emit_append(state, [:Load, dst, operation == :or])
-    let finish = state[:code_length]
+    let finish = len(state[:code])
     state = emit_patch(state, jump, [:Jump, finish])
     if operation == :and
       state = emit_patch(state, branch, [:Branch, left, right_start, short_start])
@@ -683,7 +665,7 @@ verb emit_row_binding(rows, node, source_reg, index_reg, exact, immutable, input
   if exact
     let [matched, allocated] = emit_register(state)
     state = emit_append(allocated, [:RelationPattern, matched, source_reg, heading, 1, []])
-    let branch = state[:code_length]
+    let branch = len(state[:code])
     state = emit_append(state, [:Branch, matched, branch + 2, branch + 1])
     state = emit_append(state, [:Raise, [:Constant, E_CARDINALITY], [:Constant, "exact row binding requires one row with the stated heading"], [:Register, source_reg]])
   end
@@ -780,7 +762,7 @@ verb emit_collection_slot(rows, node, kind, source_reg, position, length, input_
     operation = :Le
   end
   state = emit_append(allocated, [:Binary, condition, operation, index_reg, length])
-  let branch = state[:code_length]
+  let branch = len(state[:code])
   state = emit_append(state, [:Branch, condition, branch + 1, 0])
   let key_reg = index_reg
   if kind == :Rest_Pattern
@@ -789,9 +771,9 @@ verb emit_collection_slot(rows, node, kind, source_reg, position, length, input_
     key_reg = range_reg
   end
   state = emit_append(state, [:Index, dst, source_reg, [:Register, key_reg]])
-  let jump = state[:code_length]
+  let jump = len(state[:code])
   state = emit_append(state, [:Jump, 0])
-  let absent = state[:code_length]
+  let absent = len(state[:code])
   let [has_default, default_node] = ast_attr(rows, node, :default)
   if has_default
     let [value_reg, after_value] = emit_expr(rows, default_node, state)
@@ -802,7 +784,7 @@ verb emit_collection_slot(rows, node, kind, source_reg, position, length, input_
     state = emit_append(state, [:Load, dst, [] {}])
   end
   state = emit_patch(state, branch, [:Branch, condition, branch + 1, absent])
-  state = emit_patch(state, jump, [:Jump, state[:code_length]])
+  state = emit_patch(state, jump, [:Jump, len(state[:code])])
   return [dst, state]
 end
 
@@ -1059,14 +1041,14 @@ verb emit_if(rows, node, input_state)
     let [_, condition_node] = ast_attr(rows, branch_node, :condition)
     let [condition, after_condition] = emit_expr(rows, condition_node, state)
     state = after_condition
-    let position = state[:code_length]
+    let position = len(state[:code])
     state = emit_append(state, [:Branch, condition, position + 1, 0])
     let [body_reg, after_body] = emit_block(rows, ast_children(rows, branch_node, :body), emit_scope(state))
     state = emit_unscope(after_body)
     state = emit_append(state, [:Move, result, body_reg])
-    exits = [@exits, state[:code_length]]
+    exits = [@exits, len(state[:code])]
     state = emit_append(state, [:Jump, 0])
-    state = emit_patch(state, position, [:Branch, condition, position + 1, state[:code_length]])
+    state = emit_patch(state, position, [:Branch, condition, position + 1, len(state[:code])])
   end
   let [has_else, _] = ast_attr(rows, node, :has_else)
   if has_else
@@ -1074,7 +1056,7 @@ verb emit_if(rows, node, input_state)
     state = emit_append(emit_unscope(after_body), [:Move, result, body_reg])
   end
   for position in exits
-    state = emit_patch(state, position, [:Jump, state[:code_length]])
+    state = emit_patch(state, position, [:Jump, len(state[:code])])
   end
   return [result, state]
 end
@@ -1104,7 +1086,7 @@ verb emit_loop(rows, node, input_state)
     one_reg = one
     length_reg = length
   end
-  let start = state[:code_length]
+  let start = len(state[:code])
   let condition = 0
   if is_for
     let [reg, allocated] = emit_register(state)
@@ -1116,7 +1098,7 @@ verb emit_loop(rows, node, input_state)
     state = after_condition
     condition = reg
   end
-  let branch = state[:code_length]
+  let branch = len(state[:code])
   state = emit_append(state, [:Branch, condition, branch + 1, 0])
   if is_for
     state = emit_iteration_bindings(rows, node, collection, index_reg, state)
@@ -1130,11 +1112,11 @@ verb emit_loop(rows, node, input_state)
   end
   let continue_target = start
   if is_for
-    continue_target = state[:code_length]
+    continue_target = len(state[:code])
     state = emit_append(state, [:Binary, index_reg, :Add, index_reg, one_reg])
   end
   state = emit_append(state, [:Jump, start])
-  let finish = state[:code_length]
+  let finish = len(state[:code])
   state = emit_patch(state, branch, [:Branch, condition, branch + 1, finish])
   let loops = state[:loops]
   let loop_info = loops[len(loops) - 1]
@@ -1174,7 +1156,7 @@ verb emit_comprehension_item(rows, node, result, input_state)
     let [reg, emitted] = emit_expr(rows, condition_node, state)
     state = emitted
     condition = reg
-    branch = state[:code_length]
+    branch = len(state[:code])
     state = emit_append(state, [:Branch, condition, branch + 1, 0])
   end
   // Rust evaluates the sort key before the body, after the filter succeeds.
@@ -1195,7 +1177,7 @@ verb emit_comprehension_item(rows, node, result, input_state)
   end
   state = emit_append(state, [:BuildList, result, [[:Splice, [:Register, result]], [:Register, value]]])
   if filtered
-    state = emit_patch(state, branch, [:Branch, condition, branch + 1, state[:code_length]])
+    state = emit_patch(state, branch, [:Branch, condition, branch + 1, len(state[:code])])
   end
   return state
 end
@@ -1209,16 +1191,16 @@ verb emit_sorted_values(collection, input_state)
   let [pair, after_pair] = emit_register(after_condition)
   let [value, allocated] = emit_register(after_pair)
   state = emit_append(allocated, [:CollectionLen, length, collection])
-  let start = state[:code_length]
+  let start = len(state[:code])
   state = emit_append(state, [:Binary, condition, :Lt, index, length])
-  let branch = state[:code_length]
+  let branch = len(state[:code])
   state = emit_append(state, [:Branch, condition, branch + 1, 0])
   state = emit_append(state, [:CollectionValueAt, pair, collection, index])
   state = emit_append(state, [:Index, value, pair, [:Constant, 1]])
   state = emit_append(state, [:BuildList, result, [[:Splice, [:Register, result]], [:Register, value]]])
   state = emit_append(state, [:Binary, index, :Add, index, one])
   state = emit_append(state, [:Jump, start])
-  state = emit_patch(state, branch, [:Branch, condition, branch + 1, state[:code_length]])
+  state = emit_patch(state, branch, [:Branch, condition, branch + 1, len(state[:code])])
   return [result, state]
 end
 
@@ -1234,7 +1216,7 @@ verb emit_loop_exit(kind, input_state)
   if kind == :Continue
     key = :continues
   end
-  loop_info[key] = [@loop_info[key], state[:code_length]]
+  loop_info[key] = [@loop_info[key], len(state[:code])]
   loops[last] = loop_info
   state[:loops] = loops
   state = emit_append(state, [:Jump, 0])

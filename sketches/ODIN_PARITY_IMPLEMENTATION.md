@@ -468,3 +468,7 @@ The emitter now accumulates instructions in 64-entry chunks and flattens them on
 Jump patches update one chunk. A stored instruction count supplies absolute targets without traversing chunks.
 All eleven compiler application tests pass, including bootstrap artifact equality, generated-program execution, exception exits, and suspension.
 This bounds instruction-prefix copying within the emitter. A pinned comparison must establish its throughput effect before it is accepted as a performance improvement.
+
+The instruction-chunk capture passes all 18 processes but shows no material gain: Rust emission changes from 23.400 ms to 23.301 ms.
+Native-enabled timing and peak RSS also remain similar. The added bookkeeping is reverted; the measurement remains in the evidence.
+Parser fact-row accumulation is a separate candidate because it builds a substantially larger nested list.
