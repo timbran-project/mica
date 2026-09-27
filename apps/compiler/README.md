@@ -33,6 +33,10 @@ The lexer rejects bare `&` in DOM text. Interpolation supports text that contain
 Structural literals retain scalar, list, and map payloads, including singleton lists and splices.
 List destructuring supports optional defaults and one rest binding. Range values support list slicing.
 Exact row bindings require a singleton relation with the stated heading and raise `E_CARDINALITY` otherwise.
+Match expressions support literals, bindings, wildcards, nested list and map patterns, option and result patterns, and guards.
+List patterns support one rest binding, including between fixed elements. Map patterns permit additional keys; relation patterns require an exact singleton heading.
+The subject runs once. Guard side effects and suspended locals survive selection of the matching case.
+An unmatched value raises `E_MATCH`; the emitter does not perform static exhaustiveness analysis.
 Row iteration requires an exact relation heading; maps in a collection can have additional keys.
 Loops and comprehensions support list and row patterns, one or two names, typed names, and wildcards.
 Comprehensions support lazy filters, value sorting, and keyed sorting. Sort keys run before body expressions; equal keys sort by body value.
@@ -44,7 +48,9 @@ The parser accepts function result annotations and places parameter annotations 
 Basic type annotations produce runtime checks. The emitter does not implement Rust's static type analysis.
 Unsupported syntax produces diagnostics, including declarations, self-recursive local functions, catch patterns and guards, default verb parameters, and rest verb parameters.
 The emitter reads `RelationName` once per compilation and resolves existing relations in that snapshot.
-Compilation requires permission to read that catalogue. Relations used by the source must already exist.
+Functional field syntax also reads `Arity` and `FunctionalKey` once, then uses the cached metadata throughout compilation.
+Fields require a binary relation functional on position zero. Reads require exactly one fact; assignments replace the fact within the transaction.
+Compilation requires permission to read these catalogues. Relations used by the source must already exist.
 Emitted scans support output variables, repeated variables, holes, and splices. Assertions and retractions use the runtime transaction.
 The artifact retains relation identities from the compilation world and performs ordinary read/write checks when it executes.
 Identity literals also resolve in the compilation world. Compilation does not install methods or grant authority.

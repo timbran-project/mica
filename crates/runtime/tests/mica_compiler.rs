@@ -320,6 +320,204 @@ fn compiler_emission_workload_produces_executable_artifacts() {
 }
 
 #[test]
+fn mica_emitter_matches_donor_patterns_with_independent_expected_results() {
+    for interpreter_only in [true, false] {
+        let mut runner = compiler(interpreter_only);
+        runner.run_filein(INSTALL_EMITTED).unwrap();
+        for (source, expected) in [
+            (
+                "return match 2\ncase 1\n0\ncase 2\n42\ncase _\n9\nend",
+                "42",
+            ),
+            ("return match \"é🦀\"\ncase text\ntext\nend", "\"é🦀\""),
+            (
+                "return match 9\ncase []\n0\ncase {}\n1\ncase some(x)\nx\ncase _\n42\nend",
+                "42",
+            ),
+            (
+                "let subject = [1, 2, 3, 4]\nreturn match subject\ncase [1, @middle, 4]\nmiddle\ncase _\n[]\nend",
+                "[2, 3]",
+            ),
+            (
+                "let subject = [1, 4]\nreturn match subject\ncase [1, @middle, 4]\nmiddle\ncase _\n[99]\nend",
+                "[]",
+            ),
+            (
+                "let subject = [1, 2, 3]\nreturn match subject\ncase [@prefix, last]\n[prefix, last]\ncase _\n[]\nend",
+                "[[1, 2], 3]",
+            ),
+            (
+                "let subject = []\nreturn match subject\ncase [@all]\nall\ncase _\n[99]\nend",
+                "[]",
+            ),
+            (
+                "let subject = [1, 2, 3, 4, 5]\nreturn match subject\ncase [1, @middle, 4, 5]\nmiddle\ncase _\n[]\nend",
+                "[2, 3]",
+            ),
+            (
+                "let subject = [1, 2]\nreturn match subject\ncase [1]\n0\ncase [1, 2, 3]\n1\ncase [first, @rest]\n[first, rest]\nend",
+                "[1, [2]]",
+            ),
+            (
+                "return match {:present -> none}\ncase {:absent -> x}\n0\ncase {:present -> none}\n7\ncase _\n9\nend",
+                "7",
+            ),
+            (
+                "return match {:items -> [7, 2], :extra -> true}\ncase {:items -> [x, 2]}\nx\ncase _\n0\nend",
+                "7",
+            ),
+            (
+                "let subject = [:a, :b] {[1, 2]}\nreturn match subject\ncase {a}\n0\ncase {:b -> y, a}\na + y\ncase _\n9\nend",
+                "3",
+            ),
+            (
+                "let calls = 0\nlet value = match begin\ncalls = 1\ncalls\nend\ncase 1 if begin\ncalls = calls * 10 + 2\nfalse\nend\n0\ncase x\nx\nend\nreturn [value, calls]",
+                "[1, 12]",
+            ),
+            (
+                "let subject = [7]\nlet callback = match subject\ncase [x]\nfn() => x\ncase _\nfn() => 0\nend\nreturn callback()",
+                "7",
+            ),
+            (
+                "let subject = [7]\nreturn match subject\ncase [x] if match x\ncase 7\ntrue\ncase _\nfalse\nend\nx\ncase _\n0\nend",
+                "7",
+            ),
+            (
+                "let subject = [1]\ntry\nmatch subject\ncase [2]\n0\nend\ncatch E_MATCH as problem\nreturn problem.value\nend",
+                "some([1])",
+            ),
+            (
+                "try\nreturn err(7)\ncatch E_TYPE as problem\nreturn problem.code\nend",
+                "E_TYPE",
+            ),
+            (
+                "let total = 0\nfor x in [1, 2, 3]\ntry\nmatch x\ncase 2\ncontinue\ncase n\ntotal = total + n\nend\nfinally\ntotal = total + 10\nend\nend\nreturn total",
+                "34",
+            ),
+        ] {
+            let expected = runner.run_source(&format!("return {expected}")).unwrap();
+            let module = invoke(&mut runner, "emit_source", source);
+            install_emitted(&mut runner, module);
+            let actual = runner.run_source("return :compiler_test_entry()").unwrap();
+            let TaskOutcome::Complete {
+                value: expected, ..
+            } = expected.outcome
+            else {
+                panic!("expected literal did not complete");
+            };
+            assert!(
+                matches!(&actual.outcome, TaskOutcome::Complete { value, .. } if *value == expected),
+                "{source}: {}",
+                actual.render()
+            );
+        }
+        for source in [
+            "return match none\ncase none\n42\ncase _\n0\nend",
+            "return match some(7)\ncase some(x) if x == 7\nx\ncase _\n0\nend",
+            "return match ok(7)\ncase ok(x)\nx\ncase _\n0\nend",
+            "return match err(error(E_TEST))\ncase err(problem)\nproblem.code\ncase _\nE_OTHER\nend",
+            "let some = fn(x) => x + 1\nreturn some(7)",
+            "let subject = [:a, :b] {[1, 2]}\nreturn match subject\ncase {a, b}\na + b\ncase _\n0\nend",
+            "let subject = [:a] {}\nreturn match subject\ncase {a}\na\ncase _\n0\nend",
+        ] {
+            assert_emitted_agrees(&mut runner, source);
+        }
+        for source in [
+            "let subject = []\nreturn match subject\nend",
+            "let subject = [1, 2]\nreturn match subject\ncase [x, x]\nx\nend",
+            "let subject = []\nreturn match subject\ncase [@x, @y]\nx\nend",
+            "return match 1\ncase unknown(x)\nx\nend",
+            "let subject = [:a] {[1]}\nreturn match subject\ncase {a, a}\na\nend",
+            "match 1\ncase x\nx\nend\nreturn x",
+            "return some()",
+            "return ok(1, 2)",
+            "return some(@[1])",
+            "return some(value: 1)",
+        ] {
+            let module = invoke(&mut runner, "emit_source", source);
+            assert_eq!(
+                module.map_get(&Value::symbol(Symbol::intern("ok"))),
+                Some(Value::bool(false)),
+                "{source}: {module}"
+            );
+        }
+        let source = "let subject = [7]\nreturn match subject\ncase [x] if begin\nsuspend(0)\ntrue\nend\nx + 1\ncase _\n0\nend";
+        let module = invoke(&mut runner, "emit_source", source);
+        install_emitted(&mut runner, module);
+        let report = runner.run_source("return :compiler_test_entry()").unwrap();
+        assert!(matches!(report.outcome, TaskOutcome::Suspended { .. }));
+        let outcome = runner
+            .resume_task(TaskRequest {
+                input: TaskInput::Continuation {
+                    task_id: report.task_id,
+                    value: Value::unit(),
+                },
+                ..SourceRunner::root_source_request("")
+            })
+            .unwrap();
+        assert!(
+            matches!(outcome, TaskOutcome::Complete { value, .. } if value == Value::int(8).unwrap())
+        );
+    }
+}
+
+#[test]
+fn mica_emitter_functional_fields_preserve_visibility_cardinality_and_authority() {
+    for interpreter_only in [true, false] {
+        let mut runner = compiler(interpreter_only);
+        runner.run_filein(INSTALL_EMITTED).unwrap();
+        runner.run_filein(
+            "make_functional_relation(:CompilerLabel, 2, [0])\nmake_functional_relation(:compiler/Label, 2, [0])\nmake_relation(:CompilerPlain, 2)\nmake_functional_relation(:CompilerWide, 3, [0])\nmake_functional_relation(:CompilerWrongKey, 2, [1])"
+        ).unwrap();
+        for source in [
+            "(1).compilerLabel = \"é🦀\"\nlet first = (1).compilerLabel\n(1).compilerLabel = \"second\"\nreturn [first, (1).compilerLabel, CompilerLabel(1, ?value)]",
+            "(1).compiler/label = [7, 8]\nreturn (1).compiler/label",
+            "try\n return (99).compilerLabel\ncatch E_CARDINALITY as problem\n return [problem.code, problem.message, problem.value]\nend",
+            "let order = 0\nlet assigned = (order = order * 10 + 2).compilerLabel = (order = order * 10 + 1)\nreturn [assigned, order, (12).compilerLabel]",
+            "let value = fn() => (1).compilerLabel\nreturn value()",
+        ] {
+            assert_emitted_agrees(&mut runner, source);
+        }
+        for source in [
+            "return (1).compilerPlain",
+            "(1).compilerPlain = 2",
+            "return (1).compilerWide",
+            "return (1).compilerWrongKey",
+            "return (1).undeclaredField",
+        ] {
+            let module = invoke(&mut runner, "emit_source", source);
+            assert_eq!(
+                module.map_get(&Value::symbol(Symbol::intern("ok"))),
+                Some(Value::bool(false)),
+                "{source}: {module}"
+            );
+        }
+        for (source, operation) in [
+            ("return (1).compilerLabel", "read"),
+            ("(1).compilerLabel = 9", "write"),
+        ] {
+            let module = invoke(&mut runner, "emit_source", source);
+            install_emitted(&mut runner, module);
+            let entry = runner
+                .named_identity(Symbol::intern("compiler-test/method/:compiler_test_entry"))
+                .unwrap();
+            let mut request = SourceRunner::root_source_request("");
+            request.authority = AuthorityContext::empty();
+            request
+                .authority
+                .mint(CapabilityGrant::method(Value::identity(entry)));
+            request.input = TaskInput::Invocation {
+                selector: Symbol::intern("compiler_test_entry"),
+                roles: vec![],
+            };
+            assert!(
+                matches!(runner.submit_invocation(request), Err(SourceTaskError::TaskManager(TaskManagerError::Task(TaskError::Runtime(RuntimeError::PermissionDenied { operation: denied, .. })))) if denied == operation)
+            );
+        }
+    }
+}
+
+#[test]
 fn mica_emitter_dom_and_structural_literals_agree_with_rust_execution() {
     for interpreter_only in [true, false] {
         let mut runner = compiler(interpreter_only);
@@ -727,7 +925,15 @@ fn mica_compiler_bootstrap_preserves_artifacts_and_execution() {
         let finish = adjust(2)
         let exactly {adjustment} = [:adjustment] {[2]}
         let values = [a for {a} in [{:a -> 3}, {:a -> 1}] sort -a]
-        return finish(factorial(5) + total + len("é🦀") + adjustment + values[0])
+        (1).compilerBootstrap = values[0]
+        let subject = [some((1).compilerBootstrap), 2]
+        let matched = match subject
+          case [some(value), @tail] if len(tail) == 1
+            value
+          case _
+            0
+        end
+        return finish(factorial(5) + total + len("é🦀") + adjustment + matched)
     "#;
     for interpreter_only in [true, false] {
         let mut runner = compiler(interpreter_only).with_task_limits(TaskLimits {
@@ -736,6 +942,9 @@ fn mica_compiler_bootstrap_preserves_artifacts_and_execution() {
             ..TaskLimits::default()
         });
         runner.run_filein(INSTALL_EMITTED).unwrap();
+        runner
+            .run_filein("make_functional_relation(:CompilerBootstrap, 2, [0])")
+            .unwrap();
         let expected = invoke(&mut runner, "emit_source", TARGET);
         let source = SOURCES
             .iter()

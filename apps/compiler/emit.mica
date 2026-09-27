@@ -97,21 +97,41 @@ verb emit_source(source) -> map
   return {:ok -> true, :entry -> assemble(module[:entry]), :methods -> methods, :errors -> []}
 end
 
-verb emit_state(relations, node_kinds)
-  return {:code -> [], :next -> 0, :scopes -> [{}], :loops -> [], :errors -> [], :result_annotation -> "", :binding_types -> {}, :relations -> relations, :node_kinds -> node_kinds, :self_name -> ""}
+verb emit_state(relations, node_kinds, field_relations)
+  return {:code -> [], :next -> 0, :scopes -> [{}], :loops -> [], :errors -> [], :result_annotation -> "", :binding_types -> {}, :relations -> relations, :node_kinds -> node_kinds, :field_relations -> field_relations, :self_name -> ""}
 end
 
 verb emit_program(raw_rows, root) -> map
   let rows = sort_ast_rows(raw_rows)
   let node_kinds = {}
+  let needs_fields = false
   for row in rows
     if row[1] == :kind
       node_kinds[row[0]] = row[2]
+      needs_fields = needs_fields || row[2] == :Field
     end
   end
   let relations = {}
   for entry in RelationName(?relation, ?name)
     relations[entry[:name]] = entry[:relation]
+  end
+  let field_relations = {}
+  if needs_fields
+    let binary = {}
+    for entry in Arity(?relation, 2)
+      binary[entry[:relation]] = true
+    end
+    let keys = {}
+    for entry in FunctionalKey(?relation, ?slot, ?position)
+      let target = entry[:relation]
+      let info = index_or(keys, target, [0, true])
+      keys[target] = [info[0] + 1, info[1] && entry[:slot] == 0 && entry[:position] == 0]
+    end
+    for target, info in keys
+      if info == [1, true] && index_or(binary, target, false)
+        field_relations[target] = true
+      end
+    end
   end
   let entry_nodes = []
   let methods = []
@@ -123,7 +143,7 @@ verb emit_program(raw_rows, root) -> map
       entry_nodes = [@entry_nodes, expr]
     elseif kind == :VerbItem
       let [_, selector] = ast_attr(rows, item, :name)
-      let state = emit_state(relations, node_kinds)
+      let state = emit_state(relations, node_kinds, field_relations)
       let [has_result, result_annotation] = ast_attr(rows, item, :result)
       if has_result
         state[:result_annotation] = result_annotation
@@ -155,7 +175,7 @@ verb emit_program(raw_rows, root) -> map
       errors = [@errors, string_concat("unsupported program item: ", to_literal(kind))]
     end
   end
-  let [result, entry] = emit_block(rows, entry_nodes, emit_state(relations, node_kinds))
+  let [result, entry] = emit_block(rows, entry_nodes, emit_state(relations, node_kinds, field_relations))
   entry = emit_append(entry, [:Return, [:Register, result]])
   return {:entry -> emit_description(entry), :methods -> methods, :errors -> [@errors, @entry[:errors]]}
 end
@@ -358,7 +378,7 @@ verb emit_expr(rows, node, input_state)
     let fields = {"code" -> :Code, "message" -> :Message, "value" -> :Value}
     let field_name = index_or(fields, name_text, none)
     if field_name == none
-      return emit_error(state, "functional relation fields require catalogue metadata")
+      return emit_field_read(rows, node, name_text, state)
     end
     let [_, receiver] = ast_attr(rows, node, :receiver)
     let [error_reg, emitted] = emit_expr(rows, receiver, state)
@@ -456,6 +476,9 @@ verb emit_expr(rows, node, input_state)
   if kind == :If
     return emit_if(rows, node, state)
   end
+  if kind == :Match
+    return emit_match(rows, node, state)
+  end
   if kind == :Try
     return emit_try(rows, node, state)
   end
@@ -487,6 +510,228 @@ verb emit_expr(rows, node, input_state)
     return [reg, emit_unscope(emitted)]
   end
   return emit_error(state, string_concat("unsupported expression: ", to_literal(kind)))
+end
+
+verb emit_match_test(condition, failures, input_state)
+  let branch = len(input_state[:code])
+  return [[@failures, branch], emit_append(input_state, [:Branch, condition, branch + 1, 0])]
+end
+
+verb emit_match(rows, node, input_state)
+  let [_, value_node] = ast_attr(rows, node, :value)
+  let [subject, emitted] = emit_expr(rows, value_node, input_state)
+  let [result, state] = emit_constant(emitted, [] {[]})
+  let endings = []
+  let cases = ast_children(rows, node, :case)
+  if len(cases) == 0
+    return emit_error(state, "match requires at least one case")
+  end
+  for case_node in cases
+    state = emit_scope(state)
+    let [_, pattern] = ast_attr(rows, case_node, :pattern)
+    let [failures, after_pattern] = emit_match_pattern(rows, pattern, subject, [], state)
+    state = after_pattern
+    let [guarded, guard_node] = ast_attr(rows, case_node, :guard)
+    if guarded
+      let [guard, after_guard] = emit_expr(rows, guard_node, state)
+      let [branches, after_test] = emit_match_test(guard, failures, after_guard)
+      failures = branches
+      state = after_test
+    end
+    let [body, after_body] = emit_block(rows, ast_children(rows, case_node, :body), state)
+    state = emit_append(emit_unscope(after_body), [:Move, result, body])
+    endings = [@endings, len(state[:code])]
+    state = emit_append(state, [:Jump, 0])
+    for branch in failures
+      let instruction = state[:code][branch]
+      state = emit_patch(state, branch, [:Branch, instruction[1], instruction[2], len(state[:code])])
+    end
+  end
+  state = emit_append(state, [:Raise, [:Constant, E_MATCH], [:Constant, "non-exhaustive relation match"], [:Register, subject]])
+  for jump in endings
+    state = emit_patch(state, jump, [:Jump, len(state[:code])])
+  end
+  return [result, state]
+end
+
+verb emit_match_pattern(rows, node, subject, input_failures, input_state)
+  let state = input_state
+  let failures = input_failures
+  let kind = ast_kind(rows, node)
+  if kind == :Wildcard_Pattern
+    return [failures, state]
+  end
+  if kind == :Binding_Pattern
+    let [_, name_text] = ast_attr(rows, node, :name)
+    if name_text == "none"
+      let [matched, allocated] = emit_register(state)
+      state = emit_append(allocated, [:RelationPattern, matched, subject, [:value], 0, []])
+      return emit_match_test(matched, failures, state)
+    end
+    let [_, declared] = emit_pattern(rows, node, subject, false, "", state)
+    return [failures, declared]
+  end
+  if kind == :Literal_Pattern
+    let [_, value_node] = ast_attr(rows, node, :value)
+    let [value, emitted] = emit_expr(rows, value_node, state)
+    let [matched, allocated] = emit_register(emitted)
+    state = emit_append(allocated, [:Binary, matched, :Eq, subject, value])
+    return emit_match_test(matched, failures, state)
+  end
+  if kind == :Call_Pattern
+    let [_, name_text] = ast_attr(rows, node, :name)
+    let args = ast_children(rows, node, :arg)
+    if (name_text != "some" && name_text != "ok" && name_text != "err") || len(args) > 1
+      return [failures, emit_diagnostic(state, "match constructors are some, ok, or err with at most one pattern")]
+    end
+    let heading = [:value]
+    let equalities = []
+    if name_text != "some"
+      heading = [:case, :value]
+      let case_name = :ok
+      if name_text == "err"
+        case_name = :error
+      end
+      equalities = [[:case, case_name]]
+    end
+    let [matched, allocated] = emit_register(state)
+    state = emit_append(allocated, [:RelationPattern, matched, subject, sort(heading), 1, equalities])
+    let [branches, tested] = emit_match_test(matched, failures, state)
+    if len(args) == 0
+      return [branches, tested]
+    end
+    let [value, after_value] = emit_register(tested)
+    state = emit_append(after_value, [:RelationCell, value, subject, :value])
+    return emit_match_pattern(rows, args[0], value, branches, state)
+  end
+  if kind == :List_Pattern
+    return emit_match_list(rows, node, subject, failures, state)
+  end
+  if kind == :Map_Pattern
+    return emit_match_map(rows, node, subject, failures, state)
+  end
+  return [failures, emit_diagnostic(state, "unsupported match pattern")]
+end
+
+verb emit_match_list(rows, node, subject, input_failures, input_state)
+  let [matched, allocated] = emit_register(input_state)
+  let state = emit_append(allocated, [:BuiltinCall, matched, :is_kind, [[:Register, subject], [:Constant, :list]]])
+  let [failures, tested] = emit_match_test(matched, input_failures, state)
+  let [length, after_length] = emit_register(tested)
+  state = emit_append(after_length, [:CollectionLen, length, subject])
+  let elements = ast_children(rows, node, :element)
+  let rest = -1
+  let index = 0
+  for element in elements
+    if ast_kind(rows, element) == :Rest_Pattern
+      if rest != -1
+        return [failures, emit_diagnostic(state, "a list pattern supports only one rest binding")]
+      end
+      rest = index
+    end
+    index = index + 1
+  end
+  let fixed = len(elements)
+  let operation = :Eq
+  if rest != -1
+    fixed = fixed - 1
+    operation = :Ge
+  end
+  let [count, after_count] = emit_constant(state, fixed)
+  state = emit_append(after_count, [:Binary, matched, operation, length, count])
+  let [branches, after_test] = emit_match_test(matched, failures, state)
+  failures = branches
+  state = after_test
+  index = 0
+  for element in elements
+    let position = [:Constant, index]
+    if rest != -1 && index >= rest
+      let trailing = len(elements) - index
+      if index == rest
+        trailing = trailing - 1
+      end
+      let [offset, loaded] = emit_constant(state, trailing)
+      let [end_reg, after_end] = emit_register(loaded)
+      state = emit_append(after_end, [:Binary, end_reg, :Sub, length, offset])
+      position = [:Register, end_reg]
+      if index == rest
+        let [value, sliced] = emit_match_rest(subject, rest, end_reg, state)
+        let [_, declared] = emit_pattern(rows, element, value, false, "", sliced)
+        state = declared
+        index = index + 1
+        continue
+      end
+    end
+    let [value, after_value] = emit_register(state)
+    state = emit_append(after_value, [:Index, value, subject, position])
+    let [branches, emitted] = emit_match_pattern(rows, element, value, failures, state)
+    failures = branches
+    state = emitted
+    index = index + 1
+  end
+  return [failures, state]
+end
+
+verb emit_match_rest(subject, start, finish, input_state)
+  let [value, state] = emit_constant(input_state, [])
+  let [start_reg, after_start] = emit_constant(state, start)
+  let [nonempty, allocated] = emit_register(after_start)
+  state = emit_append(allocated, [:Binary, nonempty, :Lt, start_reg, finish])
+  let branch = len(state[:code])
+  state = emit_append(state, [:Branch, nonempty, branch + 1, 0])
+  let [one, after_one] = emit_constant(state, 1)
+  let [end_reg, after_end] = emit_register(after_one)
+  state = emit_append(after_end, [:Binary, end_reg, :Sub, finish, one])
+  let [range_reg, after_range] = emit_register(state)
+  state = emit_append(after_range, [:BuildRange, range_reg, [:Register, start_reg], [:Register, end_reg]])
+  state = emit_append(state, [:Index, value, subject, [:Register, range_reg]])
+  return [value, emit_patch(state, branch, [:Branch, nonempty, branch + 1, len(state[:code])])]
+end
+
+verb emit_match_map(rows, node, subject, input_failures, input_state)
+  let state = input_state
+  let columns = []
+  let fields = []
+  let seen = {}
+  for entry in ast_children(rows, node, :entry)
+    let [_, key] = ast_attr(rows, entry, :key)
+    let [_, spelling] = ast_attr(rows, key, :name)
+    let parsed = from_literal(string_concat(":", spelling))
+    if parsed[0][:case] != :ok
+      return [input_failures, emit_diagnostic(state, "invalid pattern column")]
+    end
+    let column = parsed[0][:value]
+    if index_or(seen, column, false)
+      return [input_failures, emit_diagnostic(state, "relation patterns cannot repeat a column")]
+    end
+    seen[column] = true
+    columns = [@columns, column]
+    let [_, pattern] = ast_attr(rows, entry, :pattern)
+    fields = [@fields, [column, pattern]]
+  end
+  let [map_reg, after_map] = emit_register(state)
+  let [matched, allocated] = emit_register(after_map)
+  state = emit_append(allocated, [:BuiltinCall, matched, :is_kind, [[:Register, subject], [:Constant, :map]]])
+  let branch = len(state[:code])
+  state = emit_append(state, [:Branch, matched, branch + 1, 0])
+  state = emit_append(state, [:Move, map_reg, subject])
+  let jump = len(state[:code])
+  state = emit_append(state, [:Jump, 0])
+  state = emit_patch(state, branch, [:Branch, matched, branch + 1, len(state[:code])])
+  state = emit_append(state, [:RelationPattern, matched, subject, sort(columns), 1, []])
+  let [failures, tested] = emit_match_test(matched, input_failures, state)
+  state = emit_append(tested, [:Index, map_reg, subject, [:Constant, 0]])
+  state = emit_patch(state, jump, [:Jump, len(state[:code])])
+  for field in fields
+    state = emit_append(state, [:BuiltinCall, matched, :map_contains_key, [[:Register, map_reg], [:Constant, field[0]]]])
+    let [branches, after_test] = emit_match_test(matched, failures, state)
+    let [value, after_value] = emit_register(after_test)
+    state = emit_append(after_value, [:Index, value, map_reg, [:Constant, field[0]]])
+    let [nested_branches, emitted] = emit_match_pattern(rows, field[1], value, branches, state)
+    failures = nested_branches
+    state = emitted
+  end
+  return [failures, state]
 end
 
 verb emit_try(rows, node, input_state)
@@ -725,10 +970,61 @@ verb emit_iteration_bindings(rows, node, collection, index_reg, input_state)
   return emit_diagnostic(state, "iteration expects one or two bindings")
 end
 
+verb emit_field_relation(name_text, state)
+  let leaf = 0
+  let index = 0
+  while index < len(name_text)
+    if name_text[index] == 47
+      leaf = index + 1
+    end
+    index = index + 1
+  end
+  let first = name_text[leaf]
+  let relation_name = name_text
+  if first >= 97 && first <= 122
+    relation_name = string_concat(string_slice(name_text, 0, leaf), string_slice("ABCDEFGHIJKLMNOPQRSTUVWXYZ", first - 97, first - 96), string_slice(name_text, leaf + 1, len(name_text)))
+  end
+  let target = index_or(state[:relations], to_symbol(relation_name), none)
+  if !index_or(state[:field_relations], target, false)
+    return none
+  end
+  return target
+end
+
+verb emit_field_read(rows, node, name_text, input_state)
+  let target = emit_field_relation(name_text, input_state)
+  if target == none
+    return emit_error(input_state, "dot read requires a binary relation functional on position 0")
+  end
+  let [_, receiver] = ast_attr(rows, node, :receiver)
+  let [key, state] = emit_expr(rows, receiver, input_state)
+  let [query, allocated] = emit_register(state)
+  let column = to_symbol(name_text)
+  state = emit_append(allocated, [:ScanDynamic, query, target, [[:Register, key], [:Query, column]]])
+  let [matched, after_match] = emit_register(state)
+  state = emit_append(after_match, [:RelationPattern, matched, query, [column], 1, []])
+  let branch = len(state[:code])
+  state = emit_append(state, [:Branch, matched, branch + 2, branch + 1])
+  state = emit_append(state, [:Raise, [:Constant, E_CARDINALITY], [:Constant, "functional dot read requires exactly one fact"], [:Register, query]])
+  let [dst, after_dst] = emit_register(state)
+  return [dst, emit_append(after_dst, [:RelationCell, dst, query, column])]
+end
+
 verb emit_assignment(rows, node, input_state)
   let [_, target] = ast_attr(rows, node, :target)
   let [_, rhs] = ast_attr(rows, node, :value)
   let target_kind = ast_kind(rows, target)
+  if target_kind == :Field
+    let [_, name_text] = ast_attr(rows, target, :name)
+    let relation = emit_field_relation(name_text, input_state)
+    if relation == none
+      return emit_error(input_state, "dot assignment requires a binary relation functional on position 0")
+    end
+    let [value, after_value] = emit_expr(rows, rhs, input_state)
+    let [_, receiver] = ast_attr(rows, target, :receiver)
+    let [key, emitted] = emit_expr(rows, receiver, after_value)
+    return [value, emit_append(emitted, [:ReplaceFunctional, relation, [[:Register, key], [:Register, value]]])]
+  end
   let root = target
   if target_kind == :Index
     let [_, collection_node] = ast_attr(rows, target, :collection)
@@ -842,7 +1138,7 @@ verb emit_call(rows, node, input_state)
       return emit_relation_call(rows, node, target, :ScanDynamic, state)
     end
     builtin = is_builtin(to_symbol(name_text))
-    if !builtin && name_text != "commit" && name_text != "suspend" && name_text != "invoke" && name_text != "mailbox_recv"
+    if !builtin && name_text != "commit" && name_text != "suspend" && name_text != "invoke" && name_text != "mailbox_recv" && name_text != "some" && name_text != "ok" && name_text != "err"
       return emit_dispatch_arguments(rows, node, none, [:Constant, to_symbol(name_text)], false, 0, state)
     end
   end
@@ -864,6 +1160,20 @@ verb emit_call(rows, node, input_state)
   end
   if name_text == "invoke" || name_text == "mailbox_recv"
     return emit_special_call(name_text, dst, args, state)
+  end
+  if name_text == "some" || name_text == "ok" || name_text == "err"
+    if len(args) != 1 || args[0][0] == :Splice
+      return emit_error(state, "option and result constructors require one positional argument")
+    end
+    if name_text == "some"
+      return [dst, emit_append(state, [:BuildRelation, dst, [:value], args, 1])]
+    end
+    let case_name = :ok
+    if name_text == "err"
+      case_name = :error
+      state = emit_append(state, [:CheckKind, args[0][1], :error, :Builtin, :err])
+    end
+    return [dst, emit_append(state, [:BuildRelation, dst, [:case, :value], [[:Constant, case_name], args[0]], 1])]
   end
   if callee_kind == :Name && name_text == "commit"
     if len(args) != 0
@@ -1188,7 +1498,7 @@ end
 
 verb emit_function(rows, node, input_state)
   let state = input_state
-  let nested = emit_state(state[:relations], state[:node_kinds])
+  let nested = emit_state(state[:relations], state[:node_kinds], state[:field_relations])
   let [has_name, name_text] = ast_attr(rows, node, :name)
   if has_name
     nested[:self_name] = name_text
