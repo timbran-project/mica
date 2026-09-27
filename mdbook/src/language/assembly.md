@@ -21,6 +21,10 @@ An artifact contains the current Rust program format. It is not portable across 
 It includes host-added builtins. Compiler forms such as `commit` are not builtins.
 The query confers no authority to call the named operation.
 
+`is_kind(value, kind)` compares a value with a kind symbol such as `:list`, `:map`, or `:relation`.
+It returns `false` on a kind mismatch. An unknown kind or invalid arguments raise `E_INVARG`.
+The kind symbols are the same as those accepted by `CheckKind`.
+
 ## Operands and bounds
 
 A register operand is `[:Register, index]`. A constant operand is `[:Constant, value]`.
@@ -71,6 +75,8 @@ An `items` list contains operands or `[:Splice, operand]` entries.
 | `[:ScanDynamic, dst, relation, arguments]` | Scan a relation identity with dynamic arguments. |
 | `[:AssertDynamic, relation, arguments]` | Assert a tuple with dynamic arguments. |
 | `[:RetractDynamic, relation, arguments]` | Retract tuples with dynamic arguments. |
+| `[:ScanValue, dst, relation, key_operand]` | Read one functional value; raise `E_CARDINALITY` unless exactly one tuple matches. |
+| `[:ReplaceFunctional, relation, operands]` | Replace a functional tuple through the current transaction. |
 | `[:EnterTry, catches, finally_target, end_target]` | Enter an exception region. |
 | `[:ExitTry]` | Leave an exception region through its normal path. |
 | `[:EndFinally]` | Finish the current finally handler. |

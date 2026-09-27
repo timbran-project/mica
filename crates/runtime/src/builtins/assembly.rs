@@ -17,6 +17,11 @@ use std::sync::Arc;
 pub(super) fn install(registry: BuiltinRegistry) -> BuiltinRegistry {
     registry
         .with_builtin(
+            "is_kind",
+            BuiltinResultKind::Exact(ValueKind::Bool),
+            is_kind,
+        )
+        .with_builtin(
             "is_builtin",
             BuiltinResultKind::Exact(ValueKind::Bool),
             is_builtin,
@@ -26,6 +31,19 @@ pub(super) fn install(registry: BuiltinRegistry) -> BuiltinRegistry {
             BuiltinResultKind::Exact(ValueKind::Bytes),
             assemble,
         )
+}
+
+fn is_kind(_: &mut BuiltinContext<'_, '_>, args: &[Value]) -> Result<Value, RuntimeError> {
+    let [value, kind] = args else {
+        return Err(raised_builtin_error(
+            "E_INVARG",
+            "is_kind expects a value and kind symbol",
+            None,
+        ));
+    };
+    let kind = value_kind(kind)
+        .map_err(|error| raised_builtin_error("E_INVARG", error.to_string(), None))?;
+    Ok(Value::bool(value.kind() == kind))
 }
 
 fn is_builtin(context: &mut BuiltinContext<'_, '_>, args: &[Value]) -> Result<Value, RuntimeError> {
@@ -485,6 +503,15 @@ fn instruction(
             relation: relation(target)?,
             args: relation_args(args)?,
         },
+        (Some("ScanValue"), [dst, target, key]) => Instruction::ScanValue {
+            dst: register(dst)?,
+            relation: relation(target)?,
+            key: operand(key)?,
+        },
+        (Some("ReplaceFunctional"), [target, values]) => Instruction::ReplaceFunctional {
+            relation: relation(target)?,
+            values: operands(values)?,
+        },
         (Some("EnterTry"), [catches, finally, end]) => Instruction::EnterTry {
             catches: list(catches)?
                 .iter()
@@ -601,7 +628,7 @@ mod tests {
         AuthorityContext, BuiltinContext, BuiltinRegistry, BuiltinResultKind, RuntimeError,
         SourceRunner, SuspendKind, Task, TaskError, TaskLimits, TaskOutcome,
     };
-    use mica_relation_kernel::{RelationKernel, RelationMetadata};
+    use mica_relation_kernel::{ConflictPolicy, RelationKernel, RelationMetadata};
     use mica_var::{Symbol, Value, ValueKind};
     use mica_vm::{Instruction, Operand, Program, ProgramResolver, Register, SpawnTarget};
     use std::sync::Arc;
@@ -676,6 +703,92 @@ mod tests {
             assert!(
                 matches!(task.run().unwrap(), TaskOutcome::Complete { value, .. } if value == Value::bool(expected)),
                 "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn kind_predicate_distinguishes_values_without_throwing_on_mismatch() {
+        let mut runner = SourceRunner::new_empty();
+        let report = runner
+            .run_source(
+                r#"
+            require is_kind([1], :list) && !is_kind([1], :map)
+            require is_kind({}, :map) && !is_kind({}, :list)
+            require is_kind(none, :relation) && !is_kind(none, :bool)
+            require is_kind(1, :int) && !is_kind(1, :float)
+            require is_kind(fn() => 1, :function)
+            require map_contains_key({:present -> none}, :present)
+            require !map_contains_key({:present -> none}, :absent)
+            require map_contains_key({7 -> "é🦀"}, 7)
+            try
+              is_kind(1, :unknown)
+            catch E_INVARG
+              return true
+            end
+            return false
+        "#,
+            )
+            .unwrap();
+        assert!(
+            matches!(report.outcome, TaskOutcome::Complete { value, .. } if value == Value::bool(true))
+        );
+    }
+
+    #[test]
+    fn assembled_functional_replacement_is_visible_to_reads_and_checks_authority() {
+        let program = assembled(
+            r#"
+          let field = make_relation(:AssemblyField, 2)
+          return assemble({:registers -> 1, :code -> [
+            [:ReplaceFunctional, field, [[:Constant, 7], [:Constant, "first"]]],
+            [:ReplaceFunctional, field, [[:Constant, 7], [:Constant, "é🦀"]]],
+            [:ScanValue, 0, field, [:Constant, 7]],
+            [:Return, [:Register, 0]]
+          ]})
+        "#,
+        );
+        let Instruction::ReplaceFunctional { relation, .. } = program.instructions()[0] else {
+            panic!("expected replacement");
+        };
+        let kernel = RelationKernel::new();
+        kernel
+            .create_relation(
+                RelationMetadata::new(relation, Symbol::intern("AssemblyField"), 2)
+                    .with_conflict_policy(ConflictPolicy::Functional {
+                        key_positions: vec![0],
+                    }),
+            )
+            .unwrap();
+        let mut task = Task::new(
+            1,
+            &kernel,
+            Arc::new(program.clone()),
+            Arc::new(ProgramResolver::new()),
+            TaskLimits::default(),
+        );
+        assert!(
+            matches!(task.run().unwrap(), TaskOutcome::Complete { value, .. } if value == Value::string("é🦀"))
+        );
+
+        for (program, operation) in [
+            (program.clone(), "write"),
+            (
+                Program::new(1, program.instructions()[2..].iter().cloned()).unwrap(),
+                "read",
+            ),
+        ] {
+            let mut task = Task::new_with_authority(
+                2,
+                &kernel,
+                Arc::new(program),
+                Arc::new(ProgramResolver::new()),
+                Arc::new(BuiltinRegistry::new()),
+                AuthorityContext::empty(),
+                TaskLimits::default(),
+            );
+            assert!(
+                matches!(task.run(), Err(TaskError::Runtime(RuntimeError::PermissionDenied { operation: denied, .. })) if denied == operation)
             );
         }
     }
@@ -870,6 +983,8 @@ mod tests {
             "{:registers -> 1, :code -> [[:Return, [:Register, -1]]]}",
             "{:registers -> 1, :code -> [[:Load, 0]]}",
             "{:registers -> 1, :code -> [[:Missing, 0]]}",
+            "{:registers -> 1, :code -> [[:ScanValue, 0, :missing, [:Constant, 0]]]}",
+            "{:registers -> 1, :code -> [[:ReplaceFunctional, 1, []]]}",
             "{:registers -> 1, :code -> [[:Dispatch, 0, [:Constant, :work], [[:value]]]]}",
             "{:registers -> 1, :code -> [[:Dispatch, 0, [:Constant, :work], [[1, [:Constant, 7]]]] ]}",
             "{:registers -> 1, :code -> [[:SpawnDispatchDynamic, 0, [:Constant, :work], [:Register, 1], none]]}",

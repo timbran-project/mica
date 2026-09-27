@@ -10,6 +10,11 @@ pub(crate) fn install(registry: BuiltinRegistry) -> BuiltinRegistry {
     registry
         .with_builtin("len", BuiltinResultKind::Exact(ValueKind::Int), len_builtin)
         .with_builtin(
+            "map_contains_key",
+            BuiltinResultKind::Exact(ValueKind::Bool),
+            map_contains_key_builtin,
+        )
+        .with_builtin(
             "string_append",
             BuiltinResultKind::Exact(ValueKind::String),
             string_append_builtin,
@@ -109,6 +114,26 @@ pub(crate) fn install(registry: BuiltinRegistry) -> BuiltinRegistry {
             option_builtin_result(TypeContract::Kind(ValueKind::String)),
             os_getenv_builtin,
         )
+}
+
+fn map_contains_key_builtin(
+    _context: &mut BuiltinContext<'_, '_>,
+    args: &[Value],
+) -> Result<Value, RuntimeError> {
+    let [map, key] = args else {
+        return Err(invalid_builtin_call(
+            "map_contains_key",
+            "expected map_contains_key(map, key)",
+        ));
+    };
+    let present = map
+        .with_map(|entries| {
+            entries
+                .binary_search_by(|(candidate, _)| candidate.cmp(key))
+                .is_ok()
+        })
+        .ok_or_else(|| invalid_builtin_call("map_contains_key", "expected a map argument"))?;
+    Ok(Value::bool(present))
 }
 
 fn len_builtin(

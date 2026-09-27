@@ -276,5 +276,8 @@ catalogue.
 ## Program assembly
 
 `assemble(description)` returns a validated Rust program artifact as bytes.
+`map_contains_key(map, key)` returns whether a map contains the key, including keys whose values are `none`.
+`is_kind(value, kind)` checks an exact value kind such as `:list`, `:map`, or `:relation` without raising on a mismatch.
+
 `is_builtin(name)` checks a symbol against the executing task's builtin registry.
 See [Program Assembly](assembly.md) for the description format, instruction forms, limits, and execution authority.
