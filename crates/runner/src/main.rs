@@ -48,6 +48,7 @@ struct Cli {
     durability: DurabilityMode,
     #[arg(long, global = true, value_enum, default_value_t = EmbeddingProviderMode::Deterministic)]
     embedding_provider: EmbeddingProviderMode,
+    /// Use this actor's policy instead of local administrative authority.
     #[arg(long, global = true, value_name = "IDENTITY")]
     actor: Option<String>,
     #[command(subcommand)]
@@ -289,7 +290,7 @@ fn parse_source_index_roots(root_specs: &[String]) -> Result<Vec<SourceIndexRoot
 struct CliSession {
     owner: DriverOwner,
     event_pump: DriverEventPump,
-    endpoint: EndpointSession,
+    endpoint: Option<EndpointSession>,
 }
 
 async fn submit_cli_source(
@@ -298,11 +299,11 @@ async fn submit_cli_source(
     source_name: Option<&str>,
 ) -> Result<InvocationHandle, String> {
     let diagnostic_source = source.clone();
-    session
-        .endpoint
-        .evaluate(source)
-        .await
-        .map_err(|error| format_driver_error_with_source(error, source_name, &diagnostic_source))
+    let result = match &session.endpoint {
+        Some(endpoint) => endpoint.evaluate(source).await,
+        None => session.owner.administrator().evaluate(source).await,
+    };
+    result.map_err(|error| format_driver_error_with_source(error, source_name, &diagnostic_source))
 }
 
 fn actor_symbol(actor: &str) -> Symbol {
@@ -365,13 +366,13 @@ fn open_cli_session_with_fileins(
         .build()
         .map_err(format_driver_error)?;
     let event_pump = owner.take_event_pump().map_err(format_driver_error)?;
-    let mut configuration = EndpointConfiguration::new(protocol);
-    if let Some(actor) = actor {
-        configuration = configuration.actor(actor);
-    }
-    let endpoint = owner
-        .client()
-        .open_endpoint(configuration)
+    let endpoint = actor
+        .map(|actor| {
+            owner
+                .client()
+                .open_endpoint(EndpointConfiguration::new(protocol).actor(actor))
+        })
+        .transpose()
         .map_err(format_driver_error)?;
     Ok(CliSession {
         owner,
@@ -382,10 +383,12 @@ fn open_cli_session_with_fileins(
 
 impl CliSession {
     async fn close(&mut self) -> Result<(), String> {
-        self.endpoint
-            .close_with_pump(&mut self.event_pump, print_driver_event)
-            .await
-            .map_err(format_driver_error)?;
+        if let Some(endpoint) = &self.endpoint {
+            endpoint
+                .close_with_pump(&mut self.event_pump, print_driver_event)
+                .await
+                .map_err(format_driver_error)?;
+        }
         self.owner
             .shutdown(&mut self.event_pump, print_driver_event)
             .await

@@ -46,6 +46,10 @@ files, command-line arguments, or the REPL through that driver, and renders repo
 Filein/fileout still use the runtime directly because they are import/export operations rather than
 ordinary task submissions.
 
+Local `run`, `eval`, and REPL sessions use administrative authority by default.
+With `--actor IDENTITY`, the session uses that actor's policy through an endpoint.
+Loading a file with `eval --filein` does not grant the actor permission to invoke its verbs.
+
 ## Licence
 
 Mica is licensed under the GNU Affero General Public License v3.0. See the repository root
