@@ -9,6 +9,7 @@ import "core:time"
 import k "../../mica/kernel"
 import r "../../mica/runtime"
 import v "../../mica/var"
+import vm "../../mica/vm"
 
 Report :: struct {
     format: int,
@@ -23,6 +24,8 @@ Report :: struct {
     storage: string,
     durability: string,
     authority: string,
+    instruction_budget: i64,
+    max_call_depth: int,
     warmup_invocations: int,
     iterations_per_sample: int,
     timed_invocations: int,
@@ -85,6 +88,7 @@ main :: proc() {
         tier = "interpreter", workers = workers, relation_parallelism = 1,
         accelerator = "disabled", accelerator_placements = 0,
         storage = "memory", durability = "none", authority = "root",
+        instruction_budget = 100_000_000, max_call_depth = vm.DEFAULT_MAX_CALL_DEPTH,
         warmup_invocations = warmup, iterations_per_sample = iterations,
         timed_invocations = samples * iterations, sample_elapsed_ns = elapsed,
     }

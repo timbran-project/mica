@@ -38,6 +38,7 @@ class CaptureContract(unittest.TestCase):
             "format": 1, "implementation": "rust", "expected": "42", "tier": "interpreter",
             "workers": 1, "relation_parallelism": 1, "accelerator": "disabled",
             "accelerator_placements": 0, "storage": "memory", "durability": "none", "authority": "root",
+            "instruction_budget": 100_000_000, "max_call_depth": 1024,
             "warmup_invocations": 2, "iterations_per_sample": 3, "timed_invocations": 6,
             "sample_elapsed_ns": [100, 200],
         }
@@ -46,6 +47,7 @@ class CaptureContract(unittest.TestCase):
         for key, value in [("expected", "41"), ("workers", 8), ("tier", "native-enabled"),
                            ("timed_invocations", 5), ("iterations_per_sample", 4),
                            ("warmup_invocations", 0), ("durability", "strict"),
+                           ("instruction_budget", 1000), ("max_call_depth", 50),
                            ("accelerator_placements", 1), ("sample_elapsed_ns", [100]),
                            ("sample_elapsed_ns", [100, 0]), ("sample_elapsed_ns", [100, True])]:
             report = copy.deepcopy(self.report)

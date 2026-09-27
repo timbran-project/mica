@@ -7,6 +7,7 @@ The manifest records each adaptation and excluded fixture.
 The Rust driver invokes installed methods through `DriverAdministrator`.
 The Odin driver invokes them through `world_call`.
 Both use root authority, serial CPU relation execution, and the requested number of task workers.
+Both permit 100,000,000 instructions and 1,024 call frames per task. Reports record these limits, and the launcher checks them.
 Every timed invocation includes task submission, execution, suspension, completion, and result verification.
 Loading and optional `setup()` execution occur before the timer.
 
@@ -51,6 +52,7 @@ It does not change the governor or stop existing processes.
 The launcher exports committed source into isolated directories.
 It copies the current measurement harness and corpus, with hashes, into the capture.
 It builds Rust with `--locked --release` and Odin with `-o:speed`.
+`--cargo-target-dir` can reuse a Rust build cache. The launcher copies and hashes the resulting binary before measurement.
 The source exports, binaries, compiler identities, commands, and build logs remain in the capture directory.
 
 Each workload runs in fresh processes with identical invocation counts across implementations.
@@ -96,6 +98,13 @@ The timed invocation checks 1,001 tokens, source positions, zero diagnostics, an
 Its `prelude` lists the lexer and parser paths. The launcher loads those files from each implementation's pinned source export.
 The generated fixture hashes and individual prelude hashes appear in `fixture_inputs` in the manifest.
 Prelude loading occurs before timing and remains included in process peak RSS.
+
+`compiler_emission` builds 100 Unicode declarations followed by a filtered, keyed comprehension.
+Each invocation runs the pinned Mica lexer, parser, emitter, and assembler, then checks success and a nonempty artifact.
+Its result is the independently counted source length: 1,941 Unicode scalars.
+Rust returns the entry artifact under `:entry`; Odin returns its whole program under `:bytes`. The fixture records this result-shape adaptation.
+This workload measures source construction through assembly. It excludes installation and execution of the generated program.
+Compiler execution comparisons and bootstrap tests check those separate correctness properties in Rust.
 
 ## Ingestion commands
 

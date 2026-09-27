@@ -292,6 +292,34 @@ fn mica_emitter_comprehension_captures_and_accumulator_survive_suspension() {
 }
 
 #[test]
+fn compiler_emission_workload_produces_executable_artifacts() {
+    for interpreter_only in [true, false] {
+        let mut runner = compiler(interpreter_only);
+        runner.run_filein(INSTALL_EMITTED).unwrap();
+        runner
+            .run_filein(include_str!(
+                "../../../benchmarks/parity/mica/compiler_emission.mica"
+            ))
+            .unwrap();
+        let source = runner
+            .run_source("return compiler_emission_source()")
+            .unwrap();
+        let TaskOutcome::Complete { value: source, .. } = source.outcome else {
+            panic!("{}", source.render());
+        };
+        let source = source.with_str(str::to_owned).unwrap();
+        assert_eq!(source.chars().count(), 1941);
+        assert_emitted_agrees(&mut runner, &source);
+        let result = runner.run_source("return :compiler_test_entry()").unwrap();
+        assert!(matches!(result.outcome, TaskOutcome::Complete { value, .. }
+            if value == Value::list([Value::int(6).unwrap(), Value::int(4).unwrap()])));
+        let result = runner.run_source("return bench()").unwrap();
+        assert!(matches!(result.outcome, TaskOutcome::Complete { value, .. }
+            if value == Value::int(1941).unwrap()));
+    }
+}
+
+#[test]
 fn mica_emitter_artifacts_agree_with_rust_execution() {
     for interpreter_only in [true, false] {
         let mut runner = compiler(interpreter_only);

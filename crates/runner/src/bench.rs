@@ -46,6 +46,7 @@ pub async fn run(cli: &Cli, options: &Options) -> Result<(), String> {
     }
     let limits = TaskLimits {
         instruction_budget: 100_000_000,
+        max_call_depth: 1024,
         ..TaskLimits::default()
     };
     let mut runner = open_runner(cli)?
@@ -105,6 +106,8 @@ pub async fn run(cli: &Cli, options: &Options) -> Result<(), String> {
                 },
             },
             "authority": "root",
+            "instruction_budget": limits.instruction_budget,
+            "max_call_depth": limits.max_call_depth,
             "warmup_invocations": options.warmup,
             "iterations_per_sample": options.iterations.get(),
             "timed_invocations": options.samples.get().checked_mul(options.iterations.get()).ok_or("invocation count overflow")?,

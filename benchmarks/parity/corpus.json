@@ -264,6 +264,20 @@
         "apps/compiler/parse.mica"
       ],
       "adaptation": "Shared application workload. Load the lexer and parser from each pinned source revision. Build and lex 200 Unicode declarations, parse the same source, and verify token and binding counts inside each timed invocation."
+    },
+    {
+      "name": "compiler_emission",
+      "file": "mica/compiler_emission.mica",
+      "expected": "1941",
+      "setup": false,
+      "rust_gap": null,
+      "sha256": "dddb7fdb9ce49136edb90893501df9d4d2d4778979e22f7e2d4f192ee37d0620",
+      "prelude": [
+        "apps/compiler/lex.mica",
+        "apps/compiler/parse.mica",
+        "apps/compiler/emit.mica"
+      ],
+      "adaptation": "Shared source-to-artifact workload with 100 Unicode declarations and a filtered, keyed comprehension. Load each pinned Mica compiler. Verify successful assembly and a nonempty artifact; accept Rust's :entry or Odin's :bytes result field. Return the independently counted source length. Installation and generated-program execution are outside this measurement."
     }
   ],
   "excluded": {

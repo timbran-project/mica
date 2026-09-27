@@ -63,6 +63,8 @@ fn benchmark_waits_for_spawned_work_and_commit_boundaries() {
         assert_eq!(report["timed_invocations"], 4);
         assert_eq!(report["sample_elapsed_ns"].as_array().unwrap().len(), 2);
         assert_eq!(report["authority"], "root");
+        assert_eq!(report["instruction_budget"], 100_000_000);
+        assert_eq!(report["max_call_depth"], 1024);
     }
 }
 

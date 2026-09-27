@@ -451,3 +451,9 @@ Comparisons preserve exact relation headings, catchable cardinality errors, lazy
 Suspension retains the accumulator and captured row values. Break and continue still run intervening finally handlers.
 All ten compiler application tests pass in the workspace run. The bootstrap reproduces artifacts containing rows and keyed comprehensions in both execution modes.
 Workspace clippy passes. These checks establish capability coverage; source-to-artifact performance remains a separate measurement.
+
+The emission workload builds 100 Unicode declarations and a filtered, keyed comprehension, then compiles through each pinned Mica assembler.
+Rust execution checks confirm the generated program returns `[6, 4]` in both modes. The timed workload checks assembly success and source length.
+The Rust benchmark task limit now matches Odin's 1,024 frames; both reports record that limit and the 100-million-instruction budget.
+An initial smoke check hit Rust's 50-frame default. A fixture check also rejected `len(bytes)`; nonempty artifacts now use byte-value comparison.
+Those failed checks contribute no timing evidence. Runner tests, harness contract tests, and workspace clippy pass.

@@ -69,6 +69,7 @@ def validate_report(report, fixture, protocol, implementation, tier):
         "tier": tier, "workers": protocol["workers"], "relation_parallelism": 1,
         "accelerator": "disabled", "accelerator_placements": 0,
         "storage": "memory", "durability": "none", "authority": "root",
+        "instruction_budget": 100_000_000, "max_call_depth": 1024,
         "warmup_invocations": protocol["warmup"],
         "iterations_per_sample": protocol["iterations"],
         "timed_invocations": protocol["samples"] * protocol["iterations"],
@@ -113,6 +114,7 @@ def main():
     parser.add_argument("--rust-revision", default="HEAD")
     parser.add_argument("--odin-repo", type=Path, default=ROOT.parent / "omica")
     parser.add_argument("--odin-revision", default="bfb368c")
+    parser.add_argument("--cargo-target-dir", type=Path)
     parser.add_argument("--runs", type=positive, default=3)
     parser.add_argument("--samples", type=positive, default=7)
     parser.add_argument("--iterations", type=positive, default=8)
@@ -150,8 +152,9 @@ def main():
     odin = shutil.which("odin")
     if odin is None:
         raise RuntimeError("Odin compiler not found")
+    target = args.cargo_target_dir.resolve() if args.cargo_target_dir else rust_source / "target"
     builds = [
-        (["cargo", "build", "--locked", "--release", "-p", "mica-runner"], rust_source, output / "rust-build.log"),
+        (["cargo", "build", "--locked", "--release", "-p", "mica-runner", "--target-dir", str(target)], rust_source, output / "rust-build.log"),
         ([odin, "build", "tools/paritybench", "-o:speed", f"-out:{output / 'odin-bench'}"], odin_source, output / "odin-build.log"),
     ]
     manifest = {
@@ -171,7 +174,8 @@ def main():
         print("building", cwd.name, flush=True)
         with log.open("w") as handle:
             subprocess.run(command, cwd=cwd, stdout=handle, stderr=subprocess.STDOUT, check=True)
-    rust = rust_source / "target/release/mica"
+    rust = output / "rust-mica"
+    shutil.copy2(target / "release/mica", rust)
     manifest["binaries"] = {"rust": digest(rust), "odin": digest(output / "odin-bench")}
     paths = {}
     manifest["fixture_inputs"] = {}
