@@ -3978,6 +3978,7 @@ fn bootstrap_kernel_with_computed_relations(
                 Symbol::intern("NamedIdentity"),
                 2,
             )
+            .with_index([1, 0])
             .with_conflict_policy(ConflictPolicy::Functional {
                 key_positions: vec![0],
             }),
