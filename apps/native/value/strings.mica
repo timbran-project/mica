@@ -1,0 +1,208 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+// A string view retains its backing allocation. Sampled offsets address the
+// backing from its first scalar, so slices can reuse the same immutable index.
+verb native_value/strings(input)
+  let context = input
+  let bytes = [:Pointer, :U8, :Mutable]
+  let offsets = [:Pointer, :U64, :Mutable]
+  let storage = [:Record, "StringStorage"]
+  let header = [:Record, "HeapString"]
+  let state = context[:state]
+  state = native/record_type(state, "StringStorage", [["data", bytes], ["capacity", :U64], ["used", :U64], ["index", offsets]])[1]
+  state = native/record_type(state, "HeapString", [["data", bytes], ["length", :U64], ["scalars", :U64], ["ascii", :Bool],
+    ["storage", [:Pointer, storage, :Mutable]], ["byte_start", :U64], ["scalar_start", :U64]])[1]
+  state = native/record_type(state, "StringAllocation", [["ok", :Bool], ["header", [:Pointer, header, :Mutable]]])[1]
+  let [ids, next] = native/constants(state, [["string_stride", :U64, "0000000000000020"], ["string_index_min", :U64, "0000000000000080"],
+    ["string_null_index", offsets, "null"], ["string_index_width", :U64, "0000000000000008"]])
+  let constants = context[:constants]
+  for name, id in ids
+    constants[name] = id
+  end
+  context[:constants] = constants
+  context[:state] = next
+  context = native_value/string_allocate(context)
+  context = native_value/string_index(context)
+  context = native_value/string_constructor(context)
+  context = native_value/heap_accessor(context, "string", header)
+  context = native_value/string_access(context)
+  context = native_value/string_append(context)
+  return native_value/string_search(context)
+end
+
+// Allocate headers, index, and byte capacity together, without publishing a
+// tagged value before its bytes and index are initialized.
+verb native_value/string_allocate(input)
+  let context = input
+  let name = "value_string_allocate"
+  let header = [:Record, "HeapString"]
+  let storage = [:Record, "StringStorage"]
+  let bytes = [:Pointer, :U8, :Mutable]
+  let result = [:Record, "StringAllocation"]
+  context = native_value/function(context, name, result,
+    [["arena", [:Pointer, [:Record, "ValueArena"], :Mutable], :Borrow], ["length", :U64, :Value], ["capacity", :U64, :Value], ["scalars", :U64, :Value], ["ascii", :Bool, :Value]],
+    [["condition", :Bool], ["header_size", :U64], ["storage_size", :U64], ["fixed_size", :U64], ["limit", :U64], ["sample_count", :U64], ["sample_bytes", :U64],
+     ["total", :U64], ["allocation", bytes], ["cursor", bytes], ["data", bytes], ["index", [:Pointer, :U64, :Mutable]],
+     ["header", header], ["storage", storage], ["pointer", [:Pointer, header, :Mutable]], ["backing", [:Pointer, storage, :Mutable]], ["result", result]],
+    ["entry", "scalar_bound", "layout", "index_size", "samples", "no_samples", "size", "allocate", "initialize", "index", "publish", "failure"],
+    [:Allocate, :ReadMemory, :WriteMemory], :Borrow, "arena")
+  context = native_value/block(context, name, "entry", [[:Less, "condition", ["capacity", "length"]]], :Branch, ["condition", "failure", "scalar_bound"])
+  context = native_value/block(context, name, "scalar_bound", [[:Less, "condition", ["length", "scalars"]]], :Branch, ["condition", "failure", "layout"])
+  context = native_value/block(context, name, "layout", [[:SizeOf, "header_size", [header]], [:SizeOf, "storage_size", [storage]], [:Add, "fixed_size", ["header_size", "storage_size"]],
+    [:Subtract, "limit", ["allocation_limit", "fixed_size"]], [:Less, "condition", ["limit", "capacity"]]], :Branch, ["condition", "failure", "index_size"])
+  context = native_value/block(context, name, "index_size", [[:Less, "condition", ["capacity", "string_index_min"]]], :Branch, ["condition", "no_samples", "samples"])
+  context = native_value/block(context, name, "samples", [[:Divide, "sample_count", ["capacity", "string_stride"]], [:Add, "sample_count", ["sample_count", "one"]]], :Jump, ["size"])
+  context = native_value/block(context, name, "no_samples", [[:Copy, "sample_count", ["zero"]]], :Jump, ["size"])
+  context = native_value/block(context, name, "size", [[:Subtract, "limit", ["limit", "capacity"]], [:Divide, "limit", ["limit", "string_index_width"]],
+    [:Less, "condition", ["limit", "sample_count"]]], :Branch, ["condition", "failure", "allocate"])
+  context = native_value/block(context, name, "allocate", [[:Multiply, "sample_bytes", ["sample_count", "string_index_width"]], [:Add, "total", ["fixed_size", "sample_bytes"]],
+    [:Add, "total", ["total", "capacity"]], [:Call, "allocation", ["value_arena_allocate", "arena", "total"]], [:Equal, "condition", ["allocation", "null_bytes"]]], :Branch, ["condition", "failure", "initialize"])
+  context = native_value/block(context, name, "initialize", [[:PointerCast, "pointer", ["allocation"]], [:Offset, "cursor", ["allocation", "header_size"]], [:PointerCast, "backing", ["cursor"]],
+    [:Offset, "cursor", ["allocation", "fixed_size"]], [:Offset, "data", ["cursor", "sample_bytes"]], [:Copy, "index", ["string_null_index"]],
+    [:Equal, "condition", ["sample_count", "zero"]]], :Branch, ["condition", "publish", "index"])
+  context = native_value/block(context, name, "index", [[:PointerCast, "index", ["cursor"]]], :Jump, ["publish"])
+  context = native_value/block(context, name, "publish", [[:Record, "storage", ["data", "capacity", "length", "index"]], [:Store, :Discard, ["backing", "storage"]],
+    [:Record, "header", ["data", "length", "scalars", "ascii", "backing", "zero", "zero"]], [:Store, :Discard, ["pointer", "header"]],
+    [:Record, "result", ["true", "pointer"]]], :Return, ["result"])
+  return native_value/block(context, name, "failure", [[:Zero, "result", []]], :Return, ["result"])
+end
+
+// Fill samples from a known scalar boundary. Appends can fill only their new
+// suffix, leaving every previously published offset unchanged.
+verb native_value/string_index(input)
+  let context = input
+  let name = "value_string_index"
+  let storage = [:Record, "StringStorage"]
+  context = native_value/function(context, name, :Bool, [["storage", [:Pointer, storage, :Mutable], :Borrow], ["offset", :U64, :Value], ["scalar", :U64, :Value], ["length", :U64, :Value], ["ascii", :Bool, :Value]],
+    [["backing", storage], ["data", [:Pointer, :U8, :Mutable]], ["index", [:Pointer, :U64, :Mutable]], ["sample", [:Pointer, :U64, :Mutable]],
+     ["source", [:Pointer, :U8, :Mutable]], ["text", [:Pointer, :U8, :Const]], ["position", :U64], ["count", :U64], ["remainder", :U64], ["sample_number", :U64],
+     ["remaining", :U64], ["width", :U64], ["decoded", [:Record, "Utf8Decode"]], ["condition", :Bool]],
+    ["entry", "initialize", "loop", "sample", "write", "end", "step", "ascii", "ascii_end", "decode", "decoded", "advance", "success", "failure"], [:ReadMemory, :WriteMemory], :Value, "")
+  context = native_value/block(context, name, "entry", [[:Load, "backing", ["storage"]], [:Field, "data", ["backing", "data"]], [:Field, "index", ["backing", "index"]],
+    [:Equal, "condition", ["index", "string_null_index"]]], :Branch, ["condition", "success", "initialize"])
+  context = native_value/block(context, name, "initialize", [[:Copy, "position", ["offset"]], [:Copy, "count", ["scalar"]]], :Jump, ["loop"])
+  context = native_value/block(context, name, "loop", [[:Less, "condition", ["length", "position"]]], :Branch, ["condition", "failure", "sample"])
+  context = native_value/block(context, name, "sample", [[:Remainder, "remainder", ["count", "string_stride"]], [:Equal, "condition", ["remainder", "zero"]]], :Branch, ["condition", "write", "end"])
+  context = native_value/block(context, name, "write", [[:Divide, "sample_number", ["count", "string_stride"]], [:Offset, "sample", ["index", "sample_number"]],
+    [:Store, :Discard, ["sample", "position"]]], :Jump, ["end"])
+  context = native_value/block(context, name, "end", [[:Equal, "condition", ["position", "length"]]], :Branch, ["condition", "success", "step"])
+  context = native_value/block(context, name, "step", [], :Branch, ["ascii", "ascii", "decode"])
+  context = native_value/block(context, name, "ascii", [[:Subtract, "remaining", ["length", "position"]], [:Subtract, "width", ["string_stride", "remainder"]],
+    [:Less, "condition", ["remaining", "width"]]], :Branch, ["condition", "ascii_end", "advance"])
+  context = native_value/block(context, name, "decode", [[:Offset, "source", ["data", "position"]], [:Freeze, "text", ["source"]], [:Subtract, "remaining", ["length", "position"]],
+    [:Call, "decoded", ["utf8_decode", "text", "remaining"]], [:Field, "condition", ["decoded", "ok"]]], :Branch, ["condition", "decoded", "failure"])
+  context = native_value/block(context, name, "ascii_end", [[:Copy, "width", ["remaining"]]], :Jump, ["advance"])
+  context = native_value/block(context, name, "decoded", [[:Field, "width", ["decoded", "width"]], [:Add, "position", ["position", "width"]], [:Add, "count", ["count", "one"]]], :Jump, ["loop"])
+  context = native_value/block(context, name, "advance", [[:Add, "position", ["position", "width"]], [:Add, "count", ["count", "width"]]], :Jump, ["loop"])
+  context = native_value/block(context, name, "success", [], :Return, ["true"])
+  return native_value/block(context, name, "failure", [], :Return, ["false"])
+end
+
+verb native_value/string_constructor(input)
+  let context = input
+  let name = "value_string"
+  let header = [:Record, "HeapString"]
+  let result = [:Record, "ValueResult"]
+  context = native_value/function(context, name, result,
+    [["arena", [:Pointer, [:Record, "ValueArena"], :Mutable], :Borrow], ["source", [:Pointer, :U8, :Const], :Borrow], ["length", :U64, :Value]],
+    [["condition", :Bool], ["scan", [:Record, "Utf8Scan"]], ["scalars", :U64], ["ascii", :Bool], ["allocation", [:Record, "StringAllocation"]],
+     ["pointer", [:Pointer, header, :Mutable]], ["header", header], ["storage", [:Pointer, [:Record, "StringStorage"], :Mutable]],
+     ["data", [:Pointer, :U8, :Mutable]], ["value", native_value/word()], ["result", result]],
+    ["entry", "validate", "allocate", "copy", "publish", "failure"], [:Allocate, :ReadMemory, :WriteMemory], :Borrow, "arena")
+  context = native_value/block(context, name, "entry", [[:Less, "condition", ["allocation_limit", "length"]]], :Branch, ["condition", "failure", "validate"])
+  context = native_value/block(context, name, "validate", [[:Call, "scan", ["utf8_scan", "source", "length"]], [:Field, "condition", ["scan", "ok"]]], :Branch, ["condition", "allocate", "failure"])
+  context = native_value/block(context, name, "allocate", [[:Field, "scalars", ["scan", "scalars"]], [:Field, "ascii", ["scan", "ascii"]],
+    [:Call, "allocation", ["value_string_allocate", "arena", "length", "length", "scalars", "ascii"]], [:Field, "condition", ["allocation", "ok"]]], :Branch, ["condition", "copy", "failure"])
+  context = native_value/block(context, name, "copy", [[:Field, "pointer", ["allocation", "header"]], [:Load, "header", ["pointer"]], [:Field, "data", ["header", "data"]],
+    [:Field, "storage", ["header", "storage"]], [:CopyBytes, :Discard, ["data", "source", "length"]],
+    [:Call, "condition", ["value_string_index", "storage", "zero", "zero", "length", "ascii"]]], :Branch, ["condition", "publish", "failure"])
+  context = native_value/block(context, name, "publish", [[:PackPointer, "value", ["pointer", "tag_string"]], [:Record, "result", ["true", "value"]]], :Return, ["result"])
+  return native_value/block(context, name, "failure", [[:Zero, "result", []]], :Return, ["result"])
+end
+
+verb native_value/string_access(input)
+  let context = input
+  let word = native_value/word()
+  let header = [:Record, "HeapString"]
+  let header_pointer = [:Pointer, header, :Const]
+  let result = [:Record, "IdResult"]
+  let name = "value_string_length"
+  context = native_value/function(context, name, result, [["value", word, :Borrow]],
+    [["checked", [:Record, "HeapStringResult"]], ["pointer", header_pointer], ["header", header], ["condition", :Bool], ["count", :U64], ["result", result]],
+    ["entry", "success", "failure"], [:ReadMemory], :Value, "")
+  context = native_value/block(context, name, "entry", [[:Call, "checked", ["value_as_string", "value"]], [:Field, "condition", ["checked", "ok"]]], :Branch, ["condition", "success", "failure"])
+  context = native_value/block(context, name, "success", [[:Field, "pointer", ["checked", "header"]], [:Load, "header", ["pointer"]],
+    [:Field, "count", ["header", "scalars"]], [:Record, "result", ["true", "count"]]], :Return, ["result"])
+  context = native_value/block(context, name, "failure", [[:Zero, "result", []]], :Return, ["result"])
+  name = "value_string_byte_offset"
+  context = native_value/function(context, name, result, [["value", word, :Borrow], ["position", :U64, :Value]],
+    [["checked", [:Record, "HeapStringResult"]], ["pointer", header_pointer], ["header", header],
+     ["backing", [:Pointer, [:Record, "StringStorage"], :Mutable]], ["storage", [:Record, "StringStorage"]],
+     ["data", [:Pointer, :U8, :Mutable]], ["source", [:Pointer, :U8, :Mutable]], ["text", [:Pointer, :U8, :Const]],
+     ["index", [:Pointer, :U64, :Mutable]], ["sample", [:Pointer, :U64, :Mutable]], ["decoded", [:Record, "Utf8Decode"]],
+     ["condition", :Bool], ["ascii", :Bool], ["length", :U64], ["scalars", :U64], ["byte_start", :U64], ["scalar_start", :U64],
+     ["end", :U64], ["target", :U64], ["offset", :U64], ["count", :U64], ["sample_number", :U64], ["remaining", :U64], ["width", :U64], ["result", result]],
+    ["entry", "bounds", "end", "ascii", "storage", "indexed", "scan", "decode", "advance", "success", "return_end", "return_ascii", "failure"], [:ReadMemory], :Value, "")
+  context = native_value/block(context, name, "entry", [[:Call, "checked", ["value_as_string", "value"]], [:Field, "condition", ["checked", "ok"]]], :Branch, ["condition", "bounds", "failure"])
+  context = native_value/block(context, name, "bounds", [[:Field, "pointer", ["checked", "header"]], [:Load, "header", ["pointer"]],
+    [:Field, "length", ["header", "length"]], [:Field, "scalars", ["header", "scalars"]], [:Less, "condition", ["scalars", "position"]]], :Branch, ["condition", "failure", "end"])
+  context = native_value/block(context, name, "end", [[:Equal, "condition", ["position", "scalars"]]], :Branch, ["condition", "return_end", "ascii"])
+  context = native_value/block(context, name, "ascii", [[:Field, "ascii", ["header", "ascii"]]], :Branch, ["ascii", "return_ascii", "storage"])
+  context = native_value/block(context, name, "storage", [[:Field, "backing", ["header", "storage"]], [:Load, "storage", ["backing"]], [:Field, "data", ["storage", "data"]],
+    [:Field, "index", ["storage", "index"]], [:Field, "byte_start", ["header", "byte_start"]], [:Field, "scalar_start", ["header", "scalar_start"]],
+    [:Add, "end", ["byte_start", "length"]], [:Add, "target", ["scalar_start", "position"]], [:Copy, "offset", ["byte_start"]], [:Copy, "count", ["scalar_start"]],
+    [:Equal, "condition", ["index", "string_null_index"]]], :Branch, ["condition", "scan", "indexed"])
+  context = native_value/block(context, name, "indexed", [[:Divide, "sample_number", ["target", "string_stride"]], [:Offset, "sample", ["index", "sample_number"]],
+    [:Load, "offset", ["sample"]], [:Multiply, "count", ["sample_number", "string_stride"]]], :Jump, ["scan"])
+  context = native_value/block(context, name, "scan", [[:Less, "condition", ["count", "target"]]], :Branch, ["condition", "decode", "success"])
+  context = native_value/block(context, name, "decode", [[:Offset, "source", ["data", "offset"]], [:Freeze, "text", ["source"]], [:Subtract, "remaining", ["end", "offset"]],
+    [:Call, "decoded", ["utf8_decode", "text", "remaining"]], [:Field, "condition", ["decoded", "ok"]]], :Branch, ["condition", "advance", "failure"])
+  context = native_value/block(context, name, "advance", [[:Field, "width", ["decoded", "width"]], [:Add, "offset", ["offset", "width"]], [:Add, "count", ["count", "one"]]], :Jump, ["scan"])
+  context = native_value/block(context, name, "success", [[:Subtract, "offset", ["offset", "byte_start"]], [:Record, "result", ["true", "offset"]]], :Return, ["result"])
+  context = native_value/block(context, name, "return_end", [[:Record, "result", ["true", "length"]]], :Return, ["result"])
+  context = native_value/block(context, name, "return_ascii", [[:Record, "result", ["true", "position"]]], :Return, ["result"])
+  context = native_value/block(context, name, "failure", [[:Zero, "result", []]], :Return, ["result"])
+  name = "value_string_scalar_at"
+  context = native_value/function(context, name, [:Record, "RuneResult"], [["value", word, :Borrow], ["position", :U64, :Value]],
+    [["offset_result", result], ["offset", :U64], ["condition", :Bool], ["pointer", header_pointer], ["header", header], ["length", :U64],
+     ["data", [:Pointer, :U8, :Mutable]], ["source", [:Pointer, :U8, :Mutable]], ["text", [:Pointer, :U8, :Const]],
+     ["decoded", [:Record, "Utf8Decode"]], ["rune", [:Scalar, "Rune", :U32]], ["result", [:Record, "RuneResult"]]],
+    ["entry", "decode", "success", "failure"], [:ReadMemory], :Value, "")
+  context = native_value/block(context, name, "entry", [[:Call, "offset_result", ["value_string_byte_offset", "value", "position"]], [:Field, "condition", ["offset_result", "ok"]]], :Branch, ["condition", "decode", "failure"])
+  context = native_value/block(context, name, "decode", [[:Field, "offset", ["offset_result", "number"]], [:UnpackPointer, "pointer", ["value"]], [:Load, "header", ["pointer"]],
+    [:Field, "length", ["header", "length"]], [:Field, "data", ["header", "data"]], [:Offset, "source", ["data", "offset"]], [:Freeze, "text", ["source"]],
+    [:Subtract, "length", ["length", "offset"]], [:Call, "decoded", ["utf8_decode", "text", "length"]], [:Field, "condition", ["decoded", "ok"]]], :Branch, ["condition", "success", "failure"])
+  context = native_value/block(context, name, "success", [[:Field, "rune", ["decoded", "rune"]], [:Record, "result", ["true", "rune"]]], :Return, ["result"])
+  context = native_value/block(context, name, "failure", [[:Zero, "result", []]], :Return, ["result"])
+  return native_value/string_slice(context)
+end
+
+verb native_value/string_slice(input)
+  let context = input
+  let name = "value_string_slice"
+  let word = native_value/word()
+  let header = [:Record, "HeapString"]
+  let result = [:Record, "ValueResult"]
+  context = native_value/function(context, name, result, [["arena", [:Pointer, [:Record, "ValueArena"], :Mutable], :Borrow],
+    ["value", word, [:Borrow, "arena"]], ["start", :U64, :Value], ["end", :U64, :Value]],
+    [["condition", :Bool], ["ascii", :Bool], ["offset", [:Record, "IdResult"]], ["first", :U64], ["last", :U64], ["length", :U64], ["scalars", :U64],
+     ["byte_start", :U64], ["scalar_start", :U64], ["size", :U64], ["allocation", [:Pointer, :U8, :Mutable]],
+     ["pointer", [:Pointer, header, :Const]], ["target", [:Pointer, header, :Mutable]], ["header", header], ["slice", header],
+     ["storage", [:Pointer, [:Record, "StringStorage"], :Mutable]], ["data", [:Pointer, :U8, :Mutable]], ["result", result], ["packed", word]],
+    ["entry", "start", "end", "allocate", "publish", "failure"], [:Allocate, :ReadMemory, :WriteMemory], :Borrow, "arena")
+  context = native_value/block(context, name, "entry", [[:Less, "condition", ["end", "start"]]], :Branch, ["condition", "failure", "start"])
+  context = native_value/block(context, name, "start", [[:Call, "offset", ["value_string_byte_offset", "value", "start"]], [:Field, "condition", ["offset", "ok"]],
+    [:Field, "first", ["offset", "number"]]], :Branch, ["condition", "end", "failure"])
+  context = native_value/block(context, name, "end", [[:Call, "offset", ["value_string_byte_offset", "value", "end"]], [:Field, "condition", ["offset", "ok"]],
+    [:Field, "last", ["offset", "number"]]], :Branch, ["condition", "allocate", "failure"])
+  context = native_value/block(context, name, "allocate", [[:SizeOf, "size", [header]], [:Call, "allocation", ["value_arena_allocate", "arena", "size"]],
+    [:Equal, "condition", ["allocation", "null_bytes"]]], :Branch, ["condition", "failure", "publish"])
+  context = native_value/block(context, name, "publish", [[:PointerCast, "target", ["allocation"]], [:UnpackPointer, "pointer", ["value"]], [:Load, "header", ["pointer"]],
+    [:Field, "data", ["header", "data"]], [:Offset, "data", ["data", "first"]], [:Field, "storage", ["header", "storage"]],
+    [:Field, "byte_start", ["header", "byte_start"]], [:Add, "byte_start", ["byte_start", "first"]], [:Field, "scalar_start", ["header", "scalar_start"]],
+    [:Add, "scalar_start", ["scalar_start", "start"]], [:Subtract, "length", ["last", "first"]], [:Subtract, "scalars", ["end", "start"]], [:Equal, "ascii", ["length", "scalars"]],
+    [:Record, "slice", ["data", "length", "scalars", "ascii", "storage", "byte_start", "scalar_start"]], [:Store, :Discard, ["target", "slice"]],
+    [:PackPointer, "packed", ["target", "tag_string"]], [:Record, "result", ["true", "packed"]]], :Return, ["result"])
+  return native_value/block(context, name, "failure", [[:Zero, "result", []]], :Return, ["result"])
+end

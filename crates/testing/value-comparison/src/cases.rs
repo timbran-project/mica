@@ -158,6 +158,16 @@ pub enum Operation {
     Remainder,
     MapGet,
     MapBuild,
+    StringFromBytes,
+    RuneEncode,
+    StringLength,
+    StringScalarAt,
+    StringSlice,
+    StringByteOffset,
+    StringAppend,
+    StringConcat,
+    StringFind,
+    StringAppendChain,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -200,6 +210,89 @@ impl Prepared {
         };
         let value = match self.op {
             Operation::Construct => Some(left.clone()),
+            Operation::StringFromBytes => left
+                .with_bytes(|bytes| std::str::from_utf8(bytes).ok().map(Value::string))
+                .flatten(),
+            Operation::RuneEncode => left
+                .as_int()
+                .and_then(|n| u32::try_from(n).ok())
+                .and_then(char::from_u32)
+                .map(|rune| Value::string(rune.to_string())),
+            Operation::StringLength => left.string_len().and_then(|n| Value::int(n as i64).ok()),
+            Operation::StringScalarAt => right
+                .as_int()
+                .and_then(|n| usize::try_from(n).ok())
+                .and_then(|n| left.string_scalar_at(n))
+                .and_then(|rune| Value::int(i64::from(u32::from(rune))).ok()),
+            Operation::StringSlice => right
+                .with_list(|bounds| {
+                    if bounds.len() != 2 {
+                        return None;
+                    }
+                    let start = usize::try_from(bounds[0].as_int()?).ok()?;
+                    let end = usize::try_from(bounds[1].as_int()?).ok()?;
+                    left.string_slice(start, end)
+                })
+                .flatten(),
+            Operation::StringByteOffset => right
+                .as_int()
+                .and_then(|n| usize::try_from(n).ok())
+                .and_then(|n| {
+                    left.with_str(|text| {
+                        if n == text.chars().count() {
+                            return Some(text.len());
+                        }
+                        text.char_indices().nth(n).map(|(offset, _)| offset)
+                    })
+                    .flatten()
+                })
+                .and_then(|n| Value::int(n as i64).ok()),
+            Operation::StringAppend | Operation::StringConcat => right
+                .with_str(|suffix| left.string_append(suffix))
+                .flatten(),
+            Operation::StringFind => right
+                .with_list(|args| {
+                    if args.len() != 2 {
+                        return None;
+                    }
+                    let start = usize::try_from(args[1].as_int()?).ok()?;
+                    left.with_str(|text| {
+                        args[0]
+                            .with_str(|needle| {
+                                let count = left.string_len()?;
+                                let byte = if start > count {
+                                    return None;
+                                } else if text.len() == count {
+                                    start
+                                } else if start == count {
+                                    text.len()
+                                } else {
+                                    text.char_indices().nth(start)?.0
+                                };
+                                let found = byte + text[byte..].find(needle)?;
+                                let position = if text.len() == count {
+                                    found
+                                } else {
+                                    text[..found].chars().count()
+                                };
+                                Value::int(position as i64).ok()
+                            })
+                            .flatten()
+                    })
+                    .flatten()
+                })
+                .flatten(),
+            Operation::StringAppendChain => right
+                .with_list(|parts| {
+                    let mut result = left.clone();
+                    for part in parts {
+                        result = part
+                            .with_str(|suffix| result.string_append(suffix))
+                            .flatten()?;
+                    }
+                    Some(result)
+                })
+                .flatten(),
             Operation::Compare => return Outcome::Order(left.cmp(right)),
             Operation::LanguageCompare => {
                 return Outcome::Order(language_cmp::numeric_cmp(left, right));
@@ -421,7 +514,98 @@ pub fn strategy() -> BoxedStrategy<Case> {
                 right: key,
             }
         });
-    prop_oneof![general, equal, construct, arithmetic, maps].boxed()
+    prop_oneof![
+        general,
+        equal,
+        construct,
+        arithmetic,
+        maps,
+        string_strategy()
+    ]
+    .boxed()
+}
+
+fn unicode_text(maximum: usize) -> BoxedStrategy<String> {
+    prop::collection::vec(
+        prop_oneof![3 => any::<char>(), 1 => Just('\0'), 2 => (b'a'..=b'z').prop_map(char::from)],
+        0..maximum,
+    )
+    .prop_map(|chars| chars.into_iter().collect())
+    .boxed()
+}
+
+pub fn string_strategy() -> BoxedStrategy<Case> {
+    let utf8 = prop::collection::vec(any::<u8>(), 0..128).prop_map(|bytes| Case {
+        op: Operation::StringFromBytes,
+        left: Input::Bytes(bytes),
+        right: Input::Empty,
+    });
+    let runes = (0i64..=0x110000).prop_map(|rune| Case {
+        op: Operation::RuneEncode,
+        left: Input::Int(rune),
+        right: Input::Empty,
+    });
+    let strings = (
+        unicode_text(160),
+        0i64..180,
+        0i64..180,
+        prop::sample::select(vec![
+            Operation::StringLength,
+            Operation::StringScalarAt,
+            Operation::StringSlice,
+            Operation::StringByteOffset,
+        ]),
+    )
+        .prop_map(|(text, start, end, op)| Case {
+            op,
+            left: Input::String(text),
+            right: if matches!(op, Operation::StringSlice) {
+                Input::List(vec![Input::Int(start), Input::Int(end)])
+            } else {
+                Input::Int(start)
+            },
+        });
+    let appends =
+        (unicode_text(160), unicode_text(80), any::<bool>()).prop_map(|(left, right, concat)| {
+            Case {
+                op: if concat {
+                    Operation::StringConcat
+                } else {
+                    Operation::StringAppend
+                },
+                left: Input::String(left),
+                right: Input::String(right),
+            }
+        });
+    let searches = (
+        unicode_text(160),
+        unicode_text(12),
+        0usize..180,
+        any::<bool>(),
+    )
+        .prop_map(|(text, needle, start, hit)| {
+            let chars: Vec<_> = text.chars().collect();
+            let needle = if hit && !chars.is_empty() {
+                chars[start % chars.len()..].iter().take(8).collect()
+            } else {
+                needle
+            };
+            Case {
+                op: Operation::StringFind,
+                left: Input::String(text),
+                right: Input::List(vec![Input::String(needle), Input::Int(start as i64)]),
+            }
+        });
+    let chains = (
+        unicode_text(80),
+        prop::collection::vec(unicode_text(24), 0..24),
+    )
+        .prop_map(|(text, parts)| Case {
+            op: Operation::StringAppendChain,
+            left: Input::String(text),
+            right: Input::List(parts.into_iter().map(Input::String).collect()),
+        });
+    prop_oneof![utf8, runes, strings, appends, searches, chains].boxed()
 }
 
 pub fn fixed_cases() -> Vec<Case> {
@@ -524,10 +708,39 @@ pub fn fixed_cases() -> Vec<Case> {
             right: Input::Float(2.0f32.to_bits()),
         });
     }
+    for bytes in [
+        vec![],
+        vec![0],
+        vec![0x7f],
+        vec![0xc2, 0x80],
+        vec![0xed, 0x9f, 0xbf],
+        vec![0xf4, 0x8f, 0xbf, 0xbf],
+        vec![0xc0, 0x80],
+        vec![0xed, 0xa0, 0x80],
+        vec![0xf4, 0x90, 0x80, 0x80],
+        vec![0x61, 0xff],
+        vec![0xf0, 0x90, 0x80],
+    ] {
+        cases.push(Case {
+            op: Operation::StringFromBytes,
+            left: Input::Bytes(bytes),
+            right: Input::Empty,
+        });
+    }
+    for rune in [
+        -1, 0, 0x7f, 0x80, 0x7ff, 0x800, 0xd7ff, 0xd800, 0xdfff, 0xe000, 0xffff, 0x10000, 0x10ffff,
+        0x110000,
+    ] {
+        cases.push(Case {
+            op: Operation::RuneEncode,
+            left: Input::Int(rune),
+            right: Input::Empty,
+        });
+    }
     cases
 }
 
-pub fn workloads() -> Vec<(&'static str, Vec<Case>)> {
+pub fn workloads() -> Vec<(String, Vec<Case>)> {
     let pairs: Vec<_> = (0..128)
         .rev()
         .map(|i| (Input::Int(i % 31), Input::Int(i)))
@@ -538,7 +751,7 @@ pub fn workloads() -> Vec<(&'static str, Vec<Case>)> {
             .flat_map(|(a, b)| [a.clone(), b.clone()])
             .collect(),
     );
-    vec![
+    let mut workloads = vec![
         (
             "integer_add",
             (0..64)
@@ -593,5 +806,61 @@ pub fn workloads() -> Vec<(&'static str, Vec<Case>)> {
                 16
             ],
         ),
-    ]
+    ];
+    let mut workloads: Vec<_> = workloads
+        .drain(..)
+        .map(|(name, cases)| (String::from(name), cases))
+        .collect();
+    for (label, text) in [
+        ("ascii", "abcdef0123456789".repeat(256)),
+        ("unicode", "aé😀\0".repeat(512)),
+    ] {
+        for (operation, suffix) in [
+            (Operation::StringLength, "length"),
+            (Operation::StringScalarAt, "index"),
+            (Operation::StringSlice, "slice"),
+            (Operation::StringFind, "find"),
+            (Operation::StringFromBytes, "construct"),
+            (Operation::StringAppendChain, "append_chain"),
+        ] {
+            let name = format!("string_{label}_{suffix}");
+            workloads.push((
+                name,
+                (0..16)
+                    .map(|i| Case {
+                        op: operation,
+                        left: if matches!(operation, Operation::StringFromBytes) {
+                            Input::Bytes(text.as_bytes().to_vec())
+                        } else {
+                            Input::String(text.clone())
+                        },
+                        right: match operation {
+                            Operation::StringSlice => {
+                                Input::List(vec![Input::Int(i * 31), Input::Int(i * 31 + 128)])
+                            }
+                            Operation::StringFind => Input::List(vec![
+                                Input::String(
+                                    if label == "ascii" {
+                                        "56789a"
+                                    } else {
+                                        "😀\0aé"
+                                    }
+                                    .into(),
+                                ),
+                                Input::Int(i * 31),
+                            ]),
+                            Operation::StringAppendChain => Input::List(vec![
+                                Input::String(
+                                    if label == "ascii" { "abcd" } else { "é😀" }.into()
+                                );
+                                64
+                            ]),
+                            _ => Input::Int(i * 127),
+                        },
+                    })
+                    .collect(),
+            ));
+        }
+    }
+    workloads
 }

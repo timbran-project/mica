@@ -948,6 +948,10 @@ fn native_value_layer_executes_on_both_mica_tiers() {
             include_str!("../../../apps/native/value/numbers.mica"),
             include_str!("../../../apps/native/value/arena.mica"),
             include_str!("../../../apps/native/value/heap.mica"),
+            include_str!("../../../apps/native/value/utf8.mica"),
+            include_str!("../../../apps/native/value/strings.mica"),
+            include_str!("../../../apps/native/value/string_append.mica"),
+            include_str!("../../../apps/native/value/string_search.mica"),
             include_str!("../../../apps/native/value/compare.mica"),
             include_str!("../../../apps/native/value/maps.mica"),
         ] {

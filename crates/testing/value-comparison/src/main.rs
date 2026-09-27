@@ -8,7 +8,7 @@ use std::fs;
 use std::hint::black_box;
 use std::io::Write;
 use std::num::{NonZeroU32, NonZeroU64};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
@@ -28,6 +28,9 @@ struct Options {
     cases: u32,
     #[arg(long, default_value_t = 1)]
     seed: u64,
+    /// Generate only UTF-8 and string property cases.
+    #[arg(long)]
+    strings: bool,
     /// Run paired timings after correctness checks. Requires a release build.
     #[arg(long)]
     bench: bool,
@@ -45,6 +48,9 @@ struct Options {
     /// Replay one JSON case printed by a failed property check.
     #[arg(long)]
     case: Option<String>,
+    /// Save the generated standalone C source at this path.
+    #[arg(long)]
+    emit_c: Option<PathBuf>,
 }
 
 struct Scratch(PathBuf);
@@ -70,7 +76,7 @@ struct Native {
     compiler: String,
 }
 impl Native {
-    fn build(sanitize: bool) -> Result<Self> {
+    fn build(sanitize: bool, emit_c: Option<&Path>) -> Result<Self> {
         let mut runner = SourceRunner::new_empty()
             .with_interpreter_only(true)
             .with_task_limits(TaskLimits {
@@ -92,6 +98,10 @@ impl Native {
             "value/numbers",
             "value/arena",
             "value/heap",
+            "value/utf8",
+            "value/strings",
+            "value/string_append",
+            "value/string_search",
             "value/compare",
             "value/maps",
         ] {
@@ -115,7 +125,10 @@ impl Native {
             .with_str(str::to_owned)
             .ok_or("C generator did not return source")?;
         let scratch = Scratch::new()?;
-        fs::write(scratch.0.join("value.c"), generated)?;
+        fs::write(scratch.0.join("value.c"), &generated)?;
+        if let Some(path) = emit_c {
+            fs::write(path, &generated)?;
+        }
         fs::copy(
             root.join("native/platform/allocation.c"),
             scratch.0.join("allocation.c"),
@@ -230,7 +243,7 @@ impl Native {
     }
 }
 
-fn check_generated(native: &Native, count: u32, seed: u64) -> Result<()> {
+fn check_generated(native: &Native, count: u32, seed: u64, strings: bool) -> Result<()> {
     let mut runner = TestRunner::new(Config {
         cases: count,
         rng_seed: RngSeed::Fixed(seed),
@@ -238,7 +251,12 @@ fn check_generated(native: &Native, count: u32, seed: u64) -> Result<()> {
         max_shrink_iters: 2048,
         ..Config::default()
     });
-    match runner.run(&cases::strategy(), |case| {
+    let strategy = if strings {
+        cases::string_strategy()
+    } else {
+        cases::strategy()
+    };
+    match runner.run(&strategy, |case| {
         native
             .check(std::slice::from_ref(&case))
             .map_err(|e| TestCaseError::fail(e.to_string()))
@@ -353,7 +371,7 @@ fn run() -> Result<()> {
     if options.bench && cfg!(debug_assertions) {
         return Err("benchmarking requires cargo run --release".into());
     }
-    let native = Native::build(options.sanitize)?;
+    let native = Native::build(options.sanitize, options.emit_c.as_deref())?;
     if let Some(case) = options.case {
         native.check(&[serde_json::from_str(&case)?])?;
         println!("{}", json!({"replay":"passed"}));
@@ -367,13 +385,13 @@ fn run() -> Result<()> {
             .check(std::slice::from_ref(case))
             .map_err(|e| format!("{e}\ncase={}", serde_json::to_string(case).unwrap()))?;
     }
-    check_generated(&native, options.cases, options.seed)?;
+    check_generated(&native, options.cases, options.seed, options.strings)?;
     for (_, cases) in cases::workloads() {
         native.check(&cases)?;
     }
     println!(
         "{}",
-        json!({"correctness":"passed","fixed_cases":fixed.len(),"generated_cases":options.cases,"seed":options.seed,"sanitizers":options.sanitize})
+        json!({"correctness":"passed","fixed_cases":fixed.len(),"generated_cases":options.cases,"string_corpus":options.strings,"seed":options.seed,"sanitizers":options.sanitize})
     );
     if options.bench {
         benchmark(
@@ -402,9 +420,10 @@ mod tests {
 
     #[test]
     fn checks_shared_values_and_detects_remainder_divergence() -> Result<()> {
-        let native = Native::build(true)?;
+        let native = Native::build(true, None)?;
         native.check(&cases::fixed_cases())?;
-        check_generated(&native, 64, 1)?;
+        check_generated(&native, 64, 1, false)?;
+        check_generated(&native, 128, 1, true)?;
         let mismatch = Case {
             op: cases::Operation::Remainder,
             left: cases::Input::Float(636431709),

@@ -236,6 +236,10 @@ apps/native/value/program.mica
 apps/native/value/immediates.mica
 apps/native/value/numbers.mica
 apps/native/value/arena.mica
+apps/native/value/utf8.mica
+apps/native/value/strings.mica
+apps/native/value/string_append.mica
+apps/native/value/string_search.mica
 apps/native/value/heap.mica
 apps/native/value/compare.mica
 apps/native/value/maps.mica
@@ -249,7 +253,8 @@ Implemented behaviour includes:
 - All immediate constructors and accessors, signed 56-bit bounds, finite binary32 values, and canonical positive zero.
 - Checked numeric operations, exact integer division, float remainder, and explicit numeric conversions.
 - A growing arena with stable addresses, eight-byte alignment, and release of all chunks.
-- Copying string, byte, and list constructors, plus range, error, and frob constructors and checked accessors.
+- UTF-8 validation, scalar encoding and decoding, indexed strings, slicing, append, concatenation, and substring search.
+- Copying byte and list constructors, plus range, error, and frob constructors and checked accessors.
 - Recursive canonical comparison for these values and maps, with separate exact integer/float comparison for language expressions.
 - Map construction with stable key sorting, the last duplicate value retained, and binary-search lookup.
 
@@ -268,7 +273,44 @@ Construction takes O(n log n) comparisons and O(n) arena storage. Lookup takes O
 `mica_value_map_get` returns `{false, 0}` for a missing key or a non-map input.
 Failed construction can retain temporary storage until arena release. It never publishes a partial map or changes the input.
 
-This module is in progress. Relations, recursive hash/copy, symbol interning, display, codecs, and optimized string/list operations remain unimplemented.
+Strings contain valid UTF-8. Byte values can contain arbitrary bytes. Neither type requires a terminating zero byte.
+`mica_unicode_scalar` rejects surrogates and numbers greater than U+10FFFF.
+`mica_utf8_decode` returns one scalar and its byte width. Malformed or incomplete input returns `ok = false` and width zero.
+`mica_utf8_encode` returns up to four bytes. `mica_utf8_scan` validates the entire input and returns its scalar count and ASCII flag.
+Validation accepts Unicode noncharacters and embedded zero bytes. It rejects overlong encodings, surrogates, isolated continuation bytes, and out-of-range scalars.
+The scanner checks ASCII in bounded eight-byte groups. Unaligned input is valid, and no read extends beyond its supplied length.
+
+String positions count Unicode scalars, not grapheme clusters. The APIs use these conventions:
+
+| Function after `mica_` | Result |
+| --- | --- |
+| `value_string_length(value)` | Scalar count as `IdResult { ok, number }` |
+| `value_string_byte_offset(value, position)` | Byte offset, including the end position |
+| `value_string_scalar_at(value, position)` | `RuneResult { ok, rune }`; the end position fails |
+| `value_string_slice(arena, value, start, end)` | Shared view of the end-exclusive scalar range |
+| `value_string_append(arena, value, bytes, length)` | String with validated suffix bytes |
+| `value_string_concat(arena, left, right)` | String with the right string appended |
+| `value_string_find(value, needle, start)` | First matching scalar position at or after `start` |
+
+Invalid types, reversed ranges, and out-of-range positions return `ok = false`.
+Search also returns `ok = false` for an absent match. An empty needle matches any valid position, including the end.
+Search uses byte comparisons, with a stack skip table for needles of at least four bytes.
+The worst-case search cost is O(haystack bytes × needle bytes). Converting a non-ASCII match to a scalar position scans its prefix.
+
+Each string view stores its byte length, scalar count, and ASCII flag.
+Backings with at least 128 bytes of capacity reserve one byte-offset sample per 32 scalar positions.
+Samples use eight bytes each. Capacity reserves enough samples for an eventual ASCII suffix.
+ASCII indexing uses direct offsets. Non-ASCII indexing starts at a sample and decodes at most 31 preceding scalars.
+Slices share the backing bytes and samples. Small backings without samples use a bounded scan.
+
+Append allocates a separate view header. It reuses spare capacity only when the input view ends at the backing's current tail.
+Other appends allocate another backing with geometric growth. Earlier views retain their bytes and lengths.
+Overlapping suffix bytes are valid. Invalid UTF-8 leaves the input unchanged.
+Serialize mutation of an arena and its string backings, including append. This module does not provide concurrent arena mutation.
+All views become invalid when their owning arena is released. Allocation errors can retain temporary storage until release.
+The allocation and index-building helpers are internal construction steps; callers must not publish incomplete headers.
+
+This module is in progress. Relations, recursive hash/copy, symbol interning, display, codecs, and list operations beyond construction and comparison remain unimplemented.
 Comparison supports the empty relation sentinel; other relation comparisons remain unimplemented and return `ok = false`.
 Heap layouts are local to this implementation. Matching immediate tags does not make heap pointers interchangeable with Odin or Rust.
 
@@ -277,6 +319,7 @@ Heap layouts are local to this implementation. Matching immediate tags does not 
 The [comparison harness](../../crates/testing/value-comparison/src/main.rs) constructs equivalent values independently in Rust and generated C.
 It compares complete semantic results through a test protocol. It does not exchange heap pointers or use the persistence codec.
 The harness covers implemented constructors, recursive comparison, mixed numeric comparison, arithmetic, map lookup, and map construction.
+String checks cover malformed bytes, Unicode scalars, indexing, slicing, search, concatenation, and append chains.
 Symbol tests use matching numeric IDs; they do not test symbol interning. Nonempty relations, hashing, and codecs remain outside its coverage.
 
 Run fixed boundary cases and a seeded corpus with shrinking:
@@ -294,7 +337,15 @@ cargo test -p mica-value-comparison
 ```
 
 Rust computes float remainder with `%`. The generated implementation uses Odin's `a - trunc(a / b) * b` calculation.
-These calculations differ for some finite inputs. The seeded command above currently fails on this discrepancy; the harness does not suppress it.
+These calculations differ for some finite inputs. Random arithmetic cases can expose this discrepancy; the harness does not suppress it.
+
+Use the string corpus to exercise this module independently of arithmetic discrepancies:
+
+```sh
+cargo run --release -p mica-value-comparison -- --strings --cases 2048 --seed 17 --sanitize
+```
+
+`--strings` selects generated string and Unicode cases. Fixed cases and benchmark correctness checks still cover all implemented operations.
 
 Run performance measurements for workloads that pass their own full result checks:
 
@@ -306,15 +357,26 @@ Here, `--cases 0` skips random cases. Fixed cases and every benchmark workload s
 This command does not establish full conformance. With random cases enabled, a mismatch prevents benchmarking.
 
 Measurements cover integer addition, mixed numeric comparison, nested comparison, map lookup, and map construction with reclamation.
+String workloads cover ASCII and Unicode length, indexing, slicing, search, construction from bytes, and 64-part append chains.
+String inputs contain 4 KiB of bytes. Index workloads reuse cached metadata; construction workloads include validation and metadata creation.
+The Rust search reference uses standard string search and scalar-offset conversion; it is not a runtime substring-search builtin.
 The harness calibrates repetitions toward the requested sample duration and alternates implementation order.
 It prints JSON lines with compiler details, all samples, median nanoseconds per operation, and C/Rust ratios. Ratios below one favour C.
 Samples include operation dispatch and result consumption, so very small operation timings also include harness costs.
 These are workload measurements, not isolated instruction costs or whole-runtime benchmarks.
 
 Generation, compilation, subprocess startup, input decoding, and input construction stay outside timed intervals.
-Operation workloads reuse prepared values. The map construction workload includes Rust result destruction and C arena release on each iteration.
+Operation workloads reuse prepared values. Construction, slice, and append workloads include Rust result destruction and C arena release on each iteration.
 C uses `-O3` without sanitizers; Rust requires a release build. Sanitizer mode cannot run benchmarks.
 For stable comparisons, use the same idle machine and CPU affinity for the parent process and its children.
 
-Generated C and executables live in temporary directories that the harness removes on exit.
+To inspect the generated standalone C source, request an explicit output file:
+
+```sh
+mkdir -p target/native
+cargo run --release -p mica-value-comparison -- --cases 0 --emit-c target/native/value.c
+```
+
+`--emit-c` writes the source before compilation. The `target/` directory stays outside source control.
+Other generated C and executables live in temporary directories that the harness removes on exit.
 Results go to stdout. The harness does not create result files or property-test persistence files in the repository.

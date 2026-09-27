@@ -1,0 +1,67 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+// Appending through the current tail can claim spare capacity. Earlier views
+// retain their lengths and offsets; a competing append from an earlier tail
+// receives another backing allocation. Arena mutation requires serialization.
+verb native_value/string_append(input)
+  let context = input
+  let name = "value_string_append"
+  let word = native_value/word()
+  let header = [:Record, "HeapString"]
+  let storage = [:Record, "StringStorage"]
+  let bytes = [:Pointer, :U8, :Mutable]
+  let result = [:Record, "ValueResult"]
+  context = native_value/function(context, name, result,
+    [["arena", [:Pointer, [:Record, "ValueArena"], :Mutable], :Borrow], ["value", word, [:Borrow, "arena"]],
+     ["suffix", [:Pointer, :U8, :Const], :Borrow], ["suffix_length", :U64, :Value]],
+    [["checked", [:Record, "HeapStringResult"]], ["original", [:Pointer, header, :Const]], ["header", header], ["updated", header],
+     ["storage", storage], ["backing", [:Pointer, storage, :Mutable]], ["allocation", [:Record, "StringAllocation"]], ["target", [:Pointer, header, :Mutable]],
+     ["scan", [:Record, "Utf8Scan"]], ["condition", :Bool], ["suffix_ascii", :Bool], ["ascii", :Bool],
+     ["length", :U64], ["scalars", :U64], ["suffix_scalars", :U64], ["total_length", :U64], ["total_scalars", :U64],
+     ["byte_start", :U64], ["scalar_start", :U64], ["old_end", :U64], ["scalar_end", :U64], ["new_end", :U64], ["used", :U64],
+     ["capacity", :U64], ["limit", :U64], ["header_size", :U64], ["data", bytes], ["base", bytes], ["destination", bytes], ["raw", bytes],
+     ["source", [:Pointer, :U8, :Const]], ["used_slot", [:Pointer, :U64, :Mutable]], ["packed", word], ["result", result]],
+    ["entry", "bounds", "empty", "validate", "metadata", "capacity", "reuse", "reuse_copy", "claim", "grow", "minimum", "allocate", "retry", "initialize", "copy", "publish", "unchanged", "failure"],
+    [:Allocate, :ReadMemory, :WriteMemory], :Borrow, "arena")
+  context = native_value/block(context, name, "entry", [[:Call, "checked", ["value_as_string", "value"]], [:Field, "condition", ["checked", "ok"]]], :Branch, ["condition", "bounds", "failure"])
+  context = native_value/block(context, name, "bounds", [[:Field, "original", ["checked", "header"]], [:Load, "header", ["original"]], [:Field, "length", ["header", "length"]],
+    [:Subtract, "limit", ["allocation_limit", "length"]], [:Less, "condition", ["limit", "suffix_length"]]], :Branch, ["condition", "failure", "empty"])
+  context = native_value/block(context, name, "empty", [[:Equal, "condition", ["suffix_length", "zero"]]], :Branch, ["condition", "unchanged", "validate"])
+  context = native_value/block(context, name, "validate", [[:Call, "scan", ["utf8_scan", "suffix", "suffix_length"]], [:Field, "condition", ["scan", "ok"]]], :Branch, ["condition", "metadata", "failure"])
+  context = native_value/block(context, name, "metadata", [[:Field, "scalars", ["header", "scalars"]], [:Field, "suffix_scalars", ["scan", "scalars"]], [:Field, "suffix_ascii", ["scan", "ascii"]],
+    [:Add, "total_length", ["length", "suffix_length"]], [:Add, "total_scalars", ["scalars", "suffix_scalars"]], [:Equal, "ascii", ["total_length", "total_scalars"]],
+    [:Field, "data", ["header", "data"]], [:Field, "backing", ["header", "storage"]], [:Load, "storage", ["backing"]], [:Field, "base", ["storage", "data"]],
+    [:Field, "capacity", ["storage", "capacity"]], [:Field, "used", ["storage", "used"]], [:Field, "byte_start", ["header", "byte_start"]], [:Field, "scalar_start", ["header", "scalar_start"]],
+    [:Add, "old_end", ["byte_start", "length"]], [:Add, "scalar_end", ["scalar_start", "scalars"]], [:Equal, "condition", ["used", "old_end"]]], :Branch, ["condition", "capacity", "grow"])
+  context = native_value/block(context, name, "capacity", [[:Subtract, "limit", ["capacity", "used"]], [:Less, "condition", ["limit", "suffix_length"]]], :Branch, ["condition", "grow", "reuse"])
+  context = native_value/block(context, name, "reuse", [[:SizeOf, "header_size", [header]], [:Call, "raw", ["value_arena_allocate", "arena", "header_size"]],
+    [:Equal, "condition", ["raw", "null_bytes"]]], :Branch, ["condition", "failure", "reuse_copy"])
+  context = native_value/block(context, name, "reuse_copy", [[:PointerCast, "target", ["raw"]], [:Offset, "destination", ["base", "old_end"]], [:CopyBytes, :Discard, ["destination", "suffix", "suffix_length"]],
+    [:Add, "new_end", ["old_end", "suffix_length"]], [:Call, "condition", ["value_string_index", "backing", "old_end", "scalar_end", "new_end", "suffix_ascii"]]], :Branch, ["condition", "claim", "failure"])
+  context = native_value/block(context, name, "claim", [[:FieldPointer, "used_slot", ["backing", "used"]], [:Store, :Discard, ["used_slot", "new_end"]]], :Jump, ["publish"])
+  context = native_value/block(context, name, "grow", [[:Add, "capacity", ["length", "length"]], [:Less, "condition", ["capacity", "total_length"]]], :Branch, ["condition", "minimum", "allocate"])
+  context = native_value/block(context, name, "minimum", [[:Copy, "capacity", ["total_length"]]], :Jump, ["allocate"])
+  context = native_value/block(context, name, "allocate", [[:Call, "allocation", ["value_string_allocate", "arena", "total_length", "capacity", "total_scalars", "ascii"]],
+    [:Field, "condition", ["allocation", "ok"]]], :Branch, ["condition", "initialize", "retry"])
+  context = native_value/block(context, name, "retry", [[:Call, "allocation", ["value_string_allocate", "arena", "total_length", "total_length", "total_scalars", "ascii"]],
+    [:Field, "condition", ["allocation", "ok"]]], :Branch, ["condition", "initialize", "failure"])
+  context = native_value/block(context, name, "initialize", [[:Field, "target", ["allocation", "header"]], [:Load, "updated", ["target"]], [:Field, "base", ["updated", "data"]],
+    [:Field, "backing", ["updated", "storage"]], [:Freeze, "source", ["data"]], [:CopyBytes, :Discard, ["base", "source", "length"]],
+    [:Offset, "destination", ["base", "length"]], [:CopyBytes, :Discard, ["destination", "suffix", "suffix_length"]], [:Copy, "data", ["base"]],
+    [:Copy, "byte_start", ["zero"]], [:Copy, "scalar_start", ["zero"]]], :Jump, ["copy"])
+  context = native_value/block(context, name, "copy", [[:Call, "condition", ["value_string_index", "backing", "zero", "zero", "total_length", "ascii"]]], :Branch, ["condition", "publish", "failure"])
+  context = native_value/block(context, name, "publish", [[:Record, "updated", ["data", "total_length", "total_scalars", "ascii", "backing", "byte_start", "scalar_start"]],
+    [:Store, :Discard, ["target", "updated"]], [:PackPointer, "packed", ["target", "tag_string"]], [:Record, "result", ["true", "packed"]]], :Return, ["result"])
+  context = native_value/block(context, name, "unchanged", [[:Record, "result", ["true", "value"]]], :Return, ["result"])
+  context = native_value/block(context, name, "failure", [[:Zero, "result", []]], :Return, ["result"])
+  name = "value_string_concat"
+  context = native_value/function(context, name, result,
+    [["arena", [:Pointer, [:Record, "ValueArena"], :Mutable], :Borrow], ["left", word, [:Borrow, "arena"]], ["right", word, :Borrow]],
+    [["checked", [:Record, "HeapStringResult"]], ["condition", :Bool], ["pointer", [:Pointer, header, :Const]], ["header", header], ["length", :U64],
+     ["data", bytes], ["source", [:Pointer, :U8, :Const]], ["result", result]], ["entry", "append", "failure"], [:Allocate, :ReadMemory, :WriteMemory], :Borrow, "arena")
+  context = native_value/block(context, name, "entry", [[:Call, "checked", ["value_as_string", "right"]], [:Field, "condition", ["checked", "ok"]]], :Branch, ["condition", "append", "failure"])
+  context = native_value/block(context, name, "append", [[:Field, "pointer", ["checked", "header"]], [:Load, "header", ["pointer"]], [:Field, "data", ["header", "data"]],
+    [:Field, "length", ["header", "length"]], [:Freeze, "source", ["data"]], [:Call, "result", ["value_string_append", "arena", "left", "source", "length"]]], :Return, ["result"])
+  return native_value/block(context, name, "failure", [[:Zero, "result", []]], :Return, ["result"])
+end

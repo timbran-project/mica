@@ -10,7 +10,6 @@ verb native_value/heap(input)
   state = native/record_type(state, "ValueMapEntry", [["key", word], ["value", word]])[1]
   state = native/record_type(state, "HeapMap", [["data", [:Pointer, [:Record, "ValueMapEntry"], :Mutable]], ["length", :U64]])[1]
   for spec in [["HeapBytes", [["data", bytes], ["length", :U64]]],
-               ["HeapString", [["data", bytes], ["length", :U64]]],
                ["HeapList", [["data", values], ["length", :U64]]],
                ["HeapRange", [["start", word], ["has_end", :Bool], ["end", word]]],
                ["HeapFrob", [["delegate", :U64], ["value", word]]],
@@ -18,7 +17,7 @@ verb native_value/heap(input)
     state = native/record_type(state, spec[0], spec[1])[1]
   end
   context[:state] = state
-  for spec in [["string", "HeapString", :U8], ["bytes", "HeapBytes", :U8], ["list", "HeapList", word]]
+  for spec in [["bytes", "HeapBytes", :U8], ["list", "HeapList", word]]
     context = native_value/sequence_constructor(context, spec)
     context = native_value/heap_accessor(context, spec[0], [:Record, spec[1]])
   end

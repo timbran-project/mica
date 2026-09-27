@@ -166,6 +166,208 @@ static void comparison_cases(struct mica_ValueArena *arena) {
     assert(frob_a.f_ok && frob_b.f_ok && compare(frob_a.f_value, frob_b.f_value) == -1);
 }
 
+static uint64_t mixed_offset(uint64_t scalar) {
+    const uint64_t offsets[] = {0,1,3,7};
+    return (scalar / 4) * 8 + offsets[scalar % 4];
+}
+
+static void string_cases(struct mica_ValueArena *arena) {
+    const uint8_t pattern[] = {'a',0xc3,0xa9,0xf0,0x9f,0x98,0x80,0};
+    const uint32_t runes[] = {'a',0xe9,0x1f600,0};
+    const uint64_t sizes[] = {1,15,16,17,64};
+    uint8_t text[512];
+    for (uint64_t i=0; i<64; ++i) memcpy(text+8*i,pattern,8);
+    for (size_t n=0; n<sizeof(sizes)/sizeof(sizes[0]); ++n) {
+        uint64_t repeats=sizes[n], count=repeats*4;
+        struct mica_ValueResult string=mica_value_string(arena,text,repeats*8);
+        assert(string.f_ok);
+        const struct mica_HeapString *header=mica_value_as_string(string.f_value).f_header;
+        assert(mica_value_string_length(string.f_value).f_number==count);
+        assert((header->f_storage->f_index!=NULL)==(repeats*8>=128));
+        for(uint64_t i=0;i<=count;++i) {
+            struct mica_IdResult offset=mica_value_string_byte_offset(string.f_value,i);
+            assert(offset.f_ok && offset.f_number==mixed_offset(i));
+            struct mica_RuneResult rune=mica_value_string_scalar_at(string.f_value,i);
+            assert(rune.f_ok==(i<count));
+            if(rune.f_ok) assert(rune.f_rune==runes[i%4]);
+        }
+        assert(!mica_value_string_byte_offset(string.f_value,count+1).f_ok);
+        assert(!mica_value_string_byte_offset(string.f_value,UINT64_MAX).f_ok);
+        struct mica_ValueResult slice=mica_value_string_slice(arena,string.f_value,1,count-1);
+        assert(slice.f_ok);
+        const struct mica_HeapString *view=mica_value_as_string(slice.f_value).f_header;
+        assert(view->f_storage==header->f_storage && view->f_data==header->f_data+1);
+        for(uint64_t i=0;i<=count-2;++i) {
+            struct mica_IdResult offset=mica_value_string_byte_offset(slice.f_value,i);
+            assert(offset.f_ok && offset.f_number==mixed_offset(i+1)-1);
+        }
+        struct mica_ValueResult nested=mica_value_string_slice(arena,slice.f_value,1,count-2);
+        assert(nested.f_ok && mica_value_string_scalar_at(nested.f_value,0).f_rune==0x1f600);
+        struct mica_ValueResult ascii=mica_value_string_slice(arena,string.f_value,0,1);
+        assert(ascii.f_ok && mica_value_as_string(ascii.f_value).f_header->f_ascii);
+        struct mica_ValueResult empty=mica_value_string_slice(arena,string.f_value,count,count);
+        assert(empty.f_ok && mica_value_string_length(empty.f_value).f_number==0);
+        assert(!mica_value_string_scalar_at(empty.f_value,0).f_ok);
+        assert(!mica_value_string_slice(arena,string.f_value,2,1).f_ok);
+        assert(!mica_value_string_slice(arena,string.f_value,0,count+1).f_ok);
+        assert(memcmp(header->f_data,text,repeats*8)==0);
+    }
+    assert(!mica_value_string_length(integer(1)).f_ok);
+    assert(!mica_value_string_scalar_at(integer(1),0).f_ok);
+}
+
+static void append_cases(struct mica_ValueArena *arena) {
+    uint8_t ascii[129]; memset(ascii,'a',sizeof(ascii));
+    struct mica_ValueResult original=mica_value_string(arena,ascii,sizeof(ascii));
+    assert(original.f_ok);
+    const uint8_t emoji[]={0xf0,0x9f,0x98,0x80};
+    struct mica_ValueResult first=mica_value_string_append(arena,original.f_value,emoji,4);
+    assert(first.f_ok);
+    const struct mica_HeapString *first_header=mica_value_as_string(first.f_value).f_header;
+    assert(first_header->f_storage->f_capacity>first_header->f_length);
+    struct mica_ValueResult second=mica_value_string_append(arena,first.f_value,(const uint8_t *)"b",1);
+    assert(second.f_ok && mica_value_as_string(second.f_value).f_header->f_storage==first_header->f_storage);
+    struct mica_ValueResult branch=mica_value_string_append(arena,first.f_value,(const uint8_t *)"c",1);
+    assert(branch.f_ok && mica_value_as_string(branch.f_value).f_header->f_storage!=first_header->f_storage);
+    assert(mica_value_string_scalar_at(second.f_value,130).f_rune=='b');
+    assert(mica_value_string_scalar_at(branch.f_value,130).f_rune=='c');
+    assert(mica_value_string_length(first.f_value).f_number==130);
+    assert(!mica_value_string_scalar_at(first.f_value,130).f_ok);
+    assert(mica_value_string_scalar_at(first.f_value,129).f_rune==0x1f600);
+    assert(mica_value_string_length(original.f_value).f_number==129);
+    assert(mica_value_string_append(arena,first.f_value,NULL,0).f_value==first.f_value);
+    assert(!mica_value_string_append(arena,first.f_value,NULL,1).f_ok);
+    const uint8_t invalid[]={0xed,0xa0,0x80};
+    uint64_t used=first_header->f_storage->f_used;
+    assert(!mica_value_string_append(arena,first.f_value,invalid,sizeof(invalid)).f_ok);
+    assert(first_header->f_storage->f_used==used);
+    assert(!mica_value_string_append(arena,first.f_value,emoji,UINT64_MAX).f_ok);
+    // Append overlapping bytes from the same backing storage.
+    const struct mica_HeapString *second_header=mica_value_as_string(second.f_value).f_header;
+    struct mica_ValueResult overlap=mica_value_string_append(arena,second.f_value,second_header->f_data+127,7);
+    assert(overlap.f_ok && mica_value_string_length(overlap.f_value).f_number==135);
+    assert(mica_value_string_scalar_at(overlap.f_value,133).f_rune==0x1f600);
+    struct mica_ValueResult slice=mica_value_string_slice(arena,overlap.f_value,128,135);
+    assert(slice.f_ok);
+    struct mica_ValueResult slice_append=mica_value_string_append(arena,slice.f_value,emoji,4);
+    assert(slice_append.f_ok && mica_value_string_length(slice_append.f_value).f_number==8);
+    assert(mica_value_string_scalar_at(slice_append.f_value,7).f_rune==0x1f600);
+    assert(mica_value_string_length(slice.f_value).f_number==7);
+    mica_type_Value versions[100]; versions[0]=original.f_value;
+    for(unsigned i=1;i<100;++i) {
+        struct mica_ValueResult next=mica_value_string_append(arena,versions[i-1],emoji,4);
+        assert(next.f_ok); versions[i]=next.f_value;
+    }
+    for(unsigned i=0;i<100;++i) {
+        assert(mica_value_string_length(versions[i]).f_number==129+i);
+        assert(mica_value_string_byte_offset(versions[i],129+i).f_number==129+4*i);
+        for(unsigned j=0;j<i;++j) assert(mica_value_string_scalar_at(versions[i],129+j).f_rune==0x1f600);
+    }
+    struct mica_ValueResult joined=mica_value_string_concat(arena,first.f_value,first.f_value);
+    assert(joined.f_ok && mica_value_string_length(joined.f_value).f_number==260);
+    assert(!mica_value_string_concat(arena,first.f_value,integer(1)).f_ok);
+    assert(!mica_value_string_concat(arena,integer(1),first.f_value).f_ok);
+    // Header allocation can fail even when backing storage has spare capacity.
+    struct mica_ValueArena failed={0}; fail_allocation=true;
+    assert(!mica_value_string_append(&failed,versions[99],emoji,4).f_ok);
+    fail_allocation=false;
+    assert(failed.f_head==NULL && mica_value_string_length(versions[99]).f_number==228);
+}
+
+static void search_cases(struct mica_ValueArena *arena) {
+    const uint8_t bytes[]={'a',0xc3,0xa9,0xf0,0x9f,0x98,0x80,0};
+    uint8_t text[1024];
+    for(unsigned i=0;i<128;i++) memcpy(text+i*8,bytes,8);
+    struct mica_ValueResult hay=mica_value_string(arena,text,sizeof(text));
+    assert(hay.f_ok);
+    // Compare every small substring against a scalar-by-scalar search oracle.
+    for(uint64_t begin=0;begin<8;begin++) for(uint64_t width=0;width<=8;width++) {
+        struct mica_ValueResult needle=mica_value_string_slice(arena,hay.f_value,begin,begin+width);
+        assert(needle.f_ok);
+        for(uint64_t start=0;start<=514;start++) {
+            uint64_t expected=start;
+            for(;expected+width<=512;expected++) {
+                uint64_t j=0;
+                for(;j<width;j++) if(mica_value_string_scalar_at(hay.f_value,expected+j).f_rune!=
+                    mica_value_string_scalar_at(needle.f_value,j).f_rune) break;
+                if(j==width) break;
+            }
+            struct mica_IdResult found=mica_value_string_find(hay.f_value,needle.f_value,start);
+            assert(found.f_ok==(expected+width<=512));
+            if(found.f_ok) assert(found.f_number==expected);
+        }
+    }
+    struct mica_ValueResult missing=mica_value_string(arena,(const uint8_t *)"aaaaab",6);
+    assert(missing.f_ok && !mica_value_string_find(hay.f_value,missing.f_value,0).f_ok);
+    struct mica_ValueResult ascii=mica_value_string(arena,(const uint8_t *)"aaaaaaaab",9);
+    assert(ascii.f_ok && mica_value_string_find(ascii.f_value,missing.f_value,0).f_number==3);
+    assert(!mica_value_string_find(hay.f_value,missing.f_value,UINT64_MAX).f_ok);
+    assert(!mica_value_string_find(integer(1),missing.f_value,0).f_ok);
+    assert(!mica_value_string_find(hay.f_value,integer(1),0).f_ok);
+}
+
+static void utf8_cases(struct mica_ValueArena *arena) {
+    const struct { uint32_t scalar; uint8_t bytes[4]; uint64_t width; } valid[] = {
+        {0, {0}, 1}, {0x7f, {0x7f}, 1}, {0x80, {0xc2, 0x80}, 2},
+        {0x7ff, {0xdf, 0xbf}, 2}, {0x800, {0xe0, 0xa0, 0x80}, 3},
+        {0xd7ff, {0xed, 0x9f, 0xbf}, 3}, {0xe000, {0xee, 0x80, 0x80}, 3},
+        {0xffff, {0xef, 0xbf, 0xbf}, 3}, {0x10000, {0xf0, 0x90, 0x80, 0x80}, 4},
+        {0x10ffff, {0xf4, 0x8f, 0xbf, 0xbf}, 4}, {0xfffd, {0xef, 0xbf, 0xbd}, 3}
+    };
+    for (size_t i = 0; i < sizeof(valid) / sizeof(valid[0]); ++i) {
+        struct mica_Utf8Decode decoded = mica_utf8_decode(valid[i].bytes, valid[i].width);
+        assert(decoded.f_ok && decoded.f_rune == valid[i].scalar && decoded.f_width == valid[i].width);
+        struct mica_Utf8Encode encoded = mica_utf8_encode(valid[i].scalar);
+        assert(encoded.f_ok && encoded.f_width == valid[i].width);
+        assert(memcmp(encoded.f_bytes.elements, valid[i].bytes, sizeof(valid[i].bytes)) == 0);
+        struct mica_Utf8Scan scan = mica_utf8_scan(valid[i].bytes, valid[i].width);
+        assert(scan.f_ok && scan.f_scalars == 1 && scan.f_ascii == (valid[i].scalar < 128));
+        for (uint64_t n = 0; n < valid[i].width; ++n) {
+            assert(!mica_utf8_decode(valid[i].bytes, n).f_ok);
+        }
+    }
+    const struct { uint8_t bytes[4]; uint64_t width; } invalid[] = {
+        {{0x80},1}, {{0xbf},1}, {{0xc0,0x80},2}, {{0xc1,0xbf},2},
+        {{0xe0,0x9f,0xbf},3}, {{0xed,0xa0,0x80},3}, {{0xed,0xbf,0xbf},3},
+        {{0xf0,0x8f,0xbf,0xbf},4}, {{0xf4,0x90,0x80,0x80},4}, {{0xf5,0x80,0x80,0x80},4},
+        {{0xff},1}, {{0xc2,0x7f},2}, {{0xe1,0x80,0xc0},3}, {{0xf1,0x80,0x80,0xff},4}
+    };
+    struct mica_ValueArenaBlock *head = arena->f_head;
+    uint64_t used = head->f_used;
+    for (size_t i = 0; i < sizeof(invalid) / sizeof(invalid[0]); ++i) {
+        struct mica_Utf8Decode decoded = mica_utf8_decode(invalid[i].bytes, invalid[i].width);
+        assert(!decoded.f_ok && decoded.f_width == 0 && decoded.f_rune == 0);
+        assert(!mica_utf8_scan(invalid[i].bytes, invalid[i].width).f_ok);
+        assert(!mica_value_string(arena, invalid[i].bytes, invalid[i].width).f_ok);
+        assert(arena->f_head == head && head->f_used == used);
+    }
+    uint8_t aligned_test[34]; memset(aligned_test,'a',sizeof(aligned_test));
+    for(uint64_t length=0;length<=32;length++) {
+        struct mica_Utf8Scan scan=mica_utf8_scan(aligned_test+1,length);
+        assert(scan.f_ok && scan.f_ascii && scan.f_scalars==length);
+        for(uint64_t bad=0;bad<length;bad++) {
+            aligned_test[bad+1]=0xff;
+            assert(!mica_utf8_scan(aligned_test+1,length).f_ok);
+            aligned_test[bad+1]='a';
+        }
+    }
+    const uint8_t bad_tail[] = {'a',0xff};
+    assert(mica_utf8_decode(bad_tail,2).f_ok && !mica_utf8_scan(bad_tail,2).f_ok);
+    assert(!mica_utf8_decode(NULL,1).f_ok && !mica_utf8_decode(NULL,0).f_ok);
+    assert(!mica_utf8_scan(NULL,1).f_ok);
+    assert(mica_utf8_scan(NULL,0).f_ok && mica_utf8_scan(NULL,0).f_ascii);
+    for (uint32_t scalar = 0; scalar <= 0x10ffff; ++scalar) {
+        bool valid_scalar = scalar < 0xd800 || scalar >= 0xe000;
+        struct mica_RuneResult rune = mica_unicode_scalar(scalar);
+        struct mica_Utf8Encode encoded = mica_utf8_encode(scalar);
+        assert(rune.f_ok == valid_scalar && encoded.f_ok == valid_scalar);
+        if (!valid_scalar) continue;
+        struct mica_Utf8Decode decoded = mica_utf8_decode(encoded.f_bytes.elements, encoded.f_width);
+        assert(decoded.f_ok && decoded.f_rune == scalar && decoded.f_width == encoded.f_width);
+    }
+    assert(!mica_utf8_encode(UINT32_MAX).f_ok && !mica_unicode_scalar(0x110000).f_ok);
+}
+
 int main(void) {
     const int64_t minimum = -(INT64_C(1) << 55);
     const int64_t maximum = (INT64_C(1) << 55) - 1;
@@ -256,6 +458,7 @@ int main(void) {
     original[0] = 0;
     struct mica_HeapStringResult extracted = mica_value_as_string(text.f_value);
     assert(extracted.f_ok && extracted.f_header->f_length == 4);
+    assert(extracted.f_header->f_scalars == 3 && !extracted.f_header->f_ascii);
     assert(extracted.f_header->f_data[0] == 0xc3 && extracted.f_header->f_data[2] == 0);
     assert(!mica_value_as_bytes(text.f_value).f_ok);
     assert(!mica_value_string(&arena, NULL, 1).f_ok);
@@ -279,6 +482,10 @@ int main(void) {
     struct mica_ValueResult error = mica_value_error(&arena, 17, true, text.f_value, true, list.f_value);
     assert(error.f_ok && mica_value_as_error(error.f_value).f_header->f_code == 17);
     assert(!mica_value_error(&arena, 17, true, integer(3), false, 0).f_ok);
+    utf8_cases(&arena);
+    string_cases(&arena);
+    append_cases(&arena);
+    search_cases(&arena);
     comparison_cases(&arena);
     map_cases(&arena);
     mica_value_arena_release(&arena);

@@ -155,6 +155,67 @@ static struct Outcome run(const struct Prepared *p, struct mica_ValueArena *aren
     case 7: result=mica_value_checked_rem(a,b); break;
     case 8: result=mica_value_map_get(a,b); break;
     case 9: result=mica_value_map(arena,p->entries,p->count); break;
+    case 10: {
+        struct mica_HeapBytesResult bytes=mica_value_as_bytes(a);
+        if(bytes.f_ok) result=mica_value_string(arena,bytes.f_header->f_data,bytes.f_header->f_length);
+        break;
+    }
+    case 11: {
+        struct mica_IntResult number=mica_value_as_int(a);
+        if(!number.f_ok || number.f_number<0 || (uint64_t)number.f_number>UINT32_MAX) break;
+        struct mica_Utf8Encode encoded=mica_utf8_encode((uint32_t)number.f_number);
+        if(encoded.f_ok) result=mica_value_string(arena,encoded.f_bytes.elements,encoded.f_width);
+        break;
+    }
+    case 12: {
+        struct mica_IdResult length=mica_value_string_length(a);
+        if(length.f_ok && length.f_number<=INT64_MAX) result=mica_value_int((int64_t)length.f_number);
+        break;
+    }
+    case 13: case 15: {
+        struct mica_IntResult index=mica_value_as_int(b);
+        if(!index.f_ok || index.f_number<0) break;
+        if(p->op==13) {
+            struct mica_RuneResult rune=mica_value_string_scalar_at(a,(uint64_t)index.f_number);
+            if(rune.f_ok) result=mica_value_int(rune.f_rune);
+        } else {
+            struct mica_IdResult offset=mica_value_string_byte_offset(a,(uint64_t)index.f_number);
+            if(offset.f_ok && offset.f_number<=INT64_MAX) result=mica_value_int((int64_t)offset.f_number);
+        }
+        break;
+    }
+    case 14: {
+        struct mica_HeapListResult bounds=mica_value_as_list(b);
+        if(!bounds.f_ok || bounds.f_header->f_length!=2) break;
+        struct mica_IntResult start=mica_value_as_int(bounds.f_header->f_data[0]);
+        struct mica_IntResult end=mica_value_as_int(bounds.f_header->f_data[1]);
+        if(start.f_ok && end.f_ok && start.f_number>=0 && end.f_number>=0)
+            result=mica_value_string_slice(arena,a,(uint64_t)start.f_number,(uint64_t)end.f_number);
+        break;
+    }
+    case 16: case 17: {
+        if(p->op==17) { result=mica_value_string_concat(arena,a,b); break; }
+        struct mica_HeapStringResult suffix=mica_value_as_string(b);
+        if(suffix.f_ok) result=mica_value_string_append(arena,a,suffix.f_header->f_data,suffix.f_header->f_length);
+        break;
+    }
+    case 18: {
+        struct mica_HeapListResult args=mica_value_as_list(b);
+        if(!args.f_ok || args.f_header->f_length!=2) break;
+        struct mica_IntResult start=mica_value_as_int(args.f_header->f_data[1]);
+        if(!start.f_ok || start.f_number<0) break;
+        struct mica_IdResult found=mica_value_string_find(a,args.f_header->f_data[0],(uint64_t)start.f_number);
+        if(found.f_ok && found.f_number<=INT64_MAX) result=mica_value_int((int64_t)found.f_number);
+        break;
+    }
+    case 19: {
+        struct mica_HeapListResult parts=mica_value_as_list(b);
+        if(!parts.f_ok) break;
+        result=(struct mica_ValueResult){true,a};
+        for(uint64_t i=0;i<parts.f_header->f_length && result.f_ok;i++)
+            result=mica_value_string_concat(arena,result.f_value,parts.f_header->f_data[i]);
+        break;
+    }
     default: fail("unknown operation");
     }
     return (struct Outcome){false,result.f_ok,0,result.f_value};
