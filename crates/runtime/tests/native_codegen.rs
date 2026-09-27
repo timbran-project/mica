@@ -22,6 +22,7 @@ const SOURCES: &[&str] = &[
     include_str!("../../../apps/native/check.mica"),
     include_str!("../../../apps/native/flow.mica"),
     include_str!("../../../apps/native/c_syntax.mica"),
+    include_str!("../../../apps/native/c_scopes.mica"),
     include_str!("../../../apps/native/c_flow.mica"),
     include_str!("../../../apps/native/c.mica"),
     include_str!("../../../apps/native/examples/scalars.mica"),
@@ -1108,6 +1109,69 @@ fn structured_builders_preserve_control_flow_and_notes() {
             .unwrap();
         assert!(!shared.contains("goto "), "{shared}");
         assert_eq!(shared.matches("mica_foreign_structured_tick()").count(), 1);
+        let body = |name: &str| {
+            generated
+                .split(&format!(" mica_{name}("))
+                .nth(1)
+                .unwrap()
+                .split_once(" {\n")
+                .unwrap()
+                .1
+                .split("\n}")
+                .next()
+                .unwrap()
+        };
+        let branch = body("scoped_branch");
+        assert!(
+            branch.starts_with("  uint64_t v_result;\n  if (v_choice) {"),
+            "{branch}"
+        );
+        assert!(
+            branch.contains("\n    uint64_t v_left_value = "),
+            "{branch}"
+        );
+        assert!(
+            branch.contains("} else {\n    uint64_t v_right_value = "),
+            "{branch}"
+        );
+        let scoped_loop = body("scoped_loop");
+        assert!(
+            scoped_loop.starts_with("  uint64_t v_i = "),
+            "{scoped_loop}"
+        );
+        assert!(
+            scoped_loop.contains("while (v_i < v_limit) {\n    uint64_t v_iteration_value = "),
+            "{scoped_loop}"
+        );
+        assert!(!scoped_loop.contains("bool v_"), "{scoped_loop}");
+        let header = body("scoped_header");
+        assert!(header.contains("while (true) {\n    uint64_t "), "{header}");
+        assert_eq!(header.matches("mica_foreign_structured_tick()").count(), 1);
+        let irreducible = body("irreducible");
+        assert!(
+            irreducible.contains("\n  bool v_condition;\n  if (v_choice) {"),
+            "{irreducible}"
+        );
+        let nested = body("structured_nested");
+        assert!(nested.contains("\n    uint64_t v_j = "), "{nested}");
+        let switch = body("scoped_switch");
+        for (name, value) in [("one", 1), ("two", 2), ("three", 3)] {
+            assert!(
+                switch.contains(&format!(
+                    "case UINT64_C(0x{value:016x}): {{\n      uint64_t v_case_{name} = "
+                )),
+                "{switch}"
+            );
+        }
+        let addressed = body("scoped_address");
+        assert!(
+            addressed.contains("  uint64_t v_left_storage, v_right_storage;"),
+            "{addressed}"
+        );
+        assert!(
+            !addressed.contains("\n    uint64_t v_left_storage"),
+            "{addressed}"
+        );
         assert!(!generated.contains("\n#error injected"));
         let reordered = eval(
             &mut runner,
@@ -1159,6 +1223,8 @@ int main(void) {{
         assert(mica_structured_dispatch(limit) == (limit >= 1 && limit <= 3 ? limit : 10));
         assert(mica_structured_ladder(limit) == (limit == 0 ? 11 : limit == 1 ? 12 : 13));
         assert(mica_structured_loop_switch(limit) == (limit >= 2 ? 11 : 0));
+        assert(mica_scoped_loop(limit) == limit * (limit + 1) / 2);
+        assert(mica_scoped_switch(limit) == (limit >= 1 && limit <= 3 ? limit + 10 : 0));
         assert(mica_irreducible(limit, true) == (limit ? limit : 1));
         assert(mica_irreducible(limit, false) == (limit ? limit : 1));
         assert(mica_cycle_a(limit) == (limit % 2 ? 2 : 1));
@@ -1166,6 +1232,10 @@ int main(void) {{
     }}
     assert(mica_structured_choice(true) == 1);
     assert(mica_structured_choice(false) == 2);
+    assert(mica_scoped_branch(true) == 13);
+    assert(mica_scoped_branch(false) == 15);
+    assert(mica_scoped_address(true) == 1);
+    assert(mica_scoped_address(false) == 2);
     assert(mica_structured_order() == UINT64_MAX && calls == 2);
     assert(mica_structured_zero(true) == 0 && calls == 3);
     assert(mica_structured_zero(false) == 0 && calls == 4);
@@ -1176,6 +1246,8 @@ int main(void) {{
     assert(mica_structured_shared_tail(0) == 11 && calls == 1);
     assert(mica_structured_shared_tail(2) == 0 && calls == 1);
     assert(mica_structured_shared_tail(3) == 12 && calls == 2);
+    calls = 0;
+    assert(mica_scoped_header() == 2 && calls == 3);
     return 0;
 }}
 "#

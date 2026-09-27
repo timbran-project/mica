@@ -124,5 +124,46 @@ verb native/control_examples(state: map, constants: map, tick: int) -> map
       [:Less, names["condition"], [names["i"], names["limit"]]]], :Branch, [names["condition"], names[spec[1]], names["done"]])
   end
   result = native/terminate(result, names["done"], :Return, [names["i"]])
+  result = native/scope_examples(result, constants, tick)
+  return result
+end
+
+verb native/scope_examples(state: map, constants: map, tick: int) -> map
+  let context: map = native/module_context(state, constants)
+  context[:functions] = {"tick" -> tick}
+  context = native/declare_function(context, "scoped_branch", :U64, [["choice", :Bool, :Value]], [["result", :U64]], [], :Value, "")
+  context = native/define_function(context, "scoped_branch", [
+    [:If, "choice", [[:Let, "left_value", :U64, [:Add, "one", "two"]], [:Set, "result", "left_value"]],
+      [[:Let, "right_value", :U64, [:Add, "two", "three"]], [:Set, "result", "right_value"]]],
+    [:Set, "result", [:Add, "result", "ten"]], [:Return, "result"]])
+  context = native/declare_function(context, "scoped_loop", :U64, [["limit", :U64, :Value]], [], [], :Value, "")
+  context = native/define_function(context, "scoped_loop", [
+    [:Let, "i", :U64, "zero"], [:Let, "total", :U64, "zero"],
+    [:While, [:Less, "i", "limit"], [
+      [:Let, "iteration_value", :U64, [:Add, "i", "one"]],
+      [:Set, "total", [:Add, "total", "iteration_value"]], [:Set, "i", "iteration_value"]]],
+    [:Return, "total"]])
+  context = native/declare_function(context, "scoped_header", :U64, [], [], [:WriteMemory], :Value, "")
+  context = native/define_function(context, "scoped_header", [
+    [:Let, "total", :U64, "zero"],
+    [:While, [:Less, [:Expr, :U64, [:Call, "tick"]], "three"], [[:Set, "total", [:Add, "total", "one"]]]],
+    [:Return, "total"]])
+  context = native/declare_function(context, "scoped_switch", :U64, [["limit", :U64, :Value]], [["result", :U64]], [], :Value, "")
+  let cases: list = []
+  for name in ["one", "two", "three"]
+    let local_name: string = string_concat("case_", name)
+    cases = [@cases, native/case_arm(name, [[:Let, local_name, :U64, [:Add, "limit", "ten"]], [:Set, "result", local_name]])]
+  end
+  context = native/define_function(context, "scoped_switch", [
+    native/switch_statement(:U64, "limit", cases, [[:Set, "result", "zero"]]), [:Return, "result"]])
+  // The chosen storage must survive leaving the branch where its address was
+  // taken. Direct-use scoping alone would leave a dangling pointer here.
+  context = native/declare_function(context, "scoped_address", :U64, [["choice", :Bool, :Value]],
+    [["pointer", [:Pointer, :U64, :Const]]], [:ReadMemory], :Value, "")
+  context = native/define_function(context, "scoped_address", [
+    [:If, "choice", [[:Let, "left_storage", :U64, "one"], [:Set, "pointer", [:Address, "left_storage"]]],
+      [[:Let, "right_storage", :U64, "two"], [:Set, "pointer", [:Address, "right_storage"]]]],
+    [:Return, [:Load, "pointer"]]])
+  let result: map = context[:state]
   return result
 end

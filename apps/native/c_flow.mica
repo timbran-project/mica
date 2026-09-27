@@ -79,7 +79,7 @@ verb native/flow_switch(index: map, flow: map, first: int) -> map
   if len(cases) < 3
     return {}
   end
-  return {:value -> native/c_value(index, selector), :cases -> cases, :fallback -> fallback, :consumed -> consumed}
+  return {:value -> native/c_value(index, selector), :references -> [selector], :cases -> cases, :fallback -> fallback, :consumed -> consumed}
 end
 
 verb native/flow_seen(input: map, block: int) -> map
@@ -93,14 +93,14 @@ end
 verb native/c_block_nodes(index: map, rows: list) -> list
   let nodes: list = []
   for row in rows
-    nodes = [@nodes, @[native/c_text(note, false) for note in native/c_notes(index, row[0], "")], native/c_text(native/c_statement(index, row), false)]
+    nodes = [@nodes, @[native/c_text(note, false) for note in native/c_notes(index, row[0], "")], native/c_instruction(row)]
   end
   return nodes
 end
 
 // Emit a region up to its postdominator. A visited block remains an explicit
 // transfer: this preserves shared tails and irreducible cycles without code
-// explosion. Function-wide locals make the remaining label entries legal C.
+// explosion. Declaration placement follows the resulting C scopes.
 verb native/c_region(index: map, flow: map, input: map, start, stop, enter_loop: bool) -> list
   let context: map = input
   let nodes: list = []
@@ -148,12 +148,14 @@ verb native/c_region(index: map, flow: map, input: map, start, stop, enter_loop:
     let rows: list = flow[:instructions][block]
     let comparison: list = native/flow_comparison(index, flow, block)
     let condition: string = ""
+    let references: list = []
     if len(comparison) > 0
       let operator: string = " == "
       if comparison[3] == :Less
         operator = " < "
       end
       condition = string_concat(native/c_value(index, comparison[5][0]), operator, native/c_value(index, comparison[5][1]))
+      references = comparison[5]
       rows = [row for row in rows if row[0] != comparison[0]]
       nodes = [@nodes, @[native/c_text(note, false) for note in native/c_notes(index, comparison[0], "")]]
     end
@@ -163,7 +165,7 @@ verb native/c_region(index: map, flow: map, input: map, start, stop, enter_loop:
       if len(term[2]) > 0
         text = string_concat("return ", native/c_value(index, term[2][0]), ";")
       end
-      return [[@nodes, native/c_text(text, true)], context]
+      return [[@nodes, native/c_references(native/c_text(text, true), term[2])], context]
     end
     if term[1] == :Jump
       block = term[2][0]
@@ -171,6 +173,7 @@ verb native/c_region(index: map, flow: map, input: map, start, stop, enter_loop:
     end
     if condition == ""
       condition = native/c_value(index, term[2][0])
+      references = [term[2][0]]
     end
     let selection: map = native/flow_switch(index, flow, block)
     let join = flow[:joins][block]
@@ -212,12 +215,12 @@ verb native/c_region(index: map, flow: map, input: map, start, stop, enter_loop:
       let [fallback: list, following: map] = native/c_region(index, flow, context, selection[:fallback], arm_stop, false)
       context = following
       context[:switch_depth] = context[:switch_depth] - 1
-      nodes = [@nodes, native/c_switch(selection[:value], cases, fallback)]
+      nodes = [@nodes, native/c_references(native/c_switch(selection[:value], cases, fallback), selection[:references])]
     else
       let [yes: list, after_yes: map] = native/c_region(index, flow, context, term[2][1], arm_stop, false)
       let [no: list, after_no: map] = native/c_region(index, flow, after_yes, term[2][2], arm_stop, false)
       context = after_no
-      nodes = [@nodes, native/c_if(condition, yes, no)]
+      nodes = [@nodes, native/c_references(native/c_if(condition, yes, no), references)]
     end
     block = join
   end
@@ -238,6 +241,9 @@ verb native/c_function_body(state: map, index: map, fn_id: int) -> list
       context = following
     end
   end
-  let lines: list = native/c_render_tree(index, nodes, native/c_tree_labels(nodes, {}), "  ")
+  let labels: map = native/c_tree_labels(nodes, {})
+  nodes = native/c_normalize_tree(nodes, labels)
+  nodes = native/c_scope_declarations(index, nodes)
+  let lines: list = native/c_render_tree(index, nodes, labels, "  ")
   return lines
 end

@@ -192,9 +192,9 @@ verb native/c_local_declarations(index: map, locals: list) -> list
   let groups: map = {}
   let lines: list = []
   for row in locals
-    let notes: list = native/c_notes(index, row[0], "  ")
+    let notes: list = native/c_notes(index, row[0], "")
     if len(notes) > 0
-      lines = [@lines, @notes, string_concat("  ", native/c_type(row[3]), " v_", row[2], ";")]
+      lines = [@lines, @notes, string_concat(native/c_type(row[3]), " v_", row[2], ";")]
     else
       let spelling: string = native/c_type(row[3])
       if !map_contains_key(groups, spelling)
@@ -209,7 +209,7 @@ verb native/c_local_declarations(index: map, locals: list) -> list
     let group: list = groups[spelling]
     let [base: string, prefix: string] = native/c_declarator(group[0])
     let names: list = [string_concat(prefix, "v_", name) for name in group[1]]
-    lines = [@lines, string_concat("  ", base, " ", string_join(names, ", "), ";")]
+    lines = [@lines, string_concat(base, " ", string_join(names, ", "), ";")]
   end
   return lines
 end
@@ -231,8 +231,6 @@ verb native/c_definitions(state, index)
       continue
     end
     lines = [@lines, "", @native/c_notes(index, fn_id, ""), @native/c_contract_notes(state, index, fn_id), string_concat(native/c_signature(state, index, fn_row), " {")]
-    let locals = native/ordered(native/owned(state[:locals], 1, fn_id), 2)
-    lines = [@lines, @native/c_local_declarations(index, locals)]
     lines = [@lines, @native/c_function_body(state, index, fn_id)]
     lines = [@lines, "}"]
   end

@@ -1,0 +1,178 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+// Each path contains [scope, statement position] from the function body to
+// one reference. Their common prefix selects the narrowest enclosing scope;
+// the earliest position there keeps declarations before every read and write.
+verb native/c_common_path(previous: list, path: list) -> list
+  let common: list = []
+  let depth: int = 0
+  while depth < len(previous) && depth < len(path) && previous[depth][0] == path[depth][0]
+    let position: int = previous[depth][1]
+    if path[depth][1] < position
+      position = path[depth][1]
+    end
+    common = [@common, [path[depth][0], position]]
+    depth = depth + 1
+  end
+  return common
+end
+
+verb native/c_reference_path(paths: map, id: int, path: list) -> map
+  let result: map = paths
+  let common: list = path
+  if map_contains_key(paths, id)
+    common = native/c_common_path(paths[id], path)
+  end
+  result[id] = common
+  return result
+end
+
+verb native/c_collect_scopes(index: map, nodes: list, path: list, input: map) -> list
+  let context: map = input
+  let scope: int = context[:next]
+  context[:next] = scope + 1
+  let result: list = []
+  let position: int = 0
+  for input_node in nodes
+    let node: map = input_node
+    let location: list = [@path, [scope, position]]
+    node[:location] = [scope, position]
+    if node[:kind] == :Label
+      let labels: map = context[:labels]
+      labels[node[:block]] = location
+      context[:labels] = labels
+    end
+    if node[:kind] == :Goto
+      context[:gotos] = [@context[:gotos], [node[:block], location]]
+    end
+    let paths: map = context[:paths]
+    if map_contains_key(node, :references)
+      for id in node[:references]
+        if map_contains_key(index[:variables], id) && index[:variables][id][3] == :Local
+          paths = native/c_reference_path(paths, id, location)
+        end
+      end
+    end
+    // An alias may outlive the last direct reference, including through a
+    // record or a foreign call. Preserve function lifetime for addressed
+    // storage until alias liveness can prove a narrower lifetime safe.
+    if node[:kind] == :Instruction && node[:row][3] == :Address
+      let id: int = node[:row][5][0]
+      if index[:variables][id][3] == :Local
+        paths[id] = [[0, 0]]
+      end
+    end
+    context[:paths] = paths
+    let children: list = []
+    if node[:kind] == :If
+      children = [:yes, :no]
+    end
+    if node[:kind] == :Loop
+      children = [:body]
+    end
+    if node[:kind] == :Switch
+      let cases: list = []
+      for arm in node[:cases]
+        let [body: list, following: map] = native/c_collect_scopes(index, arm[:body], location, context)
+        context = following
+        cases = [@cases, native/c_case(arm[:value], body)]
+      end
+      node[:cases] = cases
+      children = [:fallback]
+    end
+    for child in children
+      let [body: list, following: map] = native/c_collect_scopes(index, node[child], location, context)
+      context = following
+      node[child] = body
+    end
+    result = [@result, node]
+    position = position + 1
+  end
+  return [result, context]
+end
+
+verb native/c_place_declarations(index: map, nodes: list, declarations: map) -> list
+  let result: list = []
+  for input in nodes
+    let node: map = input
+    let location: list = node[:location]
+    if map_contains_key(declarations, location)
+      let locals: list = declarations[location]
+      if node[:kind] == :Instruction && node[:row][4] != :Discard
+        let row: list = node[:row]
+        let destination: int = row[4]
+        // Some operations expand into guards and multiple C statements.
+        // Fuse only a leading assignment, leaving those expansions intact.
+        let prefix: string = string_concat(native/c_value(index, destination), " = ")
+        let statement: string = native/c_statement(index, row)
+        if native/contains([local[0] for local in locals], destination) && !native/contains(native/reads(row), destination) && string_len(statement) >= string_len(prefix) && string_slice(statement, 0, string_len(prefix)) == prefix
+          node[:initialize] = true
+          locals = [local for local in locals if local[0] != destination]
+        end
+      end
+      result = [@result, @[native/c_text(line, false) for line in native/c_local_declarations(index, locals)]]
+      if map_contains_key(node, :initialize)
+        result = [@result, @[native/c_text(note, false) for note in native/c_notes(index, node[:row][4], "")]]
+      end
+    end
+    let children: list = []
+    if node[:kind] == :If
+      children = [:yes, :no]
+    end
+    if node[:kind] == :Loop
+      children = [:body]
+    end
+    if node[:kind] == :Switch
+      let cases: list = []
+      for arm in node[:cases]
+        cases = [@cases, native/c_case(arm[:value], native/c_place_declarations(index, arm[:body], declarations))]
+      end
+      node[:cases] = cases
+      children = [:fallback]
+    end
+    for child in children
+      node[child] = native/c_place_declarations(index, node[child], declarations)
+    end
+    result = [@result, node]
+  end
+  return result
+end
+
+verb native/c_scope_declarations(index: map, nodes: list) -> list
+  let [scoped: list, context: map] = native/c_collect_scopes(index, nodes, [], {:next -> 0, :paths -> {}, :labels -> {}, :gotos -> []})
+  // A transfer into a nested scope can re-enter it after an earlier exit.
+  // Keep its locals alive across that edge, even when all direct references
+  // are inside the scope. A common lexical ancestor alone is insufficient.
+  let lifts: map = {}
+  for transfer in context[:gotos]
+    let target: list = context[:labels][transfer[0]]
+    let path: list = native/c_common_path(target, transfer[1])
+    let depth: int = len(path)
+    while depth < len(target)
+      lifts = native/c_reference_path(lifts, target[depth][0], path)
+      depth = depth + 1
+    end
+  end
+  let declarations: map = {}
+  for id, original in context[:paths]
+    let path: list = original
+    for scope in original
+      if map_contains_key(lifts, scope[0])
+        path = native/c_common_path(path, lifts[scope[0]])
+      end
+    end
+    let location: list = path[len(path) - 1]
+    let rows: list = []
+    if map_contains_key(declarations, location)
+      rows = declarations[location]
+    end
+    let variable: list = index[:variables][id]
+    declarations[location] = [@rows, [id, variable[0], variable[1], variable[2]]]
+  end
+  for location, rows in declarations
+    declarations[location] = native/ordered(rows, 2)
+  end
+  let result: list = native/c_place_declarations(index, scoped, declarations)
+  return result
+end

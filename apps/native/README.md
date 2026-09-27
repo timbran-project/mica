@@ -29,6 +29,7 @@ cargo run --bin mica -- eval \
   --filein apps/native/check.mica \
   --filein apps/native/flow.mica \
   --filein apps/native/c_syntax.mica \
+  --filein apps/native/c_scopes.mica \
   --filein apps/native/c_flow.mica \
   --filein apps/native/c.mica \
   --filein apps/native/examples/scalars.mica \
@@ -173,6 +174,12 @@ Integer equality chains become switches when intermediate blocks contain no effe
 Pure loop comparisons become `while (condition)`; headers with computations remain inside `while (true)`.
 Calls retain their original execution order and count. Only direct returns and zero-result exits may be duplicated.
 Shared tails and irreducible cycles retain targeted gotos. Labels appear only when referenced.
+
+After control-flow restructuring, `c_scopes.mica` places each local in the smallest scope that contains all its reads and writes.
+Declarations precede the first use in that scope. Simple assignments become initialized declarations, and switch arms have separate braces.
+Locals whose addresses are taken retain function lifetime because aliases can outlive their last direct use.
+Transfers into nested blocks can also require wider scopes to preserve values across block exits and re-entry.
+Locals removed by comparison folding need no declaration.
 
 The constructors in `c_syntax.mica` own the syntax-map schema and rendering rules.
 Control-flow analysis builds nodes through these helpers instead of assembling C braces and indentation itself.

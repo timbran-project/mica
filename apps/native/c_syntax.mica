@@ -7,6 +7,23 @@ verb native/c_text(text: string, exits: bool) -> map
   return {:kind -> :Text, :text -> text, :exits -> exits}
 end
 
+// Keep operand identities until declarations have been placed. Comments and
+// generated C spelling are never scanned to recover variable references.
+verb native/c_references(input: map, references: list) -> map
+  let node: map = input
+  node[:references] = references
+  return node
+end
+
+verb native/c_instruction(row: list) -> map
+  let references: list = native/reads(row)
+  if row[4] != :Discard
+    references = [@references, row[4]]
+  end
+  let node: map = native/c_references({:kind -> :Instruction, :row -> row}, references)
+  return node
+end
+
 verb native/c_if(condition: string, yes: list, no: list) -> map
   return {:kind -> :If, :condition -> condition, :yes -> yes, :no -> no}
 end
@@ -84,55 +101,32 @@ verb native/c_tree_labels(nodes: list, input: map) -> map
   return labels
 end
 
-verb native/c_render_tree(index: map, nodes: list, labels: map, indent: string) -> list
-  let lines: list = []
-  let inner: string = string_concat(indent, "  ")
-  for node in nodes
+// Normalize before assigning lexical scopes. Rendering must not move nodes
+// across braces after declaration placement.
+verb native/c_normalize_tree(nodes: list, labels: map) -> list
+  let result: list = []
+  for input in nodes
+    let node: map = input
     let kind: symbol = node[:kind]
-    if kind == :Text
-      lines = [@lines, string_concat(indent, node[:text])]
-    end
-    if kind == :Label && map_contains_key(labels, node[:block])
-      lines = [@lines, string_concat(indent, "b_", index[:blocks][node[:block]][2], ":;")]
-    end
-    if kind == :Goto
-      lines = [@lines, string_concat(indent, "goto b_", index[:blocks][node[:block]][2], ";")]
+    if kind == :Label && !map_contains_key(labels, node[:block])
+      continue
     end
     if kind == :If
-      let condition: string = node[:condition]
-      let yes: list = node[:yes]
-      let no: list = node[:no]
-      // Put a terminating arm first, keeping the continuation at this level.
-      if !native/c_tree_exits(yes) && native/c_tree_exits(no)
-        condition = string_concat("!(", condition, ")")
-        yes = node[:no]
-        no = node[:yes]
-      end
-      let yes_lines: list = native/c_render_tree(index, yes, labels, inner)
-      let no_lines: list = native/c_render_tree(index, no, labels, inner)
-      if len(yes_lines) == 0 && len(no_lines) > 0
-        condition = string_concat("!(", condition, ")")
+      let yes: list = native/c_normalize_tree(node[:yes], labels)
+      let no: list = native/c_normalize_tree(node[:no], labels)
+      if (!native/c_tree_exits(yes) && native/c_tree_exits(no)) || (len(yes) == 0 && len(no) > 0)
+        node[:condition] = string_concat("!(", node[:condition], ")")
+        let saved: list = yes
         yes = no
-        yes_lines = no_lines
-        no = []
-        no_lines = []
+        no = saved
       end
-      lines = [@lines, string_concat(indent, "if (", condition, ") {"), @yes_lines]
-      if len(no_lines) == 0 || native/c_tree_exits(yes)
-        lines = [@lines, string_concat(indent, "}"), @native/c_render_tree(index, no, labels, indent)]
-      else
-        // A single nested conditional can use C's else-if spelling. Labels
-        // and source notes stay in place and prevent this cosmetic fold.
-        let visible: list = [child for child in no if child[:kind] != :Label || map_contains_key(labels, child[:block])]
-        // A guard renderer can place its continuing arm after the if. Such
-        // output needs the enclosing else braces to keep that arm conditional.
-        if len(visible) == 1 && visible[0][:kind] == :If && !native/c_tree_exits(visible[0][:yes]) && !native/c_tree_exits(visible[0][:no])
-          let tail: list = native/c_render_tree(index, visible, labels, indent)
-          tail[0] = string_concat(indent, "} else ", string_slice(tail[0], string_len(indent), string_len(tail[0])))
-          lines = [@lines, @tail]
-        else
-          lines = [@lines, string_concat(indent, "} else {"), @no_lines, string_concat(indent, "}")]
-        end
+      node[:yes] = yes
+      node[:no] = no
+      // The continuing arm of a guard belongs to the enclosing C scope.
+      if native/c_tree_exits(yes)
+        node[:no] = []
+        result = [@result, node, @no]
+        continue
       end
     end
     if kind == :Loop
@@ -147,8 +141,8 @@ verb native/c_render_tree(index: map, nodes: list, labels: map, indent: string) 
           executable = [@executable, child]
         end
       end
-      // A pure header comparison can be the while condition. Headers with
-      // calls or other instructions stay inside while (true), before the test.
+      // Only a pure comparison can leave the loop body. Calls and other
+      // header instructions must still execute on every iteration.
       if len(executable) == 1 && executable[0][:kind] == :If
         let branch: map = executable[0]
         if len(branch[:no]) == 1 && branch[:no][0] == native/c_text("break;", true)
@@ -160,9 +154,10 @@ verb native/c_render_tree(index: map, nodes: list, labels: map, indent: string) 
             body = branch[:no]
           end
         end
-      end
-      if condition != "true"
-        lines = [@lines, @native/c_render_tree(index, prefix, labels, indent)]
+        if condition != "true"
+          node = native/c_references(node, branch[:references])
+          result = [@result, @native/c_normalize_tree(prefix, labels)]
+        end
       end
       if len(body) > 0 && body[len(body) - 1] == native/c_text("continue;", true)
         let trimmed: list = []
@@ -173,7 +168,63 @@ verb native/c_render_tree(index: map, nodes: list, labels: map, indent: string) 
         end
         body = trimmed
       end
-      lines = [@lines, string_concat(indent, "while (", condition, ") {"), @native/c_render_tree(index, body, labels, inner), string_concat(indent, "}")]
+      node[:condition] = condition
+      node[:body] = native/c_normalize_tree(body, labels)
+    end
+    if kind == :Switch
+      let cases: list = []
+      for arm in node[:cases]
+        cases = [@cases, native/c_case(arm[:value], native/c_normalize_tree(arm[:body], labels))]
+      end
+      node[:cases] = cases
+      node[:fallback] = native/c_normalize_tree(node[:fallback], labels)
+    end
+    result = [@result, node]
+  end
+  return result
+end
+
+verb native/c_render_tree(index: map, nodes: list, labels: map, indent: string) -> list
+  let lines: list = []
+  let inner: string = string_concat(indent, "  ")
+  for node in nodes
+    let kind: symbol = node[:kind]
+    if kind == :Text
+      lines = [@lines, string_concat(indent, node[:text])]
+    end
+    if kind == :Instruction
+      let statement: string = native/c_statement(index, node[:row])
+      if map_contains_key(node, :initialize)
+        statement = string_concat(native/c_type(index[:variables][node[:row][4]][2]), " ", statement)
+      end
+      lines = [@lines, string_concat(indent, statement)]
+    end
+    if kind == :Label && map_contains_key(labels, node[:block])
+      lines = [@lines, string_concat(indent, "b_", index[:blocks][node[:block]][2], ":;")]
+    end
+    if kind == :Goto
+      lines = [@lines, string_concat(indent, "goto b_", index[:blocks][node[:block]][2], ";")]
+    end
+    if kind == :If
+      let yes: list = node[:yes]
+      let no: list = node[:no]
+      lines = [@lines, string_concat(indent, "if (", node[:condition], ") {"), @native/c_render_tree(index, yes, labels, inner)]
+      if len(no) == 0
+        lines = [@lines, string_concat(indent, "}")]
+      else
+        // A sole conditional needs no separate else scope. Any declaration
+        // or annotation in that scope prevents this cosmetic fold.
+        if len(no) == 1 && no[0][:kind] == :If
+          let tail: list = native/c_render_tree(index, no, labels, indent)
+          tail[0] = string_concat(indent, "} else ", string_slice(tail[0], string_len(indent), string_len(tail[0])))
+          lines = [@lines, @tail]
+        else
+          lines = [@lines, string_concat(indent, "} else {"), @native/c_render_tree(index, no, labels, inner), string_concat(indent, "}")]
+        end
+      end
+    end
+    if kind == :Loop
+      lines = [@lines, string_concat(indent, "while (", node[:condition], ") {"), @native/c_render_tree(index, node[:body], labels, inner), string_concat(indent, "}")]
     end
     if kind == :Switch
       lines = [@lines, string_concat(indent, "switch (", node[:value], ") {")]
@@ -183,10 +234,11 @@ verb native/c_render_tree(index: map, nodes: list, labels: map, indent: string) 
         if arm[:value] != ""
           label = string_concat("case ", arm[:value], ":")
         end
-        lines = [@lines, string_concat(inner, label), @native/c_render_tree(index, arm[:body], labels, string_concat(inner, "  "))]
+        lines = [@lines, string_concat(inner, label, " {"), @native/c_render_tree(index, arm[:body], labels, string_concat(inner, "  "))]
         if !native/c_tree_exits(arm[:body])
           lines = [@lines, string_concat(inner, "  break;")]
         end
+        lines = [@lines, string_concat(inner, "}")]
       end
       lines = [@lines, string_concat(indent, "}")]
     end

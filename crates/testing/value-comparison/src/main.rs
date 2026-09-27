@@ -137,6 +137,7 @@ impl Native {
             "check",
             "flow",
             "c_syntax",
+            "c_scopes",
             "c_flow",
             "c",
             "value/program",
