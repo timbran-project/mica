@@ -1,0 +1,12 @@
+verb bench()
+  let i = 0
+  while i < 20
+    let installed = compiler/install(emit_source(string_concat("verb replaced()\n return ", to_literal(i), "\nend")), :replacement_module)
+    require installed[:ok]
+    require(replaced() == i)
+    commit()
+    i = i + 1
+  end
+  return i
+end
+

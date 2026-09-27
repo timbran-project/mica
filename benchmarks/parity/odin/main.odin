@@ -45,7 +45,11 @@ number :: proc(text: string) -> int {
 
 invoke :: proc(world: ^r.World, expected: v.Value) {
     outcome := r.world_call(world, "bench", nil)
-    if outcome.kind != .Complete {fail(outcome.message)}
+    if outcome.kind != .Complete {
+        fmt.eprintf("%s: %s\n", outcome.message,
+            r.world_value_literal(world, outcome.error, context.temp_allocator))
+        os.exit(1)
+    }
     if !v.value_eq(outcome.value, expected) {
         fmt.eprintf("result mismatch: expected %s, got %s\n",
             r.world_value_literal(world, expected, context.temp_allocator),

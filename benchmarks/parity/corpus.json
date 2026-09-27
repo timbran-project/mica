@@ -278,9 +278,138 @@
         "apps/compiler/emit.mica"
       ],
       "adaptation": "Shared source-to-artifact workload with 100 Unicode declarations and a filtered, keyed comprehension. Load each pinned Mica compiler. Verify successful assembly and a nonempty artifact; accept Rust's :entry or Odin's :bytes result field. Return the independently counted source length. Installation and generated-program execution are outside this measurement."
+    },
+    {
+      "name": "runtime_identities",
+      "file": "mica/runtime_identities.mica",
+      "sha256": "d62f423a837fcea6322d2a2ecc218099c7839f01cbad3a4443c7f9a363797a8f",
+      "expected": "100",
+      "setup": false,
+      "rust_gap": null,
+      "source_sha256": "e3767a45669f1b2edab320fa0eed6c7601a558ef2646f5da34187a4335cb4d0a",
+      "source_file": "benchmarks/mica/runtime_new_operations.mica",
+      "invocation_mode": "single",
+      "adaptation": "Split donor entry points into fresh-process bench() fixtures. Counts and expected results are unchanged. Rust NamedIdentity stores (name, identity); Odin stores (identity, name).",
+      "implementation_inputs": {
+        "rust": {
+          "file": "mica/runtime_identities_rust.mica",
+          "sha256": "f8e2587cdc7123be56a0538d192e1cdbfd22a60d18c5f5bab8f4477b2bfe2dcd"
+        }
+      }
+    },
+    {
+      "name": "runtime_installation",
+      "file": "mica/runtime_installation.mica",
+      "sha256": "8d4ce83dc9d3b90b698c06f9532b53b095767ffccc1a2f136ae00b9dec296a62",
+      "expected": "20",
+      "setup": false,
+      "rust_gap": null,
+      "source_sha256": "e3767a45669f1b2edab320fa0eed6c7601a558ef2646f5da34187a4335cb4d0a",
+      "source_file": "benchmarks/mica/runtime_new_operations.mica",
+      "invocation_mode": "single",
+      "adaptation": "Split donor entry points into fresh-process bench() fixtures. Counts and expected results are unchanged.",
+      "implementation_inputs": {
+        "rust": {
+          "file": "mica/runtime_installation_rust.mica",
+          "sha256": "976e3f6320cddb4048fb331b9ee5b0a70c54db303efcf925107fb202904e0e4e",
+          "prelude": [
+            "apps/compiler/lex.mica",
+            "apps/compiler/parse.mica",
+            "apps/compiler/emit.mica",
+            "apps/compiler/install.mica"
+          ]
+        }
+      },
+      "measurement": "Rust uses the Mica application compiler and module installer; Odin uses native install_source. Compilation is timed for installation/replacement and excluded in cross-program setup. Separate program artifacts are installed before cross-program dispatch."
+    },
+    {
+      "name": "runtime_replacement",
+      "file": "mica/runtime_replacement.mica",
+      "sha256": "9190ba01d4dae8311ba73bd1d8c9aaefe7ee53db9c433514bd49c55f1273b9e1",
+      "expected": "20",
+      "setup": false,
+      "rust_gap": null,
+      "source_sha256": "e3767a45669f1b2edab320fa0eed6c7601a558ef2646f5da34187a4335cb4d0a",
+      "source_file": "benchmarks/mica/runtime_new_operations.mica",
+      "invocation_mode": "single",
+      "adaptation": "Split donor entry points into fresh-process bench() fixtures. Counts and expected results are unchanged.",
+      "implementation_inputs": {
+        "rust": {
+          "file": "mica/runtime_replacement_rust.mica",
+          "sha256": "3d709c50d27b1f3dacb3b71ea3263a0fa92347ffa4877c98193eb632404d9cbf",
+          "prelude": [
+            "apps/compiler/lex.mica",
+            "apps/compiler/parse.mica",
+            "apps/compiler/emit.mica",
+            "apps/compiler/install.mica"
+          ]
+        }
+      },
+      "measurement": "Rust uses the Mica application compiler and module installer; Odin uses native install_source. Compilation is timed for installation/replacement and excluded in cross-program setup. Separate program artifacts are installed before cross-program dispatch."
+    },
+    {
+      "name": "runtime_cross_program",
+      "file": "mica/runtime_cross_program.mica",
+      "sha256": "7e11b31abd5423e59c87fef00d25329e203a821480a7131b6dc45257a0c8cb69",
+      "expected": "2000",
+      "setup": true,
+      "rust_gap": null,
+      "source_sha256": "e3767a45669f1b2edab320fa0eed6c7601a558ef2646f5da34187a4335cb4d0a",
+      "source_file": "benchmarks/mica/runtime_new_operations.mica",
+      "invocation_mode": "single",
+      "adaptation": "Split donor entry points into fresh-process bench() fixtures. Counts and expected results are unchanged.",
+      "implementation_inputs": {
+        "rust": {
+          "file": "mica/runtime_cross_program_rust.mica",
+          "sha256": "554b53e78082be39b59a9ea5a2cec9fcbed40bb0df19a7a854288a4dfba2058a",
+          "prelude": [
+            "apps/compiler/lex.mica",
+            "apps/compiler/parse.mica",
+            "apps/compiler/emit.mica",
+            "apps/compiler/install.mica"
+          ]
+        }
+      },
+      "measurement": "Rust uses the Mica application compiler and module installer; Odin uses native install_source. Compilation is timed for installation/replacement and excluded in cross-program setup. Separate program artifacts are installed before cross-program dispatch."
+    },
+    {
+      "name": "buffer_committed_edits",
+      "file": "mica/buffer_committed_edits.mica",
+      "sha256": "b0e22d4fee9452109b00b59eeee631a206c38ecb07ee313789ccd994c69e74da",
+      "expected": "128",
+      "setup": true,
+      "invocation_mode": "single",
+      "rust_gap": null,
+      "measurement": "128 Unicode buffer edits over 20,480 scalars; each publishes text and a matching fact, verifies the revision and restores the document. In-memory runtime transactions, no disk durability or recovery timing.",
+      "source": "Public application and buffer APIs at pinned donor revision; fixed-work fixture added for cross-runtime comparison."
+    },
+    {
+      "name": "editor_tagged_input",
+      "file": "mica/editor_tagged_input.mica",
+      "sha256": "97d50ff4d4873d77d43b1954803d642474d923b297ef90c68550dc5a02e4a26a",
+      "expected": "64",
+      "setup": true,
+      "invocation_mode": "single",
+      "rust_gap": null,
+      "measurement": "32 tagged Unicode JSON inputs, publication/finalization, independent text/revision/point checks and a bounded JSON snapshot. Application-boundary latency, root authority, no HTTP/browser/file-service transport. Single invocation per fresh process.",
+      "source": "Public application and buffer APIs at pinned donor revision; fixed-work fixture added for cross-runtime comparison.",
+      "prelude": [
+        "apps/shared/sync-host.mica",
+        "apps/shared/buffers.mica",
+        "apps/editor/schema.mica",
+        "apps/editor/windows.mica",
+        "apps/editor/buffers.mica",
+        "apps/editor/keymaps.mica",
+        "apps/editor/undo.mica",
+        "apps/editor/commands.mica",
+        "apps/editor/session.mica",
+        "apps/editor/picker.mica",
+        "apps/editor/minibuffer.mica",
+        "apps/editor/files.mica",
+        "apps/editor/ui.mica",
+        "apps/editor/defaults.mica"
+      ]
     }
   ],
-  "excluded": {
-    "runtime_new_operations.mica": "Requires distinct single-use identity/install/replacement entry points and foreign program setup; tracked separately from repeated bench() fixtures."
-  }
+  "excluded": {}
 }

@@ -80,7 +80,10 @@ Its single invocation includes insertion, publication, and the first derived rea
 `relation_rule_small_update` materializes that closure during setup, then removes and restores one edge eight times per invocation.
 All 16 updates commit. Bound derived reads verify changed reachability and an untouched component after every publication.
 Each update changes 32 closure rows out of 8,448. Initial derivation and maintenance therefore have separate measurements.
-The single-use identity and installation fixtures also require a separate protocol.
+The identity, installation, replacement, and cross-program fixtures each run once in a fresh world.
+Cross-program setup installs a separate program before timing. Installation and replacement include compilation and commit.
+Rust uses `compiler/install(emit_source(...), module)`; Odin uses its native `install_source`.
+These compare application operations through different compilation paths. Per-implementation inputs and their hashes are recorded in the manifest.
 
 Run the harness contract tests:
 
@@ -130,3 +133,14 @@ The manifest preserves commands, input hashes, binary hashes, verification resul
 The pinned Odin CycL schema conflicts with its system `Arity/2` relation.
 The census capture supplies Rust's namespaced schema to Odin and records that file's hash as an explicit input adaptation.
 Rust persisted-result verification uses administrative filein authority, matching the loader.
+
+`buffer_committed_edits` publishes 128 alternating Unicode insertions and deletions over 20,480 scalars.
+Every commit includes a matching relation fact and checks the published revision.
+This shared runtime comparison uses memory storage; strict persistence and recovery have separate kernel captures.
+
+`editor_tagged_input` sends 32 tagged Unicode JSON items through the pinned editor application.
+Each item publishes and finalizes its delta. The fixture checks text, revisions, and point positions, then checks a bounded JSON snapshot.
+Loading and session setup occur before timing. The timed result is 64 inserted scalars.
+The measurement includes task execution and commit continuations, but excludes HTTP, browser rendering, and file services.
+It uses root authority on both implementations; actor-policy enforcement has separate conformance tests.
+A failed or crashed process remains in the capture and receives no accepted timing summary.

@@ -1,0 +1,11 @@
+verb bench()
+  let i = 0
+  while i < 100
+    let name = to_symbol(string_concat("new_identity_", to_literal(i)))
+    let id = make_identity(name)
+    require(NamedIdentity(id, name))
+    i = i + 1
+  end
+  return i
+end
+

@@ -92,7 +92,12 @@ def fixture_protocol(protocol, fixture):
     return selected
 
 
+def fixture_input(fixture, implementation):
+    return {**fixture, **fixture.get("implementation_inputs", {}).get(implementation, {})}
+
+
 def prepare_fixture(output, fixture, source, implementation):
+    fixture = fixture_input(fixture, implementation)
     workload = output / "harness" / fixture["file"]
     preludes = fixture.get("prelude", [])
     if not preludes:
@@ -134,8 +139,10 @@ def main():
     if args.case and set(args.case) != {f["name"] for f in fixtures}:
         parser.error("unknown fixture name")
     for fixture in fixtures:
-        if digest(HARNESS / fixture["file"]) != fixture["sha256"]:
-            raise ValueError(f"fixture hash differs from manifest: {fixture['name']}")
+        for implementation in ["rust", "odin"]:
+            selected = fixture_input(fixture, implementation)
+            if digest(HARNESS / selected["file"]) != selected["sha256"]:
+                raise ValueError(f"fixture hash differs from manifest: {fixture['name']}-{implementation}")
 
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=False)

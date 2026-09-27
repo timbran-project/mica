@@ -1,0 +1,12 @@
+verb bench()
+  let i = 0
+  while i < 20
+    let name = string_concat("installed_", to_literal(i))
+    install_source(string_concat("verb ", name, "()\n return 42\nend"))
+    require(invoke(to_symbol(name), {}) == 42)
+    commit()
+    i = i + 1
+  end
+  return i
+end
+

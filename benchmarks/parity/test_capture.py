@@ -31,6 +31,24 @@ class CaptureContract(unittest.TestCase):
             self.assertEqual(path, workload)
             self.assertEqual(provenance["sha256"], digest(workload))
 
+    def test_implementation_inputs_select_only_the_requested_application(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            (output / "harness").mkdir()
+            (output / "harness" / "odin.mica").write_text("native_install()")
+            (output / "harness" / "rust.mica").write_text("compiler/install()")
+            source = output / "source"
+            source.mkdir()
+            (source / "compiler.mica").write_text("// compiler")
+            fixture = {"name": "installation", "file": "odin.mica",
+                       "implementation_inputs": {"rust": {"file": "rust.mica", "prelude": ["compiler.mica"]}}}
+            rust, provenance = prepare_fixture(output, fixture, source, "rust")
+            odin, _ = prepare_fixture(output, fixture, source, "odin")
+            self.assertEqual(rust.read_text(), "// compiler\ncompiler/install()")
+            self.assertEqual(odin.read_text(), "native_install()")
+            self.assertEqual(provenance["workload_sha256"], digest(output / "harness" / "rust.mica"))
+            self.assertNotIn("prelude", fixture)
+
     def setUp(self):
         self.fixture = {"expected": "42"}
         self.protocol = {"workers": 1, "warmup": 2, "samples": 2, "iterations": 3}
