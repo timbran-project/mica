@@ -1,0 +1,73 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+// Globals hold module state, thread-local caches, or immutable byte literals.
+// Initializers are :Zero, a scalar constant ID, or bytes for a U8 array.
+verb native/add_global(state, spelling, type_id, storage, initializer)
+  return native/node(state, :globals, [spelling, type_id, storage, initializer])
+end
+
+verb native/check_globals(state, index)
+  let globals = {}
+  let names = []
+  for row in state[:globals]
+    native/identifier(row[1])
+    native/ensure(!native/contains(names, row[1]), "duplicate global name")
+    names = [@names, row[1]]
+    native/check_type(index[:records], row[2])
+    native/ensure(row[2] != :Void, "Void global")
+    native/ensure(native/contains([:Mutable, :Constant, :ThreadLocal], row[3]), "invalid global storage")
+    let init = row[4]
+    if init != :Zero
+      if is_kind(init, :list)
+        native/ensure(native/is_array(row[2]) && row[2][1] == :U8 && row[2][2] == len(init), "byte literal extent mismatch")
+        for byte in init
+          native/ensure(is_kind(byte, :int) && byte >= 0 && byte <= 255, "invalid literal byte")
+        end
+      else
+        native/ensure(map_contains_key(index[:constants], init), "unknown global initializer")
+        native/ensure(index[:constants][init][1] == row[2] && row[2] != :F32, "global initializer type mismatch")
+      end
+    end
+    globals[row[0]] = row
+  end
+  return globals
+end
+
+verb native/global_pointer(row)
+  let access = :Mutable
+  if row[3] == :Constant
+    access = :Const
+  end
+  return [:Pointer, row[2], access]
+end
+
+verb native/c_globals(state, index, declaration)
+  let lines = []
+  for row in native/ordered(state[:globals], 1)
+    let prefix = ""
+    if declaration
+      prefix = "extern "
+    end
+    if row[3] == :ThreadLocal
+      prefix = string_concat(prefix, "_Thread_local ")
+    end
+    let qualifier = ""
+    if row[3] == :Constant
+      qualifier = " const"
+    end
+    let initializer = ""
+    if !declaration
+      initializer = " = {0}"
+      if is_kind(row[4], :list)
+        initializer = string_concat(" = {{", string_join([to_literal(byte) for byte in row[4]], ", "), "}}")
+      else
+        if row[4] != :Zero
+          initializer = string_concat(" = ", native/c_value(index, row[4]))
+        end
+      end
+    end
+    lines = [@lines, string_concat(prefix, native/c_type(row[2]), qualifier, " mica_global_", row[1], initializer, ";")]
+  end
+  return lines
+end

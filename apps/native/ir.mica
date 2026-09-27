@@ -1,0 +1,211 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+// Builders batch rows in an immutable construction state. Node-producing
+// builders return [node, state]. Positions and C names are explicit; node IDs
+// are private to a build and never appear in emitted C.
+verb native/program()
+  return {:next -> 0, :functions -> [], :parameters -> [], :locals -> [],
+          :blocks -> [], :instructions -> [], :terminators -> [], :constants -> [],
+          :records -> [], :fields -> [], :globals -> [], :foreign -> [], :contracts -> [], :parameter_contracts -> []}
+end
+
+verb native/append(input_state, table, row)
+  let state = input_state
+  state[table] = [@state[table], row]
+  return state
+end
+
+verb native/node(input_state, table, fields)
+  let state = input_state
+  let id = state[:next]
+  state[:next] = id + 1
+  return [id, native/append(state, table, [id, @fields])]
+end
+
+verb native/add_function(state, spelling, result_type)
+  return native/node(state, :functions, [spelling, result_type])
+end
+
+verb native/add_parameter(state, fn_id, position, spelling, type_id)
+  return native/node(state, :parameters, [fn_id, position, spelling, type_id])
+end
+
+verb native/add_local(state, fn_id, spelling, type_id)
+  return native/node(state, :locals, [fn_id, spelling, type_id])
+end
+
+verb native/add_block(state, fn_id, spelling, is_entry)
+  return native/node(state, :blocks, [fn_id, spelling, is_entry])
+end
+
+// U64 constants use exactly 16 lowercase hexadecimal digits, without 0x.
+// This represents the full unsigned range without a Mica integer conversion.
+verb native/add_constant(state, type_id, encoding)
+  return native/node(state, :constants, [type_id, encoding])
+end
+
+verb native/add_instruction(state, block_id, position, opcode, destination, operands)
+  return native/node(state, :instructions, [block_id, position, opcode, destination, operands])
+end
+
+// Terminators: :Return [value], :Jump [block], :Branch [condition, yes, no].
+verb native/terminate(state, block_id, opcode, operands)
+  return native/append(state, :terminators, [block_id, opcode, operands])
+end
+
+// Relation values allow inspection without installing global mutable facts.
+// The checker consumes the row batches, so duplicate keys remain diagnosable.
+verb native/relations(state)
+  return {
+    :Global -> relation_from_rows([:id, :spelling, :type_id, :storage, :initializer], state[:globals]),
+    :Function -> relation_from_rows([:id, :spelling, :result_type], state[:functions]),
+    :Parameter -> relation_from_rows([:id, :owner, :position, :spelling, :type_id], state[:parameters]),
+    :Local -> relation_from_rows([:id, :owner, :spelling, :type_id], state[:locals]),
+    :Block -> relation_from_rows([:id, :owner, :spelling, :entry], state[:blocks]),
+    :Instruction -> relation_from_rows([:id, :block_id, :position, :opcode, :destination, :operands], state[:instructions]),
+    :Terminator -> relation_from_rows([:block_id, :opcode, :operands], state[:terminators]),
+    :Record -> relation_from_rows([:id, :spelling], state[:records]),
+    :Field -> relation_from_rows([:owner, :position, :spelling, :type_id], state[:fields]),
+    :Foreign -> relation_from_rows([:id], state[:foreign]),
+    :Contract -> relation_from_rows([:id, :effects, :result_mode, :owner], state[:contracts]),
+    :ParameterContract -> relation_from_rows([:id, :mode], state[:parameter_contracts]),
+    :Constant -> relation_from_rows([:id, :type_id, :encoding], state[:constants])
+  }
+end
+
+verb native/ensure(condition, message)
+  if !condition
+    raise E_INVARG, string_concat("native: ", message)
+  end
+end
+
+verb native/error_message(problem)
+  match problem.message
+  case some(message)
+    return message
+  case _
+    return to_literal(problem)
+  end
+end
+
+verb native/contains(items, item)
+  for candidate in items
+    if candidate == item
+      return true
+    end
+  end
+  return false
+end
+
+verb native/owned(rows, owner_column, owner)
+  return [row for row in rows if row[owner_column] == owner]
+end
+
+// Sort on a semantic key, never on the allocation ID.
+verb native/ordered(rows, column)
+  return [pair[1] for pair in sort([[row[column], row] for row in rows])]
+end
+
+verb native/identifier(spelling)
+  native/ensure(string_len(spelling) > 0, "empty identifier")
+  let letters = string_chars("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")
+  let digits = string_chars("0123456789")
+  let position = 0
+  for ch in string_chars(spelling)
+    native/ensure(native/contains(letters, ch) || (position > 0 && (ch == "_" || native/contains(digits, ch))), "invalid identifier")
+    position = position + 1
+  end
+end
+
+// Records are nominal types identified by their stable name.
+verb native/add_record(state, spelling)
+  return native/node(state, :records, [spelling])
+end
+
+verb native/add_field(state, record_id, position, spelling, type_id)
+  return native/append(state, :fields, [record_id, position, spelling, type_id])
+end
+
+// Foreign functions share the function/parameter schema. C names receive the
+// mica_foreign_ prefix; no raw C statements or declarations enter the IR.
+verb native/foreign(state, fn_id)
+  return native/append(state, :foreign, [fn_id])
+end
+
+// Effects are upper bounds. Pointer-bearing results require :Owned or :Borrow.
+// A borrowed result names the parameter whose lifetime bounds the result.
+verb native/contract(state, fn_id, effects, result_mode, owner)
+  return native/append(state, :contracts, [fn_id, effects, result_mode, owner])
+end
+
+verb native/parameter_contract(state, parameter, mode)
+  return native/append(state, :parameter_contracts, [parameter, mode])
+end
+
+// Convenience builders retain the same row schemas and explicit state. Names
+// resolve only while constructing this function; emitted references use IDs.
+verb native/function_scope(input_state, spelling, result_type, parameters, locals, blocks)
+  let [fn_id, after_function] = native/add_function(input_state, spelling, result_type)
+  let state = after_function
+  let bindings = {}
+  let position = 0
+  for parameter in parameters
+    let [id, next_state] = native/add_parameter(state, fn_id, position, parameter[0], parameter[1])
+    state = next_state
+    if parameter[2] != :Value
+      state = native/parameter_contract(state, id, parameter[2])
+    end
+    native/ensure(!map_contains_key(bindings, parameter[0]), "duplicate construction name")
+    bindings[parameter[0]] = id
+    position = position + 1
+  end
+  for local in locals
+    let [id, next_state] = native/add_local(state, fn_id, local[0], local[1])
+    state = next_state
+    native/ensure(!map_contains_key(bindings, local[0]), "duplicate construction name")
+    bindings[local[0]] = id
+  end
+  position = 0
+  for spelling in blocks
+    let [id, next_state] = native/add_block(state, fn_id, spelling, position == 0)
+    state = next_state
+    native/ensure(!map_contains_key(bindings, spelling), "duplicate construction name")
+    bindings[spelling] = id
+    position = position + 1
+  end
+  return [fn_id, bindings, state]
+end
+
+verb native/block_body(input_state, block, instructions, opcode, operands)
+  let state = input_state
+  let position = 0
+  for row in instructions
+    state = native/add_instruction(state, block, position, row[0], row[1], row[2])[1]
+    position = position + 1
+  end
+  return native/terminate(state, block, opcode, operands)
+end
+
+verb native/record_type(input_state, spelling, fields)
+  let [id, after_record] = native/add_record(input_state, spelling)
+  let state = after_record
+  let position = 0
+  for field in fields
+    state = native/add_field(state, id, position, field[0], field[1])
+    position = position + 1
+  end
+  return [[:Record, spelling], state]
+end
+
+verb native/constants(input_state, declarations)
+  let state = input_state
+  let bindings = {}
+  for declaration in declarations
+    native/ensure(!map_contains_key(bindings, declaration[0]), "duplicate constant name")
+    let [id, next_state] = native/add_constant(state, declaration[1], declaration[2])
+    state = next_state
+    bindings[declaration[0]] = id
+  end
+  return [bindings, state]
+end

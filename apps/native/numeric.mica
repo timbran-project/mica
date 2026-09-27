@@ -1,0 +1,152 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+verb native/is_unsigned(type_id)
+  return native/contains([:U8, :U16, :U32, :U64], type_id)
+end
+
+verb native/is_number(type_id)
+  return native/is_unsigned(type_id) || type_id == :I64 || type_id == :F32
+end
+
+verb native/check_numeric_instruction(index, fn_id, row, result_type)
+  let op = row[3]
+  let args = row[5]
+  if native/contains([:Convert, :Bitcast, :Negate, :Truncate, :IsFinite], op)
+    native/ensure(len(args) == 1, "numeric operation expects one operand")
+    let source = native/value_type(index, fn_id, args[0])
+    if op == :Convert
+      native/ensure(native/is_number(source) && native/is_number(result_type), "conversion requires numeric types")
+      native/ensure(source != :F32 || result_type == :F32, "float to integer requires CheckedFloatToInt")
+      native/ensure(result_type != :I64 || source == :I64 || (native/is_unsigned(source) && source != :U64), "U64 to I64 requires Bitcast")
+    end
+    if op == :Bitcast
+      native/ensure(native/contains([[:U64, :I64], [:I64, :U64], [:U32, :F32], [:F32, :U32]], [source, result_type]), "invalid bitcast types")
+    end
+    if op == :Negate || op == :Truncate
+      native/ensure(source == :F32 && result_type == :F32, "float operation requires F32")
+    end
+    if op == :IsFinite
+      native/ensure(source == :F32 && result_type == :Bool, "IsFinite requires F32 and Bool result")
+    end
+    return true
+  end
+  if native/contains([:CheckedAdd, :CheckedSubtract, :CheckedMultiply, :CheckedDivide, :CheckedRemainder, :CheckedNegate, :CheckedFloatToInt], op)
+    let count = 2
+    let source = :I64
+    if op == :CheckedNegate || op == :CheckedFloatToInt
+      count = 1
+    end
+    if op == :CheckedFloatToInt
+      source = :F32
+    end
+    native/ensure(len(args) == count, "checked operation operand count mismatch")
+    for arg in args
+      native/ensure(native/value_type(index, fn_id, arg) == source, "checked operand type mismatch")
+    end
+    let fields = native/record_fields(index, result_type)
+    native/ensure(len(fields) == 2 && fields[0][2] == "ok" && fields[0][3] == :Bool && fields[1][2] == "number" && fields[1][3] == :I64, "checked result requires {ok: Bool, number: I64}")
+    return true
+  end
+  if !native/contains([:Add, :Subtract, :Multiply, :Divide, :Remainder, :BitAnd, :BitOr, :BitXor, :ShiftLeft, :ShiftRight, :Equal, :Less], op)
+    return false
+  end
+  native/ensure(len(args) == 2, "binary operation expects two operands")
+  let left = native/value_type(index, fn_id, args[0])
+  let right = native/value_type(index, fn_id, args[1])
+  native/ensure(left == right, "operand type mismatch")
+  if op == :Equal || op == :Less
+    native/ensure(result_type == :Bool, "comparison result must be Bool")
+    if op == :Equal
+      native/ensure(native/is_number(left) || left == :Bool || native/is_pointer(left) || native/is_scalar(left) || native/is_tagged(left), "equality requires scalar operands")
+    else
+      native/ensure(native/is_number(left), "comparison requires numeric operands")
+    end
+    return true
+  end
+  native/ensure(result_type == left, "arithmetic result type mismatch")
+  if native/contains([:Add, :Subtract, :Multiply, :Divide], op) && left == :F32
+    return true
+  end
+  native/ensure(native/is_unsigned(left), "operation requires unsigned operands")
+  if op == :ShiftLeft || op == :ShiftRight
+    if map_contains_key(index[:constants], args[1])
+      let width = {:U8 -> "0000000000000008", :U16 -> "0000000000000010", :U32 -> "0000000000000020", :U64 -> "0000000000000040"}
+      native/ensure(index[:constants][args[1]][2] < width[left], string_concat("shift count must be below ", to_literal({:U8 -> 8, :U16 -> 16, :U32 -> 32, :U64 -> 64}[left])))
+    end
+  end
+  return true
+end
+
+// Checked integer operations never evaluate an overflowing C expression.
+// Failure always returns {false, 0}; division truncates toward zero.
+verb native/c_checked(index, row)
+  let op = row[3]
+  let args = row[5]
+  let dst = native/c_value(index, row[4])
+  let source = "int64_t"
+  if op == :CheckedFloatToInt
+    source = "float"
+  end
+  let lines = [string_concat("{ ", source, " a = ", native/c_value(index, args[0]), ";")]
+  if len(args) == 2
+    lines = [@lines, string_concat("int64_t b = ", native/c_value(index, args[1]), ";")]
+  end
+  let conditions = {
+    :CheckedAdd -> "!((b > 0 && a > INT64_MAX - b) || (b < 0 && a < INT64_MIN - b))",
+    :CheckedSubtract -> "!((b < 0 && a > INT64_MAX + b) || (b > 0 && a < INT64_MIN + b))",
+    :CheckedMultiply -> "(a == 0 || b == 0 || (a > 0 ? (b > 0 ? a <= INT64_MAX / b : b >= INT64_MIN / a) : (b > 0 ? a >= INT64_MIN / b : a >= INT64_MAX / b)))",
+    :CheckedDivide -> "(b != 0 && !(a == INT64_MIN && b == -1))",
+    :CheckedRemainder -> "(b != 0)",
+    :CheckedNegate -> "(a != INT64_MIN)",
+    :CheckedFloatToInt -> "(isfinite(a) && a >= -0x1p63f && a < 0x1p63f)"
+  }
+  let expressions = {:CheckedAdd -> "a + b", :CheckedSubtract -> "a - b", :CheckedMultiply -> "a * b",
+                     :CheckedDivide -> "a / b", :CheckedRemainder -> "(b == -1 ? 0 : a % b)",
+                     :CheckedNegate -> "-a", :CheckedFloatToInt -> "(int64_t)a"}
+  return string_join([@lines, string_concat(dst, ".f_ok = ", conditions[op], ";"),
+    string_concat(dst, ".f_number = ", dst, ".f_ok ? (", expressions[op], ") : 0; }")], " ")
+end
+
+verb native/c_numeric_statement(index, row)
+  let op = row[3]
+  let args = row[5]
+  if native/contains([:CheckedAdd, :CheckedSubtract, :CheckedMultiply, :CheckedDivide, :CheckedRemainder, :CheckedNegate, :CheckedFloatToInt], op)
+    return native/c_checked(index, row)
+  end
+  if op == :Bitcast
+    let source_type = native/value_type(index, index[:blocks][row[1]][1], args[0])
+    return string_concat("memcpy(&", native/c_value(index, row[4]), ", &(", native/c_type(source_type), "){", native/c_value(index, args[0]), "}, sizeof(", native/c_type(source_type), "));")
+  end
+  let dst = native/c_value(index, row[4])
+  let type_id = index[:variables][row[4]][2]
+  if native/contains([:Convert, :Negate, :Truncate, :IsFinite], op)
+    let arg = native/c_value(index, args[0])
+    let expressions = {:Convert -> string_concat("(", native/c_type(type_id), ")(", arg, ")"),
+                       :Negate -> string_concat("-(", arg, ")"), :Truncate -> string_concat("truncf(", arg, ")"),
+                       :IsFinite -> string_concat("isfinite(", arg, ")")}
+    return string_concat(dst, " = ", expressions[op], ";")
+  end
+  let operators = {:Add -> " + ", :Subtract -> " - ", :Multiply -> " * ", :Divide -> " / ", :Remainder -> " % ",
+                   :BitAnd -> " & ", :BitOr -> " | ", :BitXor -> " ^ ", :ShiftLeft -> " << ", :ShiftRight -> " >> ",
+                   :Equal -> " == ", :Less -> " < "}
+  if !map_contains_key(operators, op)
+    return ""
+  end
+  let left = native/c_value(index, args[0])
+  let right = native/c_value(index, args[1])
+  let guard = ""
+  if native/is_unsigned(type_id)
+    // Widen before arithmetic to prevent signed integer promotions of U8/U16.
+    left = string_concat("(uint64_t)(", left, ")")
+    right = string_concat("(uint64_t)(", right, ")")
+    if op == :Divide || op == :Remainder
+      guard = string_concat("if (", right, " == 0) { abort(); } ")
+    end
+    if op == :ShiftLeft || op == :ShiftRight
+      let width = {:U8 -> "8", :U16 -> "16", :U32 -> "32", :U64 -> "64"}[type_id]
+      guard = string_concat("if (", right, " >= ", width, ") { abort(); } ")
+    end
+  end
+  return string_concat(guard, dst, " = (", native/c_type(type_id), ")(", left, operators[op], right, ");")
+end

@@ -1,0 +1,238 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+// Structural arrays are C structs containing an array. They retain value
+// semantics in assignments and calls instead of silently decaying to pointers.
+verb native/collect_type(input_types, type_id)
+  let types = input_types
+  if type_id == :Void || native/contains(types, type_id)
+    return types
+  end
+  native/c_type(type_id)
+  types = [@types, type_id]
+  if native/is_pointer(type_id) || native/is_array(type_id)
+    types = native/collect_type(types, type_id[1])
+  end
+  return types
+end
+
+verb native/check_layouts(state, index)
+  let types = []
+  for row in state[:functions]
+    types = native/collect_type(types, row[2])
+  end
+  for row in state[:parameters]
+    types = native/collect_type(types, row[4])
+  end
+  for row in state[:locals]
+    types = native/collect_type(types, row[3])
+  end
+  for row in state[:globals]
+    types = native/collect_type(types, row[2])
+  end
+  for row in state[:constants]
+    types = native/collect_type(types, row[1])
+  end
+  for row in state[:fields]
+    types = native/collect_type(types, row[3])
+  end
+  for row in state[:records]
+    types = native/collect_type(types, [:Record, row[1]])
+  end
+  for row in state[:instructions]
+    if row[3] == :SizeOf || row[3] == :AlignOf
+      native/ensure(len(row[5]) == 1 && row[5][0] != :Void, "layout operation expects non-Void type")
+      native/check_type(index[:records], row[5][0])
+      types = native/collect_type(types, row[5][0])
+    end
+  end
+  let names = {}
+  let pending = []
+  for type_id in types
+    if native/is_record(type_id) || native/is_array(type_id) || native/is_scalar(type_id) || native/is_tagged(type_id)
+      let spelling = native/c_type(type_id)
+      native/ensure(!map_contains_key(names, spelling) || names[spelling] == type_id, "conflicting emitted type name")
+      names[spelling] = type_id
+      pending = [@pending, [spelling, type_id]]
+    end
+  end
+  pending = [row[1] for row in native/ordered(pending, 0)]
+  let ordered = []
+  while len(pending) > 0
+    let remaining = []
+    for type_id in pending
+      let dependencies = []
+      if native/is_record(type_id)
+        dependencies = [field[3] for field in index[:records][type_id[1]]]
+      end
+      if native/is_array(type_id)
+        dependencies = [type_id[1]]
+      end
+      let ready = true
+      for dependency in dependencies
+        while native/is_pointer(dependency)
+          dependency = dependency[1]
+          // Record/array pointers only require forward declarations.
+          if native/is_record(dependency) || native/is_array(dependency)
+            dependency = :U8
+          end
+        end
+        if native/contains(pending, dependency) && !native/contains(ordered, dependency)
+          ready = false
+        end
+      end
+      if ready
+        ordered = [@ordered, type_id]
+      else
+        remaining = [@remaining, type_id]
+      end
+    end
+    native/ensure(len(remaining) < len(pending), "record contains a by-value cycle")
+    pending = remaining
+  end
+  return ordered
+end
+
+verb native/check_layout_instruction(index, fn_id, row, result_type)
+  let op = row[3]
+  let args = row[5]
+  if op == :GlobalAddress
+    native/ensure(len(args) == 1 && map_contains_key(index[:globals], args[0]), "GlobalAddress requires a global")
+    native/ensure(result_type == native/global_pointer(index[:globals][args[0]]), "global pointer type mismatch")
+    return true
+  end
+  if op == :Zero
+    native/ensure(len(args) == 0 && result_type != :Void, "Zero requires a result and no operands")
+    return true
+  end
+  if op == :SizeOf || op == :AlignOf
+    native/ensure(len(args) == 1 && result_type == :U64, "layout operation requires U64 result")
+    return true
+  end
+  if op == :Address
+    native/ensure(len(args) == 1 && map_contains_key(index[:variables], args[0]), "Address requires a variable")
+    let source = native/value_type(index, fn_id, args[0])
+    native/ensure(native/is_pointer(result_type) && result_type[1] == source, "address result type mismatch")
+    native/ensure(index[:variables][args[0]][3] == :Local || result_type[2] == :Const, "parameter address must be const")
+    return true
+  end
+  if op == :ElementPointer
+    native/ensure(len(args) == 2, "ElementPointer expects array pointer and index")
+    let source = native/value_type(index, fn_id, args[0])
+    native/ensure(native/is_pointer(source) && native/is_array(source[1]), "ElementPointer requires array pointer")
+    native/ensure(result_type == [:Pointer, source[1][1], source[2]], "element pointer type mismatch")
+    native/ensure(native/value_type(index, fn_id, args[1]) == :U64, "array index must be U64")
+    return true
+  end
+  if op == :PointerCast
+    native/ensure(len(args) == 1 && native/is_pointer(result_type), "PointerCast requires pointer result")
+    let source = native/value_type(index, fn_id, args[0])
+    native/ensure(native/is_pointer(source), "PointerCast requires pointer operand")
+    native/ensure(source[2] == :Mutable || result_type[2] == :Const, "PointerCast cannot remove const")
+    native/ensure(source[1] == :U8 || result_type[1] == :U8, "PointerCast requires byte storage at one end")
+    return true
+  end
+  if op == :Wrap || op == :Unwrap
+    native/ensure(len(args) == 1, "nominal conversion expects one operand")
+    let source = native/value_type(index, fn_id, args[0])
+    if op == :Wrap
+      native/ensure(native/is_scalar(result_type) && result_type[2] == source, "Wrap representation mismatch")
+    else
+      native/ensure(native/is_scalar(source) && source[2] == result_type, "Unwrap representation mismatch")
+    end
+    return true
+  end
+  if op == :PackPointer || op == :PackImmediate
+    native/ensure(len(args) == 2 && native/is_tagged(result_type), "packing requires tagged result and two operands")
+    let source = native/value_type(index, fn_id, args[0])
+    native/ensure((op == :PackPointer && native/is_pointer(source) && (source[2] == :Mutable || result_type[2] == :Const)) || (op == :PackImmediate && source == :U64), "packing operand type mismatch")
+    native/ensure(native/value_type(index, fn_id, args[1]) == :U8, "tag must be U8")
+    return true
+  end
+  if op == :UnpackPointer || op == :Tag || op == :Payload
+    native/ensure(len(args) == 1 && native/is_tagged(native/value_type(index, fn_id, args[0])), "unpacking requires tagged value")
+    if op == :UnpackPointer
+      let tagged = native/value_type(index, fn_id, args[0])
+      native/ensure(native/is_pointer(result_type) && (tagged[2] == :Mutable || result_type[2] == :Const), "unpacking cannot remove const")
+    end
+    if op == :Tag
+      native/ensure(result_type == :U8, "Tag result must be U8")
+    end
+    if op == :Payload
+      native/ensure(result_type == :U64, "Payload result must be U64")
+    end
+    return true
+  end
+  return false
+end
+
+verb native/c_layout_statement(index, row)
+  let op = row[3]
+  let args = row[5]
+  let dst = native/c_value(index, row[4])
+  let type_id = index[:variables][row[4]][2]
+  if op == :GlobalAddress
+    return string_concat(dst, " = &mica_global_", index[:globals][args[0]][1], ";")
+  end
+  if op == :Zero
+    return string_concat(dst, " = (", native/c_type(type_id), "){0};")
+  end
+  if op == :SizeOf || op == :AlignOf
+    let operator = "sizeof"
+    if op == :AlignOf
+      operator = "_Alignof"
+    end
+    return string_concat(dst, " = ", operator, "(", native/c_type(args[0]), ");")
+  end
+  if !native/contains([:Address, :ElementPointer, :PointerCast, :Wrap, :Unwrap, :PackPointer, :PackImmediate, :UnpackPointer, :Tag, :Payload], op)
+    return ""
+  end
+  let arg = native/c_value(index, args[0])
+  if op == :Address
+    return string_concat(dst, " = &", arg, ";")
+  end
+  if op == :ElementPointer
+    let source = native/value_type(index, index[:blocks][row[1]][1], args[0])
+    let offset = native/c_value(index, args[1])
+    return string_concat("if (", offset, " >= ", to_literal(source[1][2]), ") { abort(); } ", dst, " = &", arg, "->elements[", offset, "];")
+  end
+  if op == :PointerCast
+    return string_concat("if ((uintptr_t)", arg, " % _Alignof(", native/c_type(type_id[1]), ") != 0) { abort(); } ", dst, " = (", native/c_type(type_id), ")", arg, ";")
+  end
+  if op == :Wrap || op == :Unwrap
+    return string_concat(dst, " = (", native/c_type(type_id), ")", arg, ";")
+  end
+  if op == :PackPointer || op == :PackImmediate
+    let expression = arg
+    let tag = native/c_value(index, args[1])
+    let heap = native/c_heap_tag(type_id, tag)
+    let guard = string_concat(heap, " || ")
+    if op == :PackPointer
+      expression = string_concat("(uint64_t)(uintptr_t)", arg)
+      guard = string_concat("!(", heap, ") || p == 0 || ")
+    end
+    return string_concat("{ uint64_t p = ", expression, "; if (", guard, "p > UINT64_C(0x00ffffffffffffff)) { abort(); } ", dst,
+      " = p | ((uint64_t)", native/c_value(index, args[1]), " << 56); }")
+  end
+  if op == :UnpackPointer
+    let tagged = native/value_type(index, index[:blocks][row[1]][1], args[0])
+    let heap = native/c_heap_tag(tagged, string_concat("(", arg, " >> 56)"))
+    return string_concat("{ uintptr_t p = (uintptr_t)(", arg, " & UINT64_C(0x00ffffffffffffff)); if (!(", heap, ") || p == 0 || p % _Alignof(", native/c_type(type_id[1]), ") != 0) { abort(); } ", dst, " = (", native/c_type(type_id), ")p; }")
+  end
+  if op == :Tag
+    return string_concat(dst, " = (uint8_t)(", arg, " >> 56);")
+  end
+  let tagged = native/value_type(index, index[:blocks][row[1]][1], args[0])
+  let heap = native/c_heap_tag(tagged, string_concat("(", arg, " >> 56)"))
+  return string_concat("if (", heap, ") { abort(); } ", dst, " = ", arg, " & UINT64_C(0x00ffffffffffffff);")
+end
+
+// Immediate payload extraction cannot erase a heap pointer's borrow origin.
+// The same partition guards pointer packing, unpacking, and immediate packing.
+verb native/c_heap_tag(type_id, expression)
+  let conditions = [string_concat("(", expression, " == ", to_literal(tag), ")") for tag in type_id[3]]
+  if len(conditions) == 0
+    return "false"
+  end
+  return string_concat("(", string_join(conditions, " || "), ")")
+end

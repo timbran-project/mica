@@ -1,0 +1,223 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+verb native/c_value(index, id)
+  if map_contains_key(index[:constants], id)
+    let row = index[:constants][id]
+    if native/is_pointer(row[1])
+      return "NULL"
+    end
+    if row[1] == :F32
+      return string_concat("mica_internal_f32_bits(UINT32_C(0x", row[2], "))")
+    end
+    if row[1] == :I64
+      return native/c_signed_constant(row[2])
+    end
+    if row[1] == :Bool
+      return row[2]
+    end
+    return string_concat("UINT64_C(0x", row[2], ")")
+  end
+  return string_concat("v_", index[:variables][id][1])
+end
+
+verb native/c_signature(state, index, fn_row)
+  let parameters = native/ordered(native/owned(state[:parameters], 1, fn_row[0]), 2)
+  let parts = [string_concat(native/c_type(row[4]), " v_", row[3]) for row in parameters]
+  let arguments = "void"
+  if len(parts) > 0
+    arguments = string_join(parts, ", ")
+  end
+  return string_concat(native/c_type(fn_row[2]), " ", native/c_function(index, fn_row[0]), "(", arguments, ")")
+end
+
+verb native/c_expression(index, row)
+  let op = row[3]
+  let args = row[5]
+  if op == :Copy
+    return native/c_value(index, args[0])
+  end
+  if op == :Call
+    let parts = [native/c_value(index, id) for id in native/reads(row)]
+    return string_concat(native/c_function(index, args[0]), "(", string_join(parts, ", "), ")")
+  end
+  if op == :Record
+    let type_id = index[:variables][row[4]][2]
+    return string_concat("(", native/c_type(type_id), "){", string_join([native/c_value(index, id) for id in args], ", "), "}")
+  end
+  if op == :Field
+    return string_concat("(", native/c_value(index, args[0]), ").f_", args[1])
+  end
+  if op == :FieldPointer
+    return string_concat("&(", native/c_value(index, args[0]), ")->f_", args[1])
+  end
+  if op == :Load
+    return string_concat("*(", native/c_value(index, args[0]), ")")
+  end
+  if op == :Offset
+    return string_concat("(", native/c_value(index, args[0]), " + ", native/c_value(index, args[1]), ")")
+  end
+  if op == :Freeze
+    return native/c_value(index, args[0])
+  end
+  raise E_INVARG, "native: unsupported C expression"
+end
+
+// Validation completes before any output is returned. Every operation becomes
+// a separate assignment; calls cannot acquire C's unspecified operand order.
+verb native/c_declarations(state, index)
+  let functions = native/ordered(state[:functions], 1)
+  let lines = ["#include <stdint.h>", "#include <stdbool.h>", "#include <limits.h>", "#include <stddef.h>", "#include <string.h>", "#include <stdlib.h>", "#include <math.h>", "#include <float.h>",
+               "_Static_assert(sizeof(float) == 4 && FLT_RADIX == 2 && FLT_MANT_DIG == 24 && FLT_MAX_EXP == 128, \"binary32 required\");",
+               "_Static_assert(CHAR_BIT == 8, \"8-bit bytes required\");",
+               "_Static_assert(sizeof(uint64_t) == 8, \"64-bit words required\");", ""]
+  lines = [@lines, "_Static_assert(sizeof(size_t) == 8, \"64-bit size_t required\");",
+                   "_Static_assert(sizeof(void *) == 8, \"64-bit pointers required\");",
+                   "_Static_assert(PTRDIFF_MAX == INT64_MAX, \"64-bit ptrdiff_t required\");"]
+  lines = [@lines, "#ifdef __FAST_MATH__", "#error Fast math is incompatible with Mica numeric semantics", "#endif",
+    "static inline float mica_internal_f32_bits(uint32_t bits) { float result; memcpy(&result, &bits, sizeof(result)); return result; }"]
+  for type_id in index[:type_order]
+    if native/is_record(type_id) || native/is_array(type_id)
+      lines = [@lines, string_concat(native/c_type(type_id), ";")]
+    end
+  end
+  for type_id in index[:type_order]
+    if native/is_scalar(type_id)
+      lines = [@lines, string_concat("typedef ", native/c_type(type_id[2]), " ", native/c_type(type_id), ";")]
+    end
+    if native/is_tagged(type_id)
+      lines = [@lines, string_concat("typedef uint64_t ", native/c_type(type_id), ";")]
+    end
+    if native/is_record(type_id)
+      lines = [@lines, string_concat(native/c_type(type_id), " {")]
+      for field in index[:records][type_id[1]]
+        lines = [@lines, string_concat("  ", native/c_type(field[3]), " f_", field[2], ";")]
+      end
+      lines = [@lines, "};"]
+    end
+    if native/is_array(type_id)
+      lines = [@lines, string_concat(native/c_type(type_id), " { ", native/c_type(type_id[1]), " elements[", to_literal(type_id[2]), "]; };")]
+    end
+  end
+  for fn_row in functions
+    lines = [@lines, string_concat(native/c_signature(state, index, fn_row), ";")]
+  end
+  lines = [@lines, @native/c_globals(state, index, true)]
+  return lines
+end
+
+verb native/c_definitions(state, index)
+  let functions = native/ordered(state[:functions], 1)
+  let lines = native/c_globals(state, index, false)
+  for fn_row in functions
+    let fn_id = fn_row[0]
+    if map_contains_key(index[:foreign], fn_id)
+      continue
+    end
+    lines = [@lines, "", string_concat(native/c_signature(state, index, fn_row), " {")]
+    let locals = native/ordered(native/owned(state[:locals], 1, fn_id), 2)
+    for row in locals
+      lines = [@lines, string_concat("  ", native/c_type(row[3]), " v_", row[2], ";")]
+    end
+    // Taking an address suppresses unused warnings without reading a local.
+    for row in native/ordered(native/owned(state[:parameters], 1, fn_id), 2)
+      lines = [@lines, string_concat("  (void)&v_", row[3], ";")]
+    end
+    for row in locals
+      lines = [@lines, string_concat("  (void)&v_", row[2], ";")]
+    end
+    let blocks = native/ordered(native/owned(state[:blocks], 1, fn_id), 2)
+    for block in blocks
+      if block[3]
+        lines = [@lines, string_concat("  goto b_", block[2], ";")]
+      end
+    end
+    for block in blocks
+      lines = [@lines, string_concat("b_", block[2], ":")]
+      for row in native/ordered(native/owned(state[:instructions], 1, block[0]), 2)
+        lines = [@lines, string_concat("  ", native/c_statement(index, row))]
+      end
+      let term = index[:terms][block[0]]
+      let args = term[2]
+      if term[1] == :Return
+        if len(args) == 0
+          lines = [@lines, "  return;"]
+        else
+          lines = [@lines, string_concat("  return ", native/c_value(index, args[0]), ";")]
+        end
+      end
+      if term[1] == :Jump
+        lines = [@lines, string_concat("  goto b_", index[:blocks][args[0]][2], ";")]
+      end
+      if term[1] == :Branch
+        lines = [@lines, string_concat("  if (", native/c_value(index, args[0]), ") goto b_", index[:blocks][args[1]][2], ";"),
+                         string_concat("  goto b_", index[:blocks][args[2]][2], ";")]
+      end
+    end
+    lines = [@lines, "}"]
+  end
+  return lines
+end
+
+verb native/c_function(index, id)
+  let prefix = "mica_"
+  if map_contains_key(index[:foreign], id)
+    prefix = "mica_foreign_"
+  end
+  return string_concat(prefix, index[:functions][id][1])
+end
+
+verb native/c_signed_constant(encoding)
+  if encoding == "-8000000000000000"
+    return "(-INT64_MAX - INT64_C(1))"
+  end
+  if string_slice(encoding, 0, 1) == "-"
+    return string_concat("(-INT64_C(0x", string_slice(encoding, 1, string_len(encoding)), "))")
+  end
+  return string_concat("INT64_C(0x", encoding, ")")
+end
+
+verb native/c_statement(index, row)
+  let args = row[5]
+  if row[4] != :Discard
+    let layout = native/c_layout_statement(index, row)
+    if layout != ""
+      return layout
+    end
+    let numeric = native/c_numeric_statement(index, row)
+    if numeric != ""
+      return numeric
+    end
+  end
+  if row[3] == :Store
+    return string_concat("*(", native/c_value(index, args[0]), ") = ", native/c_value(index, args[1]), ";")
+  end
+  if row[3] == :CopyBytes
+    let count = native/c_value(index, args[2])
+    return string_concat("if (", count, " != 0) memmove(", native/c_value(index, args[0]), ", ", native/c_value(index, args[1]), ", (size_t)", count, ");")
+  end
+  let prefix = ""
+  if row[4] != :Discard
+    prefix = string_concat(native/c_value(index, row[4]), " = ")
+  end
+  return string_concat(prefix, native/c_expression(index, row), ";")
+end
+
+verb native/emit_c(state)
+  let index = native/check(state)
+  return string_concat(string_join([@native/c_declarations(state, index), @native/c_definitions(state, index)], "\n"), "\n")
+end
+
+// The caller writes these artifacts. Emission performs no filesystem effects.
+verb native/emit_module(state, spelling)
+  native/identifier(spelling)
+  let index = native/check(state)
+  let guard = string_concat("MICA_GENERATED_", spelling, "_H")
+  let header = string_concat(string_join([string_concat("#ifndef ", guard), string_concat("#define ", guard),
+    @native/c_declarations(state, index), "#endif"], "\n"), "\n")
+  let source = string_concat("#include \"", spelling, ".h\"\n", string_join(native/c_definitions(state, index), "\n"), "\n")
+  let symbols = [[row[1], native/c_function(index, row[0])] for row in native/ordered(state[:functions], 1)]
+  return {:header_name -> string_concat(spelling, ".h"), :header -> header,
+          :source_name -> string_concat(spelling, ".c"), :source -> source, :symbols -> symbols,
+          :c_flags -> ["-std=c11", "-ffp-contract=off", "-fno-fast-math"], :link_flags -> ["-lm"]}
+end

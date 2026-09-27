@@ -1,0 +1,257 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+verb native/is_pointer(type_id)
+  return is_kind(type_id, :list) && len(type_id) == 3 && type_id[0] == :Pointer
+end
+
+verb native/is_record(type_id)
+  return is_kind(type_id, :list) && len(type_id) == 2 && type_id[0] == :Record
+end
+
+verb native/is_scalar(type_id)
+  return is_kind(type_id, :list) && len(type_id) == 3 && type_id[0] == :Scalar
+end
+
+verb native/is_tagged(type_id)
+  return is_kind(type_id, :list) && len(type_id) == 4 && type_id[0] == :Tagged
+end
+
+verb native/is_array(type_id)
+  return is_kind(type_id, :list) && len(type_id) == 3 && type_id[0] == :Array
+end
+
+verb native/type_name(type_id)
+  if native/is_record(type_id)
+    return string_concat("Record_", type_id[1])
+  end
+  if native/is_scalar(type_id) || native/is_tagged(type_id)
+    return string_concat("Named_", type_id[1])
+  end
+  if native/is_pointer(type_id)
+    return string_concat("Pointer_", {:Mutable -> "Mutable", :Const -> "Const"}[type_id[2]], "_", native/type_name(type_id[1]))
+  end
+  if native/is_array(type_id)
+    return string_concat("Array_", to_literal(type_id[2]), "_", native/type_name(type_id[1]))
+  end
+  return {:U8 -> "U8", :U16 -> "U16", :U32 -> "U32", :U64 -> "U64", :I64 -> "I64", :F32 -> "F32", :Bool -> "Bool"}[type_id]
+end
+
+verb native/c_type(type_id)
+  let scalars = {:U64 -> "uint64_t", :I64 -> "int64_t", :U8 -> "uint8_t", :U16 -> "uint16_t", :U32 -> "uint32_t", :F32 -> "float", :Bool -> "bool", :Void -> "void"}
+  if map_contains_key(scalars, type_id)
+    return scalars[type_id]
+  end
+  if native/is_scalar(type_id) || native/is_tagged(type_id)
+    native/identifier(type_id[1])
+    if native/is_tagged(type_id)
+      native/ensure(type_id[2] == :Mutable || type_id[2] == :Const, "invalid tagged pointer access")
+      native/ensure(is_kind(type_id[3], :list), "heap tags must be a list")
+      let previous = 0
+      for tag in type_id[3]
+        native/ensure(is_kind(tag, :int) && tag > previous && tag <= 255, "heap tags must be increasing bytes excluding zero")
+        previous = tag
+      end
+    end
+    if native/is_scalar(type_id)
+      native/ensure(native/is_number(type_id[2]) || type_id[2] == :Bool, "invalid nominal scalar representation")
+    end
+    return string_concat("mica_type_", type_id[1])
+  end
+  if native/is_array(type_id)
+    native/ensure(is_kind(type_id[2], :int) && type_id[2] > 0 && type_id[2] <= 2147483647, "invalid array extent")
+    native/ensure(type_id[1] != :Void, "Void array element")
+    native/c_type(type_id[1])
+    return string_concat("struct mica_", native/type_name(type_id))
+  end
+  if native/is_record(type_id)
+    native/identifier(type_id[1])
+    return string_concat("struct mica_", type_id[1])
+  end
+  if native/is_pointer(type_id)
+    let pointee = type_id[1]
+    let access = type_id[2]
+    native/ensure(pointee != :Void, "unsupported pointer target")
+    native/ensure(access == :Mutable || access == :Const, "invalid pointer access")
+    let qualifier = ""
+    if access == :Const
+      qualifier = " const"
+    end
+    return string_concat(native/c_type(pointee), qualifier, " *")
+  end
+  raise E_INVARG, "native: unsupported type"
+end
+
+verb native/check_type(records, type_id)
+  native/c_type(type_id)
+  if native/is_record(type_id)
+    native/ensure(map_contains_key(records, type_id[1]), "unknown record type")
+  end
+  if native/is_pointer(type_id) || native/is_array(type_id)
+    native/check_type(records, type_id[1])
+  end
+end
+
+verb native/record_fields(index, type_id)
+  native/ensure(native/is_record(type_id), "expected record type")
+  native/ensure(map_contains_key(index[:records], type_id[1]), "unknown record type")
+  return index[:records][type_id[1]]
+end
+
+verb native/field_type(index, type_id, spelling)
+  for field in native/record_fields(index, type_id)
+    if field[2] == spelling
+      return field[3]
+    end
+  end
+  raise E_INVARG, string_concat("native: unknown field ", spelling)
+end
+
+verb native/has_pointer(index, type_id)
+  if native/is_pointer(type_id) || native/is_tagged(type_id)
+    return true
+  end
+  if native/is_array(type_id)
+    return native/has_pointer(index, type_id[1])
+  end
+  if native/is_record(type_id)
+    for field in index[:records][type_id[1]]
+      if native/has_pointer(index, field[3])
+        return true
+      end
+    end
+  end
+  return false
+end
+
+// Record definitions are emitted in dependency order. Pointer cycles are legal;
+// by-value cycles and empty C records are rejected.
+verb native/check_records(state)
+  let records = {}
+  for row in state[:records]
+    native/identifier(row[1])
+    native/ensure(!map_contains_key(records, row[1]), "duplicate record name")
+    let fields = native/ordered(native/owned(state[:fields], 0, row[0]), 1)
+    native/ensure(len(fields) > 0, "empty record")
+    let names = []
+    let position = 0
+    for field in fields
+      native/identifier(field[2])
+      native/ensure(!native/contains(names, field[2]), "duplicate field name")
+      native/ensure(field[1] == position, "field positions must be contiguous from zero")
+      native/ensure(field[3] != :Void, "Void field")
+      names = [@names, field[2]]
+      position = position + 1
+    end
+    records[row[1]] = fields
+  end
+  for field in state[:fields]
+    native/ensure(len(native/owned(state[:records], 0, field[0])) == 1, "field has unknown record")
+    native/check_type(records, field[3])
+  end
+  return records
+end
+
+verb native/check_constant(row)
+  let type_id = row[1]
+  let encoding = row[2]
+  if native/is_pointer(type_id)
+    native/ensure(encoding == "null", "pointer constant must be null")
+    return
+  end
+  if type_id == :Bool
+    native/ensure(encoding == "true" || encoding == "false", "invalid Bool constant")
+    return
+  end
+  native/ensure(native/is_unsigned(type_id) || type_id == :I64 || type_id == :F32, "unsupported constant type")
+  if type_id == :F32
+    native/ensure(string_len(encoding) == 8, "F32 constant requires 8 hexadecimal bits")
+    for ch in string_chars(encoding)
+      native/ensure(native/contains(string_chars("0123456789abcdef"), ch), "invalid F32 bits")
+    end
+    return
+  end
+  let digits = encoding
+  let negative = false
+  if type_id == :I64 && string_slice(encoding, 0, 1) == "-"
+    negative = true
+    digits = string_slice(encoding, 1, string_len(encoding))
+  end
+  native/ensure(string_len(digits) == 16, "U64 or I64 constant requires 16 hexadecimal digits")
+  for ch in string_chars(digits)
+    native/ensure(native/contains(string_chars("0123456789abcdef"), ch), "invalid U64 or I64 constant")
+  end
+  if native/is_unsigned(type_id)
+    let limits = {:U8 -> "00000000000000ff", :U16 -> "000000000000ffff", :U32 -> "00000000ffffffff", :U64 -> "ffffffffffffffff"}
+    native/ensure(digits <= limits[type_id], "unsigned constant out of range")
+  end
+  if type_id == :I64
+    if negative
+      native/ensure(digits <= "8000000000000000", "I64 constant out of range")
+    else
+      native/ensure(digits <= "7fffffffffffffff", "I64 constant out of range")
+    end
+  end
+end
+
+verb native/check_memory_instruction(index, fn_id, row, result_type)
+  let op = row[3]
+  let args = row[5]
+  if op == :Record
+    let fields = native/record_fields(index, result_type)
+    native/ensure(len(fields) == len(args), "record field count mismatch")
+    let position = 0
+    for field in fields
+      native/ensure(native/value_type(index, fn_id, args[position]) == field[3], "record field type mismatch")
+      position = position + 1
+    end
+    return true
+  end
+  if op == :Field || op == :FieldPointer
+    native/ensure(len(args) == 2, "field operation expects value and field name")
+    let target_type = native/value_type(index, fn_id, args[0])
+    let expected = :Void
+    if op == :FieldPointer
+      native/ensure(native/is_pointer(target_type), "field address requires pointer")
+      expected = [:Pointer, native/field_type(index, target_type[1], args[1]), target_type[2]]
+      native/c_type(expected)
+    else
+      expected = native/field_type(index, target_type, args[1])
+    end
+    native/ensure(expected == result_type, "field result type mismatch")
+    return true
+  end
+  if op == :Load || op == :Store || op == :Offset || op == :Freeze
+    let count = 1
+    if op == :Store || op == :Offset
+      count = 2
+    end
+    native/ensure(len(args) == count, "memory operand count mismatch")
+    let pointer = native/value_type(index, fn_id, args[0])
+    native/ensure(native/is_pointer(pointer), "memory operation requires pointer")
+    if op == :Load
+      native/ensure(result_type == pointer[1], "load type mismatch")
+    end
+    if op == :Store
+      native/ensure(pointer[2] == :Mutable && result_type == :Void, "store requires mutable pointer and no result")
+      native/ensure(native/value_type(index, fn_id, args[1]) == pointer[1], "store type mismatch")
+    end
+    if op == :Offset
+      native/ensure(result_type == pointer, "offset pointer type mismatch")
+      native/ensure(native/value_type(index, fn_id, args[1]) == :U64, "offset requires U64 index")
+    end
+    if op == :Freeze
+      native/ensure(result_type == [:Pointer, pointer[1], :Const], "Freeze requires const result")
+    end
+    return true
+  end
+  if op == :CopyBytes
+    native/ensure(len(args) == 3 && result_type == :Void, "CopyBytes expects destination, source, length and no result")
+    native/ensure(native/value_type(index, fn_id, args[0]) == [:Pointer, :U8, :Mutable], "CopyBytes destination must be mutable bytes")
+    let source_type = native/value_type(index, fn_id, args[1])
+    native/ensure(source_type == [:Pointer, :U8, :Const] || source_type == [:Pointer, :U8, :Mutable], "CopyBytes source must be bytes")
+    native/ensure(native/value_type(index, fn_id, args[2]) == :U64, "CopyBytes length must be U64")
+    return true
+  end
+  return false
+end

@@ -1,0 +1,126 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+verb native/value_examples()
+  let [int_result, s0] = native/record_type(native/scalar_example(), "IntResult", [["ok", :Bool], ["number", :I64]])
+  let [arena, s1] = native/record_type(s0, "Arena", [["data", [:Pointer, :U8, :Mutable]], ["capacity", :U64], ["used", :U64]])
+  let [arena_result, s2] = native/record_type(s1, "ArenaResult", [["ok", :Bool], ["arena", arena]])
+  let [text, s3] = native/record_type(s2, "String", [["data", [:Pointer, :U8, :Const]], ["length", :U64]])
+  let [string_result, s4] = native/record_type(s3, "StringResult", [["status", :U64], ["text", text]])
+  let [constants, s5] = native/constants(s4, [
+    ["zero", :U64, "0000000000000000"], ["invalid", :U64, "0000000000000001"],
+    ["full", :U64, "0000000000000002"], ["izero", :I64, "0000000000000000"],
+    ["minimum", :I64, "-0080000000000000"], ["maximum", :I64, "007fffffffffffff"],
+    ["yes", :Bool, "true"], ["no", :Bool, "false"],
+    ["null", [:Pointer, :U8, :Mutable], "null"], ["const_null", [:Pointer, :U8, :Const], "null"],
+    ["size_limit", :U64, "7fffffffffffffff"]])
+  let s6 = native/checked_add_example(s5, int_result, constants)
+  let [allocate, unused_alloc, s7] = native/function_scope(s6, "allocate", [:Pointer, :U8, :Mutable], [["size", :U64, :Value]], [], [])
+  let s8 = native/contract(native/foreign(s7, allocate), allocate, [:Allocate], :Owned, "")
+  let [release, unused_free, s9] = native/function_scope(s8, "release", :Void, [["data", [:Pointer, :U8, :Mutable], :Consume]], [], [])
+  let s10 = native/contract(native/foreign(s9, release), release, [:Release], :Value, "")
+  let s11 = native/arena_create_example(s10, arena, arena_result, allocate, constants)
+  let s12 = native/arena_release_example(s11, arena, release, constants)
+  return native/string_example(s12, arena, text, string_result, constants)
+end
+
+// Inputs and the result must fit the Mica signed 56-bit integer range.
+// Unsigned addition and a representation copy avoid signed C overflow, even
+// for out-of-domain inputs. Range checks still reject those inputs.
+verb native/checked_add_example(input_state, result_type, k)
+  let [fn_id, v, initial] = native/function_scope(input_state, "checked_add", result_type,
+    [["left", :I64, :Value], ["right", :I64, :Value]],
+    [["condition", :Bool], ["uleft", :U64], ["uright", :U64], ["bits", :U64], ["sum", :I64], ["result", result_type]],
+    ["left_min", "left_max", "right_min", "right_max", "add", "sum_max", "success", "failure"])
+  let state = initial
+  for check in [["left_min", v["left"], k["minimum"], "left_max"],
+                ["left_max", k["maximum"], v["left"], "right_min"],
+                ["right_min", v["right"], k["minimum"], "right_max"],
+                ["right_max", k["maximum"], v["right"], "add"]]
+    state = native/block_body(state, v[check[0]], [[:Less, v["condition"], [check[1], check[2]]]],
+      :Branch, [v["condition"], v["failure"], v[check[3]]])
+  end
+  state = native/block_body(state, v["add"], [
+    [:Convert, v["uleft"], [v["left"]]], [:Convert, v["uright"], [v["right"]]],
+    [:Add, v["bits"], [v["uleft"], v["uright"]]], [:Bitcast, v["sum"], [v["bits"]]],
+    [:Less, v["condition"], [v["sum"], k["minimum"]]]], :Branch, [v["condition"], v["failure"], v["sum_max"]])
+  state = native/block_body(state, v["sum_max"], [[:Less, v["condition"], [k["maximum"], v["sum"]]]],
+    :Branch, [v["condition"], v["failure"], v["success"]])
+  state = native/block_body(state, v["success"], [[:Record, v["result"], [k["yes"], v["sum"]]]], :Return, [v["result"]])
+  return native/block_body(state, v["failure"], [[:Record, v["result"], [k["no"], k["izero"]]]], :Return, [v["result"]])
+end
+
+// One owned allocation backs each arena. Pointer arithmetic stays within
+// PTRDIFF_MAX; allocation failure publishes a canonical empty arena.
+verb native/arena_create_example(input_state, arena, result_type, allocate, k)
+  let [fn_id, v, initial] = native/function_scope(input_state, "arena_create", result_type,
+    [["capacity", :U64, :Value]], [["condition", :Bool], ["data", [:Pointer, :U8, :Mutable]], ["arena", arena], ["result", result_type]],
+    ["entry", "size_check", "allocate", "publish", "empty", "failure"])
+  let state = native/contract(initial, fn_id, [:Allocate], :Owned, "")
+  state = native/block_body(state, v["entry"], [[:Equal, v["condition"], [v["capacity"], k["zero"]]]],
+    :Branch, [v["condition"], v["empty"], v["size_check"]])
+  state = native/block_body(state, v["size_check"], [[:Less, v["condition"], [k["size_limit"], v["capacity"]]]],
+    :Branch, [v["condition"], v["failure"], v["allocate"]])
+  state = native/block_body(state, v["allocate"], [[:Call, v["data"], [allocate, v["capacity"]]],
+    [:Equal, v["condition"], [v["data"], k["null"]]]], :Branch, [v["condition"], v["failure"], v["publish"]])
+  state = native/block_body(state, v["publish"], [[:Record, v["arena"], [v["data"], v["capacity"], k["zero"]]],
+    [:Record, v["result"], [k["yes"], v["arena"]]]], :Return, [v["result"]])
+  state = native/block_body(state, v["empty"], [[:Record, v["arena"], [k["null"], k["zero"], k["zero"]]],
+    [:Record, v["result"], [k["yes"], v["arena"]]]], :Return, [v["result"]])
+  return native/block_body(state, v["failure"], [[:Record, v["arena"], [k["null"], k["zero"], k["zero"]]],
+    [:Record, v["result"], [k["no"], v["arena"]]]], :Return, [v["result"]])
+end
+
+verb native/arena_release_example(input_state, arena, release, k)
+  let [fn_id, v, initial] = native/function_scope(input_state, "arena_release", :Void,
+    [["arena", [:Pointer, arena, :Mutable], :Consume]],
+    [["contents", arena], ["data", [:Pointer, :U8, :Mutable]], ["empty", arena]], ["entry"])
+  let state = native/contract(initial, fn_id, [:ReadMemory, :WriteMemory, :Release], :Value, "")
+  return native/block_body(state, v["entry"], [[:Load, v["contents"], [v["arena"]]],
+    [:Field, v["data"], [v["contents"], "data"]], [:Call, :Discard, [release, v["data"]]],
+    [:Record, v["empty"], [k["null"], k["zero"], k["zero"]]], [:Store, :Discard, [v["arena"], v["empty"]]]], :Return, [])
+end
+
+// Status 0: success; 1: invalid length or null nonempty source; 2: no space
+// or unusable arena. The caller supplies the actual readable source extent.
+// Copy precedes both the arena update and publication of the immutable view.
+verb native/string_example(input_state, arena, text, result_type, k)
+  let bytes = [:Pointer, :U8, :Mutable]
+  let const_bytes = [:Pointer, :U8, :Const]
+  let [fn_id, v, initial] = native/function_scope(input_state, "string_copy", result_type,
+    [["arena", [:Pointer, arena, :Mutable], :Borrow], ["source", const_bytes, :Borrow],
+     ["source_length", :U64, :Value], ["length", :I64, :Value]],
+    [["condition", :Bool], ["count", :U64], ["contents", arena], ["data", bytes], ["capacity", :U64],
+     ["used", :U64], ["available", :U64], ["end", :U64], ["destination", bytes], ["published", const_bytes],
+     ["text", text], ["result", result_type]],
+    ["entry", "extent", "empty_check", "source_check", "arena_check", "capacity_check", "space_check", "storage_check", "copy", "empty", "invalid", "full"])
+  let state = native/contract(initial, fn_id, [:ReadMemory, :WriteMemory], :Borrow, "arena")
+  state = native/block_body(state, v["entry"], [[:Less, v["condition"], [v["length"], k["izero"]]]],
+    :Branch, [v["condition"], v["invalid"], v["extent"]])
+  state = native/block_body(state, v["extent"], [[:Convert, v["count"], [v["length"]]],
+    [:Less, v["condition"], [v["source_length"], v["count"]]]], :Branch, [v["condition"], v["invalid"], v["empty_check"]])
+  state = native/block_body(state, v["empty_check"], [[:Equal, v["condition"], [v["count"], k["zero"]]]],
+    :Branch, [v["condition"], v["empty"], v["source_check"]])
+  state = native/block_body(state, v["source_check"], [[:Equal, v["condition"], [v["source"], k["const_null"]]]],
+    :Branch, [v["condition"], v["invalid"], v["arena_check"]])
+  state = native/block_body(state, v["arena_check"], [[:Load, v["contents"], [v["arena"]]],
+    [:Field, v["data"], [v["contents"], "data"]], [:Field, v["capacity"], [v["contents"], "capacity"]],
+    [:Field, v["used"], [v["contents"], "used"]], [:Less, v["condition"], [k["size_limit"], v["capacity"]]]],
+    :Branch, [v["condition"], v["full"], v["capacity_check"]])
+  state = native/block_body(state, v["capacity_check"], [[:Less, v["condition"], [v["capacity"], v["used"]]]],
+    :Branch, [v["condition"], v["full"], v["space_check"]])
+  state = native/block_body(state, v["space_check"], [[:Subtract, v["available"], [v["capacity"], v["used"]]],
+    [:Less, v["condition"], [v["available"], v["count"]]]], :Branch, [v["condition"], v["full"], v["storage_check"]])
+  state = native/block_body(state, v["storage_check"], [[:Equal, v["condition"], [v["data"], k["null"]]]],
+    :Branch, [v["condition"], v["full"], v["copy"]])
+  state = native/block_body(state, v["copy"], [[:Offset, v["destination"], [v["data"], v["used"]]],
+    [:CopyBytes, :Discard, [v["destination"], v["source"], v["count"]]],
+    [:Add, v["end"], [v["used"], v["count"]]], [:Record, v["contents"], [v["data"], v["capacity"], v["end"]]],
+    [:Store, :Discard, [v["arena"], v["contents"]]], [:Freeze, v["published"], [v["destination"]]],
+    [:Record, v["text"], [v["published"], v["count"]]], [:Record, v["result"], [k["zero"], v["text"]]]], :Return, [v["result"]])
+  for outcome in [["empty", k["zero"]], ["invalid", k["invalid"]], ["full", k["full"]]]
+    state = native/block_body(state, v[outcome[0]], [[:Record, v["text"], [k["const_null"], k["zero"]]],
+      [:Record, v["result"], [outcome[1], v["text"]]]], :Return, [v["result"]])
+  end
+  return state
+end

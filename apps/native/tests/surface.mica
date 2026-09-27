@@ -1,0 +1,127 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+verb native/surface_program()
+  let state = native/program()
+  let [checked, s0] = native/record_type(state, "Checked", [["ok", :Bool], ["number", :I64]])
+  state = s0
+  for spec in [["checked_add", :CheckedAdd], ["checked_sub", :CheckedSubtract],
+               ["checked_mul", :CheckedMultiply], ["checked_div", :CheckedDivide], ["checked_rem", :CheckedRemainder]]
+    let [fn0, v0, next_state] = native/function_scope(state, spec[0], checked,
+      [["left", :I64, :Value], ["right", :I64, :Value]], [["result", checked]], ["entry"])
+    state = native/block_body(next_state, v0["entry"], [[spec[1], v0["result"], [v0["left"], v0["right"]]]], :Return, [v0["result"]])
+  end
+  for spec in [["checked_neg", :CheckedNegate, :I64], ["float_int", :CheckedFloatToInt, :F32]]
+    let [fn1, v1, next_state] = native/function_scope(state, spec[0], checked,
+      [["input", spec[2], :Value]], [["result", checked]], ["entry"])
+    state = native/block_body(next_state, v1["entry"], [[spec[1], v1["result"], [v1["input"]]]], :Return, [v1["result"]])
+  end
+  for spec in [["u8_mul", :Multiply, :U8, :U8], ["u16_mul", :Multiply, :U16, :U16],
+               ["u32_mul", :Multiply, :U32, :U32], ["u32_sub", :Subtract, :U32, :U32],
+               ["u64_div", :Divide, :U64, :U64], ["u64_rem", :Remainder, :U64, :U64],
+               ["left_shift", :ShiftLeft, :U64, :U64], ["right_shift", :ShiftRight, :U64, :U64],
+               ["float_add", :Add, :F32, :F32], ["float_sub", :Subtract, :F32, :F32],
+               ["float_mul", :Multiply, :F32, :F32], ["float_div", :Divide, :F32, :F32],
+               ["float_less", :Less, :F32, :Bool], ["float_equal", :Equal, :F32, :Bool]]
+    let [fn2, v2, next_state] = native/function_scope(state, spec[0], spec[3],
+      [["left", spec[2], :Value], ["right", spec[2], :Value]], [["result", spec[3]]], ["entry"])
+    state = native/block_body(next_state, v2["entry"], [[spec[1], v2["result"], [v2["left"], v2["right"]]]], :Return, [v2["result"]])
+  end
+  for spec in [["float_bits", :Bitcast, :F32, :U32], ["bits_float", :Bitcast, :U32, :F32],
+               ["signed_bits", :Bitcast, :I64, :U64], ["bits_signed", :Bitcast, :U64, :I64],
+               ["float_neg", :Negate, :F32, :F32], ["float_trunc", :Truncate, :F32, :F32],
+               ["float_finite", :IsFinite, :F32, :Bool], ["int_float", :Convert, :I64, :F32],
+               ["narrow", :Convert, :U64, :U8], ["extend", :Convert, :U32, :I64]]
+    let [fn3, v3, next_state] = native/function_scope(state, spec[0], spec[3],
+      [["input", spec[2], :Value]], [["result", spec[3]]], ["entry"])
+    state = native/block_body(next_state, v3["entry"], [[spec[1], v3["result"], [v3["input"]]]], :Return, [v3["result"]])
+  end
+  for spec in [["negative_zero", :F32, "80000000"], ["subnormal", :F32, "00000001"],
+               ["max_u8", :U8, "00000000000000ff"], ["max_u16", :U16, "000000000000ffff"], ["max_u32", :U32, "00000000ffffffff"]]
+    let [id, s1] = native/add_constant(state, spec[1], spec[2])
+    let [fn4, v4, s2] = native/function_scope(s1, spec[0], spec[1], [], [], ["entry"])
+    state = native/terminate(s2, v4["entry"], :Return, [id])
+  end
+  let word = [:Tagged, "Value", :Mutable, [7, 8, 9, 10, 11, 12, 14, 16]]
+  let symbol = [:Scalar, "Symbol", :U32]
+  let bytes = [:Pointer, :U8, :Mutable]
+  let const_bytes = [:Pointer, :U8, :Const]
+  let [header, s1] = native/record_type(state, "StringHeader", [["data", const_bytes], ["length", :U64]])
+  let [c, s2] = native/constants(s1, [["tag", :U8, "0000000000000007"], ["one", :U64, "0000000000000001"]])
+  let [fn5, v5, s3] = native/function_scope(s2, "string_header", word,
+    [["storage", bytes, :Borrow], ["length", :U64, :Value]],
+    [["size", :U64], ["header", [:Pointer, header, :Mutable]], ["data", bytes], ["text", const_bytes],
+     ["record", header], ["frozen", [:Pointer, header, :Const]], ["result", word]], ["entry"])
+  state = native/contract(s3, fn5, [:WriteMemory], :Borrow, "storage")
+  state = native/block_body(state, v5["entry"], [[:SizeOf, v5["size"], [header]],
+    [:PointerCast, v5["header"], [v5["storage"]]], [:Offset, v5["data"], [v5["storage"], v5["size"]]],
+    [:Freeze, v5["text"], [v5["data"]]], [:Record, v5["record"], [v5["text"], v5["length"]]],
+    [:Store, :Discard, [v5["header"], v5["record"]]], [:Freeze, v5["frozen"], [v5["header"]]],
+    [:PackPointer, v5["result"], [v5["header"], c["tag"]]]], :Return, [v5["result"]])
+  let [fn6, v6, s4] = native/function_scope(state, "string_length", :U64, [["value", word, :Borrow]],
+    [["header", [:Pointer, header, :Const]], ["field", [:Pointer, :U64, :Const]], ["result", :U64]], ["entry"])
+  state = native/contract(s4, fn6, [:ReadMemory], :Value, "")
+  state = native/block_body(state, v6["entry"], [[:UnpackPointer, v6["header"], [v6["value"]]],
+    [:FieldPointer, v6["field"], [v6["header"], "length"]], [:Load, v6["result"], [v6["field"]]]], :Return, [v6["result"]])
+  let [fn7, v7, s5] = native/function_scope(state, "string_bytes", const_bytes, [["value", word, :Borrow]],
+    [["header", [:Pointer, header, :Const]], ["field", [:Pointer, const_bytes, :Const]], ["result", const_bytes]], ["entry"])
+  state = native/contract(s5, fn7, [:ReadMemory], :Borrow, "value")
+  state = native/block_body(state, v7["entry"], [[:UnpackPointer, v7["header"], [v7["value"]]],
+    [:FieldPointer, v7["field"], [v7["header"], "data"]], [:Load, v7["result"], [v7["field"]]]], :Return, [v7["result"]])
+  for spec in [["value_tag", :Tag, :U8], ["value_payload", :Payload, :U64]]
+    let [fn8, v8, next_state] = native/function_scope(state, spec[0], spec[2], [["value", word, :Borrow]], [["result", spec[2]]], ["entry"])
+    state = native/block_body(next_state, v8["entry"], [[spec[1], v8["result"], [v8["value"]]]], :Return, [v8["result"]])
+  end
+  let [fn9, v9, s6] = native/function_scope(state, "immediate", word, [["payload", :U64, :Value], ["tag", :U8, :Value]], [["result", word]], ["entry"])
+  state = native/contract(s6, fn9, [], :Owned, "")
+  state = native/block_body(state, v9["entry"], [[:PackImmediate, v9["result"], [v9["payload"], v9["tag"]]]], :Return, [v9["result"]])
+  let array = [:Array, :U32, 256]
+  let [fn10, v10, s7] = native/function_scope(state, "array_roundtrip", :U32, [["index", :U64, :Value], ["input", :U32, :Value]],
+    [["array", array], ["address", [:Pointer, array, :Mutable]], ["element", [:Pointer, :U32, :Mutable]], ["result", :U32]], ["entry"])
+  state = native/contract(s7, fn10, [:ReadMemory, :WriteMemory], :Value, "")
+  state = native/block_body(state, v10["entry"], [[:Zero, v10["array"], []], [:Address, v10["address"], [v10["array"]]],
+    [:ElementPointer, v10["element"], [v10["address"], v10["index"]]], [:Store, :Discard, [v10["element"], v10["input"]]],
+    [:Load, v10["result"], [v10["element"]]]], :Return, [v10["result"]])
+  let [fn11, v11, s8] = native/function_scope(state, "typed_offset", :U64,
+    [["base", [:Pointer, :U64, :Const], :Borrow], ["index", :U64, :Value]], [["element", [:Pointer, :U64, :Const]], ["result", :U64]], ["entry"])
+  state = native/contract(s8, fn11, [:ReadMemory], :Value, "")
+  state = native/block_body(state, v11["entry"], [[:Offset, v11["element"], [v11["base"], v11["index"]]], [:Load, v11["result"], [v11["element"]]]], :Return, [v11["result"]])
+  let [fn12, v12, s9] = native/function_scope(state, "symbol_roundtrip", :U32, [["input", :U32, :Value]], [["symbol", symbol], ["result", :U32]], ["entry"])
+  state = native/block_body(s9, v12["entry"], [[:Wrap, v12["symbol"], [v12["input"]]], [:Unwrap, v12["result"], [v12["symbol"]]]], :Return, [v12["result"]])
+  let [counter, g0] = native/add_global(state, "counter", :U64, :Mutable, :Zero)
+  let [cache, g1] = native/add_global(g0, "cache", :U64, :ThreadLocal, :Zero)
+  let [literal, g2] = native/add_global(g1, "literal", [:Array, :U8, 4], :Constant, [65, 0, 195, 169])
+  state = g2
+  for item in [["counter_next", counter], ["cache_next", cache]]
+    let [global_fn, gv, gs] = native/function_scope(state, item[0], :U64, [],
+      [["address", [:Pointer, :U64, :Mutable]], ["before", :U64], ["after", :U64]], ["entry"])
+    state = native/contract(gs, global_fn, [:ReadMemory, :WriteMemory], :Value, "")
+    state = native/block_body(state, gv["entry"], [[:GlobalAddress, gv["address"], [item[1]]],
+      [:Load, gv["before"], [gv["address"]]], [:Add, gv["after"], [gv["before"], c["one"]]],
+      [:Store, :Discard, [gv["address"], gv["after"]]]], :Return, [gv["after"]])
+  end
+  let [literal_fn, lv, ls] = native/function_scope(state, "literal", [:Pointer, [:Array, :U8, 4], :Const], [],
+    [["address", [:Pointer, [:Array, :U8, 4], :Const]]], ["entry"])
+  state = native/contract(ls, literal_fn, [], :Static, "")
+  state = native/block_body(state, lv["entry"], [[:GlobalAddress, lv["address"], [literal]]], :Return, [lv["address"]])
+  let [align_fn, av, als] = native/function_scope(state, "header_alignment", :U64, [], [["result", :U64]], ["entry"])
+  state = native/block_body(als, av["entry"], [[:AlignOf, av["result"], [header]]], :Return, [av["result"]])
+  let [slot_fn, sv, ss] = native/function_scope(state, "slot_store", word,
+    [["storage", [:Pointer, word, :Mutable], :Borrow], ["value", word, [:Borrow, "storage"]]], [], ["entry"])
+  state = native/contract(ss, slot_fn, [:WriteMemory], :Borrow, "storage")
+  state = native/block_body(state, sv["entry"], [[:Store, :Discard, [sv["storage"], sv["value"]]]], :Return, [sv["value"]])
+  let [share_fn, sh, shs] = native/function_scope(state, "slot_share", word,
+    [["storage", [:Pointer, word, :Mutable], :Borrow], ["value", word, [:Borrow, "storage"]]], [["result", word]], ["entry"])
+  state = native/contract(shs, share_fn, [:WriteMemory], :Borrow, "storage")
+  state = native/block_body(state, sh["entry"], [[:Call, sh["result"], [slot_fn, sh["storage"], sh["value"]]]], :Return, [sh["result"]])
+  let [entry_type, es] = native/record_type(state, "MapEntry", [["key", word], ["value", word]])
+  state = es
+  for spec in [["MapHeader", [["entries", [:Pointer, entry_type, :Mutable]], ["count", :U64]]],
+               ["RelationHeader", [["heading", [:Pointer, symbol, :Const]], ["rows", [:Pointer, [:Pointer, word, :Const], :Const]], ["count", :U64]]],
+               ["StringIndex", [["offsets", [:Pointer, :U32, :Mutable]], ["count", :U64]]],
+               ["Node", [["next", [:Pointer, [:Record, "Node"], :Mutable]], ["value", word]]],
+               ["ValueArray", [["values", [:Array, word, 8]]]]]
+    state = native/record_type(state, spec[0], spec[1])[1]
+  end
+  return state
+end

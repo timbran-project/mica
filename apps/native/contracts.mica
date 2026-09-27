@@ -1,0 +1,279 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+verb native/check_contracts(state, input_index)
+  let index = input_index
+  let foreign = {}
+  for row in state[:foreign]
+    native/ensure(map_contains_key(index[:functions], row[0]), "foreign declaration has unknown function")
+    native/ensure(!map_contains_key(foreign, row[0]), "duplicate foreign declaration")
+    foreign[row[0]] = true
+  end
+  let contracts = {}
+  for row in state[:contracts]
+    native/ensure(map_contains_key(index[:functions], row[0]), "contract has unknown function")
+    native/ensure(!map_contains_key(contracts, row[0]), "duplicate function contract")
+    for effect in row[1]
+      native/ensure(native/contains([:ReadMemory, :WriteMemory, :Allocate, :Release, :Block], effect), "unknown effect")
+    end
+    native/ensure(native/contains([:Value, :Owned, :Borrow, :Static], row[2]), "invalid result ownership")
+    contracts[row[0]] = row
+  end
+  let modes = {}
+  let owner_names = {}
+  for row in state[:parameter_contracts]
+    native/ensure(map_contains_key(index[:variables], row[0]) && index[:variables][row[0]][3] == :Parameter, "ownership contract requires parameter")
+    native/ensure(!map_contains_key(modes, row[0]), "duplicate parameter contract")
+    let mode = row[1]
+    if is_kind(mode, :list)
+      native/ensure(len(mode) == 2 && mode[0] == :Borrow, "invalid parameter ownership")
+      native/identifier(mode[1])
+      owner_names[row[0]] = mode[1]
+      mode = :Borrow
+    end
+    native/ensure(mode == :Borrow || mode == :Consume, "invalid parameter ownership")
+    native/ensure(native/has_pointer(index, index[:variables][row[0]][2]), "ownership contract on scalar parameter")
+    modes[row[0]] = mode
+  end
+  let owners_by_id = {}
+  for parameter, owner_name in owner_names
+    let variable = index[:variables][parameter]
+    let candidates = [row[0] for row in state[:parameters] if row[1] == variable[0] && row[3] == owner_name]
+    native/ensure(len(candidates) == 1 && map_contains_key(modes, candidates[0]) && modes[candidates[0]] == :Borrow && !map_contains_key(owner_names, candidates[0]), "borrow region requires a root Borrow parameter")
+    owners_by_id[parameter] = candidates[0]
+  end
+  for fn_row in state[:functions]
+    let fn_id = fn_row[0]
+    if !map_contains_key(contracts, fn_id)
+      native/ensure(!map_contains_key(foreign, fn_id) && !native/has_pointer(index, fn_row[2]), "missing function contract")
+      contracts[fn_id] = [fn_id, [], :Value, ""]
+    end
+    let contract = contracts[fn_id]
+    native/ensure(native/has_pointer(index, fn_row[2]) == (contract[2] != :Value), "result ownership does not match type")
+    let owners = []
+    for parameter in native/owned(state[:parameters], 1, fn_id)
+      if native/has_pointer(index, parameter[4])
+        native/ensure(map_contains_key(modes, parameter[0]), "missing pointer parameter contract")
+        if modes[parameter[0]] == :Borrow
+          owners = [@owners, parameter[3]]
+        end
+      end
+    end
+    if contract[2] == :Borrow
+      native/ensure(native/contains(owners, contract[3]), "borrowed result requires a borrowed owner parameter")
+    else
+      native/ensure(contract[3] == "", "only borrowed results name an owner")
+    end
+  end
+  index[:foreign] = foreign
+  index[:contracts] = contracts
+  index[:parameter_modes] = modes
+  index[:parameter_owners] = owners_by_id
+  let c_names = []
+  for fn_row in state[:functions]
+    let spelling = native/c_function(index, fn_row[0])
+    native/ensure(spelling != "mica_internal_f32_bits", "reserved C helper name")
+    native/ensure(!native/contains(c_names, spelling), "duplicate emitted function name")
+    c_names = [@c_names, spelling]
+  end
+  for type_id in index[:type_order]
+    if native/is_scalar(type_id) || native/is_tagged(type_id)
+      native/ensure(!native/contains(c_names, native/c_type(type_id)), "function conflicts with C typedef")
+    end
+  end
+  for row in state[:globals]
+    native/ensure(!native/contains(c_names, string_concat("mica_global_", row[1])), "global conflicts with function C name")
+  end
+  return index
+end
+
+verb native/direct_effects(op)
+  if op == :Load
+    return [:ReadMemory]
+  end
+  if op == :Store
+    return [:WriteMemory]
+  end
+  if op == :CopyBytes
+    return [:ReadMemory, :WriteMemory]
+  end
+  return []
+end
+
+verb native/instruction_location(index, row)
+  let block = index[:blocks][row[1]]
+  return string_concat(index[:functions][block[1]][1], "/", block[2], " instruction ", to_literal(row[2]))
+end
+
+// Summaries derive from instructions and actual call edges. Foreign summaries
+// are trusted declarations. Store one witness path per effect for diagnostics.
+verb native/check_effects(state, index)
+  let summaries = {}
+  for fn_row in state[:functions]
+    let summary = {}
+    if map_contains_key(index[:foreign], fn_row[0])
+      for effect in index[:contracts][fn_row[0]][1]
+        summary[effect] = string_concat("foreign ", fn_row[1])
+      end
+    end
+    summaries[fn_row[0]] = summary
+  end
+  let changed = true
+  while changed
+    changed = false
+    for row in state[:instructions]
+      let fn_id = index[:blocks][row[1]][1]
+      let summary = summaries[fn_id]
+      let effects = {}
+      for effect in native/direct_effects(row[3])
+        effects[effect] = native/instruction_location(index, row)
+      end
+      if row[3] == :Call
+        for effect, path in summaries[row[5][0]]
+          effects[effect] = string_concat(native/instruction_location(index, row), " -> ", path)
+        end
+      end
+      for effect, path in effects
+        if !map_contains_key(summary, effect)
+          summary[effect] = path
+          changed = true
+        end
+      end
+      summaries[fn_id] = summary
+    end
+  end
+  for fn_row in state[:functions]
+    for effect, path in summaries[fn_row[0]]
+      native/ensure(native/contains(index[:contracts][fn_row[0]][1], effect), string_concat("effect ", to_literal(effect), " exceeds contract of ", fn_row[1], ": ", path))
+    end
+  end
+end
+
+verb native/union(left, right)
+  let result = left
+  for item in right
+    if !native/contains(result, item)
+      result = [@result, item]
+    end
+  end
+  return result
+end
+
+// Conservative pointer origins, including pointers nested in records. These
+// checks reject borrowed consumption and invalid result borrows. They do not
+// establish liveness after release, aliasing, bounds, or exclusive ownership.
+verb native/check_ownership(state, index)
+  let origins = {}
+  for row in state[:constants]
+    origins[row[0]] = []
+  end
+  for row in state[:parameters]
+    let sources = []
+    if native/has_pointer(index, row[4])
+      let owner = row[0]
+      if map_contains_key(index[:parameter_owners], owner)
+        owner = index[:parameter_owners][owner]
+      end
+      sources = [[index[:parameter_modes][row[0]], owner]]
+    end
+    origins[row[0]] = sources
+  end
+  for row in state[:locals]
+    origins[row[0]] = []
+  end
+  let changed = true
+  while changed
+    changed = false
+    for row in state[:instructions]
+      if row[4] == :Discard || !native/has_pointer(index, index[:variables][row[4]][2])
+        continue
+      end
+      let sources = native/result_origins(state, index, origins, row)
+      let combined = native/union(origins[row[4]], sources)
+      if combined != origins[row[4]]
+        origins[row[4]] = combined
+        changed = true
+      end
+    end
+  end
+  for row in state[:instructions]
+    if row[3] == :Store
+      for origin in origins[row[5][1]]
+        native/ensure(origin[0] != :Stack, string_concat("stack address escapes through store at ", native/instruction_location(index, row)))
+        native/ensure(origin[0] != :Borrow || native/contains(origins[row[5][0]], origin), string_concat("borrow escapes through store at ", native/instruction_location(index, row)))
+      end
+    end
+    if row[3] != :Call
+      continue
+    end
+    for parameter in native/owned(state[:parameters], 1, row[5][0])
+      if map_contains_key(index[:parameter_owners], parameter[0])
+        let owner_id = index[:parameter_owners][parameter[0]]
+        let owner_parameter = [p for p in state[:parameters] if p[0] == owner_id][0]
+        let owner_origins = origins[row[5][owner_parameter[2] + 1]]
+        for origin in origins[row[5][parameter[2] + 1]]
+          native/ensure(origin[0] == :Static || native/contains(owner_origins, origin), string_concat("argument does not share borrow region at ", native/instruction_location(index, row)))
+        end
+      end
+      if map_contains_key(index[:parameter_modes], parameter[0]) && index[:parameter_modes][parameter[0]] == :Consume
+        for origin in origins[row[5][parameter[2] + 1]]
+          native/ensure(origin[0] == :Owned || origin[0] == :Consume, string_concat("cannot consume borrowed storage at ", native/instruction_location(index, row)))
+        end
+      end
+    end
+  end
+  for term in state[:terminators]
+    if term[1] != :Return || len(term[2]) == 0
+      continue
+    end
+    let fn_id = index[:blocks][term[0]][1]
+    let contract = index[:contracts][fn_id]
+    if contract[2] == :Value
+      continue
+    end
+    for origin in origins[term[2][0]]
+      let valid = origin[0] == :Owned || origin[0] == :Consume
+      if contract[2] == :Static
+        valid = origin[0] == :Static
+      end
+      if contract[2] == :Borrow
+        let owner = [p for p in state[:parameters] if p[1] == fn_id && p[3] == contract[3]][0][0]
+        if map_contains_key(index[:parameter_owners], owner)
+          owner = index[:parameter_owners][owner]
+        end
+        valid = origin[0] == :Borrow && origin[1] == owner
+      end
+      native/ensure(valid, string_concat("result ownership mismatch in ", index[:functions][fn_id][1], "/", index[:blocks][term[0]][2]))
+    end
+  end
+end
+
+verb native/result_origins(state, index, origins, row)
+  if row[3] == :GlobalAddress
+    return [[:Static, row[5][0]]]
+  end
+  if row[3] == :Address
+    return [[:Stack, row[5][0]]]
+  end
+  if row[3] == :Call
+    let contract = index[:contracts][row[5][0]]
+    if contract[2] == :Static || contract[2] == :Owned
+      return [[contract[2], row[0]]]
+    end
+    for parameter in native/owned(state[:parameters], 1, row[5][0])
+      if parameter[3] == contract[3]
+        let owner = parameter
+        if map_contains_key(index[:parameter_owners], parameter[0])
+          owner = [p for p in state[:parameters] if p[0] == index[:parameter_owners][parameter[0]]][0]
+        end
+        return origins[row[5][owner[2] + 1]]
+      end
+    end
+    return []
+  end
+  let sources = []
+  for operand in native/reads(row)
+    sources = native/union(sources, origins[operand])
+  end
+  return sources
+end

@@ -1,0 +1,288 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+// Build indexes once per validation pass. No cached validation survives an edit.
+verb native/check(state)
+  let ids = {}
+  for table in [:functions, :parameters, :locals, :blocks, :instructions, :constants, :records, :globals]
+    for row in state[table]
+      native/ensure(!map_contains_key(ids, row[0]), "duplicate node ID")
+      ids[row[0]] = true
+    end
+  end
+  let records = native/check_records(state)
+  let functions = {}
+  let symbols = {}
+  for row in state[:functions]
+    native/identifier(row[1])
+    native/check_type(records, row[2])
+    native/ensure(!map_contains_key(symbols, row[1]), "duplicate function name")
+    symbols[row[1]] = true
+    functions[row[0]] = row
+  end
+  let variables = {}
+  let names = {}
+  let slots = {}
+  for row in state[:parameters]
+    native/ensure(map_contains_key(functions, row[1]), "parameter has unknown function")
+    native/identifier(row[3])
+    native/check_type(records, row[4])
+    native/ensure(row[4] != :Void, "Void parameter")
+    native/ensure(!map_contains_key(names, [row[1], row[3]]), "duplicate variable name")
+    native/ensure(!map_contains_key(slots, [row[1], row[2]]), "duplicate parameter position")
+    names[[row[1], row[3]]] = true
+    slots[[row[1], row[2]]] = true
+    variables[row[0]] = [row[1], row[3], row[4], :Parameter]
+  end
+  for row in state[:locals]
+    native/ensure(map_contains_key(functions, row[1]), "local has unknown function")
+    native/identifier(row[2])
+    native/check_type(records, row[3])
+    native/ensure(row[3] != :Void, "Void local")
+    native/ensure(!map_contains_key(names, [row[1], row[2]]), "duplicate variable name")
+    names[[row[1], row[2]]] = true
+    variables[row[0]] = [row[1], row[2], row[3], :Local]
+  end
+  let constants = {}
+  for row in state[:constants]
+    native/check_type(records, row[1])
+    native/check_constant(row)
+    constants[row[0]] = row
+  end
+  let blocks = {}
+  let block_names = {}
+  for row in state[:blocks]
+    native/ensure(map_contains_key(functions, row[1]), "block has unknown function")
+    native/identifier(row[2])
+    native/ensure(row[3] == true || row[3] == false, "entry flag must be Bool")
+    native/ensure(!map_contains_key(block_names, [row[1], row[2]]), "duplicate block name")
+    block_names[[row[1], row[2]]] = true
+    blocks[row[0]] = row
+  end
+  let terms = {}
+  for row in state[:terminators]
+    native/ensure(map_contains_key(blocks, row[0]), "terminator has unknown block")
+    native/ensure(!map_contains_key(terms, row[0]), "duplicate terminator")
+    terms[row[0]] = row
+  end
+  for row in state[:instructions]
+    native/ensure(map_contains_key(blocks, row[1]), "instruction has unknown block")
+  end
+  let index = {:records -> records, :functions -> functions, :variables -> variables, :constants -> constants,
+               :blocks -> blocks, :terms -> terms}
+  index[:globals] = native/check_globals(state, index)
+  index[:type_order] = native/check_layouts(state, index)
+  index = native/check_contracts(state, index)
+  for fn_row in state[:functions]
+    try
+      native/check_function(state, index, fn_row)
+    catch E_INVARG as problem
+      raise E_INVARG, string_concat("native: function ", fn_row[1], ": ", native/error_message(problem))
+    end
+  end
+  native/check_effects(state, index)
+  native/check_ownership(state, index)
+  return index
+end
+
+verb native/value_type(index, fn_id, id)
+  if map_contains_key(index[:constants], id)
+    return index[:constants][id][1]
+  end
+  native/ensure(map_contains_key(index[:variables], id), "unknown value")
+  let row = index[:variables][id]
+  native/ensure(row[0] == fn_id, "value belongs to another function")
+  return row[2]
+end
+
+verb native/check_instruction(index, fn_id, row)
+  let op = row[3]
+  let dst = row[4]
+  let args = row[5]
+  let result_type = :Void
+  if dst != :Discard
+    native/ensure(map_contains_key(index[:variables], dst), "destination is not a variable")
+    result_type = native/value_type(index, fn_id, dst)
+    native/ensure(index[:variables][dst][3] == :Local, "cannot assign a parameter")
+  end
+  if native/check_layout_instruction(index, fn_id, row, result_type) || native/check_memory_instruction(index, fn_id, row, result_type)
+    return
+  end
+  if op == :Call
+    native/ensure(len(args) > 0 && map_contains_key(index[:functions], args[0]), "unknown callee")
+    let callee = index[:functions][args[0]]
+    native/ensure(result_type == callee[2], "call result type mismatch")
+    return
+  end
+  if op == :Copy
+    native/ensure(len(args) == 1, "Copy expects one operand")
+    native/ensure(native/value_type(index, fn_id, args[0]) == result_type, "copy type mismatch")
+    return
+  end
+  native/ensure(native/check_numeric_instruction(index, fn_id, row, result_type), "unsupported operation")
+end
+
+verb native/targets(term)
+  if term[1] == :Jump
+    return term[2]
+  end
+  if term[1] == :Branch
+    return [term[2][1], term[2][2]]
+  end
+  return []
+end
+
+verb native/reads(row)
+  if native/contains([:Zero, :SizeOf, :AlignOf, :GlobalAddress], row[3])
+    return []
+  end
+  if row[3] == :Field || row[3] == :FieldPointer
+    return [row[5][0]]
+  end
+  if row[3] == :Call
+    let args = []
+    let i = 1
+    while i < len(row[5])
+      args = [@args, row[5][i]]
+      i = i + 1
+    end
+    return args
+  end
+  return row[5]
+end
+
+verb native/check_function(state, index, fn_row)
+  let fn_id = fn_row[0]
+  let parameters = native/ordered(native/owned(state[:parameters], 1, fn_id), 2)
+  let position = 0
+  for row in parameters
+    native/ensure(row[2] == position, "parameter positions must be contiguous from zero")
+    position = position + 1
+  end
+  let blocks = native/owned(state[:blocks], 1, fn_id)
+  if map_contains_key(index[:foreign], fn_id)
+    native/ensure(len(blocks) == 0, "foreign function has a body")
+    return
+  end
+  let entries = [row[0] for row in blocks if row[3]]
+  native/ensure(len(entries) == 1, "function requires exactly one entry block")
+  let instructions = {}
+  let predecessors = {}
+  for block in blocks
+    predecessors[block[0]] = []
+  end
+  for block in blocks
+    let id = block[0]
+    native/ensure(map_contains_key(index[:terms], id), "block has no terminator")
+    let term = index[:terms][id]
+    let args = term[2]
+    native/ensure(native/contains([:Return, :Jump, :Branch], term[1]), "unsupported terminator")
+    if term[1] == :Branch
+      native/ensure(len(args) == 3, "Branch expects condition and two targets")
+      native/ensure(native/value_type(index, fn_id, args[0]) == :Bool, "branch condition must be Bool")
+    else
+      let arity = 1
+      if term[1] == :Return && fn_row[2] == :Void
+        arity = 0
+      end
+      native/ensure(len(args) == arity, "Return or Jump operand count mismatch")
+      if term[1] == :Return && arity == 1
+        native/ensure(native/value_type(index, fn_id, args[0]) == fn_row[2], "return type mismatch")
+      end
+    end
+    for target in native/targets(term)
+      native/ensure(map_contains_key(index[:blocks], target), "unknown branch target")
+      native/ensure(index[:blocks][target][1] == fn_id, "branch crosses function boundary")
+      predecessors[target] = [@predecessors[target], id]
+    end
+    let ordered = native/ordered(native/owned(state[:instructions], 1, id), 2)
+    let ordinal = 0
+    for row in ordered
+      native/ensure(row[2] == ordinal, "instruction positions must be contiguous from zero")
+      try
+        native/check_instruction(index, fn_id, row)
+      catch E_INVARG as problem
+        raise E_INVARG, string_concat("block ", block[2], " instruction ", to_literal(ordinal), ": ", native/error_message(problem))
+      end
+      if row[3] == :Call
+        let args = row[5]
+        let callee_params = native/ordered(native/owned(state[:parameters], 1, args[0]), 2)
+        native/ensure(len(args) == len(callee_params) + 1, "call arity mismatch")
+        let i = 1
+        for parameter in callee_params
+          native/ensure(native/value_type(index, fn_id, args[i]) == parameter[4], "call argument type mismatch")
+          i = i + 1
+        end
+      end
+      ordinal = ordinal + 1
+    end
+    instructions[id] = ordered
+  end
+  // Reject dead blocks: they otherwise have no meaningful definite-assignment input.
+  let reachable = entries
+  let cursor = 0
+  while cursor < len(reachable)
+    for target in native/targets(index[:terms][reachable[cursor]])
+      if !native/contains(reachable, target)
+        reachable = [@reachable, target]
+      end
+    end
+    cursor = cursor + 1
+  end
+  native/ensure(len(reachable) == len(blocks), "unreachable block")
+  // Forward must-analysis. Start non-entry blocks at the universe, then
+  // intersect predecessor outputs until the sets stop shrinking.
+  let initial = [row[0] for row in parameters]
+  let universe = sort([@initial, @[row[0] for row in native/owned(state[:locals], 1, fn_id)]])
+  let incoming = {}
+  let outgoing = {}
+  for block in blocks
+    incoming[block[0]] = universe
+    outgoing[block[0]] = universe
+  end
+  let changed = true
+  while changed
+    changed = false
+    for block in blocks
+      let id = block[0]
+      let assigned = universe
+      if id == entries[0]
+        assigned = sort(initial)
+      else
+        for predecessor in predecessors[id]
+          assigned = [item for item in assigned if native/contains(outgoing[predecessor], item)]
+        end
+      end
+      incoming[id] = assigned
+      for row in instructions[id]
+        if row[4] != :Discard && !native/contains(assigned, row[4])
+          assigned = [@assigned, row[4]]
+        end
+      end
+      assigned = sort(assigned)
+      if assigned != outgoing[id]
+        outgoing[id] = assigned
+        changed = true
+      end
+    end
+  end
+  for block in blocks
+    let assigned = incoming[block[0]]
+    for row in instructions[block[0]]
+      for operand in native/reads(row)
+        native/assigned(index, assigned, operand)
+      end
+      if row[4] != :Discard
+        assigned = [@assigned, row[4]]
+      end
+    end
+    let term = index[:terms][block[0]]
+    if term[1] != :Jump && len(term[2]) > 0
+      native/assigned(index, assigned, term[2][0])
+    end
+  end
+end
+
+verb native/assigned(index, assigned, id)
+  native/ensure(map_contains_key(index[:constants], id) || native/contains(assigned, id), "read before definite assignment")
+end

@@ -1,0 +1,44 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+// Extract a tagged word's high byte, and sum [0, limit) through a loop.
+// The sum calls a generated wrapping-add function.
+verb native/scalar_example()
+  let [zero, s0] = native/add_constant(native/program(), :U64, "0000000000000000")
+  let [one, s1] = native/add_constant(s0, :U64, "0000000000000001")
+  let [shift, s2] = native/add_constant(s1, :U64, "0000000000000038")
+  let [tag, s3] = native/add_function(s2, "tag", :U64)
+  let [word, s4] = native/add_parameter(s3, tag, 0, "word", :U64)
+  let [tag_result, s5] = native/add_local(s4, tag, "result", :U64)
+  let [tag_entry, s6] = native/add_block(s5, tag, "entry", true)
+  let [tag_op, s7] = native/add_instruction(s6, tag_entry, 0, :ShiftRight, tag_result, [word, shift])
+  let s8 = native/terminate(s7, tag_entry, :Return, [tag_result])
+
+  let [add, s9] = native/add_function(s8, "add", :U64)
+  let [left, s10] = native/add_parameter(s9, add, 0, "left", :U64)
+  let [right, s11] = native/add_parameter(s10, add, 1, "right", :U64)
+  let [added, s12] = native/add_local(s11, add, "result", :U64)
+  let [add_entry, s13] = native/add_block(s12, add, "entry", true)
+  let [add_op, s14] = native/add_instruction(s13, add_entry, 0, :Add, added, [left, right])
+  let s15 = native/terminate(s14, add_entry, :Return, [added])
+
+  let [sum, s16] = native/add_function(s15, "sum", :U64)
+  let [limit, s17] = native/add_parameter(s16, sum, 0, "limit", :U64)
+  let [cursor, s18] = native/add_local(s17, sum, "cursor", :U64)
+  let [total, s19] = native/add_local(s18, sum, "total", :U64)
+  let [condition, s20] = native/add_local(s19, sum, "condition", :Bool)
+  let [entry, s21] = native/add_block(s20, sum, "entry", true)
+  let [test_block, s22] = native/add_block(s21, sum, "test", false)
+  let [step, s23] = native/add_block(s22, sum, "step", false)
+  let [done, s24] = native/add_block(s23, sum, "done", false)
+  let state = s24
+  state = native/add_instruction(state, entry, 0, :Copy, cursor, [zero])[1]
+  state = native/add_instruction(state, entry, 1, :Copy, total, [zero])[1]
+  state = native/terminate(state, entry, :Jump, [test_block])
+  state = native/add_instruction(state, test_block, 0, :Less, condition, [cursor, limit])[1]
+  state = native/terminate(state, test_block, :Branch, [condition, step, done])
+  state = native/add_instruction(state, step, 0, :Call, total, [add, total, cursor])[1]
+  state = native/add_instruction(state, step, 1, :Add, cursor, [cursor, one])[1]
+  state = native/terminate(state, step, :Jump, [test_block])
+  return native/terminate(state, done, :Return, [total])
+end
