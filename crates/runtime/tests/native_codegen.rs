@@ -1113,6 +1113,8 @@ int main(void) {{
     assert(mica_structured_choice(true) == 1);
     assert(mica_structured_choice(false) == 2);
     assert(mica_structured_order() == UINT64_MAX && calls == 2);
+    assert(mica_structured_zero(true) == 0 && calls == 3);
+    assert(mica_structured_zero(false) == 0 && calls == 4);
     mica_structured_void();
     return 0;
 }}

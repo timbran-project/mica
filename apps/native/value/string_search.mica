@@ -6,58 +6,95 @@
 // continuation byte. Longer needles use a stack-resident Horspool skip table.
 verb native_value/string_search(input: map) -> map
   let context: map = input
-  let name = "value_string_find"
-  let word = native_value/word()
-  let header = [:Record, "HeapString"]
-  let result = [:Record, "IdResult"]
-  let table = [:Array, :U64, 256]
+  let name: string = "value_string_find"
+  let word: list = native_value/word()
+  let header: list = [:Record, "HeapString"]
+  let result: list = [:Record, "IdResult"]
+  let table: list = [:Array, :U64, 256]
   let [constant, state] = native/add_constant(context[:state], :U64, "0000000000000100")
   context[:state] = state
   let constants: map = context[:constants]
   constants["byte_domain"] = constant
   context[:constants] = constants
   context = native_value/function(context, name, result, [["value", word, :Borrow], ["needle", word, :Borrow], ["start", :U64, :Value]],
-    [["offset_result", result], ["checked", [:Record, "HeapStringResult"]], ["hay_pointer", [:Pointer, header, :Const]], ["needle_pointer", [:Pointer, header, :Const]],
-     ["hay", header], ["pattern", header], ["hay_data", [:Pointer, :U8, :Mutable]], ["needle_data", [:Pointer, :U8, :Mutable]],
-     ["hay_slot", [:Pointer, :U8, :Mutable]], ["needle_slot", [:Pointer, :U8, :Mutable]], ["text", [:Pointer, :U8, :Const]],
-     ["hay_byte", :U8], ["needle_byte", :U8], ["condition", :Bool], ["skip", :Bool], ["ascii", :Bool],
-     ["hay_length", :U64], ["needle_length", :U64], ["candidate", :U64], ["limit", :U64], ["last", :U64], ["index", :U64], ["byte", :U64], ["step", :U64], ["remaining", :U64],
-     ["table", table], ["table_address", [:Pointer, table, :Mutable]], ["table_slot", [:Pointer, :U64, :Mutable]], ["scan", [:Record, "Utf8Scan"]], ["result", result]],
-    ["entry", "needle", "headers", "empty", "bounds", "choose", "table", "fill", "fill_byte", "pattern", "pattern_bound", "pattern_byte", "candidate", "compare", "bytes", "next_byte", "mismatch", "skip", "unit", "advance", "step", "found", "scalar", "return_scalar", "return_ascii", "return_empty", "missing"],
-    [:ReadMemory, :WriteMemory], :Value, "")
-  context = native_value/block(context, name, "entry", [[:Call, "offset_result", ["value_string_byte_offset", "value", "start"]], [:Field, "condition", ["offset_result", "ok"]],
-    [:Field, "candidate", ["offset_result", "number"]]], :Branch, ["condition", "needle", "missing"])
-  context = native_value/block(context, name, "needle", [[:Call, "checked", ["value_as_string", "needle"]], [:Field, "condition", ["checked", "ok"]]], :Branch, ["condition", "headers", "missing"])
-  context = native_value/block(context, name, "headers", [[:Field, "needle_pointer", ["checked", "header"]], [:Load, "pattern", ["needle_pointer"]], [:UnpackPointer, "hay_pointer", ["value"]], [:Load, "hay", ["hay_pointer"]],
-    [:Field, "hay_data", ["hay", "data"]], [:Field, "hay_length", ["hay", "length"]], [:Field, "needle_data", ["pattern", "data"]], [:Field, "needle_length", ["pattern", "length"]]], :Jump, ["empty"])
-  context = native_value/block(context, name, "empty", [[:Equal, "condition", ["needle_length", "zero"]]], :Branch, ["condition", "return_empty", "bounds"])
-  context = native_value/block(context, name, "bounds", [[:Subtract, "remaining", ["hay_length", "candidate"]], [:Less, "condition", ["remaining", "needle_length"]]], :Branch, ["condition", "missing", "choose"])
-  context = native_value/block(context, name, "choose", [[:Subtract, "limit", ["hay_length", "needle_length"]], [:Subtract, "last", ["needle_length", "one"]],
-    [:Less, "condition", ["needle_length", "utf64_4"]], [:Copy, "skip", ["false"]], [:Zero, "table", []], [:Address, "table_address", ["table"]]], :Branch, ["condition", "candidate", "table"])
-  context = native_value/block(context, name, "table", [[:Copy, "skip", ["true"]], [:Copy, "index", ["zero"]]], :Jump, ["fill"])
-  context = native_value/block(context, name, "fill", [[:Less, "condition", ["index", "byte_domain"]]], :Branch, ["condition", "fill_byte", "pattern"])
-  context = native_value/block(context, name, "fill_byte", [[:ElementPointer, "table_slot", ["table_address", "index"]], [:Store, :Discard, ["table_slot", "needle_length"]],
-    [:Add, "index", ["index", "one"]]], :Jump, ["fill"])
-  context = native_value/block(context, name, "pattern", [[:Copy, "index", ["zero"]]], :Jump, ["pattern_bound"])
-  context = native_value/block(context, name, "pattern_bound", [[:Less, "condition", ["index", "last"]]], :Branch, ["condition", "pattern_byte", "candidate"])
-  context = native_value/block(context, name, "pattern_byte", [[:Offset, "needle_slot", ["needle_data", "index"]], [:Load, "needle_byte", ["needle_slot"]], [:Convert, "byte", ["needle_byte"]],
-    [:ElementPointer, "table_slot", ["table_address", "byte"]], [:Subtract, "step", ["last", "index"]], [:Store, :Discard, ["table_slot", "step"]], [:Add, "index", ["index", "one"]]], :Jump, ["pattern_bound"])
-  context = native_value/block(context, name, "candidate", [[:Copy, "index", ["zero"]]], :Jump, ["compare"])
-  context = native_value/block(context, name, "compare", [[:Less, "condition", ["index", "needle_length"]]], :Branch, ["condition", "bytes", "found"])
-  context = native_value/block(context, name, "bytes", [[:Add, "byte", ["candidate", "index"]], [:Offset, "hay_slot", ["hay_data", "byte"]], [:Load, "hay_byte", ["hay_slot"]],
-    [:Offset, "needle_slot", ["needle_data", "index"]], [:Load, "needle_byte", ["needle_slot"]], [:Equal, "condition", ["hay_byte", "needle_byte"]]], :Branch, ["condition", "next_byte", "mismatch"])
-  context = native_value/block(context, name, "next_byte", [[:Add, "index", ["index", "one"]]], :Jump, ["compare"])
-  context = native_value/block(context, name, "mismatch", [], :Branch, ["skip", "skip", "unit"])
-  context = native_value/block(context, name, "skip", [[:Add, "byte", ["candidate", "last"]], [:Offset, "hay_slot", ["hay_data", "byte"]], [:Load, "hay_byte", ["hay_slot"]],
-    [:Convert, "byte", ["hay_byte"]], [:ElementPointer, "table_slot", ["table_address", "byte"]], [:Load, "step", ["table_slot"]]], :Jump, ["advance"])
-  context = native_value/block(context, name, "unit", [[:Copy, "step", ["one"]]], :Jump, ["advance"])
-  context = native_value/block(context, name, "advance", [[:Subtract, "remaining", ["limit", "candidate"]], [:Less, "condition", ["remaining", "step"]]], :Branch, ["condition", "missing", "step"])
-  context = native_value/block(context, name, "step", [[:Add, "candidate", ["candidate", "step"]]], :Jump, ["candidate"])
-  context = native_value/block(context, name, "found", [[:Field, "ascii", ["hay", "ascii"]]], :Branch, ["ascii", "return_ascii", "scalar"])
-  context = native_value/block(context, name, "scalar", [[:Freeze, "text", ["hay_data"]], [:Call, "scan", ["utf8_scan", "text", "candidate"]], [:Field, "condition", ["scan", "ok"]]], :Branch, ["condition", "return_scalar", "missing"])
-  context = native_value/block(context, name, "return_scalar", [[:Field, "candidate", ["scan", "scalars"]]], :Jump, ["return_ascii"])
-  context = native_value/block(context, name, "return_ascii", [[:Record, "result", ["true", "candidate"]]], :Return, ["result"])
-  context = native_value/block(context, name, "return_empty", [[:Record, "result", ["true", "start"]]], :Return, ["result"])
-  context = native_value/block(context, name, "missing", [[:Zero, "result", []]], :Return, ["result"])
+    [], [:ReadMemory, :WriteMemory], :Value, "")
+  context = native_value/body(context, name, [
+    [:Let, "offset_result", result, [:Call, "value_string_byte_offset", "value", "start"]],
+    [:Let, "condition", :Bool, [:Field, "offset_result", "ok"]],
+    [:Let, "candidate", :U64, [:Field, "offset_result", "number"]],
+    [:If, "condition", [], [[:Return, [:Zero]]]],
+    [:Let, "checked", [:Record, "HeapStringResult"], [:Call, "value_as_string", "needle"]],
+    [:If, [:Field, "checked", "ok"], [], [[:Return, [:Zero]]]],
+    [:Let, "needle_pointer", [:Pointer, header, :Const], [:Field, "checked", "header"]],
+    [:Let, "pattern", header, [:Load, "needle_pointer"]],
+    [:Let, "hay_pointer", [:Pointer, header, :Const], [:UnpackPointer, "value"]],
+    [:Let, "hay", header, [:Load, "hay_pointer"]],
+    [:Let, "hay_data", [:Pointer, :U8, :Mutable], [:Field, "hay", "data"]],
+    [:Let, "hay_length", :U64, [:Field, "hay", "length"]],
+    [:Let, "needle_data", [:Pointer, :U8, :Mutable], [:Field, "pattern", "data"]],
+    [:Let, "needle_length", :U64, [:Field, "pattern", "length"]],
+    [:If, [:Equal, "needle_length", "zero"], [[:Let, "result", result, [:Record, "true", "start"]], [:Return, "result"]], []],
+    [:Let, "remaining", :U64, [:Subtract, "hay_length", "candidate"]],
+    [:If, [:Less, "remaining", "needle_length"], [[:Return, [:Zero]]], []],
+    [:Let, "limit", :U64, [:Subtract, "hay_length", "needle_length"]],
+    [:Let, "last", :U64, [:Subtract, "needle_length", "one"]],
+    [:Set, "condition", [:Less, "needle_length", "utf64_4"]],
+    [:Let, "skip", :Bool, "false"],
+    [:Let, "table", table, [:Zero]],
+    [:Let, "table_address", [:Pointer, table, :Mutable], [:Address, "table"]],
+    [:If, "condition", [], [
+      [:Set, "skip", "true"],
+      [:Let, "index", :U64, "zero"],
+      [:While, [:Less, "index", "byte_domain"], [
+        [:Let, "table_slot", [:Pointer, :U64, :Mutable], [:ElementPointer, "table_address", "index"]],
+        [:Do, [:Store, "table_slot", "needle_length"]],
+        [:Set, "index", [:Add, "index", "one"]]
+      ]],
+      [:Set, "index", "zero"],
+      [:While, [:Less, "index", "last"], [
+        [:Let, "needle_slot", [:Pointer, :U8, :Mutable], [:Offset, "needle_data", "index"]],
+        [:Let, "needle_byte", :U8, [:Load, "needle_slot"]],
+        [:Let, "byte", :U64, [:Convert, "needle_byte"]],
+        [:Set, "table_slot", [:ElementPointer, "table_address", "byte"]],
+        [:Let, "step", :U64, [:Subtract, "last", "index"]],
+        [:Do, [:Store, "table_slot", "step"]],
+        [:Set, "index", [:Add, "index", "one"]]
+      ]]
+    ]],
+    [:Note, :Invariant, "A valid UTF-8 needle can match only at a scalar boundary."],
+    [:While, "true", [
+      [:Set, "index", "zero"],
+      [:While, [:Less, "index", "needle_length"], [
+        [:Set, "byte", [:Add, "candidate", "index"]],
+        [:Let, "hay_slot", [:Pointer, :U8, :Mutable], [:Offset, "hay_data", "byte"]],
+        [:Let, "hay_byte", :U8, [:Load, "hay_slot"]],
+        [:Set, "needle_slot", [:Offset, "needle_data", "index"]],
+        [:Set, "needle_byte", [:Load, "needle_slot"]],
+        [:If, [:Equal, "hay_byte", "needle_byte"], [], [[:Break]]],
+        [:Set, "index", [:Add, "index", "one"]]
+      ]],
+      [:If, [:Equal, "index", "needle_length"], [
+        [:If, [:Field, "hay", "ascii"], [[:Set, "result", [:Record, "true", "candidate"]], [:Return, "result"]], []],
+        [:Let, "text", [:Pointer, :U8, :Const], [:Freeze, "hay_data"]],
+        [:Let, "scan", [:Record, "Utf8Scan"], [:Call, "utf8_scan", "text", "candidate"]],
+        [:If, [:Field, "scan", "ok"], [], [[:Return, [:Zero]]]],
+        [:Set, "candidate", [:Field, "scan", "scalars"]],
+        [:Set, "result", [:Record, "true", "candidate"]],
+        [:Return, "result"]
+      ], []],
+      [:If, "skip", [
+        [:Set, "byte", [:Add, "candidate", "last"]],
+        [:Set, "hay_slot", [:Offset, "hay_data", "byte"]],
+        [:Set, "hay_byte", [:Load, "hay_slot"]],
+        [:Set, "byte", [:Convert, "hay_byte"]],
+        [:Set, "table_slot", [:ElementPointer, "table_address", "byte"]],
+        [:Set, "step", [:Load, "table_slot"]]
+      ], [[:Set, "step", "one"]]],
+      [:Set, "remaining", [:Subtract, "limit", "candidate"]],
+      [:If, [:Less, "remaining", "step"], [[:Return, [:Zero]]], []],
+      [:Set, "candidate", [:Add, "candidate", "step"]]
+    ]],
+    [:Return, [:Zero]]
+  ])
   return context
 end

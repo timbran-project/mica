@@ -54,9 +54,9 @@ end
 
 // Named operands keep the value algorithms readable. Native validation still
 // consumes the same typed IR and checks every instruction and call.
-verb native_value/function(input: map, name: string, result, parameters: list, locals: list, blocks: list, effects: list, mode: symbol, owner: string) -> map
+verb native_value/function(input: map, name: string, result, parameters: list, locals: list, effects: list, mode: symbol, owner: string) -> map
   let context: map = input
-  let [id, bindings, state] = native/function_scope(context[:state], name, result, parameters, locals, [string_concat("block_", block) for block in blocks])
+  let [id, bindings, state] = native/function_scope(context[:state], name, result, parameters, locals, [])
   native/ensure(!map_contains_key(context[:functions], name), "duplicate value function")
   context[:state] = native/contract(state, id, effects, mode, owner)
   let functions: map = context[:functions]
@@ -65,55 +65,6 @@ verb native_value/function(input: map, name: string, result, parameters: list, l
   let scopes: map = context[:bindings]
   scopes[name] = bindings
   context[:bindings] = scopes
-  return context
-end
-
-verb native_value/operand(context: map, bindings: map, spelling: string) -> int
-  if map_contains_key(bindings, spelling)
-    let bound_id: int = bindings[spelling]
-    return bound_id
-  end
-  native/ensure(map_contains_key(context[:constants], spelling), string_concat("unknown value operand ", spelling))
-  let constant_id: int = context[:constants][spelling]
-  return constant_id
-end
-
-verb native_value/block(input: map, name: string, block: string, instructions: list, terminator: symbol, operands: list) -> map
-  let context: map = input
-  let bindings: map = context[:bindings][name]
-  let rows: list = []
-  for row in instructions
-    let destination = :Discard
-    if row[1] != :Discard
-      destination = bindings[row[1]]
-    end
-    let args: list = []
-    let position: int = 0
-    for operand in row[2]
-      if row[0] == :SizeOf || row[0] == :AlignOf || ((row[0] == :Field || row[0] == :FieldPointer) && position == 1)
-        args = [@args, operand]
-      else
-        if row[0] == :Call && position == 0
-          args = [@args, context[:functions][operand]]
-        else
-          args = [@args, native_value/operand(context, bindings, operand)]
-        end
-      end
-      position = position + 1
-    end
-    rows = [@rows, [row[0], destination, args]]
-  end
-  let targets: list = []
-  let position: int = 0
-  for operand in operands
-    if terminator == :Jump || (terminator == :Branch && position > 0)
-      targets = [@targets, bindings[string_concat("block_", operand)]]
-    else
-      targets = [@targets, native_value/operand(context, bindings, operand)]
-    end
-    position = position + 1
-  end
-  context[:state] = native/block_body(context[:state], bindings[string_concat("block_", block)], rows, terminator, targets)
   return context
 end
 

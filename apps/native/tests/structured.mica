@@ -48,6 +48,12 @@ verb native/structured_example(first_id)
   state = native/function_body(state, order, order_names, [
     [:Note, :Invariant, "Nested calls execute left to right."],
     [:Return, [:Subtract, [:Expr, :U64, [:Call, "tick"]], [:Expr, :U64, [:Call, "tick"]]]]])
+  let [zero, zero_names, zero_state] = native/function_scope(state, "structured_zero", :U64, [["choice", :Bool, :Value]], [], [])
+  zero_names["tick"] = tick
+  state = native/contract(zero_state, zero, [:WriteMemory], :Value, "")
+  state = native/function_body(state, zero, zero_names, [
+    [:If, "choice", [[:Let, "first_tick", :U64, [:Call, "tick"]], [:Return, [:Zero]]], []],
+    [:Let, "second_tick", :U64, [:Call, "tick"]], [:Return, [:Zero]]])
   let [empty, empty_names, empty_state] = native/function_scope(state, "structured_void", :Void, [], [], [])
   state = native/function_body(empty_state, empty, empty_names, [[:Return]])
   // This text must remain a comment, even after C preprocessing.

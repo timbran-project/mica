@@ -5,112 +5,178 @@
 // last input value. Both buffers belong to the arena; the input is never changed.
 verb native_value/maps(input: map) -> map
   let context: map = input
-  let word = native_value/word()
-  let entry = [:Record, "ValueMapEntry"]
-  let entries = [:Pointer, entry, :Mutable]
-  let header = [:Record, "HeapMap"]
-  let result = [:Record, "ValueResult"]
-  let name = "value_map"
+  let word: list = native_value/word()
+  let entry: list = [:Record, "ValueMapEntry"]
+  let entries: list = [:Pointer, entry, :Mutable]
+  let header: list = [:Record, "HeapMap"]
+  let result: list = [:Record, "ValueResult"]
+  let name: string = "value_map"
   let [null, ns] = native/add_constant(context[:state], [:Pointer, entry, :Const], "null")
   context[:state] = ns
   let constants: map = context[:constants]
   constants["null_map_entries"] = null
   context[:constants] = constants
-  context = native_value/function(context, name, result,
-    [["arena", [:Pointer, [:Record, "ValueArena"], :Mutable], :Borrow], ["source", [:Pointer, entry, :Const], [:Borrow, "arena"]], ["length", :U64, :Value]],
-    [["input_slot", [:Pointer, entry, :Const]], ["header_size", :U64], ["limit", :U64], ["total", :U64],
-     ["raw_data", [:Pointer, :U8, :Mutable]], ["result", result], ["value", word], ["pointer", [:Pointer, header, :Mutable]], ["header", header],
-     ["src", entries], ["dst", entries], ["swap", entries], ["left_slot", entries], ["right_slot", entries], ["out_slot", entries],
-     ["left_entry", entry], ["right_entry", entry], ["left_key", word], ["right_key", word],
-     ["comparison", [:Record, "IntResult"]], ["order", :I64], ["condition", :Bool], ["allocation", [:Pointer, :U8, :Mutable]],
-     ["size", :U64], ["bytes", :U64], ["width", :U64], ["base", :U64], ["middle", :U64], ["end", :U64], ["left", :U64],
-     ["right", :U64], ["out", :U64], ["read", :U64], ["write", :U64], ["previous", :U64]],
-    ["entry", "source_check", "layout", "storage", "initialize", "copy_loop", "copy_entry", "size", "allocate", "scratch", "pass", "runs", "middle", "clamp_middle", "end", "clamp_end", "merge_start", "merge",
-     "right_bound", "compare", "order", "choose", "take_left", "take_right", "write_left", "write_right", "next_run", "next_pass",
-     "compact_start", "compact", "load", "duplicate", "duplicate_order", "replace", "append", "advance", "publish", "return_result", "failure"],
-    [:Allocate, :ReadMemory, :WriteMemory], :Borrow, "arena")
-  context = native_value/block(context, name, "entry", [[:Equal, "condition", ["length", "zero"]]], :Branch, ["condition", "layout", "source_check"])
-  context = native_value/block(context, name, "source_check", [[:Equal, "condition", ["source", "null_map_entries"]]], :Branch, ["condition", "failure", "layout"])
-  context = native_value/block(context, name, "layout", [[:SizeOf, "header_size", [header]], [:SizeOf, "size", [entry]],
-    [:Subtract, "limit", ["allocation_limit", "header_size"]], [:Divide, "limit", ["limit", "size"]], [:Less, "condition", ["limit", "length"]]], :Branch, ["condition", "failure", "storage"])
-  context = native_value/block(context, name, "storage", [[:Multiply, "bytes", ["length", "size"]], [:Add, "total", ["header_size", "bytes"]],
-    [:Call, "allocation", ["value_arena_allocate", "arena", "total"]], [:Equal, "condition", ["allocation", "null_bytes"]]], :Branch, ["condition", "failure", "initialize"])
-  context = native_value/block(context, name, "initialize", [[:PointerCast, "pointer", ["allocation"]], [:Offset, "raw_data", ["allocation", "header_size"]],
-    [:PointerCast, "src", ["raw_data"]], [:Copy, "read", ["zero"]], [:Copy, "write", ["length"]]], :Jump, ["copy_loop"])
-  context = native_value/block(context, name, "copy_loop", [[:Less, "condition", ["read", "length"]]], :Branch, ["condition", "copy_entry", "size"])
-  context = native_value/block(context, name, "copy_entry", [[:Offset, "input_slot", ["source", "read"]], [:Load, "right_entry", ["input_slot"]],
-    [:Offset, "out_slot", ["src", "read"]], [:Store, :Discard, ["out_slot", "right_entry"]], [:Add, "read", ["read", "one"]]], :Jump, ["copy_loop"])
-  context = native_value/block(context, name, "size", [[:Less, "condition", ["one", "length"]]], :Branch, ["condition", "allocate", "publish"])
-  context = native_value/block(context, name, "allocate", [[:SizeOf, "size", [entry]], [:Multiply, "bytes", ["length", "size"]],
-    [:Call, "allocation", ["value_arena_allocate", "arena", "bytes"]], [:Equal, "condition", ["allocation", "null_bytes"]]], :Branch, ["condition", "failure", "scratch"])
-  context = native_value/block(context, name, "scratch", [[:PointerCast, "dst", ["allocation"]], [:Copy, "width", ["one"]]], :Jump, ["pass"])
-  context = native_value/block(context, name, "pass", [[:Less, "condition", ["width", "length"]]], :Branch, ["condition", "runs", "compact_start"])
-  context = native_value/block(context, name, "runs", [[:Copy, "base", ["zero"]]], :Jump, ["middle"])
-  context = native_value/block(context, name, "middle", [[:Add, "middle", ["base", "width"]], [:Less, "condition", ["length", "middle"]]], :Branch, ["condition", "clamp_middle", "end"])
-  context = native_value/block(context, name, "clamp_middle", [[:Copy, "middle", ["length"]]], :Jump, ["end"])
-  context = native_value/block(context, name, "end", [[:Add, "end", ["middle", "width"]], [:Less, "condition", ["length", "end"]]], :Branch, ["condition", "clamp_end", "merge_start"])
-  context = native_value/block(context, name, "clamp_end", [[:Copy, "end", ["length"]]], :Jump, ["merge_start"])
-  context = native_value/block(context, name, "merge_start", [[:Copy, "left", ["base"]], [:Copy, "right", ["middle"]], [:Copy, "out", ["base"]]], :Jump, ["merge"])
-  context = native_value/block(context, name, "merge", [[:Less, "condition", ["out", "end"]]], :Branch, ["condition", "right_bound", "next_run"])
-  context = native_value/block(context, name, "right_bound", [[:Less, "condition", ["right", "end"]]], :Branch, ["condition", "compare", "take_left"])
-  context = native_value/block(context, name, "compare", [[:Less, "condition", ["left", "middle"]]], :Branch, ["condition", "order", "take_right"])
-  context = native_value/block(context, name, "order", [[:Offset, "left_slot", ["src", "left"]], [:Load, "left_entry", ["left_slot"]],
-    [:Offset, "right_slot", ["src", "right"]], [:Load, "right_entry", ["right_slot"]], [:Field, "left_key", ["left_entry", "key"]], [:Field, "right_key", ["right_entry", "key"]],
-    [:Call, "comparison", ["value_compare", "left_key", "right_key"]], [:Field, "condition", ["comparison", "ok"]]], :Branch, ["condition", "choose", "failure"])
-  // Choosing the left run on equality preserves the input order of duplicates.
-  context = native_value/block(context, name, "choose", [[:Field, "order", ["comparison", "number"]], [:Less, "condition", ["int_zero", "order"]]], :Branch, ["condition", "take_right", "take_left"])
-  for side in ["left", "right"]
-    context = native_value/block(context, name, string_concat("take_", side), [[:Offset, string_concat(side, "_slot"), ["src", side]],
-      [:Load, string_concat(side, "_entry"), [string_concat(side, "_slot")]], [:Offset, "out_slot", ["dst", "out"]]], :Jump, [string_concat("write_", side)])
-    context = native_value/block(context, name, string_concat("write_", side), [[:Store, :Discard, ["out_slot", string_concat(side, "_entry")]],
-      [:Add, side, [side, "one"]], [:Add, "out", ["out", "one"]]], :Jump, ["merge"])
-  end
-  context = native_value/block(context, name, "next_run", [[:Copy, "base", ["end"]], [:Less, "condition", ["base", "length"]]], :Branch, ["condition", "middle", "next_pass"])
-  context = native_value/block(context, name, "next_pass", [[:Copy, "swap", ["src"]], [:Copy, "src", ["dst"]], [:Copy, "dst", ["swap"]], [:Add, "width", ["width", "width"]]], :Jump, ["pass"])
-  context = native_value/block(context, name, "compact_start", [[:Copy, "read", ["zero"]], [:Copy, "write", ["zero"]]], :Jump, ["compact"])
-  context = native_value/block(context, name, "compact", [[:Less, "condition", ["read", "length"]]], :Branch, ["condition", "load", "publish"])
-  context = native_value/block(context, name, "load", [[:Offset, "right_slot", ["src", "read"]], [:Load, "right_entry", ["right_slot"]], [:Equal, "condition", ["write", "zero"]]], :Branch, ["condition", "append", "duplicate"])
-  context = native_value/block(context, name, "duplicate", [[:Subtract, "previous", ["write", "one"]], [:Offset, "left_slot", ["src", "previous"]], [:Load, "left_entry", ["left_slot"]],
-    [:Field, "left_key", ["left_entry", "key"]], [:Field, "right_key", ["right_entry", "key"]], [:Call, "comparison", ["value_compare", "left_key", "right_key"]], [:Field, "condition", ["comparison", "ok"]]], :Branch, ["condition", "duplicate_order", "failure"])
-  context = native_value/block(context, name, "duplicate_order", [[:Field, "order", ["comparison", "number"]], [:Equal, "condition", ["order", "int_zero"]]], :Branch, ["condition", "replace", "append"])
-  context = native_value/block(context, name, "replace", [[:Store, :Discard, ["left_slot", "right_entry"]]], :Jump, ["advance"])
-  context = native_value/block(context, name, "append", [[:Offset, "out_slot", ["src", "write"]], [:Store, :Discard, ["out_slot", "right_entry"]], [:Add, "write", ["write", "one"]]], :Jump, ["advance"])
-  context = native_value/block(context, name, "advance", [[:Add, "read", ["read", "one"]]], :Jump, ["compact"])
-  context = native_value/block(context, name, "publish", [[:Record, "header", ["src", "write"]], [:Store, :Discard, ["pointer", "header"]], [:PackPointer, "value", ["pointer", "tag_map"]], [:Record, "result", ["true", "value"]]], :Jump, ["return_result"])
-  context = native_value/block(context, name, "return_result", [], :Return, ["result"])
-  context = native_value/block(context, name, "failure", [[:Zero, "result", []]], :Return, ["result"])
+  context = native_value/function(context, name, result, [
+      ["arena", [:Pointer, [:Record, "ValueArena"], :Mutable], :Borrow],
+      ["source", [:Pointer, entry, :Const], [:Borrow, "arena"]],
+      ["length", :U64, :Value]
+    ],
+    [], [:Allocate, :ReadMemory, :WriteMemory], :Borrow, "arena")
+  context = native_value/body(context, name, [
+    [:If, [:Equal, "length", "zero"], [], [[:If, [:Equal, "source", "null_map_entries"], [[:Return, [:Zero]]], []]]],
+    [:Let, "header_size", :U64, [:SizeOf, header]],
+    [:Let, "size", :U64, [:SizeOf, entry]],
+    [:Let, "limit", :U64, [:Subtract, "allocation_limit", "header_size"]],
+    [:Set, "limit", [:Divide, "limit", "size"]],
+    [:If, [:Less, "limit", "length"], [[:Return, [:Zero]]], []],
+    [:Let, "bytes", :U64, [:Multiply, "length", "size"]],
+    [:Let, "total", :U64, [:Add, "header_size", "bytes"]],
+    [:Let, "allocation", [:Pointer, :U8, :Mutable], [:Call, "value_arena_allocate", "arena", "total"]],
+    [:If, [:Equal, "allocation", "null_bytes"], [[:Return, [:Zero]]], []],
+    [:Let, "pointer", [:Pointer, header, :Mutable], [:PointerCast, "allocation"]],
+    [:Let, "raw_data", [:Pointer, :U8, :Mutable], [:Offset, "allocation", "header_size"]],
+    [:Let, "src", entries, [:PointerCast, "raw_data"]],
+    [:Let, "read", :U64, "zero"],
+    [:Let, "write", :U64, "length"],
+    [:While, [:Less, "read", "length"], [
+      [:Let, "input_slot", [:Pointer, entry, :Const], [:Offset, "source", "read"]],
+      [:Let, "right_entry", entry, [:Load, "input_slot"]],
+      [:Let, "out_slot", entries, [:Offset, "src", "read"]],
+      [:Do, [:Store, "out_slot", "right_entry"]],
+      [:Set, "read", [:Add, "read", "one"]]
+    ]],
+    [:If, [:Less, "one", "length"], [
+      [:Set, "size", [:SizeOf, entry]],
+      [:Set, "bytes", [:Multiply, "length", "size"]],
+      [:Set, "allocation", [:Call, "value_arena_allocate", "arena", "bytes"]],
+      [:If, [:Equal, "allocation", "null_bytes"], [[:Return, [:Zero]]], []],
+      [:Let, "dst", entries, [:PointerCast, "allocation"]],
+      [:Let, "width", :U64, "one"],
+      [:Note, :Invariant, "Choose the left run on equality to preserve input order before keeping the last duplicate."],
+      [:While, [:Less, "width", "length"], [
+        [:Let, "base", :U64, "zero"],
+        [:While, [:Less, "base", "length"], [
+          [:Let, "middle", :U64, [:Add, "base", "width"]],
+          [:If, [:Less, "length", "middle"], [[:Set, "middle", "length"]], []],
+          [:Let, "end", :U64, [:Add, "middle", "width"]],
+          [:If, [:Less, "length", "end"], [[:Set, "end", "length"]], []],
+          [:Let, "left", :U64, "base"],
+          [:Let, "right", :U64, "middle"],
+          [:Let, "out", :U64, "base"],
+          [:While, [:Less, "out", "end"], [
+            [:Let, "take_left", :Bool, "true"],
+            [:If, [:Less, "right", "end"], [
+              [:If, [:Less, "left", "middle"], [
+                [:Let, "left_slot", entries, [:Offset, "src", "left"]],
+                [:Let, "left_entry", entry, [:Load, "left_slot"]],
+                [:Let, "right_slot", entries, [:Offset, "src", "right"]],
+                [:Set, "right_entry", [:Load, "right_slot"]],
+                [:Let, "left_key", word, [:Field, "left_entry", "key"]],
+                [:Let, "right_key", word, [:Field, "right_entry", "key"]],
+                [:Let, "comparison", [:Record, "IntResult"], [:Call, "value_compare", "left_key", "right_key"]],
+                [:If, [:Field, "comparison", "ok"], [], [[:Return, [:Zero]]]],
+                [:Let, "order", :I64, [:Field, "comparison", "number"]],
+                [:If, [:Less, "int_zero", "order"], [[:Set, "take_left", "false"]], []]
+              ], [[:Set, "take_left", "false"]]]
+            ], []],
+            [:If, "take_left", [
+              [:Set, "left_slot", [:Offset, "src", "left"]],
+              [:Set, "left_entry", [:Load, "left_slot"]],
+              [:Set, "out_slot", [:Offset, "dst", "out"]],
+              [:Do, [:Store, "out_slot", "left_entry"]],
+              [:Set, "left", [:Add, "left", "one"]]
+            ], [
+              [:Set, "right_slot", [:Offset, "src", "right"]],
+              [:Set, "right_entry", [:Load, "right_slot"]],
+              [:Set, "out_slot", [:Offset, "dst", "out"]],
+              [:Do, [:Store, "out_slot", "right_entry"]],
+              [:Set, "right", [:Add, "right", "one"]]
+            ]],
+            [:Set, "out", [:Add, "out", "one"]]
+          ]],
+          [:Set, "base", "end"]
+        ]],
+        [:Let, "swap", entries, "src"],
+        [:Set, "src", "dst"],
+        [:Set, "dst", "swap"],
+        [:Set, "width", [:Add, "width", "width"]]
+      ]],
+      [:Set, "read", "zero"],
+      [:Set, "write", "zero"],
+      [:While, [:Less, "read", "length"], [
+        [:Set, "right_slot", [:Offset, "src", "read"]],
+        [:Set, "right_entry", [:Load, "right_slot"]],
+        [:If, [:Equal, "write", "zero"], [
+          [:Set, "out_slot", [:Offset, "src", "write"]],
+          [:Do, [:Store, "out_slot", "right_entry"]],
+          [:Set, "write", [:Add, "write", "one"]]
+        ], [
+          [:Let, "previous", :U64, [:Subtract, "write", "one"]],
+          [:Set, "left_slot", [:Offset, "src", "previous"]],
+          [:Set, "left_entry", [:Load, "left_slot"]],
+          [:Set, "left_key", [:Field, "left_entry", "key"]],
+          [:Set, "right_key", [:Field, "right_entry", "key"]],
+          [:Set, "comparison", [:Call, "value_compare", "left_key", "right_key"]],
+          [:If, [:Field, "comparison", "ok"], [], [[:Return, [:Zero]]]],
+          [:Set, "order", [:Field, "comparison", "number"]],
+          [:If, [:Equal, "order", "int_zero"], [[:Do, [:Store, "left_slot", "right_entry"]]], [
+            [:Set, "out_slot", [:Offset, "src", "write"]],
+            [:Do, [:Store, "out_slot", "right_entry"]],
+            [:Set, "write", [:Add, "write", "one"]]
+          ]]
+        ]],
+        [:Set, "read", [:Add, "read", "one"]]
+      ]]
+    ], []],
+    [:Let, "header", header, [:Record, "src", "write"]],
+    [:Do, [:Store, "pointer", "header"]],
+    [:Let, "value", word, [:PackPointer, "pointer", "tag_map"]],
+    [:Let, "result", result, [:Record, "true", "value"]],
+    [:Return, "result"]
+  ])
   context = native_value/map_lookup(context)
   return context
 end
 
 verb native_value/map_lookup(input: map) -> map
   let context: map = input
-  let word = native_value/word()
-  let entry = [:Record, "ValueMapEntry"]
-  let result = [:Record, "ValueResult"]
-  let name = "value_map_get"
+  let word: list = native_value/word()
+  let entry: list = [:Record, "ValueMapEntry"]
+  let result: list = [:Record, "ValueResult"]
+  let name: string = "value_map_get"
   let [two, s] = native/add_constant(context[:state], :U64, "0000000000000002")
   context[:state] = s
   let constants: map = context[:constants]
   constants["two"] = two
   context[:constants] = constants
   context = native_value/function(context, name, result, [["map", word, :Borrow], ["key", word, :Borrow]],
-    [["tag", :U8], ["condition", :Bool], ["pointer", [:Pointer, [:Record, "HeapMap"], :Const]], ["header", [:Record, "HeapMap"]],
-     ["data", [:Pointer, entry, :Mutable]], ["slot", [:Pointer, entry, :Mutable]], ["entry", entry], ["candidate", word], ["value", word],
-     ["low", :U64], ["high", :U64], ["middle", :U64], ["distance", :U64], ["comparison", [:Record, "IntResult"]], ["order", :I64], ["result", result]],
-    ["check", "initialize", "loop", "compare", "equal", "order", "lower", "upper", "found", "missing"], [:ReadMemory], :Borrow, "map")
-  context = native_value/block(context, name, "check", [[:Tag, "tag", ["map"]], [:Equal, "condition", ["tag", "tag_map"]]], :Branch, ["condition", "initialize", "missing"])
-  context = native_value/block(context, name, "initialize", [[:UnpackPointer, "pointer", ["map"]], [:Load, "header", ["pointer"]], [:Field, "data", ["header", "data"]],
-    [:Field, "high", ["header", "length"]], [:Copy, "low", ["zero"]]], :Jump, ["loop"])
-  context = native_value/block(context, name, "loop", [[:Less, "condition", ["low", "high"]]], :Branch, ["condition", "compare", "missing"])
-  context = native_value/block(context, name, "compare", [[:Subtract, "distance", ["high", "low"]], [:Divide, "distance", ["distance", "two"]], [:Add, "middle", ["low", "distance"]],
-    [:Offset, "slot", ["data", "middle"]], [:Load, "entry", ["slot"]], [:Field, "candidate", ["entry", "key"]],
-    [:Call, "comparison", ["value_compare", "candidate", "key"]], [:Field, "condition", ["comparison", "ok"]]], :Branch, ["condition", "equal", "missing"])
-  context = native_value/block(context, name, "equal", [[:Field, "order", ["comparison", "number"]], [:Equal, "condition", ["order", "int_zero"]]], :Branch, ["condition", "found", "order"])
-  context = native_value/block(context, name, "order", [[:Less, "condition", ["order", "int_zero"]]], :Branch, ["condition", "lower", "upper"])
-  context = native_value/block(context, name, "lower", [[:Add, "low", ["middle", "one"]]], :Jump, ["loop"])
-  context = native_value/block(context, name, "upper", [[:Copy, "high", ["middle"]]], :Jump, ["loop"])
-  context = native_value/block(context, name, "found", [[:Field, "value", ["entry", "value"]], [:Record, "result", ["true", "value"]]], :Return, ["result"])
-  context = native_value/block(context, name, "missing", [[:Zero, "result", []]], :Return, ["result"])
+    [], [:ReadMemory], :Borrow, "map")
+  context = native_value/body(context, name, [
+    [:Let, "tag", :U8, [:Tag, "map"]],
+    [:If, [:Equal, "tag", "tag_map"], [], [[:Return, [:Zero]]]],
+    [:Let, "pointer", [:Pointer, [:Record, "HeapMap"], :Const], [:UnpackPointer, "map"]],
+    [:Let, "header", [:Record, "HeapMap"], [:Load, "pointer"]],
+    [:Let, "data", [:Pointer, entry, :Mutable], [:Field, "header", "data"]],
+    [:Let, "high", :U64, [:Field, "header", "length"]],
+    [:Let, "low", :U64, "zero"],
+    [:While, [:Less, "low", "high"], [
+      [:Let, "distance", :U64, [:Subtract, "high", "low"]],
+      [:Set, "distance", [:Divide, "distance", "two"]],
+      [:Let, "middle", :U64, [:Add, "low", "distance"]],
+      [:Let, "slot", [:Pointer, entry, :Mutable], [:Offset, "data", "middle"]],
+      [:Let, "entry", entry, [:Load, "slot"]],
+      [:Let, "candidate", word, [:Field, "entry", "key"]],
+      [:Let, "comparison", [:Record, "IntResult"], [:Call, "value_compare", "candidate", "key"]],
+      [:If, [:Field, "comparison", "ok"], [], [[:Return, [:Zero]]]],
+      [:Let, "order", :I64, [:Field, "comparison", "number"]],
+      [:If, [:Equal, "order", "int_zero"], [
+        [:Let, "value", word, [:Field, "entry", "value"]],
+        [:Let, "result", result, [:Record, "true", "value"]],
+        [:Return, "result"]
+      ], []],
+      [:If, [:Less, "order", "int_zero"], [[:Set, "low", [:Add, "middle", "one"]]], [[:Set, "high", "middle"]]]
+    ]],
+    [:Return, [:Zero]]
+  ])
   return context
 end

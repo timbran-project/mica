@@ -101,7 +101,9 @@ state = native/function_body(declared, function, names, [
 ```
 
 Here, `constants` supplies U64 zero and one from `native/constants`.
-[The UTF-8 scanner](value/utf8.mica) uses the same builders for bounded reads, early returns, and loop continuation.
+The [value generators](value/) use these builders throughout, including UTF-8 decoding, string search, recursive comparison, and map sorting.
+They declare control flow with branches, loops, and early returns; the shared builder creates the blocks and branch targets.
+Mica kind annotations check generator interfaces, while explicit IR types describe the generated values.
 
 | Statement | Behaviour |
 | --- | --- |

@@ -55,7 +55,7 @@ verb native_value/sequence_constructor(input: map, spec: list) -> map
   context[:state] = state
   context = native_value/function(context, name, result,
     [["arena", [:Pointer, [:Record, "ValueArena"], :Mutable], :Borrow], ["source", source, mode], ["length", :U64, :Value]],
-    [], [], [:Allocate, :ReadMemory, :WriteMemory], :Borrow, "arena")
+    [], [:Allocate, :ReadMemory, :WriteMemory], :Borrow, "arena")
   let failure: list = [[:Return, [:Zero]]]
   let statements: list = [
     [:If, [:Equal, "length", "zero"], [], [[:If, [:Equal, "source", null_name], failure, []]]],
@@ -94,7 +94,7 @@ verb native_value/record_constructor(input: map, spec: list) -> map
   let result: list = [:Record, "ValueResult"]
   context = native_value/function(context, name, result,
     [["arena", [:Pointer, [:Record, "ValueArena"], :Mutable], :Borrow], @spec[2]],
-    [], [], [:Allocate, :ReadMemory, :WriteMemory], :Borrow, "arena")
+    [], [:Allocate, :ReadMemory, :WriteMemory], :Borrow, "arena")
   let failure: list = [[:Return, [:Zero]]]
   let statements: list = []
   if spec[0] == "frob"
@@ -121,7 +121,7 @@ verb native_value/heap_accessor(input: map, kind: string, header: list) -> map
   let result: list = [:Record, result_name]
   context[:state] = native/record_type(context[:state], result_name, [["ok", :Bool], ["header", pointer]])[1]
   let name: string = string_concat("value_as_", kind)
-  context = native_value/function(context, name, result, [["value", native_value/word(), :Borrow]], [], [], [], :Borrow, "value")
+  context = native_value/function(context, name, result, [["value", native_value/word(), :Borrow]], [], [], :Borrow, "value")
   context = native_value/body(context, name, [
     [:If, [:Equal, [:Expr, :U8, [:Tag, "value"]], string_concat("tag_", kind)], [], [[:Return, [:Zero]]]],
     [:Return, [:Record, "true", [:Expr, pointer, [:UnpackPointer, "value"]]]]])

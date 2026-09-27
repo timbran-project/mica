@@ -153,6 +153,23 @@ verb native/body_while(input: map, condition, statements: list) -> map
   return context
 end
 
+// Share the pure zero-result exit used by fallible value operations. Keeping
+// failure paths together avoids duplicating aggregate returns during lowering.
+verb native/body_zero_return(input: map) -> map
+  let context: map = input
+  if map_contains_key(context, :zero_return)
+    context = native/body_end(context, :Jump, [context[:zero_return]])
+    return context
+  end
+  let [block: int, opened: map] = native/body_block(context, "return_zero", false)
+  opened[:zero_return] = block
+  context = native/body_end(opened, :Jump, [block])
+  context = native/body_enter(context, block)
+  let [value: int, evaluated: map] = native/body_value(context, context[:result], [:Zero])
+  context = native/body_end(evaluated, :Return, [value])
+  return context
+end
+
 verb native/body_statements(input: map, statements: list) -> map
   let context: map = input
   native/ensure(is_kind(statements, :list), "structured body must be a statement list")
@@ -167,6 +184,10 @@ verb native/body_statements(input: map, statements: list) -> map
         arity = 1
       end
       native/ensure(len(statement) == arity, "structured Return operand count mismatch")
+      if arity == 2 && statement[1] == [:Zero]
+        context = native/body_zero_return(context)
+        continue
+      end
       let args: list = []
       if arity == 2
         let [id, next] = native/body_value(context, context[:result], statement[1])
