@@ -117,3 +117,7 @@ The CycL case counts 100,000 assertions without writing facts.
 Odin includes in-memory schema initialization. Rust runs only its census parser.
 Both cases measure process launch through exit and record peak process RSS.
 The manifest preserves commands, input hashes, binary hashes, verification results, and implementation differences.
+
+The pinned Odin CycL schema conflicts with its system `Arity/2` relation.
+The census capture supplies Rust's namespaced schema to Odin and records that file's hash as an explicit input adaptation.
+Rust persisted-result verification uses administrative filein authority, matching the loader.

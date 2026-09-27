@@ -96,6 +96,7 @@ def main():
     builds = [(['cargo', 'build', '--locked', '--release', '-p', 'mica-runner', '--target-dir', str(target)], rust_source, 'rust')]
     builds += [([odin, 'build', f'tools/{tool}', '-o:speed', f'-out:{output / tool}'], odin_source, tool)
                for tool in ['owlstream', 'cycl-load', 'filein']]
+    cycl_schema = rust_source / 'apps/bycycle/00_schema.mica'
     manifest = {
         'format': 1, 'created_utc': datetime.datetime.now(datetime.timezone.utc).isoformat(),
         'rust_revision': rust_rev, 'odin_revision': odin_rev,
@@ -103,7 +104,8 @@ def main():
         'machine': list(os.uname()), 'cpu': args.cpu, 'workers': 1,
         'accelerator': 'none', 'authority': 'root', 'runs': args.runs,
         'inputs': {'owl': {'sha256': digest(owl), 'subjects': args.subjects + 1, 'facts': 2 * args.subjects + 1},
-                   'cycl': {'sha256': digest(cycl), 'assertions': args.assertions}},
+                   'cycl': {'sha256': digest(cycl), 'assertions': args.assertions,
+                            'odin_schema': str(cycl_schema), 'odin_schema_sha256': digest(cycl_schema)}},
         'protocol': {
             'timing': 'whole child process, from launch through exit; zero warmup',
             'memory': 'GNU time peak process RSS, including open, parsing, execution, commit, and close',
@@ -111,6 +113,7 @@ def main():
             'owl_tier': {'rust': 'native-enabled Mica loader', 'odin': 'native host loader'},
             'owl_durability': 'strict', 'owl_storage': {'rust': 'Fjall', 'odin': 'Odin store'},
             'cycl': 'no fact writes; Rust parser only; Odin includes in-memory schema initialization',
+            'cycl_adaptation': 'Odin loads the namespaced Rust schema because its pinned Arity/3 conflicts with system Arity/2',
             'cycl_tier': 'native host parsers',
             'batch': 'Rust publishes cursor with facts; Odin publishes cursor in a separate transaction',
             'timeout_seconds': args.timeout,
@@ -153,7 +156,7 @@ def main():
                                    [str(output / 'owlstream'), '--store', str(store), '--durability', 'strict', '--owl', str(owl), '--commit-batch', '1000000000'])
                     else:
                         command = ([str(rust), 'cycl-census', str(cycl)] if implementation == 'rust' else
-                                   [str(output / 'cycl-load'), 'apps/bycycle/00_schema.mica', str(cycl)])
+                                   [str(output / 'cycl-load'), str(cycl_schema), str(cycl)])
                     rss = output / f'{name}.rss'
                     command = ['/usr/bin/time', '-f', '%M', '-o', str(rss), *prefix, *command]
                     result['command'] = command
@@ -173,7 +176,9 @@ def main():
                                  f'require len(Genls(?child, ?parent)) == {args.subjects}\n'
                                  'let root = GuidOf(?id, "Mx4rParityRoot0000000000")[0][:id]\n'
                                  'require Label(root, "Root é🦀")\nrequire Genls(_, root)\nreturn 8675309')
-                        verification = ([str(rust), '--store', str(store), 'eval', query] if implementation == 'rust' else
+                        verify_source = output / f'{name}-verify.mica'
+                        verify_source.write_text('verb ingestion_verify()\n' + query + '\nend\nreturn ingestion_verify()\n')
+                        verification = ([str(rust), '--store', str(store), 'filein', str(verify_source)] if implementation == 'rust' else
                                         [str(output / 'filein'), '--store', str(store), '--eval', query])
                         checked = execute(prefix + verification, source, args.timeout)
                         (output / f'{name}-verify.stdout').write_text(checked.stdout)
