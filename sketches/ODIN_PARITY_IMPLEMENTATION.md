@@ -488,3 +488,7 @@ Assembly now exposes the VM's existing positional and named-role spawn instructi
 Both suspend through the task interface, preserve arguments and optional delay, and receive the continuation value in the destination register.
 Assembly tests cover splices, role maps, delays, invalid operands, and live registers across continuation. Runtime clippy passes.
 Receiver dispatch and spawn emission remain the next compiler application step.
+
+Assembly also exposes static role lists for dispatch and spawn, alongside dynamic role maps.
+Static lists retain duplicate roles for the VM's ordinary normalization and dispatch rules; converting them to maps would discard entries.
+The spawn regression verifies duplicate-role preservation through serialization and execution. Malformed role entries are rejected during assembly.

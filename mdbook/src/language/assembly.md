@@ -61,8 +61,10 @@ An `items` list contains operands or `[:Splice, operand]` entries.
 | `[:Jump, target]` | Jump to an instruction. |
 | `[:BuiltinCall, dst, name, items]` | Call the builtin named by a symbol. |
 | `[:PositionalDispatch, dst, selector_operand, items]` | Dispatch positional arguments through the runtime method catalogue. |
+| `[:Dispatch, dst, selector_operand, roles]` | Dispatch named roles from `[role_symbol, operand]` pairs. |
 | `[:DynamicDispatch, dst, selector_operand, roles_operand]` | Dispatch a runtime role map. |
-| `[:SpawnDispatch, dst, selector_operand, roles_operand, delay_operand]` | Request a child invocation with a role map; resume with the child task identifier in `dst`. |
+| `[:SpawnDispatch, dst, selector_operand, roles, delay_operand]` | Request a child invocation with named role pairs. |
+| `[:SpawnDispatchDynamic, dst, selector_operand, roles_operand, delay_operand]` | Request a child invocation with a role map; resume with the child task identifier in `dst`. |
 | `[:SpawnPositionalDispatch, dst, selector_operand, items, delay_operand]` | Request a child invocation with positional arguments, including splices. |
 | `[:LoadFunction, dst, description, captures, min_arity, max_arity]` | Create a function from a nested program and capture operands. |
 | `[:CallValue, dst, callee_operand, items]` | Call a function value. |

@@ -147,6 +147,19 @@ fn operands(value: &Value) -> Result<Vec<Operand>, AssemblyError> {
     list(value)?.iter().map(operand).collect()
 }
 
+fn roles(value: &Value) -> Result<Vec<(Value, Operand)>, AssemblyError> {
+    list(value)?
+        .iter()
+        .map(|entry| {
+            let fields = list(entry)?;
+            let [role, value] = fields.as_slice() else {
+                return Err(invalid("role entry must contain a symbol and operand"));
+            };
+            Ok((Value::symbol(symbol(role)?), operand(value)?))
+        })
+        .collect()
+}
+
 fn optional_operand(value: &Value) -> Result<Option<Operand>, AssemblyError> {
     if *value == Value::option_none() {
         return Ok(None);
@@ -420,6 +433,14 @@ fn instruction(
                 program_bytes: methods.program_bytes,
             }
         }
+        (Some("Dispatch"), [dst, selector, entries]) => Instruction::Dispatch {
+            dst: register(dst)?,
+            selector: operand(selector)?,
+            roles: roles(entries)?,
+            relations: methods.dispatch,
+            program_relation: methods.method_program,
+            program_bytes: methods.program_bytes,
+        },
         (Some("DynamicDispatch"), [dst, selector, roles]) => Instruction::DynamicDispatch {
             dst: register(dst)?,
             selector: operand(selector)?,
@@ -520,7 +541,13 @@ fn instruction(
         (Some("CommitValue"), [dst]) => Instruction::CommitValue {
             dst: register(dst)?,
         },
-        (Some("SpawnDispatch"), [dst, selector, roles, delay]) => {
+        (Some("SpawnDispatch"), [dst, selector, entries, delay]) => Instruction::SpawnDispatch {
+            dst: register(dst)?,
+            selector: operand(selector)?,
+            roles: roles(entries)?,
+            delay: optional_operand(delay)?,
+        },
+        (Some("SpawnDispatchDynamic"), [dst, selector, roles, delay]) => {
             Instruction::SpawnDispatchDynamic {
                 dst: register(dst)?,
                 selector: operand(selector)?,
@@ -787,8 +814,16 @@ mod tests {
                 Some(250),
             ),
             (
-                "[:SpawnDispatch, 1, [:Constant, :work], [:Constant, {:value -> 7}], none]",
+                "[:SpawnDispatchDynamic, 1, [:Constant, :work], [:Constant, {:value -> 7}], none]",
                 SpawnTarget::NamedRoles(vec![(Symbol::intern("value"), Value::int(7).unwrap())]),
+                None,
+            ),
+            (
+                "[:SpawnDispatch, 1, [:Constant, :work], [[:value, [:Constant, 7]], [:value, [:Constant, 8]]], none]",
+                SpawnTarget::NamedRoles(vec![
+                    (Symbol::intern("value"), Value::int(7).unwrap()),
+                    (Symbol::intern("value"), Value::int(8).unwrap()),
+                ]),
                 None,
             ),
         ] {
@@ -835,6 +870,9 @@ mod tests {
             "{:registers -> 1, :code -> [[:Return, [:Register, -1]]]}",
             "{:registers -> 1, :code -> [[:Load, 0]]}",
             "{:registers -> 1, :code -> [[:Missing, 0]]}",
+            "{:registers -> 1, :code -> [[:Dispatch, 0, [:Constant, :work], [[:value]]]]}",
+            "{:registers -> 1, :code -> [[:Dispatch, 0, [:Constant, :work], [[1, [:Constant, 7]]]] ]}",
+            "{:registers -> 1, :code -> [[:SpawnDispatchDynamic, 0, [:Constant, :work], [:Register, 1], none]]}",
             "{:registers -> 1, :code -> [[:SpawnDispatch, 1, [:Constant, :work], [:Constant, {}], none]]}",
             "{:registers -> 1, :code -> [[:SpawnDispatch, 0, :work, [:Constant, {}], none]]}",
             "{:registers -> 1, :code -> [[:SpawnPositionalDispatch, 0, [:Constant, :work], [], [:Register, 1]]]}",
