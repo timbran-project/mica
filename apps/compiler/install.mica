@@ -1,0 +1,70 @@
+// Installation uses the caller's authority and transaction.
+make_functional_relation(:compiler/Generation, 2, [0])
+make_relation(:compiler/Method, 2)
+
+// The name is both the module key and the selector for its entry program.
+verb compiler/install(module: map, name: symbol) -> map
+  if !module[:ok]
+    return module
+  end
+  for definition in module[:methods]
+    if definition[:selector] == name
+      return {:ok -> false, :errors -> ["the entry selector conflicts with a declared verb"]}
+    end
+  end
+  let generation = 0
+  for row in compiler/Generation(name, ?current)
+    generation = row[:current] + 1
+  end
+  let definitions = [@module[:methods], {:selector -> name, :parameters -> [], :program -> module[:entry]}]
+  let methods = []
+  let retained = {}
+  let position = 0
+  for definition in definitions
+    let parameters = [[parameter[:role], parameter[:restriction]] for parameter in definition[:parameters]]
+    let signature = [name, definition[:selector], parameters]
+    let target = make_identity(to_symbol(string_concat("compiler/method/", to_literal(signature))))
+    let program_key = [name, generation, position]
+    let artifact = make_identity(to_symbol(string_concat("compiler/program/", to_literal(program_key))))
+    assert ProgramBytes(artifact, definition[:program])
+    retract MethodProgram(target, _)
+    assert MethodProgram(target, artifact)
+    assert MethodSelector(target, definition[:selector])
+    retract Param(target, _, _, _)
+    let ordinal = 0
+    for parameter in definition[:parameters]
+      assert Param(target, parameter[:role], parameter[:restriction], ordinal)
+      ordinal = ordinal + 1
+    end
+    retract MethodSource(target, _)
+    assert MethodSource(target, module[:source])
+    methods = [@methods, target]
+    retained[target] = true
+    position = position + 1
+  end
+  for row in compiler/Method(name, ?owned_method)
+    let target = row[:owned_method]
+    if !map_contains_key(retained, target)
+      retract MethodSelector(target, _)
+      retract MethodProgram(target, _)
+      retract Param(target, _, _, _)
+      retract MethodSource(target, _)
+    end
+  end
+  retract compiler/Method(name, _)
+  for target in methods
+    assert compiler/Method(name, target)
+  end
+  retract compiler/Generation(name, _)
+  assert compiler/Generation(name, generation)
+  return {:ok -> true, :entry -> name, :methods -> methods, :errors -> []}
+end
+
+// Installation and entry execution commit together when the task completes.
+verb compiler/run(source: string, name: symbol) -> map
+  let installed: map = compiler/install(emit_source(source), name)
+  if !installed[:ok]
+    return installed
+  end
+  return {:ok -> true, :value -> invoke(installed[:entry], {}), :errors -> []}
+end

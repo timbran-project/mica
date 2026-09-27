@@ -19,6 +19,10 @@ const SOURCES: &[(&str, &str)] = &[
         "emit.mica",
         include_str!("../../../apps/compiler/emit.mica"),
     ),
+    (
+        "install.mica",
+        include_str!("../../../apps/compiler/install.mica"),
+    ),
 ];
 
 fn compiler(interpreter_only: bool) -> SourceRunner {
@@ -122,39 +126,7 @@ fn mica_frontend_lexes_unicode_and_parses_a_program() {
     }
 }
 
-const INSTALL_EMITTED: &str = r#"
-make_relation(:CompilerTestGeneration, 1)
-verb compiler_test_install(source)
-  let generation = len(CompilerTestGeneration(?existing))
-  assert CompilerTestGeneration(generation)
-  let definitions = [@source[:methods], {:selector -> :compiler_test_entry, :parameters -> [], :program -> source[:entry]}]
-  for definition in definitions
-    let selector = definition[:selector]
-    let candidates = MethodSelector(?candidate, selector)
-    let target = none
-    if len(candidates) == 0
-      target = make_identity(to_symbol(string_concat("compiler-test/method/", to_literal(selector))))
-      assert MethodSelector(target, selector)
-    else
-      let exactly {:candidate -> existing} = candidates
-      target = existing
-    end
-    let artifact = make_identity(to_symbol(string_concat("compiler-test/program/", to_literal(generation), "/", to_literal(selector))))
-    assert ProgramBytes(artifact, definition[:program])
-    retract MethodProgram(target, _)
-    assert MethodProgram(target, artifact)
-    retract Param(target, _, _, _)
-    let position = 0
-    for role in definition[:parameters]
-      assert Param(target, role, :dispatch/unrestricted, position)
-      position = position + 1
-    end
-  end
-  return true
-end
-"#;
-
-fn install_emitted(runner: &mut SourceRunner, module: Value) {
+fn install_emitted(runner: &mut SourceRunner, module: Value) -> Value {
     assert_eq!(
         module.map_get(&Value::symbol(Symbol::intern("ok"))),
         Some(Value::bool(true)),
@@ -162,13 +134,45 @@ fn install_emitted(runner: &mut SourceRunner, module: Value) {
     );
     let mut request = SourceRunner::root_source_request("");
     request.input = TaskInput::Invocation {
-        selector: Symbol::intern("compiler_test_install"),
-        roles: vec![(Symbol::intern("source"), module)],
+        selector: Symbol::intern("compiler/install"),
+        roles: vec![
+            (Symbol::intern("module"), module),
+            (
+                Symbol::intern("name"),
+                Value::symbol(Symbol::intern("compiler_test_entry")),
+            ),
+        ],
     };
     let submitted = runner.submit_invocation(request).unwrap();
-    assert!(
-        matches!(submitted.outcome, TaskOutcome::Complete { value, .. } if value == Value::bool(true))
+    let TaskOutcome::Complete { value, .. } = submitted.outcome else {
+        panic!("{:?}", submitted.outcome);
+    };
+    assert_eq!(
+        value.map_get(&Value::symbol(Symbol::intern("ok"))),
+        Some(Value::bool(true)),
+        "{value}"
     );
+    let methods = value
+        .map_get(&Value::symbol(Symbol::intern("methods")))
+        .unwrap();
+    methods.list_get(methods.list_len().unwrap() - 1).unwrap()
+}
+
+fn retire_bootstrap_methods(runner: &mut SourceRunner) {
+    let report = runner
+        .run_source(
+            "for owned in compiler/Method(:compiler_test_entry, ?owned_method)\n\
+           for selected in MethodSelector(owned[:owned_method], ?selector)\n\
+             for previous in MethodSelector(?candidate, selected[:selector])\n\
+               if previous[:candidate] != owned[:owned_method]\n\
+                 retract MethodSelector(previous[:candidate], selected[:selector])\n\
+               end\n\
+             end\n\
+           end\n\
+         end",
+        )
+        .unwrap();
+    assert!(matches!(report.outcome, TaskOutcome::Complete { .. }));
 }
 
 fn assert_emitted_agrees(runner: &mut SourceRunner, source: &str) {
@@ -199,7 +203,6 @@ fn assert_emitted_agrees(runner: &mut SourceRunner, source: &str) {
 fn mica_emitter_rows_and_comprehensions_agree_with_rust_execution() {
     for interpreter_only in [true, false] {
         let mut runner = compiler(interpreter_only);
-        runner.run_filein(INSTALL_EMITTED).unwrap();
         for source in [
             "let exactly {:path/field -> x, :\"é🦀\" -> y} = [:path/field, :\"é🦀\"] {[1, 2]}\nreturn [x, y]",
             "let exactly {b, :a -> first} = [:a, :b] {[2, 3]}\nreturn first + b",
@@ -266,7 +269,6 @@ fn mica_emitter_comprehension_captures_and_accumulator_survive_suspension() {
     const SOURCE: &str = "let callbacks = [begin\n let callback = fn() => a\n if a == 2\n suspend()\n end\n callback\nend for {a} in [{:a -> 3}, {:a -> 2}, {:a -> 1}] sort a]\nreturn [f() for f in callbacks]";
     for interpreter_only in [true, false] {
         let mut runner = compiler(interpreter_only);
-        runner.run_filein(INSTALL_EMITTED).unwrap();
         let module = invoke(&mut runner, "emit_source", SOURCE);
         install_emitted(&mut runner, module);
         for source in [SOURCE, "return :compiler_test_entry()"] {
@@ -295,7 +297,6 @@ fn mica_emitter_comprehension_captures_and_accumulator_survive_suspension() {
 fn compiler_emission_workload_produces_executable_artifacts() {
     for interpreter_only in [true, false] {
         let mut runner = compiler(interpreter_only);
-        runner.run_filein(INSTALL_EMITTED).unwrap();
         runner
             .run_filein(include_str!(
                 "../../../benchmarks/parity/mica/compiler_emission.mica"
@@ -323,7 +324,6 @@ fn compiler_emission_workload_produces_executable_artifacts() {
 fn mica_emitter_matches_donor_patterns_with_independent_expected_results() {
     for interpreter_only in [true, false] {
         let mut runner = compiler(interpreter_only);
-        runner.run_filein(INSTALL_EMITTED).unwrap();
         for (source, expected) in [
             (
                 "return match 2\ncase 1\n0\ncase 2\n42\ncase _\n9\nend",
@@ -465,7 +465,6 @@ fn mica_emitter_matches_donor_patterns_with_independent_expected_results() {
 fn mica_emitter_functional_fields_preserve_visibility_cardinality_and_authority() {
     for interpreter_only in [true, false] {
         let mut runner = compiler(interpreter_only);
-        runner.run_filein(INSTALL_EMITTED).unwrap();
         runner.run_filein(
             "make_functional_relation(:CompilerLabel, 2, [0])\nmake_functional_relation(:compiler/Label, 2, [0])\nmake_relation(:CompilerPlain, 2)\nmake_functional_relation(:CompilerWide, 3, [0])\nmake_functional_relation(:CompilerWrongKey, 2, [1])"
         ).unwrap();
@@ -497,15 +496,10 @@ fn mica_emitter_functional_fields_preserve_visibility_cardinality_and_authority(
             ("(1).compilerLabel = 9", "write"),
         ] {
             let module = invoke(&mut runner, "emit_source", source);
-            install_emitted(&mut runner, module);
-            let entry = runner
-                .named_identity(Symbol::intern("compiler-test/method/:compiler_test_entry"))
-                .unwrap();
+            let entry = install_emitted(&mut runner, module);
             let mut request = SourceRunner::root_source_request("");
             request.authority = AuthorityContext::empty();
-            request
-                .authority
-                .mint(CapabilityGrant::method(Value::identity(entry)));
+            request.authority.mint(CapabilityGrant::method(entry));
             request.input = TaskInput::Invocation {
                 selector: Symbol::intern("compiler_test_entry"),
                 roles: vec![],
@@ -521,7 +515,6 @@ fn mica_emitter_functional_fields_preserve_visibility_cardinality_and_authority(
 fn mica_emitter_dom_and_structural_literals_agree_with_rust_execution() {
     for interpreter_only in [true, false] {
         let mut runner = compiler(interpreter_only);
-        runner.run_filein(INSTALL_EMITTED).unwrap();
         runner.run_source("make_identity(:compiler_tag)").unwrap();
         for source in [
             "return dom_html(dom <button disabled title=\"é🦀\">Send go</button>)",
@@ -544,7 +537,6 @@ fn mica_emitter_dom_and_structural_literals_agree_with_rust_execution() {
 fn mica_emitter_invoke_and_mailbox_receive_use_runtime_instructions() {
     for interpreter_only in [true, false] {
         let mut runner = compiler(interpreter_only);
-        runner.run_filein(INSTALL_EMITTED).unwrap();
         runner
             .run_filein("verb compiler_pair(left, right)\nreturn [left, right]\nend")
             .unwrap();
@@ -636,7 +628,6 @@ fn mica_emitter_invoke_and_mailbox_receive_use_runtime_instructions() {
 fn mica_emitter_dispatch_preserves_receivers_roles_and_evaluation_order() {
     for interpreter_only in [true, false] {
         let mut runner = compiler(interpreter_only);
-        runner.run_filein(INSTALL_EMITTED).unwrap();
         runner.run_filein("verb compiler_pair(receiver, argument)\n return [receiver, argument]\nend\nverb compiler/pair(receiver, argument)\n return [receiver, argument]\nend").unwrap();
         for source in [
             "return (1):compiler_pair(2)",
@@ -686,15 +677,10 @@ fn mica_emitter_dispatch_preserves_receivers_roles_and_evaluation_order() {
             "return invoke(@[:compiler_pair, {:receiver -> 1, :argument -> 2}])",
         ] {
             let module = invoke(&mut runner, "emit_source", source);
-            install_emitted(&mut runner, module);
-            let entry = runner
-                .named_identity(Symbol::intern("compiler-test/method/:compiler_test_entry"))
-                .unwrap();
+            let entry = install_emitted(&mut runner, module);
             let mut request = SourceRunner::root_source_request(source);
             request.authority = AuthorityContext::empty();
-            request
-                .authority
-                .mint(CapabilityGrant::method(Value::identity(entry)));
+            request.authority.mint(CapabilityGrant::method(entry));
             let native_denied = runner.submit_source(request.clone());
             request.input = TaskInput::Invocation {
                 selector: Symbol::intern("compiler_test_entry"),
@@ -720,7 +706,6 @@ fn mica_emitter_dispatch_preserves_receivers_roles_and_evaluation_order() {
 fn mica_emitter_spawn_preserves_requests_order_and_parent_continuations() {
     for interpreter_only in [true, false] {
         let mut runner = compiler(interpreter_only);
-        runner.run_filein(INSTALL_EMITTED).unwrap();
         for target in [
             ":work(7, @[8, 9])",
             ":work(value: 7)",
@@ -787,7 +772,6 @@ fn mica_emitter_spawn_preserves_requests_order_and_parent_continuations() {
 fn mica_emitter_artifacts_agree_with_rust_execution() {
     for interpreter_only in [true, false] {
         let mut runner = compiler(interpreter_only);
-        runner.run_filein(INSTALL_EMITTED).unwrap();
         for source in [
             "return 2 + 3 * 4",
             "let make_adder = fn(base) => fn(value) => base + value\nlet add10 = make_adder(10)\nreturn add10(32)",
@@ -836,10 +820,229 @@ fn mica_emitter_artifacts_agree_with_rust_execution() {
 }
 
 #[test]
+fn mica_compiler_installs_overloads_and_replaces_only_owned_methods() {
+    const INITIAL: &str = r#"
+        verb compiler_pick(value)
+          return :fallback
+        end
+        verb compiler_pick(value @ #integer)
+          return value + 10
+        end
+        verb compiler_pick(value @ #string)
+          return string_append(value, "!")
+        end
+        verb compiler_pick(value @ #compiler_parent)
+          return :wrapped
+        end
+        verb compiler_member(value @ #compiler_parent)
+          return :member
+        end
+        return [compiler_pick(2), :compiler_pick(value: "é"), invoke(:compiler_pick, {:value -> true}), compiler_pick(#compiler_parent<7>), compiler_member(#compiler_child)]
+    "#;
+    const REPLACEMENT: &str =
+        "verb compiler_pick(value)\nreturn :updated\nend\nreturn compiler_pick(2)";
+    for interpreter_only in [true, false] {
+        let mut runner = compiler(interpreter_only);
+        runner
+            .run_filein(
+                "make_identity(:compiler_parent)\nmake_identity(:compiler_child)\n\
+             assert Delegates(#compiler_child, #compiler_parent, 0)\n\
+             verb compiler_pick(value @ #float)\nreturn :independent\nend",
+            )
+            .unwrap();
+        let source = format!(
+            r#"
+            let installed = compiler/install(emit_source({initial:?}), :compiler_installed)
+            if !(installed[:ok])
+              raise E_INSTALL_TEST, "initial compilation", installed
+            end
+            if !(invoke(installed[:entry], {{}}) == [12, "é!", :fallback, :wrapped, :member])
+              raise E_INSTALL_TEST, "overload selection", installed
+            end
+            if !(len(MethodSelector(?candidate, :compiler_pick)) == 5)
+              raise E_INSTALL_TEST, "overload count", installed
+            end
+            let fallback = installed[:methods][0]
+            let replaced = compiler/install(emit_source({replacement:?}), :compiler_installed)
+            if !(replaced[:ok])
+              raise E_INSTALL_TEST, "replacement compilation", installed
+            end
+            if !(replaced[:methods][0] == fallback)
+              raise E_INSTALL_TEST, "stable method identity", installed
+            end
+            if !(:compiler_installed() == :updated)
+              raise E_INSTALL_TEST, "replacement execution", installed
+            end
+            if !(:compiler_pick(value: 1.5) == :independent)
+              raise E_INSTALL_TEST, "independent overload preserved", installed
+            end
+            if !(len(MethodSelector(?candidate, :compiler_pick)) == 2)
+              raise E_INSTALL_TEST, "obsolete overloads removed", installed
+            end
+            if !(len(MethodSelector(?candidate, :compiler_member)) == 0)
+              raise E_INSTALL_TEST, "obsolete selector removed", installed
+            end
+            if !(len(compiler/Method(:compiler_installed, ?owned_method)) == 2)
+              raise E_INSTALL_TEST, "module ownership updated", installed
+            end
+            let generation = compiler/Generation(:compiler_installed, ?number)
+            let rejected = compiler/install(emit_source("verb compiler_installed()\nreturn 0\nend"), :compiler_installed)
+            if !(!rejected[:ok])
+              raise E_INSTALL_TEST, "entry selector collision rejected", installed
+            end
+            if !(compiler/Generation(:compiler_installed, ?number) == generation)
+              raise E_INSTALL_TEST, "rejected installation leaves generation unchanged", installed
+            end
+            if !(:compiler_installed() == :updated)
+              raise E_INSTALL_TEST, "rejected installation leaves entry unchanged", installed
+            end
+            return true
+            "#,
+            initial = Value::string(INITIAL),
+            replacement = Value::string(REPLACEMENT),
+        );
+        let report = runner.run_source(&source).unwrap();
+        assert!(
+            matches!(&report.outcome, TaskOutcome::Complete { value, .. } if *value == Value::bool(true)),
+            "{}",
+            report.render()
+        );
+        for invalid in [
+            "verb duplicate(x)\nx\nend\nverb duplicate(x)\nx + 1\nend",
+            "verb bad(x @ 7)\nx\nend",
+            "verb bad(x @ #absent_compiler_prototype)\nx\nend",
+            "verb bad(x @ #compiler_parent<7>)\nx\nend",
+        ] {
+            let module = invoke(&mut runner, "emit_source", invalid);
+            assert_eq!(
+                module.map_get(&Value::symbol(Symbol::intern("ok"))),
+                Some(Value::bool(false)),
+                "{invalid}: {module}"
+            );
+        }
+    }
+}
+
+#[test]
+fn mica_compiler_run_rolls_back_installation_with_failed_entry_effects() {
+    for interpreter_only in [true, false] {
+        let mut runner = compiler(interpreter_only);
+        runner
+            .run_filein("make_relation(:CompilerInstallFact, 1)")
+            .unwrap();
+        let installed = runner
+            .run_source(r#"return compiler/run("return 17", :compiler_atomic)"#)
+            .unwrap();
+        assert!(matches!(
+            installed.outcome,
+            TaskOutcome::Complete { value, .. }
+                if value.map_get(&Value::symbol(Symbol::intern("value"))) == Some(Value::int(17).unwrap())
+        ));
+        let failed = runner.run_source(
+            r#"return compiler/run("assert CompilerInstallFact(7)\nraise E_INSTALL_TEST", :compiler_atomic)"#,
+        ).unwrap();
+        assert!(
+            matches!(failed.outcome, TaskOutcome::Aborted { .. }),
+            "{}",
+            failed.render()
+        );
+        let verified = runner
+            .run_source(
+                "require len(CompilerInstallFact(?item)) == 0\n\
+             require compiler/Generation(:compiler_atomic, 0)\n\
+             require :compiler_atomic() == 17\n\
+             let invalid = compiler/run(\"let = 7\", :compiler_atomic)\n\
+             require !invalid[:ok]\n\
+             require compiler/Generation(:compiler_atomic, 0)\n\
+             return true",
+            )
+            .unwrap();
+        assert!(
+            matches!(&verified.outcome, TaskOutcome::Complete { value, .. } if *value == Value::bool(true)),
+            "{}",
+            verified.render()
+        );
+    }
+}
+
+#[test]
+fn mica_compiler_reinstallation_preserves_suspended_programs_and_checks_authority() {
+    for interpreter_only in [true, false] {
+        let mut runner = compiler(interpreter_only);
+        let module = invoke(
+            &mut runner,
+            "emit_source",
+            "verb compiled_wait()\nsuspend(0)\nreturn 17\nend\nreturn compiled_wait()",
+        );
+        install_emitted(&mut runner, module);
+        let suspended = runner.run_source("return :compiler_test_entry()").unwrap();
+        assert!(matches!(suspended.outcome, TaskOutcome::Suspended { .. }));
+        let replacement = invoke(
+            &mut runner,
+            "emit_source",
+            "verb compiled_wait()\nreturn 99\nend\nreturn compiled_wait()",
+        );
+        install_emitted(&mut runner, replacement);
+        let current = runner.run_source("return :compiler_test_entry()").unwrap();
+        assert!(
+            matches!(current.outcome, TaskOutcome::Complete { value, .. } if value == Value::int(99).unwrap())
+        );
+        let resumed = runner
+            .resume_task(TaskRequest {
+                input: TaskInput::Continuation {
+                    task_id: suspended.task_id,
+                    value: Value::unit(),
+                },
+                ..SourceRunner::root_source_request("")
+            })
+            .unwrap();
+        assert!(
+            matches!(&resumed, TaskOutcome::Complete { value, .. } if *value == Value::int(17).unwrap()),
+            "{resumed:?}"
+        );
+
+        let installer = runner.run_source(
+            "let exactly {candidate} = MethodSelector(?candidate, :compiler/install)\nreturn candidate",
+        ).unwrap();
+        let TaskOutcome::Complete {
+            value: installer, ..
+        } = installer.outcome
+        else {
+            panic!("{}", installer.render());
+        };
+        let module = invoke(&mut runner, "emit_source", "return 0");
+        let mut request = SourceRunner::root_source_request("");
+        request.authority = AuthorityContext::empty();
+        request.authority.mint(CapabilityGrant::method(installer));
+        request.input = TaskInput::Invocation {
+            selector: Symbol::intern("compiler/install"),
+            roles: vec![
+                (Symbol::intern("module"), module),
+                (
+                    Symbol::intern("name"),
+                    Value::symbol(Symbol::intern("compiler_denied")),
+                ),
+            ],
+        };
+        assert!(matches!(
+            runner.submit_invocation(request),
+            Err(SourceTaskError::TaskManager(TaskManagerError::Task(
+                TaskError::Runtime(RuntimeError::PermissionDenied { .. })
+            )))
+        ));
+        let verified = runner
+            .run_source("return len(compiler/Method(:compiler_denied, ?owned_method)) == 0")
+            .unwrap();
+        assert!(
+            matches!(&verified.outcome, TaskOutcome::Complete { value, .. } if *value == Value::bool(true))
+        );
+    }
+}
+
+#[test]
 fn mica_emitter_installs_forward_recursive_and_typed_verbs() {
     for interpreter_only in [true, false] {
         let mut runner = compiler(interpreter_only);
-        runner.run_filein(INSTALL_EMITTED).unwrap();
         let source = r#"
             verb len(input)
               return 999
@@ -900,11 +1103,11 @@ fn mica_emitter_bootstraps_its_lexer() {
         max_call_depth: 256,
         ..TaskLimits::default()
     });
-    runner.run_filein(INSTALL_EMITTED).unwrap();
     let source = "let label = \"é🦀\"\r\n// comment\nreturn [label, 12.5]";
     let expected = invoke(&mut runner, "lex", source);
     let module = invoke(&mut runner, "emit_source", SOURCES[0].1);
     install_emitted(&mut runner, module);
+    retire_bootstrap_methods(&mut runner);
     assert_eq!(invoke(&mut runner, "lex", source), expected);
 }
 
@@ -941,7 +1144,6 @@ fn mica_compiler_bootstrap_preserves_artifacts_and_execution() {
             max_call_depth: 256,
             ..TaskLimits::default()
         });
-        runner.run_filein(INSTALL_EMITTED).unwrap();
         runner
             .run_filein("make_functional_relation(:CompilerBootstrap, 2, [0])")
             .unwrap();
@@ -953,6 +1155,7 @@ fn mica_compiler_bootstrap_preserves_artifacts_and_execution() {
             .join("\n");
         let compiler_module = invoke(&mut runner, "emit_source", &source);
         install_emitted(&mut runner, compiler_module);
+        retire_bootstrap_methods(&mut runner);
         let actual = invoke(&mut runner, "emit_source", TARGET);
         assert_eq!(actual, expected);
         install_emitted(&mut runner, actual);
@@ -969,7 +1172,6 @@ fn mica_compiler_bootstrap_preserves_artifacts_and_execution() {
 fn mica_emitter_queries_and_mutates_catalogue_relations() {
     for interpreter_only in [true, false] {
         let mut runner = compiler(interpreter_only);
-        runner.run_filein(INSTALL_EMITTED).unwrap();
         runner
             .run_filein("make_relation(:CompilerData, 2)\nassert CompilerData(1, 2)\nassert CompilerData(2, 2)\nassert CompilerData(3, 4)")
             .unwrap();
@@ -1004,15 +1206,10 @@ fn mica_emitter_queries_and_mutates_catalogue_relations() {
             ("assert CompilerData(8, 9)", "write"),
         ] {
             let module = invoke(&mut runner, "emit_source", source);
-            install_emitted(&mut runner, module);
-            let method = runner
-                .named_identity(Symbol::intern("compiler-test/method/:compiler_test_entry"))
-                .unwrap();
+            let method = install_emitted(&mut runner, module);
             let mut request = SourceRunner::root_source_request("");
             request.authority = AuthorityContext::empty();
-            request
-                .authority
-                .mint(CapabilityGrant::method(Value::identity(method)));
+            request.authority.mint(CapabilityGrant::method(method));
             request.input = TaskInput::Invocation {
                 selector: Symbol::intern("compiler_test_entry"),
                 roles: vec![],
@@ -1036,7 +1233,6 @@ fn mica_emitter_queries_and_mutates_catalogue_relations() {
 fn mica_emitter_rejects_invalid_function_parameters_and_preserves_arity_errors() {
     for interpreter_only in [true, false] {
         let mut runner = compiler(interpreter_only);
-        runner.run_filein(INSTALL_EMITTED).unwrap();
         for source in [
             "return fn(?value) => value",
             "return fn(@first, @second) => first",

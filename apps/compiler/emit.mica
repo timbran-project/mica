@@ -94,7 +94,7 @@ verb emit_source(source) -> map
     compiled[:program] = assemble(definition[:program])
     methods = [@methods, compiled]
   end
-  return {:ok -> true, :entry -> assemble(module[:entry]), :methods -> methods, :errors -> []}
+  return {:ok -> true, :entry -> assemble(module[:entry]), :methods -> methods, :source -> source, :errors -> []}
 end
 
 verb emit_state(relations, node_kinds, field_relations)
@@ -135,6 +135,7 @@ verb emit_program(raw_rows, root) -> map
   end
   let entry_nodes = []
   let methods = []
+  let signatures = {}
   let errors = []
   for item in ast_children(rows, root, :item)
     let kind = ast_kind(rows, item)
@@ -155,20 +156,23 @@ verb emit_program(raw_rows, root) -> map
         if mode != :req
           state = emit_diagnostic(state, "verb default and rest parameters need an argument wrapper")
         end
-        let [restricted, _] = ast_attr(rows, param, :restrict)
-        if restricted
-          state = emit_diagnostic(state, "prototype-restricted verbs require installation metadata")
-        end
+        let [restriction, after_restriction] = emit_parameter_restriction(rows, param, state)
+        state = after_restriction
         let [reg, allocated] = emit_register(state)
         state = emit_declare(allocated, name_text, reg, true)
         let [annotated, annotation] = ast_attr(rows, param, :annotation)
         if annotated
           state = emit_annotation(state, reg, annotation, :Parameter, name_text)
         end
-        parameters = [@parameters, to_symbol(name_text)]
+        parameters = [@parameters, {:role -> to_symbol(name_text), :restriction -> restriction}]
       end
       let [result, emitted] = emit_block(rows, ast_children(rows, item, :body), state)
       state = emit_finish(emitted, result)
+      let signature = [to_symbol(selector), parameters]
+      if map_contains_key(signatures, signature)
+        state = emit_diagnostic(state, "duplicate verb signature")
+      end
+      signatures[signature] = true
       methods = [@methods, {:selector -> to_symbol(selector), :parameters -> parameters, :program -> emit_description(state)}]
       errors = [@errors, @state[:errors]]
     else
@@ -178,6 +182,22 @@ verb emit_program(raw_rows, root) -> map
   let [result, entry] = emit_block(rows, entry_nodes, emit_state(relations, node_kinds, field_relations))
   entry = emit_append(entry, [:Return, [:Register, result]])
   return {:entry -> emit_description(entry), :methods -> methods, :errors -> [@errors, @entry[:errors]]}
+end
+
+verb emit_parameter_restriction(rows, param, input_state)
+  let [restricted, node] = ast_attr(rows, param, :restrict)
+  if !restricted
+    return [:dispatch/unrestricted, input_state]
+  end
+  if ast_kind(rows, node) != :Identity_Literal
+    return [none, emit_diagnostic(input_state, "a parameter restriction must name a prototype identity")]
+  end
+  let [_, name_text] = ast_attr(rows, node, :name)
+  let parsed = from_literal(string_concat("#", name_text))
+  if parsed[0][:case] != :ok
+    return [none, emit_diagnostic(input_state, string_concat("unresolved parameter prototype: ", name_text))]
+  end
+  return [parsed[0][:value], input_state]
 end
 
 verb emit_description(state)
