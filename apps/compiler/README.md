@@ -21,6 +21,10 @@ A parse or emission diagnostic returns `{:ok -> false, :errors -> diagnostics}`.
 
 The current emitter covers literals, local bindings, list destructuring, collection construction, indexing, assignment, calls, conditionals, loops, and required verb parameters.
 Calls include builtins, explicit selectors, named roles, and local function values.
+Receiver calls support positional arguments, named roles, splices, and dynamic selectors.
+Static role lists preserve duplicate roles. Spliced role maps use ordinary map replacement semantics.
+Spawn emission preserves receiver, selector, argument, and delay evaluation order, followed by the parent continuation.
+The spawn tests compare task requests and parent results. They do not execute the child through the driver.
 Forward calls and recursive verbs resolve through the runtime method catalogue.
 List destructuring supports optional defaults and one rest binding. Range values support list slicing.
 Exact row bindings require a singleton relation with the stated heading and raise `E_CARDINALITY` otherwise.

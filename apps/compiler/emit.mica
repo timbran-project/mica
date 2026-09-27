@@ -401,6 +401,17 @@ verb emit_expr(rows, node, input_state)
   if kind == :Call
     return emit_call(rows, node, state)
   end
+  if kind == :Receiver_Call
+    return emit_dispatch(rows, node, false, 0, state)
+  end
+  if kind == :Spawn
+    let [_, target] = ast_attr(rows, node, :call)
+    let [delayed, delay_node] = ast_attr(rows, node, :delay)
+    if !delayed
+      delay_node = 0
+    end
+    return emit_dispatch(rows, target, true, delay_node, state)
+  end
   if kind == :Assert || kind == :Retract
     let [_, atom] = ast_attr(rows, node, :atom)
     let [has_callee, callee] = ast_attr(rows, atom, :callee)
@@ -791,16 +802,17 @@ end
 verb emit_call(rows, node, input_state)
   let [_, callee] = ast_attr(rows, node, :callee)
   let callee_kind = ast_kind(rows, callee)
+  if callee_kind == :Symbol_Literal || callee_kind == :Selector_Expr
+    return emit_dispatch(rows, node, false, 0, input_state)
+  end
   let name_text = ""
   if callee_kind == :Name
     name_text = string_join(ast_children(rows, callee, :part), "/")
-  elseif callee_kind == :Symbol_Literal
-    let [_, name] = ast_attr(rows, callee, :name)
-    name_text = name
   end
   let state = input_state
   let callee_reg = 0
   let is_function = false
+  let builtin = false
   if callee_kind == :Name
     let [found, reg, _] = emit_local(state, name_text)
     if found
@@ -809,7 +821,7 @@ verb emit_call(rows, node, input_state)
       state = emit_append(allocated, [:Move, copy, reg])
       callee_reg = copy
     end
-  elseif callee_kind != :Symbol_Literal
+  else
     let [reg, after_callee] = emit_expr(rows, callee, state)
     state = after_callee
     is_function = true
@@ -823,30 +835,24 @@ verb emit_call(rows, node, input_state)
     if target != none
       return emit_relation_call(rows, node, target, :ScanDynamic, state)
     end
+    builtin = is_builtin(to_symbol(name_text))
+    if !builtin && name_text != "commit" && name_text != "suspend"
+      return emit_dispatch_arguments(rows, node, none, [:Constant, to_symbol(name_text)], false, 0, state)
+    end
   end
   let args = []
-  let roles = []
   for arg in ast_children(rows, node, :arg)
     let [_, value_node] = ast_attr(rows, arg, :expr)
     let [items, after_value] = emit_items(rows, [value_node], state)
     state = after_value
-    let [named, role] = ast_attr(rows, arg, :role)
+    let [named, _] = ast_attr(rows, arg, :role)
     if named
-      roles = [@roles, [[:Constant, to_symbol(role)], items[0]]]
-    else
-      args = [@args, items[0]]
+      return emit_error(state, "ordinary call arguments must be positional")
     end
+    args = [@args, items[0]]
   end
   let [dst, allocated] = emit_register(state)
   state = allocated
-  if len(roles) > 0
-    if len(args) > 0 || is_function
-      return emit_error(state, "named arguments require a selector call without positional arguments")
-    end
-    let [role_reg, after_roles] = emit_register(state)
-    state = emit_append(after_roles, [:BuildMap, role_reg, roles])
-    return [dst, emit_append(state, [:DynamicDispatch, dst, [:Constant, to_symbol(name_text)], [:Register, role_reg]])]
-  end
   if is_function
     return [dst, emit_append(state, [:CallValue, dst, [:Register, callee_reg], args])]
   end
@@ -866,10 +872,137 @@ verb emit_call(rows, node, input_state)
     end
     return [dst, emit_append(state, [:SuspendValue, dst, duration])]
   end
-  if callee_kind == :Name && is_builtin(to_symbol(name_text))
+  if callee_kind == :Name && builtin
     return [dst, emit_append(state, [:BuiltinCall, dst, to_symbol(name_text), args])]
   end
   return [dst, emit_append(state, [:PositionalDispatch, dst, [:Constant, to_symbol(name_text)], args])]
+end
+
+verb emit_dispatch(rows, node, spawning, delay_node, input_state)
+  let state = input_state
+  let receiver = none
+  let selector = none
+  let kind = ast_kind(rows, node)
+  if kind == :Receiver_Call
+    let [_, receiver_node] = ast_attr(rows, node, :receiver)
+    let [reg, emitted] = emit_expr(rows, receiver_node, state)
+    state = emitted
+    receiver = [:Register, reg]
+    let [dynamic, expr] = ast_attr(rows, node, :selector_expr)
+    if dynamic
+      let [reg, emitted] = emit_expr(rows, expr, state)
+      state = emitted
+      selector = [:Register, reg]
+    else
+      let [_, spelling] = ast_attr(rows, node, :selector)
+      let parsed = from_literal(string_concat(":", spelling))
+      if parsed[0][:case] != :ok
+        return emit_error(state, "invalid receiver selector")
+      end
+      selector = [:Constant, parsed[0][:value]]
+    end
+  elseif kind == :Call
+    let [_, callee] = ast_attr(rows, node, :callee)
+    let callee_kind = ast_kind(rows, callee)
+    let value_node = callee
+    if callee_kind == :Selector_Expr
+      let [_, expr] = ast_attr(rows, callee, :value)
+      value_node = expr
+    elseif callee_kind != :Symbol_Literal
+      return emit_error(state, "spawn requires a selector or receiver call")
+    end
+    let [reg, emitted] = emit_expr(rows, value_node, state)
+    state = emitted
+    selector = [:Register, reg]
+  else
+    return emit_error(state, "spawn requires a selector or receiver call")
+  end
+  return emit_dispatch_arguments(rows, node, receiver, selector, spawning, delay_node, state)
+end
+
+verb emit_dispatch_arguments(rows, node, receiver, selector, spawning, delay_node, input_state)
+  let state = input_state
+  let arguments = ast_children(rows, node, :arg)
+  let named = false
+  let ordinary = false
+  if !spawning && receiver == none
+    let [has_callee, callee] = ast_attr(rows, node, :callee)
+    if has_callee
+      ordinary = ast_kind(rows, callee) == :Name
+      named = !ordinary
+    end
+  end
+  let dynamic_roles = false
+  for arg in arguments
+    let [has_role, _] = ast_attr(rows, arg, :role)
+    if ordinary && has_role
+      return emit_error(state, "ordinary call arguments must be positional")
+    end
+    named = named || has_role
+    let [_, value_node] = ast_attr(rows, arg, :expr)
+    dynamic_roles = dynamic_roles || ast_kind(rows, value_node) == :Splice
+  end
+  let items = []
+  if receiver != none
+    if named
+      let role = :receiver
+      if dynamic_roles
+        role = [:Constant, role]
+      end
+      items = [[role, receiver]]
+    else
+      items = [receiver]
+    end
+  end
+  for arg in arguments
+    let [_, value_node] = ast_attr(rows, arg, :expr)
+    let [has_role, role] = ast_attr(rows, arg, :role)
+    let spliced = ast_kind(rows, value_node) == :Splice
+    if named && ((!has_role && !spliced) || (has_role && spliced))
+      return emit_error(state, "named dispatch requires role values or spliced role maps")
+    end
+    let [emitted_items, emitted] = emit_items(rows, [value_node], state)
+    state = emitted
+    if named && has_role
+      let key = to_symbol(role)
+      if dynamic_roles
+        key = [:Constant, key]
+      end
+      items = [@items, [key, emitted_items[0]]]
+    else
+      items = [@items, emitted_items[0]]
+    end
+  end
+  let roles = none
+  if named && dynamic_roles
+    let [reg, allocated] = emit_register(state)
+    state = emit_append(allocated, [:BuildMap, reg, items])
+    roles = [:Register, reg]
+  end
+  let delay = none
+  if delay_node != 0
+    let [reg, emitted] = emit_expr(rows, delay_node, state)
+    state = emitted
+    delay = [:Register, reg]
+  end
+  let [dst, allocated] = emit_register(state)
+  state = allocated
+  if spawning
+    if named
+      if dynamic_roles
+        return [dst, emit_append(state, [:SpawnDispatchDynamic, dst, selector, roles, delay])]
+      end
+      return [dst, emit_append(state, [:SpawnDispatch, dst, selector, items, delay])]
+    end
+    return [dst, emit_append(state, [:SpawnPositionalDispatch, dst, selector, items, delay])]
+  end
+  if named
+    if dynamic_roles
+      return [dst, emit_append(state, [:DynamicDispatch, dst, selector, roles])]
+    end
+    return [dst, emit_append(state, [:Dispatch, dst, selector, items])]
+  end
+  return [dst, emit_append(state, [:PositionalDispatch, dst, selector, items])]
 end
 
 // Collect references through AST edges. Shadowed names can add harmless

@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 use mica_runtime::{
-    SourceRunner, SourceTaskError, TaskError, TaskInput, TaskLimits, TaskManagerError, TaskOutcome,
-    TaskRequest,
+    SourceRunner, SourceTaskError, SuspendKind, TaskError, TaskInput, TaskLimits, TaskManagerError,
+    TaskOutcome, TaskRequest,
 };
 use mica_var::{Symbol, Value};
 use mica_vm::{AuthorityContext, CapabilityGrant, RuntimeError};
@@ -320,6 +320,155 @@ fn compiler_emission_workload_produces_executable_artifacts() {
 }
 
 #[test]
+fn mica_emitter_dispatch_preserves_receivers_roles_and_evaluation_order() {
+    for interpreter_only in [true, false] {
+        let mut runner = compiler(interpreter_only);
+        runner.run_filein(INSTALL_EMITTED).unwrap();
+        runner.run_filein("verb compiler_pair(receiver, argument)\n return [receiver, argument]\nend\nverb compiler/pair(receiver, argument)\n return [receiver, argument]\nend").unwrap();
+        for source in [
+            "return (1):compiler_pair(2)",
+            "return (1):compiler_pair(argument: 2)",
+            "return (1):compiler/pair(@[2])",
+            "return :\"compiler/pair\"(receiver: 1, argument: 2)",
+            "return :compiler_pair(receiver: 1, @{:argument -> 2})",
+            "return (1):compiler_pair(argument: 2, @{:receiver -> 3})",
+            "return :compiler_pair(receiver: 1, argument: 2, @{:argument -> 3})",
+            "return :compiler_pair(receiver: 1, receiver: 9, argument: 2)",
+            "return (1):compiler_pair(receiver: 9, argument: 2)",
+            "let selector = :compiler_pair\nreturn :(selector)(@{:receiver -> 1, :argument -> 2})",
+            "let selector = :compiler_pair\nreturn :(selector)(receiver: 1, @{:argument -> 2})",
+            "let selector = :compiler_pair\nreturn (1):(selector)(argument: 2, @{})",
+        ] {
+            assert_emitted_agrees(&mut runner, source);
+        }
+        for call in [
+            "(order = order * 10 + 1):(begin\norder = order * 10 + 2\n:compiler_pair\nend)(order = order * 10 + 3)",
+            "(order = order * 10 + 1):(begin\norder = order * 10 + 2\n:compiler_pair\nend)(@[order = order * 10 + 3])",
+            "(order = order * 10 + 1):(begin\norder = order * 10 + 2\n:compiler_pair\nend)(argument: order = order * 10 + 3, @{})",
+        ] {
+            assert_emitted_agrees(
+                &mut runner,
+                &format!("let order = 0\nlet result = {call}\nreturn [result, order]"),
+            );
+        }
+        for source in [
+            "return compiler_pair(receiver: 1, @{:argument -> 2})",
+            "return :compiler_pair(1, 2)",
+            "return (1):compiler_pair(2, argument: 3)",
+            "return :compiler_pair(receiver: @[1], argument: 2)",
+            "spawn compiler_pair(1, 2)",
+            "spawn (fn() => 1)()",
+        ] {
+            let module = invoke(&mut runner, "emit_source", source);
+            assert_eq!(
+                module.map_get(&Value::symbol(Symbol::intern("ok"))),
+                Some(Value::bool(false)),
+                "{source}: {module}"
+            );
+        }
+        for source in [
+            "return (1):compiler_pair(2)",
+            "return (1):compiler_pair(argument: 2, @{})",
+        ] {
+            let module = invoke(&mut runner, "emit_source", source);
+            install_emitted(&mut runner, module);
+            let entry = runner
+                .named_identity(Symbol::intern("compiler-test/method/:compiler_test_entry"))
+                .unwrap();
+            let mut request = SourceRunner::root_source_request(source);
+            request.authority = AuthorityContext::empty();
+            request
+                .authority
+                .mint(CapabilityGrant::method(Value::identity(entry)));
+            let native_denied = runner.submit_source(request.clone());
+            request.input = TaskInput::Invocation {
+                selector: Symbol::intern("compiler_test_entry"),
+                roles: vec![],
+            };
+            let denied = runner.submit_invocation(request);
+            for result in [native_denied, denied] {
+                assert!(
+                    matches!(
+                        &result,
+                        Err(SourceTaskError::TaskManager(TaskManagerError::Task(
+                            TaskError::Runtime(RuntimeError::NoApplicableMethod { selector })
+                        ))) if *selector == Value::symbol(Symbol::intern("compiler_pair"))
+                    ),
+                    "{source}: {result:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn mica_emitter_spawn_preserves_requests_order_and_parent_continuations() {
+    for interpreter_only in [true, false] {
+        let mut runner = compiler(interpreter_only);
+        runner.run_filein(INSTALL_EMITTED).unwrap();
+        for target in [
+            ":work(7, @[8, 9])",
+            ":work(value: 7)",
+            ":work(value: 7, value: 8)",
+            ":work(value: 7, @{:extra -> 8})",
+            "(7):work(@[8])",
+            "(7):work(value: 8)",
+            "(7):work(value: 8, @{:receiver -> 9})",
+            ":(begin\norder = order * 10 + 1\n:work\nend)(order = order * 10 + 2)",
+            "(order = order * 10 + 1):(begin\norder = order * 10 + 2\n:work\nend)(@[order = order * 10 + 3])",
+            "(order = order * 10 + 1):(begin\norder = order * 10 + 2\n:work\nend)(value: order = order * 10 + 3, @{})",
+        ] {
+            for delay in [
+                "",
+                " after (order = order * 10 + 4)",
+                " after 0.125 + 0.125",
+            ] {
+                let source = format!(
+                    "let order = 0\nlet child = spawn {target}{delay}\nreturn [child, order]"
+                );
+                let module = invoke(&mut runner, "emit_source", &source);
+                assert_eq!(
+                    module.map_get(&Value::symbol(Symbol::intern("ok"))),
+                    Some(Value::bool(true)),
+                    "{source}: {module}"
+                );
+                install_emitted(&mut runner, module);
+                let mut requests = Vec::new();
+                let mut results = Vec::new();
+                for input in [source.as_str(), "return :compiler_test_entry()"] {
+                    let report = runner
+                        .run_source(input)
+                        .unwrap_or_else(|error| panic!("{source}: {error:?}"));
+                    let TaskOutcome::Suspended {
+                        kind: SuspendKind::Spawn(request),
+                        ..
+                    } = report.outcome
+                    else {
+                        panic!("{source}: {}", report.render());
+                    };
+                    requests.push(request);
+                    let resumed = runner
+                        .resume_task(TaskRequest {
+                            input: TaskInput::Continuation {
+                                task_id: report.task_id,
+                                value: Value::int(42).unwrap(),
+                            },
+                            ..SourceRunner::root_source_request("")
+                        })
+                        .unwrap();
+                    let TaskOutcome::Complete { value, .. } = resumed else {
+                        panic!("{source}: {resumed:?}");
+                    };
+                    results.push(value);
+                }
+                assert_eq!(requests[0], requests[1], "{source}");
+                assert_eq!(results[0], results[1], "{source}");
+            }
+        }
+    }
+}
+
+#[test]
 fn mica_emitter_artifacts_agree_with_rust_execution() {
     for interpreter_only in [true, false] {
         let mut runner = compiler(interpreter_only);
@@ -404,7 +553,7 @@ fn mica_emitter_installs_forward_recursive_and_typed_verbs() {
               number = input
               return number
             end
-            return compiled_entry(5) + :len([])
+            return compiled_entry(5) + :len(input: [])
         "#;
         let module = invoke(&mut runner, "emit_source", source);
         install_emitted(&mut runner, module);

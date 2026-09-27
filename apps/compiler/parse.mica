@@ -1355,19 +1355,36 @@ verb parse_postfix(input_state)
     end
     if k == :Colon
       let next_kind = tok_at(state, 1)[:kind]
-      let after_kind = tok_at(state, 2)[:kind]
-      if next_kind != :Ident || after_kind != :LParen
+      if next_kind != :Ident && next_kind != :String && next_kind != :LParen
         return [current, state]
       end
       state = bump(state)
-      let selector_token = tok(state)
-      state = bump(state)
+      let selector_text = ""
+      let selector_expr = 0
+      if at(state, :LParen)
+        state = bump(state)
+        let [expr, after_expr] = parse_expression(state)
+        state = after_expr
+        selector_expr = expr
+        let [_, closed] = expect(state, :RParen, "expected ')' after selector expression")
+        state = closed
+      else
+        let token = tok(state)
+        state = bump(state)
+        let [qualified, after_qualified] = parse_qualified_name(state, token)
+        state = after_qualified
+        selector_text = qualified
+      end
       let [args, after_args] = parse_call_arguments(state)
       state = after_args
       let [receiver_node, after_receiver] = make_node(state, :Receiver_Call)
       state = after_receiver
       state = fact(state, receiver_node, :receiver, current, 0)
-      state = fact(state, receiver_node, :selector, selector_token[:text], 0)
+      if selector_expr == 0
+        state = fact(state, receiver_node, :selector, selector_text, 0)
+      else
+        state = fact(state, receiver_node, :selector_expr, selector_expr, 0)
+      end
       let arg_index = 0
       for arg in args
         state = fact(state, receiver_node, :arg, arg, arg_index)
@@ -1902,6 +1919,14 @@ verb parse_primary_token(input_state, token)
     return make_node(state, :Wildcard)
   end
   if kind == :Colon
+    if at(state, :LParen)
+      state = bump(state)
+      let [expr, after_expr] = parse_expression(state)
+      state = after_expr
+      let [_, closed] = expect(state, :RParen, "expected ')' after selector expression")
+      let [selector, allocated] = make_node(closed, :Selector_Expr)
+      return [selector, fact(allocated, selector, :value, expr, 0)]
+    end
     let next = tok(state)
     state = bump(state)
     if next[:kind] == :Ident
@@ -2059,7 +2084,7 @@ verb parse_spawn(input_state)
   state = fact(state, spawn_node, :call, call, 0)
   if at(state, :After)
     state = bump(state)
-    let [delay_node, after_delay] = parse_unary(state)
+    let [delay_node, after_delay] = parse_expression(state)
     state = after_delay
     state = fact(state, spawn_node, :has_delay, true, 0)
     state = fact(state, spawn_node, :delay, delay_node, 0)
