@@ -483,3 +483,8 @@ Rust frontend latency falls from 36.0 ms to 19.6 ms, approximately 46%. Source-t
 Odin measures 37.1 ms and 8.8 ms respectively. Rust now leads on the frontend workload but retains an approximately 2.2-times emission gap.
 Process peak RSS stays similar. Native-enabled Rust execution remains close to the interpreter result.
 The parser change is retained. Public installation, broader compiler capabilities, and the remaining performance workstreams are still open.
+
+Assembly now exposes the VM's existing positional and named-role spawn instructions.
+Both suspend through the task interface, preserve arguments and optional delay, and receive the continuation value in the destination register.
+Assembly tests cover splices, role maps, delays, invalid operands, and live registers across continuation. Runtime clippy passes.
+Receiver dispatch and spawn emission remain the next compiler application step.

@@ -62,6 +62,8 @@ An `items` list contains operands or `[:Splice, operand]` entries.
 | `[:BuiltinCall, dst, name, items]` | Call the builtin named by a symbol. |
 | `[:PositionalDispatch, dst, selector_operand, items]` | Dispatch positional arguments through the runtime method catalogue. |
 | `[:DynamicDispatch, dst, selector_operand, roles_operand]` | Dispatch a runtime role map. |
+| `[:SpawnDispatch, dst, selector_operand, roles_operand, delay_operand]` | Request a child invocation with a role map; resume with the child task identifier in `dst`. |
+| `[:SpawnPositionalDispatch, dst, selector_operand, items, delay_operand]` | Request a child invocation with positional arguments, including splices. |
 | `[:LoadFunction, dst, description, captures, min_arity, max_arity]` | Create a function from a nested program and capture operands. |
 | `[:CallValue, dst, callee_operand, items]` | Call a function value. |
 | `[:ScanDynamic, dst, relation, arguments]` | Scan a relation identity with dynamic arguments. |
@@ -94,6 +96,9 @@ Those maps can contain additional keys. The relation form requires the exact hea
 
 Each catch entry is `[error_code, binding_register, target]`. The code and binding can be `none`.
 The finally target can be `none`. Exception targets belong to the containing program.
+
+Spawn instructions suspend through the ordinary task interface. The delay is in seconds; `none` means no specified delay.
+Child invocation checks and continuation authority remain the host task driver's responsibility.
 
 A function receives its captures in the first registers, followed by one register containing its complete argument list.
 Its nested program must reserve those registers and unpack the argument list itself.

@@ -520,6 +520,22 @@ fn instruction(
         (Some("CommitValue"), [dst]) => Instruction::CommitValue {
             dst: register(dst)?,
         },
+        (Some("SpawnDispatch"), [dst, selector, roles, delay]) => {
+            Instruction::SpawnDispatchDynamic {
+                dst: register(dst)?,
+                selector: operand(selector)?,
+                roles: operand(roles)?,
+                delay: optional_operand(delay)?,
+            }
+        }
+        (Some("SpawnPositionalDispatch"), [dst, selector, args, delay]) => {
+            Instruction::SpawnPositionalDispatchDynamic {
+                dst: register(dst)?,
+                selector: operand(selector)?,
+                args: list_items(args)?,
+                delay: optional_operand(delay)?,
+            }
+        }
         (Some("SuspendValue"), [dst, duration]) => Instruction::SuspendValue {
             dst: register(dst)?,
             duration: optional_operand(duration)?,
@@ -560,7 +576,7 @@ mod tests {
     };
     use mica_relation_kernel::{RelationKernel, RelationMetadata};
     use mica_var::{Symbol, Value, ValueKind};
-    use mica_vm::{Instruction, Operand, Program, ProgramResolver, Register};
+    use mica_vm::{Instruction, Operand, Program, ProgramResolver, Register, SpawnTarget};
     use std::sync::Arc;
 
     fn assembled(source: &str) -> Program {
@@ -759,6 +775,52 @@ mod tests {
     }
 
     #[test]
+    fn assembled_spawn_requests_preserve_arguments_delay_and_continuations() {
+        for (instruction, expected, delay) in [
+            (
+                "[:SpawnPositionalDispatch, 1, [:Constant, :work], [[:Constant, 7], [:Splice, [:Constant, [8, 9]]]], [:Constant, 0.25]]",
+                SpawnTarget::PositionalArgs(vec![
+                    Value::int(7).unwrap(),
+                    Value::int(8).unwrap(),
+                    Value::int(9).unwrap(),
+                ]),
+                Some(250),
+            ),
+            (
+                "[:SpawnDispatch, 1, [:Constant, :work], [:Constant, {:value -> 7}], none]",
+                SpawnTarget::NamedRoles(vec![(Symbol::intern("value"), Value::int(7).unwrap())]),
+                None,
+            ),
+        ] {
+            let program = assembled(&format!(
+                "return assemble({{:registers -> 2, :code -> [[:Load, 0, 40], {instruction}, [:Binary, 0, :Add, 0, 1], [:Return, [:Register, 0]]]}})"
+            ));
+            let kernel = RelationKernel::new();
+            let mut task = Task::new(
+                1,
+                &kernel,
+                Arc::new(program),
+                Arc::new(ProgramResolver::new()),
+                TaskLimits::default(),
+            );
+            let TaskOutcome::Suspended {
+                kind: SuspendKind::Spawn(request),
+                ..
+            } = task.run().unwrap()
+            else {
+                panic!("expected spawn suspension");
+            };
+            assert_eq!(request.selector, Symbol::intern("work"));
+            assert_eq!(request.target, expected);
+            assert_eq!(request.delay_millis, delay);
+            task.resume_with(Value::int(2).unwrap()).unwrap();
+            assert!(
+                matches!(task.run().unwrap(), TaskOutcome::Complete { value, .. } if value == Value::int(42).unwrap())
+            );
+        }
+    }
+
+    #[test]
     fn assembly_rejects_invalid_shapes_registers_targets_and_artifacts() {
         let mut runner = SourceRunner::new_empty();
         for description in [
@@ -773,6 +835,10 @@ mod tests {
             "{:registers -> 1, :code -> [[:Return, [:Register, -1]]]}",
             "{:registers -> 1, :code -> [[:Load, 0]]}",
             "{:registers -> 1, :code -> [[:Missing, 0]]}",
+            "{:registers -> 1, :code -> [[:SpawnDispatch, 1, [:Constant, :work], [:Constant, {}], none]]}",
+            "{:registers -> 1, :code -> [[:SpawnDispatch, 0, :work, [:Constant, {}], none]]}",
+            "{:registers -> 1, :code -> [[:SpawnPositionalDispatch, 0, [:Constant, :work], [], [:Register, 1]]]}",
+            "{:registers -> 1, :code -> [[:SpawnPositionalDispatch, 0, [:Constant, :work], [[:Splice]], none]]}",
             "{:registers -> 1, :code -> [[:ErrorField, 0, 0, :Missing]]}",
             "{:registers -> 1, :code -> [[:CheckKind, 0, :missing, :Binding, :x]]}",
             "{:registers -> 1, :code -> [[:CheckKind, 0, :int, :Missing, :x]]}",
