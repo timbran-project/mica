@@ -62,5 +62,6 @@ Rust does not expose Odin's `--defer-derivation` or manual checkpoint flags here
 
 Tests cover the pinned fixture, Unicode, aliases, namespace prefixes, gzip, inference, retraction, aborted batches, and persistent resume.
 The CLI test resumes a strict store across separate processes.
-Comparative ingestion throughput and memory measurements remain pending.
+The [pinned ingestion measurements](../../benchmarks/parity/results/2026-09-26-02653be/ingestion-summary.json) include a strict-store load of 10,001 subjects without inference rules.
+The [capture manifest](../../benchmarks/parity/results/2026-09-26-02653be/ingestion-manifest.json) records process latency, peak RSS, and loader differences.
 The separate Odin CycL census tool counts assertions but does not load the full dump.

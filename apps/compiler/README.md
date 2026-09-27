@@ -51,7 +51,7 @@ Named local functions can recurse and return their own callable value. Reassigni
 Closures capture referenced outer names at creation time. A shadowed name can add an unused capture, but unrelated locals are excluded.
 The parser accepts function result annotations and places parameter annotations before optional defaults.
 Basic type annotations produce runtime checks. The emitter does not implement Rust's static type analysis.
-Unsupported syntax produces diagnostics, including declarations, catch patterns and guards, default verb parameters, and rest verb parameters.
+Unsupported syntax produces diagnostics, including declarations and catch patterns and guards.
 The emitter reads `RelationName` once per compilation and resolves existing relations in that snapshot.
 Functional field syntax also reads `Arity` and `FunctionalKey` once, then uses the cached metadata throughout compilation.
 Fields require a binary relation functional on position zero. Reads require exactly one fact; assignments replace the fact within the transaction.

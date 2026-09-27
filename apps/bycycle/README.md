@@ -33,4 +33,5 @@ For example, `Cyc/Arity/3` describes a predicate within a microtheory. The runti
 The sample returns Alice and Bob for the dentist query. The same query in `#cyc/base_kb` returns no rows.
 
 Tests load both application schemas together and preserve their distinct arities and facts.
-Comparative census performance measurements remain pending.
+The [pinned ingestion measurements](../../benchmarks/parity/results/2026-09-26-02653be/ingestion-summary.json) include a 100,000-assertion census.
+The [capture manifest](../../benchmarks/parity/results/2026-09-26-02653be/ingestion-manifest.json) records process latency, peak RSS, and the Odin schema adaptation.

@@ -1,0 +1,508 @@
+{
+  "format": 1,
+  "created_utc": "2026-09-27T02:51:22.959061+00:00",
+  "rust_revision": "02653bef150d6491a9f4047612fb6fe4d20c6c34",
+  "odin_revision": "bfb368c0b7586ab98c3915c0ae7cd3b46843fc8f",
+  "rust_compiler": "rustc 1.98.1 (48a229cea 2026-09-01)\nbinary: rustc\ncommit-hash: 48a229ceaefd4985c50990b14116b6d856af0985\ncommit-date: 2026-09-01\nhost: aarch64-unknown-linux-gnu\nrelease: 1.98.1\nLLVM version: 22.1.8",
+  "odin_compiler": "/home/ryan/src/odin-setup/odin version dev-2026-09-nightly:a2fb372",
+  "machine": [
+    "Linux",
+    "yew",
+    "6.17.0-1029-nvidia",
+    "#29-Ubuntu SMP PREEMPT_DYNAMIC Wed Jul  1 00:13:52 UTC 2026",
+    "aarch64"
+  ],
+  "cpu": 5,
+  "workers": 1,
+  "accelerator": "none",
+  "authority": "root",
+  "runs": 3,
+  "inputs": {
+    "owl": {
+      "sha256": "2993e1a50ec7c4cda5b0e50a8ba466df8fb1fe13984a0a63b62daf9bc0a422fa",
+      "subjects": 10001,
+      "facts": 20001
+    },
+    "cycl": {
+      "sha256": "9758b53ba1e7fd88a8c6b9ac8c224c60730f8ae5f611209e5c04867cf5cff5f2",
+      "assertions": 100000,
+      "odin_schema": "/tmp/mica-ingestion-02653be/rust-source/apps/bycycle/00_schema.mica",
+      "odin_schema_sha256": "22e5cef207603c234ec6b9cd9a34458ebc827ecfdd507a46817c36a3efc534ea"
+    }
+  },
+  "protocol": {
+    "timing": "whole child process, from launch through exit; zero warmup",
+    "memory": "GNU time peak process RSS, including open, parsing, execution, commit, and close",
+    "owl": "fresh initialized strict store; no inference rules; one input batch; result verification after timing",
+    "owl_tier": {
+      "rust": "native-enabled Mica loader",
+      "odin": "native host loader"
+    },
+    "owl_durability": "strict",
+    "owl_storage": {
+      "rust": "Fjall",
+      "odin": "Odin store"
+    },
+    "cycl": "no fact writes; Rust parser only; Odin includes in-memory schema initialization",
+    "cycl_adaptation": "Odin loads the namespaced Rust schema because its pinned Arity/3 conflicts with system Arity/2",
+    "cycl_tier": "native host parsers",
+    "batch": "Rust publishes cursor with facts; Odin publishes cursor in a separate transaction",
+    "timeout_seconds": 120
+  },
+  "harness_sha256": {
+    "capture_ingestion.py": "5827576826d1550fac074ed9ba031e9f051d919e7b3a0f7e3c9fc7e26ddfec71",
+    "capture.py": "f5889c5c63b02c60deefabca1d8fa7dd290f3ab72299365f048d5faf38d06c58"
+  },
+  "builds": [
+    {
+      "command": [
+        "cargo",
+        "build",
+        "--locked",
+        "--release",
+        "-p",
+        "mica-runner",
+        "--target-dir",
+        "/tmp/mica-parity-arity-cache/rust-source/target"
+      ],
+      "cwd": "/tmp/mica-ingestion-02653be/rust-source"
+    },
+    {
+      "command": [
+        "/home/ryan/src/odin-setup/odin",
+        "build",
+        "tools/owlstream",
+        "-o:speed",
+        "-out:/tmp/mica-ingestion-02653be/owlstream"
+      ],
+      "cwd": "/tmp/mica-ingestion-02653be/odin-source"
+    },
+    {
+      "command": [
+        "/home/ryan/src/odin-setup/odin",
+        "build",
+        "tools/cycl-load",
+        "-o:speed",
+        "-out:/tmp/mica-ingestion-02653be/cycl-load"
+      ],
+      "cwd": "/tmp/mica-ingestion-02653be/odin-source"
+    },
+    {
+      "command": [
+        "/home/ryan/src/odin-setup/odin",
+        "build",
+        "tools/filein",
+        "-o:speed",
+        "-out:/tmp/mica-ingestion-02653be/filein"
+      ],
+      "cwd": "/tmp/mica-ingestion-02653be/odin-source"
+    }
+  ],
+  "results": [
+    {
+      "case": "owl",
+      "implementation": "rust",
+      "run": 0,
+      "passed": true,
+      "setup_command": [
+        "/tmp/mica-ingestion-02653be/mica",
+        "--store",
+        "/tmp/mica-ingestion-02653be/owl-rust-0.store",
+        "--durability",
+        "strict",
+        "filein",
+        "apps/bycycle-owl/00_schema.mica",
+        "apps/bycycle-owl/40_loader.mica"
+      ],
+      "command": [
+        "/usr/bin/time",
+        "-f",
+        "%M",
+        "-o",
+        "/tmp/mica-ingestion-02653be/owl-rust-0.rss",
+        "taskset",
+        "-c",
+        "5",
+        "/tmp/mica-ingestion-02653be/mica",
+        "--store",
+        "/tmp/mica-ingestion-02653be/owl-rust-0.store",
+        "--durability",
+        "strict",
+        "owl",
+        "--owl",
+        "/tmp/mica-ingestion-02653be/input.owl",
+        "--commit-batch",
+        "1000000000"
+      ],
+      "elapsed_ns": 234575256,
+      "returncode": 0,
+      "peak_rss_kib": 66644,
+      "verify_command": [
+        "/tmp/mica-ingestion-02653be/mica",
+        "--store",
+        "/tmp/mica-ingestion-02653be/owl-rust-0.store",
+        "filein",
+        "/tmp/mica-ingestion-02653be/owl-rust-0-verify.mica"
+      ]
+    },
+    {
+      "case": "owl",
+      "implementation": "odin",
+      "run": 0,
+      "passed": true,
+      "setup_command": [
+        "/tmp/mica-ingestion-02653be/filein",
+        "--store",
+        "/tmp/mica-ingestion-02653be/owl-odin-0.store",
+        "--durability",
+        "strict",
+        "apps/bycycle-owl/00_schema.mica"
+      ],
+      "command": [
+        "/usr/bin/time",
+        "-f",
+        "%M",
+        "-o",
+        "/tmp/mica-ingestion-02653be/owl-odin-0.rss",
+        "taskset",
+        "-c",
+        "5",
+        "/tmp/mica-ingestion-02653be/owlstream",
+        "--store",
+        "/tmp/mica-ingestion-02653be/owl-odin-0.store",
+        "--durability",
+        "strict",
+        "--owl",
+        "/tmp/mica-ingestion-02653be/input.owl",
+        "--commit-batch",
+        "1000000000"
+      ],
+      "elapsed_ns": 61367293,
+      "returncode": 0,
+      "peak_rss_kib": 47992,
+      "verify_command": [
+        "/tmp/mica-ingestion-02653be/filein",
+        "--store",
+        "/tmp/mica-ingestion-02653be/owl-odin-0.store",
+        "--eval",
+        "require len(GuidOf(?id, ?guid)) == 10001\nrequire len(Label(?id, ?label)) == 10001\nrequire len(Genls(?child, ?parent)) == 10000\nlet root = GuidOf(?id, \"Mx4rParityRoot0000000000\")[0][:id]\nrequire Label(root, \"Root \u00e9\ud83e\udd80\")\nrequire Genls(_, root)\nreturn 8675309"
+      ]
+    },
+    {
+      "case": "cycl",
+      "implementation": "rust",
+      "run": 0,
+      "passed": true,
+      "command": [
+        "/usr/bin/time",
+        "-f",
+        "%M",
+        "-o",
+        "/tmp/mica-ingestion-02653be/cycl-rust-0.rss",
+        "taskset",
+        "-c",
+        "5",
+        "/tmp/mica-ingestion-02653be/mica",
+        "cycl-census",
+        "/tmp/mica-ingestion-02653be/input.cycl"
+      ],
+      "elapsed_ns": 16591184,
+      "returncode": 0,
+      "peak_rss_kib": 4804
+    },
+    {
+      "case": "cycl",
+      "implementation": "odin",
+      "run": 0,
+      "passed": true,
+      "command": [
+        "/usr/bin/time",
+        "-f",
+        "%M",
+        "-o",
+        "/tmp/mica-ingestion-02653be/cycl-odin-0.rss",
+        "taskset",
+        "-c",
+        "5",
+        "/tmp/mica-ingestion-02653be/cycl-load",
+        "/tmp/mica-ingestion-02653be/rust-source/apps/bycycle/00_schema.mica",
+        "/tmp/mica-ingestion-02653be/input.cycl"
+      ],
+      "elapsed_ns": 94787022,
+      "returncode": 0,
+      "peak_rss_kib": 115448
+    },
+    {
+      "case": "owl",
+      "implementation": "odin",
+      "run": 1,
+      "passed": true,
+      "setup_command": [
+        "/tmp/mica-ingestion-02653be/filein",
+        "--store",
+        "/tmp/mica-ingestion-02653be/owl-odin-1.store",
+        "--durability",
+        "strict",
+        "apps/bycycle-owl/00_schema.mica"
+      ],
+      "command": [
+        "/usr/bin/time",
+        "-f",
+        "%M",
+        "-o",
+        "/tmp/mica-ingestion-02653be/owl-odin-1.rss",
+        "taskset",
+        "-c",
+        "5",
+        "/tmp/mica-ingestion-02653be/owlstream",
+        "--store",
+        "/tmp/mica-ingestion-02653be/owl-odin-1.store",
+        "--durability",
+        "strict",
+        "--owl",
+        "/tmp/mica-ingestion-02653be/input.owl",
+        "--commit-batch",
+        "1000000000"
+      ],
+      "elapsed_ns": 61129388,
+      "returncode": 0,
+      "peak_rss_kib": 49448,
+      "verify_command": [
+        "/tmp/mica-ingestion-02653be/filein",
+        "--store",
+        "/tmp/mica-ingestion-02653be/owl-odin-1.store",
+        "--eval",
+        "require len(GuidOf(?id, ?guid)) == 10001\nrequire len(Label(?id, ?label)) == 10001\nrequire len(Genls(?child, ?parent)) == 10000\nlet root = GuidOf(?id, \"Mx4rParityRoot0000000000\")[0][:id]\nrequire Label(root, \"Root \u00e9\ud83e\udd80\")\nrequire Genls(_, root)\nreturn 8675309"
+      ]
+    },
+    {
+      "case": "owl",
+      "implementation": "rust",
+      "run": 1,
+      "passed": true,
+      "setup_command": [
+        "/tmp/mica-ingestion-02653be/mica",
+        "--store",
+        "/tmp/mica-ingestion-02653be/owl-rust-1.store",
+        "--durability",
+        "strict",
+        "filein",
+        "apps/bycycle-owl/00_schema.mica",
+        "apps/bycycle-owl/40_loader.mica"
+      ],
+      "command": [
+        "/usr/bin/time",
+        "-f",
+        "%M",
+        "-o",
+        "/tmp/mica-ingestion-02653be/owl-rust-1.rss",
+        "taskset",
+        "-c",
+        "5",
+        "/tmp/mica-ingestion-02653be/mica",
+        "--store",
+        "/tmp/mica-ingestion-02653be/owl-rust-1.store",
+        "--durability",
+        "strict",
+        "owl",
+        "--owl",
+        "/tmp/mica-ingestion-02653be/input.owl",
+        "--commit-batch",
+        "1000000000"
+      ],
+      "elapsed_ns": 231983686,
+      "returncode": 0,
+      "peak_rss_kib": 66596,
+      "verify_command": [
+        "/tmp/mica-ingestion-02653be/mica",
+        "--store",
+        "/tmp/mica-ingestion-02653be/owl-rust-1.store",
+        "filein",
+        "/tmp/mica-ingestion-02653be/owl-rust-1-verify.mica"
+      ]
+    },
+    {
+      "case": "cycl",
+      "implementation": "odin",
+      "run": 1,
+      "passed": true,
+      "command": [
+        "/usr/bin/time",
+        "-f",
+        "%M",
+        "-o",
+        "/tmp/mica-ingestion-02653be/cycl-odin-1.rss",
+        "taskset",
+        "-c",
+        "5",
+        "/tmp/mica-ingestion-02653be/cycl-load",
+        "/tmp/mica-ingestion-02653be/rust-source/apps/bycycle/00_schema.mica",
+        "/tmp/mica-ingestion-02653be/input.cycl"
+      ],
+      "elapsed_ns": 88658168,
+      "returncode": 0,
+      "peak_rss_kib": 115460
+    },
+    {
+      "case": "cycl",
+      "implementation": "rust",
+      "run": 1,
+      "passed": true,
+      "command": [
+        "/usr/bin/time",
+        "-f",
+        "%M",
+        "-o",
+        "/tmp/mica-ingestion-02653be/cycl-rust-1.rss",
+        "taskset",
+        "-c",
+        "5",
+        "/tmp/mica-ingestion-02653be/mica",
+        "cycl-census",
+        "/tmp/mica-ingestion-02653be/input.cycl"
+      ],
+      "elapsed_ns": 12412237,
+      "returncode": 0,
+      "peak_rss_kib": 4876
+    },
+    {
+      "case": "owl",
+      "implementation": "rust",
+      "run": 2,
+      "passed": true,
+      "setup_command": [
+        "/tmp/mica-ingestion-02653be/mica",
+        "--store",
+        "/tmp/mica-ingestion-02653be/owl-rust-2.store",
+        "--durability",
+        "strict",
+        "filein",
+        "apps/bycycle-owl/00_schema.mica",
+        "apps/bycycle-owl/40_loader.mica"
+      ],
+      "command": [
+        "/usr/bin/time",
+        "-f",
+        "%M",
+        "-o",
+        "/tmp/mica-ingestion-02653be/owl-rust-2.rss",
+        "taskset",
+        "-c",
+        "5",
+        "/tmp/mica-ingestion-02653be/mica",
+        "--store",
+        "/tmp/mica-ingestion-02653be/owl-rust-2.store",
+        "--durability",
+        "strict",
+        "owl",
+        "--owl",
+        "/tmp/mica-ingestion-02653be/input.owl",
+        "--commit-batch",
+        "1000000000"
+      ],
+      "elapsed_ns": 229790804,
+      "returncode": 0,
+      "peak_rss_kib": 66644,
+      "verify_command": [
+        "/tmp/mica-ingestion-02653be/mica",
+        "--store",
+        "/tmp/mica-ingestion-02653be/owl-rust-2.store",
+        "filein",
+        "/tmp/mica-ingestion-02653be/owl-rust-2-verify.mica"
+      ]
+    },
+    {
+      "case": "owl",
+      "implementation": "odin",
+      "run": 2,
+      "passed": true,
+      "setup_command": [
+        "/tmp/mica-ingestion-02653be/filein",
+        "--store",
+        "/tmp/mica-ingestion-02653be/owl-odin-2.store",
+        "--durability",
+        "strict",
+        "apps/bycycle-owl/00_schema.mica"
+      ],
+      "command": [
+        "/usr/bin/time",
+        "-f",
+        "%M",
+        "-o",
+        "/tmp/mica-ingestion-02653be/owl-odin-2.rss",
+        "taskset",
+        "-c",
+        "5",
+        "/tmp/mica-ingestion-02653be/owlstream",
+        "--store",
+        "/tmp/mica-ingestion-02653be/owl-odin-2.store",
+        "--durability",
+        "strict",
+        "--owl",
+        "/tmp/mica-ingestion-02653be/input.owl",
+        "--commit-batch",
+        "1000000000"
+      ],
+      "elapsed_ns": 69624789,
+      "returncode": 0,
+      "peak_rss_kib": 49440,
+      "verify_command": [
+        "/tmp/mica-ingestion-02653be/filein",
+        "--store",
+        "/tmp/mica-ingestion-02653be/owl-odin-2.store",
+        "--eval",
+        "require len(GuidOf(?id, ?guid)) == 10001\nrequire len(Label(?id, ?label)) == 10001\nrequire len(Genls(?child, ?parent)) == 10000\nlet root = GuidOf(?id, \"Mx4rParityRoot0000000000\")[0][:id]\nrequire Label(root, \"Root \u00e9\ud83e\udd80\")\nrequire Genls(_, root)\nreturn 8675309"
+      ]
+    },
+    {
+      "case": "cycl",
+      "implementation": "rust",
+      "run": 2,
+      "passed": true,
+      "command": [
+        "/usr/bin/time",
+        "-f",
+        "%M",
+        "-o",
+        "/tmp/mica-ingestion-02653be/cycl-rust-2.rss",
+        "taskset",
+        "-c",
+        "5",
+        "/tmp/mica-ingestion-02653be/mica",
+        "cycl-census",
+        "/tmp/mica-ingestion-02653be/input.cycl"
+      ],
+      "elapsed_ns": 12139309,
+      "returncode": 0,
+      "peak_rss_kib": 4812
+    },
+    {
+      "case": "cycl",
+      "implementation": "odin",
+      "run": 2,
+      "passed": true,
+      "command": [
+        "/usr/bin/time",
+        "-f",
+        "%M",
+        "-o",
+        "/tmp/mica-ingestion-02653be/cycl-odin-2.rss",
+        "taskset",
+        "-c",
+        "5",
+        "/tmp/mica-ingestion-02653be/cycl-load",
+        "/tmp/mica-ingestion-02653be/rust-source/apps/bycycle/00_schema.mica",
+        "/tmp/mica-ingestion-02653be/input.cycl"
+      ],
+      "elapsed_ns": 85642837,
+      "returncode": 0,
+      "peak_rss_kib": 115452
+    }
+  ],
+  "binaries": {
+    "mica": "3dc5d2898be69c0c1acaeb4fac6a01ea12865447fb111e2825c641e9332e0f76",
+    "owlstream": "a4b01af0f5dfecb0475ce51b11254ef4d163caa598da3b19140dfb971bf676f8",
+    "cycl-load": "faed80cc45ca03156aa4ec904ec47ed3fb92e9d8d72895a18bf449cf608828a0",
+    "filein": "3ffd7f4da09c2f56d8b47850232d532752bfcb41711094f127e08c93e4c8cc77"
+  }
+}
