@@ -1,0 +1,167 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+// Rust's owned value format: little-endian immediate words and structural
+// extended records. Symbol IDs require a shared namespace; names survive restarts.
+verb native_value/codec(input: map) -> map
+  let context: map = input
+  let word: list = native_value/word()
+  let options: list = [:Record, "ValueCodecOptions"]
+  let arena: list = ["arena", [:Pointer, [:Record, "ValueArena"], :Mutable], :Borrow]
+  let table: list = ["table", [:Pointer, [:Record, "SymbolTable"], :Mutable], :Borrow]
+  let buffer: list = ["buffer", [:Pointer, [:Record, "ValueBuffer"], :Mutable], [:Borrow, "arena"]]
+  context[:state] = native/record_type(context[:state], "ValueCodecOptions", [["symbol_ids", :Bool], ["allow_capabilities", :Bool]])[1]
+  let [constants, state] = native/constants(context[:state], [
+    ["codec_extended", :U64, "ff00000000000000"], ["codec_aux_mask", :U64, "0000ffffffffffff"],
+    ["codec_kind_shift", :U64, "0000000000000030"], ["codec_tag_shift", :U64, "0000000000000038"],
+    ["codec_byte_mask", :U64, "00000000000000ff"], ["codec_u32_max", :U64, "00000000ffffffff"],
+    ["codec_error_flags", :U64, "0000000000000003"]])
+  context[:state] = state
+  let bindings: map = context[:constants]
+  for name, id in constants
+    bindings[name] = id
+  end
+  context[:constants] = bindings
+  context = native_value/function(context, "codec_header", :Bool, [arena, buffer, ["kind", :U8, :Value], ["aux", :U64, :Value]], [],
+    [:Allocate, :ReadMemory, :WriteMemory], :Value, "")
+  context = native_value/body(context, "codec_header", [
+    [:If, [:Less, "codec_aux_mask", "aux"], [[:Return, "false"]], []],
+    [:Let, "kind_bits", :U64, [:ShiftLeft, [:Expr, :U64, [:Convert, "kind"]], "codec_kind_shift"]],
+    [:Let, "header", :U64, [:BitOr, "codec_extended", "kind_bits"]], [:Set, "header", [:BitOr, "header", "aux"]],
+    [:Return, [:Call, "buffer_word", "arena", "buffer", "header"]]])
+  context = native_value/function(context, "codec_encode", :Bool, [arena, table, buffer, ["value", word, :Borrow], ["options", options, :Value]], [],
+    [:Allocate, :ReadMemory, :WriteMemory, :Block], :Value, "")
+  context = native_value/codec_encode(context)
+  context = native_value/function(context, "value_encode", [:Record, "ValueResult"], [arena, table, ["value", word, :Borrow], ["options", options, :Value]], [],
+    [:Allocate, :ReadMemory, :WriteMemory, :Block], :Borrow, "arena")
+  context = native_value/body(context, "value_encode", [
+    [:Let, "buffer", [:Pointer, [:Record, "ValueBuffer"], :Mutable], [:Call, "value_buffer", "arena"]],
+    [:If, [:Equal, "buffer", "null_buffer"], [[:Return, [:Zero]]], []],
+    [:If, [:Call, "codec_encode", "arena", "table", "buffer", "value", "options"], [], [[:Return, [:Zero]]]],
+    [:Let, "output", [:Record, "ValueBuffer"], [:Load, "buffer"]],
+    [:Let, "data", [:Pointer, :U8, :Mutable], [:Field, "output", "data"]],
+    [:Let, "length", :U64, [:Field, "output", "length"]],
+    [:Let, "raw", [:Pointer, :U8, :Mutable], [:Call, "value_arena_allocate", "arena", [:Expr, :U64, [:SizeOf, [:Record, "HeapBytes"]]]]],
+    [:If, [:Equal, "raw", "null_bytes"], [[:Return, [:Zero]]], []],
+    [:Let, "header", [:Pointer, [:Record, "HeapBytes"], :Mutable], [:PointerCast, "raw"]],
+    [:Do, [:Store, "header", [:Expr, [:Record, "HeapBytes"], [:Record, "data", "length"]]]],
+    [:Return, [:Record, "true", [:Expr, word, [:PackPointer, "header", "tag_bytes"]]]]])
+  return context
+end
+
+verb native_value/encode_step(call: list) -> list
+  return [[:If, call, [], [[:Return, "false"]]]]
+end
+
+verb native_value/encode_child(value: string) -> list
+  let rows: list = native_value/encode_step([:Call, "codec_encode", "arena", "table", "buffer", value, "options"])
+  return rows
+end
+
+verb native_value/codec_encode(input: map) -> map
+  let context: map = input
+  let word: list = native_value/word()
+  let bytes: list = [:Pointer, :U8, :Mutable]
+  let rows: list = [[:Let, "tag", :U8, [:Tag, "value"]],
+    [:Let, "payload", :U64, "zero"],
+    [:If, [:Less, "tag", "tag_string"], [[:Set, "payload", [:Payload, "value"]]], []],
+    [:If, [:Equal, "tag", "tag_capability"], [[:Set, "payload", [:Payload, "value"]]], []],
+    [:Let, "inline_word", :U64, [:ShiftLeft, [:Expr, :U64, [:Convert, "tag"]], "codec_tag_shift"]],
+    [:Set, "inline_word", [:BitOr, "inline_word", "payload"]],
+    [:If, [:Equal, "tag", "zero_tag"], [[:Return, [:Call, "buffer_word", "arena", "buffer", "zero"]]], []]]
+  for name in ["bool", "int", "float", "identity"]
+    rows = [@rows, [:If, [:Equal, "tag", string_concat("tag_", name)], [[:Return, [:Call, "buffer_word", "arena", "buffer", "inline_word"]]], []]]
+  end
+  rows = [@rows, [:If, [:Equal, "tag", "tag_capability"], [
+    [:If, [:Field, "options", "allow_capabilities"], [[:Return, [:Call, "buffer_word", "arena", "buffer", "inline_word"]]], [[:Return, "false"]]]], []]]
+  for name in ["symbol", "error_code"]
+    rows = [@rows, [:If, [:Equal, "tag", string_concat("tag_", name)], [
+      [:If, [:Field, "options", "symbol_ids"], [[:Return, [:Call, "buffer_word", "arena", "buffer", "inline_word"]]], []],
+      [:If, [:Equal, "table", [:Expr, [:Pointer, [:Record, "SymbolTable"], :Mutable], [:Zero]]], [[:Return, "false"]], []],
+      [:Let, string_concat(name, "_text"), [:Record, "SymbolText"], [:Call, "value_symbol_text", "table", [:Expr, :U32, [:Convert, "payload"]]]],
+      [:If, [:Field, string_concat(name, "_text"), "ok"], [], [[:Return, "false"]]],
+      [:Let, string_concat(name, "_length"), :U64, [:Field, string_concat(name, "_text"), "length"]],
+      @native_value/encode_step([:Call, "codec_header", "arena", "buffer", "tag", string_concat(name, "_length")]),
+      [:Return, [:Call, "buffer_append", "arena", "buffer", [:Expr, [:Pointer, :U8, :Const], [:Field, string_concat(name, "_text"), "data"]], string_concat(name, "_length")]]
+    ], []]]
+  end
+  for spec in [["string", "HeapString", :U8], ["bytes", "HeapBytes", :U8], ["list", "HeapList", word], ["map", "HeapMap", [:Record, "ValueMapEntry"]]]
+    let name: string = spec[0]
+    let pointer: string = string_concat(name, "_pointer")
+    let header: string = string_concat(name, "_header")
+    let data: string = string_concat(name, "_data")
+    let length: string = string_concat(name, "_length")
+    let body: list = [
+      [:Let, pointer, [:Pointer, [:Record, spec[1]], :Const], [:UnpackPointer, "value"]],
+      [:Let, header, [:Record, spec[1]], [:Load, pointer]],
+      [:Let, data, [:Pointer, spec[2], :Mutable], [:Field, header, "data"]],
+      [:Let, length, :U64, [:Field, header, "length"]],
+      @native_value/encode_step([:Call, "codec_header", "arena", "buffer", "tag", length])]
+    if spec[2] == :U8
+      body = [@body, [:Return, [:Call, "buffer_append", "arena", "buffer", [:Expr, [:Pointer, :U8, :Const], [:Freeze, data]], length]]]
+    else
+      let index: string = string_concat(name, "_i")
+      let element: string = string_concat(name, "_element")
+      let children: list = []
+      if name == "list"
+        children = native_value/encode_child(element)
+      else
+        for field in ["key", "value"]
+          let child: string = string_concat(name, "_", field)
+          children = [@children, [:Let, child, word, [:Field, element, field]], @native_value/encode_child(child)]
+        end
+      end
+      body = [@body, [:Let, index, :U64, "zero"], [:While, [:Less, index, length], [
+        [:Let, element, spec[2], [:Load, [:Expr, [:Pointer, spec[2], :Mutable], [:Offset, data, index]]]],
+        @children, [:Set, index, [:Add, index, "one"]]]], [:Return, "true"]]
+    end
+    rows = [@rows, [:If, [:Equal, "tag", string_concat("tag_", name)], body, []]]
+  end
+  rows = [@rows, [:If, [:Equal, "tag", "tag_range"], [
+    [:Let, "range", [:Record, "HeapRange"], [:Load, [:Expr, [:Pointer, [:Record, "HeapRange"], :Const], [:UnpackPointer, "value"]]]],
+    [:Let, "has_end", :Bool, [:Field, "range", "has_end"]], [:Let, "range_flags", :U64, "zero"],
+    [:If, "has_end", [[:Set, "range_flags", "one"]], []],
+    @native_value/encode_step([:Call, "codec_header", "arena", "buffer", "tag", "range_flags"]),
+    [:Let, "start", word, [:Field, "range", "start"]], @native_value/encode_child("start"),
+    [:If, "has_end", [[:Let, "end", word, [:Field, "range", "end"]], @native_value/encode_child("end")], []], [:Return, "true"]], []],
+    [:If, [:Equal, "tag", "tag_error"], [
+      [:Let, "error", [:Record, "HeapError"], [:Load, [:Expr, [:Pointer, [:Record, "HeapError"], :Const], [:UnpackPointer, "value"]]]],
+      [:Let, "has_message", :Bool, [:Field, "error", "has_message"]], [:Let, "has_value", :Bool, [:Field, "error", "has_value"]],
+      [:Let, "error_flags", :U64, "zero"], [:If, "has_message", [[:Set, "error_flags", "one"]], []],
+      [:If, "has_value", [[:Set, "error_flags", [:Add, "error_flags", "two"]]], []],
+      @native_value/encode_step([:Call, "codec_header", "arena", "buffer", "tag", "error_flags"]),
+      [:Let, "code", word, [:PackImmediate, [:Expr, :U64, [:Convert, [:Expr, :U32, [:Field, "error", "code"]]]], "tag_error_code"]], @native_value/encode_child("code"),
+      [:If, "has_message", [
+        [:Let, "message", word, [:Field, "error", "message"]],
+        [:Let, "message_header", [:Record, "HeapString"], [:Load, [:Expr, [:Pointer, [:Record, "HeapString"], :Const], [:UnpackPointer, "message"]]]],
+        [:Let, "message_length", :U64, [:Field, "message_header", "length"]],
+        @native_value/encode_step([:Call, "buffer_word", "arena", "buffer", "message_length"]),
+        @native_value/encode_step([:Call, "buffer_append", "arena", "buffer", [:Expr, [:Pointer, :U8, :Const], [:Freeze, [:Expr, bytes, [:Field, "message_header", "data"]]]], "message_length"])], []],
+      [:If, "has_value", [[:Let, "error_value", word, [:Field, "error", "value"]], @native_value/encode_child("error_value")], []], [:Return, "true"]], []],
+    [:If, [:Equal, "tag", "tag_frob"], [
+      [:Let, "frob", [:Record, "HeapFrob"], [:Load, [:Expr, [:Pointer, [:Record, "HeapFrob"], :Const], [:UnpackPointer, "value"]]]],
+      @native_value/encode_step([:Call, "codec_header", "arena", "buffer", "tag", "zero"]),
+      [:Let, "delegate", word, [:PackImmediate, [:Expr, :U64, [:Field, "frob", "delegate"]], "tag_identity"]], @native_value/encode_child("delegate"),
+      [:Let, "frob_value", word, [:Field, "frob", "value"]], @native_value/encode_child("frob_value"), [:Return, "true"]], []],
+    [:If, [:Equal, "tag", "tag_relation"], [
+      [:Let, "relation", [:Record, "HeapRelation"], [:Load, [:Expr, [:Pointer, [:Record, "HeapRelation"], :Const], [:UnpackPointer, "value"]]]],
+      [:Let, "arity", :U64, [:Field, "relation", "arity"]],
+      [:Let, "heading", [:Pointer, :U32, :Mutable], [:Field, "relation", "heading"]],
+      @native_value/encode_step([:Call, "codec_header", "arena", "buffer", "tag", "arity"]),
+      [:Let, "column", :U64, "zero"], [:While, [:Less, "column", "arity"], [
+        [:Let, "column_id", :U32, [:Load, [:Expr, [:Pointer, :U32, :Mutable], [:Offset, "heading", "column"]]]],
+        [:Let, "column_value", word, [:PackImmediate, [:Expr, :U64, [:Convert, "column_id"]], "tag_symbol"]], @native_value/encode_child("column_value"),
+        [:Set, "column", [:Add, "column", "one"]]]],
+      [:Let, "length", :U64, [:Field, "relation", "length"]],
+      @native_value/encode_step([:Call, "buffer_word", "arena", "buffer", "length"]),
+      [:Let, "tuples", [:Pointer, [:Record, "ValueTuple"], :Mutable], [:Field, "relation", "rows"]],
+      [:Let, "row", :U64, "zero"], [:While, [:Less, "row", "length"], [
+        [:Let, "tuple", [:Record, "ValueTuple"], [:Load, [:Expr, [:Pointer, [:Record, "ValueTuple"], :Mutable], [:Offset, "tuples", "row"]]]],
+        [:Let, "cells", [:Pointer, word, :Mutable], [:Field, "tuple", "data"]],
+        [:Set, "column", "zero"], [:While, [:Less, "column", "arity"], [
+          [:Let, "cell", word, [:Load, [:Expr, [:Pointer, word, :Mutable], [:Offset, "cells", "column"]]]], @native_value/encode_child("cell"),
+          [:Set, "column", [:Add, "column", "one"]]]], [:Set, "row", [:Add, "row", "one"]]]], [:Return, "true"]], []],
+    [:Return, "false"]]
+  context = native_value/body(context, "codec_encode", rows)
+  return context
+end

@@ -314,6 +314,10 @@ apps/native/value/collections.mica
 apps/native/value/relations.mica
 apps/native/value/hash.mica
 apps/native/value/copy.mica
+apps/native/value/buffer.mica
+apps/native/value/codec.mica
+apps/native/value/codec_decode.mica
+apps/native/value/persistence.mica
 ```
 
 `native_value/program()` returns its IR. `native/emit_module(native_value/program(), "value")` returns the C artifacts.
@@ -490,13 +494,36 @@ Copy returns `ValueResult` or `TupleResult`. Allocation failure returns `ok = fa
 Partial allocations remain in the destination arena until release. The caller must serialize destination arena mutation.
 Traversal uses native recursion. Copy duplicates shared subtrees and does not preserve source aliasing or spare capacity.
 
-This module is in progress. Display and codecs remain unimplemented.
+`value_is_persistable(value)` rejects capabilities and function handles, including nested children.
+It ignores absent optional fields. This predicate does not check whether symbols have registered names.
+
+`value_encode(arena, table, value, options)` returns a `ValueResult` containing owned bytes.
+`ValueCodecOptions { symbol_ids, allow_capabilities }` defaults to persistence-safe options when zero-initialized: names, with capabilities disabled.
+The format matches Rust's owned value codec: little-endian words, structural heap records, and UTF-8 symbol names.
+Heap pointers are never encoded. Function handles are always rejected.
+Set `symbol_ids` only when producer and consumer share the same symbol namespace.
+Set `allow_capabilities` only for transient transfer within the same authority namespace; this does not make capabilities persistable.
+
+`value_decode(arena, table, data, length, options)` returns `ValueDecodeResult { ok, value, consumed }`.
+`value_decode_exact` returns `ValueResult` and rejects trailing bytes.
+Decoding checks tags, flags, lengths, UTF-8, and relation headings before publishing a value.
+Maps and relations use their ordinary constructors to normalize order and duplicates.
+Names require an initialized symbol table. ID mode permits a null table.
+Named decoding interns into the destination table, so resulting IDs can differ from the source IDs.
+
+Encoded bytes and decoded heap storage belong to the destination arena. Neither borrows source storage or symbol-name bytes.
+The caller must serialize destination arena mutation; symbol-table access uses its existing lock.
+A failure returns `ok = false` without publishing a partial result. Partial arena allocations remain until release.
+Names interned before a decode failure remain in the symbol table.
+The codec uses native recursion, with no separate nesting limit. Callers must bound untrusted input depth before using it.
+
+This module is in progress. Display remains unimplemented.
 Heap layouts are local to this implementation. Matching immediate tags does not make heap pointers interchangeable with Odin or Rust.
 
 ## Rust and generated C comparison
 
 The [comparison harness](../../crates/testing/value-comparison/src/main.rs) constructs equivalent values independently in Rust and generated C.
-It compares complete semantic results through a test protocol. It does not exchange heap pointers or use the persistence codec.
+It compares complete semantic results through a test protocol. Codec cases additionally exchange Rust-compatible encoded bytes; heap pointers never cross implementations.
 The harness covers implemented constructors, recursive comparison, mixed numeric comparison, arithmetic, map lookup, and map construction.
 Collection checks cover nested values, indexing, slicing, append chains, replacement, and map updates.
 Use `--collections` to select only collection property cases.
@@ -506,7 +533,13 @@ The comparison normalizes Rust IDs by first occurrence because IDs belong to the
 These checks read every name after the complete sequence, including growth, and include malformed UTF-8 and repeated names.
 Use `--symbol-case` to replay the JSON byte arrays from a failed sequence.
 Relation checks cover reordered columns, duplicate rows, nested values, empty relations, unit, accessors, and invalid headings or row widths.
-Use `--relations` to select relation property cases. Codecs remain outside the harness coverage.
+Use `--relations` to select relation property cases.
+
+`--codecs` selects encoding, decoding, malformed-input, and persistence cases.
+ID-mode checks compare exact encoded bytes and decode Rust encodings in C.
+Name-mode checks decode and re-encode with a different C symbol namespace, then compare values after Rust decoding.
+Codec lifetime checks release source storage before inspecting results. Codec benchmarks use ID mode.
+
 `--traversal` selects hash and copy cases across all value kinds, including nested relations.
 Copy checks release the actual decoded source arena before they inspect the result under AddressSanitizer.
 The Rust hash reference implements Omica's algorithm over Rust values. It does not use Rust's unspecified standard hash algorithm.

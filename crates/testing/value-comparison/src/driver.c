@@ -166,7 +166,7 @@ static void write_value(mica_type_Value v) {
 struct Prepared {
     unsigned op; struct mica_ValueResult left, right;
     struct mica_ValueMapEntry *entries; uint64_t count;
-    struct mica_ValueArena copy_source;
+    struct mica_ValueArena input_arena;
 };
 enum OutcomeKind { OUTCOME_VALUE, OUTCOME_ORDER, OUTCOME_HASH };
 struct Outcome { enum OutcomeKind kind; bool ok; int64_t comparison; mica_type_Value value; };
@@ -314,6 +314,18 @@ static struct Outcome run(const struct Prepared *p, struct mica_ValueArena *aren
         return (struct Outcome){OUTCOME_HASH,hash.f_ok,0,hash.f_number};
     }
     case 36: result=mica_value_copy(arena,a); break;
+    case 37: case 38: {
+        struct mica_BoolResult allow=mica_value_as_bool(b);
+        struct mica_ValueCodecOptions options={true,allow.f_ok && allow.f_value};
+        // ID mode never uses the symbol table.
+        if(p->op==37) result=mica_value_encode(arena,NULL,a,options);
+        else {
+            struct mica_HeapBytesResult bytes=mica_value_as_bytes(a);
+            if(bytes.f_ok) result=mica_value_decode_exact(arena,NULL,bytes.f_header->f_data,bytes.f_header->f_length,options);
+        }
+        break;
+    }
+    case 39: result=(struct mica_ValueResult){true,mica_value_bool(mica_value_is_persistable(a))}; break;
     default: fail("unknown operation");
     }
     return (struct Outcome){OUTCOME_VALUE,result.f_ok,0,result.f_value};
@@ -366,7 +378,35 @@ static int symbol_driver(void) {
     return ferror(stdout) ? 2 : 0;
 }
 
+// Default name mode changes symbol IDs during decoding. Rust checks the
+// returned encoding after interning names back into its own namespace.
+static int codec_driver(void) {
+    struct mica_SymbolTable table={0};
+    if(!mica_value_symbol_table_init(&table)) fail("codec symbol table init failed");
+    // Force a different ID order from the Rust source namespace.
+    const uint8_t prefix[]="pre-existing C name";
+    if(!mica_value_symbol_intern(&table,prefix,sizeof(prefix)-1).f_ok) fail("codec preseed failed");
+    uint64_t length;
+    uint8_t *bytes=read_bytes(&length);
+    struct mica_ValueArena decoded={0},encoded={0};
+    struct mica_ValueCodecOptions options={false,false};
+    struct mica_ValueResult value=mica_value_decode_exact(&decoded,&table,bytes,length,options);
+    free(bytes);
+    struct mica_ValueResult result={false,0};
+    if(value.f_ok) result=mica_value_encode(&encoded,&table,value.f_value,options);
+    mica_value_arena_release(&decoded);
+    mica_value_symbol_table_release(&table);
+    write_number(result.f_ok,1);
+    if(result.f_ok) {
+        const struct mica_HeapBytes *header=mica_value_as_bytes(result.f_value).f_header;
+        write_bytes(header->f_data,header->f_length);
+    }
+    mica_value_arena_release(&encoded);
+    return ferror(stdout) ? 2 : 0;
+}
+
 int main(int argc, char **argv) {
+    if (argc == 2 && strcmp(argv[1], "codec") == 0) return codec_driver();
     if (argc == 2 && strcmp(argv[1], "symbols") == 0) return symbol_driver();
     if (argc == 3 && strcmp(argv[1], "symbol-load") == 0)
         return symbol_load_driver(strtoull(argv[2], NULL, 10));
@@ -377,7 +417,7 @@ int main(int argc, char **argv) {
     for(uint64_t i=0;i<count;++i) {
         struct Prepared *p=&cases[i];
         p->op=(unsigned)read_number(1);
-        struct mica_ValueArena *source=p->op==36 ? &p->copy_source : &inputs;
+        struct mica_ValueArena *source=(p->op==36 || p->op==37 || p->op==38) ? &p->input_arena : &inputs;
         p->left=read_value(source); p->right=read_value(source);
         if(p->op==9 && p->left.f_ok) {
             struct mica_HeapListResult list=mica_value_as_list(p->left.f_value);
@@ -389,8 +429,8 @@ int main(int argc, char **argv) {
     if(rounds==0) {
         for(uint64_t i=0;i<count;++i) {
             struct mica_ValueArena output={0}; struct Outcome r=run(&cases[i],&output);
-            // Copies must survive release of the actual decoded source arena.
-            mica_value_arena_release(&cases[i].copy_source);
+            // Copies, encodings, and decoded values must outlive their source arena.
+            mica_value_arena_release(&cases[i].input_arena);
             write_number(!r.ok ? 0 : r.kind==OUTCOME_HASH ? 3 : r.kind==OUTCOME_ORDER ? 2 : 1,1);
             if(r.ok) {
                 if(r.kind==OUTCOME_ORDER) write_number((uint64_t)r.comparison,8);
@@ -415,7 +455,7 @@ int main(int argc, char **argv) {
         uint64_t elapsed=now()-start;
         printf("%llu %llu\n",(unsigned long long)elapsed,(unsigned long long)digest);
     }
-    for(uint64_t i=0;i<count;++i) { free(cases[i].entries); mica_value_arena_release(&cases[i].copy_source); }
+    for(uint64_t i=0;i<count;++i) { free(cases[i].entries); mica_value_arena_release(&cases[i].input_arena); }
     free(cases); mica_value_arena_release(&inputs);
     return ferror(stdout) ? 2 : 0;
 }

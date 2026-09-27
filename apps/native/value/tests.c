@@ -879,7 +879,121 @@ static void traversal_cases(void) {
     mica_value_arena_release(&deep_destination);
 }
 
+static void codec_cases(void) {
+    struct mica_ValueArena source={0},encoded={0},decoded={0};
+    struct mica_ValueCodecOptions ids={true,false},names={0},caps={true,true};
+    uint8_t *text=malloc(20000); assert(text);
+    for(size_t i=0;i<20000;i+=2) { text[i]=0xc3; text[i+1]=0xa9; }
+    mica_type_Value string=mica_value_string(&source,text,20000).f_value;
+    free(text);
+    mica_type_Value error=mica_value_error(&source,7,true,string,true,integer(-3)).f_value;
+    mica_type_Value roots[]={string,error,0,mica_value_range(&source,error,false,0).f_value};
+    mica_type_Value list=mica_value_list(&source,roots,4).f_value;
+    uint32_t heading[]={9,3};
+    mica_type_Value cells[]={list,error};
+    struct mica_ValueTuple row={cells,2};
+    mica_type_Value relation=mica_value_relation(&source,heading,2,&row,1).f_value;
+    uint64_t hash=mica_value_hash(relation).f_number;
+    assert(mica_value_is_persistable(relation));
+    struct mica_ValueResult wire=mica_value_encode(&encoded,NULL,relation,ids);
+    assert(wire.f_ok);
+    const struct mica_HeapBytes *bytes=mica_value_as_bytes(wire.f_value).f_header;
+    struct mica_ValueDecodeResult prefix=mica_value_decode(&decoded,NULL,bytes->f_data,bytes->f_length,ids);
+    assert(prefix.f_ok && prefix.f_consumed==bytes->f_length);
+    assert(compare(prefix.f_value,relation)==0);
+    // A stream decoder consumes exactly one record; the exact decoder rejects suffixes.
+    uint8_t stream[16]={0};
+    struct mica_ValueDecodeResult first=mica_value_decode(&decoded,NULL,stream,sizeof(stream),ids);
+    assert(first.f_ok && first.f_value==0 && first.f_consumed==8);
+    assert(!mica_value_decode_exact(&decoded,NULL,stream,sizeof(stream),ids).f_ok);
+    assert(!mica_value_decode_exact(&decoded,NULL,NULL,1,ids).f_ok);
+    assert(!mica_value_decode_exact(&decoded,NULL,NULL,0,ids).f_ok);
+    // Each foreign allocation failure can leave arena scratch, but publishes no value.
+    for(unsigned operation=0;operation<2;operation++) {
+        bool succeeded=false;
+        for(size_t allowance=0;allowance<128;allowance++) {
+            struct mica_ValueArena attempt_arena={0};
+            allocation_allowance=allowance;
+            struct mica_ValueResult attempt=operation==0
+                ? mica_value_encode(&attempt_arena,NULL,relation,ids)
+                : mica_value_decode_exact(&attempt_arena,NULL,bytes->f_data,bytes->f_length,ids);
+            allocation_allowance=SIZE_MAX;
+            if(attempt.f_ok) {
+                if(operation==0) {
+                    const struct mica_HeapBytes *actual=mica_value_as_bytes(attempt.f_value).f_header;
+                    assert(actual->f_length==bytes->f_length);
+                    assert(memcmp(actual->f_data,bytes->f_data,(size_t)bytes->f_length)==0);
+                } else assert(compare(attempt.f_value,relation)==0);
+                succeeded=true;
+            } else assert(attempt.f_value==0);
+            assert(mica_value_hash(relation).f_number==hash);
+            mica_value_arena_release(&attempt_arena);
+            if(succeeded) break;
+        }
+        assert(succeeded);
+    }
+    mica_value_arena_release(&source);
+    mica_value_arena_release(&encoded);
+    assert(mica_value_hash(prefix.f_value).f_number==hash);
+    mica_value_arena_release(&decoded);
+
+    // Source and destination symbol tables have unrelated IDs. Encoded names
+    // and decoded heap storage must outlive the source bytes and symbol table.
+    struct mica_SymbolTable source_symbols={0},target_symbols={0};
+    assert(mica_value_symbol_table_init(&source_symbols));
+    assert(mica_value_symbol_table_init(&target_symbols));
+    const uint8_t spelling[]={0xc3,0xa9,0,'x'};
+    struct mica_IdResult id=mica_value_symbol_intern(&source_symbols,spelling,sizeof(spelling));
+    assert(id.f_ok);
+    assert(mica_value_symbol_intern(&target_symbols,(const uint8_t *)"other",5).f_ok);
+    mica_type_Value symbol=mica_value_symbol((uint32_t)id.f_number).f_value;
+    assert(mica_value_is_persistable(symbol));
+    assert(!mica_value_encode(&encoded,NULL,symbol,names).f_ok);
+    assert(!mica_value_encode(&encoded,&source_symbols,mica_value_symbol(999).f_value,names).f_ok);
+    wire=mica_value_encode(&encoded,&source_symbols,symbol,names); assert(wire.f_ok);
+    mica_value_symbol_table_release(&source_symbols);
+    bytes=mica_value_as_bytes(wire.f_value).f_header;
+    assert(!mica_value_decode_exact(&decoded,NULL,bytes->f_data,bytes->f_length,names).f_ok);
+    assert(!mica_value_decode_exact(&decoded,&target_symbols,bytes->f_data,bytes->f_length,ids).f_ok);
+    struct mica_ValueResult named=mica_value_decode_exact(&decoded,&target_symbols,bytes->f_data,bytes->f_length,names);
+    assert(named.f_ok);
+    uint32_t target_id=(uint32_t)mica_value_as_symbol(named.f_value).f_number;
+    assert(target_id!=id.f_number);
+    mica_value_arena_release(&encoded);
+    struct mica_SymbolText name=mica_value_symbol_text(&target_symbols,target_id);
+    assert(name.f_ok && name.f_length==sizeof(spelling));
+    assert(memcmp(name.f_data,spelling,sizeof(spelling))==0);
+    mica_value_symbol_table_release(&target_symbols);
+    mica_value_arena_release(&decoded);
+
+    // Restrictions recurse, but absent optional fields do not count as children.
+    mica_type_Value cap=mica_value_capability(1).f_value;
+    mica_type_Value function=mica_value_function(0).f_value;
+    assert(!mica_value_is_persistable(cap) && !mica_value_is_persistable(function));
+    mica_type_Value absent=mica_value_range(&source,integer(1),false,cap).f_value;
+    assert(mica_value_is_persistable(absent));
+    assert(mica_value_encode(&encoded,NULL,absent,ids).f_ok);
+    mica_type_Value nested=mica_value_list(&source,&cap,1).f_value;
+    assert(!mica_value_is_persistable(nested));
+    assert(!mica_value_encode(&encoded,NULL,nested,ids).f_ok);
+    wire=mica_value_encode(&encoded,NULL,nested,caps); assert(wire.f_ok);
+    bytes=mica_value_as_bytes(wire.f_value).f_header;
+    assert(!mica_value_decode_exact(&decoded,NULL,bytes->f_data,bytes->f_length,ids).f_ok);
+    assert(mica_value_decode_exact(&decoded,NULL,bytes->f_data,bytes->f_length,caps).f_ok);
+    assert(!mica_value_encode(&encoded,NULL,function,caps).f_ok);
+    // Reject lengths before accessing an invalid span or allocating count-sized storage.
+    uint8_t invalid[16]={0};
+    memset(invalid,255,8); invalid[6]=7;
+    assert(!mica_value_decode_exact(&decoded,NULL,invalid,8,ids).f_ok);
+    memset(invalid,0,16); invalid[7]=255; invalid[6]=16; invalid[8]=2;
+    assert(!mica_value_decode_exact(&decoded,NULL,invalid,16,ids).f_ok);
+    mica_value_arena_release(&source);
+    mica_value_arena_release(&encoded);
+    mica_value_arena_release(&decoded);
+}
+
 int main(void) {
+    codec_cases();
     traversal_cases();
     relation_cases();
     collection_cases();

@@ -211,6 +211,9 @@ pub enum Operation {
     RelationBuild,
     Hash,
     Copy,
+    Encode,
+    Decode,
+    IsPersistable,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -289,6 +292,9 @@ impl Prepared {
                 .flatten(),
             Operation::Hash => return Outcome::Hash(crate::traversal::hash(left)),
             Operation::Copy => Some(crate::traversal::copy(left)),
+            Operation::IsPersistable => Some(Value::bool(left.is_persistable())),
+            Operation::Encode => crate::codecs::encode(left, right.as_bool().unwrap_or(false)),
+            Operation::Decode => crate::codecs::decode(left, right.as_bool().unwrap_or(false)),
             Operation::Construct => Some(left.clone()),
             Operation::StringFromBytes => left
                 .with_bytes(|bytes| std::str::from_utf8(bytes).ok().map(Value::string))
@@ -571,7 +577,7 @@ fn encode_value(value: &Value, out: &mut Vec<u8>) {
     }
 }
 
-fn input_strategy() -> BoxedStrategy<Input> {
+pub(crate) fn input_strategy() -> BoxedStrategy<Input> {
     let leaf = prop_oneof![
         Just(Input::Empty),
         any::<bool>().prop_map(Input::Bool),
@@ -1151,6 +1157,7 @@ pub fn fixed_cases() -> Vec<Case> {
             });
         }
     }
+    cases.extend(crate::codecs::fixed_cases());
     cases
 }
 
@@ -1290,6 +1297,8 @@ pub fn workloads() -> Vec<(String, Vec<Case>)> {
     for (name, op) in [
         ("value_hash", Operation::Hash),
         ("value_deep_copy", Operation::Copy),
+        ("value_encode", Operation::Encode),
+        ("value_decode", Operation::Decode),
     ] {
         let child = Input::Map(vec![(
             Input::String("é".repeat(32)),
@@ -1306,8 +1315,14 @@ pub fn workloads() -> Vec<(String, Vec<Case>)> {
             (0..8)
                 .map(|_| Case {
                     op,
-                    left: relation.clone(),
-                    right: Input::Empty,
+                    left: if matches!(op, Operation::Decode) {
+                        let bytes =
+                            crate::codecs::encode(&relation.build().unwrap(), false).unwrap();
+                        Input::Bytes(bytes.with_bytes(<[u8]>::to_vec).unwrap())
+                    } else {
+                        relation.clone()
+                    },
+                    right: Input::Bool(false),
                 })
                 .collect(),
         ));

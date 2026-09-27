@@ -1,0 +1,60 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+// Private, growing output storage. Publication happens only after a complete operation.
+verb native_value/buffers(input: map) -> map
+  let context: map = input
+  let bytes: list = [:Pointer, :U8, :Mutable]
+  let buffer: list = [:Record, "ValueBuffer"]
+  let pointer: list = [:Pointer, buffer, :Mutable]
+  context[:state] = native/record_type(context[:state], "ValueBuffer", [["data", bytes], ["length", :U64], ["capacity", :U64]])[1]
+  let [constants, state] = native/constants(context[:state], [
+    ["buffer_initial_capacity", :U64, "0000000000000040"], ["word_bytes", :U64, "0000000000000008"],
+    ["null_buffer", pointer, "null"]])
+  context[:state] = state
+  let bindings: map = context[:constants]
+  for name, id in constants
+    bindings[name] = id
+  end
+  context[:constants] = bindings
+  let arena: list = ["arena", [:Pointer, [:Record, "ValueArena"], :Mutable], :Borrow]
+  context = native_value/function(context, "value_buffer", pointer, [arena], [], [:Allocate, :ReadMemory, :WriteMemory], :Borrow, "arena")
+  context = native_value/body(context, "value_buffer", [
+    [:Let, "raw", bytes, [:Call, "value_arena_allocate", "arena", [:Expr, :U64, [:SizeOf, buffer]]]],
+    [:If, [:Equal, "raw", "null_bytes"], [[:Return, "null_buffer"]], []],
+    [:Let, "buffer", pointer, [:PointerCast, "raw"]], [:Do, [:Store, "buffer", [:Expr, buffer, [:Zero]]]], [:Return, "buffer"]])
+  context = native_value/function(context, "buffer_append", :Bool, [arena, ["buffer", pointer, [:Borrow, "arena"]],
+    ["source", [:Pointer, :U8, :Const], :Borrow], ["count", :U64, :Value]], [], [:Allocate, :ReadMemory, :WriteMemory], :Value, "")
+  context = native_value/body(context, "buffer_append", [
+    [:Let, "header", buffer, [:Load, "buffer"]],
+    [:Let, "length", :U64, [:Field, "header", "length"]],
+    [:If, [:Less, [:Expr, :U64, [:Subtract, "allocation_limit", "length"]], "count"], [[:Return, "false"]], []],
+    [:Let, "needed", :U64, [:Add, "length", "count"]],
+    [:Let, "capacity", :U64, [:Field, "header", "capacity"]],
+    [:Let, "data", bytes, [:Field, "header", "data"]],
+    [:If, [:Less, "capacity", "needed"], [
+      [:Let, "grown", :U64, [:Multiply, "capacity", "two"]],
+      [:If, [:Less, "grown", "buffer_initial_capacity"], [[:Set, "grown", "buffer_initial_capacity"]], []],
+      [:If, [:Less, "allocation_limit", "grown"], [[:Set, "grown", "allocation_limit"]], []],
+      [:If, [:Less, "grown", "needed"], [[:Set, "grown", "needed"]], []],
+      [:Let, "allocation", bytes, [:Call, "value_arena_allocate", "arena", "grown"]],
+      [:If, [:Equal, "allocation", "null_bytes"], [[:Return, "false"]], []],
+      [:Do, [:CopyBytes, "allocation", [:Expr, [:Pointer, :U8, :Const], [:Freeze, "data"]], "length"]],
+      [:Set, "data", "allocation"], [:Set, "capacity", "grown"]], []],
+    [:If, [:Less, "zero", "count"], [
+      [:Let, "tail", bytes, [:Offset, "data", "length"]], [:Do, [:CopyBytes, "tail", "source", "count"]]], []],
+    [:Do, [:Store, "buffer", [:Expr, buffer, [:Record, "data", "needed", "capacity"]]]], [:Return, "true"]])
+  context = native_value/function(context, "buffer_word", :Bool, [arena, ["buffer", pointer, [:Borrow, "arena"]],
+    ["number", :U64, :Value]], [], [:Allocate, :ReadMemory, :WriteMemory], :Value, "")
+  context = native_value/body(context, "buffer_word", [
+    [:Let, "storage", [:Array, :U8, 8], [:Zero]],
+    [:Let, "array", [:Pointer, [:Array, :U8, 8], :Mutable], [:Address, "storage"]],
+    [:Let, "remaining", :U64, "number"], [:Let, "i", :U64, "zero"],
+    [:While, [:Less, "i", "word_bytes"], [
+      [:Let, "slot", bytes, [:ElementPointer, "array", "i"]],
+      [:Do, [:Store, "slot", [:Expr, :U8, [:Convert, "remaining"]]]],
+      [:Set, "remaining", [:ShiftRight, "remaining", "word_bytes"]], [:Set, "i", [:Add, "i", "one"]]]],
+    [:Let, "first", bytes, [:ElementPointer, "array", "zero"]],
+    [:Return, [:Call, "buffer_append", "arena", "buffer", [:Expr, [:Pointer, :U8, :Const], [:Freeze, "first"]], "word_bytes"]]])
+  return context
+end

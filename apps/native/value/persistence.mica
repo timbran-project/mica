@@ -1,0 +1,63 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+// Persistence excludes ephemeral authority and executable handles at any depth.
+// A persistable symbol can still lack a name in the selected codec namespace.
+verb native_value/persistence(input: map) -> map
+  let context: map = input
+  let word: list = native_value/word()
+  context = native_value/function(context, "value_is_persistable", :Bool, [["value", word, :Borrow]], [], [:ReadMemory], :Value, "")
+  let rows: list = [[:Let, "tag", :U8, [:Tag, "value"]],
+    [:If, [:Equal, "tag", "zero_tag"], [[:Return, "true"]], []]]
+  for name in ["bool", "int", "float", "identity", "symbol", "error_code", "string", "bytes"]
+    rows = [@rows, [:If, [:Equal, "tag", string_concat("tag_", name)], [[:Return, "true"]], []]]
+  end
+  for spec in [["list", "HeapList", word], ["map", "HeapMap", [:Record, "ValueMapEntry"]]]
+    let name: string = spec[0]
+    let header: string = string_concat(name, "_header")
+    let data: string = string_concat(name, "_data")
+    let length: string = string_concat(name, "_length")
+    let index: string = string_concat(name, "_i")
+    let element: string = string_concat(name, "_element")
+    let children: list = []
+    if name == "list"
+      children = [[:If, [:Call, "value_is_persistable", element], [], [[:Return, "false"]]]]
+    else
+      for field in ["key", "value"]
+        children = [@children, [:If, [:Call, "value_is_persistable", [:Expr, word, [:Field, element, field]]], [], [[:Return, "false"]]]]
+      end
+    end
+    rows = [@rows, [:If, [:Equal, "tag", string_concat("tag_", name)], [
+      [:Let, header, [:Record, spec[1]], [:Load, [:Expr, [:Pointer, [:Record, spec[1]], :Const], [:UnpackPointer, "value"]]]],
+      [:Let, data, [:Pointer, spec[2], :Mutable], [:Field, header, "data"]], [:Let, length, :U64, [:Field, header, "length"]],
+      [:Let, index, :U64, "zero"], [:While, [:Less, index, length], [
+        [:Let, element, spec[2], [:Load, [:Expr, [:Pointer, spec[2], :Mutable], [:Offset, data, index]]]],
+        @children, [:Set, index, [:Add, index, "one"]]]], [:Return, "true"]], []]]
+  end
+  for spec in [["range", "HeapRange", [["start", ""], ["end", "has_end"]]],
+    ["error", "HeapError", [["value", "has_value"]]], ["frob", "HeapFrob", [["value", ""]]]]
+    let header: string = string_concat(spec[0], "_header")
+    let body: list = [[:Let, header, [:Record, spec[1]], [:Load, [:Expr, [:Pointer, [:Record, spec[1]], :Const], [:UnpackPointer, "value"]]]]]
+    for field in spec[2]
+      let step: list = [[:If, [:Call, "value_is_persistable", [:Expr, word, [:Field, header, field[0]]]], [], [[:Return, "false"]]]]
+      if field[1] != ""
+        step = [[:If, [:Field, header, field[1]], step, []]]
+      end
+      body = [@body, @step]
+    end
+    rows = [@rows, [:If, [:Equal, "tag", string_concat("tag_", spec[0])], [@body, [:Return, "true"]], []]]
+  end
+  rows = [@rows, [:If, [:Equal, "tag", "tag_relation"], [
+    [:Let, "relation", [:Record, "HeapRelation"], [:Load, [:Expr, [:Pointer, [:Record, "HeapRelation"], :Const], [:UnpackPointer, "value"]]]],
+    [:Let, "arity", :U64, [:Field, "relation", "arity"]], [:Let, "length", :U64, [:Field, "relation", "length"]],
+    [:Let, "tuples", [:Pointer, [:Record, "ValueTuple"], :Mutable], [:Field, "relation", "rows"]],
+    [:Let, "row", :U64, "zero"], [:While, [:Less, "row", "length"], [
+      [:Let, "tuple", [:Record, "ValueTuple"], [:Load, [:Expr, [:Pointer, [:Record, "ValueTuple"], :Mutable], [:Offset, "tuples", "row"]]]],
+      [:Let, "cells", [:Pointer, word, :Mutable], [:Field, "tuple", "data"]],
+      [:Let, "column", :U64, "zero"], [:While, [:Less, "column", "arity"], [
+        [:Let, "cell", word, [:Load, [:Expr, [:Pointer, word, :Mutable], [:Offset, "cells", "column"]]]],
+        [:If, [:Call, "value_is_persistable", "cell"], [], [[:Return, "false"]]],
+        [:Set, "column", [:Add, "column", "one"]]]], [:Set, "row", [:Add, "row", "one"]]]], [:Return, "true"]], []], [:Return, "false"]]
+  context = native_value/body(context, "value_is_persistable", rows)
+  return context
+end

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 mod cases;
+mod codecs;
 mod symbol_loads;
 mod symbols;
 mod traversal;
@@ -43,6 +44,9 @@ struct Options {
     /// Generate only recursive hash and copy property cases.
     #[arg(long, conflicts_with_all = ["strings", "collections", "relations", "symbol_loads"])]
     traversal: bool,
+    /// Generate codec interoperability, malformed input, and persistence cases.
+    #[arg(long, conflicts_with_all = ["strings", "collections", "relations", "traversal", "symbol_loads"])]
+    codecs: bool,
     /// Run paired timings after correctness checks. Requires a release build.
     #[arg(long)]
     bench: bool,
@@ -148,6 +152,10 @@ impl Native {
             "value/relations",
             "value/hash",
             "value/copy",
+            "value/buffer",
+            "value/codec",
+            "value/codec_decode",
+            "value/persistence",
         ] {
             let text = fs::read_to_string(root.join(format!("apps/native/{source}.mica")))?;
             let reports = runner
@@ -307,6 +315,7 @@ enum Corpus {
     Collections,
     Relations,
     Traversal,
+    Codecs,
 }
 
 fn check_generated(native: &Native, count: u32, seed: u64, corpus: Corpus) -> Result<()> {
@@ -323,6 +332,7 @@ fn check_generated(native: &Native, count: u32, seed: u64, corpus: Corpus) -> Re
         Corpus::Collections => cases::collection_strategy(),
         Corpus::Relations => cases::relation_strategy(),
         Corpus::Traversal => cases::traversal_strategy(),
+        Corpus::Codecs => codecs::strategy(),
     };
     match runner.run(&strategy, |case| {
         native
@@ -521,7 +531,10 @@ fn run() -> Result<()> {
             .check(std::slice::from_ref(case))
             .map_err(|e| format!("{e}\ncase={}", serde_json::to_string(case).unwrap()))?;
     }
-    let corpus = if options.traversal {
+    codecs::check_names(&native)?;
+    let corpus = if options.codecs {
+        Corpus::Codecs
+    } else if options.traversal {
         Corpus::Traversal
     } else if options.relations {
         Corpus::Relations
@@ -540,7 +553,7 @@ fn run() -> Result<()> {
     }
     println!(
         "{}",
-        json!({"correctness":"passed","fixed_cases":fixed.len(),"generated_cases":options.cases,"string_corpus":options.strings,"collection_corpus":options.collections,"relation_corpus":options.relations,"traversal_corpus":options.traversal,"symbol_sequences":options.cases,"symbol_load_cases":options.cases,"symbol_threads":threads,"seed":options.seed,"sanitizers":options.sanitize,"thread_sanitizer":options.thread_sanitize})
+        json!({"correctness":"passed","fixed_cases":fixed.len(),"generated_cases":options.cases,"string_corpus":options.strings,"collection_corpus":options.collections,"relation_corpus":options.relations,"traversal_corpus":options.traversal,"codec_corpus":options.codecs,"symbol_sequences":options.cases,"symbol_load_cases":options.cases,"symbol_threads":threads,"seed":options.seed,"sanitizers":options.sanitize,"thread_sanitizer":options.thread_sanitize})
     );
     if options.bench {
         benchmark(
@@ -579,6 +592,8 @@ mod tests {
     fn checks_shared_values_and_collections() -> Result<()> {
         let native = Native::build(Sanitizer::Address, None)?;
         native.check(&cases::fixed_cases())?;
+        codecs::check_names(&native)?;
+        check_generated(&native, 128, 19, Corpus::Codecs)?;
         check_generated(&native, 64, 1, Corpus::General)?;
         check_generated(&native, 256, 7, Corpus::Traversal)?;
         check_generated(&native, 256, 41, Corpus::Relations)?;

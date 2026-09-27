@@ -101,6 +101,10 @@ verb native_value/program() -> map
   context = native_value/relations(context)
   context = native_value/hashing(context)
   context = native_value/copying(context)
+  context = native_value/buffers(context)
+  context = native_value/codec(context)
+  context = native_value/codec_decoder(context)
+  context = native_value/persistence(context)
   let state: map = context[:state]
   return state
 end
