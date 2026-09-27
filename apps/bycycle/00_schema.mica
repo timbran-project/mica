@@ -1,0 +1,64 @@
+// Bycycle ontology: schema for OpenCyc KB5022 loaded from text dump.
+// Every assertion in CycL is scoped to a microtheory (Mt).
+// Relations are Mt-scoped (except for some display/utility relations).
+//
+// Cyc/ names keep these relations separate from the runtime catalogue and OWL.
+// Microtheory visibility and logical-form evaluation are not implemented here.
+
+// Core taxonomic relationships (Mt-scoped)
+make_relation(:Cyc/Isa, 3)           // Isa(subject, collection, Mt)
+make_relation(:Cyc/Genls, 3)         // Genls(child, parent, Mt)
+make_relation(:Cyc/DisjointWith, 3)  // DisjointWith(a, b, Mt)
+make_relation(:Cyc/QuotedIsa, 3)     // QuotedIsa(subject, collection, Mt)
+
+// Variant relationships
+make_relation(:Cyc/TypeGenls, 3)     // TypeGenls(child, parent, Mt)
+
+// Predicate metadata (Mt-scoped)
+make_relation(:Cyc/Arity, 3)         // Arity(predicate, arity_value, Mt)
+make_relation(:Cyc/ArgIsa, 4)        // ArgIsa(predicate, argNum, argType, Mt)
+make_relation(:Cyc/Arg1Isa, 3)       // Arg1Isa(predicate, argType, Mt)
+make_relation(:Cyc/Arg2Isa, 3)       // Arg2Isa(predicate, argType, Mt)
+make_relation(:Cyc/Arg3Isa, 3)       // Arg3Isa(predicate, argType, Mt)
+make_relation(:Cyc/Arg1Genl, 3)      // Arg1Genl(predicate, genlArg, Mt)
+make_relation(:Cyc/Arg2Genl, 3)      // Arg2Genl(predicate, genlArg, Mt)
+make_relation(:Cyc/ArgFormat, 4)     // ArgFormat(predicate, argNum, format, Mt)
+make_relation(:Cyc/Arg2Format, 3)    // Arg2Format(predicate, format, Mt)
+make_relation(:Cyc/ResultIsa, 3)     // ResultIsa(predicate, resultType, Mt)
+
+// Predicate relationships
+make_relation(:Cyc/GenlPreds, 3)     // GenlPreds(childPred, parentPred, Mt)
+make_relation(:Cyc/ArgGenl, 4)       // ArgGenl(predicate, argNum, genlArg, Mt)
+
+// Metadata and properties
+make_relation(:Cyc/Comment, 3)       // Comment(term, text, Mt)
+make_relation(:Cyc/PrettyString, 3)  // PrettyString(term, text, Mt)
+make_relation(:Cyc/BroaderTerm, 3)   // BroaderTerm(term, broaderTerm, Mt)
+
+// Microtheory relationships
+make_relation(:Cyc/GenlMt, 3)        // GenlMt(specializedMt, generalMt, Mt)
+
+// Logical rules and special forms
+make_relation(:Cyc/Implies, 3)       // Implies(antecedent, consequent, Mt)
+make_relation(:Cyc/Not, 3)           // Three columns reserved for logical-form storage
+
+// Logical form properties
+make_relation(:Cyc/FunctionalInArgs, 3)              // FunctionalInArgs(predicate, args, Mt)
+make_relation(:Cyc/SingleEntryFormatInArgs, 3)      // SingleEntryFormatInArgs(predicate, args, Mt)
+make_relation(:Cyc/StrictlyFunctionalInArgs, 3)     // StrictlyFunctionalInArgs(predicate, args, Mt)
+make_relation(:Cyc/QuotedArgument, 3)               // QuotedArgument(predicate, argNum, Mt)
+make_relation(:Cyc/ArgQuotedIsa, 3)                 // ArgQuotedIsa(predicate, argNum, Mt)
+
+// Display relations (not Mt-scoped, used for UI)
+make_functional_relation(:Cyc/PrettyStringCanonical, 2, [0])
+make_functional_relation(:Cyc/Label, 2, [0])
+make_functional_relation(:Cyc/CycLabel, 2, [0])
+make_functional_relation(:Cyc/WikiName, 2, [0])
+make_functional_relation(:Cyc/WikiURL, 2, [0])
+
+// Term of unit (NARTs)
+make_relation(:Cyc/TermOfUnit, 3)    // TermOfUnit(nart, unit, Mt)
+
+// Loader state: resume points for batch loading
+make_functional_relation(:Cyc/LoaderState, 2, [0])
+make_functional_relation(:Cyc/AssertionCount, 2, [0])

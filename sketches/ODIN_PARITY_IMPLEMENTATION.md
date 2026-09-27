@@ -22,7 +22,7 @@ Passing an early workstream does not complete this plan.
 | Query and storage execution | Measured columnar/storage improvements that preserve incremental maintenance | Persistent rule collections, indexed recursive reseeding, retained visible rows, and retained derived indexes measured; initial derivation remains open |
 | Query measurements | Separate initial derivation and small-update maintenance workloads | Implemented and measured; Rust has substantial initial and recursive-deletion costs |
 | Mica compiler | Ported compiler with an intentional Rust assembly interface and bootstrap conformance | Assembly, frontend, bootstrap, collections, closures, exceptions, and relation operations implemented; further donor features and public installation remain |
-| Ingestion | Ported ingestion applications with verified loaded facts and inference results | OWL ontology ported and tested; loader and CycL census remain |
+| Ingestion | Ported ingestion applications with verified loaded facts and inference results | OWL batches, streaming input, durable resume, CycL census, and scoped sample implemented; comparative ingestion measurements remain |
 
 ## RFC cross-check
 
@@ -392,3 +392,17 @@ Self-recursive local functions remain unsupported. Capture discovery can retain 
 The pinned Bycycle OWL schema and rules now load in Rust. The application test checks taxonomy, contradictions, graph navigation, and retrieval.
 Committed retractions remove unsupported derived rows while alternate taxonomy paths remain. Both execution modes pass.
 The full OWL loader, batch recovery, and CycL census remain separate ingestion work.
+
+The OWL command streams XML or gzip into batches passed to `bycycle_load_batch` through the existing invocation API.
+The Mica verb commits facts, names, GUID mappings, retrieval grants, and its expected progress cursor in one transaction.
+The cursor identifies exact source bytes, actor name, subject count, and completion. Resume reparses the prefix to recover namespace context.
+The pinned fixture produces 13 accepted facts, two dropped repeats, and one dropped resource in both execution modes.
+Tests cover literal decoding, distinct GUID punctuation, inference, pending-batch rollback, strict-store reopening, and changed-source rejection.
+No ingestion throughput or memory parity claim follows from these functional checks. CycL census and comparative ingestion measurements remain open.
+
+The CycL census validates one assertion per line and counts predicates without allocating a full AST or opening a store.
+The namespaced CycL schema and seven-fact sample coexist with the OWL schema and Rust's `Arity/2` catalogue relation.
+The donor's full dump router is not implemented. This port does not claim to add it or Cyc logical inference.
+
+The OWL workspace run and workspace clippy pass. Focused CycL parser and cross-schema sample tests also pass.
+The CLI regression verifies gzip census without a store, strict import, separate-process resume, completion, and actor mismatch rejection.

@@ -1,0 +1,103 @@
+// Each invocation commits facts, identity mappings, and progress together.
+// Batch subjects are [GUID, [[relation symbol, object text, is GUID], ...]].
+// Progress is [source SHA-256, retrieval actor name, subject count, complete].
+
+verb bycycle_progress()
+  for row in LoaderState(:resume, ?progress)
+    return row[:progress]
+  end
+  return []
+end
+
+verb bycycle_identity(guid: string)
+  let identity = make_identity(to_symbol(string_concat("bycycle/guid/", guid)))
+  if !GuidOf(identity, guid)
+    require !GuidOf(identity, _)
+    assert GuidOf(identity, guid)
+  end
+  return identity
+end
+
+verb bycycle_load_batch(batch: list, expected: list, progress: list, retrieval_actor: string)
+  require bycycle_progress() == expected
+  require len(progress) == 4
+  require progress[1] == retrieval_actor
+  let previous = 0
+  if len(expected) > 0
+    require len(expected) == 4
+    require expected[0] == progress[0] && expected[1] == progress[1]
+    require !expected[3]
+    previous = expected[2]
+  end
+  require progress[2] == previous + len(batch)
+  let actor = none
+  if retrieval_actor != ""
+    actor = make_identity(to_symbol(retrieval_actor))
+  end
+  let asserted = 0
+  let dropped = 0
+  for [guid, triples] in batch
+    let subject = bycycle_identity(guid)
+    if retrieval_actor != ""
+      assert CanRetrieveSubject(actor, subject)
+    end
+    for [field, text, resource] in triples
+      let object = text
+      if resource
+        object = bycycle_identity(text)
+      end
+      if field == :Label && Label(subject, _)
+        field = :Alias
+      elseif field == :CycLabel && CycLabel(subject, _)
+        field = :Alias
+      elseif field == :Comment && Comment(subject, _)
+        field = :Alias
+      elseif field == :WikiName && WikiName(subject, _)
+        dropped = dropped + 1
+        continue
+      elseif field == :WikiURL && WikiURL(subject, _)
+        dropped = dropped + 1
+        continue
+      end
+      if field == :Isa
+        assert Isa(subject, object)
+      elseif field == :Genls
+        assert Genls(subject, object)
+      elseif field == :DisjointWith
+        assert DisjointWith(subject, object)
+      elseif field == :QuotedIsa
+        assert QuotedIsa(subject, object)
+      elseif field == :TypeGenls
+        assert TypeGenls(subject, object)
+      elseif field == :Arg1Pred
+        assert Arg1Pred(subject, object)
+      elseif field == :RewriteOf
+        assert RewriteOf(subject, object)
+      elseif field == :BroaderTerm
+        assert BroaderTerm(subject, object)
+      elseif field == :Label
+        assert Label(subject, object)
+      elseif field == :CycLabel
+        assert CycLabel(subject, object)
+      elseif field == :Comment
+        assert Comment(subject, object)
+      elseif field == :Alias
+        assert Alias(subject, object)
+      elseif field == :SeeAlso
+        assert SeeAlso(subject, object)
+      elseif field == :WikiName
+        assert WikiName(subject, object)
+      elseif field == :WikiURL
+        assert WikiURL(subject, object)
+      elseif field == :SameAs
+        assert SameAs(subject, object)
+      else
+        raise E_OWL_FIELD, "unknown OWL relation", field
+      end
+      asserted = asserted + 1
+    end
+  end
+  retract LoaderState(:resume, _)
+  assert LoaderState(:resume, progress)
+  return [asserted, dropped]
+end

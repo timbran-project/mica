@@ -10,6 +10,7 @@ const SOURCES: &[&str] = &[
     include_str!("../../../apps/bycycle-owl/10_taxonomy.mica"),
     include_str!("../../../apps/bycycle-owl/20_constraints.mica"),
     include_str!("../../../apps/bycycle-owl/30_graph.mica"),
+    include_str!("../../../apps/bycycle-owl/40_loader.mica"),
 ];
 
 #[test]
@@ -119,5 +120,80 @@ fn owl_ontology_derives_and_retracts_taxonomy_constraints_and_retrieval() {
             "{}",
             report.render()
         );
+    }
+}
+
+#[test]
+fn owl_batches_commit_facts_and_progress_atomically() {
+    for interpreter_only in [true, false] {
+        let mut runner = SourceRunner::new_empty().with_interpreter_only(interpreter_only);
+        for source in SOURCES {
+            runner.run_filein(source).unwrap();
+        }
+        let report = runner
+            .run_source(
+                r#"
+            return bycycle_load_batch([
+                ["animal", [[:Label, "Animal é🦀", false], [:Label, "Beast", false]]],
+                ["dog", [[:Genls, "animal", true]]]
+            ], [], ["digest", "reader", 2, false], "reader")
+        "#,
+            )
+            .unwrap();
+        assert!(
+            matches!(report.outcome, TaskOutcome::Complete { ref value, .. }
+            if *value == Value::list([Value::int(3).unwrap(), Value::int(0).unwrap()]))
+        );
+        let report = runner
+            .run_source(
+                r#"
+            require bycycle_progress() == ["digest", "reader", 2, false]
+            require Alias(#bycycle/guid/animal, "Beast")
+            require InstanceOf(#bycycle/guid/dog, _) == false
+            require Subsumes(#bycycle/guid/animal, #bycycle/guid/dog)
+            require CanRetrieveSubject(#reader, #bycycle/guid/dog)
+            return true
+        "#,
+            )
+            .unwrap();
+        assert!(
+            matches!(report.outcome, TaskOutcome::Complete { .. }),
+            "{}",
+            report.render()
+        );
+        let report = runner
+            .run_source(
+                r#"
+            return bycycle_load_batch([
+                ["uncommitted", [[:Label, "Discard", false], [:Unknown, "invalid", false]]]
+            ], ["digest", "reader", 2, false], ["digest", "reader", 3, false], "reader")
+        "#,
+            )
+            .unwrap();
+        assert!(matches!(report.outcome, TaskOutcome::Aborted { .. }));
+        let report = runner
+            .run_source(
+                r#"
+            require !GuidOf(_, "uncommitted")
+            require !NamedIdentity(:bycycle/guid/uncommitted, _)
+            require !Label(_, "Discard")
+            require bycycle_progress() == ["digest", "reader", 2, false]
+            return true
+        "#,
+            )
+            .unwrap();
+        assert!(
+            matches!(report.outcome, TaskOutcome::Complete { .. }),
+            "{}",
+            report.render()
+        );
+        let report = runner
+            .run_source(
+                r#"
+            return bycycle_load_batch([], [], ["digest", "reader", 0, true], "reader")
+        "#,
+            )
+            .unwrap();
+        assert!(matches!(report.outcome, TaskOutcome::Aborted { .. }));
     }
 }

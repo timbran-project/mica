@@ -3714,6 +3714,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "compio",
+ "flate2",
  "mica-compiler",
  "mica-driver",
  "mica-relation-kernel",
@@ -3722,6 +3723,8 @@ dependencies = [
  "mica-var",
  "rustyline",
  "serde_json",
+ "sha2 0.10.9",
+ "xml",
 ]
 
 [[package]]

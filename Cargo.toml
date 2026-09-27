@@ -70,6 +70,7 @@ cyper = { version = "0.8.0", default-features = false, features = ["native-tls",
 fast-telemetry = "0.8"
 fast-telemetry-export = { version = "0.8", default-features = false, features = ["compio"] }
 fjall = "3.1"
+flate2 = { version = "1.1", default-features = false, features = ["rust_backend"] }
 futures-util = "0.3"
 h3-webtransport = "0.1.2"
 http = "1.4"

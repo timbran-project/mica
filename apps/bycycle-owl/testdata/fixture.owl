@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- owlstream regression fixture (scripts/test.sh integration:owlstream).
+     Each subject exercises one loader case found in review; the expected
+     counts live in the test. <tags> in this comment are not tags. -->
+<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"
+         xmlns:rdfs="http://www.w3.org/2000/01/rdf-schema#"
+         xmlns:owl="http://www.w3.org/2002/07/owl#"
+         xmlns:cycAnnot="http://sw.cyc.com/CycAnnotations_v1#"
+         xml:base="http://sw.opencyc.org/concept/">
+  <!-- A self-closing subject: skipped, and must not swallow the rest. -->
+  <owl:Ontology rdf:about="http://sw.opencyc.org/concept/"/>
+  <owl:Class rdf:about="http://sw.opencyc.org/concept/Mx4rTestAnimalGuid000001">
+    <!-- Two labels on a functional relation: the second goes to Alias. -->
+    <rdfs:label xml:lang="en">Animal</rdfs:label>
+    <rdfs:label xml:lang="en">Beast</rdfs:label>
+    <!-- Two wiki names and URLs: the repeats are dropped. -->
+    <Mx4rTv-jk9SPTXa991kk5mAvHg>Animal</Mx4rTv-jk9SPTXa991kk5mAvHg>
+    <Mx4rTv-jk9SPTXa991kk5mAvHg>Animalia</Mx4rTv-jk9SPTXa991kk5mAvHg>
+    <Mx4rNv0nbm4TTjOp7yhmnzOyqg>http://en.wikipedia.org/wiki/Animal</Mx4rNv0nbm4TTjOp7yhmnzOyqg>
+    <Mx4rNv0nbm4TTjOp7yhmnzOyqg>http://en.wikipedia.org/wiki/Animalia</Mx4rNv0nbm4TTjOp7yhmnzOyqg>
+    <!-- CDATA after whitespace: unwrapped, verbatim, not entity-decoded. -->
+    <rdfs:comment>
+      <![CDATA[A <b>living</b> thing &amp; more]]>
+    </rdfs:comment>
+    <!-- A short-fragment resource is not a GUID: a dropped resource. -->
+    <rdfs:subClassOf rdf:resource="http://example.org/Thing"/>
+  </owl:Class>
+  <owl:Class rdf:about="http://sw.opencyc.org/concept/Mx4rTestDogGuid000000002">
+    <rdfs:subClassOf rdf:resource="http://sw.opencyc.org/concept/Mx4rTestAnimalGuid000001"/>
+    <rdfs:label xml:lang="en">Dog &amp; kin</rdfs:label>
+    <!-- A comment inside a literal is not content. -->
+    <rdfs:comment>Canine<!-- note -->s</rdfs:comment>
+  </owl:Class>
+  <owl:Class rdf:about="http://sw.opencyc.org/concept/Mx4rTestArtifactGuid0003">
+    <rdfs:label xml:lang="en">Artifact</rdfs:label>
+    <owl:disjointWith rdf:resource="http://sw.opencyc.org/concept/Mx4rTestAnimalGuid000001"/>
+  </owl:Class>
+  <owl:NamedIndividual rdf:about="http://sw.opencyc.org/concept/Mx4rTestRoboDogGuid00004">
+    <rdf:type rdf:resource="http://sw.opencyc.org/concept/Mx4rTestDogGuid000000002"/>
+    <rdf:type rdf:resource="http://sw.opencyc.org/concept/Mx4rTestArtifactGuid0003"/>
+    <rdfs:label xml:lang="en">RoboDog</rdfs:label>
+  </owl:NamedIndividual>
+</rdf:RDF>

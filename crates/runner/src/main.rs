@@ -12,6 +12,8 @@
 // with this program. If not, see <https://www.gnu.org/licenses/>.
 
 mod bench;
+mod cycl;
+mod owl;
 
 use clap::{ArgAction, Parser, Subcommand, ValueEnum};
 use mica_compiler::parse;
@@ -94,6 +96,10 @@ impl From<EmbeddingProviderMode> for EmbeddingProviderKind {
 enum Command {
     /// Measure complete invocations of a verb in a source fixture.
     Bench(bench::Options),
+    /// Load OpenCyc OWL facts in resumable transactions, or count its predicates.
+    Owl(owl::Options),
+    /// Parse and count CycL dump assertions without writing to a store.
+    CyclCensus(cycl::Options),
     Run {
         file: PathBuf,
     },
@@ -144,6 +150,8 @@ async fn run() -> Result<(), String> {
     let cli = Cli::parse();
     match cli.command.as_ref().unwrap_or(&Command::Repl) {
         Command::Bench(options) => bench::run(&cli, options).await,
+        Command::Owl(options) => owl::run(&cli, options),
+        Command::CyclCensus(options) => cycl::run(&cli, options),
         Command::Run { file } => {
             let source = fs::read_to_string(file)
                 .map_err(|error| format!("failed to read {}: {error}", file.display()))?;

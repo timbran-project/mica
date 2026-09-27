@@ -12,6 +12,7 @@ path = "src/main.rs"
 [dependencies]
 clap.workspace = true
 compio.workspace = true
+flate2.workspace = true
 mica-compiler.workspace = true
 mica-driver.workspace = true
 mica-relation-kernel = { workspace = true, features = ["fjall-provider"] }
@@ -20,3 +21,5 @@ mica-source-provider.workspace = true
 mica-var.workspace = true
 rustyline.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
+xml.workspace = true
