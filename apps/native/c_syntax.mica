@@ -1,0 +1,195 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+// C syntax is data until rendering. Constructors own the map schema, so flow
+// analysis does not assemble braces, indentation, or ad hoc syntax maps.
+verb native/c_text(text: string, exits: bool) -> map
+  return {:kind -> :Text, :text -> text, :exits -> exits}
+end
+
+verb native/c_if(condition: string, yes: list, no: list) -> map
+  return {:kind -> :If, :condition -> condition, :yes -> yes, :no -> no}
+end
+
+verb native/c_loop(body: list) -> map
+  return {:kind -> :Loop, :body -> body}
+end
+
+verb native/c_case(value: string, body: list) -> map
+  return {:value -> value, :body -> body}
+end
+
+verb native/c_switch(value: string, cases: list, fallback: list) -> map
+  return {:kind -> :Switch, :value -> value, :cases -> cases, :fallback -> fallback}
+end
+
+verb native/c_label(block: int) -> map
+  return {:kind -> :Label, :block -> block}
+end
+
+verb native/c_goto(block: int) -> map
+  return {:kind -> :Goto, :block -> block}
+end
+
+verb native/c_tree_exits(nodes: list) -> bool
+  if len(nodes) == 0
+    return false
+  end
+  let node: map = nodes[len(nodes) - 1]
+  if node[:kind] == :Text
+    let exits: bool = node[:exits]
+    return exits
+  end
+  if node[:kind] == :Goto
+    return true
+  end
+  if node[:kind] == :If
+    let exits: bool = native/c_tree_exits(node[:yes]) && native/c_tree_exits(node[:no])
+    return exits
+  end
+  if node[:kind] == :Switch
+    if !native/c_tree_exits(node[:fallback])
+      return false
+    end
+    for arm in node[:cases]
+      if !native/c_tree_exits(arm[:body])
+        return false
+      end
+    end
+    return true
+  end
+  return false
+end
+
+verb native/c_tree_labels(nodes: list, input: map) -> map
+  let labels: map = input
+  for node in nodes
+    if node[:kind] == :Goto
+      labels[node[:block]] = true
+    end
+    if node[:kind] == :If
+      labels = native/c_tree_labels(node[:yes], labels)
+      labels = native/c_tree_labels(node[:no], labels)
+    end
+    if node[:kind] == :Loop
+      labels = native/c_tree_labels(node[:body], labels)
+    end
+    if node[:kind] == :Switch
+      for arm in node[:cases]
+        labels = native/c_tree_labels(arm[:body], labels)
+      end
+      labels = native/c_tree_labels(node[:fallback], labels)
+    end
+  end
+  return labels
+end
+
+verb native/c_render_tree(index: map, nodes: list, labels: map, indent: string) -> list
+  let lines: list = []
+  let inner: string = string_concat(indent, "  ")
+  for node in nodes
+    let kind: symbol = node[:kind]
+    if kind == :Text
+      lines = [@lines, string_concat(indent, node[:text])]
+    end
+    if kind == :Label && map_contains_key(labels, node[:block])
+      lines = [@lines, string_concat(indent, "b_", index[:blocks][node[:block]][2], ":;")]
+    end
+    if kind == :Goto
+      lines = [@lines, string_concat(indent, "goto b_", index[:blocks][node[:block]][2], ";")]
+    end
+    if kind == :If
+      let condition: string = node[:condition]
+      let yes: list = node[:yes]
+      let no: list = node[:no]
+      // Put a terminating arm first, keeping the continuation at this level.
+      if !native/c_tree_exits(yes) && native/c_tree_exits(no)
+        condition = string_concat("!(", condition, ")")
+        yes = node[:no]
+        no = node[:yes]
+      end
+      let yes_lines: list = native/c_render_tree(index, yes, labels, inner)
+      let no_lines: list = native/c_render_tree(index, no, labels, inner)
+      if len(yes_lines) == 0 && len(no_lines) > 0
+        condition = string_concat("!(", condition, ")")
+        yes = no
+        yes_lines = no_lines
+        no = []
+        no_lines = []
+      end
+      lines = [@lines, string_concat(indent, "if (", condition, ") {"), @yes_lines]
+      if len(no_lines) == 0 || native/c_tree_exits(yes)
+        lines = [@lines, string_concat(indent, "}"), @native/c_render_tree(index, no, labels, indent)]
+      else
+        // A single nested conditional can use C's else-if spelling. Labels
+        // and source notes stay in place and prevent this cosmetic fold.
+        let visible: list = [child for child in no if child[:kind] != :Label || map_contains_key(labels, child[:block])]
+        // A guard renderer can place its continuing arm after the if. Such
+        // output needs the enclosing else braces to keep that arm conditional.
+        if len(visible) == 1 && visible[0][:kind] == :If && !native/c_tree_exits(visible[0][:yes]) && !native/c_tree_exits(visible[0][:no])
+          let tail: list = native/c_render_tree(index, visible, labels, indent)
+          tail[0] = string_concat(indent, "} else ", string_slice(tail[0], string_len(indent), string_len(tail[0])))
+          lines = [@lines, @tail]
+        else
+          lines = [@lines, string_concat(indent, "} else {"), @no_lines, string_concat(indent, "}")]
+        end
+      end
+    end
+    if kind == :Loop
+      let body: list = node[:body]
+      let condition: string = "true"
+      let prefix: list = []
+      let executable: list = []
+      for child in body
+        if len(executable) == 0 && ((child[:kind] == :Label && !map_contains_key(labels, child[:block])) || (child[:kind] == :Text && string_len(child[:text]) >= 2 && string_slice(child[:text], 0, 2) == "/*"))
+          prefix = [@prefix, child]
+        else
+          executable = [@executable, child]
+        end
+      end
+      // A pure header comparison can be the while condition. Headers with
+      // calls or other instructions stay inside while (true), before the test.
+      if len(executable) == 1 && executable[0][:kind] == :If
+        let branch: map = executable[0]
+        if len(branch[:no]) == 1 && branch[:no][0] == native/c_text("break;", true)
+          condition = branch[:condition]
+          body = branch[:yes]
+        else
+          if len(branch[:yes]) == 1 && branch[:yes][0] == native/c_text("break;", true)
+            condition = string_concat("!(", branch[:condition], ")")
+            body = branch[:no]
+          end
+        end
+      end
+      if condition != "true"
+        lines = [@lines, @native/c_render_tree(index, prefix, labels, indent)]
+      end
+      if len(body) > 0 && body[len(body) - 1] == native/c_text("continue;", true)
+        let trimmed: list = []
+        let position: int = 0
+        while position + 1 < len(body)
+          trimmed = [@trimmed, body[position]]
+          position = position + 1
+        end
+        body = trimmed
+      end
+      lines = [@lines, string_concat(indent, "while (", condition, ") {"), @native/c_render_tree(index, body, labels, inner), string_concat(indent, "}")]
+    end
+    if kind == :Switch
+      lines = [@lines, string_concat(indent, "switch (", node[:value], ") {")]
+      let arms: list = [@node[:cases], native/c_case("", node[:fallback])]
+      for arm in arms
+        let label: string = "default:"
+        if arm[:value] != ""
+          label = string_concat("case ", arm[:value], ":")
+        end
+        lines = [@lines, string_concat(inner, label), @native/c_render_tree(index, arm[:body], labels, string_concat(inner, "  "))]
+        if !native/c_tree_exits(arm[:body])
+          lines = [@lines, string_concat(inner, "  break;")]
+        end
+      end
+      lines = [@lines, string_concat(indent, "}")]
+    end
+  end
+  return lines
+end

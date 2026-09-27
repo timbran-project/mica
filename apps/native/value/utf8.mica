@@ -31,12 +31,12 @@ verb native_value/utf8(input: map) -> map
   context[:constants] = all
   context[:state] = next
   let name: string = "unicode_scalar"
-  context = native_value/function(context, name, [:Record, "RuneResult"], [["number", :U32, :Value]],
+  context = native/declare_function(context, name, [:Record, "RuneResult"], [["number", :U32, :Value]],
     [], [], :Value, "")
   context[:state] = native/annotate(context[:state], context[:functions][name], :Source, "apps/native/value/utf8.mica: native_value/utf8")
   context[:state] = native/annotate(context[:state], context[:functions][name], :Invariant, "A successful Rune is at most U+10FFFF and excludes U+D800 through U+DFFF.")
   let failure: list = [[:Return, [:Zero]]]
-  context = native_value/body(context, name, [
+  context = native/define_function(context, name, [
     [:If, [:Less, "number", "utf32_1114112"], [], failure],
     [:If, [:Less, "number", "utf32_55296"], [], [[:If, [:Less, "number", "utf32_57344"], failure, []]]],
     [:Return, [:Record, "true", [:Expr, rune, [:Wrap, "number"]]]]
@@ -52,9 +52,9 @@ verb native_value/utf8_decode(input: map) -> map
   let name: string = "utf8_decode"
   let pointer: list = [:Pointer, :U8, :Const]
   let result: list = [:Record, "Utf8Decode"]
-  context = native_value/function(context, name, result, [["source", pointer, :Borrow], ["length", :U64, :Value]],
+  context = native/declare_function(context, name, result, [["source", pointer, :Borrow], ["length", :U64, :Value]],
     [], [:ReadMemory], :Value, "")
-  context = native_value/body(context, name, [
+  context = native/define_function(context, name, [
     [:Note, :Invariant, "Reject overlong encodings, surrogate scalars, and incomplete sequences without consuming input."],
     [:If, [:Equal, "length", "zero"], [[:Return, [:Zero]]], []],
     [:If, [:Equal, "source", "utf8_null"], [[:Return, [:Zero]]], []],
@@ -105,9 +105,9 @@ verb native_value/utf8_encode(input: map) -> map
   let name: string = "utf8_encode"
   let bytes: list = [:Array, :U8, 4]
   let result: list = [:Record, "Utf8Encode"]
-  context = native_value/function(context, name, result, [["rune", [:Scalar, "Rune", :U32], :Value]],
+  context = native/declare_function(context, name, result, [["rune", [:Scalar, "Rune", :U32], :Value]],
     [], [:WriteMemory], :Value, "")
-  context = native_value/body(context, name, [
+  context = native/define_function(context, name, [
     [:Let, "number", :U32, [:Unwrap, "rune"]],
     [:Let, "scalar", [:Record, "RuneResult"], [:Call, "unicode_scalar", "number"]],
     [:If, [:Field, "scalar", "ok"], [], [[:Return, [:Zero]]]],
@@ -143,12 +143,12 @@ verb native_value/utf8_scan(input: map) -> map
   let name: string = "utf8_scan"
   let pointer: list = [:Pointer, :U8, :Const]
   let result: list = [:Record, "Utf8Scan"]
-  context = native_value/function(context, name, result, [["source", pointer, :Borrow], ["length", :U64, :Value]],
+  context = native/declare_function(context, name, result, [["source", pointer, :Borrow], ["length", :U64, :Value]],
     [], [:ReadMemory, :WriteMemory], :Value, "")
   context[:state] = native/annotate(context[:state], context[:functions][name], :Source, "apps/native/value/utf8.mica: native_value/utf8_scan")
   context[:state] = native/annotate(context[:state], context[:functions][name], :Purpose, "Validate UTF-8 and count Unicode scalars, with an eight-byte ASCII fast path.")
   let failure: list = [[:Return, [:Zero]]]
-  context = native_value/body(context, name, [
+  context = native/define_function(context, name, [
     [:If, [:Equal, "length", "zero"], [[:Return, [:Record, "true", "zero", "true"]]], []],
     [:If, [:Equal, "source", "utf8_null"], failure, []],
     [:Let, "offset", :U64, "zero"],

@@ -1,0 +1,243 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+// A shared return or zero-result exit is cheap to duplicate at its incoming
+// edges. Calls, loads, and other computations are never duplicated here.
+verb native/flow_inline_return(index: map, flow: map, block) -> bool
+  if block == :Exit || index[:terms][block][1] != :Return
+    return false
+  end
+  let rows: list = flow[:instructions][block]
+  return len(rows) == 0 || (len(rows) == 1 && rows[0][3] == :Zero)
+end
+
+verb native/flow_comparison(index: map, flow: map, block: int) -> list
+  let rows: list = flow[:instructions][block]
+  let term: list = index[:terms][block]
+  if term[1] != :Branch || len(rows) == 0
+    return []
+  end
+  let row: list = rows[len(rows) - 1]
+  if !native/contains([:Equal, :Less], row[3]) || row[4] != term[2][0] || flow[:uses][row[4]] != 1
+    return []
+  end
+  return row
+end
+
+// Recognize an equality decision chain without moving effects. Intermediate
+// blocks must have one predecessor and contain only the comparison or a jump.
+verb native/flow_switch(index: map, flow: map, first: int) -> map
+  let block: int = first
+  let selector = :Missing
+  let cases: list = []
+  let consumed: list = []
+  let pending: list = []
+  let values: list = []
+  let fallback: int = first
+  let visited: list = []
+  while !native/contains(visited, block)
+    visited = [@visited, block]
+    if block != first && len(flow[:predecessors][block]) != 1
+      break
+    end
+    let term: list = index[:terms][block]
+    let rows: list = flow[:instructions][block]
+    if block != first && len(rows) == 0 && term[1] == :Jump
+      pending = [@pending, block]
+      block = term[2][0]
+      continue
+    end
+    let row: list = native/flow_comparison(index, flow, block)
+    if len(row) == 0 || row[3] != :Equal || (block != first && len(rows) != 1)
+      break
+    end
+    let operand: int = row[5][0]
+    let constant: int = row[5][1]
+    if !map_contains_key(index[:constants], constant)
+      operand = row[5][1]
+      constant = row[5][0]
+    end
+    if !map_contains_key(index[:constants], constant)
+      break
+    end
+    let type_id = index[:constants][constant][1]
+    if !native/is_unsigned(type_id) && type_id != :I64
+      break
+    end
+    let spelling: string = native/c_value(index, constant)
+    if (selector != :Missing && selector != operand) || native/contains(values, spelling)
+      break
+    end
+    selector = operand
+    values = [@values, spelling]
+    cases = [@cases, [spelling, term[2][1]]]
+    consumed = [@consumed, @pending, block]
+    pending = []
+    fallback = term[2][2]
+    block = fallback
+  end
+  if len(cases) < 3
+    return {}
+  end
+  return {:value -> native/c_value(index, selector), :cases -> cases, :fallback -> fallback, :consumed -> consumed}
+end
+
+verb native/flow_seen(input: map, block: int) -> map
+  let context: map = input
+  let seen: map = context[:seen]
+  seen[block] = true
+  context[:seen] = seen
+  return context
+end
+
+verb native/c_block_nodes(index: map, rows: list) -> list
+  let nodes: list = []
+  for row in rows
+    nodes = [@nodes, @[native/c_text(note, false) for note in native/c_notes(index, row[0], "")], native/c_text(native/c_statement(index, row), false)]
+  end
+  return nodes
+end
+
+// Emit a region up to its postdominator. A visited block remains an explicit
+// transfer: this preserves shared tails and irreducible cycles without code
+// explosion. Function-wide locals make the remaining label entries legal C.
+verb native/c_region(index: map, flow: map, input: map, start, stop, enter_loop: bool) -> list
+  let context: map = input
+  let nodes: list = []
+  let block = start
+  let entering: bool = enter_loop
+  while block != :Exit
+    if len(context[:loops]) > 0
+      let loop: map = context[:loops][len(context[:loops]) - 1]
+      if block == loop[:header] && !entering
+        return [[@nodes, native/c_text("continue;", true)], context]
+      end
+      if block == loop[:exit]
+        if context[:switch_depth] > loop[:switch_depth]
+          return [[@nodes, native/c_goto(block)], context]
+        end
+        return [[@nodes, native/c_text("break;", true)], context]
+      end
+    end
+    if block == stop
+      return [nodes, context]
+    end
+    if map_contains_key(context[:seen], block) && !native/flow_inline_return(index, flow, block)
+      return [[@nodes, native/c_goto(block)], context]
+    end
+    if map_contains_key(flow[:loops], block) && !entering
+      let loop: map = flow[:loops][block]
+      loop[:header] = block
+      loop[:switch_depth] = context[:switch_depth]
+      let outer: list = context[:loops]
+      context[:loops] = [@outer, loop]
+      let [body: list, following: map] = native/c_region(index, flow, context, block, :Exit, true)
+      context = following
+      context[:loops] = outer
+      nodes = [@nodes, native/c_loop(body)]
+      block = loop[:exit]
+      continue
+    end
+    entering = false
+    if !map_contains_key(context[:seen], block)
+      nodes = [@nodes, native/c_label(block)]
+    end
+    context = native/flow_seen(context, block)
+    nodes = [@nodes, @[native/c_text(note, false) for note in native/c_notes(index, block, "")]]
+    let term: list = index[:terms][block]
+    let rows: list = flow[:instructions][block]
+    let comparison: list = native/flow_comparison(index, flow, block)
+    let condition: string = ""
+    if len(comparison) > 0
+      let operator: string = " == "
+      if comparison[3] == :Less
+        operator = " < "
+      end
+      condition = string_concat(native/c_value(index, comparison[5][0]), operator, native/c_value(index, comparison[5][1]))
+      rows = [row for row in rows if row[0] != comparison[0]]
+      nodes = [@nodes, @[native/c_text(note, false) for note in native/c_notes(index, comparison[0], "")]]
+    end
+    nodes = [@nodes, @native/c_block_nodes(index, rows)]
+    if term[1] == :Return
+      let text: string = "return;"
+      if len(term[2]) > 0
+        text = string_concat("return ", native/c_value(index, term[2][0]), ";")
+      end
+      return [[@nodes, native/c_text(text, true)], context]
+    end
+    if term[1] == :Jump
+      block = term[2][0]
+      continue
+    end
+    if condition == ""
+      condition = native/c_value(index, term[2][0])
+    end
+    let selection: map = native/flow_switch(index, flow, block)
+    let join = flow[:joins][block]
+    if join == :Exit && len(selection) == 0
+      join = native/flow_shared_tail(index, flow, block)
+    end
+    if native/flow_inline_return(index, flow, join)
+      join = :Exit
+    end
+    if len(context[:loops]) > 0
+      let loop: map = context[:loops][len(context[:loops]) - 1]
+      if !native/contains(loop[:members], join)
+        join = :Exit
+      end
+    end
+    // An early-return branch may have no local join. Its continuing arm must
+    // still stop at the enclosing region's boundary rather than absorb it.
+    let arm_stop = join
+    if join == :Exit
+      arm_stop = stop
+    end
+    if len(selection) > 0
+      for consumed in selection[:consumed]
+        if consumed != block
+          nodes = [@nodes, @[native/c_text(note, false) for note in native/c_notes(index, consumed, "")]]
+          for row in flow[:instructions][consumed]
+            nodes = [@nodes, @[native/c_text(note, false) for note in native/c_notes(index, row[0], "")]]
+          end
+        end
+        context = native/flow_seen(context, consumed)
+      end
+      let cases: list = []
+      context[:switch_depth] = context[:switch_depth] + 1
+      for arm in selection[:cases]
+        let [body: list, following: map] = native/c_region(index, flow, context, arm[1], arm_stop, false)
+        context = following
+        cases = [@cases, native/c_case(arm[0], body)]
+      end
+      let [fallback: list, following: map] = native/c_region(index, flow, context, selection[:fallback], arm_stop, false)
+      context = following
+      context[:switch_depth] = context[:switch_depth] - 1
+      nodes = [@nodes, native/c_switch(selection[:value], cases, fallback)]
+    else
+      let [yes: list, after_yes: map] = native/c_region(index, flow, context, term[2][1], arm_stop, false)
+      let [no: list, after_no: map] = native/c_region(index, flow, after_yes, term[2][2], arm_stop, false)
+      context = after_no
+      nodes = [@nodes, native/c_if(condition, yes, no)]
+    end
+    block = join
+  end
+  return [nodes, context]
+end
+
+verb native/c_function_body(state: map, index: map, fn_id: int) -> list
+  let flow: map = native/flow_analysis(state, index, fn_id)
+  let context: map = {:seen -> {}, :loops -> [], :switch_depth -> 0}
+  let [nodes: list, emitted: map] = native/c_region(index, flow, context, flow[:entry], :Exit, false)
+  context = emitted
+  // Exits crossed by an explicit transfer are emitted once following the entry
+  // region. This is also the fallback for cycles with multiple entry points.
+  for block in flow[:order]
+    if !map_contains_key(context[:seen], block)
+      let [tail: list, following: map] = native/c_region(index, flow, context, block, :Exit, false)
+      nodes = [@nodes, @tail]
+      context = following
+    end
+  end
+  let lines: list = native/c_render_tree(index, nodes, native/c_tree_labels(nodes, {}), "  ")
+  return lines
+end

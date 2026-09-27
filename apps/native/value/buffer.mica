@@ -18,14 +18,14 @@ verb native_value/buffers(input: map) -> map
   end
   context[:constants] = bindings
   let arena: list = ["arena", [:Pointer, [:Record, "ValueArena"], :Mutable], :Borrow]
-  context = native_value/function(context, "value_buffer", pointer, [arena], [], [:Allocate, :ReadMemory, :WriteMemory], :Borrow, "arena")
-  context = native_value/body(context, "value_buffer", [
+  context = native/declare_function(context, "value_buffer", pointer, [arena], [], [:Allocate, :ReadMemory, :WriteMemory], :Borrow, "arena")
+  context = native/define_function(context, "value_buffer", [
     [:Let, "raw", bytes, [:Call, "value_arena_allocate", "arena", [:Expr, :U64, [:SizeOf, buffer]]]],
     [:If, [:Equal, "raw", "null_bytes"], [[:Return, "null_buffer"]], []],
     [:Let, "buffer", pointer, [:PointerCast, "raw"]], [:Do, [:Store, "buffer", [:Expr, buffer, [:Zero]]]], [:Return, "buffer"]])
-  context = native_value/function(context, "buffer_append", :Bool, [arena, ["buffer", pointer, [:Borrow, "arena"]],
+  context = native/declare_function(context, "buffer_append", :Bool, [arena, ["buffer", pointer, [:Borrow, "arena"]],
     ["source", [:Pointer, :U8, :Const], :Borrow], ["count", :U64, :Value]], [], [:Allocate, :ReadMemory, :WriteMemory], :Value, "")
-  context = native_value/body(context, "buffer_append", [
+  context = native/define_function(context, "buffer_append", [
     [:Let, "header", buffer, [:Load, "buffer"]],
     [:Let, "length", :U64, [:Field, "header", "length"]],
     [:If, [:Less, [:Expr, :U64, [:Subtract, "allocation_limit", "length"]], "count"], [[:Return, "false"]], []],
@@ -44,9 +44,9 @@ verb native_value/buffers(input: map) -> map
     [:If, [:Less, "zero", "count"], [
       [:Let, "tail", bytes, [:Offset, "data", "length"]], [:Do, [:CopyBytes, "tail", "source", "count"]]], []],
     [:Do, [:Store, "buffer", [:Expr, buffer, [:Record, "data", "needed", "capacity"]]]], [:Return, "true"]])
-  context = native_value/function(context, "buffer_word", :Bool, [arena, ["buffer", pointer, [:Borrow, "arena"]],
+  context = native/declare_function(context, "buffer_word", :Bool, [arena, ["buffer", pointer, [:Borrow, "arena"]],
     ["number", :U64, :Value]], [], [:Allocate, :ReadMemory, :WriteMemory], :Value, "")
-  context = native_value/body(context, "buffer_word", [
+  context = native/define_function(context, "buffer_word", [
     [:Let, "storage", [:Array, :U8, 8], [:Zero]],
     [:Let, "array", [:Pointer, [:Array, :U8, 8], :Mutable], [:Address, "storage"]],
     [:Let, "remaining", :U64, "number"], [:Let, "i", :U64, "zero"],

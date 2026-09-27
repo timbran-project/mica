@@ -16,13 +16,13 @@ verb native_value/maps(input: map) -> map
   let constants: map = context[:constants]
   constants["null_map_entries"] = null
   context[:constants] = constants
-  context = native_value/function(context, name, result, [
+  context = native/declare_function(context, name, result, [
       ["arena", [:Pointer, [:Record, "ValueArena"], :Mutable], :Borrow],
       ["source", [:Pointer, entry, :Const], [:Borrow, "arena"]],
       ["length", :U64, :Value]
     ],
     [], [:Allocate, :ReadMemory, :WriteMemory], :Borrow, "arena")
-  context = native_value/body(context, name, [
+  context = native/define_function(context, name, [
     [:If, [:Equal, "length", "zero"], [], [[:If, [:Equal, "source", "null_map_entries"], [[:Return, [:Zero]]], []]]],
     [:Let, "header_size", :U64, [:SizeOf, header]],
     [:Let, "size", :U64, [:SizeOf, entry]],
@@ -149,9 +149,9 @@ verb native_value/map_lookup(input: map) -> map
   let constants: map = context[:constants]
   constants["two"] = two
   context[:constants] = constants
-  context = native_value/function(context, name, result, [["map", word, :Borrow], ["key", word, :Borrow]],
+  context = native/declare_function(context, name, result, [["map", word, :Borrow], ["key", word, :Borrow]],
     [], [:ReadMemory], :Borrow, "map")
-  context = native_value/body(context, name, [
+  context = native/define_function(context, name, [
     [:Let, "tag", :U8, [:Tag, "map"]],
     [:If, [:Equal, "tag", "tag_map"], [], [[:Return, [:Zero]]]],
     [:Let, "pointer", [:Pointer, [:Record, "HeapMap"], :Const], [:UnpackPointer, "map"]],

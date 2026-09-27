@@ -15,21 +15,21 @@ verb native_value/hashing(input: map) -> map
     bindings[name] = id
   end
   context[:constants] = bindings
-  context = native_value/function(context, "value_hash_mix", :U64, [["hash", :U64, :Value], ["number", :U64, :Value]], [], [], :Value, "")
-  context = native_value/body(context, "value_hash_mix", [
+  context = native/declare_function(context, "value_hash_mix", :U64, [["hash", :U64, :Value], ["number", :U64, :Value]], [], [], :Value, "")
+  context = native/define_function(context, "value_hash_mix", [
     [:Let, "mixed", :U64, [:BitXor, "hash", "number"]], [:Return, [:Multiply, "mixed", "value_hash_prime"]]])
-  context = native_value/function(context, "value_hash_bytes", :U64, [["hash", :U64, :Value],
+  context = native/declare_function(context, "value_hash_bytes", :U64, [["hash", :U64, :Value],
     ["data", [:Pointer, :U8, :Const], :Borrow], ["length", :U64, :Value]], [], [:ReadMemory], :Value, "")
-  context = native_value/body(context, "value_hash_bytes", [
+  context = native/define_function(context, "value_hash_bytes", [
     [:Let, "result", :U64, "hash"], [:Let, "i", :U64, "zero"],
     [:While, [:Less, "i", "length"], [
       [:Let, "slot", [:Pointer, :U8, :Const], [:Offset, "data", "i"]],
       [:Let, "byte", :U8, [:Load, "slot"]],
       [:Set, "result", [:Call, "value_hash_mix", "result", [:Expr, :U64, [:Convert, "byte"]]]],
       [:Set, "i", [:Add, "i", "one"]]]], [:Return, "result"]])
-  context = native_value/function(context, "value_hash", result, [["value", word, :Borrow]], [["child_hash", result]], [:ReadMemory], :Value, "")
-  context = native_value/function(context, "value_tuple_hash", result, [["tuple", [:Record, "ValueTuple"], :Borrow]], [["child_hash", result]], [:ReadMemory], :Value, "")
-  context = native_value/body(context, "value_tuple_hash", [
+  context = native/declare_function(context, "value_hash", result, [["value", word, :Borrow]], [["child_hash", result]], [:ReadMemory], :Value, "")
+  context = native/declare_function(context, "value_tuple_hash", result, [["tuple", [:Record, "ValueTuple"], :Borrow]], [["child_hash", result]], [:ReadMemory], :Value, "")
+  context = native/define_function(context, "value_tuple_hash", [
     [:Let, "arity", :U64, [:Field, "tuple", "arity"]],
     [:Let, "data", [:Pointer, word, :Mutable], [:Field, "tuple", "data"]],
     [:Let, "hash", :U64, [:Call, "value_hash_mix", "value_hash_basis", "arity"]],
@@ -142,7 +142,7 @@ verb native_value/hashing(input: map) -> map
       [:Set, "row", [:Add, "row", "one"]]]],
     [:Return, [:Record, "true", "hash"]]
   ], []], [:Return, [:Zero]]]
-  context = native_value/body(context, "value_hash", rows)
+  context = native/define_function(context, "value_hash", rows)
   return context
 end
 

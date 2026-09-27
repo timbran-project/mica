@@ -8,9 +8,9 @@ verb native_value/copying(input: map) -> map
   let word: list = native_value/word()
   let result: list = [:Record, "ValueResult"]
   let arena: list = ["arena", [:Pointer, [:Record, "ValueArena"], :Mutable], :Borrow]
-  context = native_value/function(context, "value_copy", result, [arena, ["value", word, :Borrow]], [],
+  context = native/declare_function(context, "value_copy", result, [arena, ["value", word, :Borrow]], [],
     [:Allocate, :ReadMemory, :WriteMemory], :Borrow, "arena")
-  context = native_value/function(context, "value_tuple_copy", [:Record, "TupleResult"], [arena, ["tuple", [:Record, "ValueTuple"], :Borrow]], [],
+  context = native/declare_function(context, "value_tuple_copy", [:Record, "TupleResult"], [arena, ["tuple", [:Record, "ValueTuple"], :Borrow]], [],
     [:Allocate, :ReadMemory, :WriteMemory], :Borrow, "arena")
   context = native_value/copy_tuple(context)
   context = native_value/copy_relation(context)
@@ -129,7 +129,7 @@ verb native_value/copying(input: map) -> map
       [@body, [:Return, [:Call, string_concat("value_", spec[0]), @arguments]]], []]]
   end
   rows = [@rows, [:If, [:Equal, "tag", "tag_relation"], [[:Return, [:Call, "value_relation_copy", "arena", "value"]]], []], [:Return, [:Zero]]]
-  context = native_value/body(context, "value_copy", rows)
+  context = native/define_function(context, "value_copy", rows)
   return context
 end
 
@@ -145,7 +145,7 @@ verb native_value/copy_tuple(input: map) -> map
   let word: list = native_value/word()
   let values: list = [:Pointer, word, :Mutable]
   let tuple: list = [:Record, "ValueTuple"]
-  context = native_value/body(context, "value_tuple_copy", [
+  context = native/define_function(context, "value_tuple_copy", [
     [:Let, "arity", :U64, [:Field, "tuple", "arity"]],
     [:If, [:Equal, "arity", "zero"], [[:Return, [:Record, "true", [:Expr, tuple, [:Zero]]]]], []],
     [:Let, "source", values, [:Field, "tuple", "data"]],
@@ -173,10 +173,10 @@ verb native_value/copy_relation(input: map) -> map
   let tuple: list = [:Record, "ValueTuple"]
   let tuples: list = [:Pointer, tuple, :Mutable]
   let bytes: list = [:Pointer, :U8, :Mutable]
-  context = native_value/function(context, "value_relation_copy", [:Record, "ValueResult"], [
+  context = native/declare_function(context, "value_relation_copy", [:Record, "ValueResult"], [
     ["arena", [:Pointer, [:Record, "ValueArena"], :Mutable], :Borrow], ["value", word, :Borrow]], [],
     [:Allocate, :ReadMemory, :WriteMemory], :Borrow, "arena")
-  context = native_value/body(context, "value_relation_copy", [
+  context = native/define_function(context, "value_relation_copy", [
     [:Let, "checked", [:Record, "RelationResult"], [:Call, "value_relation_view", "value"]],
     [:If, [:Field, "checked", "ok"], [], [[:Return, [:Zero]]]],
     [:Let, "original", relation, [:Field, "checked", "relation"]],

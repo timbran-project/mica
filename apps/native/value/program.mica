@@ -49,38 +49,7 @@ verb native_value/context() -> map
     declarations = [@declarations, [string_concat("tag_", kind[0]), :U8, native_value/hex(kind[1])]]
   end
   let [constants, next_state] = native/constants(state, declarations)
-  return {:state -> next_state, :constants -> constants, :functions -> {}, :bindings -> {}}
-end
-
-// Named operands keep the value algorithms readable. Native validation still
-// consumes the same typed IR and checks every instruction and call.
-verb native_value/function(input: map, name: string, result, parameters: list, locals: list, effects: list, mode: symbol, owner: string) -> map
-  let context: map = input
-  let [id, bindings, state] = native/function_scope(context[:state], name, result, parameters, locals, [])
-  native/ensure(!map_contains_key(context[:functions], name), "duplicate value function")
-  context[:state] = native/contract(state, id, effects, mode, owner)
-  let functions: map = context[:functions]
-  functions[name] = id
-  context[:functions] = functions
-  let scopes: map = context[:bindings]
-  scopes[name] = bindings
-  context[:bindings] = scopes
-  return context
-end
-
-// Structured value functions use the shared builder and the same symbol scope.
-verb native_value/body(input: map, name: string, statements: list) -> map
-  let context: map = input
-  let bindings: map = context[:constants]
-  for spelling, id in context[:functions]
-    native/ensure(!map_contains_key(bindings, spelling), "duplicate structured binding")
-    bindings[spelling] = id
-  end
-  for spelling, id in context[:bindings][name]
-    native/ensure(!map_contains_key(bindings, spelling), "duplicate structured binding")
-    bindings[spelling] = id
-  end
-  context[:state] = native/function_body(context[:state], context[:functions][name], bindings, statements)
+  let context: map = native/module_context(next_state, constants)
   return context
 end
 

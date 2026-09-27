@@ -24,7 +24,7 @@ verb native_value/comparison(input: map) -> map
   let word: list = native_value/word()
   let result: list = [:Record, "IntResult"]
   let name: string = "value_compare"
-  context = native_value/function(context, name, result, [["left", word, :Borrow], ["right", word, :Borrow]],
+  context = native/declare_function(context, name, result, [["left", word, :Borrow], ["right", word, :Borrow]],
     [["comparison", result]], [:ReadMemory], :Value, "")
   let equal: list = [[:Return, [:Record, "true", "int_zero"]]]
   let statements: list = [
@@ -123,7 +123,7 @@ verb native_value/comparison(input: map) -> map
     end
     statements = [@statements, [:If, [:Equal, "left_kind", string_concat("tag_", spec[0])], [@rows, @equal], []]]
   end
-  context = native_value/body(context, name, [@statements,
+  context = native/define_function(context, name, [@statements,
     [:If, [:Equal, "left_kind", "tag_relation"], [[:Return, [:Call, "value_relation_compare", "left", "right"]]], []],
     [:Let, "left_payload", :U64, [:Payload, "left"]],
     [:Let, "right_payload", :U64, [:Payload, "right"]],
@@ -138,8 +138,8 @@ verb native_value/language_comparison(input: map) -> map
   let result: list = [:Record, "IntResult"]
   let word: list = native_value/word()
   let name: string = "value_compare_int_float"
-  context = native_value/function(context, name, result, [["integer", :I64, :Value], ["float", :F32, :Value]], [], [], :Value, "")
-  context = native_value/body(context, name, [
+  context = native/declare_function(context, name, result, [["integer", :I64, :Value], ["float", :F32, :Value]], [], [], :Value, "")
+  context = native/define_function(context, name, [
     [:Note, :Invariant, "Compare the integer part before the fraction; rounding the integer to f32 would lose precision."],
     [:If, [:IsFinite, "float"], [], [[:Return, [:Zero]]]],
     [:If, [:Less, "float", "float_lower"], [[:Return, [:Record, "true", "int_one"]]], []],
@@ -152,7 +152,7 @@ verb native_value/language_comparison(input: map) -> map
     [:Let, "integral_float", :F32, [:Convert, "truncated"]],
     @native_value/scalar_order("integral_float", "float")])
   name = "value_language_compare"
-  context = native_value/function(context, name, result, [["left", word, :Borrow], ["right", word, :Borrow]], [], [:ReadMemory], :Value, "")
+  context = native/declare_function(context, name, result, [["left", word, :Borrow], ["right", word, :Borrow]], [], [:ReadMemory], :Value, "")
   let statements: list = [[:Let, "left_kind", :U8, [:Tag, "left"]], [:Let, "right_kind", :U8, [:Tag, "right"]]]
   for spec in [["forward", "left", "right"], ["reverse", "right", "left"]]
     let prefix: string = spec[0]
@@ -171,10 +171,10 @@ verb native_value/language_comparison(input: map) -> map
     statements = [@statements, [:If, [:Equal, string_concat(spec[1], "_kind"), "tag_int"], [
       [:If, [:Equal, string_concat(spec[2], "_kind"), "tag_float"], [@rows, [:Return, comparison]], []]], []]]
   end
-  context = native_value/body(context, name, [@statements, [:Return, [:Call, "value_compare", "left", "right"]]])
+  context = native/define_function(context, name, [@statements, [:Return, [:Call, "value_compare", "left", "right"]]])
   for spec in [["value_equal", "value_compare"], ["value_language_equal", "value_language_compare"]]
-    context = native_value/function(context, spec[0], [:Record, "BoolResult"], [["left", word, :Borrow], ["right", word, :Borrow]], [], [:ReadMemory], :Value, "")
-    context = native_value/body(context, spec[0], [
+    context = native/declare_function(context, spec[0], [:Record, "BoolResult"], [["left", word, :Borrow], ["right", word, :Borrow]], [], [:ReadMemory], :Value, "")
+    context = native/define_function(context, spec[0], [
       [:Let, "comparison", result, [:Call, spec[1], "left", "right"]],
       [:If, [:Field, "comparison", "ok"], [], [[:Return, [:Zero]]]],
       [:Return, [:Record, "true", [:Expr, :Bool, [:Equal, [:Expr, :I64, [:Field, "comparison", "number"]], "int_zero"]]]]])

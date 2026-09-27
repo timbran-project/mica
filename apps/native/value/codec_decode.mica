@@ -16,8 +16,8 @@ verb native_value/codec_decoder(input: map) -> map
   context[:state] = native/record_type(context[:state], "ValueReader", [["data", bytes], ["length", :U64], ["position", :U64]])[1]
   context[:state] = native/record_type(context[:state], "CodecSpan", [["ok", :Bool], ["data", bytes]])[1]
   context[:state] = native/record_type(context[:state], "ValueDecodeResult", [["ok", :Bool], ["value", word], ["consumed", :U64]])[1]
-  context = native_value/function(context, "codec_span", span, [["reader", pointer, :Borrow], ["count", :U64, :Value]], [], [:ReadMemory, :WriteMemory], :Borrow, "reader")
-  context = native_value/body(context, "codec_span", [
+  context = native/declare_function(context, "codec_span", span, [["reader", pointer, :Borrow], ["count", :U64, :Value]], [], [:ReadMemory, :WriteMemory], :Borrow, "reader")
+  context = native/define_function(context, "codec_span", [
     [:Let, "header", reader, [:Load, "reader"]], [:Let, "position", :U64, [:Field, "header", "position"]],
     [:Let, "length", :U64, [:Field, "header", "length"]],
     [:If, [:Less, [:Expr, :U64, [:Subtract, "length", "position"]], "count"], [[:Return, [:Zero]]], []],
@@ -26,8 +26,8 @@ verb native_value/codec_decoder(input: map) -> map
     [:Let, "start", bytes, [:Offset, "data", "position"]],
     [:Do, [:Store, [:Expr, [:Pointer, :U64, :Mutable], [:FieldPointer, "reader", "position"]], [:Expr, :U64, [:Add, "position", "count"]]]],
     [:Return, [:Record, "true", "start"]]])
-  context = native_value/function(context, "codec_word", [:Record, "IdResult"], [["reader", pointer, :Borrow]], [], [:ReadMemory, :WriteMemory], :Value, "")
-  context = native_value/body(context, "codec_word", [
+  context = native/declare_function(context, "codec_word", [:Record, "IdResult"], [["reader", pointer, :Borrow]], [], [:ReadMemory, :WriteMemory], :Value, "")
+  context = native/define_function(context, "codec_word", [
     [:Let, "span", span, [:Call, "codec_span", "reader", "word_bytes"]],
     [:If, [:Field, "span", "ok"], [], [[:Return, [:Zero]]]],
     [:Let, "data", bytes, [:Field, "span", "data"]], [:Let, "number", :U64, "zero"], [:Let, "i", :U64, "zero"],
@@ -37,18 +37,18 @@ verb native_value/codec_decoder(input: map) -> map
       [:Let, "part", :U64, [:ShiftLeft, [:Expr, :U64, [:Convert, "byte"]], "shift"]],
       [:Set, "number", [:BitOr, "number", "part"]], [:Set, "i", [:Add, "i", "one"]]]],
     [:Return, [:Record, "true", "number"]]])
-  context = native_value/function(context, "codec_count", :Bool, [["reader", pointer, :Borrow], ["count", :U64, :Value], ["width", :U64, :Value]], [], [:ReadMemory], :Value, "")
-  context = native_value/body(context, "codec_count", [
+  context = native/declare_function(context, "codec_count", :Bool, [["reader", pointer, :Borrow], ["count", :U64, :Value], ["width", :U64, :Value]], [], [:ReadMemory], :Value, "")
+  context = native/define_function(context, "codec_count", [
     [:Let, "header", reader, [:Load, "reader"]],
     [:Let, "remaining", :U64, [:Subtract, [:Expr, :U64, [:Field, "header", "length"]], [:Expr, :U64, [:Field, "header", "position"]]]],
     [:If, [:Less, [:Expr, :U64, [:Divide, "remaining", "width"]], "count"], [[:Return, "false"]], []], [:Return, "true"]])
-  context = native_value/function(context, "codec_decode", result, [arena, table, ["reader", pointer, :Borrow], options], [],
+  context = native/declare_function(context, "codec_decode", result, [arena, table, ["reader", pointer, :Borrow], options], [],
     [:Allocate, :ReadMemory, :WriteMemory, :Block], :Borrow, "arena")
   context = native_value/decode_relation(context)
   context = native_value/decode_value(context)
   let parameters: list = [arena, table, ["data", bytes, :Borrow], ["length", :U64, :Value], options]
-  context = native_value/function(context, "value_decode", decoded, parameters, [], [:Allocate, :ReadMemory, :WriteMemory, :Block], :Borrow, "arena")
-  context = native_value/body(context, "value_decode", [
+  context = native/declare_function(context, "value_decode", decoded, parameters, [], [:Allocate, :ReadMemory, :WriteMemory, :Block], :Borrow, "arena")
+  context = native/define_function(context, "value_decode", [
     [:If, [:Equal, "data", [:Expr, bytes, [:Zero]]], [[:If, [:Less, "zero", "length"], [[:Return, [:Zero]]], []]], []],
     [:Let, "cursor", reader, [:Record, "data", "length", "zero"]],
     [:Let, "reader", pointer, [:Address, "cursor"]],
@@ -56,8 +56,8 @@ verb native_value/codec_decoder(input: map) -> map
     [:If, [:Field, "result", "ok"], [], [[:Return, [:Zero]]]],
     [:Let, "position", :U64, [:Load, [:Expr, [:Pointer, :U64, :Mutable], [:FieldPointer, "reader", "position"]]]],
     [:Return, [:Record, "true", [:Expr, word, [:Field, "result", "value"]], "position"]]])
-  context = native_value/function(context, "value_decode_exact", result, parameters, [], [:Allocate, :ReadMemory, :WriteMemory, :Block], :Borrow, "arena")
-  context = native_value/body(context, "value_decode_exact", [
+  context = native/declare_function(context, "value_decode_exact", result, parameters, [], [:Allocate, :ReadMemory, :WriteMemory, :Block], :Borrow, "arena")
+  context = native/define_function(context, "value_decode_exact", [
     [:Let, "result", decoded, [:Call, "value_decode", "arena", "table", "data", "length", "options"]],
     [:If, [:Field, "result", "ok"], [], [[:Return, [:Zero]]]],
     [:If, [:Equal, [:Expr, :U64, [:Field, "result", "consumed"]], "length"], [], [[:Return, [:Zero]]]],
@@ -180,7 +180,7 @@ verb native_value/decode_value(input: map) -> map
       [:Return, [:Call, "value_frob", "arena", [:Expr, :U64, [:Payload, "delegate"]], "frob_value"]]], []],
     [:If, [:Equal, "kind", "tag_relation"], [[:Return, [:Call, "codec_relation", "arena", "table", "reader", "options", "aux"]]], []],
     [:Return, [:Zero]]]
-  context = native_value/body(context, "codec_decode", rows)
+  context = native/define_function(context, "codec_decode", rows)
   return context
 end
 
@@ -188,13 +188,13 @@ verb native_value/decode_relation(input: map) -> map
   let context: map = input
   let word: list = native_value/word()
   let tuple: list = [:Record, "ValueTuple"]
-  context = native_value/function(context, "codec_relation", [:Record, "ValueResult"], [
+  context = native/declare_function(context, "codec_relation", [:Record, "ValueResult"], [
     ["arena", [:Pointer, [:Record, "ValueArena"], :Mutable], :Borrow],
     ["table", [:Pointer, [:Record, "SymbolTable"], :Mutable], :Borrow],
     ["reader", [:Pointer, [:Record, "ValueReader"], :Mutable], :Borrow],
     ["options", [:Record, "ValueCodecOptions"], :Value], ["arity", :U64, :Value]], [],
     [:Allocate, :ReadMemory, :WriteMemory, :Block], :Borrow, "arena")
-  context = native_value/body(context, "codec_relation", [
+  context = native/define_function(context, "codec_relation", [
     [:If, [:Less, "relation_max_arity", "arity"], [[:Return, [:Zero]]], []],
     [:If, [:Call, "codec_count", "reader", "arity", "word_bytes"], [], [[:Return, [:Zero]]]],
     @native_value/decode_allocation("heading", :U32, "arity"),

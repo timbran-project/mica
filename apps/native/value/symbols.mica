@@ -41,19 +41,19 @@ verb native_value/symbol_lookup(input: map) -> map
   let bytes: list = [:Pointer, :U8, :Const]
   let table: list = [:Record, "SymbolTable"]
   let entry: list = [:Record, "SymbolEntry"]
-  context = native_value/function(context, "symbol_hash", :U64,
+  context = native/declare_function(context, "symbol_hash", :U64,
     [["source", bytes, :Borrow], ["length", :U64, :Value]], [], [:ReadMemory], :Value, "")
-  context = native_value/body(context, "symbol_hash", [
+  context = native/define_function(context, "symbol_hash", [
     [:Let, "hash", :U64, "symbol_hash_basis"], [:Let, "position", :U64, "zero"],
     [:While, [:Less, "position", "length"], [
       [:Let, "byte", :U8, [:Load, [:Expr, bytes, [:Offset, "source", "position"]]]],
       [:Set, "hash", [:BitXor, "hash", [:Expr, :U64, [:Convert, "byte"]]]],
       [:Set, "hash", [:Multiply, "hash", "symbol_hash_prime"]],
       [:Set, "position", [:Add, "position", "one"]]]], [:Return, "hash"]])
-  context = native_value/function(context, "symbol_slot", :U64,
+  context = native/declare_function(context, "symbol_slot", :U64,
     [["table", [:Pointer, table, :Mutable], :Borrow], ["source", bytes, :Borrow],
      ["length", :U64, :Value], ["hash", :U64, :Value]], [], [:ReadMemory], :Value, "")
-  context = native_value/body(context, "symbol_slot", [
+  context = native/define_function(context, "symbol_slot", [
     [:Note, :Invariant, "Capacity is nonzero; at least half the buckets are empty."],
     [:Let, "header", table, [:Load, "table"]],
     [:Let, "entries", [:Pointer, entry, :Mutable], [:Field, "header", "entries"]],
@@ -88,9 +88,9 @@ verb native_value/symbol_grow(input: map) -> map
   let entries: list = [:Pointer, entry, :Mutable]
   let buckets: list = [:Pointer, :U64, :Mutable]
   let bytes: list = [:Pointer, :U8, :Mutable]
-  context = native_value/function(context, "symbol_grow", :Bool,
+  context = native/declare_function(context, "symbol_grow", :Bool,
     [["table", [:Pointer, table, :Mutable], :Borrow]], [], [:ReadMemory, :WriteMemory, :Allocate], :Value, "")
-  context = native_value/body(context, "symbol_grow", [
+  context = native/define_function(context, "symbol_grow", [
     [:Let, "header", table, [:Load, "table"]],
     [:Let, "capacity", :U64, [:Field, "header", "capacity"]],
     [:If, [:Less, "capacity", "symbol_id_limit"], [], [[:Return, "false"]]],
@@ -140,10 +140,10 @@ verb native_value/symbol_intern(input: map) -> map
   let mutable_bytes: list = [:Pointer, :U8, :Mutable]
   let buckets: list = [:Pointer, :U64, :Mutable]
   let result: list = [:Record, "IdResult"]
-  context = native_value/function(context, "symbol_intern_locked", result,
+  context = native/declare_function(context, "symbol_intern_locked", result,
     [["table", [:Pointer, table, :Mutable], :Borrow], ["source", bytes, :Borrow],
      ["length", :U64, :Value]], [], [:ReadMemory, :WriteMemory, :Allocate], :Value, "")
-  context = native_value/body(context, "symbol_intern_locked", [
+  context = native/define_function(context, "symbol_intern_locked", [
     [:If, [:Less, "allocation_limit", "length"], [[:Return, [:Zero]]], []],
     [:If, [:Equal, "length", "zero"], [], [
       [:If, [:Equal, "source", [:Expr, bytes, [:Zero]]], [[:Return, [:Zero]]], []]]],
@@ -188,9 +188,9 @@ verb native_value/symbol_access(input: map) -> map
   let table: list = [:Record, "SymbolTable"]
   let entry: list = [:Record, "SymbolEntry"]
   let pointer: list = [:Pointer, table, :Mutable]
-  context = native_value/function(context, "symbol_text_locked", [:Record, "SymbolText"],
+  context = native/declare_function(context, "symbol_text_locked", [:Record, "SymbolText"],
     [["table", pointer, :Borrow], ["id", :U32, :Value]], [], [:ReadMemory], :Borrow, "table")
-  context = native_value/body(context, "symbol_text_locked", [
+  context = native/define_function(context, "symbol_text_locked", [
     [:Let, "header", table, [:Load, "table"]],
     [:Let, "index", :U64, [:Convert, "id"]],
     [:If, [:Less, "index", [:Expr, :U64, [:Field, "header", "count"]]], [], [[:Return, [:Zero]]]],
@@ -199,9 +199,9 @@ verb native_value/symbol_access(input: map) -> map
     [:Return, [:Record, "true", [:Expr, [:Pointer, :U8, :Const], [:Field, "item", "data"]],
       [:Expr, :U64, [:Field, "item", "length"]], [:Expr, :U64, [:Field, "item", "scalars"]],
       [:Expr, :Bool, [:Field, "item", "ascii"]]]]])
-  context = native_value/function(context, "value_symbol_table_release", :Void,
+  context = native/declare_function(context, "value_symbol_table_release", :Void,
     [["table", pointer, :Consume]], [], [:ReadMemory, :WriteMemory, :Release], :Value, "")
-  context = native_value/body(context, "value_symbol_table_release", [
+  context = native/define_function(context, "value_symbol_table_release", [
     [:Let, "arena", [:Pointer, [:Record, "ValueArena"], :Mutable], [:FieldPointer, "table", "arena"]],
     [:Do, [:Call, "value_arena_release", "arena"]],
     [:Let, "mutex", [:Pointer, :U8, :Mutable], [:Load,
@@ -217,17 +217,17 @@ verb native_value/symbol_synchronization(input: map) -> map
   let context: map = input
   let bytes: list = [:Pointer, :U8, :Mutable]
   let pointer: list = [:Pointer, [:Record, "SymbolTable"], :Mutable]
-  context = native_value/function(context, "mutex_create", bytes, [], [], [:Allocate, :Release, :WriteMemory], :Owned, "")
+  context = native/declare_function(context, "mutex_create", bytes, [], [], [:Allocate, :Release, :WriteMemory], :Owned, "")
   context[:state] = native/foreign(context[:state], context[:functions]["mutex_create"])
   for spec in [["mutex_lock", :Borrow, [:ReadMemory, :WriteMemory, :Block]],
                ["mutex_unlock", :Borrow, [:ReadMemory, :WriteMemory]],
                ["mutex_destroy", :Consume, [:ReadMemory, :WriteMemory, :Release]]]
-    context = native_value/function(context, spec[0], :Void, [["mutex", bytes, spec[1]]], [], spec[2], :Value, "")
+    context = native/declare_function(context, spec[0], :Void, [["mutex", bytes, spec[1]]], [], spec[2], :Value, "")
     context[:state] = native/foreign(context[:state], context[:functions][spec[0]])
   end
-  context = native_value/function(context, "value_symbol_table_init", :Bool,
+  context = native/declare_function(context, "value_symbol_table_init", :Bool,
     [["table", pointer, :Borrow]], [], [:ReadMemory, :WriteMemory, :Allocate, :Release], :Value, "")
-  context = native_value/body(context, "value_symbol_table_init", [
+  context = native/define_function(context, "value_symbol_table_init", [
     [:Let, "slot", [:Pointer, bytes, :Mutable], [:FieldPointer, "table", "mutex"]],
     [:Let, "existing", bytes, [:Load, "slot"]],
     [:If, [:Equal, "existing", "null_bytes"], [], [[:Return, "false"]]],
@@ -248,8 +248,8 @@ verb native_value/symbol_synchronized_access(input: map) -> map
        ["source", "length"], [:ReadMemory, :WriteMemory, :Allocate, :Block], :Value, ""],
       ["value_symbol_text", "symbol_text_locked", [:Record, "SymbolText"],
        [["id", :U32, :Value]], ["id"], [:ReadMemory, :WriteMemory, :Block], :Borrow, "table"]]
-    context = native_value/function(context, spec[0], spec[2], [["table", pointer, :Borrow], @spec[3]], [], spec[5], spec[6], spec[7])
-    context = native_value/body(context, spec[0], [
+    context = native/declare_function(context, spec[0], spec[2], [["table", pointer, :Borrow], @spec[3]], [], spec[5], spec[6], spec[7])
+    context = native/define_function(context, spec[0], [
       [:Let, "mutex", bytes, [:Load, [:Expr, [:Pointer, bytes, :Mutable], [:FieldPointer, "table", "mutex"]]]],
       [:If, [:Equal, "mutex", "null_bytes"], [[:Return, [:Zero]]], []],
       [:Do, [:Call, "mutex_lock", "mutex"]],

@@ -4,6 +4,84 @@
 // Structured bodies lower to the same checked instructions and terminators.
 // Bindings map names to existing constants, functions, parameters, and locals.
 // A body's local names are function-wide; generated names reserve body_ prefix.
+verb native/module_context(state: map, constants: map) -> map
+  return {:state -> state, :constants -> constants, :functions -> {}, :bindings -> {}}
+end
+
+// Separate declarations from bodies to support mutually recursive modules.
+verb native/declare_function(input: map, name: string, result, parameters: list, locals: list, effects: list, mode: symbol, owner: string) -> map
+  let context: map = input
+  native/ensure(!map_contains_key(context[:functions], name), "duplicate module function")
+  let [id, bindings, state] = native/function_scope(context[:state], name, result, parameters, locals, [])
+  context[:state] = native/contract(state, id, effects, mode, owner)
+  let functions: map = context[:functions]
+  functions[name] = id
+  context[:functions] = functions
+  let scopes: map = context[:bindings]
+  scopes[name] = bindings
+  context[:bindings] = scopes
+  return context
+end
+
+verb native/define_function(input: map, name: string, statements: list) -> map
+  let context: map = input
+  let bindings: map = context[:constants]
+  for group in [context[:functions], context[:bindings][name]]
+    for spelling, id in group
+      native/ensure(!map_contains_key(bindings, spelling), "duplicate structured binding")
+      bindings[spelling] = id
+    end
+  end
+  context[:state] = native/function_body(context[:state], context[:functions][name], bindings, statements)
+  return context
+end
+
+// Syntax constructors compose with list splices and generator loops. They
+// return the checked body's existing syntax, not a second lowering API.
+verb native/let_statement(name: string, type_id, expression) -> list
+  return [:Let, name, type_id, expression]
+end
+
+verb native/set_statement(name: string, expression) -> list
+  return [:Set, name, expression]
+end
+
+verb native/if_statement(condition, yes: list, no: list) -> list
+  return [:If, condition, yes, no]
+end
+
+verb native/while_statement(condition, body: list) -> list
+  return [:While, condition, body]
+end
+
+verb native/switch_statement(type_id, value, cases: list, fallback: list) -> list
+  return [:Switch, type_id, value, cases, fallback]
+end
+
+verb native/case_arm(value: string, body: list) -> list
+  return [value, body]
+end
+
+verb native/return_value(value) -> list
+  return [:Return, value]
+end
+
+verb native/call_expression(name: string, arguments: list) -> list
+  return [:Call, name, @arguments]
+end
+
+verb native/typed_expression(type_id, expression) -> list
+  return [:Expr, type_id, expression]
+end
+
+verb native/field_expression(value, name: string) -> list
+  return [:Field, value, name]
+end
+
+verb native/binary_expression(op: symbol, left, right) -> list
+  return [op, left, right]
+end
+
 verb native/function_body(state: map, fn_id: int, bindings: map, statements: list) -> map
   let functions = native/owned(state[:functions], 0, fn_id)
   native/ensure(len(functions) == 1, "body requires a declared function")
@@ -31,7 +109,9 @@ end
 verb native/body_block(input: map, role: string, entry: bool) -> list
   let [spelling, context] = native/body_name(input, role)
   let [id, state] = native/add_block(context[:state], context[:function], spelling, entry)
-  context[:state] = native/annotate(state, id, :Purpose, role)
+  // The block name retains its role. Structured C carries that role in its
+  // syntax; reserve annotations for source notes rather than mechanical labels.
+  context[:state] = state
   return [id, context]
 end
 
@@ -153,6 +233,48 @@ verb native/body_while(input: map, condition, statements: list) -> map
   return context
 end
 
+verb native/body_switch(input: map, type_id, expression, cases: list, fallback: list) -> map
+  native/ensure(native/is_unsigned(type_id) || type_id == :I64, "Switch requires an integer selector")
+  let [name, named] = native/body_name(input, "selector")
+  let [id, declared] = native/body_local(named, name, type_id)
+  let context: map = native/body_expression(declared, id, expression)
+  let values: list = []
+  for arm in cases
+    native/ensure(is_kind(arm, :list) && len(arm) == 2, "Switch case requires a constant and body")
+    let constant: int = native/body_binding(context, arm[0])
+    let rows: list = native/owned(context[:state][:constants], 0, constant)
+    native/ensure(len(rows) == 1 && rows[0][1] == type_id, "Switch case must be a constant of the selector type")
+    native/ensure(!native/contains(values, rows[0][2]), "duplicate Switch case")
+    values = [@values, rows[0][2]]
+  end
+  let open_arms: list = []
+  for arm in cases
+    let [test, evaluated] = native/body_value(context, :Bool, native/binary_expression(:Equal, name, arm[0]))
+    let [yes, with_yes] = native/body_block(evaluated, "switch_case", false)
+    let [no, with_no] = native/body_block(with_yes, "switch_next", false)
+    context = native/body_end(with_no, :Branch, [test, yes, no])
+    context = native/body_statements(native/body_enter(context, yes), arm[1])
+    if context[:block] != :Closed
+      open_arms = [@open_arms, context[:block]]
+    end
+    context = native/body_enter(context, no)
+  end
+  context = native/body_statements(context, fallback)
+  if context[:block] != :Closed
+    open_arms = [@open_arms, context[:block]]
+  end
+  if len(open_arms) == 0
+    return context
+  end
+  let [join, joined] = native/body_block(context, "switch_end", false)
+  context = joined
+  for block in open_arms
+    context = native/body_end(native/body_enter(context, block), :Jump, [join])
+  end
+  context = native/body_enter(context, join)
+  return context
+end
+
 // Share the pure zero-result exit used by fallible value operations. Keeping
 // failure paths together avoids duplicating aggregate returns during lowering.
 verb native/body_zero_return(input: map) -> map
@@ -177,7 +299,7 @@ verb native/body_statements(input: map, statements: list) -> map
     native/ensure(context[:block] != :Closed, "statement after control flow terminates")
     native/ensure(is_kind(statement, :list) && len(statement) > 0, "invalid structured statement")
     let op = statement[0]
-    let arities: map = {:Let -> 4, :Set -> 3, :Do -> 2, :If -> 4, :While -> 3, :Break -> 1, :Continue -> 1, :Note -> 3}
+    let arities: map = {:Let -> 4, :Set -> 3, :Do -> 2, :If -> 4, :While -> 3, :Switch -> 5, :Break -> 1, :Continue -> 1, :Note -> 3}
     if op == :Return
       let arity: int = 2
       if context[:result] == :Void
@@ -215,6 +337,9 @@ verb native/body_statements(input: map, statements: list) -> map
     end
     if op == :While
       context = native/body_while(context, statement[1], statement[2])
+    end
+    if op == :Switch
+      context = native/body_switch(context, statement[1], statement[2], statement[3], statement[4])
     end
     if op == :Break || op == :Continue
       native/ensure(len(context[:loops]) > 0, "loop control outside a loop")

@@ -58,5 +58,71 @@ verb native/structured_example(first_id)
   state = native/function_body(empty_state, empty, empty_names, [[:Return]])
   // This text must remain a comment, even after C preprocessing.
   state = native/annotate(state, empty, :Purpose, "*/\n#error injected\n/* ??/\\\r\n\0")
-  return state
+  return native/control_examples(state, constants, tick)
+end
+
+verb native/control_examples(state: map, constants: map, tick: int) -> map
+  let context: map = native/module_context(state, constants)
+  let functions: map = context[:functions]
+  functions["tick"] = tick
+  context[:functions] = functions
+  for name in ["dispatch", "loop_switch", "ladder"]
+    context = native/declare_function(context, string_concat("structured_", name), :U64, [["limit", :U64, :Value]], [], [], :Value, "")
+  end
+  context = native/declare_function(context, "structured_tick_switch", :U64, [], [], [:WriteMemory], :Value, "")
+  context = native/declare_function(context, "structured_shared_tail", :U64, [["limit", :U64, :Value]], [], [:WriteMemory], :Value, "")
+  let cases: list = []
+  for name in ["one", "two", "three"]
+    cases = [@cases, native/case_arm(name, [native/set_statement("result", name)])]
+  end
+  context = native/define_function(context, "structured_dispatch", [
+    native/let_statement("result", :U64, "zero"),
+    native/switch_statement(:U64, "limit", cases, [native/set_statement("result", "ten")]),
+    native/return_value("result")])
+  context = native/define_function(context, "structured_ladder", [
+    native/let_statement("result", :U64, "zero"),
+    native/if_statement(native/binary_expression(:Less, "limit", "one"), [native/set_statement("result", "one")], [
+      native/if_statement(native/binary_expression(:Less, "limit", "two"), [native/set_statement("result", "two")], [native/set_statement("result", "three")])]),
+    native/set_statement("result", native/binary_expression(:Add, "result", "ten")), native/return_value("result")])
+  context = native/define_function(context, "structured_shared_tail", [
+    native/let_statement("result", :U64, "zero"),
+    native/if_statement(native/binary_expression(:Less, "limit", "two"), [native/set_statement("result", "one")], [
+      native/if_statement(native/binary_expression(:Less, "limit", "three"), [native/return_value("zero")], []),
+      native/set_statement("result", "two")]),
+    native/let_statement("observed", :U64, native/call_expression("tick", [])),
+    native/set_statement("result", native/binary_expression(:Add, "result", "ten")), native/return_value("result")])
+  context = native/define_function(context, "structured_tick_switch", [
+    native/switch_statement(:U64, native/call_expression("tick", []), [
+      native/case_arm("one", [native/return_value("ten")]),
+      native/case_arm("two", [native/return_value("two")]),
+      native/case_arm("three", [native/return_value("three")])], [native/return_value("zero")])])
+  context = native/define_function(context, "structured_loop_switch", [
+    native/let_statement("i", :U64, "zero"), native/let_statement("total", :U64, "zero"),
+    native/while_statement(native/binary_expression(:Less, "i", "limit"), [
+      native/set_statement("i", native/binary_expression(:Add, "i", "one")),
+      native/switch_statement(:U64, "i", [
+        native/case_arm("one", [[:Continue]]),
+        native/case_arm("two", [native/set_statement("total", native/binary_expression(:Add, "total", "ten"))]),
+        native/case_arm("three", [[:Break]])], [native/set_statement("total", native/binary_expression(:Add, "total", "one"))]),
+      native/set_statement("total", native/binary_expression(:Add, "total", "one"))]), native/return_value("total")])
+  for name in ["cycle_a", "cycle_b"]
+    context = native/declare_function(context, name, :U64, [["n", :U64, :Value]], [], [], :Value, "")
+  end
+  for spec in [["cycle_a", "cycle_b", "one"], ["cycle_b", "cycle_a", "two"]]
+    context = native/define_function(context, spec[0], [
+      native/if_statement(native/binary_expression(:Equal, "n", "zero"), [native/return_value(spec[2])], []),
+      native/return_value(native/call_expression(spec[1], [native/typed_expression(:U64, native/binary_expression(:Subtract, "n", "one"))]))])
+  end
+  // This two-entry cycle cannot become a natural loop without duplicating
+  // code or adding a dispatch variable. Keep its explicit transfers.
+  let [id, names, declared] = native/function_scope(context[:state], "irreducible", :U64,
+    [["limit", :U64, :Value], ["choice", :Bool, :Value]], [["i", :U64], ["condition", :Bool]], ["entry", "left", "right", "done"])
+  let result: map = native/block_body(declared, names["entry"], [[:Copy, names["i"], [constants["zero"]]]], :Branch, [names["choice"], names["left"], names["right"]])
+  for spec in [["left", "right"], ["right", "left"]]
+    result = native/block_body(result, names[spec[0]], [
+      [:Add, names["i"], [names["i"], constants["one"]]],
+      [:Less, names["condition"], [names["i"], names["limit"]]]], :Branch, [names["condition"], names[spec[1]], names["done"]])
+  end
+  result = native/terminate(result, names["done"], :Return, [names["i"]])
+  return result
 end

@@ -27,6 +27,9 @@ cargo run --bin mica -- eval \
   --filein apps/native/storage.mica \
   --filein apps/native/contracts.mica \
   --filein apps/native/check.mica \
+  --filein apps/native/flow.mica \
+  --filein apps/native/c_syntax.mica \
+  --filein apps/native/c_flow.mica \
   --filein apps/native/c.mica \
   --filein apps/native/examples/scalars.mica \
   --filein apps/native/examples/values.mica \
@@ -112,12 +115,30 @@ Mica kind annotations check generator interfaces, while explicit IR types descri
 | `[:Do, expression]` | Emit an operation with no result |
 | `[:If, condition, yes, no]` | Select one statement list |
 | `[:While, condition, body]` | Re-evaluate the condition before each iteration |
+| `[:Switch, type, selector, cases, fallback]` | Evaluate an integer selector once; select a constant case or the fallback |
 | `[:Break]`, `[:Continue]` | Exit or repeat the innermost loop |
 | `[:Return, expression]` | Return a value; use `[:Return]` for Void |
 | `[:Note, kind, text]` | Annotate the current block |
 
 An expression is a binding name or `[opcode, operand, ...]`.
 Nested operands use `[:Expr, type, expression]`. For example, `[:Expr, :U64, [:Call, "next"]]` supplies a typed call result.
+
+Named constructors build the same syntax: `native/let_statement`, `native/set_statement`, `native/if_statement`,
+`native/while_statement`, `native/switch_statement`, `native/case_arm`, and `native/return_value`.
+Expressions compose through `native/call_expression`, `native/typed_expression`, `native/field_expression`, and `native/binary_expression`.
+For example:
+
+```mica
+let cases: list = [native/case_arm(name, [native/return_value(name)]) for name in ["one", "two", "three"]]
+let body: list = [native/switch_statement(:U64, native/call_expression("next", []), cases, [native/return_value("zero")])]
+```
+
+Case names resolve to constants of the selector type. Duplicate cases are rejected. Cases do not fall through.
+`Break` and `Continue` still refer to the enclosing loop, including inside a switch.
+`native/module_context(state, constants)` creates a module construction context.
+`native/declare_function(context, name, result, parameters, locals, effects, mode, owner)` registers a function and its contract.
+`native/define_function(context, name, statements)` resolves constants, functions, and parameters without manual binding-map assembly.
+Declare mutually recursive functions before defining their bodies. The value generators use this shared API throughout.
 Operands evaluate once, from left to right. Each operation lowers to a separate instruction before C emission.
 Field names and the type operands of `SizeOf` and `AlignOf` retain their existing metadata forms.
 
@@ -138,6 +159,23 @@ Function declarations and definitions include allowed effects, result ownership,
 Nominal scalar names remain typedefs. Tagged types retain comments describing their tag bits, heap tags, and pointer access.
 Structured blocks retain their control-flow roles, such as loop condition and exit.
 Output ordering uses semantic names and annotation text, independent of node IDs or symbol insertion order.
+
+### Declaration order and control flow
+
+Standalone C places callees before callers. Prototypes remain for foreign functions and backward calls within recursive cycles.
+Self-recursion needs no separate prototype. Module headers retain public function declarations for callers in other translation units.
+Record and array definitions follow their layout dependencies; pointer fields can refer to incomplete struct tags.
+
+The emitter analyzes the checked control-flow graph, including bodies built directly from blocks.
+Dominators identify natural loops; postdominators identify shared branch continuations.
+The resulting C syntax tree uses `if`, `else`, `while`, `break`, `continue`, and early returns.
+Integer equality chains become switches when intermediate blocks contain no effects or outside entries.
+Pure loop comparisons become `while (condition)`; headers with computations remain inside `while (true)`.
+Calls retain their original execution order and count. Only direct returns and zero-result exits may be duplicated.
+Shared tails and irreducible cycles retain targeted gotos. Labels appear only when referenced.
+
+The constructors in `c_syntax.mica` own the syntax-map schema and rendering rules.
+Control-flow analysis builds nodes through these helpers instead of assembling C braces and indentation itself.
 
 Invariant notes describe author intent. They are not proofs and do not remove checks or introduce optimizer assumptions.
 Comments do not affect C optimization. Existing types and operations continue to determine executable semantics.

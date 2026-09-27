@@ -118,9 +118,9 @@ verb native/c_uses_float_constants(state, index)
   return false
 end
 
-// Validation completes before any output is returned. Every operation becomes
-// a separate assignment; calls cannot acquire C's unspecified operand order.
-verb native/c_declarations(state, index)
+// Validation completes before any output is returned. Calls retain separate,
+// ordered statements; a final pure comparison can become a C condition.
+verb native/c_declarations(state, index, public: bool)
   let functions = native/ordered(state[:functions], 1)
   let lines = ["#include <stdint.h>", "#include <stdbool.h>", "#include <limits.h>", "#include <stddef.h>", "#include <string.h>", "#include <stdlib.h>", "#include <math.h>", "#include <float.h>",
                "_Static_assert(sizeof(float) == 4 && FLT_RADIX == 2 && FLT_MANT_DIG == 24 && FLT_MAX_EXP == 128, \"binary32 required\");",
@@ -132,11 +132,6 @@ verb native/c_declarations(state, index)
   lines = [@lines, "#ifdef __FAST_MATH__", "#error Fast math is incompatible with Mica numeric semantics", "#endif"]
   if native/c_uses_float_constants(state, index)
     lines = [@lines, "static inline float mica_internal_f32_bits(uint32_t bits) { float result; memcpy(&result, &bits, sizeof(result)); return result; }"]
-  end
-  for type_id in index[:type_order]
-    if native/is_record(type_id) || native/is_array(type_id)
-      lines = [@lines, string_concat(native/c_type(type_id), ";")]
-    end
   end
   for type_id in index[:type_order]
     if native/is_scalar(type_id)
@@ -165,7 +160,11 @@ verb native/c_declarations(state, index)
     constant_notes = [@constant_notes, @native/c_notes(index, row[0], "")]
   end
   lines = [@lines, @sort(constant_notes)]
+  let order: map = native/function_order(state, index)
   for fn_row in functions
+    if !public && !map_contains_key(index[:foreign], fn_row[0]) && !map_contains_key(order[:declare], fn_row[0])
+      continue
+    end
     lines = [@lines, @native/c_notes(index, fn_row[0], ""), @native/c_contract_notes(state, index, fn_row[0]), string_concat(native/c_signature(state, index, fn_row), ";")]
   end
   lines = [@lines, @native/c_globals(state, index, true)]
@@ -216,7 +215,8 @@ verb native/c_local_declarations(index: map, locals: list) -> list
 end
 
 verb native/c_definitions(state, index)
-  let functions = native/ordered(state[:functions], 1)
+  let order: map = native/function_order(state, index)
+  let functions: list = [index[:functions][id] for id in order[:order]]
   let lines = [@native/c_globals(state, index, false),
     "/* Lowering can retain unused locals and parameters. Scope these warnings to generated definitions. */",
     "#if defined(__GNUC__) || defined(__clang__)",
@@ -233,34 +233,7 @@ verb native/c_definitions(state, index)
     lines = [@lines, "", @native/c_notes(index, fn_id, ""), @native/c_contract_notes(state, index, fn_id), string_concat(native/c_signature(state, index, fn_row), " {")]
     let locals = native/ordered(native/owned(state[:locals], 1, fn_id), 2)
     lines = [@lines, @native/c_local_declarations(index, locals)]
-    let blocks = native/ordered(native/owned(state[:blocks], 1, fn_id), 2)
-    for block in blocks
-      if block[3]
-        lines = [@lines, string_concat("  goto b_", block[2], ";")]
-      end
-    end
-    for block in blocks
-      lines = [@lines, @native/c_notes(index, block[0], ""), string_concat("b_", block[2], ":")]
-      for row in native/ordered(native/owned(state[:instructions], 1, block[0]), 2)
-        lines = [@lines, @native/c_notes(index, row[0], "  "), string_concat("  ", native/c_statement(index, row))]
-      end
-      let term = index[:terms][block[0]]
-      let args = term[2]
-      if term[1] == :Return
-        if len(args) == 0
-          lines = [@lines, "  return;"]
-        else
-          lines = [@lines, string_concat("  return ", native/c_value(index, args[0]), ";")]
-        end
-      end
-      if term[1] == :Jump
-        lines = [@lines, string_concat("  goto b_", index[:blocks][args[0]][2], ";")]
-      end
-      if term[1] == :Branch
-        lines = [@lines, string_concat("  if (", native/c_value(index, args[0]), ") goto b_", index[:blocks][args[1]][2], ";"),
-                         string_concat("  goto b_", index[:blocks][args[2]][2], ";")]
-      end
-    end
+    lines = [@lines, @native/c_function_body(state, index, fn_id)]
     lines = [@lines, "}"]
   end
   return [@lines, "#if defined(__GNUC__) || defined(__clang__)", "#pragma GCC diagnostic pop", "#endif"]
@@ -315,17 +288,17 @@ verb native/c_statement(index, row)
 end
 
 verb native/emit_c(state)
-  let index = native/check(state)
-  return string_concat(string_join([@native/c_declarations(state, index), @native/c_definitions(state, index)], "\n"), "\n")
+  let index = native/emission_index(state, native/check(state))
+  return string_concat(string_join([@native/c_declarations(state, index, false), @native/c_definitions(state, index)], "\n"), "\n")
 end
 
 // The caller writes these artifacts. Emission performs no filesystem effects.
 verb native/emit_module(state, spelling)
   native/identifier(spelling)
-  let index = native/check(state)
+  let index = native/emission_index(state, native/check(state))
   let guard = string_concat("MICA_GENERATED_", spelling, "_H")
   let header = string_concat(string_join([string_concat("#ifndef ", guard), string_concat("#define ", guard),
-    @native/c_declarations(state, index), "#endif"], "\n"), "\n")
+    @native/c_declarations(state, index, true), "#endif"], "\n"), "\n")
   let source = string_concat("#include \"", spelling, ".h\"\n", string_join(native/c_definitions(state, index), "\n"), "\n")
   let symbols = [[row[1], native/c_function(index, row[0])] for row in native/ordered(state[:functions], 1)]
   return {:header_name -> string_concat(spelling, ".h"), :header -> header,

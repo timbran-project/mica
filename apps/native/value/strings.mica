@@ -41,7 +41,7 @@ verb native_value/string_allocate(input: map) -> map
   let storage: list = [:Record, "StringStorage"]
   let bytes: list = [:Pointer, :U8, :Mutable]
   let result: list = [:Record, "StringAllocation"]
-  context = native_value/function(context, name, result, [
+  context = native/declare_function(context, name, result, [
       ["arena", [:Pointer, [:Record, "ValueArena"], :Mutable], :Borrow],
       ["length", :U64, :Value],
       ["capacity", :U64, :Value],
@@ -49,7 +49,7 @@ verb native_value/string_allocate(input: map) -> map
       ["ascii", :Bool, :Value]
     ],
     [], [:Allocate, :ReadMemory, :WriteMemory], :Borrow, "arena")
-  context = native_value/body(context, name, [
+  context = native/define_function(context, name, [
     [:If, [:Less, "capacity", "length"], [[:Return, [:Zero]]], []],
     [:If, [:Less, "length", "scalars"], [[:Return, [:Zero]]], []],
     [:Let, "header_size", :U64, [:SizeOf, header]],
@@ -93,7 +93,7 @@ verb native_value/string_index(input: map) -> map
   let context: map = input
   let name: string = "value_string_index"
   let storage: list = [:Record, "StringStorage"]
-  context = native_value/function(context, name, :Bool, [
+  context = native/declare_function(context, name, :Bool, [
       ["storage", [:Pointer, storage, :Mutable], :Borrow],
       ["offset", :U64, :Value],
       ["scalar", :U64, :Value],
@@ -101,7 +101,7 @@ verb native_value/string_index(input: map) -> map
       ["ascii", :Bool, :Value]
     ],
     [], [:ReadMemory, :WriteMemory], :Value, "")
-  context = native_value/body(context, name, [
+  context = native/define_function(context, name, [
     [:Let, "backing", storage, [:Load, "storage"]],
     [:Let, "data", [:Pointer, :U8, :Mutable], [:Field, "backing", "data"]],
     [:Let, "index", [:Pointer, :U64, :Mutable], [:Field, "backing", "index"]],
@@ -144,13 +144,13 @@ verb native_value/string_constructor(input: map) -> map
   let name: string = "value_string"
   let header: list = [:Record, "HeapString"]
   let result: list = [:Record, "ValueResult"]
-  context = native_value/function(context, name, result, [
+  context = native/declare_function(context, name, result, [
       ["arena", [:Pointer, [:Record, "ValueArena"], :Mutable], :Borrow],
       ["source", [:Pointer, :U8, :Const], :Borrow],
       ["length", :U64, :Value]
     ],
     [], [:Allocate, :ReadMemory, :WriteMemory], :Borrow, "arena")
-  context = native_value/body(context, name, [
+  context = native/define_function(context, name, [
     [:If, [:Less, "allocation_limit", "length"], [[:Return, [:Zero]]], []],
     [:Let, "scan", [:Record, "Utf8Scan"], [:Call, "utf8_scan", "source", "length"]],
     [:If, [:Field, "scan", "ok"], [], [[:Return, [:Zero]]]],
@@ -178,9 +178,9 @@ verb native_value/string_access(input: map) -> map
   let header_pointer: list = [:Pointer, header, :Const]
   let result: list = [:Record, "IdResult"]
   let name: string = "value_string_length"
-  context = native_value/function(context, name, result, [["value", word, :Borrow]],
+  context = native/declare_function(context, name, result, [["value", word, :Borrow]],
     [], [:ReadMemory], :Value, "")
-  context = native_value/body(context, name, [
+  context = native/define_function(context, name, [
     [:Let, "checked", [:Record, "HeapStringResult"], [:Call, "value_as_string", "value"]],
     [:If, [:Field, "checked", "ok"], [], [[:Return, [:Zero]]]],
     [:Let, "pointer", header_pointer, [:Field, "checked", "header"]],
@@ -190,9 +190,9 @@ verb native_value/string_access(input: map) -> map
     [:Return, "result"]
   ])
   name = "value_string_byte_offset"
-  context = native_value/function(context, name, result, [["value", word, :Borrow], ["position", :U64, :Value]],
+  context = native/declare_function(context, name, result, [["value", word, :Borrow], ["position", :U64, :Value]],
     [], [:ReadMemory], :Value, "")
-  context = native_value/body(context, name, [
+  context = native/define_function(context, name, [
     [:Let, "checked", [:Record, "HeapStringResult"], [:Call, "value_as_string", "value"]],
     [:If, [:Field, "checked", "ok"], [], [[:Return, [:Zero]]]],
     [:Let, "pointer", header_pointer, [:Field, "checked", "header"]],
@@ -234,9 +234,9 @@ verb native_value/string_access(input: map) -> map
     [:Return, "result"]
   ])
   name = "value_string_scalar_at"
-  context = native_value/function(context, name, [:Record, "RuneResult"], [["value", word, :Borrow], ["position", :U64, :Value]],
+  context = native/declare_function(context, name, [:Record, "RuneResult"], [["value", word, :Borrow], ["position", :U64, :Value]],
     [], [:ReadMemory], :Value, "")
-  context = native_value/body(context, name, [
+  context = native/define_function(context, name, [
     [:Let, "offset_result", result, [:Call, "value_string_byte_offset", "value", "position"]],
     [:If, [:Field, "offset_result", "ok"], [], [[:Return, [:Zero]]]],
     [:Let, "offset", :U64, [:Field, "offset_result", "number"]],
@@ -263,14 +263,14 @@ verb native_value/string_slice(input: map) -> map
   let word: list = native_value/word()
   let header: list = [:Record, "HeapString"]
   let result: list = [:Record, "ValueResult"]
-  context = native_value/function(context, name, result, [
+  context = native/declare_function(context, name, result, [
       ["arena", [:Pointer, [:Record, "ValueArena"], :Mutable], :Borrow],
       ["value", word, [:Borrow, "arena"]],
       ["start", :U64, :Value],
       ["end", :U64, :Value]
     ],
     [], [:Allocate, :ReadMemory, :WriteMemory], :Borrow, "arena")
-  context = native_value/body(context, name, [
+  context = native/define_function(context, name, [
     [:If, [:Less, "end", "start"], [[:Return, [:Zero]]], []],
     [:Let, "offset", [:Record, "IdResult"], [:Call, "value_string_byte_offset", "value", "start"]],
     [:Let, "condition", :Bool, [:Field, "offset", "ok"]],

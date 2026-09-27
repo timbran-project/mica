@@ -22,14 +22,14 @@ verb native_value/arena(input: map) -> map
   end
   context[:constants] = all_constants
   context[:state] = next
-  context = native_value/function(context, "allocate", bytes, [["size", :U64, :Value]], [], [:Allocate], :Owned, "")
+  context = native/declare_function(context, "allocate", bytes, [["size", :U64, :Value]], [], [:Allocate], :Owned, "")
   context[:state] = native/foreign(context[:state], context[:functions]["allocate"])
-  context = native_value/function(context, "release", :Void, [["allocation", bytes, :Consume]], [], [:Release], :Value, "")
+  context = native/declare_function(context, "release", :Void, [["allocation", bytes, :Consume]], [], [:Release], :Value, "")
   context[:state] = native/foreign(context[:state], context[:functions]["release"])
-  context = native_value/function(context, "value_arena_allocate", bytes, [["arena", arena_ptr, :Borrow], ["size", :U64, :Value]],
+  context = native/declare_function(context, "value_arena_allocate", bytes, [["arena", arena_ptr, :Borrow], ["size", :U64, :Value]],
     [["adopted", block_ptr]], [:ReadMemory, :WriteMemory, :Allocate], :Borrow, "arena")
   let failure: list = [[:Return, "null_bytes"]]
-  context = native_value/body(context, "value_arena_allocate", [
+  context = native/define_function(context, "value_arena_allocate", [
     [:Note, :Invariant, "Arena allocations remain stable and are aligned to eight bytes."],
     [:If, [:Equal, "size", "zero"], failure, []],
     [:If, [:Less, "allocation_limit", "size"], failure, []],
@@ -61,8 +61,8 @@ verb native_value/arena(input: map) -> map
     [:Let, "next_used", :U64, [:Add, "aligned", "size"]],
     [:Let, "used_slot", [:Pointer, :U64, :Mutable], [:FieldPointer, "adopted", "used"]],
     [:Do, [:Store, "used_slot", "next_used"]], [:Return, [:Offset, "data", "aligned"]]])
-  context = native_value/function(context, "value_arena_release", :Void, [["arena", arena_ptr, :Consume]], [], [:ReadMemory, :WriteMemory, :Release], :Value, "")
-  context = native_value/body(context, "value_arena_release", [
+  context = native/declare_function(context, "value_arena_release", :Void, [["arena", arena_ptr, :Consume]], [], [:ReadMemory, :WriteMemory, :Release], :Value, "")
+  context = native/define_function(context, "value_arena_release", [
     [:Let, "head_slot", [:Pointer, block_ptr, :Mutable], [:FieldPointer, "arena", "head"]],
     [:Let, "head", block_ptr, [:Load, "head_slot"]],
     [:While, "true", [

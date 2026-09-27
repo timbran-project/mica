@@ -20,6 +20,9 @@ const SOURCES: &[&str] = &[
     include_str!("../../../apps/native/storage.mica"),
     include_str!("../../../apps/native/contracts.mica"),
     include_str!("../../../apps/native/check.mica"),
+    include_str!("../../../apps/native/flow.mica"),
+    include_str!("../../../apps/native/c_syntax.mica"),
+    include_str!("../../../apps/native/c_flow.mica"),
     include_str!("../../../apps/native/c.mica"),
     include_str!("../../../apps/native/examples/scalars.mica"),
     include_str!("../../../apps/native/examples/values.mica"),
@@ -1081,7 +1084,30 @@ fn structured_builders_preserve_control_flow_and_notes() {
         assert!(generated.contains("apps/native/tests/structured.mica: native/structured_example"));
         assert!(generated.contains("Nested calls execute left to right."));
         assert!(generated.contains("Allowed effects:"));
-        assert!(generated.contains("while_condition"));
+        assert!(generated.contains("while (v_i < v_limit) {"));
+        assert!(generated.contains("switch ("));
+        assert!(generated.contains("} else if ("));
+        assert!(!generated.contains("uint64_t mica_structured_sum(uint64_t v_limit);"));
+        assert!(generated.contains("uint64_t mica_cycle_a(uint64_t v_n);"));
+        assert!(!generated.contains("uint64_t mica_cycle_b(uint64_t v_n);"));
+        // Only the irreducible cycle and a loop exit inside a switch need labels.
+        let sum = generated
+            .split("uint64_t mica_structured_sum(uint64_t v_limit) {")
+            .nth(1)
+            .unwrap()
+            .split("\n}")
+            .next()
+            .unwrap();
+        assert!(!sum.contains("goto "), "{sum}");
+        let shared = generated
+            .split("uint64_t mica_structured_shared_tail(uint64_t v_limit) {")
+            .nth(1)
+            .unwrap()
+            .split("\n}")
+            .next()
+            .unwrap();
+        assert!(!shared.contains("goto "), "{shared}");
+        assert_eq!(shared.matches("mica_foreign_structured_tick()").count(), 1);
         assert!(!generated.contains("\n#error injected"));
         let reordered = eval(
             &mut runner,
@@ -1130,6 +1156,13 @@ int main(void) {{
         for (uint64_t i = 1; i <= limit && i < 10; ++i) if (i != 3) sum += i;
         assert(mica_structured_sum(limit) == sum);
         assert(mica_structured_nested(limit) == (limit >= 2 ? limit : 0));
+        assert(mica_structured_dispatch(limit) == (limit >= 1 && limit <= 3 ? limit : 10));
+        assert(mica_structured_ladder(limit) == (limit == 0 ? 11 : limit == 1 ? 12 : 13));
+        assert(mica_structured_loop_switch(limit) == (limit >= 2 ? 11 : 0));
+        assert(mica_irreducible(limit, true) == (limit ? limit : 1));
+        assert(mica_irreducible(limit, false) == (limit ? limit : 1));
+        assert(mica_cycle_a(limit) == (limit % 2 ? 2 : 1));
+        assert(mica_cycle_b(limit) == (limit % 2 ? 1 : 2));
     }}
     assert(mica_structured_choice(true) == 1);
     assert(mica_structured_choice(false) == 2);
@@ -1137,6 +1170,12 @@ int main(void) {{
     assert(mica_structured_zero(true) == 0 && calls == 3);
     assert(mica_structured_zero(false) == 0 && calls == 4);
     mica_structured_void();
+    calls = 0;
+    assert(mica_structured_tick_switch() == 10 && calls == 1);
+    calls = 0;
+    assert(mica_structured_shared_tail(0) == 11 && calls == 1);
+    assert(mica_structured_shared_tail(2) == 0 && calls == 1);
+    assert(mica_structured_shared_tail(3) == 12 && calls == 2);
     return 0;
 }}
 "#
@@ -1169,6 +1208,50 @@ int main(void) {{
         assert!(executed.status.success(), "{executed:?}");
         assert!(executed.stderr.is_empty(), "{executed:?}");
     }
+}
+
+#[test]
+fn graph_traversal_uses_work_stacks_for_long_chains() {
+    let mut runner = runner(true);
+    let mut source = String::from(
+        "let [constants, state] = native/constants(native/program(), [[\"one\", :U64, \"0000000000000001\"]])\n\
+         let context = native/module_context(state, constants)\n",
+    );
+    for i in 0..80 {
+        source.push_str(&format!(
+            "context = native/declare_function(context, \"chain_{i}\", :U64, [], [], [], :Value, \"\")\n"
+        ));
+    }
+    for i in 0..80 {
+        let value = if i == 79 {
+            "\"one\"".to_owned()
+        } else {
+            format!("native/call_expression(\"chain_{}\", [])", i + 1)
+        };
+        source.push_str(&format!(
+            "context = native/define_function(context, \"chain_{i}\", [native/return_value({value})])\n"
+        ));
+    }
+    let blocks: Vec<String> = (0..80).map(|i| format!("step_{i}")).collect();
+    source.push_str(&format!(
+        "let [id, names, declared] = native/function_scope(context[:state], \"blocks\", :U64, [], [], {blocks:?})\nstate = declared\n"
+    ));
+    for i in 0..79 {
+        source.push_str(&format!(
+            "state = native/terminate(state, names[\"step_{i}\"], :Jump, [names[\"step_{}\"]])\n",
+            i + 1
+        ));
+    }
+    source.push_str(
+        "state = native/terminate(state, names[\"step_79\"], :Return, [constants[\"one\"]])\nreturn native/emit_c(state)",
+    );
+    let generated = eval(&mut runner, &source).with_str(str::to_owned).unwrap();
+    assert!(!generated.contains("goto "));
+    assert!(!generated.contains("uint64_t mica_chain_0(void);"));
+    assert!(
+        generated.find("mica_chain_79(void) {").unwrap()
+            < generated.find("mica_chain_0(void) {").unwrap()
+    );
 }
 
 #[test]
@@ -1206,6 +1289,14 @@ state = declared
             "duplicate structured local",
         ),
         ("[[:Return, \"missing\"]]", "unknown structured operand"),
+        (
+            "[native/switch_statement(:U64, \"one\", [native/case_arm(\"one\", [native/return_value(\"one\")]), native/case_arm(\"one\", [native/return_value(\"one\")])], [native/return_value(\"one\")])]",
+            "duplicate Switch case",
+        ),
+        (
+            "[native/switch_statement(:U64, \"one\", [native/case_arm(\"condition\", [native/return_value(\"one\")])], [native/return_value(\"one\")])]",
+            "Switch case must be a constant",
+        ),
     ] {
         let source = format!(
             "{prefix}\ntry\n state = native/function_body(state, fn_id, names, {body})\n native/emit_c(state)\n return \"accepted\"\ncatch E_INVARG as problem\n return native/error_message(problem)\nend"

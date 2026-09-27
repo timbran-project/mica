@@ -22,19 +22,19 @@ verb native_value/codec(input: map) -> map
     bindings[name] = id
   end
   context[:constants] = bindings
-  context = native_value/function(context, "codec_header", :Bool, [arena, buffer, ["kind", :U8, :Value], ["aux", :U64, :Value]], [],
+  context = native/declare_function(context, "codec_header", :Bool, [arena, buffer, ["kind", :U8, :Value], ["aux", :U64, :Value]], [],
     [:Allocate, :ReadMemory, :WriteMemory], :Value, "")
-  context = native_value/body(context, "codec_header", [
+  context = native/define_function(context, "codec_header", [
     [:If, [:Less, "codec_aux_mask", "aux"], [[:Return, "false"]], []],
     [:Let, "kind_bits", :U64, [:ShiftLeft, [:Expr, :U64, [:Convert, "kind"]], "codec_kind_shift"]],
     [:Let, "header", :U64, [:BitOr, "codec_extended", "kind_bits"]], [:Set, "header", [:BitOr, "header", "aux"]],
     [:Return, [:Call, "buffer_word", "arena", "buffer", "header"]]])
-  context = native_value/function(context, "codec_encode", :Bool, [arena, table, buffer, ["value", word, :Borrow], ["options", options, :Value]], [],
+  context = native/declare_function(context, "codec_encode", :Bool, [arena, table, buffer, ["value", word, :Borrow], ["options", options, :Value]], [],
     [:Allocate, :ReadMemory, :WriteMemory, :Block], :Value, "")
   context = native_value/codec_encode(context)
-  context = native_value/function(context, "value_encode", [:Record, "ValueResult"], [arena, table, ["value", word, :Borrow], ["options", options, :Value]], [],
+  context = native/declare_function(context, "value_encode", [:Record, "ValueResult"], [arena, table, ["value", word, :Borrow], ["options", options, :Value]], [],
     [:Allocate, :ReadMemory, :WriteMemory, :Block], :Borrow, "arena")
-  context = native_value/body(context, "value_encode", [
+  context = native/define_function(context, "value_encode", [
     [:Let, "buffer", [:Pointer, [:Record, "ValueBuffer"], :Mutable], [:Call, "value_buffer", "arena"]],
     [:If, [:Equal, "buffer", "null_buffer"], [[:Return, [:Zero]]], []],
     [:If, [:Call, "codec_encode", "arena", "table", "buffer", "value", "options"], [], [[:Return, [:Zero]]]],
@@ -162,6 +162,6 @@ verb native_value/codec_encode(input: map) -> map
           [:Let, "cell", word, [:Load, [:Expr, [:Pointer, word, :Mutable], [:Offset, "cells", "column"]]]], @native_value/encode_child("cell"),
           [:Set, "column", [:Add, "column", "one"]]]], [:Set, "row", [:Add, "row", "one"]]]], [:Return, "true"]], []],
     [:Return, "false"]]
-  context = native_value/body(context, "codec_encode", rows)
+  context = native/define_function(context, "codec_encode", rows)
   return context
 end

@@ -1,0 +1,309 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+verb native/group_rows(rows: list, column: int) -> map
+  let groups: map = {}
+  for row in rows
+    let key = row[column]
+    let group: list = []
+    if map_contains_key(groups, key)
+      group = groups[key]
+    end
+    groups[key] = [@group, row]
+  end
+  return groups
+end
+
+// Index once for emission, rather than scanning every instruction for each
+// basic block. These indexes belong to this checked snapshot only.
+verb native/emission_index(state: map, checked: map) -> map
+  let index: map = checked
+  index[:function_blocks] = native/group_rows(state[:blocks], 1)
+  let instructions: map = native/group_rows(state[:instructions], 1)
+  for row in state[:blocks]
+    let rows: list = []
+    if map_contains_key(instructions, row[0])
+      rows = instructions[row[0]]
+    end
+    instructions[row[0]] = native/ordered(rows, 2)
+  end
+  index[:block_instructions] = instructions
+  return index
+end
+
+// Visit callees before callers. Only a back edge to another active function
+// needs a prototype; a function's own definition already declares recursion.
+verb native/function_order(state: map, index: map) -> map
+  let calls: map = {}
+  for row in state[:functions]
+    calls[row[0]] = []
+  end
+  for row in state[:instructions]
+    if row[3] == :Call
+      let owner: int = index[:blocks][row[1]][1]
+      calls[owner] = [@calls[owner], row[5][0]]
+    end
+  end
+  for id, targets in calls
+    calls[id] = [pair[1] for pair in sort([[index[:functions][target][1], target] for target in targets])]
+  end
+  let active: map = {}
+  let done: map = {}
+  let order: list = []
+  let declarations: map = {}
+  for row in native/ordered(state[:functions], 1)
+    let stack: map = {0 -> [row[0], row[0], false]}
+    let depth: int = 0
+    while depth >= 0
+      let frame: list = stack[depth]
+      depth = depth - 1
+      let id: int = frame[0]
+      if map_contains_key(done, id)
+        continue
+      end
+      if frame[2]
+        done[id] = true
+        order = [@order, id]
+        continue
+      end
+      if map_contains_key(active, id)
+        if id != frame[1]
+          declarations[id] = true
+        end
+        continue
+      end
+      active[id] = true
+      depth = depth + 1
+      stack[depth] = [id, id, true]
+      let position: int = len(calls[id]) - 1
+      while position >= 0
+        depth = depth + 1
+        stack[depth] = [calls[id][position], id, false]
+        position = position - 1
+      end
+    end
+  end
+  return {:order -> order, :declare -> declarations}
+end
+
+// Both analyses use a fixed point over the checked graph. Postdominators have
+// a virtual exit; non-returning regions have no common return continuation.
+verb native/flow_sets(order: list, incoming: map, root, live: list) -> map
+  let universe: map = {}
+  for id in live
+    universe[id] = true
+  end
+  let sets: map = {root -> {root -> true}}
+  for id in order
+    sets[id] = {id -> true}
+    if map_contains_key(universe, id) && id != root
+      sets[id] = universe
+    end
+  end
+  let changed: bool = true
+  while changed
+    changed = false
+    for id in order
+      if id == root || !map_contains_key(universe, id)
+        continue
+      end
+      let common: map = universe
+      for predecessor in incoming[id]
+        let intersection: map = {}
+        for item, present in common
+          if map_contains_key(sets[predecessor], item)
+            intersection[item] = true
+          end
+        end
+        common = intersection
+      end
+      common[id] = true
+      if common != sets[id]
+        sets[id] = common
+        changed = true
+      end
+    end
+  end
+  return sets
+end
+
+// Explicit work stacks keep graph depth independent of Mica's call limit.
+verb native/flow_postorder(terms: map, entry: int) -> list
+  let seen: map = {}
+  let order: list = []
+  let stack: map = {0 -> [entry, false]}
+  let depth: int = 0
+  while depth >= 0
+    let frame: list = stack[depth]
+    depth = depth - 1
+    let block: int = frame[0]
+    if frame[1]
+      order = [@order, block]
+      continue
+    end
+    if map_contains_key(seen, block)
+      continue
+    end
+    seen[block] = true
+    depth = depth + 1
+    stack[depth] = [block, true]
+    let targets: list = native/targets(terms[block])
+    let position: int = len(targets) - 1
+    while position >= 0
+      depth = depth + 1
+      stack[depth] = [targets[position], false]
+      position = position - 1
+    end
+  end
+  return order
+end
+
+verb native/flow_analysis(state: map, index: map, fn_id: int) -> map
+  let blocks: list = index[:function_blocks][fn_id]
+  let entry: int = [row[0] for row in blocks if row[3]][0]
+  let postorder: list = native/flow_postorder(index[:terms], entry)
+  let order: list = []
+  for id in postorder
+    order = [id, @order]
+  end
+  let instructions: map = {}
+  let predecessors: map = {}
+  let successors: map = {}
+  let uses: map = {}
+  for id in order
+    instructions[id] = index[:block_instructions][id]
+    predecessors[id] = []
+  end
+  let exits: list = []
+  for id in order
+    let term: list = index[:terms][id]
+    let targets: list = native/targets(term)
+    for target in targets
+      predecessors[target] = [@predecessors[target], id]
+    end
+    if term[1] == :Return
+      exits = [@exits, id]
+      targets = [:Exit]
+    end
+    successors[id] = targets
+    let reads: list = [native/reads(row) for row in instructions[id]]
+    if term[1] != :Jump && len(term[2]) > 0
+      reads = [@reads, [term[2][0]]]
+    end
+    for group in reads
+      for operand in group
+        let count: int = 0
+        if map_contains_key(uses, operand)
+          count = uses[operand]
+        end
+        uses[operand] = count + 1
+      end
+    end
+  end
+  let live: list = exits
+  let cursor: int = 0
+  while cursor < len(live)
+    for predecessor in predecessors[live[cursor]]
+      if !native/contains(live, predecessor)
+        live = [@live, predecessor]
+      end
+    end
+    cursor = cursor + 1
+  end
+  let dominators: map = native/flow_sets(order, predecessors, entry, order)
+  let postdominators: map = native/flow_sets(postorder, successors, :Exit, [@live, :Exit])
+  let joins: map = {}
+  for id in order
+    let join = :Exit
+    let size: int = 0
+    for candidate, present in postdominators[id]
+      if candidate != id && len(postdominators[candidate]) > size
+        join = candidate
+        size = len(postdominators[candidate])
+      end
+    end
+    joins[id] = join
+  end
+  let loops: map = {}
+  for tail in order
+    for header in native/targets(index[:terms][tail])
+      if !map_contains_key(dominators[tail], header)
+        continue
+      end
+      let members: list = [header]
+      let pending: list = [tail]
+      let position: int = 0
+      while position < len(pending)
+        let id: int = pending[position]
+        position = position + 1
+        if native/contains(members, id)
+          continue
+        end
+        members = [@members, id]
+        pending = [@pending, @predecessors[id]]
+      end
+      if map_contains_key(loops, header)
+        members = [@members, @[id for id in loops[header][:members] if !native/contains(members, id)]]
+      end
+      loops[header] = {:members -> members, :exit -> :Exit}
+    end
+  end
+  for header, loop in loops
+    let outside: list = [id for id in native/targets(index[:terms][header]) if !native/contains(loop[:members], id)]
+    if len(outside) == 1
+      loop[:exit] = outside[0]
+    else
+      if !native/contains(loop[:members], joins[header])
+        loop[:exit] = joins[header]
+      end
+    end
+    loops[header] = loop
+  end
+  return {:entry -> entry, :order -> order, :instructions -> instructions, :predecessors -> predecessors,
+    :joins -> joins, :loops -> loops, :uses -> uses, :dominators -> dominators}
+end
+
+verb native/flow_distances(terms: map, start: int, boundary: int) -> map
+  let distances: map = {start -> 0}
+  let pending: list = [start]
+  let cursor: int = 0
+  while cursor < len(pending)
+    let block: int = pending[cursor]
+    cursor = cursor + 1
+    for target in native/targets(terms[block])
+      if target != boundary && !map_contains_key(distances, target)
+        distances[target] = distances[block] + 1
+        pending = [@pending, target]
+      end
+    end
+  end
+  return distances
+end
+
+// An early return in one arm prevents a strict postdominator even when both
+// successful paths share a tail. Factor a nearby shared entry only when both
+// arms can reach it without re-entering this branch. Other paths still return
+// or transfer explicitly; they cannot fall through into the factored tail.
+verb native/flow_shared_tail(index: map, flow: map, block: int)
+  let arms: list = native/targets(index[:terms][block])
+  let candidates: list = []
+  for candidate in [arms[0], arms[1], flow[:joins][arms[0]], flow[:joins][arms[1]]]
+    if candidate != :Exit && !map_contains_key(flow[:dominators][block], candidate) && !native/flow_inline_return(index, flow, candidate) && len(flow[:predecessors][candidate]) > 1
+      candidates = [@candidates, candidate]
+    end
+  end
+  if len(candidates) == 0
+    return :Exit
+  end
+  let left: map = native/flow_distances(index[:terms], arms[0], block)
+  let right: map = native/flow_distances(index[:terms], arms[1], block)
+  let join = :Exit
+  let distance: int = len(flow[:order]) * 2 + 1
+  for candidate in candidates
+    if map_contains_key(left, candidate) && map_contains_key(right, candidate) && left[candidate] + right[candidate] < distance
+      join = candidate
+      distance = left[candidate] + right[candidate]
+    end
+  end
+  return join
+end

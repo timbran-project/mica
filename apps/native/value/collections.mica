@@ -27,11 +27,11 @@ verb native_value/list_allocation(input: map) -> map
     bindings[name] = id
   end
   context[:constants] = bindings
-  context = native_value/function(context, "list_allocate", pointer, [
+  context = native/declare_function(context, "list_allocate", pointer, [
     ["arena", [:Pointer, [:Record, "ValueArena"], :Mutable], :Borrow],
     ["length", :U64, :Value], ["capacity", :U64, :Value]], [],
     [:Allocate, :ReadMemory, :WriteMemory], :Borrow, "arena")
-  context = native_value/body(context, "list_allocate", [
+  context = native/define_function(context, "list_allocate", [
     [:If, [:Less, "capacity", "length"], [[:Return, "null_list_header"]], []],
     [:Let, "header_size", :U64, [:SizeOf, header]],
     [:Let, "storage_size", :U64, [:SizeOf, storage]],
@@ -52,11 +52,11 @@ verb native_value/list_allocation(input: map) -> map
     [:Do, [:Store, "backing", [:Expr, storage, [:Record, "data", "length", "capacity"]]]],
     [:Do, [:Store, "target", [:Expr, header, [:Record, "data", "length", "backing"]]]],
     [:Return, "target"]])
-  context = native_value/function(context, "value_list", [:Record, "ValueResult"], [
+  context = native/declare_function(context, "value_list", [:Record, "ValueResult"], [
     ["arena", [:Pointer, [:Record, "ValueArena"], :Mutable], :Borrow],
     ["source", [:Pointer, word, :Const], [:Borrow, "arena"]], ["length", :U64, :Value]], [],
     [:Allocate, :ReadMemory, :WriteMemory], :Borrow, "arena")
-  context = native_value/body(context, "value_list", [
+  context = native/define_function(context, "value_list", [
     [:If, [:Equal, "length", "zero"], [], [
       [:If, [:Equal, "source", "null_values"], [[:Return, [:Zero]]], []]]],
     [:Let, "target", pointer, [:Call, "list_allocate", "arena", "length", "length"]],
@@ -86,8 +86,8 @@ verb native_value/list_operations(input: map) -> map
       record = [:Record, "HeapMap"]
     end
     let name: string = string_concat("value_", kind, "_length")
-    context = native_value/function(context, name, [:Record, "IdResult"], [["value", word, :Borrow]], [], [:ReadMemory], :Value, "")
-    context = native_value/body(context, name, [
+    context = native/declare_function(context, name, [:Record, "IdResult"], [["value", word, :Borrow]], [], [:ReadMemory], :Value, "")
+    context = native/define_function(context, name, [
       [:If, [:Equal, [:Expr, :U8, [:Tag, "value"]], string_concat("tag_", kind)], [], [[:Return, [:Zero]]]],
       [:Let, "pointer", [:Pointer, record, :Const], [:UnpackPointer, "value"]],
       [:Let, "header", record, [:Load, "pointer"]],
@@ -99,14 +99,14 @@ verb native_value/list_operations(input: map) -> map
     [:Let, "header", header, [:Load, "pointer"]],
     [:Let, "data", values, [:Field, "header", "data"]],
     [:Let, "length", :U64, [:Field, "header", "length"]]]
-  context = native_value/function(context, "value_list_get", result, [["value", word, :Borrow], ["index", :U64, :Value]], [], [:ReadMemory], :Borrow, "value")
-  context = native_value/body(context, "value_list_get", [@read,
+  context = native/declare_function(context, "value_list_get", result, [["value", word, :Borrow], ["index", :U64, :Value]], [], [:ReadMemory], :Borrow, "value")
+  context = native/define_function(context, "value_list_get", [@read,
     [:If, [:Less, "index", "length"], [], [[:Return, [:Zero]]]],
     [:Let, "slot", values, [:Offset, "data", "index"]],
     [:Return, [:Record, "true", [:Expr, word, [:Load, "slot"]]]]])
-  context = native_value/function(context, "value_list_slice", result, [arena, ["value", word, [:Borrow, "arena"]],
+  context = native/declare_function(context, "value_list_slice", result, [arena, ["value", word, [:Borrow, "arena"]],
     ["start", :U64, :Value], ["end", :U64, :Value]], [], [:Allocate, :ReadMemory, :WriteMemory], :Borrow, "arena")
-  context = native_value/body(context, "value_list_slice", [@read,
+  context = native/define_function(context, "value_list_slice", [@read,
     [:If, [:Less, "end", "start"], [[:Return, [:Zero]]], []],
     [:If, [:Less, "length", "end"], [[:Return, [:Zero]]], []],
     [:Let, "size", :U64, [:SizeOf, header]],
@@ -118,9 +118,9 @@ verb native_value/list_operations(input: map) -> map
     [:Let, "storage", [:Pointer, [:Record, "ListStorage"], :Mutable], [:Field, "header", "storage"]],
     [:Do, [:Store, "target", [:Expr, header, [:Record, "data", "length", "storage"]]]],
     [:Return, [:Record, "true", [:Expr, word, [:PackPointer, "target", "tag_list"]]]]])
-  context = native_value/function(context, "value_list_set", result, [arena, ["value", word, [:Borrow, "arena"]],
+  context = native/declare_function(context, "value_list_set", result, [arena, ["value", word, [:Borrow, "arena"]],
     ["index", :U64, :Value], ["element", word, [:Borrow, "arena"]]], [], [:Allocate, :ReadMemory, :WriteMemory], :Borrow, "arena")
-  context = native_value/body(context, "value_list_set", [@read,
+  context = native/define_function(context, "value_list_set", [@read,
     [:If, [:Less, "index", "length"], [], [[:Return, [:Zero]]]],
     [:Let, "source", [:Pointer, word, :Const], [:Freeze, "data"]],
     [:Let, "copied", result, [:Call, "value_list", "arena", "source", "length"]],
@@ -131,9 +131,9 @@ verb native_value/list_operations(input: map) -> map
     [:Set, "data", [:Field, "header", "data"]],
     [:Let, "slot", values, [:Offset, "data", "index"]],
     [:Do, [:Store, "slot", "element"]], [:Return, "copied"]])
-  context = native_value/function(context, "value_list_append", result, [arena, ["value", word, [:Borrow, "arena"]],
+  context = native/declare_function(context, "value_list_append", result, [arena, ["value", word, [:Borrow, "arena"]],
     ["element", word, [:Borrow, "arena"]]], [], [:Allocate, :ReadMemory, :WriteMemory], :Borrow, "arena")
-  context = native_value/body(context, "value_list_append", [@read,
+  context = native/define_function(context, "value_list_append", [@read,
     [:Let, "storage", [:Pointer, [:Record, "ListStorage"], :Mutable], [:Field, "header", "storage"]],
     [:Let, "backing", [:Record, "ListStorage"], [:Load, "storage"]],
     [:Let, "base", values, [:Field, "backing", "data"]],
@@ -183,11 +183,11 @@ verb native_value/map_update(input: map) -> map
   let header: list = [:Record, "HeapMap"]
   let entry: list = [:Record, "ValueMapEntry"]
   let entries: list = [:Pointer, entry, :Mutable]
-  context = native_value/function(context, "value_map_set", [:Record, "ValueResult"], [
+  context = native/declare_function(context, "value_map_set", [:Record, "ValueResult"], [
     ["arena", [:Pointer, [:Record, "ValueArena"], :Mutable], :Borrow],
     ["value", word, [:Borrow, "arena"]], ["key", word, [:Borrow, "arena"]],
     ["element", word, [:Borrow, "arena"]]], [], [:Allocate, :ReadMemory, :WriteMemory], :Borrow, "arena")
-  context = native_value/body(context, "value_map_set", [
+  context = native/define_function(context, "value_map_set", [
     [:If, [:Equal, [:Expr, :U8, [:Tag, "value"]], "tag_map"], [], [[:Return, [:Zero]]]],
     [:Let, "pointer", [:Pointer, header, :Const], [:UnpackPointer, "value"]],
     [:Let, "header", header, [:Load, "pointer"]],

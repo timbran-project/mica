@@ -6,32 +6,32 @@ verb native_value/immediates(input: map) -> map
   let word = native_value/word()
   let result = [:Record, "ValueResult"]
   let failure: list = [[:Return, [:Zero]]]
-  context = native_value/function(context, "value_empty_relation", word, [], [], [], :Immediate, "")
-  context = native_value/body(context, "value_empty_relation", [[:Return, [:Zero]]])
-  context = native_value/function(context, "value_tag", :U8, [["value", word, :Borrow]], [], [], :Value, "")
-  context = native_value/body(context, "value_tag", [[:Return, [:Tag, "value"]]])
-  context = native_value/function(context, "value_kind", :U8, [["value", word, :Borrow]], [], [], :Value, "")
-  context = native_value/body(context, "value_kind", [
+  context = native/declare_function(context, "value_empty_relation", word, [], [], [], :Immediate, "")
+  context = native/define_function(context, "value_empty_relation", [[:Return, [:Zero]]])
+  context = native/declare_function(context, "value_tag", :U8, [["value", word, :Borrow]], [], [], :Value, "")
+  context = native/define_function(context, "value_tag", [[:Return, [:Tag, "value"]]])
+  context = native/declare_function(context, "value_kind", :U8, [["value", word, :Borrow]], [], [], :Value, "")
+  context = native/define_function(context, "value_kind", [
     [:Let, "tag", :U8, [:Tag, "value"]],
     [:If, [:Equal, "tag", "zero_tag"], [[:Return, "tag_relation"]], []], [:Return, "tag"]])
-  context = native_value/function(context, "value_bool", word, [["input", :Bool, :Value]], [], [], :Immediate, "")
-  context = native_value/body(context, "value_bool", [[:If, "input",
+  context = native/declare_function(context, "value_bool", word, [["input", :Bool, :Value]], [], [], :Immediate, "")
+  context = native/define_function(context, "value_bool", [[:If, "input",
     [[:Return, [:PackImmediate, "one", "tag_bool"]]], [[:Return, [:PackImmediate, "zero", "tag_bool"]]]]])
-  context = native_value/function(context, "value_int", result, [["input", :I64, :Value]], [], [], :Immediate, "")
-  context = native_value/body(context, "value_int", [
+  context = native/declare_function(context, "value_int", result, [["input", :I64, :Value]], [], [], :Immediate, "")
+  context = native/define_function(context, "value_int", [
     [:Note, :Invariant, "Signed integer payloads fit 56 bits."],
     [:If, [:Less, "input", "int_min"], failure, []], [:If, [:Less, "int_max", "input"], failure, []],
     [:Let, "bits", :U64, [:Convert, "input"]], [:Let, "payload", :U64, [:BitAnd, "bits", "payload_mask"]],
     [:Return, [:Record, "true", [:Expr, word, [:PackImmediate, "payload", "tag_int"]]]]])
-  context = native_value/function(context, "value_float", result, [["input", :F32, :Value]], [["bits", :U32]], [], :Immediate, "")
-  context = native_value/body(context, "value_float", [
+  context = native/declare_function(context, "value_float", result, [["input", :F32, :Value]], [["bits", :U32]], [], :Immediate, "")
+  context = native/define_function(context, "value_float", [
     [:Note, :Invariant, "Float values are finite binary32; both zero signs encode positive zero."],
     [:If, [:IsFinite, "input"], [], failure],
     [:If, [:Equal, "input", "float_zero"], [[:Set, "bits", "u32_zero"]], [[:Set, "bits", [:Bitcast, "input"]]]],
     [:Let, "payload", :U64, [:Convert, "bits"]],
     [:Return, [:Record, "true", [:Expr, word, [:PackImmediate, "payload", "tag_float"]]]]])
-  context = native_value/function(context, "value_float_from_bits", result, [["bits", :U32, :Value]], [], [], :Immediate, "")
-  context = native_value/body(context, "value_float_from_bits", [[:Return, [:Call, "value_float", [:Expr, :F32, [:Bitcast, "bits"]]]]])
+  context = native/declare_function(context, "value_float_from_bits", result, [["bits", :U32, :Value]], [], [], :Immediate, "")
+  context = native/define_function(context, "value_float_from_bits", [[:Return, [:Call, "value_float", [:Expr, :F32, [:Bitcast, "bits"]]]]])
   for name in ["identity", "capability", "function", "symbol", "error_code"]
     context = native_value/id_constructor(context, name)
   end
@@ -52,13 +52,13 @@ verb native_value/id_constructor(input: map, kind: string) -> map
   end
   let word = native_value/word()
   let result = [:Record, "ValueResult"]
-  context = native_value/function(context, name, result, [["input", source, :Value]], [], [], :Immediate, "")
+  context = native/declare_function(context, name, result, [["input", source, :Value]], [], [], :Immediate, "")
   let statements: list = [[:Let, "payload", :U64, [:Convert, "input"]],
     [:If, [:Less, "payload_mask", "payload"], [[:Return, [:Zero]]], []]]
   if kind == "capability"
     statements = [@statements, [:If, [:Equal, "payload", "zero"], [[:Return, [:Zero]]], []]]
   end
-  context = native_value/body(context, name, [@statements,
+  context = native/define_function(context, name, [@statements,
     [:Return, [:Record, "true", [:Expr, word, [:PackImmediate, "payload", string_concat("tag_", kind)]]]]])
   return context
 end
@@ -67,12 +67,12 @@ verb native_value/immediate_accessor(input: map, spec: list) -> map
   let context: map = input
   let name = string_concat("value_as_", spec[0])
   let result = [:Record, spec[2]]
-  context = native_value/function(context, name, result, [["value", native_value/word(), :Borrow]], [], [], :Value, "")
+  context = native/declare_function(context, name, result, [["value", native_value/word(), :Borrow]], [], [], :Value, "")
   let statements: list = [[:Let, "tag", :U8, [:Tag, "value"]],
     [:If, [:Equal, "tag", string_concat("tag_", spec[0])], [], [[:Return, [:Zero]]]],
     [:Let, "payload", :U64, [:Payload, "value"]]]
   if spec[0] == "bool"
-    context = native_value/body(context, name, [@statements, [:If, [:Equal, "payload", "zero"],
+    context = native/define_function(context, name, [@statements, [:If, [:Equal, "payload", "zero"],
       [[:Return, [:Record, "true", "false"]]], [[:Return, [:Record, "true", "true"]]]]])
     return context
   end
@@ -86,6 +86,6 @@ verb native_value/immediate_accessor(input: map, spec: list) -> map
     statements = [@statements, [:Let, "bits", :U32, [:Convert, "payload"]]]
     expression = [:Bitcast, "bits"]
   end
-  context = native_value/body(context, name, [@statements, [:Let, "number", spec[1], expression], [:Return, [:Record, "true", "number"]]])
+  context = native/define_function(context, name, [@statements, [:Let, "number", spec[1], expression], [:Return, [:Record, "true", "number"]]])
   return context
 end
