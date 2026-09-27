@@ -22,7 +22,7 @@ Passing an early workstream does not complete this plan.
 | Query and storage execution | Measured columnar/storage improvements that preserve incremental maintenance | Persistent rule collections, indexed recursive reseeding, retained visible rows, and retained derived indexes measured; initial derivation remains open |
 | Query measurements | Separate initial derivation and small-update maintenance workloads | Implemented and measured; Rust has substantial initial and recursive-deletion costs |
 | Mica compiler | Ported compiler with an intentional Rust assembly interface and bootstrap conformance | Assembly, frontend, bootstrap, collections, closures, exceptions, and relation operations implemented; further donor features and public installation remain |
-| Ingestion | Ported ingestion applications with verified loaded facts and inference results | OWL batches, streaming input, durable resume, CycL census, and scoped sample implemented; comparative ingestion measurements remain |
+| Ingestion | Ported ingestion applications with verified loaded facts and inference results | OWL batches, streaming input, durable resume, CycL census, and scoped sample implemented; initial ingestion comparison measured; OWL load performance remains open |
 
 ## RFC cross-check
 
@@ -406,3 +406,10 @@ The donor's full dump router is not implemented. This port does not claim to add
 
 The OWL workspace run and workspace clippy pass. Focused CycL parser and cross-schema sample tests also pass.
 The CLI regression verifies gzip census without a store, strict import, separate-process resume, completion, and actor mismatch rejection.
+
+The first corrected ingestion capture passes all 12 processes at Rust `64e4bd4` and Odin `bfb368c`.
+Strict OWL loading of 1,001 subjects and 2,001 facts takes 162.6 ms in Rust versus 21.4 ms in Odin.
+Peak RSS is approximately 20.7 MiB versus 10.9 MiB. This capture excludes rules and separates setup and persisted-result verification from loading.
+The 100,000-assertion CycL census takes 12.1 ms versus 94.7 ms, with approximately 4.8 MiB versus 112.8 MiB peak RSS.
+Odin includes schema initialization. Its pinned schema conflicts with `Arity/2`, so the capture records a namespaced-schema adaptation.
+The initial failed verification and schema runs remain in the evidence. They do not contribute accepted timing summaries.
