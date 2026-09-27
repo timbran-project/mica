@@ -1,0 +1,104 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+verb native_value/numbers(input)
+  let context = input
+  for spec in [["add", :CheckedAdd, :Add], ["sub", :CheckedSubtract, :Subtract],
+               ["mul", :CheckedMultiply, :Multiply], ["div", :CheckedDivide, :Divide],
+               ["rem", :CheckedRemainder, :Remainder]]
+    context = native_value/binary_number(context, spec)
+  end
+  for name in ["value_checked_neg", "value_to_int", "value_to_float"]
+    context = native_value/unary_number(context, name)
+  end
+  return context
+end
+
+verb native_value/binary_number(input, spec)
+  let context = input
+  let name = string_concat("value_checked_", spec[0])
+  let word = native_value/word()
+  let result = [:Record, "ValueResult"]
+  let ir = [:Record, "IntResult"]
+  let fr = [:Record, "FloatResult"]
+  let blocks = ["entry", "kinds", "int_case", "int_args", "int_compute", "int_pack", "float_kind", "float_args", "float_compute", "failure"]
+  if spec[0] == "div"
+    blocks = [@blocks, "int_exact"]
+  end
+  if spec[0] == "div" || spec[0] == "rem"
+    blocks = [@blocks, "float_nonzero"]
+  end
+  context = native_value/function(context, name, result, [["left", word, :Borrow], ["right", word, :Borrow]],
+    [["ltag", :U8], ["rtag", :U8], ["condition", :Bool], ["li", ir], ["ri", ir], ["checked", ir],
+     ["lf", fr], ["rf", fr], ["a", :I64], ["b", :I64], ["integer", :I64],
+     ["x", :F32], ["y", :F32], ["quotient", :F32], ["truncated", :F32], ["product", :F32], ["number", :F32], ["result", result]], blocks, [], :Immediate, "")
+  context = native_value/block(context, name, "entry", [[:Tag, "ltag", ["left"]], [:Tag, "rtag", ["right"]], [:Equal, "condition", ["ltag", "rtag"]]], :Branch, ["condition", "kinds", "failure"])
+  context = native_value/block(context, name, "kinds", [[:Equal, "condition", ["ltag", "tag_int"]]], :Branch, ["condition", "int_case", "float_kind"])
+  context = native_value/block(context, name, "int_case", [[:Call, "li", ["value_as_int", "left"]], [:Call, "ri", ["value_as_int", "right"]]], :Jump, ["int_args"])
+  let int_next = "int_compute"
+  if spec[0] == "div"
+    int_next = "int_exact"
+    context = native_value/block(context, name, "int_exact", [[:CheckedRemainder, "checked", ["a", "b"]], [:Field, "condition", ["checked", "ok"]]], :Branch, ["condition", "int_compute", "failure"])
+    context = native_value/block(context, name, "int_compute", [[:Field, "integer", ["checked", "number"]], [:Equal, "condition", ["integer", "int_zero"]]], :Branch, ["condition", "int_pack", "failure"])
+    context = native_value/block(context, name, "int_pack", [[:CheckedDivide, "checked", ["a", "b"]], [:Field, "integer", ["checked", "number"]], [:Call, "result", ["value_int", "integer"]]], :Return, ["result"])
+  else
+    context = native_value/block(context, name, "int_compute", [[spec[1], "checked", ["a", "b"]], [:Field, "condition", ["checked", "ok"]]], :Branch, ["condition", "int_pack", "failure"])
+    context = native_value/block(context, name, "int_pack", [[:Field, "integer", ["checked", "number"]], [:Call, "result", ["value_int", "integer"]]], :Return, ["result"])
+  end
+  context = native_value/block(context, name, "int_args", [[:Field, "a", ["li", "number"]], [:Field, "b", ["ri", "number"]]], :Jump, [int_next])
+  context = native_value/block(context, name, "float_kind", [[:Equal, "condition", ["ltag", "tag_float"]]], :Branch, ["condition", "float_args", "failure"])
+  let float_next = "float_compute"
+  if spec[0] == "div" || spec[0] == "rem"
+    float_next = "float_nonzero"
+    context = native_value/block(context, name, "float_nonzero", [[:Equal, "condition", ["y", "float_zero"]]], :Branch, ["condition", "failure", "float_compute"])
+  end
+  context = native_value/block(context, name, "float_args", [[:Call, "lf", ["value_as_float", "left"]], [:Call, "rf", ["value_as_float", "right"]],
+    [:Field, "x", ["lf", "number"]], [:Field, "y", ["rf", "number"]]], :Jump, [float_next])
+  let float_ops = [[spec[2], "number", ["x", "y"]]]
+  if spec[0] == "rem"
+    // Omica's remainder is x - trunc(x/y)*y, not the C fmod operation.
+    float_ops = [[:Divide, "quotient", ["x", "y"]], [:Truncate, "truncated", ["quotient"]], [:Multiply, "product", ["truncated", "y"]], [:Subtract, "number", ["x", "product"]]]
+  end
+  context = native_value/block(context, name, "float_compute", [@float_ops, [:Call, "result", ["value_float", "number"]]], :Return, ["result"])
+  return native_value/block(context, name, "failure", [[:Zero, "result", []]], :Return, ["result"])
+end
+
+verb native_value/unary_number(input, name)
+  let context = input
+  let word = native_value/word()
+  let result = [:Record, "ValueResult"]
+  let ir = [:Record, "IntResult"]
+  let fr = [:Record, "FloatResult"]
+  let blocks = ["entry", "int_case", "float_kind", "float", "failure"]
+  if name == "value_to_int"
+    blocks = [@blocks, "convert", "pack"]
+  end
+  context = native_value/function(context, name, result, [["value", word, :Borrow]],
+    [["tag", :U8], ["condition", :Bool], ["ir", ir], ["fr", fr], ["integer", :I64], ["number", :F32],
+     ["converted", :F32], ["checked", ir], ["result", result]], blocks, [], :Immediate, "")
+  context = native_value/block(context, name, "entry", [[:Tag, "tag", ["value"]], [:Equal, "condition", ["tag", "tag_int"]]], :Branch, ["condition", "int_case", "float_kind"])
+  let int_ops = [[:Call, "ir", ["value_as_int", "value"]], [:Field, "integer", ["ir", "number"]]]
+  if name == "value_to_float"
+    int_ops = [@int_ops, [:Convert, "number", ["integer"]], [:Call, "result", ["value_float", "number"]]]
+  else
+    if name == "value_checked_neg"
+      // Every valid integer fits 56 bits, so I64 negation cannot overflow.
+      int_ops = [@int_ops, [:CheckedNegate, "checked", ["integer"]], [:Field, "integer", ["checked", "number"]]]
+    end
+    int_ops = [@int_ops, [:Call, "result", ["value_int", "integer"]]]
+  end
+  context = native_value/block(context, name, "int_case", int_ops, :Return, ["result"])
+  context = native_value/block(context, name, "float_kind", [[:Equal, "condition", ["tag", "tag_float"]]], :Branch, ["condition", "float", "failure"])
+  let float_ops = [[:Call, "fr", ["value_as_float", "value"]], [:Field, "number", ["fr", "number"]]]
+  if name == "value_to_int"
+    context = native_value/block(context, name, "float", [@float_ops, [:Truncate, "converted", ["number"]], [:Equal, "condition", ["number", "converted"]]], :Branch, ["condition", "convert", "failure"])
+    context = native_value/block(context, name, "convert", [[:CheckedFloatToInt, "checked", ["number"]], [:Field, "condition", ["checked", "ok"]]], :Branch, ["condition", "pack", "failure"])
+    context = native_value/block(context, name, "pack", [[:Field, "integer", ["checked", "number"]], [:Call, "result", ["value_int", "integer"]]], :Return, ["result"])
+  else
+    if name == "value_checked_neg"
+      float_ops = [@float_ops, [:Negate, "number", ["number"]]]
+    end
+    context = native_value/block(context, name, "float", [@float_ops, [:Call, "result", ["value_float", "number"]]], :Return, ["result"])
+  end
+  return native_value/block(context, name, "failure", [[:Zero, "result", []]], :Return, ["result"])
+end

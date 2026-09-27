@@ -661,6 +661,7 @@ return expected == native/emit_module(state, "surface")
             "unpack",
             "erase",
             "misaligned",
+            "null_adoption",
         ] {
             let rejected = Command::new(&binary).arg(violation).output().unwrap();
             #[cfg(unix)]
@@ -778,6 +779,25 @@ state = native/block_body(state, v["entry"], [[:Call, v["result"], [target, v["s
 "#,
             "argument does not share borrow region",
         ),
+        (
+            r#"
+let bytes = [:Pointer, :U8, :Mutable]
+let [fn_id, v, s] = native/function_scope(state, "bad", bytes,
+  [["slot", [:Pointer, bytes, :Mutable], :Borrow], ["input", bytes, :Borrow]], [["result", bytes]], ["entry"])
+state = native/contract(s, fn_id, [:WriteMemory], :Borrow, "slot")
+state = native/block_body(state, v["entry"], [[:Adopt, v["result"], [v["slot"], v["input"]]]], :Return, [v["result"]])
+"#,
+            "cannot adopt borrowed storage at bad",
+        ),
+        (
+            r#"
+let word = [:Tagged, "Value", :Mutable, [7, 8, 9, 10, 11, 12, 14, 16]]
+let [fn_id, v, s] = native/function_scope(state, "bad", word, [["value", word, :Borrow]], [], ["entry"])
+state = native/contract(s, fn_id, [], :Immediate, "")
+state = native/terminate(state, v["entry"], :Return, [v["value"]])
+"#,
+            "result ownership mismatch in bad",
+        ),
     ];
     for interpreter_only in [true, false] {
         let mut runner = runner(interpreter_only);
@@ -801,5 +821,207 @@ state = native/block_body(state, v["entry"], [[:Call, v["result"], [target, v["s
                 report.render()
             );
         }
+    }
+}
+
+#[test]
+fn adoption_and_immediate_contracts_reject_invalid_ownership() {
+    let adopt = r#"
+let state = native/program()
+let bytes = [:Pointer, :U8, :Mutable]
+let [fn_id, v, s] = native/function_scope(state, "adopt", bytes,
+  [["slot", [:Pointer, bytes, :Mutable], :Borrow], ["allocation", bytes, :Consume]],
+  [["result", bytes]], ["entry"])
+state = native/contract(s, fn_id, [:WriteMemory], :Borrow, "slot")
+state = native/block_body(state, v["entry"], [[:Adopt, v["result"], [v["slot"], v["allocation"]]]], :Return, [v["result"]])
+"#;
+    let cases = [
+        (
+            "state[:contracts] = [[fn_id, [], :Borrow, \"slot\"]]",
+            "effect :WriteMemory exceeds contract",
+        ),
+        (
+            "state[:contracts] = [[fn_id, [:WriteMemory], :Owned, \"\"]]",
+            "result ownership mismatch in adopt",
+        ),
+        (
+            "state[:parameter_contracts] = [[v[\"slot\"], :Borrow], [v[\"allocation\"], :Borrow]]",
+            "cannot adopt borrowed storage at adopt",
+        ),
+        (
+            r#"
+let rows = state[:parameters]
+rows[0] = [v["slot"], fn_id, 0, "slot", [:Pointer, bytes, :Const]]
+state[:parameters] = rows
+"#,
+            "Adopt owner slot type mismatch",
+        ),
+        (
+            r#"
+let rows = state[:parameters]
+rows[1] = [v["allocation"], fn_id, 1, "allocation", [:Pointer, :U8, :Const]]
+state[:parameters] = rows
+"#,
+            "Adopt allocation type mismatch",
+        ),
+        (
+            r#"
+let [null, ns] = native/add_constant(state, bytes, "null")
+state = ns
+let instruction = state[:instructions][0]
+instruction[5] = [v["slot"], null]
+state[:instructions] = [instruction]
+"#,
+            "Adopt requires an owned allocation",
+        ),
+        (
+            r#"
+let [release, rv, rs] = native/function_scope(state, "release", :Void, [["allocation", bytes, :Consume]], [], [])
+state = native/contract(native/foreign(rs, release), release, [:Release], :Value, "")
+state[:contracts] = [[fn_id, [:WriteMemory, :Release], :Borrow, "slot"], [release, [:Release], :Value, ""]]
+state = native/add_instruction(state, v["entry"], 1, :Call, :Discard, [release, v["result"]])[1]
+"#,
+            "cannot consume borrowed storage at adopt",
+        ),
+    ];
+    let immediate = r#"
+let state = native/program()
+let word = [:Tagged, "Word", :Mutable, [7]]
+let bytes = [:Pointer, :U8, :Mutable]
+"#;
+    for interpreter_only in [true, false] {
+        let mut runner = runner(interpreter_only);
+        let mut sources: Vec<(String, &str)> = cases
+            .iter()
+            .map(|(mutation, expected)| (format!("{adopt}\n{mutation}"), *expected))
+            .collect();
+        // Native addresses are forbidden even when zeroed or nested in aggregates.
+        for result in ["bytes", "[:Array, bytes, 2]", "[:Record, \"Wrapper\"]"] {
+            sources.push((
+                format!(
+                    r#"{immediate}
+state = native/record_type(state, "Wrapper", [["values", [:Array, bytes, 2]]])[1]
+let [fn_id, v, s] = native/function_scope(state, "bad", {result}, [], [["result", {result}]], ["entry"])
+state = native/contract(s, fn_id, [], :Immediate, "")
+state = native/block_body(state, v["entry"], [[:Zero, v["result"], []]], :Return, [v["result"]])
+"#
+                ),
+                "Immediate result cannot contain pointer fields",
+            ));
+        }
+        sources.push((
+            format!(
+                r#"{immediate}
+let [pair, s0] = native/record_type(state, "Pair", [["value", word]])
+let [tag, s1] = native/add_constant(s0, :U8, "0000000000000007")
+let [fn_id, v, s] = native/function_scope(s1, "bad", pair, [["input", bytes, :Borrow]],
+  [["word", word], ["result", pair]], ["entry"])
+state = native/contract(s, fn_id, [], :Immediate, "")
+state = native/block_body(state, v["entry"], [[:PackPointer, v["word"], [v["input"], tag]],
+  [:Record, v["result"], [v["word"]]]], :Return, [v["result"]])
+"#
+            ),
+            "result ownership mismatch in bad",
+        ));
+        for (source, expected) in sources {
+            let report = runner
+                .run_source(&format!("{source}\nreturn native/emit_c(state)"))
+                .unwrap();
+            assert!(
+                matches!(report.outcome, TaskOutcome::Aborted { .. })
+                    && report.render().contains(expected),
+                "expected {expected}: {}",
+                report.render()
+            );
+        }
+    }
+}
+
+#[test]
+fn native_value_layer_executes_on_both_mica_tiers() {
+    let mut previous = None;
+    for interpreter_only in [true, false] {
+        let mut runner = runner(interpreter_only);
+        for source in [
+            include_str!("../../../apps/native/value/program.mica"),
+            include_str!("../../../apps/native/value/immediates.mica"),
+            include_str!("../../../apps/native/value/numbers.mica"),
+            include_str!("../../../apps/native/value/arena.mica"),
+            include_str!("../../../apps/native/value/heap.mica"),
+            include_str!("../../../apps/native/value/compare.mica"),
+            include_str!("../../../apps/native/value/maps.mica"),
+        ] {
+            runner.run_filein(source).unwrap_or_else(|error| {
+                panic!("{}", runner.render_source_task_error(&error));
+            });
+        }
+        let generated = eval(&mut runner, r#"
+let state = native_value/program()
+let functions = {}
+for row in state[:functions]
+  functions[row[1]] = row[0]
+end
+let word = native_value/word()
+let result = [:Record, "ValueResult"]
+let [number, s0] = native/add_constant(state, :I64, "0000000000000003")
+let [has_end, s1] = native/add_constant(s0, :Bool, "false")
+let [fn_id, v, s2] = native/function_scope(s1, "test_composed", result,
+  [["arena", [:Pointer, [:Record, "ValueArena"], :Mutable], :Borrow]],
+  [["integer", result], ["value", word], ["empty", word], ["result", result]], ["entry"])
+state = native/contract(s2, fn_id, [:Allocate, :ReadMemory, :WriteMemory], :Borrow, "arena")
+state = native/block_body(state, v["entry"], [[:Call, v["integer"], [functions["value_int"], number]],
+  [:Field, v["value"], [v["integer"], "value"]], [:Zero, v["empty"], []],
+  [:Call, v["result"], [functions["value_range"], v["arena"], v["value"], has_end, v["empty"]]]], :Return, [v["result"]])
+return native/emit_c(state)
+"#)
+            .with_str(str::to_owned)
+            .unwrap();
+        if let Some(previous) = &previous {
+            assert_eq!(&generated, previous);
+        }
+        previous = Some(generated.clone());
+        let scratch = Scratch::new();
+        let source = scratch.0.join("value.c");
+        let binary = scratch.0.join("value");
+        fs::write(
+            &source,
+            format!(
+                "{generated}\n#define mica_foreign_allocate native_test_allocate\n#define mica_foreign_release native_test_release\n{}\n#undef mica_foreign_allocate\n#undef mica_foreign_release\n{}",
+                include_str!("../../../native/platform/allocation.c"),
+                include_str!("../../../apps/native/value/tests.c")
+            ),
+        )
+        .unwrap();
+        let compiled = Command::new(std::env::var_os("CC").unwrap_or_else(|| "cc".into()))
+            .args([
+                "-std=c11",
+                "-O2",
+                "-g",
+                "-Wall",
+                "-Wextra",
+                "-Werror",
+                "-pedantic",
+                "-ffp-contract=off",
+                "-fno-fast-math",
+                "-fsanitize=address,undefined,float-cast-overflow",
+                "-fno-sanitize-recover=all",
+                "-fno-omit-frame-pointer",
+            ])
+            .arg(&source)
+            .args(["-lm", "-o"])
+            .arg(&binary)
+            .output()
+            .unwrap();
+        assert!(
+            compiled.status.success(),
+            "{}",
+            String::from_utf8_lossy(&compiled.stderr)
+        );
+        let executed = Command::new(binary)
+            .env("ASAN_OPTIONS", "detect_leaks=1:halt_on_error=1")
+            .output()
+            .unwrap();
+        assert!(executed.status.success(), "{executed:?}");
+        assert!(executed.stderr.is_empty(), "{executed:?}");
     }
 }

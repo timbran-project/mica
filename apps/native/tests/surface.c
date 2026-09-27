@@ -33,6 +33,7 @@ static void arithmetic(int64_t a, int64_t b) {
 int main(int argc, char **argv) {
     if (argc == 2) {
         switch (argv[1][0]) {
+        case 'n': (void)mica_adopt_bytes(NULL, NULL); break;
         case 's': (void)mica_left_shift(1, 64); break;
         case 'd': (void)mica_u64_div(1, 0); break;
         case 'a': (void)mica_array_roundtrip(256, 1); break;
@@ -108,6 +109,20 @@ int main(int argc, char **argv) {
         mica_type_Value v = mica_immediate(UINT64_C(0x00ffffffffffffff), (uint8_t)i);
         assert(mica_value_tag(v) == i && mica_value_payload(v) == UINT64_C(0x00ffffffffffffff));
     }
+    struct mica_ImmediatePair pair = mica_immediate_pair(42, 2);
+    assert(pair.f_value == mica_immediate(42, 2));
+    assert(pair.f_padding.elements[0] == 0 && pair.f_padding.elements[1] == 0);
+    mica_type_Value immediate_slot = 0;
+    assert(mica_immediate_store(&immediate_slot, 42, 2) == pair.f_value);
+    assert(immediate_slot == pair.f_value);
+    uint8_t *allocation = malloc(16);
+    assert(allocation != NULL);
+    uint8_t *owner_slot = NULL;
+    uint8_t *adopted = mica_adopt_bytes(&owner_slot, allocation);
+    assert(adopted == allocation && owner_slot == allocation);
+    adopted[0] = 42;
+    assert(owner_slot[0] == 42);
+    free(owner_slot);
     uint64_t words[] = {7, 11, 13};
     assert(mica_typed_offset(words, 2) == 13);
     uint8_t *storage = malloc(sizeof(struct mica_StringHeader) + 16);

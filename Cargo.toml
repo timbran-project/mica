@@ -18,6 +18,7 @@ members = [
     "crates/source-provider",
     "crates/telnet-host",
     "crates/testing/load-tools",
+    "crates/testing/value-comparison",
     "crates/var",
     "crates/vm",
     "crates/vm-cranelift",

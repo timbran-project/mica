@@ -3785,6 +3785,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "mica-value-comparison"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "mica-runtime",
+ "mica-var",
+ "proptest",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "mica-var"
 version = "0.1.0"
 dependencies = [

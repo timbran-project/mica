@@ -189,6 +189,10 @@ verb native/c_statement(index, row)
       return numeric
     end
   end
+  if row[3] == :Adopt
+    let allocation = native/c_value(index, args[1])
+    return string_concat("if (", allocation, " == NULL) { abort(); } *(", native/c_value(index, args[0]), ") = ", allocation, "; ", native/c_value(index, row[4]), " = ", allocation, ";")
+  end
   if row[3] == :Store
     return string_concat("*(", native/c_value(index, args[0]), ") = ", native/c_value(index, args[1]), ";")
   end

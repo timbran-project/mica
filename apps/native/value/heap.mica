@@ -1,0 +1,131 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+verb native_value/heap(input)
+  let context = input
+  let word = native_value/word()
+  let bytes = [:Pointer, :U8, :Mutable]
+  let values = [:Pointer, word, :Mutable]
+  let state = context[:state]
+  state = native/record_type(state, "ValueMapEntry", [["key", word], ["value", word]])[1]
+  state = native/record_type(state, "HeapMap", [["data", [:Pointer, [:Record, "ValueMapEntry"], :Mutable]], ["length", :U64]])[1]
+  for spec in [["HeapBytes", [["data", bytes], ["length", :U64]]],
+               ["HeapString", [["data", bytes], ["length", :U64]]],
+               ["HeapList", [["data", values], ["length", :U64]]],
+               ["HeapRange", [["start", word], ["has_end", :Bool], ["end", word]]],
+               ["HeapFrob", [["delegate", :U64], ["value", word]]],
+               ["HeapError", [["code", :U32], ["has_message", :Bool], ["message", word], ["has_value", :Bool], ["value", word]]]]
+    state = native/record_type(state, spec[0], spec[1])[1]
+  end
+  context[:state] = state
+  for spec in [["string", "HeapString", :U8], ["bytes", "HeapBytes", :U8], ["list", "HeapList", word]]
+    context = native_value/sequence_constructor(context, spec)
+    context = native_value/heap_accessor(context, spec[0], [:Record, spec[1]])
+  end
+  for spec in [["range", "HeapRange", [["start", word, [:Borrow, "arena"]], ["has_end", :Bool, :Value], ["end", word, [:Borrow, "arena"]]]],
+               ["frob", "HeapFrob", [["delegate", :U64, :Value], ["value", word, [:Borrow, "arena"]]]],
+               ["error", "HeapError", [["code", :U32, :Value], ["has_message", :Bool, :Value], ["message", word, [:Borrow, "arena"]], ["has_value", :Bool, :Value], ["value", word, [:Borrow, "arena"]]]]]
+    context = native_value/record_constructor(context, spec)
+    context = native_value/heap_accessor(context, spec[0], [:Record, spec[1]])
+  end
+  return native_value/heap_accessor(context, "map", [:Record, "HeapMap"])
+end
+
+// Headers and their backing arrays occupy one aligned arena allocation.
+// Child values in a list must already share the destination arena lifetime.
+verb native_value/sequence_constructor(input, spec)
+  let context = input
+  let name = string_concat("value_", spec[0])
+  let word = native_value/word()
+  let header = [:Record, spec[1]]
+  let pointer = [:Pointer, header, :Mutable]
+  let data = [:Pointer, spec[2], :Mutable]
+  let source = [:Pointer, spec[2], :Const]
+  let bytes = [:Pointer, :U8, :Mutable]
+  let result = [:Record, "ValueResult"]
+  let mode = :Borrow
+  if spec[0] == "list"
+    mode = [:Borrow, "arena"]
+  end
+  let [source_null, state] = native/add_constant(context[:state], source, "null")
+  let constants = context[:constants]
+  constants[string_concat(name, "_null")] = source_null
+  context[:constants] = constants
+  context[:state] = state
+  let blocks = ["entry", "source_check", "size", "allocate", "initialize", "publish", "failure"]
+  if spec[0] == "list"
+    blocks = [@blocks, "loop", "copy"]
+  end
+  context = native_value/function(context, name, result,
+    [["arena", [:Pointer, [:Record, "ValueArena"], :Mutable], :Borrow], ["source", source, mode], ["length", :U64, :Value]],
+    [["condition", :Bool], ["header_size", :U64], ["element_size", :U64], ["limit", :U64], ["byte_count", :U64], ["total", :U64],
+     ["allocation", bytes], ["raw_data", bytes], ["data", data], ["header", header], ["pointer", pointer], ["value", word], ["result", result],
+     ["index", :U64], ["src_element", source], ["dst_element", data], ["element", spec[2]]],
+    blocks,
+    [:Allocate, :ReadMemory, :WriteMemory], :Borrow, "arena")
+  context = native_value/block(context, name, "entry", [[:Equal, "condition", ["length", "zero"]]], :Branch, ["condition", "size", "source_check"])
+  context = native_value/block(context, name, "source_check", [[:Equal, "condition", ["source", string_concat(name, "_null")]]], :Branch, ["condition", "failure", "size"])
+  context = native_value/block(context, name, "size", [[:SizeOf, "header_size", [header]], [:SizeOf, "element_size", [spec[2]]],
+    [:Subtract, "limit", ["allocation_limit", "header_size"]], [:Divide, "limit", ["limit", "element_size"]], [:Less, "condition", ["limit", "length"]]], :Branch, ["condition", "failure", "allocate"])
+  context = native_value/block(context, name, "allocate", [[:Multiply, "byte_count", ["length", "element_size"]], [:Add, "total", ["header_size", "byte_count"]],
+    [:Call, "allocation", ["value_arena_allocate", "arena", "total"]], [:Equal, "condition", ["allocation", "null_bytes"]]], :Branch, ["condition", "failure", "initialize"])
+  let initialize = [[:PointerCast, "pointer", ["allocation"]], [:Offset, "raw_data", ["allocation", "header_size"]],
+    [:PointerCast, "data", ["raw_data"]]]
+  if spec[0] == "list"
+    context = native_value/block(context, name, "initialize", [@initialize, [:Copy, "index", ["zero"]]], :Jump, ["loop"])
+    context = native_value/block(context, name, "loop", [[:Less, "condition", ["index", "length"]]], :Branch, ["condition", "copy", "publish"])
+    context = native_value/block(context, name, "copy", [[:Offset, "src_element", ["source", "index"]], [:Load, "element", ["src_element"]],
+      [:Offset, "dst_element", ["data", "index"]], [:Store, :Discard, ["dst_element", "element"]], [:Add, "index", ["index", "one"]]], :Jump, ["loop"])
+  else
+    context = native_value/block(context, name, "initialize", [@initialize, [:CopyBytes, :Discard, ["raw_data", "source", "byte_count"]]], :Jump, ["publish"])
+  end
+  context = native_value/block(context, name, "publish", [[:Record, "header", ["data", "length"]], [:Store, :Discard, ["pointer", "header"]],
+    [:PackPointer, "value", ["pointer", string_concat("tag_", spec[0])]], [:Record, "result", ["true", "value"]]], :Return, ["result"])
+  return native_value/block(context, name, "failure", [[:Zero, "result", []]], :Return, ["result"])
+end
+
+verb native_value/record_constructor(input, spec)
+  let context = input
+  let name = string_concat("value_", spec[0])
+  let word = native_value/word()
+  let header = [:Record, spec[1]]
+  let result = [:Record, "ValueResult"]
+  let blocks = ["entry", "publish", "failure"]
+  if spec[0] == "frob"
+    blocks = ["delegate_check", @blocks]
+  end
+  if spec[0] == "error"
+    blocks = ["message_check", "message_kind", @blocks]
+  end
+  context = native_value/function(context, name, result,
+    [["arena", [:Pointer, [:Record, "ValueArena"], :Mutable], :Borrow], @spec[2]],
+    [["tag", :U8], ["size", :U64], ["allocation", [:Pointer, :U8, :Mutable]], ["pointer", [:Pointer, header, :Mutable]],
+     ["header", header], ["packed", word], ["condition", :Bool], ["result", result]], blocks,
+    [:Allocate, :ReadMemory, :WriteMemory], :Borrow, "arena")
+  if spec[0] == "frob"
+    context = native_value/block(context, name, "delegate_check", [[:Less, "condition", ["payload_mask", "delegate"]]], :Branch, ["condition", "failure", "entry"])
+  end
+  if spec[0] == "error"
+    context = native_value/block(context, name, "message_check", [], :Branch, ["has_message", "message_kind", "entry"])
+    context = native_value/block(context, name, "message_kind", [[:Tag, "tag", ["message"]], [:Equal, "condition", ["tag", "tag_string"]]], :Branch, ["condition", "entry", "failure"])
+  end
+  context = native_value/block(context, name, "entry", [[:SizeOf, "size", [header]], [:Call, "allocation", ["value_arena_allocate", "arena", "size"]],
+    [:Equal, "condition", ["allocation", "null_bytes"]]], :Branch, ["condition", "failure", "publish"])
+  context = native_value/block(context, name, "publish", [[:PointerCast, "pointer", ["allocation"]], [:Record, "header", [field[0] for field in spec[2]]],
+    [:Store, :Discard, ["pointer", "header"]], [:PackPointer, "packed", ["pointer", string_concat("tag_", spec[0])]], [:Record, "result", ["true", "packed"]]], :Return, ["result"])
+  return native_value/block(context, name, "failure", [[:Zero, "result", []]], :Return, ["result"])
+end
+
+verb native_value/heap_accessor(input, kind, header)
+  let context = input
+  let pointer = [:Pointer, header, :Const]
+  let result_name = string_concat(header[1], "Result")
+  let result = [:Record, result_name]
+  context[:state] = native/record_type(context[:state], result_name, [["ok", :Bool], ["header", pointer]])[1]
+  let name = string_concat("value_as_", kind)
+  context = native_value/function(context, name, result, [["value", native_value/word(), :Borrow]],
+    [["tag", :U8], ["condition", :Bool], ["pointer", pointer], ["result", result]], ["entry", "unpack", "failure"], [], :Borrow, "value")
+  context = native_value/block(context, name, "entry", [[:Tag, "tag", ["value"]], [:Equal, "condition", ["tag", string_concat("tag_", kind)]]], :Branch, ["condition", "unpack", "failure"])
+  context = native_value/block(context, name, "unpack", [[:UnpackPointer, "pointer", ["value"]], [:Record, "result", ["true", "pointer"]]], :Return, ["result"])
+  return native_value/block(context, name, "failure", [[:Zero, "result", []]], :Return, ["result"])
+end

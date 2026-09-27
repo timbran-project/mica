@@ -1,0 +1,113 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+verb native_value/immediates(input)
+  let context = input
+  let word = native_value/word()
+  let result = [:Record, "ValueResult"]
+  context = native_value/function(context, "value_empty_relation", word, [], [["result", word]], ["entry"], [], :Immediate, "")
+  context = native_value/block(context, "value_empty_relation", "entry", [[:Zero, "result", []]], :Return, ["result"])
+  context = native_value/function(context, "value_tag", :U8, [["value", word, :Borrow]], [["result", :U8]], ["entry"], [], :Value, "")
+  context = native_value/block(context, "value_tag", "entry", [[:Tag, "result", ["value"]]], :Return, ["result"])
+  context = native_value/function(context, "value_kind", :U8, [["value", word, :Borrow]],
+    [["tag", :U8], ["condition", :Bool]], ["entry", "empty", "other"], [], :Value, "")
+  context = native_value/block(context, "value_kind", "entry", [[:Tag, "tag", ["value"]], [:Equal, "condition", ["tag", "zero_tag"]]], :Branch, ["condition", "empty", "other"])
+  context = native_value/block(context, "value_kind", "empty", [], :Return, ["tag_relation"])
+  context = native_value/block(context, "value_kind", "other", [], :Return, ["tag"])
+  context = native_value/function(context, "value_bool", word, [["input", :Bool, :Value]], [["result", word]], ["entry", "yes", "no"], [], :Immediate, "")
+  context = native_value/block(context, "value_bool", "entry", [], :Branch, ["input", "yes", "no"])
+  for spec in [["yes", "one"], ["no", "zero"]]
+    context = native_value/block(context, "value_bool", spec[0], [[:PackImmediate, "result", [spec[1], "tag_bool"]]], :Return, ["result"])
+  end
+  context = native_value/function(context, "value_int", result, [["input", :I64, :Value]],
+    [["condition", :Bool], ["bits", :U64], ["payload", :U64], ["value", word], ["result", result]], ["entry", "upper", "pack", "failure"], [], :Immediate, "")
+  context = native_value/block(context, "value_int", "entry", [[:Less, "condition", ["input", "int_min"]]], :Branch, ["condition", "failure", "upper"])
+  context = native_value/block(context, "value_int", "upper", [[:Less, "condition", ["int_max", "input"]]], :Branch, ["condition", "failure", "pack"])
+  context = native_value/block(context, "value_int", "pack", [[:Convert, "bits", ["input"]], [:BitAnd, "payload", ["bits", "payload_mask"]],
+    [:PackImmediate, "value", ["payload", "tag_int"]], [:Record, "result", ["true", "value"]]], :Return, ["result"])
+  context = native_value/block(context, "value_int", "failure", [[:Zero, "result", []]], :Return, ["result"])
+  context = native_value/function(context, "value_float", result, [["input", :F32, :Value]],
+    [["condition", :Bool], ["bits", :U32], ["payload", :U64], ["value", word], ["result", result]],
+    ["entry", "zero_test", "zero", "encode_bits", "pack", "failure"], [], :Immediate, "")
+  context = native_value/block(context, "value_float", "entry", [[:IsFinite, "condition", ["input"]]], :Branch, ["condition", "zero_test", "failure"])
+  context = native_value/block(context, "value_float", "zero_test", [[:Equal, "condition", ["input", "float_zero"]]], :Branch, ["condition", "zero", "encode_bits"])
+  context = native_value/block(context, "value_float", "zero", [[:Copy, "bits", ["u32_zero"]]], :Jump, ["pack"])
+  context = native_value/block(context, "value_float", "encode_bits", [[:Bitcast, "bits", ["input"]]], :Jump, ["pack"])
+  context = native_value/block(context, "value_float", "pack", [[:Convert, "payload", ["bits"]], [:PackImmediate, "value", ["payload", "tag_float"]],
+    [:Record, "result", ["true", "value"]]], :Return, ["result"])
+  context = native_value/block(context, "value_float", "failure", [[:Zero, "result", []]], :Return, ["result"])
+  context = native_value/function(context, "value_float_from_bits", result, [["bits", :U32, :Value]],
+    [["number", :F32], ["result", result]], ["entry"], [], :Immediate, "")
+  context = native_value/block(context, "value_float_from_bits", "entry", [[:Bitcast, "number", ["bits"]], [:Call, "result", ["value_float", "number"]]], :Return, ["result"])
+  for name in ["identity", "capability", "function", "symbol", "error_code"]
+    context = native_value/id_constructor(context, name)
+  end
+  for spec in [["int", :I64, "IntResult", "number"], ["float", :F32, "FloatResult", "number"],
+               ["bool", :Bool, "BoolResult", "value"], ["identity", :U64, "IdResult", "number"],
+               ["capability", :U64, "IdResult", "number"], ["function", :U64, "IdResult", "number"],
+               ["symbol", :U64, "IdResult", "number"], ["error_code", :U64, "IdResult", "number"]]
+    context = native_value/immediate_accessor(context, spec)
+  end
+  return context
+end
+
+verb native_value/id_constructor(input, kind)
+  let context = input
+  let name = string_concat("value_", kind)
+  let source = :U64
+  if kind == "symbol" || kind == "error_code"
+    source = :U32
+  end
+  let word = native_value/word()
+  let result = [:Record, "ValueResult"]
+  let blocks = ["entry", "pack", "failure"]
+  if kind == "capability"
+    blocks = [@blocks, "nonzero"]
+  end
+  context = native_value/function(context, name, result, [["input", source, :Value]],
+    [["payload", :U64], ["condition", :Bool], ["value", word], ["result", result]], blocks, [], :Immediate, "")
+  let next = "pack"
+  if kind == "capability"
+    next = "nonzero"
+    context = native_value/block(context, name, "nonzero", [[:Equal, "condition", ["payload", "zero"]]], :Branch, ["condition", "failure", "pack"])
+  end
+  context = native_value/block(context, name, "entry", [[:Convert, "payload", ["input"]], [:Less, "condition", ["payload_mask", "payload"]]], :Branch, ["condition", "failure", next])
+  context = native_value/block(context, name, "pack", [[:PackImmediate, "value", ["payload", string_concat("tag_", kind)]], [:Record, "result", ["true", "value"]]], :Return, ["result"])
+  return native_value/block(context, name, "failure", [[:Zero, "result", []]], :Return, ["result"])
+end
+
+verb native_value/immediate_accessor(input, spec)
+  let context = input
+  let name = string_concat("value_as_", spec[0])
+  let result = [:Record, spec[2]]
+  let word = native_value/word()
+  let blocks = ["entry", "unpack", "failure"]
+  if spec[0] == "bool"
+    blocks = [@blocks, "bool_true", "bool_false"]
+  end
+  context = native_value/function(context, name, result, [["value", word, :Borrow]],
+    [["tag", :U8], ["condition", :Bool], ["payload", :U64], ["sign", :U64], ["bits", :U64], ["float_bits", :U32], ["number", spec[1]], ["result", result]], blocks, [], :Value, "")
+  context = native_value/block(context, name, "entry", [[:Tag, "tag", ["value"]], [:Equal, "condition", ["tag", string_concat("tag_", spec[0])]]], :Branch, ["condition", "unpack", "failure"])
+  let instructions = [[:Payload, "payload", ["value"]]]
+  if spec[0] == "int"
+    // (payload xor sign) - sign sign-extends without signed shifts or overflow.
+    instructions = [@instructions, [:BitXor, "sign", ["payload", "sign_bit"]], [:Subtract, "bits", ["sign", "sign_bit"]], [:Bitcast, "number", ["bits"]]]
+  else
+    if spec[0] == "float"
+      instructions = [@instructions, [:Convert, "float_bits", ["payload"]], [:Bitcast, "number", ["float_bits"]]]
+    else
+      if spec[0] != "bool"
+        instructions = [@instructions, [:Copy, "number", ["payload"]]]
+      end
+    end
+  end
+  if spec[0] == "bool"
+    context = native_value/block(context, name, "unpack", [@instructions, [:Equal, "condition", ["payload", "zero"]]], :Branch, ["condition", "bool_false", "bool_true"])
+    for branch in [["bool_false", "false"], ["bool_true", "true"]]
+      context = native_value/block(context, name, branch[0], [[:Record, "result", ["true", branch[1]]]], :Return, ["result"])
+    end
+  else
+    context = native_value/block(context, name, "unpack", [@instructions, [:Record, "result", ["true", "number"]]], :Return, ["result"])
+  end
+  return native_value/block(context, name, "failure", [[:Zero, "result", []]], :Return, ["result"])
+end

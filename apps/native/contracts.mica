@@ -16,7 +16,7 @@ verb native/check_contracts(state, input_index)
     for effect in row[1]
       native/ensure(native/contains([:ReadMemory, :WriteMemory, :Allocate, :Release, :Block], effect), "unknown effect")
     end
-    native/ensure(native/contains([:Value, :Owned, :Borrow, :Static], row[2]), "invalid result ownership")
+    native/ensure(native/contains([:Value, :Owned, :Borrow, :Static, :Immediate], row[2]), "invalid result ownership")
     contracts[row[0]] = row
   end
   let modes = {}
@@ -50,6 +50,9 @@ verb native/check_contracts(state, input_index)
     end
     let contract = contracts[fn_id]
     native/ensure(native/has_pointer(index, fn_row[2]) == (contract[2] != :Value), "result ownership does not match type")
+    if contract[2] == :Immediate
+      native/ensure(!native/has_address(index, fn_row[2]), "Immediate result cannot contain pointer fields")
+    end
     let owners = []
     for parameter in native/owned(state[:parameters], 1, fn_id)
       if native/has_pointer(index, parameter[4])
@@ -91,7 +94,7 @@ verb native/direct_effects(op)
   if op == :Load
     return [:ReadMemory]
   end
-  if op == :Store
+  if op == :Store || op == :Adopt
     return [:WriteMemory]
   end
   if op == :CopyBytes
@@ -197,6 +200,13 @@ verb native/check_ownership(state, index)
     end
   end
   for row in state[:instructions]
+    if row[3] == :Adopt
+      let allocation = origins[row[5][1]]
+      native/ensure(len(allocation) > 0, string_concat("Adopt requires an owned allocation at ", native/instruction_location(index, row)))
+      for origin in allocation
+        native/ensure(origin[0] == :Owned || origin[0] == :Consume, string_concat("cannot adopt borrowed storage at ", native/instruction_location(index, row)))
+      end
+    end
     if row[3] == :Store
       for origin in origins[row[5][1]]
         native/ensure(origin[0] != :Stack, string_concat("stack address escapes through store at ", native/instruction_location(index, row)))
@@ -233,6 +243,9 @@ verb native/check_ownership(state, index)
     end
     for origin in origins[term[2][0]]
       let valid = origin[0] == :Owned || origin[0] == :Consume
+      if contract[2] == :Immediate
+        valid = false
+      end
       if contract[2] == :Static
         valid = origin[0] == :Static
       end
@@ -249,6 +262,10 @@ verb native/check_ownership(state, index)
 end
 
 verb native/result_origins(state, index, origins, row)
+  if row[3] == :Adopt
+    // The owner now keeps the allocation alive; the result borrows its region.
+    return origins[row[5][0]]
+  end
   if row[3] == :GlobalAddress
     return [[:Static, row[5][0]]]
   end
@@ -257,6 +274,9 @@ verb native/result_origins(state, index, origins, row)
   end
   if row[3] == :Call
     let contract = index[:contracts][row[5][0]]
+    if contract[2] == :Immediate
+      return []
+    end
     if contract[2] == :Static || contract[2] == :Owned
       return [[contract[2], row[0]]]
     end

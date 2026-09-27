@@ -128,6 +128,7 @@ Bool constants are `"true"` or `"false"`. Pointer constants are `"null"`.
 | `:Record`, `:Field` | Construct a complete record or read one field |
 | `:Address`, `:FieldPointer` | Address an initialized variable or a field through a pointer |
 | `:Load`, `:Store` | Read or write through a typed pointer |
+| `:Adopt` | Store an owned allocation in an owner slot and return a pointer borrowed from that owner |
 | `:Offset` | Offset a typed pointer by a U64 element count |
 | `:ElementPointer` | Address a fixed-array element, preserving pointer access |
 | `:SizeOf`, `:AlignOf` | Query a type's C size or alignment as U64 |
@@ -185,11 +186,20 @@ Foreign effects are trusted declarations. Missing foreign contracts and unknown 
 An omitted contract on a generated scalar function permits no effects.
 
 Every pointer-bearing parameter declares `:Borrow` or `:Consume`.
-Pointer-bearing results declare `:Owned`, `:Borrow`, or `:Static`. Borrowed results name their owner parameter.
+Pointer-bearing results declare `:Owned`, `:Borrow`, or `:Static`; tagged results can also declare `:Immediate`.
+Borrowed results name their owner parameter.
 Static results refer to module or thread-local storage. Thread-local pointers remain valid only during their originating thread’s lifetime.
 Scalar results use `:Value` with an empty owner name.
+`:Immediate` results contain tagged words but no heap references or native pointers, including inside records and arrays.
+Every return path must have no pointer origins. Calls preserve this guarantee; foreign implementations must honour it.
+This lets numeric constructors supply container elements without inventing an arena dependency.
 Tagged values and aggregates containing them also require ownership contracts.
 The checker propagates possible pointer origins through records, arrays, tagged values, and calls.
+`Adopt` requires an owned or consumed allocation, a mutable slot of the matching pointer type, and the `:WriteMemory` effect.
+It writes the allocation into that slot. The result inherits the slot's owner instead of retaining independent ownership.
+A null allocation aborts before the slot changes. The owner must release its adopted allocations.
+The checker does not prove that other aliases stop using a consumed allocation.
+
 Address-taking introduces a stack origin. Stack addresses cannot escape through returns, stores, or consuming calls.
 
 A parameter mode `[:Borrow, "arena"]` binds its lifetime to a root `:Borrow` parameter named `arena`.
@@ -216,3 +226,95 @@ Status 0 means success, 1 means invalid length or null nonempty input, and 2 mea
 Failure leaves the arena cursor unchanged and returns a null, zero-length view.
 Successful copying finishes before cursor advancement and publication.
 Length counts bytes. The operation preserves UTF-8 and embedded zero bytes; it does not validate UTF-8.
+
+## Value implementation
+
+The [value module](value/program.mica) builds on this generator. Load its files after the generator files:
+
+```text
+apps/native/value/program.mica
+apps/native/value/immediates.mica
+apps/native/value/numbers.mica
+apps/native/value/arena.mica
+apps/native/value/heap.mica
+apps/native/value/compare.mica
+apps/native/value/maps.mica
+```
+
+`native_value/program()` returns its IR. `native/emit_module(native_value/program(), "value")` returns the C artifacts.
+The platform boundary remains the allocation and release wrappers in `native/platform/allocation.c`.
+
+Implemented behaviour includes:
+
+- All immediate constructors and accessors, signed 56-bit bounds, finite binary32 values, and canonical positive zero.
+- Checked numeric operations, exact integer division, float remainder, and explicit numeric conversions.
+- A growing arena with stable addresses, eight-byte alignment, and release of all chunks.
+- Copying string, byte, and list constructors, plus range, error, and frob constructors and checked accessors.
+- Recursive canonical comparison for these values and maps, with separate exact integer/float comparison for language expressions.
+- Map construction with stable key sorting, the last duplicate value retained, and binary-search lookup.
+
+Initialize `struct mica_ValueArena` to zero before use. Release it with `mica_value_arena_release` after its last borrowed value becomes unused.
+Allocation failure returns a null pointer or `{false, 0}`. Failed arena growth preserves the existing allocation list and cursor.
+Child values stored in a container must share the destination arena's lifetime. Strings and bytes copy their input storage.
+Error messages are string values. Their presence and the optional error payload have separate flags.
+
+`mica_value_compare` and `mica_value_language_compare` return `IntResult { ok, number }`, where `number` is −1, 0, or 1.
+Canonical comparison distinguishes integer and float keys. Language comparison compares their numeric values without rounding integers to binary32.
+Comparison ignores absent range ends, error messages, and error payloads.
+`mica_value_equal` and `mica_value_language_equal` return the corresponding equality result as `BoolResult { ok, value }`.
+
+`mica_value_map` copies its input and uses a stable merge sort before duplicate compaction.
+Construction takes O(n log n) comparisons and O(n) arena storage. Lookup takes O(log n) comparisons.
+`mica_value_map_get` returns `{false, 0}` for a missing key or a non-map input.
+Failed construction can retain temporary storage until arena release. It never publishes a partial map or changes the input.
+
+This module is in progress. Relations, recursive hash/copy, symbol interning, display, codecs, and optimized string/list operations remain unimplemented.
+Comparison supports the empty relation sentinel; other relation comparisons remain unimplemented and return `ok = false`.
+Heap layouts are local to this implementation. Matching immediate tags does not make heap pointers interchangeable with Odin or Rust.
+
+## Rust and generated C comparison
+
+The [comparison harness](../../crates/testing/value-comparison/src/main.rs) constructs equivalent values independently in Rust and generated C.
+It compares complete semantic results through a test protocol. It does not exchange heap pointers or use the persistence codec.
+The harness covers implemented constructors, recursive comparison, mixed numeric comparison, arithmetic, map lookup, and map construction.
+Symbol tests use matching numeric IDs; they do not test symbol interning. Nonempty relations, hashing, and codecs remain outside its coverage.
+
+Run fixed boundary cases and a seeded corpus with shrinking:
+
+```sh
+cargo run --release -p mica-value-comparison -- --seed 7 --cases 512
+```
+
+A mismatch exits with failure and prints a reduced JSON case. Pass that JSON to `--case` to replay it.
+Add `--sanitize` for C address and undefined-behaviour checks, or set `CC=clang` to select Clang.
+The test suite checks passing cases and verifies detection of a known floating-point remainder discrepancy:
+
+```sh
+cargo test -p mica-value-comparison
+```
+
+Rust computes float remainder with `%`. The generated implementation uses Odin's `a - trunc(a / b) * b` calculation.
+These calculations differ for some finite inputs. The seeded command above currently fails on this discrepancy; the harness does not suppress it.
+
+Run performance measurements for workloads that pass their own full result checks:
+
+```sh
+cargo run --release -p mica-value-comparison -- --cases 0 --bench --samples 7 --sample-ms 100
+```
+
+Here, `--cases 0` skips random cases. Fixed cases and every benchmark workload still undergo correctness checks before timing.
+This command does not establish full conformance. With random cases enabled, a mismatch prevents benchmarking.
+
+Measurements cover integer addition, mixed numeric comparison, nested comparison, map lookup, and map construction with reclamation.
+The harness calibrates repetitions toward the requested sample duration and alternates implementation order.
+It prints JSON lines with compiler details, all samples, median nanoseconds per operation, and C/Rust ratios. Ratios below one favour C.
+Samples include operation dispatch and result consumption, so very small operation timings also include harness costs.
+These are workload measurements, not isolated instruction costs or whole-runtime benchmarks.
+
+Generation, compilation, subprocess startup, input decoding, and input construction stay outside timed intervals.
+Operation workloads reuse prepared values. The map construction workload includes Rust result destruction and C arena release on each iteration.
+C uses `-O3` without sanitizers; Rust requires a release build. Sanitizer mode cannot run benchmarks.
+For stable comparisons, use the same idle machine and CPU affinity for the parent process and its children.
+
+Generated C and executables live in temporary directories that the harness removes on exit.
+Results go to stdout. The harness does not create result files or property-test persistence files in the repository.

@@ -1,0 +1,236 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+// Canonical ordering distinguishes numeric kinds. Results are -1, 0, or 1;
+// an unsupported kind fails explicitly instead of comparing pointer payloads.
+verb native_value/comparison(input)
+  let context = input
+  let word = native_value/word()
+  let result = [:Record, "IntResult"]
+  let locals = [["left_kind", :U8], ["right_kind", :U8], ["condition", :Bool], ["result", result],
+    ["order", :I64], ["left_payload", :U64], ["right_payload", :U64]]
+  let blocks = ["entry", "kinds", "kind_order", "less", "equal", "greater", "failure", "return_order", "map_value_order", "map_value"]
+  let cases = ["int", "float", "string", "bytes", "list", "map", "range", "error", "frob"]
+  for kind in cases
+    blocks = [@blocks, string_concat("test_", kind), kind]
+  end
+  blocks = [@blocks, "payload", "payload_order"]
+  for spec in [["int", :I64, "IntResult"], ["float", :F32, "FloatResult"]]
+    for side in ["left", "right"]
+      locals = [@locals, [string_concat(side, "_", spec[0]), spec[1]], [string_concat(side, "_", spec[0], "_result"), [:Record, spec[2]]]]
+    end
+    blocks = [@blocks, string_concat(spec[0], "_order")]
+  end
+  for spec in [["string", "HeapString", :U8], ["bytes", "HeapBytes", :U8], ["list", "HeapList", word], ["map", "HeapMap", [:Record, "ValueMapEntry"]]]
+    let prefix = spec[0]
+    for side in ["left", "right"]
+      let base = string_concat(prefix, "_", side)
+      locals = [@locals, [string_concat(base, "_pointer"), [:Pointer, [:Record, spec[1]], :Const]],
+        [string_concat(base, "_header"), [:Record, spec[1]]], [string_concat(base, "_data"), [:Pointer, spec[2], :Mutable]],
+        [string_concat(base, "_length"), :U64], [string_concat(base, "_slot"), [:Pointer, spec[2], :Mutable]],
+        [string_concat(base, "_element"), spec[2]]]
+      if prefix == "map"
+        locals = [@locals, [string_concat(base, "_key"), word], [string_concat(base, "_value"), word]]
+      end
+    end
+    locals = [@locals, [string_concat(prefix, "_index"), :U64]]
+    for suffix in ["loop", "right_bound", "element", "advance", "length", "length_order", "element_order"]
+      blocks = [@blocks, string_concat(prefix, "_", suffix)]
+    end
+  end
+  let records = [["range", "HeapRange", [["start", word, ""], ["has_end", :Bool, ""], ["end", word, "has_end"]]],
+    ["error", "HeapError", [["code", :U32, ""], ["has_message", :Bool, ""], ["message", word, "has_message"], ["has_value", :Bool, ""], ["value", word, "has_value"]]],
+    ["frob", "HeapFrob", [["delegate", :U64, ""], ["value", word, ""]]]]
+  for spec in records
+    for side in ["left", "right"]
+      let base = string_concat(spec[0], "_", side)
+      locals = [@locals, [string_concat(base, "_pointer"), [:Pointer, [:Record, spec[1]], :Const]], [string_concat(base, "_header"), [:Record, spec[1]]]]
+      for field in spec[2]
+        locals = [@locals, [string_concat(base, "_", field[0]), field[1]]]
+      end
+    end
+    for field in spec[2]
+      for suffix in ["", "_compare", "_order"]
+        blocks = [@blocks, string_concat(spec[0], "_", field[0], suffix)]
+      end
+    end
+  end
+  context = native_value/function(context, "value_compare", result, [["left", word, :Borrow], ["right", word, :Borrow]], locals, blocks, [:ReadMemory], :Value, "")
+  let name = "value_compare"
+  context = native_value/block(context, name, "entry", [[:Equal, "condition", ["left", "right"]]], :Branch, ["condition", "equal", "kinds"])
+  context = native_value/block(context, name, "kinds", [[:Call, "left_kind", ["value_kind", "left"]], [:Call, "right_kind", ["value_kind", "right"]],
+    [:Equal, "condition", ["left_kind", "right_kind"]]], :Branch, ["condition", "test_int", "kind_order"])
+  context = native_value/block(context, name, "kind_order", [[:Less, "condition", ["left_kind", "right_kind"]]], :Branch, ["condition", "less", "greater"])
+  for pair in [["less", "int_minus_one"], ["equal", "int_zero"], ["greater", "int_one"]]
+    context = native_value/block(context, name, pair[0], [[:Record, "result", ["true", pair[1]]]], :Return, ["result"])
+  end
+  context = native_value/block(context, name, "failure", [[:Zero, "result", []]], :Return, ["result"])
+  context = native_value/block(context, name, "return_order", [], :Return, ["result"])
+  let index = 0
+  for kind in cases
+    let next = "payload"
+    if index + 1 < len(cases)
+      next = string_concat("test_", cases[index + 1])
+    end
+    context = native_value/block(context, name, string_concat("test_", kind), [[:Equal, "condition", ["left_kind", string_concat("tag_", kind)]]], :Branch, ["condition", kind, next])
+    index = index + 1
+  end
+  // The remaining immediate kinds all order by unsigned payload. Relation
+  // has no heap constructor yet, so reject it before Payload can erase a pointer.
+  context = native_value/block(context, name, "payload", [[:Equal, "condition", ["left_kind", "tag_relation"]]], :Branch, ["condition", "failure", "payload_order"])
+  context = native_value/block(context, name, "payload_order", [[:Payload, "left_payload", ["left"]], [:Payload, "right_payload", ["right"]],
+    [:Less, "condition", ["left_payload", "right_payload"]]], :Branch, ["condition", "less", "greater"])
+  for kind in ["int", "float"]
+    context = native_value/block(context, name, kind, [[:Call, string_concat("left_", kind, "_result"), [string_concat("value_as_", kind), "left"]],
+      [:Call, string_concat("right_", kind, "_result"), [string_concat("value_as_", kind), "right"]],
+      [:Field, string_concat("left_", kind), [string_concat("left_", kind, "_result"), "number"]],
+      [:Field, string_concat("right_", kind), [string_concat("right_", kind, "_result"), "number"]],
+      [:Less, "condition", [string_concat("left_", kind), string_concat("right_", kind)]]], :Branch, ["condition", "less", string_concat(kind, "_order")])
+    context = native_value/block(context, name, string_concat(kind, "_order"), [[:Less, "condition", [string_concat("right_", kind), string_concat("left_", kind)]]], :Branch, ["condition", "greater", "equal"])
+  end
+  for spec in [["string", "HeapString"], ["bytes", "HeapBytes"], ["list", "HeapList"], ["map", "HeapMap"]]
+    let prefix = spec[0]
+    let l = string_concat(prefix, "_left")
+    let r = string_concat(prefix, "_right")
+    let i = string_concat(prefix, "_index")
+    let rows = []
+    for side in [l, r]
+      rows = [@rows, [:UnpackPointer, string_concat(side, "_pointer"), ["left"]]]
+      if side == r
+        rows[len(rows) - 1] = [:UnpackPointer, string_concat(side, "_pointer"), ["right"]]
+      end
+      rows = [@rows, [:Load, string_concat(side, "_header"), [string_concat(side, "_pointer")]],
+        [:Field, string_concat(side, "_data"), [string_concat(side, "_header"), "data"]],
+        [:Field, string_concat(side, "_length"), [string_concat(side, "_header"), "length"]]]
+    end
+    context = native_value/block(context, name, prefix, [@rows, [:Copy, i, ["zero"]]], :Jump, [string_concat(prefix, "_loop")])
+    context = native_value/block(context, name, string_concat(prefix, "_loop"), [[:Less, "condition", [i, string_concat(l, "_length")]]], :Branch, ["condition", string_concat(prefix, "_right_bound"), string_concat(prefix, "_length")])
+    context = native_value/block(context, name, string_concat(prefix, "_right_bound"), [[:Less, "condition", [i, string_concat(r, "_length")]]], :Branch, ["condition", string_concat(prefix, "_element"), string_concat(prefix, "_length")])
+    rows = []
+    for side in [l, r]
+      rows = [@rows, [:Offset, string_concat(side, "_slot"), [string_concat(side, "_data"), i]], [:Load, string_concat(side, "_element"), [string_concat(side, "_slot")]]]
+    end
+    if prefix == "string" || prefix == "bytes"
+      context = native_value/block(context, name, string_concat(prefix, "_element"), [@rows, [:Equal, "condition", [string_concat(l, "_element"), string_concat(r, "_element")]]], :Branch, ["condition", string_concat(prefix, "_advance"), string_concat(prefix, "_element_order")])
+      context = native_value/block(context, name, string_concat(prefix, "_element_order"), [[:Less, "condition", [string_concat(l, "_element"), string_concat(r, "_element")]]], :Branch, ["condition", "less", "greater"])
+    else
+      let left = string_concat(l, "_element")
+      let right = string_concat(r, "_element")
+      if prefix == "map"
+        for side in [l, r]
+          rows = [@rows, [:Field, string_concat(side, "_key"), [string_concat(side, "_element"), "key"]], [:Field, string_concat(side, "_value"), [string_concat(side, "_element"), "value"]]]
+        end
+        left = string_concat(l, "_key")
+        right = string_concat(r, "_key")
+      end
+      context = native_value/block(context, name, string_concat(prefix, "_element"), [@rows, [:Call, "result", [name, left, right]], [:Field, "condition", ["result", "ok"]]], :Branch, ["condition", string_concat(prefix, "_element_order"), "return_order"])
+      let next = string_concat(prefix, "_advance")
+      if prefix == "map"
+        next = string_concat(prefix, "_value")
+      end
+      context = native_value/block(context, name, string_concat(prefix, "_element_order"), [[:Field, "order", ["result", "number"]], [:Equal, "condition", ["order", "int_zero"]]], :Branch, ["condition", next, "return_order"])
+      if prefix == "map"
+        context = native_value/block(context, name, next, [[:Call, "result", [name, string_concat(l, "_value"), string_concat(r, "_value")]], [:Field, "condition", ["result", "ok"]]], :Branch, ["condition", "map_value_order", "return_order"])
+      end
+    end
+    context = native_value/block(context, name, string_concat(prefix, "_advance"), [[:Add, i, [i, "one"]]], :Jump, [string_concat(prefix, "_loop")])
+    context = native_value/block(context, name, string_concat(prefix, "_length"), [[:Equal, "condition", [string_concat(l, "_length"), string_concat(r, "_length")]]], :Branch, ["condition", "equal", string_concat(prefix, "_length_order")])
+    context = native_value/block(context, name, string_concat(prefix, "_length_order"), [[:Less, "condition", [string_concat(l, "_length"), string_concat(r, "_length")]]], :Branch, ["condition", "less", "greater"])
+  end
+  context = native_value/block(context, name, "map_value_order", [[:Field, "order", ["result", "number"]], [:Equal, "condition", ["order", "int_zero"]]], :Branch, ["condition", "map_advance", "return_order"])
+  for spec in records
+    let rows = []
+    for side in ["left", "right"]
+      let base = string_concat(spec[0], "_", side)
+      rows = [@rows, [:UnpackPointer, string_concat(base, "_pointer"), [side]], [:Load, string_concat(base, "_header"), [string_concat(base, "_pointer")]]]
+      for field in spec[2]
+        rows = [@rows, [:Field, string_concat(base, "_", field[0]), [string_concat(base, "_header"), field[0]]]]
+      end
+    end
+    context = native_value/block(context, name, spec[0], rows, :Jump, [string_concat(spec[0], "_", spec[2][0][0])])
+    let position = 0
+    for field in spec[2]
+      let base = string_concat(spec[0], "_", field[0])
+      let left = string_concat(spec[0], "_left_", field[0])
+      let right = string_concat(spec[0], "_right_", field[0])
+      let next = "equal"
+      if position + 1 < len(spec[2])
+        next = string_concat(spec[0], "_", spec[2][position + 1][0])
+      end
+      if field[2] != ""
+        context = native_value/block(context, name, base, [], :Branch, [string_concat(spec[0], "_left_", field[2]), string_concat(base, "_compare"), next])
+      else
+        context = native_value/block(context, name, base, [], :Jump, [string_concat(base, "_compare")])
+      end
+      if field[1] == word
+        context = native_value/block(context, name, string_concat(base, "_compare"), [[:Call, "result", [name, left, right]], [:Field, "condition", ["result", "ok"]]], :Branch, ["condition", string_concat(base, "_order"), "return_order"])
+        context = native_value/block(context, name, string_concat(base, "_order"), [[:Field, "order", ["result", "number"]], [:Equal, "condition", ["order", "int_zero"]]], :Branch, ["condition", next, "return_order"])
+      else
+        context = native_value/block(context, name, string_concat(base, "_compare"), [[:Equal, "condition", [left, right]]], :Branch, ["condition", next, string_concat(base, "_order")])
+        if field[1] == :Bool
+          context = native_value/block(context, name, string_concat(base, "_order"), [], :Branch, [left, "greater", "less"])
+        else
+          context = native_value/block(context, name, string_concat(base, "_order"), [[:Less, "condition", [left, right]]], :Branch, ["condition", "less", "greater"])
+        end
+      end
+      position = position + 1
+    end
+  end
+  return context
+end
+
+// Guard the float-to-integer conversion before comparing the integer part and
+// fraction. Converting the integer to f32 first would lose significant bits.
+verb native_value/language_comparison(input)
+  let context = input
+  let result = [:Record, "IntResult"]
+  let name = "value_compare_int_float"
+  context = native_value/function(context, name, result, [["integer", :I64, :Value], ["float", :F32, :Value]],
+    [["condition", :Bool], ["converted", result], ["truncated", :I64], ["integral_float", :F32], ["result", result]],
+    ["finite", "lower", "upper", "convert", "integer_less", "integer_greater", "fraction_less", "fraction_greater", "less", "equal", "greater", "failure"], [], :Value, "")
+  context = native_value/block(context, name, "finite", [[:IsFinite, "condition", ["float"]]], :Branch, ["condition", "lower", "failure"])
+  context = native_value/block(context, name, "lower", [[:Less, "condition", ["float", "float_lower"]]], :Branch, ["condition", "greater", "upper"])
+  context = native_value/block(context, name, "upper", [[:Less, "condition", ["float", "float_upper"]]], :Branch, ["condition", "convert", "less"])
+  context = native_value/block(context, name, "convert", [[:CheckedFloatToInt, "converted", ["float"]], [:Field, "condition", ["converted", "ok"]]], :Branch, ["condition", "integer_less", "failure"])
+  context = native_value/block(context, name, "integer_less", [[:Field, "truncated", ["converted", "number"]], [:Less, "condition", ["integer", "truncated"]]], :Branch, ["condition", "less", "integer_greater"])
+  context = native_value/block(context, name, "integer_greater", [[:Less, "condition", ["truncated", "integer"]]], :Branch, ["condition", "greater", "fraction_less"])
+  context = native_value/block(context, name, "fraction_less", [[:Convert, "integral_float", ["truncated"]], [:Less, "condition", ["integral_float", "float"]]], :Branch, ["condition", "less", "fraction_greater"])
+  context = native_value/block(context, name, "fraction_greater", [[:Less, "condition", ["float", "integral_float"]]], :Branch, ["condition", "greater", "equal"])
+  for pair in [["less", "int_minus_one"], ["equal", "int_zero"], ["greater", "int_one"]]
+    context = native_value/block(context, name, pair[0], [[:Record, "result", ["true", pair[1]]]], :Return, ["result"])
+  end
+  context = native_value/block(context, name, "failure", [[:Zero, "result", []]], :Return, ["result"])
+  name = "value_language_compare"
+  let word = native_value/word()
+  context = native_value/function(context, name, result, [["left", word, :Borrow], ["right", word, :Borrow]],
+    [["left_kind", :U8], ["right_kind", :U8], ["condition", :Bool], ["integer", result], ["float", [:Record, "FloatResult"]],
+     ["int_number", :I64], ["float_number", :F32], ["order", :I64], ["result", result]],
+    ["entry", "int_float", "float_int", "right_int", "forward", "reverse", "reverse_ok", "invert", "canonical", "return_result"], [:ReadMemory], :Value, "")
+  context = native_value/block(context, name, "entry", [[:Tag, "left_kind", ["left"]], [:Tag, "right_kind", ["right"]], [:Equal, "condition", ["left_kind", "tag_int"]]], :Branch, ["condition", "int_float", "float_int"])
+  context = native_value/block(context, name, "int_float", [[:Equal, "condition", ["right_kind", "tag_float"]]], :Branch, ["condition", "forward", "canonical"])
+  context = native_value/block(context, name, "float_int", [[:Equal, "condition", ["left_kind", "tag_float"]]], :Branch, ["condition", "right_int", "canonical"])
+  context = native_value/block(context, name, "right_int", [[:Equal, "condition", ["right_kind", "tag_int"]]], :Branch, ["condition", "reverse", "canonical"])
+  for spec in [["forward", "left", "right"], ["reverse", "right", "left"]]
+    let target = "return_result"
+    if spec[0] == "reverse"
+      target = "reverse_ok"
+    end
+    context = native_value/block(context, name, spec[0], [[:Call, "integer", ["value_as_int", spec[1]]], [:Call, "float", ["value_as_float", spec[2]]],
+      [:Field, "int_number", ["integer", "number"]], [:Field, "float_number", ["float", "number"]],
+      [:Call, "result", ["value_compare_int_float", "int_number", "float_number"]]], :Jump, [target])
+  end
+  context = native_value/block(context, name, "reverse_ok", [[:Field, "condition", ["result", "ok"]]], :Branch, ["condition", "invert", "return_result"])
+  context = native_value/block(context, name, "invert", [[:Field, "order", ["result", "number"]], [:CheckedNegate, "result", ["order"]]], :Jump, ["return_result"])
+  context = native_value/block(context, name, "canonical", [[:Call, "result", ["value_compare", "left", "right"]]], :Jump, ["return_result"])
+  context = native_value/block(context, name, "return_result", [], :Return, ["result"])
+  for spec in [["value_equal", "value_compare"], ["value_language_equal", "value_language_compare"]]
+    context = native_value/function(context, spec[0], [:Record, "BoolResult"], [["left", word, :Borrow], ["right", word, :Borrow]],
+      [["comparison", result], ["order", :I64], ["ok", :Bool], ["equal", :Bool], ["result", [:Record, "BoolResult"]]],
+      ["entry", "success", "failure"], [:ReadMemory], :Value, "")
+    context = native_value/block(context, spec[0], "entry", [[:Call, "comparison", [spec[1], "left", "right"]], [:Field, "ok", ["comparison", "ok"]]], :Branch, ["ok", "success", "failure"])
+    context = native_value/block(context, spec[0], "success", [[:Field, "order", ["comparison", "number"]], [:Equal, "equal", ["order", "int_zero"]],
+      [:Record, "result", ["true", "equal"]]], :Return, ["result"])
+    context = native_value/block(context, spec[0], "failure", [[:Zero, "result", []]], :Return, ["result"])
+  end
+  return context
+end

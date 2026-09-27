@@ -1,0 +1,128 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+// Process-local tags follow Omica. Persistence is a separate value encoding.
+verb native_value/kinds()
+  return [["bool", 1, false], ["int", 2, false], ["float", 3, false],
+    ["identity", 4, false], ["symbol", 5, false], ["error_code", 6, false],
+    ["string", 7, true], ["bytes", 8, true], ["list", 9, true],
+    ["map", 10, true], ["range", 11, true], ["error", 12, true],
+    ["capability", 13, false], ["frob", 14, true], ["function", 15, false], ["relation", 16, true]]
+end
+
+verb native_value/word()
+  return [:Tagged, "Value", :Mutable, [row[1] for row in native_value/kinds() if row[2]]]
+end
+
+verb native_value/hex(number)
+  let digits = string_chars("0123456789abcdef")
+  let result = ""
+  let rest = number
+  let position = 0
+  while position < 16
+    result = string_concat(digits[rest % 16], result)
+    rest = (rest - rest % 16) / 16
+    position = position + 1
+  end
+  return result
+end
+
+verb native_value/context()
+  let state = native/program()
+  let word = native_value/word()
+  for spec in [["ValueResult", [["ok", :Bool], ["value", word]]],
+               ["IntResult", [["ok", :Bool], ["number", :I64]]],
+               ["FloatResult", [["ok", :Bool], ["number", :F32]]],
+               ["BoolResult", [["ok", :Bool], ["value", :Bool]]],
+               ["IdResult", [["ok", :Bool], ["number", :U64]]]]
+    state = native/record_type(state, spec[0], spec[1])[1]
+  end
+  let declarations = [["false", :Bool, "false"], ["true", :Bool, "true"],
+    ["zero", :U64, "0000000000000000"], ["one", :U64, "0000000000000001"],
+    ["payload_mask", :U64, "00ffffffffffffff"], ["sign_bit", :U64, "0080000000000000"],
+    ["int_min", :I64, "-0080000000000000"], ["int_max", :I64, "007fffffffffffff"],
+    ["int_zero", :I64, "0000000000000000"], ["int_one", :I64, "0000000000000001"],
+    ["int_minus_one", :I64, "-0000000000000001"], ["float_zero", :F32, "00000000"],
+    ["float_lower", :F32, "db000000"], ["float_upper", :F32, "5b000000"],
+    ["zero_tag", :U8, "0000000000000000"], ["u32_zero", :U32, "0000000000000000"]]
+  for kind in native_value/kinds()
+    declarations = [@declarations, [string_concat("tag_", kind[0]), :U8, native_value/hex(kind[1])]]
+  end
+  let [constants, next_state] = native/constants(state, declarations)
+  return {:state -> next_state, :constants -> constants, :functions -> {}, :bindings -> {}}
+end
+
+// Named operands keep the value algorithms readable. Native validation still
+// consumes the same typed IR and checks every instruction and call.
+verb native_value/function(input, name, result, parameters, locals, blocks, effects, mode, owner)
+  let context = input
+  let [id, bindings, state] = native/function_scope(context[:state], name, result, parameters, locals, [string_concat("block_", block) for block in blocks])
+  native/ensure(!map_contains_key(context[:functions], name), "duplicate value function")
+  context[:state] = native/contract(state, id, effects, mode, owner)
+  let functions = context[:functions]
+  functions[name] = id
+  context[:functions] = functions
+  let scopes = context[:bindings]
+  scopes[name] = bindings
+  context[:bindings] = scopes
+  return context
+end
+
+verb native_value/operand(context, bindings, spelling)
+  if map_contains_key(bindings, spelling)
+    return bindings[spelling]
+  end
+  native/ensure(map_contains_key(context[:constants], spelling), string_concat("unknown value operand ", spelling))
+  return context[:constants][spelling]
+end
+
+verb native_value/block(input, name, block, instructions, terminator, operands)
+  let context = input
+  let bindings = context[:bindings][name]
+  let rows = []
+  for row in instructions
+    let destination = :Discard
+    if row[1] != :Discard
+      destination = bindings[row[1]]
+    end
+    let args = []
+    let position = 0
+    for operand in row[2]
+      if row[0] == :SizeOf || row[0] == :AlignOf || ((row[0] == :Field || row[0] == :FieldPointer) && position == 1)
+        args = [@args, operand]
+      else
+        if row[0] == :Call && position == 0
+          args = [@args, context[:functions][operand]]
+        else
+          args = [@args, native_value/operand(context, bindings, operand)]
+        end
+      end
+      position = position + 1
+    end
+    rows = [@rows, [row[0], destination, args]]
+  end
+  let targets = []
+  let position = 0
+  for operand in operands
+    if terminator == :Jump || (terminator == :Branch && position > 0)
+      targets = [@targets, bindings[string_concat("block_", operand)]]
+    else
+      targets = [@targets, native_value/operand(context, bindings, operand)]
+    end
+    position = position + 1
+  end
+  context[:state] = native/block_body(context[:state], bindings[string_concat("block_", block)], rows, terminator, targets)
+  return context
+end
+
+verb native_value/program()
+  let context = native_value/context()
+  context = native_value/immediates(context)
+  context = native_value/numbers(context)
+  context = native_value/arena(context)
+  context = native_value/heap(context)
+  context = native_value/comparison(context)
+  context = native_value/language_comparison(context)
+  context = native_value/maps(context)
+  return context[:state]
+end

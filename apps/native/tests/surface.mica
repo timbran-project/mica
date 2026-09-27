@@ -73,7 +73,7 @@ verb native/surface_program()
     state = native/block_body(next_state, v8["entry"], [[spec[1], v8["result"], [v8["value"]]]], :Return, [v8["result"]])
   end
   let [fn9, v9, s6] = native/function_scope(state, "immediate", word, [["payload", :U64, :Value], ["tag", :U8, :Value]], [["result", word]], ["entry"])
-  state = native/contract(s6, fn9, [], :Owned, "")
+  state = native/contract(s6, fn9, [], :Immediate, "")
   state = native/block_body(state, v9["entry"], [[:PackImmediate, v9["result"], [v9["payload"], v9["tag"]]]], :Return, [v9["result"]])
   let array = [:Array, :U32, 256]
   let [fn10, v10, s7] = native/function_scope(state, "array_roundtrip", :U32, [["index", :U64, :Value], ["input", :U32, :Value]],
@@ -114,6 +114,25 @@ verb native/surface_program()
     [["storage", [:Pointer, word, :Mutable], :Borrow], ["value", word, [:Borrow, "storage"]]], [["result", word]], ["entry"])
   state = native/contract(shs, share_fn, [:WriteMemory], :Borrow, "storage")
   state = native/block_body(state, sh["entry"], [[:Call, sh["result"], [slot_fn, sh["storage"], sh["value"]]]], :Return, [sh["result"]])
+  let [adopt_fn, ad, ads] = native/function_scope(state, "adopt_bytes", bytes,
+    [["slot", [:Pointer, bytes, :Mutable], :Borrow], ["allocation", bytes, :Consume]],
+    [["result", bytes]], ["entry"])
+  state = native/contract(ads, adopt_fn, [:WriteMemory], :Borrow, "slot")
+  state = native/block_body(state, ad["entry"], [[:Adopt, ad["result"], [ad["slot"], ad["allocation"]]]], :Return, [ad["result"]])
+  let [pair, ps] = native/record_type(state, "ImmediatePair", [["value", word], ["padding", [:Array, word, 2]]])
+  let [pair_fn, pv, pvs] = native/function_scope(ps, "immediate_pair", pair,
+    [["payload", :U64, :Value], ["tag", :U8, :Value]],
+    [["value", word], ["padding", [:Array, word, 2]], ["result", pair]], ["entry"])
+  state = native/contract(pvs, pair_fn, [], :Immediate, "")
+  state = native/block_body(state, pv["entry"], [[:Call, pv["value"], [fn9, pv["payload"], pv["tag"]]],
+    [:Zero, pv["padding"], []], [:Record, pv["result"], [pv["value"], pv["padding"]]]], :Return, [pv["result"]])
+  let [store_fn, iv, ivs] = native/function_scope(state, "immediate_store", word,
+    [["slot", [:Pointer, word, :Mutable], :Borrow], ["payload", :U64, :Value], ["tag", :U8, :Value]],
+    [["pair", pair], ["value", word], ["result", word]], ["entry"])
+  state = native/contract(ivs, store_fn, [:WriteMemory], :Borrow, "slot")
+  state = native/block_body(state, iv["entry"], [[:Call, iv["pair"], [pair_fn, iv["payload"], iv["tag"]]],
+    [:Field, iv["value"], [iv["pair"], "value"]],
+    [:Call, iv["result"], [slot_fn, iv["slot"], iv["value"]]]], :Return, [iv["result"]])
   let [entry_type, es] = native/record_type(state, "MapEntry", [["key", word], ["value", word]])
   state = es
   for spec in [["MapHeader", [["entries", [:Pointer, entry_type, :Mutable]], ["count", :U64]]],
