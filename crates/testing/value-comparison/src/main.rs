@@ -2,13 +2,14 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 mod cases;
+mod symbol_loads;
 mod symbols;
 
 use std::error::Error;
 use std::fs;
 use std::hint::black_box;
 use std::io::Write;
-use std::num::{NonZeroU32, NonZeroU64};
+use std::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
@@ -38,14 +39,26 @@ struct Options {
     #[arg(long, default_value = "7")]
     samples: NonZeroU32,
     /// Minimum repetitions before duration calibration.
-    #[arg(long, default_value = "128")]
+    #[arg(long, default_value = "1")]
     iterations: NonZeroU64,
-    /// Target duration for the faster implementation in each sample.
+    /// Target sample duration; symbol loads calibrate each implementation independently.
     #[arg(long, default_value = "100")]
     sample_ms: NonZeroU32,
     /// Check generated C with address and undefined-behaviour sanitizers.
     #[arg(long, conflicts_with = "bench")]
     sanitize: bool,
+    /// Check C symbol loads with ThreadSanitizer.
+    #[arg(long, conflicts_with_all = ["bench", "sanitize"])]
+    thread_sanitize: bool,
+    /// Run only symbol concurrency checks and benchmarks.
+    #[arg(long, conflicts_with = "strings")]
+    symbol_loads: bool,
+    /// Worker counts for shared-table symbol loads.
+    #[arg(long, value_delimiter = ',', default_value = "1,2,4,8")]
+    symbol_threads: Vec<NonZeroUsize>,
+    /// Replay a JSON concurrent symbol load.
+    #[arg(long)]
+    symbol_load_case: Option<String>,
     /// Replay one JSON case printed by a failed property check.
     #[arg(long)]
     case: Option<String>,
@@ -53,7 +66,9 @@ struct Options {
     #[arg(long)]
     symbol_case: Option<String>,
     #[arg(long, hide = true)]
-    symbol_worker: Option<String>,
+    symbol_load_worker: bool,
+    #[arg(long, hide = true)]
+    symbol_load_verify: bool,
     /// Save the generated standalone C source at this path.
     #[arg(long)]
     emit_c: Option<PathBuf>,
@@ -77,12 +92,19 @@ impl Drop for Scratch {
     }
 }
 
+#[derive(Clone, Copy)]
+enum Sanitizer {
+    None,
+    Address,
+    Thread,
+}
+
 struct Native {
     scratch: Scratch,
     compiler: String,
 }
 impl Native {
-    fn build(sanitize: bool, emit_c: Option<&Path>) -> Result<Self> {
+    fn build(sanitizer: Sanitizer, emit_c: Option<&Path>) -> Result<Self> {
         let mut runner = SourceRunner::new_empty()
             .with_interpreter_only(true)
             .with_task_limits(TaskLimits {
@@ -145,6 +167,10 @@ impl Native {
             root.join("native/platform/mutex.c"),
             scratch.0.join("mutex.c"),
         )?;
+        fs::write(
+            scratch.0.join("symbol_loads.c"),
+            include_str!("symbol_loads.c"),
+        )?;
         fs::write(scratch.0.join("driver.c"), include_str!("driver.c"))?;
         let cc = std::env::var_os("CC").unwrap_or_else(|| "cc".into());
         let version = Command::new(&cc).arg("--version").output()?;
@@ -168,10 +194,14 @@ impl Native {
             "-ffp-contract=off",
             "-fno-fast-math",
         ]);
-        if sanitize {
+        if !matches!(sanitizer, Sanitizer::None) {
             command.args([
                 "-g",
-                "-fsanitize=address,undefined,float-cast-overflow",
+                match sanitizer {
+                    Sanitizer::Address => "-fsanitize=address,undefined,float-cast-overflow",
+                    Sanitizer::Thread => "-fsanitize=thread",
+                    Sanitizer::None => unreachable!(),
+                },
                 "-fno-sanitize-recover=all",
                 "-fno-omit-frame-pointer",
             ]);
@@ -316,16 +346,34 @@ fn median(samples: &[f64]) -> f64 {
     }
 }
 
-fn benchmark(native: &Native, samples: u32, minimum_rounds: u64, sample_ms: u32) -> Result<()> {
+fn benchmark_metadata(
+    native: &Native,
+    samples: u32,
+    minimum_rounds: u64,
+    sample_ms: u32,
+) -> Result<()> {
     let rustc = Command::new("rustc").arg("--version").output()?;
+    let affinity = fs::read_to_string("/proc/self/status")
+        .ok()
+        .and_then(|status| {
+            status.lines().find_map(|line| {
+                line.strip_prefix("Cpus_allowed_list:")
+                    .map(|value| value.trim().to_owned())
+            })
+        });
     println!(
         "{}",
         json!({"metadata": {"c_compiler":native.compiler,"rust_compiler":String::from_utf8_lossy(&rustc.stdout).trim(),
         "c_flags":"-std=c11 -pthread -O3 -ffp-contract=off -fno-fast-math", "rust_profile":"release",
-        "os":std::env::consts::OS,"arch":std::env::consts::ARCH,"samples":samples,"minimum_rounds":minimum_rounds,"target_sample_ms":sample_ms,
+        "os":std::env::consts::OS,"arch":std::env::consts::ARCH,"cpu_affinity":affinity,"samples":samples,"minimum_rounds":minimum_rounds,"target_sample_ms":sample_ms,
         "rustflags":std::env::var("RUSTFLAGS").unwrap_or_default(),
         "timing":"monotonic wall time; input preparation and subprocess startup excluded; alternating implementation order"}})
     );
+    Ok(())
+}
+
+fn benchmark(native: &Native, samples: u32, minimum_rounds: u64, sample_ms: u32) -> Result<()> {
+    benchmark_metadata(native, samples, minimum_rounds, sample_ms)?;
     for (name, cases) in cases::workloads() {
         native.check(&cases)?;
         let prepared: Vec<_> = cases.iter().map(Case::prepare).collect();
@@ -381,13 +429,55 @@ fn benchmark(native: &Native, samples: u32, minimum_rounds: u64, sample_ms: u32)
 
 fn run() -> Result<()> {
     let options = Options::parse();
-    if let Some(mode) = &options.symbol_worker {
-        return symbols::worker(mode, options.iterations.get());
+    if options.symbol_load_worker {
+        return symbol_loads::worker(if options.symbol_load_verify {
+            0
+        } else {
+            options.iterations.get()
+        });
     }
     if options.bench && cfg!(debug_assertions) {
         return Err("benchmarking requires cargo run --release".into());
     }
-    let native = Native::build(options.sanitize, options.emit_c.as_deref())?;
+    let sanitizer = if options.thread_sanitize {
+        Sanitizer::Thread
+    } else if options.sanitize {
+        Sanitizer::Address
+    } else {
+        Sanitizer::None
+    };
+    let native = Native::build(sanitizer, options.emit_c.as_deref())?;
+    let threads: Vec<_> = options.symbol_threads.iter().map(|n| n.get()).collect();
+    if let Some(case) = &options.symbol_load_case {
+        symbol_loads::replay(&native, case)?;
+        println!("{}", json!({"symbol_load_replay":"passed"}));
+        return Ok(());
+    }
+    if options.symbol_loads {
+        symbol_loads::check(&native, options.cases, options.seed, &threads)?;
+        println!(
+            "{}",
+            json!({"symbol_load_correctness":"passed","threads":threads,"cases":options.cases,"seed":options.seed,
+            "sanitizers":options.sanitize,"thread_sanitizer":options.thread_sanitize})
+        );
+        if options.bench {
+            benchmark_metadata(
+                &native,
+                options.samples.get(),
+                options.iterations.get(),
+                options.sample_ms.get(),
+            )?;
+            symbol_loads::benchmark(
+                &native,
+                &threads,
+                options.seed,
+                options.samples.get(),
+                options.iterations.get(),
+                options.sample_ms.get(),
+            )?;
+        }
+        return Ok(());
+    }
     if let Some(case) = &options.symbol_case {
         symbols::replay(&native, case)?;
         println!("{}", json!({"symbol_replay":"passed"}));
@@ -408,12 +498,13 @@ fn run() -> Result<()> {
     }
     check_generated(&native, options.cases, options.seed, options.strings)?;
     symbols::check(&native, options.cases, options.seed)?;
+    symbol_loads::check(&native, options.cases, options.seed, &threads)?;
     for (_, cases) in cases::workloads() {
         native.check(&cases)?;
     }
     println!(
         "{}",
-        json!({"correctness":"passed","fixed_cases":fixed.len(),"generated_cases":options.cases,"string_corpus":options.strings,"symbol_sequences":options.cases,"seed":options.seed,"sanitizers":options.sanitize})
+        json!({"correctness":"passed","fixed_cases":fixed.len(),"generated_cases":options.cases,"string_corpus":options.strings,"symbol_sequences":options.cases,"symbol_load_cases":options.cases,"symbol_threads":threads,"seed":options.seed,"sanitizers":options.sanitize,"thread_sanitizer":options.thread_sanitize})
     );
     if options.bench {
         benchmark(
@@ -422,8 +513,10 @@ fn run() -> Result<()> {
             options.iterations.get(),
             options.sample_ms.get(),
         )?;
-        symbols::benchmark(
+        symbol_loads::benchmark(
             &native,
+            &threads,
+            options.seed,
             options.samples.get(),
             options.iterations.get(),
             options.sample_ms.get(),
@@ -448,11 +541,13 @@ mod tests {
 
     #[test]
     fn checks_shared_values_and_detects_remainder_divergence() -> Result<()> {
-        let native = Native::build(true, None)?;
+        let native = Native::build(Sanitizer::Address, None)?;
         native.check(&cases::fixed_cases())?;
         check_generated(&native, 64, 1, false)?;
         check_generated(&native, 128, 1, true)?;
         symbols::check(&native, 128, 1)?;
+        symbol_loads::check(&native, 16, 1, &[1, 2, 4, 8])?;
+        symbol_loads::detects_incorrect_metadata(&native)?;
         let mismatch = Case {
             op: cases::Operation::Remainder,
             left: cases::Input::Float(636431709),

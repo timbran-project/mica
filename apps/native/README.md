@@ -459,7 +459,7 @@ Use the string corpus to exercise this module independently of arithmetic discre
 cargo run --release -p mica-value-comparison -- --strings --cases 2048 --seed 17 --sanitize
 ```
 
-`--strings` selects generated string and Unicode cases. Symbol sequences run independently with the same seed and case count.
+`--strings` selects generated string and Unicode cases. Symbol sequences and concurrent loads run independently with the same seed and case count.
 Fixed cases and benchmark correctness checks still cover all implemented operations.
 
 Run performance measurements for workloads that pass their own full result checks:
@@ -475,12 +475,58 @@ Measurements cover integer addition, mixed numeric comparison, nested comparison
 String workloads cover ASCII and Unicode length, indexing, slicing, search, construction from bytes, and 64-part append chains.
 String inputs contain 4 KiB of bytes. Index workloads reuse cached metadata; construction workloads include validation and metadata creation.
 The Rust search reference uses standard string search and scalar-offset conversion; it is not a runtime substring-search builtin.
-Symbol workloads measure one repeated name, 1,024 existing names, reverse lookup, and 65,536 distinct insertions.
-Each symbol sample runs in a fresh process. Insertion visits each prepared name once, without warmup or duration calibration.
-Other symbol samples pre-intern names before timing. Reverse lookup reads text and cached metadata through each implementation's public API.
-C table initialization and cleanup stay outside timed intervals. Rust creates its global table on first use and retains names until process exit.
-Both implementations include synchronization in the measured operations. These samples measure uncontended calls from one thread.
-Rust uses a global read-write lock and a thread-local cache. Generated C uses a mutex per table.
+Symbol workloads run on one shared table with 1, 2, 4, and 8 worker threads by default.
+Even the one-worker case creates a thread. This prevents glibc from using its single-thread mutex shortcut.
+Use `--symbol-threads` to select worker counts and `--symbol-loads` to exclude unrelated value workloads.
+
+| Symbol workload | Operations |
+| --- | --- |
+| `one` | Repeated interning of one existing name |
+| `hot` | Existing names: 90% of requests select eight hot names, 10% select from 1,024 names |
+| `uniform` | Existing names selected uniformly from 1,024 names |
+| `text` | Text lookup through each implementation's public API |
+| `metadata` | Cached metadata lookup through each implementation's public API |
+| `unique` | 65,536 distinct names partitioned among workers |
+| `shared` | Every worker interns the same 8,192 names in shuffled order |
+| `mixed` | 20% new-name insertion, 20% existing-name interning, 40% text lookup, 20% metadata lookup |
+
+The catalog mixes ASCII, Unicode, embedded NUL bytes, and different name lengths.
+The seed fixes operation sequences. Thread scheduling and numeric ID assignment remain nondeterministic.
+Correctness runs check every result during execution, then check deduplication, stable IDs, text, metadata, and table cardinality after workers finish.
+Seeded stress cases also include malformed UTF-8 and concurrent insertion of an empty name.
+Failures print replay inputs for `--symbol-load-case`. Replay preserves inputs, not thread scheduling.
+
+Run concurrent correctness checks with address and undefined-behaviour sanitizers:
+
+```sh
+CC=clang cargo run --release -p mica-value-comparison -- --symbol-loads --sanitize --cases 128 --seed 17
+```
+
+Run the generated C workers under ThreadSanitizer:
+
+```sh
+CC=clang cargo run --release -p mica-value-comparison -- --symbol-loads --thread-sanitize --cases 128 --seed 17
+```
+
+Run paired throughput measurements:
+
+```sh
+CC=clang cargo run --release -p mica-value-comparison -- --symbol-loads --symbol-threads 1,2,4,8 --bench --cases 64 --seed 17
+```
+
+Give the process enough CPUs for the requested workers. Pin the parent and its children to the same CPU set for repeatable comparisons.
+The JSON metadata records Linux CPU affinity. Pinning every worker to one CPU measures scheduling and contention, not multicore scaling.
+
+Each sample uses a fresh process and table. Only names in the existing prefix undergo warmup on each worker before timing.
+New-name workloads make one pass, without repetition calibration. Other symbol workloads calibrate Rust and C separately toward the requested duration.
+Independent calibration keeps large contention differences from producing excessive sample times. Output records each implementation's operation count.
+Start and finish barriers are timed. Thread creation, warmup, joins, complete result validation, and table cleanup are outside the timer.
+Timed workers consume results and check ID stability across repetitions. A separate correctness pass checks every operation before performance sampling.
+Every timed sample also checks complete final identities, text, and metadata after timing.
+
+Symbol results include operations per second and aggregate nanoseconds per operation: wall time divided by total operations across all workers.
+These measure throughput, not per-call latency. Rust uses its global read-write lock and thread-local cache; generated C uses a mutex per table.
+Text and metadata workloads each make one public API call per operation. No claim about memory efficiency follows from these timings.
 The harness calibrates other workloads toward the requested sample duration and alternates implementation order.
 It prints JSON lines with compiler details, all samples, median nanoseconds per operation, and C/Rust ratios. Ratios below one favour C.
 Samples include operation dispatch and result consumption, so very small operation timings also include harness costs.
