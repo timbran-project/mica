@@ -11,7 +11,9 @@
 // You should have received a copy of the GNU Affero General Public License along
 // with this program. If not, see <https://www.gnu.org/licenses/>.
 
-use crate::{ApplicableMethodCall, ApplicablePositionalMethod, DispatchRelations};
+use crate::{
+    ApplicableMethod, ApplicableMethodCall, ApplicablePositionalMethod, DispatchRelations,
+};
 use mica_var::Value;
 use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};
@@ -20,9 +22,18 @@ use std::sync::{Arc, RwLock};
 pub(crate) struct DispatchCache {
     entries: Arc<RwLock<BTreeMap<DispatchCacheKey, Arc<[ApplicableMethodCall]>>>>,
     positional_entries: Arc<RwLock<PositionalDispatchEntries>>,
+    candidates: Arc<RwLock<BTreeMap<CandidateKey, Arc<[ApplicableMethod]>>>>,
 }
 
-type PositionalDispatchEntries = BTreeMap<DispatchRelationsKey, BTreeMap<Value, PositionalMethods>>;
+type CandidateKey = (DispatchRelationsKey, Value);
+
+type PositionalDispatchEntries = BTreeMap<DispatchRelationsKey, PositionalRelationEntries>;
+
+#[derive(Debug, Default)]
+struct PositionalRelationEntries {
+    selectors: BTreeMap<Value, PositionalMethods>,
+    count: usize,
+}
 
 #[derive(Debug, Default)]
 struct PositionalMethods {
@@ -30,11 +41,38 @@ struct PositionalMethods {
     by_values: BTreeMap<Vec<Value>, Arc<[ApplicablePositionalMethod]>>,
 }
 
+// Bound retained argument values and selector candidates within each snapshot.
+const MAX_POSITIONAL_ENTRIES_PER_RELATION: usize = 1024;
+const MAX_KEYED_ENTRIES: usize = 4096;
+
 impl DispatchCache {
     pub(crate) fn new() -> Self {
         Self {
             entries: Arc::new(RwLock::new(BTreeMap::new())),
             positional_entries: Arc::new(RwLock::new(BTreeMap::new())),
+            candidates: Arc::new(RwLock::new(BTreeMap::new())),
+        }
+    }
+
+    pub(crate) fn get_candidates(
+        &self,
+        relations: DispatchRelations,
+        selector: &Value,
+    ) -> Option<Arc<[ApplicableMethod]>> {
+        let key = (DispatchRelationsKey::from(relations), selector.clone());
+        self.candidates.read().unwrap().get(&key).map(Arc::clone)
+    }
+
+    pub(crate) fn insert_candidates(
+        &self,
+        relations: DispatchRelations,
+        selector: &Value,
+        candidates: Arc<[ApplicableMethod]>,
+    ) {
+        let key = (DispatchRelationsKey::from(relations), selector.clone());
+        let mut entries = self.candidates.write().unwrap();
+        if entries.len() < MAX_KEYED_ENTRIES {
+            entries.entry(key).or_insert(candidates);
         }
     }
 
@@ -94,6 +132,7 @@ impl DispatchCache {
         let entries = self.positional_entries.read().unwrap();
         let methods = entries
             .get(&DispatchRelationsKey::from(relations))?
+            .selectors
             .get(selector)?;
         methods
             .by_arity
@@ -111,24 +150,38 @@ impl DispatchCache {
         argument_independent: bool,
     ) {
         let mut entries = self.positional_entries.write().unwrap();
-        let entry = entries
+        let relation = entries
             .entry(DispatchRelationsKey::from(relations))
-            .or_default()
-            .entry(selector.clone())
             .or_default();
-        if argument_independent {
-            entry.by_arity.entry(args.len()).or_insert(methods);
+        if relation.count >= MAX_POSITIONAL_ENTRIES_PER_RELATION {
             return;
         }
-        entry.by_values.entry(args.to_vec()).or_insert(methods);
+        let entry = relation.selectors.entry(selector.clone()).or_default();
+        let inserted = if argument_independent {
+            match entry.by_arity.entry(args.len()) {
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    entry.insert(methods);
+                    true
+                }
+                std::collections::btree_map::Entry::Occupied(_) => false,
+            }
+        } else {
+            match entry.by_values.entry(args.to_vec()) {
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    entry.insert(methods);
+                    true
+                }
+                std::collections::btree_map::Entry::Occupied(_) => false,
+            }
+        };
+        relation.count += usize::from(inserted);
     }
 
     fn insert_key(&self, key: DispatchCacheKey, methods: Vec<ApplicableMethodCall>) {
-        self.entries
-            .write()
-            .unwrap()
-            .entry(key)
-            .or_insert_with(|| methods.into());
+        let mut entries = self.entries.write().unwrap();
+        if entries.len() < MAX_KEYED_ENTRIES {
+            entries.entry(key).or_insert_with(|| methods.into());
+        }
     }
 }
 
@@ -255,8 +308,8 @@ mod tests {
                 let selector = &selector;
                 let stable = &stable;
                 scope.spawn(move || {
-                    for item in 0..512 {
-                        let argument = value(worker * 512 + item);
+                    for item in 0..128 {
+                        let argument = value(worker * 128 + item);
                         let methods = Arc::<[ApplicablePositionalMethod]>::from(
                             [argument.clone()].map(ApplicablePositionalMethod::required),
                         );
@@ -292,7 +345,7 @@ mod tests {
                 });
             }
         });
-        for item in 0..2048 {
+        for item in 0..512 {
             let argument = value(item);
             assert_eq!(
                 &*cache
@@ -302,5 +355,46 @@ mod tests {
             );
         }
         assert_eq!(&*stable, &[ApplicablePositionalMethod::required(value(9))]);
+    }
+    #[test]
+    fn full_positional_cache_preserves_existing_entries() {
+        let cache = DispatchCache::new();
+        let relations = DispatchRelations {
+            method_selector: relation(1),
+            param: relation(2),
+            delegates: relation(3),
+        };
+        let selector = value(4);
+        let methods: Arc<[ApplicablePositionalMethod]> =
+            [ApplicablePositionalMethod::required(value(9))].into();
+        for item in 0..MAX_POSITIONAL_ENTRIES_PER_RELATION {
+            cache.insert_positional(
+                relations,
+                &selector,
+                &[value(item as i64)],
+                Arc::clone(&methods),
+                false,
+            );
+        }
+        cache.insert_positional(
+            relations,
+            &selector,
+            &[value(-1)],
+            Arc::clone(&methods),
+            false,
+        );
+        assert!(
+            cache
+                .get_positional(relations, &selector, &[value(-1)])
+                .is_none()
+        );
+        for item in 0..MAX_POSITIONAL_ENTRIES_PER_RELATION {
+            assert!(Arc::ptr_eq(
+                &methods,
+                &cache
+                    .get_positional(relations, &selector, &[value(item as i64)])
+                    .unwrap()
+            ));
+        }
     }
 }

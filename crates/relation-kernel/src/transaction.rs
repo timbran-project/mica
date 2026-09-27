@@ -14,6 +14,7 @@
 mod overlay;
 
 use crate::computed::{ComputedPreparationCache, ComputedRelationRead};
+use crate::dispatch::ApplicableMethod;
 use crate::index::{RelationMutationKind, RelationState};
 use crate::metrics::{CommitOutcome, TransactionReadOperation, TransactionWriteOperation};
 use crate::relation_algebra::{
@@ -1312,6 +1313,32 @@ impl DispatchRead for Transaction<'_> {
     ) -> Result<Option<Arc<[ApplicablePositionalMethod]>>, KernelError> {
         self.cached_applicable_positional_methods(relations, selector, args)
             .map(Some)
+    }
+
+    fn cached_method_candidates(
+        &self,
+        relations: DispatchRelations,
+        selector: &Value,
+    ) -> Result<Option<Arc<[ApplicableMethod]>>, KernelError> {
+        // The overlay's dispatch relations may differ from the base snapshot;
+        // then the cached candidate set is not valid and the caller scans.
+        if !self.dispatch_view_matches_base(relations)? {
+            return Ok(None);
+        }
+        Ok(self.base.dispatch_cache.get_candidates(relations, selector))
+    }
+
+    fn store_method_candidates(
+        &self,
+        relations: DispatchRelations,
+        selector: &Value,
+        candidates: Arc<[ApplicableMethod]>,
+    ) {
+        if self.dispatch_view_matches_base(relations).unwrap_or(false) {
+            self.base
+                .dispatch_cache
+                .insert_candidates(relations, selector, candidates);
+        }
     }
 }
 

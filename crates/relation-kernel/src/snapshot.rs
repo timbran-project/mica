@@ -19,10 +19,10 @@ use crate::method_program_cache::MethodProgramCache;
 use crate::relation_algebra::union_ordered_tuple_rows;
 use crate::relation_states::RelationStates;
 use crate::{
-    ApplicableMethodCall, ApplicablePositionalMethod, DispatchRead, DispatchRelations, KernelError,
-    PackedRelation, RelationCapabilities, RelationId, RelationMetadata, RelationRead,
-    RelationSource, RuleDefinition, RuleEvalError, RuleSet, ScanControl, Tuple, ValueDomain,
-    Version,
+    ApplicableMethod, ApplicableMethodCall, ApplicablePositionalMethod, DispatchRead,
+    DispatchRelations, KernelError, PackedRelation, RelationCapabilities, RelationId,
+    RelationMetadata, RelationRead, RelationSource, RuleDefinition, RuleEvalError, RuleSet,
+    ScanControl, Tuple, ValueDomain, Version,
 };
 use mica_var::{Identity, Symbol, Value};
 use std::collections::BTreeMap;
@@ -580,8 +580,9 @@ impl Snapshot {
             return Ok(methods);
         }
 
+        let candidates = crate::dispatch::method_candidates(self, relations, selector)?;
         let resolved =
-            crate::dispatch::resolve_positional_methods(self, relations, selector.clone(), args)?;
+            crate::dispatch::filter_positional_candidates(self, relations, args, &candidates)?;
         let methods = Arc::from(resolved.methods);
         self.dispatch_cache.insert_positional(
             relations,
@@ -712,6 +713,24 @@ impl DispatchRead for Snapshot {
         method: &Value,
     ) -> Result<Option<Option<Value>>, KernelError> {
         self.cached_method_program(relation, method).map(Some)
+    }
+
+    fn cached_method_candidates(
+        &self,
+        relations: DispatchRelations,
+        selector: &Value,
+    ) -> Result<Option<Arc<[ApplicableMethod]>>, KernelError> {
+        Ok(self.dispatch_cache.get_candidates(relations, selector))
+    }
+
+    fn store_method_candidates(
+        &self,
+        relations: DispatchRelations,
+        selector: &Value,
+        candidates: Arc<[ApplicableMethod]>,
+    ) {
+        self.dispatch_cache
+            .insert_candidates(relations, selector, candidates);
     }
 
     fn cached_applicable_positional_methods(

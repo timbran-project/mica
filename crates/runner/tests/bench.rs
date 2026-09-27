@@ -88,3 +88,72 @@ fn benchmark_rejects_failed_setup_and_invalid_counts() {
     assert!(!fixture.run("1", &["--iterations", "0"]).status.success());
     assert!(!fixture.run("2", &[]).status.success());
 }
+
+#[test]
+fn benchmark_calibrates_multiple_files_and_reports_validation() {
+    let first = Fixture::new("verb bench()\n return 42\nend");
+    let second = Fixture::new("verb bench()\n return 42\nend");
+    let output = Command::new(env!("CARGO_BIN_EXE_mica"))
+        .arg("bench")
+        .args([&first.0, &second.0])
+        .args([
+            "--expected",
+            "42",
+            "--samples",
+            "1",
+            "--budget-ms",
+            "1",
+            "--warmup",
+            "0",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let reports: Vec<Value> = String::from_utf8(output.stdout)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(reports.len(), 2);
+    for report in reports {
+        assert_eq!(report["result_validated"], true);
+        assert_eq!(report["calibration_invocations"], 1);
+        assert_eq!(report["budget_ms"], 1);
+        assert!(report["iterations_per_sample"].as_u64().unwrap() >= 1);
+        assert_eq!(report["timed_invocations"], report["iterations_per_sample"]);
+    }
+    let unvalidated = Command::new(env!("CARGO_BIN_EXE_mica"))
+        .arg("bench")
+        .arg(&first.0)
+        .args(["--samples", "1", "--iterations", "1", "--warmup", "0"])
+        .output()
+        .unwrap();
+    assert!(unvalidated.status.success());
+    let report: Value = serde_json::from_slice(&unvalidated.stdout).unwrap();
+    assert_eq!(report["result_validated"], false);
+    assert_eq!(report["calibration_invocations"], 0);
+    assert!(report["expected"].is_null());
+}
+
+#[test]
+fn benchmark_rejects_failed_calibration_and_conflicting_sampling_options() {
+    let fixture = Fixture::new("verb bench()\n return 42\nend");
+    for args in [
+        vec!["--budget-ms", "1", "--expected", "41", "--warmup", "0"],
+        vec!["--budget-ms", "1", "--iterations", "1"],
+        vec!["--budget-ms", "0"],
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_mica"))
+            .arg("bench")
+            .arg(&fixture.0)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty());
+    }
+}

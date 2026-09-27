@@ -1357,6 +1357,36 @@ fn positional_arity_cache_preserves_restrictions_overlays_and_snapshots() {
         &[crate::ApplicablePositionalMethod::required(generic.clone())]
     );
 
+    // Distinct restricted arguments exceed the result-cache bound. Candidate
+    // declarations remain reusable and filtering still selects the right method.
+    let candidates = restricted
+        .dispatch_cache
+        .get_candidates(relations, &selector)
+        .unwrap();
+    for argument in 0..1100 {
+        let methods = restricted
+            .cached_applicable_positional_methods(relations, &selector, &[int(argument)])
+            .unwrap();
+        let expected = if argument == 7 { &specific } else { &generic };
+        assert_eq!(methods[0].method, *expected);
+    }
+    let cached = restricted
+        .dispatch_cache
+        .get_candidates(relations, &selector)
+        .unwrap();
+    assert!(Arc::ptr_eq(&candidates, &cached));
+    let calls = restricted
+        .cached_applicable_method_calls(relations, &selector, &[(role.clone(), int(7))])
+        .unwrap();
+    assert_eq!(calls[0].method, specific);
+    assert!(Arc::ptr_eq(
+        &candidates,
+        &restricted
+            .dispatch_cache
+            .get_candidates(relations, &selector)
+            .unwrap()
+    ));
+
     let mut tx = kernel.begin();
     tx.retract(rel(2), unrestricted).unwrap();
     tx.assert(

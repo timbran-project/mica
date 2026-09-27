@@ -1001,12 +1001,12 @@ fn generated_natural_loop_stops_at_an_exact_instruction_budget() {
 }
 
 #[test]
-fn generated_numeric_arithmetic_matches_float_and_mixed_value_semantics() {
+fn generated_numeric_arithmetic_matches_float_and_integer_value_semantics() {
     let compiled = CompiledNaturalLoop::compile(&numeric_arithmetic_plan()).unwrap();
     for (left, right) in [
         (Value::float(2.0).unwrap(), Value::float(0.5).unwrap()),
-        (Value::int(2).unwrap(), Value::float(0.5).unwrap()),
-        (Value::float(-2.5).unwrap(), Value::int(4).unwrap()),
+        (Value::float(-2.5).unwrap(), Value::float(4.0).unwrap()),
+        (Value::int(2).unwrap(), Value::int(3).unwrap()),
     ] {
         let expected = [
             left.checked_neg().unwrap(),
@@ -1032,6 +1032,30 @@ fn generated_numeric_arithmetic_matches_float_and_mixed_value_semantics() {
         for (slot, expected) in (2..6).zip(expected) {
             assert_eq!(value(scratch[slot]), expected);
         }
+    }
+}
+
+#[test]
+fn generated_numeric_arithmetic_side_exits_on_mixed_kinds() {
+    // Mixed int/float arithmetic raises in the interpreter, so the compiled
+    // loop must side exit rather than widen.
+    let compiled = CompiledNaturalLoop::compile(&numeric_arithmetic_plan()).unwrap();
+    for (left, right) in [
+        (Value::int(2).unwrap(), Value::float(0.5).unwrap()),
+        (Value::float(-2.5).unwrap(), Value::int(4).unwrap()),
+    ] {
+        let mut scratch = [
+            borrowed_value_bits(&left),
+            borrowed_value_bits(&right),
+            bits(Value::empty_relation()),
+            bits(Value::empty_relation()),
+            bits(Value::empty_relation()),
+            bits(Value::empty_relation()),
+        ];
+        assert_eq!(
+            unsafe { compiled.run(&mut scratch, &[], 4) },
+            NaturalLoopOutcome::SideExit,
+        );
     }
 }
 
@@ -1064,11 +1088,9 @@ fn generated_numeric_division_matches_value_semantics() {
     let compiled = CompiledNaturalLoop::compile(&numeric_division_plan()).unwrap();
     assert_eq!(compiled.imported_helper_count(), 0);
     for (left, right) in [
-        (Value::int(8).unwrap(), Value::int(2).unwrap()),
-        (Value::int(7).unwrap(), Value::int(2).unwrap()),
-        (Value::int(-7).unwrap(), Value::int(2).unwrap()),
-        (Value::int(7).unwrap(), Value::float(2.0).unwrap()),
-        (Value::float(7.5).unwrap(), Value::int(2).unwrap()),
+        (Value::float(8.0).unwrap(), Value::float(2.0).unwrap()),
+        (Value::float(5.0).unwrap(), Value::float(2.0).unwrap()),
+        (Value::float(-7.0).unwrap(), Value::float(2.0).unwrap()),
     ] {
         let mut scratch = [
             borrowed_value_bits(&left),
@@ -1087,15 +1109,94 @@ fn generated_numeric_division_matches_value_semantics() {
 }
 
 #[test]
-fn generated_numeric_remainder_matches_value_semantics() {
-    let compiled = CompiledNaturalLoop::compile(&numeric_remainder_plan()).unwrap();
-    assert_eq!(compiled.imported_helper_count(), 1);
+fn generated_numeric_division_side_exits_on_inexact_integer_quotients() {
+    // Exact integer division stays native. Inexact integer division and mixed
+    // kinds raise, so the compiled loop must side exit.
+    let compiled = CompiledNaturalLoop::compile(&numeric_division_plan()).unwrap();
     for (left, right) in [
         (Value::int(7).unwrap(), Value::int(2).unwrap()),
         (Value::int(-7).unwrap(), Value::int(2).unwrap()),
         (Value::int(7).unwrap(), Value::float(2.0).unwrap()),
         (Value::float(7.5).unwrap(), Value::int(2).unwrap()),
-        (Value::float(f32::MAX).unwrap(), Value::float(0.5).unwrap()),
+    ] {
+        let mut scratch = [
+            borrowed_value_bits(&left),
+            borrowed_value_bits(&right),
+            bits(Value::empty_relation()),
+        ];
+        assert_eq!(
+            unsafe { compiled.run(&mut scratch, &[], 1) },
+            NaturalLoopOutcome::SideExit,
+        );
+    }
+
+    // Exact integer division stays on the native path.
+    let left = Value::int(8).unwrap();
+    let right = Value::int(2).unwrap();
+    let mut scratch = [
+        borrowed_value_bits(&left),
+        borrowed_value_bits(&right),
+        bits(Value::empty_relation()),
+    ];
+    assert_eq!(
+        unsafe { compiled.run(&mut scratch, &[], 1) },
+        NaturalLoopOutcome::Complete {
+            instructions: 1,
+            modified_slots: 0x4,
+        },
+    );
+    assert_eq!(value(scratch[2]), left.checked_div(&right).unwrap());
+}
+
+#[test]
+fn generated_numeric_remainder_matches_value_semantics() {
+    let compiled = CompiledNaturalLoop::compile(&numeric_remainder_plan()).unwrap();
+    assert_eq!(compiled.imported_helper_count(), 1);
+    for (left, right) in [
+        (Value::float(7.5).unwrap(), Value::float(2.0).unwrap()),
+        (Value::float(-7.5).unwrap(), Value::float(2.0).unwrap()),
+        (Value::float(7.5).unwrap(), Value::float(3.0).unwrap()),
+    ] {
+        let mut scratch = [
+            borrowed_value_bits(&left),
+            borrowed_value_bits(&right),
+            bits(Value::empty_relation()),
+        ];
+        assert_eq!(
+            unsafe { compiled.run(&mut scratch, &[], 1) },
+            NaturalLoopOutcome::Complete {
+                instructions: 1,
+                modified_slots: 0x4,
+            },
+        );
+        assert_eq!(value(scratch[2]), left.checked_rem(&right).unwrap());
+    }
+}
+
+#[test]
+fn generated_numeric_remainder_side_exits_on_integer_operands() {
+    // Integer remainder stays on the native integer path; mixed kinds raise
+    // and side exit.
+    let compiled = CompiledNaturalLoop::compile(&numeric_remainder_plan()).unwrap();
+    for (left, right) in [
+        (Value::int(7).unwrap(), Value::float(2.0).unwrap()),
+        (Value::float(7.5).unwrap(), Value::int(2).unwrap()),
+    ] {
+        let mut scratch = [
+            borrowed_value_bits(&left),
+            borrowed_value_bits(&right),
+            bits(Value::empty_relation()),
+        ];
+        assert_eq!(
+            unsafe { compiled.run(&mut scratch, &[], 1) },
+            NaturalLoopOutcome::SideExit,
+        );
+    }
+
+    // Integer remainder is an integer result and stays native.
+    for (left, right) in [
+        (Value::int(7).unwrap(), Value::int(2).unwrap()),
+        (Value::int(-7).unwrap(), Value::int(2).unwrap()),
     ] {
         let mut scratch = [
             borrowed_value_bits(&left),
@@ -1348,7 +1449,28 @@ fn generated_language_ordering_helper_executes_concurrently() {
 }
 
 #[test]
-fn generated_mixed_numeric_arithmetic_executes_concurrently() {
+fn generated_mixed_numeric_arithmetic_side_exits() {
+    // Mixed int/float arithmetic is not a fast path: the compiled loop must
+    // side exit so the interpreter raises the type error.
+    let compiled = CompiledNaturalLoop::compile(&numeric_arithmetic_plan()).unwrap();
+    let left = Value::int(3).unwrap();
+    let right = Value::float(0.5).unwrap();
+    let mut scratch = [
+        borrowed_value_bits(&left),
+        borrowed_value_bits(&right),
+        bits(Value::empty_relation()),
+        bits(Value::empty_relation()),
+        bits(Value::empty_relation()),
+        bits(Value::empty_relation()),
+    ];
+    assert_eq!(
+        unsafe { compiled.run(&mut scratch, &[], 4) },
+        NaturalLoopOutcome::SideExit,
+    );
+}
+
+#[test]
+fn generated_float_numeric_arithmetic_executes_concurrently() {
     let compiled = Arc::new(CompiledNaturalLoop::compile(&numeric_arithmetic_plan()).unwrap());
     let barrier = Arc::new(Barrier::new(4));
     let mut threads = Vec::new();
@@ -1356,7 +1478,7 @@ fn generated_mixed_numeric_arithmetic_executes_concurrently() {
         let compiled = Arc::clone(&compiled);
         let barrier = Arc::clone(&barrier);
         threads.push(std::thread::spawn(move || {
-            let left = Value::int(3).unwrap();
+            let left = Value::float(3.0).unwrap();
             let right = Value::float(0.5).unwrap();
             let mut scratch = [
                 borrowed_value_bits(&left),

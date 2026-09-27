@@ -462,17 +462,15 @@ impl NaturalLoopPlan {
                 | NaturalLoopInstruction::Multiply { dst, left, right } => {
                     is_numeric(left)
                         && is_numeric(right)
-                        && if is_integer(left) && is_integer(right) {
+                        && same_numeric_kind(left, right)
+                        && if is_integer(left) {
                             is_integer(dst)
                         } else {
                             is_float(dst)
                         }
                 }
                 NaturalLoopInstruction::Divide { dst, left, right } => {
-                    is_numeric(left)
-                        && is_numeric(right)
-                        && (is_float(left) || is_float(right))
-                        && is_float(dst)
+                    is_float(left) && is_float(right) && is_float(dst)
                 }
                 NaturalLoopInstruction::Compare {
                     dst, left, right, ..
