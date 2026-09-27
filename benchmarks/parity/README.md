@@ -96,3 +96,24 @@ The timed invocation checks 1,001 tokens, source positions, zero diagnostics, an
 Its `prelude` lists the lexer and parser paths. The launcher loads those files from each implementation's pinned source export.
 The generated fixture hashes and individual prelude hashes appear in `fixture_inputs` in the manifest.
 Prelude loading occurs before timing and remains included in process peak RSS.
+
+## Ingestion commands
+
+```sh
+python3 benchmarks/parity/capture_ingestion.py /tmp/mica-ingestion \
+  --rust-revision HEAD --odin-revision bfb368c --cpu 5 --runs 3 \
+  --subjects 1000 --assertions 100000
+```
+
+This capture exports and builds both revisions. `--cargo-target-dir` can reuse a Cargo build cache.
+It copies the resulting Rust binary into the capture and records its hash.
+The OWL case loads 1,001 subjects and 2,001 facts into fresh, initialized stores with strict durability.
+Setup and persisted-result verification occur outside the timed load command. No inference rules are installed.
+One input batch covers the file. Rust commits progress with the facts, while Odin uses a separate progress commit.
+Rust executes a Mica loader with native execution enabled. Odin executes its native host loader.
+These timings compare complete application commands, including their different storage engines and transaction paths.
+
+The CycL case counts 100,000 assertions without writing facts.
+Odin includes in-memory schema initialization. Rust runs only its census parser.
+Both cases measure process launch through exit and record peak process RSS.
+The manifest preserves commands, input hashes, binary hashes, verification results, and implementation differences.
