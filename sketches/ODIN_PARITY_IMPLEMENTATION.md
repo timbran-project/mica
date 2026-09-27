@@ -4,6 +4,94 @@ This plan records the implementation requested on 2026-09-26.
 Rust starts at `350713b`. The initial Odin reference is `bfb368c`.
 Pending changes in either checkout are outside the reference baseline.
 
+## Endpoint agreed at the checkpoint
+
+The user selected: "Finish the capabilities and measured improvements, then review the remaining performance gaps together."
+
+This phase ends with the six capability rows below verified, a final measurement report, and an explicit list of remaining performance gaps.
+Matching every Odin timing is not an acceptance condition for this phase.
+Performance parity remains a separate claim, which the current evidence does not establish.
+An unsupported required capability remains unfinished. A documented gap does not count as an implemented capability.
+
+The reference stays at Odin `bfb368c0b7586ab98c3915c0ae7cd3b46843fc8f`.
+The shared measurement corpus contains 28 fixtures at Rust `0bc54c0`.
+Later Odin changes, experimental RFCs, and unrelated language extensions do not expand this phase.
+The single-use `runtime_new_operations.mica` exclusion remains visible in the measurement manifest.
+It requires a separate protocol before the donor corpus comparison can be called complete.
+
+| Original workstream | Capability acceptance | Remaining closure work |
+| --- | --- | --- |
+| Baselines | Shared inputs, independent expected results, pinned sources, and complete protocol metadata | Refresh all 28 fixtures at one final Rust revision. Account for the single-use fixture separately. |
+| Strings, collections, and calls | Unicode and construction cases pass. Aliases, exceptions, suspension, closures, and retries retain their semantics. | Run the final integration suite and report nested-list and call results. Further optimization depends on the performance review. |
+| Computed scans and retrieval | CPU batches and cached preparation preserve authority, local writes, output bindings, ties, and exact scores. | Run the existing regressions and refresh the exact-retrieval comparison. Approximate GPU selection is outside this phase. |
+| Buffers and editor | Atomic facts/text, conflicts, restart recovery, markers, and client revisions pass. The editor supports input, undo, files, and reconnect through Rust hosts. | Repeat the integration checks. Report buffer edit/recovery costs and editor latency, including unresolved timeouts and missing comparisons. |
+| Query and storage | Selected improvements preserve incremental maintenance, retractions, alternate support, and retained snapshots. | Run the existing regressions. Refresh initial derivation and small-update measurements separately. Further engine redesign depends on the performance review. |
+| Compiler and ingestion applications | The pinned Mica compiler runs through Rust assembly. Its supported source cases produce executable artifacts. OWL loading/resume and the donor CycL census/sample pass. | Close the compiler coverage inventory below. Refresh bootstrap, ingestion, and persisted-result checks. Report compiler and ingestion performance gaps. |
+
+### Compiler boundary
+
+The compiler remains Mica source in `apps/compiler`.
+The Rust work exposes assembly operations and adapts the Mica emitter to Rust's program format.
+Parser acceptance, valid bytecode, successful execution, and bootstrap are separate checks.
+The current test installer establishes bootstrap execution. It does not establish a public application workflow.
+
+The fixed donor inventory comes from `apps/compiler/{lex,parse,emit}.mica` at the pinned revision.
+Rust's native compiler is an execution oracle for shared semantics, not a source of extra feature requirements.
+The inventory must distinguish donor limitations from missing Rust support before further feature work.
+
+| Compiler area | Current evidence | Required closure |
+| --- | --- | --- |
+| Lexer, parser, assembly, bootstrap | Corpus parsing, malformed input, assembly validation, and byte-identical bootstrap artifacts have tests | Pass the final suite in both execution modes |
+| Expressions, collections, control flow, rows, comprehensions | Executed comparisons cover values, evaluation order, aliases, exceptions, and suspension | Preserve those results |
+| Calls and spawn | Checkpoint tests cover receiver calls, roles, splices, dynamic selectors, and spawn continuations | Passed. Spawn tests inspect requests and parent continuations, not child execution |
+| Verbs and local functions | Required verb parameters and closures pass. Default/rest/restricted verb parameters remain unsupported by this emitter | Establish executable donor cases for the missing parameter and overload behaviour, then close those cases |
+| Remaining donor expression families | The pinned emitter contains match patterns, DOM elements/text, structural literals, and functional field reads/writes | Record executable cases for these four families, then close their gaps |
+| Special calls | The pinned emitter treats `invoke` and `mailbox_recv` as VM operations. Rust's Mica emitter currently routes these names through ordinary dispatch. | Add the two lowering cases with execution and suspension checks. Check donor relation-retraction calls in the same inventory |
+| Module use | Tests install emitted methods with administrative catalogue writes | Establish the smallest public compile/install/execute workflow through existing runtime APIs |
+| Declarations and other syntax | The donor emitter's top-level passes select expressions and verbs. Other parsed items are not evidence of emitted declarations. | Do not add full declaration or unit compilation solely to match Rust's native compiler |
+
+The recent dynamic-selector and broader catch/parameter discussions cannot silently become additional language-development objectives.
+Only a failing pinned capability case, or a defect in a changed path, justifies more implementation in this phase.
+
+### Performance evidence at the checkpoint
+
+These captures use different Rust commits. They identify remaining gaps but do not form a final comparison of the current checkout.
+All ratios refer to the named workload and protocol, not general implementation speed.
+
+| Workload | Latest recorded result | Evidence |
+| --- | --- | --- |
+| Shared-list calls | Rust approximately 2 times slower | [Arity cache](../benchmarks/parity/results/2026-09-26-arity-cache/README.md) |
+| Exact retrieval | Rust 2.78 ms, Odin 6.54 ms | [Retrieval](../benchmarks/parity/results/2026-09-26-retrieval-cache/README.md) |
+| Initial derivation | Rust 28.03 ms, Odin 2.04 ms | [Rules](../benchmarks/parity/results/2026-09-26-rule-derived-indexes/README.md) |
+| Sixteen small updates | Rust 93.76 ms, Odin 14.65 ms | [Rules](../benchmarks/parity/results/2026-09-26-rule-derived-indexes/README.md) |
+| Compiler frontend | Rust 19.59 ms, Odin 37.12 ms | [Compiler](../benchmarks/parity/results/2026-09-26-compiler-fact-chunks/README.md) |
+| Source to artifact | Rust 19.46 ms, Odin 8.81 ms | [Compiler](../benchmarks/parity/results/2026-09-26-compiler-fact-chunks/README.md) |
+| OWL, 10,001 subjects | Rust 231.75 ms, Odin 61.75 ms | [Ingestion](../benchmarks/parity/results/2026-09-26-ingestion-identity-index/README.md) |
+| Buffer, 32,768 edits | Strict capture has timeouts. Relaxed edits take 604 ms and recovery takes 211 ms. This is a Rust before/after comparison. | [Buffers](../benchmarks/parity/results/2026-09-26-buffer-single-open-history/README.md) |
+| Editor | Functional scenarios and browser checks exist. Comparative latency is missing. | Existing editor and browser tests establish correctness only |
+
+The final report must retain failed and unsupported cases.
+It must include fixed-work peak RSS alongside latency, source revisions, execution tier, workers, durability, and accelerator placement.
+Buffer and editor results must name their measurement boundary. A kernel probe cannot establish browser latency.
+Unresolved performance gaps return to the user for review after capability closure.
+
+### Work order and stopping rules
+
+1. Finish and commit the pending compiler change with its tests.
+2. Produce the complete pinned compiler coverage inventory, then close its missing capability cases.
+3. Run integration checks across all six workstreams.
+4. Capture final performance evidence and report missing or failed measurements explicitly.
+5. Present the capability results, retained improvements, and remaining performance gaps for review.
+
+Each implementation step must name the failed acceptance case that it closes.
+New optimization candidates go into the final gap report rather than starting another implementation loop.
+A failed correctness check can reopen its affected step. A slower timing does not automatically start another rewrite.
+The final review is the endpoint of this phase, not a claim that all performance gaps are closed.
+
+The checkpoint workspace tests and clippy pass, including all 13 compiler application tests and both execution modes.
+The dispatch regression verifies that native and emitted code both reject invocation without method authority.
+An earlier test used `:len([])`, which the native parser rejects. It now uses the explicit role form `:len(input: [])`.
+
 ## Acceptance criteria
 
 Each workstream requires implementation, focused regressions, and relevant integration tests.
@@ -21,7 +109,7 @@ Passing an early workstream does not complete this plan.
 | Editor | Shared buffer library and programmable editor running through Rust host services | Shared library, source scenarios, confined files, browser input, and reconnect replay implemented; comparative measurements remain |
 | Query and storage execution | Measured columnar/storage improvements that preserve incremental maintenance | Persistent rule collections, indexed recursive reseeding, retained visible rows, and retained derived indexes measured; initial derivation remains open |
 | Query measurements | Separate initial derivation and small-update maintenance workloads | Implemented and measured; Rust has substantial initial and recursive-deletion costs |
-| Mica compiler | Ported compiler with an intentional Rust assembly interface and bootstrap conformance | Assembly, frontend, bootstrap, collections, closures, exceptions, and relation operations implemented; further donor features and public installation remain |
+| Mica compiler | Mica sources running through Rust assembly, with bootstrap and execution conformance | See the fixed compiler boundary above for implemented coverage and remaining cases |
 | Ingestion | Ported ingestion applications with verified loaded facts and inference results | OWL batches, streaming input, durable resume, CycL census, and scoped sample implemented; initial ingestion comparison measured; OWL load performance remains open |
 
 ## RFC cross-check
