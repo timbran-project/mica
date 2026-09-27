@@ -314,14 +314,16 @@ require from_literal(to_literal(minimum)) == ok(minimum)
 
 ### Numeric Conversion
 
-`to_float(number)` returns a float. Integer conversion rounds to binary32. A float argument passes through unchanged.
-`to_int(number)` returns an integer only if the input is exactly integral and fits the integer range.
-Both functions raise `E_TYPE` for unsupported values. `to_int` also raises `E_TYPE` for fractional or out-of-range numbers.
+`to_float(number)` returns a float. Integer conversion rounds to binary32. A float argument passes
+through unchanged. `to_int(number)` returns an integer only if the input is exactly integral and
+fits the integer range. Both functions raise `E_TYPE` for unsupported values. `to_int` also raises
+`E_TYPE` for fractional or out-of-range numbers.
 
-`parse_int(text)` accepts decimal digits with an optional leading minus.
-`parse_float(text)` accepts a decimal number with an optional sign, fraction, and exponent, then rounds it to binary32.
-Neither parser accepts surrounding whitespace, separators, or trailing text. Invalid spelling or overflow raises `E_INVARG`. A non-string argument raises `E_TYPE`.
-Float underflow can round to zero. Infinity and NaN remain invalid.
+`parse_int(text)` accepts decimal digits with an optional leading minus. `parse_float(text)` accepts
+a decimal number with an optional sign, fraction, and exponent, then rounds it to binary32. Neither
+parser accepts surrounding whitespace, separators, or trailing text. Invalid spelling or overflow
+raises `E_INVARG`. A non-string argument raises `E_TYPE`. Float underflow can round to zero.
+Infinity and NaN remain invalid.
 
 ```mica,eval
 require parse_int("-42") == -42
@@ -355,9 +357,9 @@ Numeric equality applies when the two operands themselves are numbers. It does n
 coerce cells inside lists, maps, frobs, or relation values. This is why the list comparison above is
 false even though its individual numeric elements compare equal.
 
-Arithmetic does not mix integer and float operands. Both operands must have the same numeric kind;
-a mixed pair raises `E_TYPE`, and no implicit conversion is performed. Use `to_float` or `to_int`
-to convert an operand explicitly. Converting an integer to a float rounds to binary32 and can lose
+Arithmetic does not mix integer and float operands. Both operands must have the same numeric kind; a
+mixed pair raises `E_TYPE`, and no implicit conversion is performed. Use `to_float` or `to_int` to
+convert an operand explicitly. Converting an integer to a float rounds to binary32 and can lose
 precision.
 
 Integer overflow and non-finite arithmetic results raise `E_ARITH`; division or remainder by zero

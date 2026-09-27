@@ -8464,17 +8464,29 @@ fn comprehension_accumulator_survives_suspension() {
 }
 
 #[test]
-fn comprehensions_match_shared_odin_pattern_fixture() {
+fn comprehensions_compose_with_list_row_and_wildcard_loop_patterns() {
     let mut runner = SourceRunner::new_empty();
-    runner
-        .run_filein(include_str!(
-            "../../../benchmarks/parity/mica/language_for_pattern.mica"
-        ))
+    let report = runner
+        .run_source(
+            r#"
+        let total = 0
+        for [a, b] in [[1, 2], [3, 4]]
+            total = total + a + b
+        end
+        for {x} in [:x] {[10], [20]}
+            total = total + x
+        end
+        for _ in [1, 2, 3]
+            total = total + 1
+        end
+        let evens = [n for n in [1, 2, 3, 4] if n == 2]
+        let ordered = [n for n in [3, 1, 2] sort]
+        let keyed = [pair[1] for pair in [[1, "b"], [0, "a"]] sort pair[0]]
+        return total + len(evens) + ordered[0] + len(keyed)
+    "#,
+        )
         .unwrap();
-    assert_completed_value(
-        &runner.run_source("return bench()").unwrap(),
-        Value::int(47).unwrap(),
-    );
+    assert_completed_value(&report, Value::int(47).unwrap());
 }
 
 #[test]

@@ -151,16 +151,16 @@ That distinction matters for freshness. An approximate index should expose an in
 so retrieval code can decide whether the index is fresh enough. The exact relation reports the
 snapshot it read from.
 
-Exact search prepares index membership, subjects, vectors, and vector norms once per transaction and index.
-Later searches reuse that preparation. Any local write clears the prepared data.
-A resumed task or a new transaction starts with an empty preparation cache.
-The cache retains at most 16 index entries per transaction; other indexes still work without retention.
+Exact search prepares index membership, subjects, vectors, and vector norms once per transaction and
+index. Later searches reuse that preparation. Any local write clears the prepared data. A resumed
+task or a new transaction starts with an empty preparation cache. The cache retains at most 16 index
+entries per transaction; other indexes still work without retention.
 
-Batched rule probes share preparation across their input queries. Scoring uses f64 arithmetic on the CPU;
-Mica receives finite binary32 scores. Ranking uses the f64 scores, with subject value order breaking ties.
-Multiple embeddings for one subject contribute that subject's best score.
-Bindings on subject, score, and snapshot version filter the selected top-k results.
-They do not restrict the candidate population before ranking.
+Batched rule probes share preparation across their input queries. Scoring uses f64 arithmetic on the
+CPU; Mica receives finite binary32 scores. Ranking uses the f64 scores, with subject value order
+breaking ties. Multiple embeddings for one subject contribute that subject's best score. Bindings on
+subject, score, and snapshot version filter the selected top-k results. They do not restrict the
+candidate population before ranking.
 
 ## Retrieval Authority
 

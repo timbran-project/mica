@@ -165,14 +165,14 @@ role. The instrument branch narrows the role to matching identities and values, 
 branch narrows it further through delegation. Method definition order does not establish priority.
 
 Named calls supply roles by name. A branch receives its declared parameters in declaration order;
-additional call roles can be present. Positional calls bind arguments in parameter order.
-Required parameters must be supplied in either form.
+additional call roles can be present. Positional calls bind arguments in parameter order. Required
+parameters must be supplied in either form.
 
-Optional parameters follow required parameters. Write `?name = literal`, or `?name` for a default of `none`.
-Defaults are fixed at installation. They can contain nested literal lists, maps, `some`, and `ok` values.
-They cannot call functions or refer to parameters. Restrictions also check defaults when arguments are omitted.
-A final `@name` parameter collects remaining positional arguments into a list.
-For named calls, supply that role as a list or omit it for an empty list.
+Optional parameters follow required parameters. Write `?name = literal`, or `?name` for a default of
+`none`. Defaults are fixed at installation. They can contain nested literal lists, maps, `some`, and
+`ok` values. They cannot call functions or refer to parameters. Restrictions also check defaults
+when arguments are omitted. A final `@name` parameter collects remaining positional arguments into a
+list. For named calls, supply that role as a list or omit it for an empty list.
 
 ```mica,eval
 verb gather(first, ?extra = 2, @tail)
@@ -184,14 +184,14 @@ require gather(1, 3, 4, 5) == [1, 3, [4, 5]]
 require :gather(first: 1, tail: [4, 5]) == [1, 2, [4, 5]]
 ```
 
-Positional overload selection considers accepted argument counts and restrictions.
-A fixed-arity branch can be more specific than an optional or rest branch.
-For named calls, requiring a role is more specific than accepting that role optionally.
-An additional unrestricted optional role alone does not make a branch more specific.
+Positional overload selection considers accepted argument counts and restrictions. A fixed-arity
+branch can be more specific than an optional or rest branch. For named calls, requiring a role is
+more specific than accepting that role optionally. An additional unrestricted optional role alone
+does not make a branch more specific.
 
-The catalogue stores `Param(method, role, restriction, position, mode, default)`.
-Positions start at zero. Modes are `:required`, `:optional`, and `:rest`.
-Required and rest parameters store `none` in the default column.
+The catalogue stores `Param(method, role, restriction, position, mode, default)`. Positions start at
+zero. Modes are `:required`, `:optional`, and `:rest`. Required and rest parameters store `none` in
+the default column.
 
 ## Ambiguity Across Roles
 

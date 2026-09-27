@@ -28,7 +28,8 @@ In a positive body predicate, `_` matches any value independently of other holes
 CurrentLength(buffer, length) :- WatchedBuffer(buffer), BufferStat(buffer, length, _, _)
 ```
 
-Holes do not appear in the derived result. Rule heads, negated predicates, and comparison guards cannot contain holes.
+Holes do not appear in the derived result. Rule heads, negated predicates, and comparison guards
+cannot contain holes.
 
 ## Reading a Rule as a Query
 

@@ -102,9 +102,10 @@ cargo run --bin mica-telnet-host -- --rpc ipc:///tmp/mica-rpc.sock --bind 127.0.
 
 ## Notes
 
-- Repeat `--editor-root DIR` to enable the editor's fixed read, stat, list, and atomic-save services within those directories.
-  With no configured root, these services deny access. They run through the existing external-request effect boundary.
-  See [the editor file contract](../../apps/editor/README.md) for limits, stamps, and save semantics.
+- Repeat `--editor-root DIR` to enable the editor's fixed read, stat, list, and atomic-save services
+  within those directories. With no configured root, these services deny access. They run through
+  the existing external-request effect boundary. See
+  [the editor file contract](../../apps/editor/README.md) for limits, stamps, and save semantics.
 - The daemon needs at least one surface: `--rpc-bind`, `--telnet-bind`, `--web-bind`, or
   `--webtransport-bind`.
 - WebTransport requires `--webtransport-cert` and `--webtransport-key`.

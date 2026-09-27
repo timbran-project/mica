@@ -8,40 +8,40 @@ expected failure as ordinary values.
 
 ## Scalar and Collection Functions
 
-| Function                                   | Result                                               |
-| ------------------------------------------ | ---------------------------------------------------- |
-| `len(collection)`                         | string scalar count, list length, map size, or relation row count |
-| `string_append(text, suffix)`              | concatenated string; preserves both inputs            |
-| `string_span(text, start, members)`        | end of an ASCII member run                            |
-| `string_find_any(text, start, members)`    | first ASCII member position, or string length         |
-| `string_len(text)`                         | number of Unicode scalar values                      |
-| `string_chars(text)`                       | list of one-character strings                        |
-| `string_slice(text, start, end)`           | end-exclusive character slice                        |
-| `string_from_chars(chars)`                 | string assembled from character strings              |
-| `string_concat(@parts)`                    | concatenated strings; accepts zero or more arguments |
-| `string_join(parts, separator)`            | joined list of strings                               |
-| `string_starts_with(text, prefix)`         | boolean prefix test                                  |
-| `string_contains(text, subject)`           | boolean substring test                               |
-| `string_equal_fold(left, right)`           | equality after Unicode lowercasing                   |
-| `lower(text)`                              | lowercase string                                     |
-| `words(text)`                              | parsed word list                                     |
-| `edit_distance(left, right)`               | character edit distance                              |
-| `parse_ordinal(text)`                      | `result<int>`                                        |
-| `url_encode_component(text)`               | percent-encoded URL component                        |
-| `url_decode_component(text)`               | decoded URL component                                |
-| `sort(list)`                               | canonically sorted list                              |
-| `to_symbol(text)`                          | named symbol                                         |
-| `to_float(number)`                         | explicit numeric conversion to float                 |
-| `to_int(number)`                           | explicit numeric conversion to an integral int       |
-| `error_code(symbol)`                       | error code with the symbol's name                    |
-| `error(code[, message[, payload]])`        | structured error value                               |
-| `to_literal(value)`                        | parseable Mica value text                            |
-| `from_literal(text)`                       | `result<dynamic>`                                    |
-| `map_pairs(map)`                           | list of two-item key/value lists                     |
-| `index_or(collection, index, default)`     | string, list, map, or relation lookup with a default         |
-| `json_encode(value)` / `json_decode(text)` | JSON conversion                                      |
-| `json_null()`                              | explicit JSON null value                             |
-| `os_getenv(name)`                          | `option<string>`                                     |
+| Function                                   | Result                                                            |
+| ------------------------------------------ | ----------------------------------------------------------------- |
+| `len(collection)`                          | string scalar count, list length, map size, or relation row count |
+| `string_append(text, suffix)`              | concatenated string; preserves both inputs                        |
+| `string_span(text, start, members)`        | end of an ASCII member run                                        |
+| `string_find_any(text, start, members)`    | first ASCII member position, or string length                     |
+| `string_len(text)`                         | number of Unicode scalar values                                   |
+| `string_chars(text)`                       | list of one-character strings                                     |
+| `string_slice(text, start, end)`           | end-exclusive character slice                                     |
+| `string_from_chars(chars)`                 | string assembled from character strings                           |
+| `string_concat(@parts)`                    | concatenated strings; accepts zero or more arguments              |
+| `string_join(parts, separator)`            | joined list of strings                                            |
+| `string_starts_with(text, prefix)`         | boolean prefix test                                               |
+| `string_contains(text, subject)`           | boolean substring test                                            |
+| `string_equal_fold(left, right)`           | equality after Unicode lowercasing                                |
+| `lower(text)`                              | lowercase string                                                  |
+| `words(text)`                              | parsed word list                                                  |
+| `edit_distance(left, right)`               | character edit distance                                           |
+| `parse_ordinal(text)`                      | `result<int>`                                                     |
+| `url_encode_component(text)`               | percent-encoded URL component                                     |
+| `url_decode_component(text)`               | decoded URL component                                             |
+| `sort(list)`                               | canonically sorted list                                           |
+| `to_symbol(text)`                          | named symbol                                                      |
+| `to_float(number)`                         | explicit numeric conversion to float                              |
+| `to_int(number)`                           | explicit numeric conversion to an integral int                    |
+| `error_code(symbol)`                       | error code with the symbol's name                                 |
+| `error(code[, message[, payload]])`        | structured error value                                            |
+| `to_literal(value)`                        | parseable Mica value text                                         |
+| `from_literal(text)`                       | `result<dynamic>`                                                 |
+| `map_pairs(map)`                           | list of two-item key/value lists                                  |
+| `index_or(collection, index, default)`     | string, list, map, or relation lookup with a default              |
+| `json_encode(value)` / `json_decode(text)` | JSON conversion                                                   |
+| `json_null()`                              | explicit JSON null value                                          |
+| `os_getenv(name)`                          | `option<string>`                                                  |
 
 `os_getenv` requires root authority or an invoke grant for `:os_getenv`, such as
 `CanInvoke(#reader, :os_getenv)` or a matching `RoleCanInvoke` grant. This grants access to the host
@@ -55,8 +55,8 @@ position regardless of its UTF-8 byte length. A letter followed by a combining a
 positions. Use these operations for character-based text processing; a host that lays out text may
 group several scalars into one displayed character.
 
-Indexing a string returns the integer Unicode scalar value at that position.
-A `for` loop over a string yields those integers. Two loop bindings receive the scalar position and value.
+Indexing a string returns the integer Unicode scalar value at that position. A `for` loop over a
+string yields those integers. Two loop bindings receive the scalar position and value.
 `string_chars` returns one-scalar strings instead.
 
 ```mica,eval
@@ -68,10 +68,9 @@ end
 require sum == 131
 ```
 
-`string_span` advances while scalars belong to its ASCII member set.
-`string_find_any` advances until a scalar belongs to that set.
-Both return scalar positions and clamp starts beyond the string to its length.
-A negative start raises `E_INDEX`. Non-ASCII scalars never belong to the member set.
+`string_span` advances while scalars belong to its ASCII member set. `string_find_any` advances
+until a scalar belongs to that set. Both return scalar positions and clamp starts beyond the string
+to its length. A negative start raises `E_INDEX`. Non-ASCII scalars never belong to the member set.
 
 ```mica,eval
 require string_span("éabc!", 1, "abc") == 4
@@ -80,7 +79,8 @@ require string_find_any("éabc", 0, "!") == 4
 require string_append("é", "abc") == "éabc"
 ```
 
-Append operations preserve all earlier values, including values captured by closures or retained across suspension.
+Append operations preserve all earlier values, including values captured by closures or retained
+across suspension.
 
 `string_slice` uses an exclusive end position and accepts an empty interval. A list range such as
 `items[1..3]` includes position 3. Write the bounds for the operation being called:
@@ -195,8 +195,8 @@ Encoding accepts booleans, numbers, strings, symbols, lists, maps, and the null 
 must be strings or symbols. Symbols become JSON strings, so decoding an encoded symbol returns a
 string. Decoded object keys are always symbols, even when the original Mica map used string keys.
 
-Malformed JSON, out-of-range numbers, and values that cannot be encoded raise catchable `E_INVARG` errors.
-Passing a non-string value to `json_decode` raises `E_TYPE`.
+Malformed JSON, out-of-range numbers, and values that cannot be encoded raise catchable `E_INVARG`
+errors. Passing a non-string value to `json_decode` raises `E_TYPE`.
 
 Project identities, relations, errors, and other application values to a deliberate wire shape
 before encoding them. For example, encode a query as a list of maps with fields your protocol
@@ -206,18 +206,19 @@ builtin call.
 
 ## Relation Algebra
 
-| Function                          | Result                                        |
-| --------------------------------- | --------------------------------------------- |
+| Function                            | Result                                                  |
+| ----------------------------------- | ------------------------------------------------------- |
 | `relation_from_rows(heading, rows)` | relation value from a symbol heading and lists of cells |
-| `project(relation, :column, ...)` | selected heading columns                      |
-| `union(left, right)`              | rows present in either equal-heading relation |
-| `difference(left, right)`         | left rows absent from the right relation      |
-| `natural_join(left, right)`       | natural join over shared heading names        |
+| `project(relation, :column, ...)`   | selected heading columns                                |
+| `union(left, right)`                | rows present in either equal-heading relation           |
+| `difference(left, right)`           | left rows absent from the right relation                |
+| `natural_join(left, right)`         | natural join over shared heading names                  |
 
 See [Relations](./relations.md#relation-value-algebra) for heading and duplicate semantics.
 
-`relation_from_rows` preserves column meaning when it canonicalizes the heading. It sorts and deduplicates rows without changing either input.
-Invalid argument kinds raise `E_TYPE`; duplicate columns and row arity mismatches raise `E_INVARG`.
+`relation_from_rows` preserves column meaning when it canonicalizes the heading. It sorts and
+deduplicates rows without changing either input. Invalid argument kinds raise `E_TYPE`; duplicate
+columns and row arity mismatches raise `E_INVARG`.
 
 ## World Definition and Introspection
 
@@ -295,8 +296,10 @@ catalogue.
 ## Program assembly
 
 `assemble(description)` returns a validated Rust program artifact as bytes.
-`map_contains_key(map, key)` returns whether a map contains the key, including keys whose values are `none`.
-`is_kind(value, kind)` checks an exact value kind such as `:list`, `:map`, or `:relation` without raising on a mismatch.
+`map_contains_key(map, key)` returns whether a map contains the key, including keys whose values are
+`none`. `is_kind(value, kind)` checks an exact value kind such as `:list`, `:map`, or `:relation`
+without raising on a mismatch.
 
-`is_builtin(name)` checks a symbol against the executing task's builtin registry.
-See [Program Assembly](assembly.md) for the description format, instruction forms, limits, and execution authority.
+`is_builtin(name)` checks a symbol against the executing task's builtin registry. See
+[Program Assembly](assembly.md) for the description format, instruction forms, limits, and execution
+authority.

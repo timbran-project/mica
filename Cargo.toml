@@ -80,9 +80,9 @@ rand = "0.9"
 rand_core = { version = "0.6", features = ["getrandom"] }
 rayon = "1.12"
 rcgen = "0.14"
+rustix = { version = "1.1", features = ["fs"] }
 rustls-pemfile = "2.2"
 rustls-pki-types = "1.13"
-rustix = { version = "1.1", features = ["fs"] }
 rusty_paseto = { version = "0.10", default-features = false, features = ["batteries_included", "v4_local"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

@@ -12,7 +12,8 @@ rules, and inspection views.
 - `src/kernel.rs`: `RelationKernel`, the snapshot-published entry point.
 - `src/transaction.rs`: transaction overlays, assertions, retractions, conflict checks, and commit.
 - `src/snapshot.rs`: immutable snapshot state, commit records, and fact changes.
-- `src/buffer/`: persistent text trees, provenance deltas, transactional buffer views, and conflict policies.
+- `src/buffer/`: persistent text trees, provenance deltas, transactional buffer views, and conflict
+  policies.
 - `src/metadata.rs`: relation schemas, conflict policies, and index specs.
 - `src/index.rs`: in-memory relation indexes.
 - `src/tuple.rs` and `src/fact.rs`: tuple and fact representations.
@@ -55,11 +56,11 @@ path as stored relations and may be visible to rule evaluation, but their rows a
 truth. Providers can override `ComputedRelation::scan_batch` to prepare work once for several input
 rows. Positive rule steps and equality probes use this hook when inputs are available. Each output
 carries its input-row index; the registry checks arity and all bindings for both scalar and batch
-scans. Rule planning defers computed atoms until their required input positions are bound.
-The default batch implementation calls the scalar provider with the same read view.
+scans. Rule planning defers computed atoms until their required input positions are bound. The
+default batch implementation calls the scalar provider with the same read view.
 
-Callers that use computed search rows must validate the candidate against ordinary relation
-state for existence, freshness, and authority before recording or exposing derived context.
+Callers that use computed search rows must validate the candidate against ordinary relation state
+for existence, freshness, and authority before recording or exposing derived context.
 
 Persistence stores canonical relation state: relation metadata, rule definitions, current
 extensional facts, and the latest committed version. Each successful mutation is still represented
@@ -75,7 +76,8 @@ work, not the only durable representation of the world.
 
 Buffers share the snapshot and commit boundary with facts. Fjall recovers each buffer from a
 checkpoint and fewer than 4096 deltas totalling less than 1 MiB. See
-[Transactional Buffers](../../mdbook/src/runtime/buffers.md) for the Rust API and conflict semantics.
+[Transactional Buffers](../../mdbook/src/runtime/buffers.md) for the Rust API and conflict
+semantics.
 
 `FjallStateProvider::open` defaults to relaxed durability: a commit returns after it has been
 accepted into the provider's ordered writer queue, and normal provider shutdown drains that queue.
@@ -87,7 +89,8 @@ commit; relaxed mode lets the host choose explicit flush boundaries.
 For developers, this means the persisted representation is the state encoding in
 `src/provider/fjall/codec.rs`, plus the commit encoding kept beside it. Changes to the state shape,
 value encoding, or catalogue representation must update the format version or shape marker.
-`FjallStateProvider` rejects incompatible stores. Migration adapters require an explicit product decision.
+`FjallStateProvider` rejects incompatible stores. Migration adapters require an explicit product
+decision.
 
 ## Licence
 

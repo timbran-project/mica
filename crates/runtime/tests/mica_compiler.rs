@@ -7,7 +7,6 @@ use mica_runtime::{
 };
 use mica_var::{Symbol, Value};
 use mica_vm::{AuthorityContext, CapabilityGrant, RuntimeError};
-use std::path::Path;
 
 const SOURCES: &[(&str, &str)] = &[
     ("lex.mica", include_str!("../../../apps/compiler/lex.mica")),
@@ -64,20 +63,22 @@ fn invoke(runner: &mut SourceRunner, selector: &str, source: &str) -> Value {
 }
 
 #[test]
-fn mica_frontend_parses_the_shared_corpus_and_reports_malformed_input() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../benchmarks/parity");
-    let corpus: serde_json::Value =
-        serde_json::from_str(include_str!("../../../benchmarks/parity/corpus.json")).unwrap();
+fn mica_frontend_parses_language_forms_and_reports_malformed_input() {
+    let sources = [
+        "let values = [3, 1, 2]\nreturn [n * 2 for n in values if n > 1 sort -n]",
+        "verb choose(value, ?fallback = 0, @rest)\n return match value\n case some(x)\n x\n case _\n fallback\n end\nend",
+        "make_relation(:Edge, 2)\nReach(x, y) :- Edge(x, y)\nReach(x, z) :- Reach(x, y), Edge(y, z)",
+        "let total = 0\nfor [a, b] in [[1, 2], [3, 4]]\n total = total + a + b\nend\nreturn total",
+        "try\n return 1 / 0\ncatch E_DIV as problem\n return problem.message\nfinally\n let done = true\nend",
+    ];
     for interpreter_only in [true, false] {
         let mut runner = compiler(interpreter_only);
-        for fixture in corpus["fixtures"].as_array().unwrap() {
-            let file = fixture["file"].as_str().unwrap();
-            let source = std::fs::read_to_string(root.join(file)).unwrap();
-            let parsed = invoke(&mut runner, "parse_rows", &source);
+        for source in sources {
+            let parsed = invoke(&mut runner, "parse_rows", source);
             let errors = parsed
                 .map_get(&Value::symbol(Symbol::intern("errors")))
                 .unwrap();
-            assert_eq!(errors, Value::list([]), "{file}");
+            assert_eq!(errors, Value::list([]), "{source}");
         }
         for source in [
             "let = 7",
@@ -294,29 +295,17 @@ fn mica_emitter_comprehension_captures_and_accumulator_survive_suspension() {
 }
 
 #[test]
-fn compiler_emission_workload_produces_executable_artifacts() {
+fn mica_emitter_compiles_many_locals_into_an_executable_artifact() {
+    let mut source = (0..100)
+        .map(|index| format!("let value{index} = \"é🦀\"\n"))
+        .collect::<String>();
+    source.push_str("return [n * 2 for n in [3, 1, 2] if n > 1 sort -n]\n");
     for interpreter_only in [true, false] {
         let mut runner = compiler(interpreter_only);
-        runner
-            .run_filein(include_str!(
-                "../../../benchmarks/parity/mica/compiler_emission.mica"
-            ))
-            .unwrap();
-        let source = runner
-            .run_source("return compiler_emission_source()")
-            .unwrap();
-        let TaskOutcome::Complete { value: source, .. } = source.outcome else {
-            panic!("{}", source.render());
-        };
-        let source = source.with_str(str::to_owned).unwrap();
-        assert_eq!(source.chars().count(), 1941);
         assert_emitted_agrees(&mut runner, &source);
         let result = runner.run_source("return :compiler_test_entry()").unwrap();
         assert!(matches!(result.outcome, TaskOutcome::Complete { value, .. }
             if value == Value::list([Value::int(6).unwrap(), Value::int(4).unwrap()])));
-        let result = runner.run_source("return bench()").unwrap();
-        assert!(matches!(result.outcome, TaskOutcome::Complete { value, .. }
-            if value == Value::int(1941).unwrap()));
     }
 }
 

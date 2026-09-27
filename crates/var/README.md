@@ -33,18 +33,20 @@ joins, dispatch matching, and VM execution all move values heavily.
 
 ## Append storage
 
-String and list values remain immutable. An append can claim unused capacity after an immutable prefix without changing that prefix.
-A competing append or a full allocation creates another allocation. Each allocation stays at a fixed address.
-Earlier views can retain the allocation's later contents until all views are released.
+String and list values remain immutable. An append can claim unused capacity after an immutable
+prefix without changing that prefix. A competing append or a full allocation creates another
+allocation. Each allocation stays at a fixed address. Earlier views can retain the allocation's
+later contents until all views are released.
 
-Ordinary lists use exact arrays. The VM uses prefix storage for the common `[@items, value]` construction.
-Shared list storage accepts values only when a bounded traversal proves that they contain no lists.
-An appended list, or a container with nested lists, copies the prefix instead.
-This restriction prevents reference-count cycles through invisible tails, including tails appended concurrently.
-It means that appending nested lists still has linear copying cost.
+Ordinary lists use exact arrays. The VM uses prefix storage for the common `[@items, value]`
+construction. Shared list storage accepts values only when a bounded traversal proves that they
+contain no lists. An appended list, or a container with nested lists, copies the prefix instead.
+This restriction prevents reference-count cycles through invisible tails, including tails appended
+concurrently. It means that appending nested lists still has linear copying cost.
 
-String lengths use cached scalar counts. ASCII positions map directly to bytes; other strings lazily cache every thirty-second scalar offset.
-Published offsets and prefixes are immutable. Tests cover concurrent access and borrowed views under Miri.
+String lengths use cached scalar counts. ASCII positions map directly to bytes; other strings lazily
+cache every thirty-second scalar offset. Published offsets and prefixes are immutable. Tests cover
+concurrent access and borrowed views under Miri.
 
 ## Licence
 

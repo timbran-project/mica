@@ -91,13 +91,13 @@ end
 `for` evaluates its iterable expression once. The number and shape of the bindings determine what
 each iteration receives:
 
-| Iterable             | One binding | Two bindings                  |
-| -------------------- | ----------- | ----------------------------- |
+| Iterable             | One binding            | Two bindings                    |
+| -------------------- | ---------------------- | ------------------------------- |
 | string               | Unicode scalar integer | scalar position, scalar integer |
-| list                 | element     | zero-based index, element     |
-| map                  | value       | key, value                    |
-| relation value       | row map     | zero-based row index, row map |
-| closed integer range | integer     | zero-based offset, integer    |
+| list                 | element                | zero-based index, element       |
+| map                  | value                  | key, value                      |
+| relation value       | row map                | zero-based row index, row map   |
+| closed integer range | integer                | zero-based offset, integer      |
 
 Maps and relation values use canonical order. Lists and ranges have their natural sequence order.
 Use a list when iteration order carries application meaning.
@@ -110,8 +110,8 @@ end
 require numbered == [[0, "inspect"], [1, "repair"]]
 ```
 
-List patterns use the same bindings as scatter assignment. They support annotations, optional values, rest bindings, and `_` for ignored elements.
-A single `_` ignores the whole iteration value.
+List patterns use the same bindings as scatter assignment. They support annotations, optional
+values, rest bindings, and `_` for ignored elements. A single `_` ignores the whole iteration value.
 
 ```mica,eval
 let total = 0
@@ -121,8 +121,9 @@ end
 require total == 10
 ```
 
-Row patterns also bind fields from maps. A map can contain additional fields.
-A relation row must have the pattern's exact heading. Missing map fields or mismatched relation headings raise `E_MATCH`.
+Row patterns also bind fields from maps. A map can contain additional fields. A relation row must
+have the pattern's exact heading. Missing map fields or mismatched relation headings raise
+`E_MATCH`.
 
 ```mica,eval
 let total = 0
@@ -177,8 +178,9 @@ alternative work to perform.
 
 ## List Comprehensions
 
-A comprehension builds a list from an iterable. It accepts the same bindings and destructuring patterns as `for`.
-The iterable is evaluated once. Without sorting, retained values keep their iteration order.
+A comprehension builds a list from an iterable. It accepts the same bindings and destructuring
+patterns as `for`. The iterable is evaluated once. Without sorting, retained values keep their
+iteration order.
 
 ```mica,eval
 require [n + 1 for n in [1, 2, 3]] == [2, 3, 4]
@@ -186,19 +188,20 @@ require [n for n in [1, 2, 3, 4] if n > 2] == [3, 4]
 require [left + right for [left, right] in [[1, 2], [3, 4]]] == [3, 7]
 ```
 
-The optional `if` clause runs before the produced value. Rejected items do not evaluate that value or a sorting key.
-Bindings remain local to the comprehension.
+The optional `if` clause runs before the produced value. Rejected items do not evaluate that value
+or a sorting key. Bindings remain local to the comprehension.
 
-A bare `sort` orders the produced values. An expression after `sort` supplies a key for each retained item.
-Keys are evaluated once, before their corresponding values. Equal keys use the produced values as tie breakers.
-Sorting uses Mica's canonical value order.
+A bare `sort` orders the produced values. An expression after `sort` supplies a key for each
+retained item. Keys are evaluated once, before their corresponding values. Equal keys use the
+produced values as tie breakers. Sorting uses Mica's canonical value order.
 
 ```mica,eval
 require [n for n in [3, 1, 2] sort] == [1, 2, 3]
 require [pair[1] for pair in [[1, "b"], [0, "a"]] sort pair[0]] == ["a", "b"]
 ```
 
-Comprehensions can nest. A `break` or `continue` inside a comprehension clause targets that comprehension's loop.
+Comprehensions can nest. A `break` or `continue` inside a comprehension clause targets that
+comprehension's loop.
 
 ## Blocks and Ranges
 
