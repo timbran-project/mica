@@ -52,6 +52,103 @@ pub struct ApplicableMethodCall {
     pub args: Option<Vec<Value>>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ApplicablePositionalMethod {
+    pub method: Value,
+    binding: Option<Arc<PositionalArgumentBinding>>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct PositionalArgumentBinding {
+    required: usize,
+    defaults: Vec<Value>,
+    rest: bool,
+}
+
+impl ApplicablePositionalMethod {
+    pub fn required(method: Value) -> Self {
+        Self {
+            method,
+            binding: None,
+        }
+    }
+
+    /// Bind arguments with the arity used to resolve this entry.
+    /// Reuse fixed-arity arguments; fill defaults and collect rest values when needed.
+    pub fn bind_arguments(&self, mut args: Vec<Value>) -> Vec<Value> {
+        let Some(binding) = &self.binding else {
+            return args;
+        };
+        let fixed = binding.required + binding.defaults.len();
+        assert!(args.len() >= binding.required && (binding.rest || args.len() <= fixed));
+        let rest = if binding.rest && args.len() > fixed {
+            args.split_off(fixed)
+        } else {
+            Vec::new()
+        };
+        if args.len() < fixed {
+            args.extend_from_slice(&binding.defaults[args.len() - binding.required..]);
+        }
+        if binding.rest {
+            args.push(Value::list(rest));
+        }
+        args
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ParameterMode {
+    Required,
+    Optional,
+    Rest,
+}
+
+fn parameter_mode(param: &crate::Tuple) -> Option<ParameterMode> {
+    if param.values().len() != 6 {
+        return None;
+    }
+    match param.values()[4].as_symbol()?.name()? {
+        "required" => Some(ParameterMode::Required),
+        "optional" => Some(ParameterMode::Optional),
+        "rest" => Some(ParameterMode::Rest),
+        _ => None,
+    }
+}
+
+fn parameter_layout(params: &[crate::Tuple]) -> Option<(usize, usize, bool)> {
+    let mut required = 0;
+    let mut optional = false;
+    let mut rest = false;
+    for (position, param) in params.iter().enumerate() {
+        if param_position(param)? as usize != position || rest {
+            return None;
+        }
+        match parameter_mode(param)? {
+            ParameterMode::Required if !optional => required += 1,
+            ParameterMode::Required => return None,
+            ParameterMode::Optional => optional = true,
+            ParameterMode::Rest => rest = true,
+        }
+    }
+    Some((required, params.len() - usize::from(rest), rest))
+}
+
+fn positional_binding(params: &[crate::Tuple]) -> Option<Option<Arc<PositionalArgumentBinding>>> {
+    let (required, fixed, rest) = parameter_layout(params)?;
+    if required == fixed && !rest {
+        return Some(None);
+    }
+    let defaults = params[required..fixed]
+        .iter()
+        .map(|param| param.values()[5].clone())
+        .collect();
+    Some(Some(Arc::new(PositionalArgumentBinding {
+        required,
+        defaults,
+        rest,
+    })))
+}
+
 pub trait DispatchRead: RelationRead {
     fn cached_applicable_method_calls(
         &self,
@@ -84,7 +181,7 @@ pub trait DispatchRead: RelationRead {
         _relations: DispatchRelations,
         _selector: &Value,
         _args: &[Value],
-    ) -> Result<Option<Arc<[Value]>>, KernelError> {
+    ) -> Result<Option<Arc<[ApplicablePositionalMethod]>>, KernelError> {
         Ok(None)
     }
 }
@@ -120,7 +217,7 @@ pub fn applicable_method_entries(
             let mut params = Vec::new();
             reader.visit_relation(
                 relations.param,
-                &[Some(method.clone()), None, None, None],
+                &[Some(method.clone()), None, None, None, None, None],
                 &mut |param| {
                     params.push(param.clone());
                     Ok(ScanControl::Continue)
@@ -212,11 +309,17 @@ pub fn applicable_positional_methods(
     selector: Value,
     args: &[Value],
 ) -> Result<Vec<Value>, KernelError> {
-    resolve_positional_methods(reader, relations, selector, args).map(|resolved| resolved.methods)
+    resolve_positional_methods(reader, relations, selector, args).map(|resolved| {
+        resolved
+            .methods
+            .into_iter()
+            .map(|entry| entry.method)
+            .collect()
+    })
 }
 
 pub(crate) struct PositionalResolution {
-    pub(crate) methods: Vec<Value>,
+    pub(crate) methods: Vec<ApplicablePositionalMethod>,
     pub(crate) argument_independent: bool,
 }
 
@@ -237,7 +340,7 @@ pub(crate) fn resolve_positional_methods(
             let mut params = Vec::new();
             reader.visit_relation(
                 relations.param,
-                &[Some(method.clone()), None, None, None],
+                &[Some(method.clone()), None, None, None, None, None],
                 &mut |param| {
                     params.push(param.clone());
                     Ok(ScanControl::Continue)
@@ -258,7 +361,15 @@ pub(crate) fn resolve_positional_methods(
     Ok(PositionalResolution {
         methods: prune_positional_methods(reader, relations.delegates, methods)?
             .into_iter()
-            .map(|entry| entry.method)
+            .map(|entry| {
+                let params =
+                    ordered_params(&entry.params).expect("applicable parameters are ordered");
+                ApplicablePositionalMethod {
+                    method: entry.method,
+                    binding: positional_binding(&params)
+                        .expect("applicable parameter binding is valid"),
+                }
+            })
             .collect(),
         argument_independent,
     })
@@ -269,29 +380,33 @@ pub fn applicable_positional_methods_cached(
     relations: DispatchRelations,
     selector: Value,
     args: &[Value],
-) -> Result<Arc<[Value]>, KernelError> {
+) -> Result<Arc<[ApplicablePositionalMethod]>, KernelError> {
     if let Some(methods) =
         reader.cached_applicable_positional_methods(relations, &selector, args)?
     {
         return Ok(methods);
     }
-    applicable_positional_methods(reader, relations, selector, args).map(Arc::from)
+    resolve_positional_methods(reader, relations, selector, args)
+        .map(|resolved| Arc::from(resolved.methods))
 }
 
 fn method_call_args_from_params(
     params: &[crate::Tuple],
     roles: &[(Value, Value)],
 ) -> Option<Vec<Value>> {
+    let ordered = ordered_params(params)?;
+    parameter_layout(&ordered)?;
     let mut args = Vec::with_capacity(params.len());
-    let mut ordered = params.iter().collect::<Vec<_>>();
-    ordered.sort_by_key(|param| param_position(param).unwrap_or(u16::MAX));
-    if ordered.iter().any(|param| param_position(param).is_none()) {
-        return None;
-    }
-
-    for param in ordered {
-        let value = role_value(roles, &param.values()[1])?;
-        args.push(value.clone());
+    for param in &ordered {
+        let supplied = role_value(roles, &param.values()[1]);
+        let value = match (parameter_mode(param)?, supplied) {
+            (ParameterMode::Required, value) => value?.clone(),
+            (ParameterMode::Optional, value) => value.unwrap_or(&param.values()[5]).clone(),
+            (ParameterMode::Rest, Some(value)) if value.list_len().is_some() => value.clone(),
+            (ParameterMode::Rest, None) => Value::list([]),
+            _ => return None,
+        };
+        args.push(value);
     }
 
     Some(args)
@@ -351,13 +466,27 @@ fn named_method_more_specific(
     left: &ApplicableMethod,
     right: &ApplicableMethod,
 ) -> Result<bool, KernelError> {
-    let mut stricter = left.params.len() > right.params.len();
+    let mut stricter = left.params.iter().any(|param| {
+        param_for_role(&right.params, &param.values()[1]).is_none()
+            && (parameter_mode(param) != Some(ParameterMode::Optional)
+                || &param.values()[2] != unrestricted_marker())
+    });
 
     for right_param in &right.params {
         let role = &right_param.values()[1];
         let Some(left_param) = param_for_role(&left.params, role) else {
+            if parameter_mode(right_param) == Some(ParameterMode::Optional)
+                && &right_param.values()[2] == unrestricted_marker()
+            {
+                continue;
+            }
             return Ok(false);
         };
+        match (parameter_mode(left_param), parameter_mode(right_param)) {
+            (Some(ParameterMode::Required), Some(ParameterMode::Optional)) => stricter = true,
+            (left, right) if left != right => return Ok(false),
+            _ => {}
+        }
         let left_restriction = &left_param.values()[2];
         let right_restriction = &right_param.values()[2];
         if !restriction_implies(
@@ -393,12 +522,37 @@ fn positional_method_more_specific(
     let Some(right_params) = ordered_params(&right.params) else {
         return Ok(false);
     };
-    if left_params.len() != right_params.len() {
+    let Some((left_required, left_fixed, left_rest)) = parameter_layout(&left_params) else {
+        return Ok(false);
+    };
+    let Some((right_required, right_fixed, right_rest)) = parameter_layout(&right_params) else {
+        return Ok(false);
+    };
+    if left_required < right_required || (!right_rest && (left_rest || left_fixed > right_fixed)) {
         return Ok(false);
     }
-
-    let mut stricter = false;
-    for (left_param, right_param) in left_params.iter().zip(right_params.iter()) {
+    // A restriction on a collected rest list cannot be compared to a scalar slot.
+    if right_rest
+        && &right_params[right_fixed].values()[2] != unrestricted_marker()
+        && (!left_rest || left_fixed != right_fixed)
+    {
+        return Ok(false);
+    }
+    let mut stricter =
+        left_required > right_required || (!left_rest && (right_rest || left_fixed < right_fixed));
+    for (position, right_param) in right_params.iter().enumerate() {
+        let Some(left_param) = left_params.get(position) else {
+            if left_rest && &right_param.values()[2] != unrestricted_marker() {
+                return Ok(false);
+            }
+            continue;
+        };
+        if position >= left_fixed && position < right_fixed {
+            if &right_param.values()[2] != unrestricted_marker() {
+                return Ok(false);
+            }
+            continue;
+        }
         let left_restriction = &left_param.values()[2];
         let right_restriction = &right_param.values()[2];
         if !restriction_implies(
@@ -447,11 +601,27 @@ fn params_match(
     roles: &[(Value, Value)],
     params: &[crate::Tuple],
 ) -> Result<bool, KernelError> {
-    for param in params {
+    let Some(ordered) = ordered_params(params) else {
+        return Ok(false);
+    };
+    if parameter_layout(&ordered).is_none() {
+        return Ok(false);
+    }
+    for param in &ordered {
         let role = &param.values()[1];
         let restriction = &param.values()[2];
-        let Some(value) = role_value(roles, role) else {
-            return Ok(false);
+        let empty;
+        let value = match (parameter_mode(param), role_value(roles, role)) {
+            (Some(ParameterMode::Optional), value) => value.unwrap_or(&param.values()[5]),
+            (Some(ParameterMode::Rest), None) => {
+                empty = Value::list([]);
+                &empty
+            }
+            (Some(ParameterMode::Rest), Some(value)) if value.list_len().is_none() => {
+                return Ok(false);
+            }
+            (_, Some(value)) => value,
+            _ => return Ok(false),
         };
         if !matches_restriction(reader, delegates_relation, value, restriction)? {
             return Ok(false);
@@ -474,15 +644,20 @@ pub fn positional_method_args(
     params: &[crate::Tuple],
     args: &[Value],
 ) -> Option<Vec<(Value, Value)>> {
-    let mut params = ordered_params(params)?;
-    if params.len() != args.len() {
+    let params = ordered_params(params)?;
+    let (required, fixed, rest) = parameter_layout(&params)?;
+    if args.len() < required || (!rest && args.len() > fixed) {
         return None;
     }
+    let method = ApplicablePositionalMethod {
+        method: Value::unit(),
+        binding: positional_binding(&params)?,
+    };
     Some(
         params
-            .drain(..)
-            .zip(args)
-            .map(|(param, value)| (param.values()[1].clone(), value.clone()))
+            .iter()
+            .zip(method.bind_arguments(args.to_vec()))
+            .map(|(param, value)| (param.values()[1].clone(), value))
             .collect(),
     )
 }
@@ -497,30 +672,7 @@ pub fn ordered_params(params: &[crate::Tuple]) -> Option<Vec<crate::Tuple>> {
 }
 
 pub fn named_method_args(params: &[crate::Tuple], roles: &[(Value, Value)]) -> Option<Vec<Value>> {
-    let mut args = Vec::with_capacity(params.len());
-
-    if params.len() <= 1 {
-        for param in params {
-            param_position(param)?;
-            if let Some(value) = role_value(roles, &param.values()[1]) {
-                args.push(value.clone());
-            }
-        }
-        return Some(args);
-    }
-
-    let mut ordered = params.iter().collect::<Vec<_>>();
-    ordered.sort_by_key(|param| param_position(param).unwrap_or(u16::MAX));
-    if ordered.iter().any(|param| param_position(param).is_none()) {
-        return None;
-    }
-
-    for param in ordered {
-        if let Some(value) = role_value(roles, &param.values()[1]) {
-            args.push(value.clone());
-        }
-    }
-    Some(args)
+    method_call_args_from_params(params, roles)
 }
 
 fn positional_params_match(
@@ -532,11 +684,26 @@ fn positional_params_match(
     let Some(params) = ordered_params(params) else {
         return Ok(false);
     };
-    if params.len() != args.len() {
+    let Some((required, fixed, rest)) = parameter_layout(&params) else {
+        return Ok(false);
+    };
+    if args.len() < required || (!rest && args.len() > fixed) {
         return Ok(false);
     }
-    for (param, value) in params.iter().zip(args) {
+    for (position, param) in params[..fixed].iter().enumerate() {
+        let value = args.get(position).unwrap_or(&param.values()[5]);
         if !matches_restriction(reader, delegates_relation, value, &param.values()[2])? {
+            return Ok(false);
+        }
+    }
+    if rest && &params[fixed].values()[2] != unrestricted_marker() {
+        let tail = Value::list(args.get(fixed..).unwrap_or_default().iter().cloned());
+        if !matches_restriction(
+            reader,
+            delegates_relation,
+            &tail,
+            &params[fixed].values()[2],
+        )? {
             return Ok(false);
         }
     }
@@ -648,7 +815,7 @@ mod tests {
             .unwrap();
         kernel
             .create_relation(
-                RelationMetadata::new(rel(41), Symbol::intern("Param"), 4).with_index([0, 1]),
+                RelationMetadata::new(rel(41), Symbol::intern("Param"), 6).with_index([0, 1]),
             )
             .unwrap();
         kernel
@@ -676,12 +843,26 @@ mod tests {
             .unwrap();
         tx.assert(
             rel(41),
-            Tuple::from([int(100), sym("actor"), int(11), int(0)]),
+            Tuple::from([
+                int(100),
+                sym("actor"),
+                int(11),
+                int(0),
+                sym("required"),
+                Value::option_none(),
+            ]),
         )
         .unwrap();
         tx.assert(
             rel(41),
-            Tuple::from([int(100), sym("item"), int(2), int(1)]),
+            Tuple::from([
+                int(100),
+                sym("item"),
+                int(2),
+                int(1),
+                sym("required"),
+                Value::option_none(),
+            ]),
         )
         .unwrap();
         tx.assert(rel(42), Tuple::from([int(10), int(11), int(0)]))
@@ -709,7 +890,14 @@ mod tests {
             .unwrap();
         tx.assert(
             rel(41),
-            Tuple::from([int(100), sym("actor"), int(11), int(0)]),
+            Tuple::from([
+                int(100),
+                sym("actor"),
+                int(11),
+                int(0),
+                sym("required"),
+                Value::option_none(),
+            ]),
         )
         .unwrap();
 
@@ -733,7 +921,14 @@ mod tests {
             .unwrap();
         tx.assert(
             rel(41),
-            Tuple::from([int(100), sym("actor"), int(11), int(0)]),
+            Tuple::from([
+                int(100),
+                sym("actor"),
+                int(11),
+                int(0),
+                sym("required"),
+                Value::option_none(),
+            ]),
         )
         .unwrap();
         tx.assert(
@@ -743,6 +938,8 @@ mod tests {
                 sym("message"),
                 unrestricted_dispatch_restriction(),
                 int(1),
+                sym("required"),
+                Value::option_none(),
             ]),
         )
         .unwrap();
@@ -787,6 +984,8 @@ mod tests {
                 sym("text"),
                 Value::identity(STRING_PROTOTYPE),
                 int(0),
+                sym("required"),
+                Value::option_none(),
             ]),
         )
         .unwrap();
@@ -820,7 +1019,14 @@ mod tests {
             .unwrap();
         tx.assert(
             rel(41),
-            Tuple::from([int(100), sym("event"), event.clone(), int(0)]),
+            Tuple::from([
+                int(100),
+                sym("event"),
+                event.clone(),
+                int(0),
+                sym("required"),
+                Value::option_none(),
+            ]),
         )
         .unwrap();
         tx.assert(rel(42), Tuple::from([take_event, event, int(0)]))
@@ -852,7 +1058,14 @@ mod tests {
             .unwrap();
         tx.assert(
             rel(41),
-            Tuple::from([int(100), sym("event"), frob_only, int(0)]),
+            Tuple::from([
+                int(100),
+                sym("event"),
+                frob_only,
+                int(0),
+                sym("required"),
+                Value::option_none(),
+            ]),
         )
         .unwrap();
         tx.assert(rel(42), Tuple::from([take_event.clone(), event, int(0)]))
@@ -899,6 +1112,8 @@ mod tests {
                 sym("kind"),
                 unrestricted_dispatch_restriction(),
                 int(0),
+                sym("required"),
+                Value::option_none(),
             ]),
         )
         .unwrap();
@@ -906,14 +1121,28 @@ mod tests {
             .unwrap();
         tx.assert(
             rel(41),
-            Tuple::from([int(101), sym("kind"), event.clone(), int(0)]),
+            Tuple::from([
+                int(101),
+                sym("kind"),
+                event.clone(),
+                int(0),
+                sym("required"),
+                Value::option_none(),
+            ]),
         )
         .unwrap();
         tx.assert(rel(40), Tuple::from([int(102), sym("label")]))
             .unwrap();
         tx.assert(
             rel(41),
-            Tuple::from([int(102), sym("kind"), movement_event.clone(), int(0)]),
+            Tuple::from([
+                int(102),
+                sym("kind"),
+                movement_event.clone(),
+                int(0),
+                sym("required"),
+                Value::option_none(),
+            ]),
         )
         .unwrap();
         tx.assert(
@@ -947,7 +1176,14 @@ mod tests {
             .unwrap();
         tx.assert(
             rel(41),
-            Tuple::from([int(100), sym("actor"), player.clone(), int(0)]),
+            Tuple::from([
+                int(100),
+                sym("actor"),
+                player.clone(),
+                int(0),
+                sym("required"),
+                Value::option_none(),
+            ]),
         )
         .unwrap();
         tx.assert(
@@ -957,6 +1193,8 @@ mod tests {
                 sym("item"),
                 unrestricted_dispatch_restriction(),
                 int(1),
+                sym("required"),
+                Value::option_none(),
             ]),
         )
         .unwrap();
@@ -969,12 +1207,21 @@ mod tests {
                 sym("actor"),
                 unrestricted_dispatch_restriction(),
                 int(0),
+                sym("required"),
+                Value::option_none(),
             ]),
         )
         .unwrap();
         tx.assert(
             rel(41),
-            Tuple::from([int(101), sym("item"), portable.clone(), int(1)]),
+            Tuple::from([
+                int(101),
+                sym("item"),
+                portable.clone(),
+                int(1),
+                sym("required"),
+                Value::option_none(),
+            ]),
         )
         .unwrap();
         tx.assert(rel(42), Tuple::from([alice.clone(), player, int(0)]))
@@ -1007,14 +1254,28 @@ mod tests {
             .unwrap();
         tx.assert(
             rel(41),
-            Tuple::from([int(100), sym("event"), event.clone(), int(0)]),
+            Tuple::from([
+                int(100),
+                sym("event"),
+                event.clone(),
+                int(0),
+                sym("required"),
+                Value::option_none(),
+            ]),
         )
         .unwrap();
         tx.assert(rel(40), Tuple::from([int(101), sym("render")]))
             .unwrap();
         tx.assert(
             rel(41),
-            Tuple::from([int(101), sym("event"), take_event.clone(), int(0)]),
+            Tuple::from([
+                int(101),
+                sym("event"),
+                take_event.clone(),
+                int(0),
+                sym("required"),
+                Value::option_none(),
+            ]),
         )
         .unwrap();
         tx.assert(rel(42), Tuple::from([take_event, event, int(0)]))
@@ -1046,6 +1307,8 @@ mod tests {
                 sym("value"),
                 unrestricted_dispatch_restriction(),
                 int(0),
+                sym("required"),
+                Value::option_none(),
             ]),
         )
         .unwrap();
@@ -1058,6 +1321,8 @@ mod tests {
                 sym("value"),
                 Value::identity(STRING_PROTOTYPE),
                 int(0),
+                sym("required"),
+                Value::option_none(),
             ]),
         )
         .unwrap();
@@ -1140,7 +1405,10 @@ mod tests {
         let first =
             applicable_positional_methods_cached(&tx, dispatch_relations(), sym("look"), &[])
                 .unwrap();
-        assert_eq!(first.as_ref(), &[int(100)]);
+        assert_eq!(
+            first.as_ref(),
+            &[ApplicablePositionalMethod::required(int(100))]
+        );
         let second =
             applicable_positional_methods_cached(&tx, dispatch_relations(), sym("look"), &[])
                 .unwrap();
@@ -1197,7 +1465,7 @@ mod tests {
             applicable_positional_methods_cached(&tx, dispatch_relations(), sym("look"), &[],)
                 .unwrap()
                 .as_ref(),
-            &[int(100)]
+            &[ApplicablePositionalMethod::required(int(100))]
         );
     }
 
@@ -1224,7 +1492,7 @@ mod tests {
                 applicable_positional_methods_cached(&tx, dispatch_relations(), sym("look"), &[],)
                     .unwrap()
                     .as_ref(),
-                std::slice::from_ref(&method)
+                &[ApplicablePositionalMethod::required(method.clone())]
             );
         }
         for _ in 0..2 {
@@ -1283,7 +1551,10 @@ mod tests {
         let methods =
             applicable_positional_methods_cached(&tx, dispatch_relations(), sym("look"), &[])
                 .unwrap();
-        assert_eq!(methods.as_ref(), &[int(100)]);
+        assert_eq!(
+            methods.as_ref(),
+            &[ApplicablePositionalMethod::required(int(100))]
+        );
     }
 
     #[test]
@@ -1312,12 +1583,16 @@ mod tests {
                 sym("item"),
                 unrestricted_dispatch_restriction(),
                 int(1),
+                sym("required"),
+                Value::option_none(),
             ]),
             Tuple::from([
                 int(100),
                 sym("actor"),
                 unrestricted_dispatch_restriction(),
                 int(0),
+                sym("required"),
+                Value::option_none(),
             ]),
         ];
 
@@ -1325,5 +1600,115 @@ mod tests {
             named_method_args(&params, &[(sym("actor"), int(10)), (sym("item"), int(1))]).unwrap(),
             vec![int(10), int(1)]
         );
+    }
+    #[test]
+    fn cached_defaults_follow_transaction_edits_and_retained_snapshots() {
+        let kernel = kernel_with_dispatch_relations();
+        let parameter = |default| {
+            Tuple::from([
+                int(100),
+                sym("value"),
+                unrestricted_dispatch_restriction(),
+                int(0),
+                sym("optional"),
+                int(default),
+            ])
+        };
+        let mut tx = kernel.begin();
+        tx.assert(rel(40), Tuple::from([int(100), sym("defaulted")]))
+            .unwrap();
+        tx.assert(rel(41), parameter(7)).unwrap();
+        tx.commit().unwrap();
+        let retained = kernel.snapshot();
+        let before = applicable_positional_methods_cached(
+            &*retained,
+            dispatch_relations(),
+            sym("defaulted"),
+            &[],
+        )
+        .unwrap();
+        assert_eq!(before[0].bind_arguments(vec![]), vec![int(7)]);
+        let mut tx = kernel.begin();
+        tx.retract(rel(41), parameter(7)).unwrap();
+        tx.assert(rel(41), parameter(9)).unwrap();
+        let local =
+            applicable_positional_methods_cached(&tx, dispatch_relations(), sym("defaulted"), &[])
+                .unwrap();
+        assert_eq!(local[0].bind_arguments(vec![]), vec![int(9)]);
+        assert_eq!(
+            applicable_method_calls(&tx, dispatch_relations(), sym("defaulted"), &[]).unwrap()[0]
+                .args,
+            Some(vec![int(9)])
+        );
+        tx.commit().unwrap();
+        let after = applicable_positional_methods_cached(
+            &*kernel.snapshot(),
+            dispatch_relations(),
+            sym("defaulted"),
+            &[],
+        )
+        .unwrap();
+        assert_eq!(after[0].bind_arguments(vec![]), vec![int(9)]);
+        assert_eq!(before[0].bind_arguments(vec![]), vec![int(7)]);
+        let still_before = applicable_positional_methods_cached(
+            &*retained,
+            dispatch_relations(),
+            sym("defaulted"),
+            &[],
+        )
+        .unwrap();
+        assert!(Arc::ptr_eq(&before, &still_before));
+    }
+
+    #[test]
+    fn argument_binding_preserves_aliases_and_checks_parameter_layouts() {
+        let parameter = |role, position, mode, default| {
+            Tuple::from([
+                int(100),
+                sym(role),
+                unrestricted_dispatch_restriction(),
+                int(position),
+                sym(mode),
+                default,
+            ])
+        };
+        let params = [
+            parameter("head", 0, "required", Value::option_none()),
+            parameter("extra", 1, "optional", Value::list([int(7)])),
+            parameter("tail", 2, "rest", Value::option_none()),
+        ];
+        assert_eq!(
+            positional_method_args(&params, &[int(1)]),
+            Some(vec![
+                (sym("head"), int(1)),
+                (sym("extra"), Value::list([int(7)])),
+                (sym("tail"), Value::list([]))
+            ])
+        );
+        assert!(positional_method_args(&params, &[]).is_none());
+        assert!(
+            named_method_args(&params, &[(sym("head"), int(1)), (sym("tail"), int(2))]).is_none()
+        );
+        let bound = named_method_args(&params, &[(sym("head"), int(1))]).unwrap();
+        let changed = bound[1].list_set(0, int(9)).unwrap();
+        assert_eq!(changed, Value::list([int(9)]));
+        assert_eq!(
+            named_method_args(&params, &[(sym("head"), int(1))]).unwrap()[1],
+            Value::list([int(7)])
+        );
+        for params in [
+            vec![parameter("value", 1, "required", Value::option_none())],
+            vec![
+                parameter("first", 0, "optional", int(1)),
+                parameter("second", 1, "required", Value::option_none()),
+            ],
+            vec![
+                parameter("first", 0, "rest", Value::option_none()),
+                parameter("second", 1, "optional", int(1)),
+            ],
+        ] {
+            assert!(named_method_args(&params, &[]).is_none());
+            assert!(positional_method_args(&params, &[]).is_none());
+        }
     }
 }

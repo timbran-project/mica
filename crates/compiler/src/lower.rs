@@ -228,7 +228,17 @@ impl<'a> Lower<'a> {
     }
 
     fn lower_verb_param(&mut self, node: &CstNode) -> MethodParam {
+        let mode = match self.token_children(node).next().map(|token| token.kind) {
+            Some(SyntaxKind::Question) => ParamMode::Optional,
+            Some(SyntaxKind::At) => ParamMode::Rest,
+            _ => ParamMode::Required,
+        };
         MethodParam {
+            mode,
+            default: self
+                .node_children(node)
+                .find(|child| is_expr_node(child.kind))
+                .map(|child| self.lower_expr(child)),
             id: self.node_id(),
             name: self.first_text(node, SyntaxKind::Ident).unwrap_or_default(),
             restriction: self
@@ -271,6 +281,8 @@ impl<'a> Lower<'a> {
             .map(|param| MethodParam {
                 id: self.node_id(),
                 name: param.name,
+                mode: ParamMode::Required,
+                default: None,
                 restriction: param.restriction,
                 annotation: None,
                 span: param.span,
@@ -2933,7 +2945,12 @@ mod tests {
                 }
             }
             Item::Method { params, body, .. } => {
-                ids.extend(params.iter().map(|param| param.id));
+                for param in params {
+                    ids.push(param.id);
+                    if let Some(default) = &param.default {
+                        collect_expr_ids(default, ids);
+                    }
+                }
                 for item in body {
                     collect_item_ids(item, ids);
                 }

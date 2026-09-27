@@ -158,7 +158,11 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_verb_param(&mut self) -> CstNode {
-        let mut children = vec![self.expect_token(SyntaxKind::Ident, "expected verb parameter")];
+        let mut children = Vec::new();
+        if matches!(self.current_kind(), SyntaxKind::Question | SyntaxKind::At) {
+            children.push(self.bump_element());
+        }
+        children.push(self.expect_token(SyntaxKind::Ident, "expected verb parameter"));
         if self.current_kind() == SyntaxKind::At {
             children.push(self.bump_element());
             children.push(CstElement::Node(self.parse_dispatch_restriction()));
@@ -166,6 +170,10 @@ impl<'a> Parser<'a> {
         if self.current_kind() == SyntaxKind::Colon {
             children.push(self.bump_element());
             children.push(CstElement::Node(self.parse_type_ref()));
+        }
+        if self.current_kind() == SyntaxKind::Eq {
+            children.push(self.bump_element());
+            children.push(CstElement::Node(self.parse_expr(0)));
         }
         CstNode::new(SyntaxKind::VerbParam, children)
     }

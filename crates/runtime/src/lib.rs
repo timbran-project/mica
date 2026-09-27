@@ -4201,7 +4201,7 @@ fn method_relation_metadata() -> Vec<RelationMetadata> {
             2,
         )
         .with_index([1, 0]),
-        RelationMetadata::new(param_relation(), Symbol::intern("Param"), 4).with_index([0, 1]),
+        RelationMetadata::new(param_relation(), Symbol::intern("Param"), 6).with_index([0, 1]),
         RelationMetadata::new(delegates_relation(), Symbol::intern("Delegates"), 3)
             .with_index([0, 2, 1]),
         RelationMetadata::new(

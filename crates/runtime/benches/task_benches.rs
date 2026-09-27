@@ -1797,7 +1797,7 @@ fn create_method_relations(kernel: &RelationKernel, relations: MethodRelations) 
         .unwrap();
     kernel
         .create_relation(
-            RelationMetadata::new(relations.dispatch.param, Symbol::intern("Param"), 4)
+            RelationMetadata::new(relations.dispatch.param, Symbol::intern("Param"), 6)
                 .with_index([0, 1]),
         )
         .unwrap();

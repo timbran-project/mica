@@ -888,7 +888,13 @@ impl<'a> Analyzer<'a> {
                         let declared_kind = declared_type
                             .as_ref()
                             .and_then(StaticType::exact_outer_kind);
+                        let default = param
+                            .default
+                            .as_ref()
+                            .map(|expr| self.lower_expr(expr, scope));
                         HirMethodParam {
+                            mode: param.mode.clone(),
+                            default,
                             id: param.id,
                             binding: self.declare(
                                 method_scope,
@@ -2123,6 +2129,9 @@ fn collect_item_spans(items: &[Item], spans: &mut HashMap<NodeId, Span>) {
                 spans.insert(*id, span.clone());
                 for param in params {
                     spans.insert(param.id, param.span.clone());
+                    if let Some(default) = &param.default {
+                        collect_expr_span(default, spans);
+                    }
                 }
                 collect_item_spans(body, spans);
             }

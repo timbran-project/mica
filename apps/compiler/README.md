@@ -17,12 +17,13 @@ The emitter produces Rust artifacts directly. It does not translate Odin bytecod
 
 `emit_source(source)` returns `{:ok -> true, :entry -> bytes, :methods -> definitions, :source -> source, :errors -> []}`.
 Each method definition contains a selector, an ordered parameter list, and program bytes.
-Each parameter records its `:role` and `:restriction`. Prototype restrictions use `value @ #prototype` syntax.
+Each parameter records its `:role`, `:restriction`, `:mode`, and `:default`. Prototype restrictions use `value @ #prototype` syntax.
+Modes are `:required`, `:optional`, and `:rest`. Defaults are literal values fixed at installation.
 Overloads retain separate definitions and use ordinary runtime dispatch. Duplicate signatures produce a diagnostic.
 A parse or emission diagnostic returns `{:ok -> false, :errors -> diagnostics}`.
 `emit_program(rows, root)` returns assembly descriptions before serialization.
 
-The current emitter covers literals, local bindings, list destructuring, collection construction, indexing, assignment, calls, conditionals, loops, and required verb parameters.
+The current emitter covers literals, local bindings, list destructuring, collection construction, indexing, assignment, calls, conditionals, loops, and verb parameters with literal defaults and a final rest parameter.
 Calls include builtins, explicit selectors, named roles, and local function values.
 `invoke` and `mailbox_recv` use runtime instructions, including spliced argument lists and arity checks.
 Mailbox receive retains local values across suspension and resumes with the delivered value.

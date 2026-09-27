@@ -21,7 +21,7 @@ verb compiler/install(module: map, name: symbol) -> map
   let retained = {}
   let position = 0
   for definition in definitions
-    let parameters = [[parameter[:role], parameter[:restriction]] for parameter in definition[:parameters]]
+    let parameters = [[parameter[:role], parameter[:restriction], parameter[:mode]] for parameter in definition[:parameters]]
     let signature = [name, definition[:selector], parameters]
     let target = make_identity(to_symbol(string_concat("compiler/method/", to_literal(signature))))
     let program_key = [name, generation, position]
@@ -30,10 +30,10 @@ verb compiler/install(module: map, name: symbol) -> map
     retract MethodProgram(target, _)
     assert MethodProgram(target, artifact)
     assert MethodSelector(target, definition[:selector])
-    retract Param(target, _, _, _)
+    retract Param(target, _, _, _, _, _)
     let ordinal = 0
     for parameter in definition[:parameters]
-      assert Param(target, parameter[:role], parameter[:restriction], ordinal)
+      assert Param(target, parameter[:role], parameter[:restriction], ordinal, parameter[:mode], parameter[:default])
       ordinal = ordinal + 1
     end
     retract MethodSource(target, _)
@@ -47,7 +47,7 @@ verb compiler/install(module: map, name: symbol) -> map
     if !map_contains_key(retained, target)
       retract MethodSelector(target, _)
       retract MethodProgram(target, _)
-      retract Param(target, _, _, _)
+      retract Param(target, _, _, _, _, _)
       retract MethodSource(target, _)
     end
   end

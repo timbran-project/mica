@@ -96,6 +96,8 @@ pub struct MethodParam {
     pub restriction: Option<DispatchRestriction>,
     pub annotation: Option<TypeRef>,
     pub span: Span,
+    pub mode: ParamMode,
+    pub default: Option<Expr>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

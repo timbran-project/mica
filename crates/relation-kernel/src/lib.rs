@@ -67,11 +67,12 @@ pub use computed::{
     ComputedRelationRegistry, ComputedRow, ReadAuthority,
 };
 pub use dispatch::{
-    ApplicableMethod, ApplicableMethodCall, DispatchRead, DispatchRelations,
-    applicable_method_calls, applicable_method_calls_normalized, applicable_method_entries,
-    applicable_methods, applicable_positional_methods, applicable_positional_methods_cached,
-    frob_only_dispatch_restriction, method_program_id, named_method_args, normalize_dispatch_roles,
-    ordered_params, positional_method_args, role_value, unrestricted_dispatch_restriction,
+    ApplicableMethod, ApplicableMethodCall, ApplicablePositionalMethod, DispatchRead,
+    DispatchRelations, applicable_method_calls, applicable_method_calls_normalized,
+    applicable_method_entries, applicable_methods, applicable_positional_methods,
+    applicable_positional_methods_cached, frob_only_dispatch_restriction, method_program_id,
+    named_method_args, normalize_dispatch_roles, ordered_params, positional_method_args,
+    role_value, unrestricted_dispatch_restriction,
 };
 pub use error::{Conflict, ConflictKind, KernelError};
 pub use execution::{

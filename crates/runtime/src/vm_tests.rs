@@ -978,7 +978,7 @@ fn authority_context_filters_dispatch_applicability() {
         .unwrap();
     kernel
         .create_relation(
-            RelationMetadata::new(rel(41), Symbol::intern("Param"), 4).with_index([0, 1]),
+            RelationMetadata::new(rel(41), Symbol::intern("Param"), 6).with_index([0, 1]),
         )
         .unwrap();
     kernel
@@ -1006,7 +1006,14 @@ fn authority_context_filters_dispatch_applicability() {
         .unwrap();
     seed.assert(
         rel(41),
-        Tuple::from([method.clone(), sym("actor"), int(1), int(0)]),
+        Tuple::from([
+            method.clone(),
+            sym("actor"),
+            int(1),
+            int(0),
+            sym("required"),
+            Value::option_none(),
+        ]),
     )
     .unwrap();
     seed.assert(rel(43), Tuple::from([method.clone(), program_id.clone()]))

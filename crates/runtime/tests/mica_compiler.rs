@@ -1037,7 +1037,7 @@ fn mica_compiler_reinstallation_preserves_suspended_programs_and_checks_authorit
         let module = invoke(
             &mut runner,
             "emit_source",
-            "verb compiled_wait()\nsuspend(0)\nreturn 17\nend\nreturn compiled_wait()",
+            "verb compiled_wait(?value = [17], @tail)\nlet saved = fn() => value[0] + len(tail)\nsuspend(0)\nreturn saved()\nend\nreturn compiled_wait()",
         );
         install_emitted(&mut runner, module);
         let suspended = runner.run_source("return :compiler_test_entry()").unwrap();
@@ -1045,7 +1045,7 @@ fn mica_compiler_reinstallation_preserves_suspended_programs_and_checks_authorit
         let replacement = invoke(
             &mut runner,
             "emit_source",
-            "verb compiled_wait()\nreturn 99\nend\nreturn compiled_wait()",
+            "verb compiled_wait(?value = [99], @tail)\nreturn value[0] + len(tail)\nend\nreturn compiled_wait()",
         );
         install_emitted(&mut runner, replacement);
         let current = runner.run_source("return :compiler_test_entry()").unwrap();
@@ -1185,6 +1185,11 @@ fn mica_compiler_bootstrap_preserves_artifacts_and_execution() {
           end
           return n * factorial(n - 1)
         end
+        verb bootstrap_defaults(first, ?extra = 3, @tail)
+          return first + extra + len(tail)
+        end
+        require bootstrap_defaults(1) == 4
+        require bootstrap_defaults(1, 2, 3, 4) == 5
         let total = 0
         for [left, right] in [[1, 2], [3, 4]]
           total = total + left * right
@@ -1341,5 +1346,130 @@ fn mica_emitter_rejects_invalid_function_parameters_and_preserves_arity_errors()
                 "{call}"
             );
         }
+    }
+}
+
+#[test]
+fn verb_defaults_and_rest_bind_in_native_and_mica_compilers() {
+    const SOURCE: &str = r#"
+        verb collect(first, ?extra = {:items -> [2, some(3), ok(:yes), E_TYPE]}, @tail)
+          let saved = extra
+          let changed = extra
+          changed[:items] = [99]
+          require saved == extra
+          return [first, saved, tail]
+        end
+        verb restricted(?value @ #string: string = "ok", @tail @ #list: list)
+          return [value, tail]
+        end
+        verb invalid_default(?value @ #string = 7)
+          return value
+        end
+        verb absent(?value)
+          return value
+        end
+        verb literals(?value = [-7, -1.5, "é🦀", b"YQ==", true, #string, none])
+          return value
+        end
+        verb choose(value)
+          return :fixed
+        end
+        verb choose(value, ?extra = 2)
+          return :optional
+        end
+        verb choose(value, @tail)
+          return :rest
+        end
+        verb choose_named(?value = 1)
+          return :optional
+        end
+        verb choose_named(value)
+          return :required
+        end
+        begin
+        let expected = {:items -> [2, some(3), ok(:yes), E_TYPE]}
+        require collect(1) == [1, expected, []]
+        require collect(1) == [1, expected, []]
+        require collect(@[1, {:items -> [4]}, 5, 6]) == [1, {:items -> [4]}, [5, 6]]
+        require :collect(first: 1, tail: [5, 6]) == [1, expected, [5, 6]]
+        require invoke(:collect, {:first -> 1}) == [1, expected, []]
+        require restricted() == ["ok", []]
+        require restricted("text", 1, 2) == ["text", [1, 2]]
+        require :restricted(tail: [1]) == ["ok", [1]]
+        require absent() == none
+        require :absent() == none
+        require literals() == [-7, -1.5, "é🦀", b"YQ==", true, #string, none]
+        require choose(1) == :fixed
+        require choose(1, 2) == :optional
+        require choose(1, 2, 3) == :rest
+        require :choose_named(value: 1) == :required
+        require :choose_named() == :optional
+        return true
+        end
+    "#;
+    for interpreter_only in [true, false] {
+        let mut native = SourceRunner::new_empty().with_interpreter_only(interpreter_only);
+        let report = native
+            .run_source(SOURCE)
+            .unwrap_or_else(|error| panic!("{error:?}"));
+        assert!(
+            matches!(report.outcome, TaskOutcome::Complete { ref value, .. } if *value == Value::bool(true)),
+            "{}",
+            report.render()
+        );
+        let mut runner = compiler(interpreter_only);
+        let module = invoke(&mut runner, "emit_source", SOURCE);
+        install_emitted(&mut runner, module);
+        let report = runner.run_source("return :compiler_test_entry()").unwrap();
+        assert!(
+            matches!(report.outcome, TaskOutcome::Complete { ref value, .. } if *value == Value::bool(true)),
+            "{}",
+            report.render()
+        );
+        for source in [
+            "return restricted(7)",
+            "return invalid_default()",
+            "return :invalid_default()",
+            "return collect()",
+            "return :collect(first: 1, tail: 7)",
+            "return literals(1, 2)",
+        ] {
+            assert!(
+                matches!(
+                    runner.run_source(source),
+                    Err(SourceTaskError::TaskManager(TaskManagerError::Task(
+                        TaskError::Runtime(RuntimeError::NoApplicableMethod { .. })
+                    )))
+                ),
+                "{source}"
+            );
+        }
+    }
+}
+
+#[test]
+fn verb_defaults_reject_expressions_and_invalid_parameter_order() {
+    let mut runner = compiler(true);
+    for params in [
+        "?value = err(E_TYPE)",
+        "?value = 1 + 2",
+        "?value = len([])",
+        "?value = [@[1]]",
+        "value = 1",
+        "?first = 1, second",
+        "@tail, ?last = 1",
+        "@tail, last",
+        "@first, @second",
+        "@tail = []",
+    ] {
+        let source = format!("verb invalid({params})\n return true\nend");
+        let module = invoke(&mut runner, "emit_source", &source);
+        assert_eq!(
+            module.map_get(&Value::symbol(Symbol::intern("ok"))),
+            Some(Value::bool(false)),
+            "{source}: {module}"
+        );
+        let mut native = SourceRunner::new_empty();
+        assert!(native.run_source(&source).is_err(), "{source}");
     }
 }

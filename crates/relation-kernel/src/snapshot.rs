@@ -19,9 +19,10 @@ use crate::method_program_cache::MethodProgramCache;
 use crate::relation_algebra::union_ordered_tuple_rows;
 use crate::relation_states::RelationStates;
 use crate::{
-    ApplicableMethodCall, DispatchRead, DispatchRelations, KernelError, PackedRelation,
-    RelationCapabilities, RelationId, RelationMetadata, RelationRead, RelationSource,
-    RuleDefinition, RuleEvalError, RuleSet, ScanControl, Tuple, ValueDomain, Version,
+    ApplicableMethodCall, ApplicablePositionalMethod, DispatchRead, DispatchRelations, KernelError,
+    PackedRelation, RelationCapabilities, RelationId, RelationMetadata, RelationRead,
+    RelationSource, RuleDefinition, RuleEvalError, RuleSet, ScanControl, Tuple, ValueDomain,
+    Version,
 };
 use mica_var::{Identity, Symbol, Value};
 use std::collections::BTreeMap;
@@ -571,7 +572,7 @@ impl Snapshot {
         relations: DispatchRelations,
         selector: &Value,
         args: &[Value],
-    ) -> Result<Arc<[Value]>, KernelError> {
+    ) -> Result<Arc<[ApplicablePositionalMethod]>, KernelError> {
         if let Some(methods) = self
             .dispatch_cache
             .get_positional(relations, selector, args)
@@ -718,7 +719,7 @@ impl DispatchRead for Snapshot {
         relations: DispatchRelations,
         selector: &Value,
         args: &[Value],
-    ) -> Result<Option<Arc<[Value]>>, KernelError> {
+    ) -> Result<Option<Arc<[ApplicablePositionalMethod]>>, KernelError> {
         self.cached_applicable_positional_methods(relations, selector, args)
             .map(Some)
     }

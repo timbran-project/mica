@@ -26,10 +26,10 @@ use crate::snapshot::{
     maintained_cache_with, relation_has_active_rule_head,
 };
 use crate::{
-    ApplicableMethodCall, Conflict, ConflictKind, ConflictPolicy, DispatchRead, DispatchRelations,
-    ExecutionContext, KernelError, PackedRelation, RelationCapabilities, RelationId,
-    RelationKernel, RelationMetadata, RelationRead, RelationSource, RelationWorkspace, RuleSet,
-    ScanControl, Snapshot, Tuple, ValueDomain, Version,
+    ApplicableMethodCall, ApplicablePositionalMethod, Conflict, ConflictKind, ConflictPolicy,
+    DispatchRead, DispatchRelations, ExecutionContext, KernelError, PackedRelation,
+    RelationCapabilities, RelationId, RelationKernel, RelationMetadata, RelationRead,
+    RelationSource, RelationWorkspace, RuleSet, ScanControl, Snapshot, Tuple, ValueDomain, Version,
 };
 use mica_var::{Symbol, Value};
 use overlay::{FunctionalVisibleMap, LocalChange, RelationWriteOverlay};
@@ -79,7 +79,7 @@ struct PositionalDispatchCacheEntry {
     relations: DispatchRelations,
     selector: Value,
     args: PositionalDispatchArgs,
-    methods: Arc<[Value]>,
+    methods: Arc<[ApplicablePositionalMethod]>,
 }
 
 enum PositionalDispatchArgs {
@@ -140,7 +140,7 @@ impl TransactionDispatchCache {
         selector: &Value,
         args: &[Value],
         state: u8,
-    ) -> Option<Arc<[Value]>> {
+    ) -> Option<Arc<[ApplicablePositionalMethod]>> {
         let entries = self.entries.borrow();
         let entry = entries.as_ref().and_then(|entries| {
             entries.positional.iter().flatten().find(|entry| {
@@ -158,7 +158,7 @@ impl TransactionDispatchCache {
         relations: DispatchRelations,
         selector: &Value,
         args: &[Value],
-        methods: Arc<[Value]>,
+        methods: Arc<[ApplicablePositionalMethod]>,
     ) {
         let mut cached = self.entries.borrow_mut();
         let entries =
@@ -180,7 +180,7 @@ impl TransactionDispatchCache {
         relations: DispatchRelations,
         selector: &Value,
         args: &[Value],
-        methods: Arc<[Value]>,
+        methods: Arc<[ApplicablePositionalMethod]>,
         state: u8,
     ) {
         self.remember_positional(relations, selector, args, methods);
@@ -364,7 +364,7 @@ impl<'a> Transaction<'a> {
         relations: DispatchRelations,
         selector: &Value,
         args: &[Value],
-    ) -> Result<Arc<[Value]>, KernelError> {
+    ) -> Result<Arc<[ApplicablePositionalMethod]>, KernelError> {
         let state = self.dispatch_inline_cache.state();
         if state & POSITIONAL_DISPATCH_CACHED != 0 {
             return self
@@ -392,7 +392,7 @@ impl<'a> Transaction<'a> {
         selector: &Value,
         args: &[Value],
         state: u8,
-    ) -> Result<Arc<[Value]>, KernelError> {
+    ) -> Result<Arc<[ApplicablePositionalMethod]>, KernelError> {
         if let Some(methods) = self
             .dispatch_inline_cache
             .positional(relations, selector, args, state)
@@ -426,13 +426,13 @@ impl<'a> Transaction<'a> {
         relations: DispatchRelations,
         selector: &Value,
         args: &[Value],
-    ) -> Result<Arc<[Value]>, KernelError> {
+    ) -> Result<Arc<[ApplicablePositionalMethod]>, KernelError> {
         if self.dispatch_view_matches_base(relations)? {
             self.base
                 .cached_applicable_positional_methods(relations, selector, args)
         } else {
-            crate::dispatch::applicable_positional_methods(self, relations, selector.clone(), args)
-                .map(Arc::from)
+            crate::dispatch::resolve_positional_methods(self, relations, selector.clone(), args)
+                .map(|resolved| Arc::from(resolved.methods))
         }
     }
 
@@ -1309,7 +1309,7 @@ impl DispatchRead for Transaction<'_> {
         relations: DispatchRelations,
         selector: &Value,
         args: &[Value],
-    ) -> Result<Option<Arc<[Value]>>, KernelError> {
+    ) -> Result<Option<Arc<[ApplicablePositionalMethod]>>, KernelError> {
         self.cached_applicable_positional_methods(relations, selector, args)
             .map(Some)
     }
@@ -1643,9 +1643,15 @@ mod tests {
             Value::symbol(Symbol::intern("third")),
         ];
         let methods = [
-            Arc::<[Value]>::from([Value::identity(rel(11))]),
-            Arc::<[Value]>::from([Value::identity(rel(12))]),
-            Arc::<[Value]>::from([Value::identity(rel(13))]),
+            Arc::<[ApplicablePositionalMethod]>::from(
+                [Value::identity(rel(11))].map(ApplicablePositionalMethod::required),
+            ),
+            Arc::<[ApplicablePositionalMethod]>::from(
+                [Value::identity(rel(12))].map(ApplicablePositionalMethod::required),
+            ),
+            Arc::<[ApplicablePositionalMethod]>::from(
+                [Value::identity(rel(13))].map(ApplicablePositionalMethod::required),
+            ),
         ];
 
         for index in 0..INLINE_DISPATCH_CACHE_CAPACITY {

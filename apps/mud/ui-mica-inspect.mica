@@ -224,7 +224,7 @@ verb ui/mica_can_link(value)
     return true
   end
 
-  for found in Param(?method_id, ?role, value, ?position)
+  for found in Param(?method_id, ?role, value, ?position, _, _)
     return true
   end
 
@@ -543,7 +543,7 @@ verb ui/mica_method_catalog_node(entity)
     {ui/mica_method_mode_node("inherited", "Inherited", mode)}
   </div>
   if mode != "inherited"
-    for found in Param(?m, ?role, entity, ?position)
+    for found in Param(?m, ?role, entity, ?position, _, _)
       let method_id = found[:m]
       let role = found[:role]
       let position = found[:position]
@@ -557,7 +557,7 @@ verb ui/mica_method_catalog_node(entity)
   if mode != "direct"
     for inherited in ui/MicaPrototype(entity, ?prototype)
       let prototype = inherited[:prototype]
-      for found in Param(?m, ?role, prototype, ?position)
+      for found in Param(?m, ?role, prototype, ?position, _, _)
         let method_id = found[:m]
         let role = found[:role]
         let position = found[:position]

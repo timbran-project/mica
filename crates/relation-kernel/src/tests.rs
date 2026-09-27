@@ -1221,7 +1221,7 @@ fn transaction_method_program_cache_tracks_computed_relation_writes() {
         .unwrap();
     kernel
         .create_relation(
-            RelationMetadata::new(rel(41), Symbol::intern("Param"), 4).with_index([0, 1]),
+            RelationMetadata::new(rel(41), Symbol::intern("Param"), 6).with_index([0, 1]),
         )
         .unwrap();
     kernel
@@ -1250,7 +1250,7 @@ fn transaction_method_program_cache_tracks_computed_relation_writes() {
             applicable_positional_methods_cached(&tx, dispatch_relations, selector.clone(), &[],)
                 .unwrap()
                 .as_ref(),
-            std::slice::from_ref(&method)
+            &[crate::ApplicablePositionalMethod::required(method.clone())]
         );
     }
     assert_eq!(method_program_id(&tx, rel(201), &method).unwrap(), None);
@@ -1271,7 +1271,7 @@ fn positional_arity_cache_preserves_restrictions_overlays_and_snapshots() {
     let kernel = RelationKernel::new();
     for (id, name, arity) in [
         (1, "MethodSelector", 2),
-        (2, "Param", 4),
+        (2, "Param", 6),
         (3, "Delegates", 3),
     ] {
         kernel
@@ -1292,6 +1292,8 @@ fn positional_arity_cache_preserves_restrictions_overlays_and_snapshots() {
         role.clone(),
         crate::unrestricted_dispatch_restriction(),
         int(0),
+        Value::symbol(Symbol::intern("required")),
+        Value::option_none(),
     ]);
     let mut tx = kernel.begin();
     tx.assert(rel(1), Tuple::from([generic.clone(), selector.clone()]))
@@ -1310,7 +1312,10 @@ fn positional_arity_cache_preserves_restrictions_overlays_and_snapshots() {
         )
         .unwrap();
     assert!(Arc::ptr_eq(&first, &changed));
-    assert_eq!(&*changed, std::slice::from_ref(&generic));
+    assert_eq!(
+        &*changed,
+        &[crate::ApplicablePositionalMethod::required(generic.clone())]
+    );
     assert!(
         retained
             .cached_applicable_positional_methods(relations, &selector, &[])
@@ -1323,7 +1328,14 @@ fn positional_arity_cache_preserves_restrictions_overlays_and_snapshots() {
         .unwrap();
     tx.assert(
         rel(2),
-        Tuple::from([specific.clone(), role.clone(), int(7), int(0)]),
+        Tuple::from([
+            specific.clone(),
+            role.clone(),
+            int(7),
+            int(0),
+            Value::symbol(Symbol::intern("required")),
+            Value::option_none(),
+        ]),
     )
     .unwrap();
     tx.commit().unwrap();
@@ -1333,20 +1345,32 @@ fn positional_arity_cache_preserves_restrictions_overlays_and_snapshots() {
             &*restricted
                 .cached_applicable_positional_methods(relations, &selector, &[int(argument)])
                 .unwrap(),
-            std::slice::from_ref(expected)
+            &[crate::ApplicablePositionalMethod::required(
+                expected.clone()
+            )]
         );
     }
     assert_eq!(
         &*retained
             .cached_applicable_positional_methods(relations, &selector, &[int(7)])
             .unwrap(),
-        std::slice::from_ref(&generic)
+        &[crate::ApplicablePositionalMethod::required(generic.clone())]
     );
 
     let mut tx = kernel.begin();
     tx.retract(rel(2), unrestricted).unwrap();
-    tx.assert(rel(2), Tuple::from([generic.clone(), role, int(8), int(0)]))
-        .unwrap();
+    tx.assert(
+        rel(2),
+        Tuple::from([
+            generic.clone(),
+            role,
+            int(8),
+            int(0),
+            Value::symbol(Symbol::intern("required")),
+            Value::option_none(),
+        ]),
+    )
+    .unwrap();
     assert!(
         applicable_positional_methods_cached(&tx, relations, selector.clone(), &[int(9)])
             .unwrap()
@@ -1355,7 +1379,7 @@ fn positional_arity_cache_preserves_restrictions_overlays_and_snapshots() {
     assert_eq!(
         &*applicable_positional_methods_cached(&tx, relations, selector.clone(), &[int(8)])
             .unwrap(),
-        std::slice::from_ref(&generic)
+        &[crate::ApplicablePositionalMethod::required(generic.clone())]
     );
     drop(tx);
     assert_eq!(
@@ -1363,7 +1387,7 @@ fn positional_arity_cache_preserves_restrictions_overlays_and_snapshots() {
             .snapshot()
             .cached_applicable_positional_methods(relations, &selector, &[int(9)])
             .unwrap(),
-        std::slice::from_ref(&generic)
+        &[crate::ApplicablePositionalMethod::required(generic.clone())]
     );
 }
 

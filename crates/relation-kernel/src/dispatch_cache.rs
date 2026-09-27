@@ -11,7 +11,7 @@
 // You should have received a copy of the GNU Affero General Public License along
 // with this program. If not, see <https://www.gnu.org/licenses/>.
 
-use crate::{ApplicableMethodCall, DispatchRelations};
+use crate::{ApplicableMethodCall, ApplicablePositionalMethod, DispatchRelations};
 use mica_var::Value;
 use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};
@@ -26,8 +26,8 @@ type PositionalDispatchEntries = BTreeMap<DispatchRelationsKey, BTreeMap<Value, 
 
 #[derive(Debug, Default)]
 struct PositionalMethods {
-    by_arity: BTreeMap<usize, Arc<[Value]>>,
-    by_values: BTreeMap<Vec<Value>, Arc<[Value]>>,
+    by_arity: BTreeMap<usize, Arc<[ApplicablePositionalMethod]>>,
+    by_values: BTreeMap<Vec<Value>, Arc<[ApplicablePositionalMethod]>>,
 }
 
 impl DispatchCache {
@@ -90,7 +90,7 @@ impl DispatchCache {
         relations: DispatchRelations,
         selector: &Value,
         args: &[Value],
-    ) -> Option<Arc<[Value]>> {
+    ) -> Option<Arc<[ApplicablePositionalMethod]>> {
         let entries = self.positional_entries.read().unwrap();
         let methods = entries
             .get(&DispatchRelationsKey::from(relations))?
@@ -107,7 +107,7 @@ impl DispatchCache {
         relations: DispatchRelations,
         selector: &Value,
         args: &[Value],
-        methods: Arc<[Value]>,
+        methods: Arc<[ApplicablePositionalMethod]>,
         argument_independent: bool,
     ) {
         let mut entries = self.positional_entries.write().unwrap();
@@ -213,7 +213,9 @@ mod tests {
         };
         let selector = value(4);
         let args = [value(5), value(6)];
-        let methods = Arc::<[Value]>::from([value(7), value(8)]);
+        let methods = Arc::<[ApplicablePositionalMethod]>::from(
+            [value(7), value(8)].map(ApplicablePositionalMethod::required),
+        );
 
         cache.insert_positional(relations, &selector, &args, Arc::clone(&methods), true);
 
@@ -243,7 +245,9 @@ mod tests {
             delegates: relation(3),
         };
         let selector = value(4);
-        let stable = Arc::<[Value]>::from([value(9)]);
+        let stable = Arc::<[ApplicablePositionalMethod]>::from(
+            [value(9)].map(ApplicablePositionalMethod::required),
+        );
         cache.insert_positional(relations, &selector, &[], Arc::clone(&stable), false);
         std::thread::scope(|scope| {
             for worker in 0..4 {
@@ -253,7 +257,9 @@ mod tests {
                 scope.spawn(move || {
                     for item in 0..512 {
                         let argument = value(worker * 512 + item);
-                        let methods = Arc::<[Value]>::from([argument.clone()]);
+                        let methods = Arc::<[ApplicablePositionalMethod]>::from(
+                            [argument.clone()].map(ApplicablePositionalMethod::required),
+                        );
                         cache.insert_positional(
                             relations,
                             selector,
@@ -292,9 +298,9 @@ mod tests {
                 &*cache
                     .get_positional(relations, &selector, std::slice::from_ref(&argument))
                     .unwrap(),
-                &[argument]
+                &[ApplicablePositionalMethod::required(argument)]
             );
         }
-        assert_eq!(&*stable, &[value(9)]);
+        assert_eq!(&*stable, &[ApplicablePositionalMethod::required(value(9))]);
     }
 }

@@ -203,6 +203,12 @@ pub fn install_methods(
                         param.role.clone(),
                         param.restriction.clone(),
                         Value::int(i64::from(param.position)).unwrap(),
+                        Value::symbol(Symbol::intern(match param.mode {
+                            ParamMode::Required => "required",
+                            ParamMode::Optional => "optional",
+                            ParamMode::Rest => "rest",
+                        })),
+                        param.default.clone(),
                     ]),
                 )?;
             }
@@ -246,6 +252,8 @@ pub struct InstalledParam {
     pub role: Value,
     pub restriction: Value,
     pub position: u16,
+    pub mode: ParamMode,
+    pub default: Value,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1252,27 +1260,125 @@ fn compile_installed_params(
     context: &CompileContext,
     params: &[HirMethodParam],
 ) -> Result<Vec<InstalledParam>, CompileError> {
-    params
-        .iter()
-        .enumerate()
-        .map(|(position, param)| {
-            let binding = &semantic.bindings[param.binding.as_u32() as usize];
-            let restriction = match &param.restriction {
-                Some(restriction) => compile_param_restriction(param.id, context, restriction)?,
-                None => unrestricted_dispatch_restriction(),
-            };
-            Ok(InstalledParam {
-                name: binding.name.clone(),
-                role: Value::symbol(Symbol::intern(&binding.name)),
-                restriction,
-                position: u16::try_from(position).map_err(|_| CompileError::Unsupported {
-                    node: id,
-                    span: semantic.span(id).cloned(),
-                    message: "method parameter count exceeds supported limit".to_owned(),
-                })?,
+    let mut optional = false;
+    let mut rest = false;
+    let mut installed = Vec::with_capacity(params.len());
+    for (position, param) in params.iter().enumerate() {
+        let invalid = match param.mode {
+            ParamMode::Required => optional || rest || param.default.is_some(),
+            ParamMode::Optional => rest,
+            ParamMode::Rest => rest || param.default.is_some(),
+        };
+        if invalid {
+            return Err(CompileError::Unsupported {
+                node: param.id,
+                span: semantic.span(param.id).cloned(),
+                message: "expected required parameters, optional parameters, then one rest parameter; only optional parameters accept defaults".to_owned(),
+            });
+        }
+        optional |= param.mode == ParamMode::Optional;
+        rest |= param.mode == ParamMode::Rest;
+        let default = param
+            .default
+            .as_ref()
+            .map(|expr| method_default_value(semantic, context, expr))
+            .transpose()?
+            .unwrap_or_else(Value::option_none);
+        let binding = &semantic.bindings[param.binding.as_u32() as usize];
+        let restriction = match &param.restriction {
+            Some(restriction) => compile_param_restriction(param.id, context, restriction)?,
+            None => unrestricted_dispatch_restriction(),
+        };
+        installed.push(InstalledParam {
+            name: binding.name.clone(),
+            role: Value::symbol(Symbol::intern(&binding.name)),
+            restriction,
+            mode: param.mode.clone(),
+            default,
+            position: u16::try_from(position).map_err(|_| CompileError::Unsupported {
+                node: id,
+                span: semantic.span(id).cloned(),
+                message: "method parameter count exceeds supported limit".to_owned(),
+            })?,
+        });
+    }
+    Ok(installed)
+}
+
+fn method_default_value(
+    semantic: &SemanticProgram,
+    context: &CompileContext,
+    expr: &HirExpr,
+) -> Result<Value, CompileError> {
+    let invalid = || CompileError::Unsupported {
+        node: expr_id(expr),
+        span: semantic.span(expr_id(expr)).cloned(),
+        message: "verb parameter defaults must be literal values".to_owned(),
+    };
+    match expr {
+        HirExpr::Literal { id, value } => literal_value_for_rule(semantic, *id, value),
+        HirExpr::Symbol { name, .. } => Ok(Value::symbol(Symbol::intern(name))),
+        HirExpr::Identity { id, name } => {
+            context.identity(name).map(Value::identity).ok_or_else(|| {
+                CompileError::UnknownIdentity {
+                    node: *id,
+                    span: semantic.span(*id).cloned(),
+                    name: name.clone(),
+                }
             })
-        })
-        .collect()
+        }
+        HirExpr::ExternalRef { name, .. } if name == "none" => Ok(Value::option_none()),
+        HirExpr::Unary {
+            op: UnaryOp::Neg,
+            expr: inner,
+            ..
+        } => {
+            let HirExpr::Literal { id, value } = inner.as_ref() else {
+                return Err(invalid());
+            };
+            let literal = match value {
+                Literal::Int(text) => Literal::Int(format!("-{text}")),
+                Literal::Float(text) => Literal::Float(format!("-{text}")),
+                _ => return Err(invalid()),
+            };
+            literal_value_for_rule(semantic, *id, &literal)
+        }
+        HirExpr::List { items, .. } => items
+            .iter()
+            .map(|item| {
+                let HirCollectionItem::Expr(value) = item else {
+                    return Err(invalid());
+                };
+                method_default_value(semantic, context, value)
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map(Value::list),
+        HirExpr::Map { entries, .. } => entries
+            .iter()
+            .map(|(key, value)| {
+                Ok((
+                    method_default_value(semantic, context, key)?,
+                    method_default_value(semantic, context, value)?,
+                ))
+            })
+            .collect::<Result<Vec<_>, CompileError>>()
+            .map(Value::map),
+        HirExpr::Call { callee, args, .. }
+            if args.len() == 1 && args[0].role.is_none() && !args[0].splice =>
+        {
+            let HirExpr::ExternalRef { name, .. } = callee.as_ref() else {
+                return Err(invalid());
+            };
+            let inner = method_default_value(semantic, context, &args[0].value)?;
+            match name.as_str() {
+                "some" => Ok(Value::option_some(inner)),
+                "ok" => Ok(Value::result_ok(inner)),
+                "err" if inner.kind() == ValueKind::Error => Ok(Value::result_err(inner)),
+                _ => Err(invalid()),
+            }
+        }
+        _ => Err(invalid()),
+    }
 }
 
 fn compile_param_restriction(
@@ -6060,7 +6166,7 @@ mod tests {
             .unwrap();
         kernel
             .create_relation(
-                RelationMetadata::new(relations.dispatch.param, Symbol::intern("Param"), 4)
+                RelationMetadata::new(relations.dispatch.param, Symbol::intern("Param"), 6)
                     .with_index([0, 1]),
             )
             .unwrap();
@@ -9559,7 +9665,7 @@ mod tests {
             .snapshot()
             .scan(
                 dispatch_relations().dispatch.param,
-                &[Some(Value::identity(method)), None, None, None],
+                &[Some(Value::identity(method)), None, None, None, None, None],
             )
             .unwrap();
         assert_eq!(param_rows.len(), 2);
@@ -9568,12 +9674,16 @@ mod tests {
             Value::symbol(Symbol::intern("value")),
             Value::identity(string),
             Value::int(0).unwrap(),
+            Value::symbol(Symbol::intern("required")),
+            Value::option_none(),
         ])));
         assert!(param_rows.contains(&Tuple::from([
             Value::identity(method),
             Value::symbol(Symbol::intern("target")),
             Value::identity(identity),
             Value::int(1).unwrap(),
+            Value::symbol(Symbol::intern("required")),
+            Value::option_none(),
         ])));
     }
 

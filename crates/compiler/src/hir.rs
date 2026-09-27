@@ -296,6 +296,8 @@ pub struct HirMethodParam {
     pub restriction: Option<DispatchRestriction>,
     pub declared_type: Option<StaticType>,
     pub declared_kind: Option<ValueKind>,
+    pub mode: ParamMode,
+    pub default: Option<HirExpr>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

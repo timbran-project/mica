@@ -332,9 +332,9 @@ verb parse_params(input_state)
     let [name_token, after_name] = expect(state, :Ident, "expected parameter name")
     state = after_name
     state = fact(state, param, :name, name_token[:text], 0)
-    if at(state, :At) && mode != :rest
+    if at(state, :At)
       state = bump(state)
-      let [restriction, after_restriction] = parse_unary(state)
+      let [restriction, after_restriction] = parse_primary(state)
       state = after_restriction
       state = fact(state, param, :restrict, restriction, 0)
     end

@@ -150,11 +150,37 @@ verb emit_program(raw_rows, root) -> map
         state[:result_annotation] = result_annotation
       end
       let parameters = []
+      let saw_optional = false
+      let saw_rest = false
       for param in ast_children(rows, item, :param)
         let [_, name_text] = ast_attr(rows, param, :name)
         let [_, mode] = ast_attr(rows, param, :mode)
-        if mode != :req
-          state = emit_diagnostic(state, "verb default and rest parameters need an argument wrapper")
+        let [has_default, default_node] = ast_attr(rows, param, :default)
+        let parameter_mode = :required
+        if mode == :req
+          if saw_optional || saw_rest || has_default
+            state = emit_diagnostic(state, "required parameters must precede optional and rest parameters and cannot have defaults")
+          end
+        elseif mode == :opt
+          parameter_mode = :optional
+          if saw_rest
+            state = emit_diagnostic(state, "optional parameters must precede a rest parameter")
+          end
+          saw_optional = true
+        elseif mode == :rest
+          parameter_mode = :rest
+          if saw_rest || has_default
+            state = emit_diagnostic(state, "a verb supports one final rest parameter without a default")
+          end
+          saw_rest = true
+        end
+        let default_value = none
+        if has_default
+          let [valid, value] = emit_parameter_default(rows, default_node)
+          if !valid
+            state = emit_diagnostic(state, "verb parameter defaults must be literal values")
+          end
+          default_value = value
         end
         let [restriction, after_restriction] = emit_parameter_restriction(rows, param, state)
         state = after_restriction
@@ -164,11 +190,11 @@ verb emit_program(raw_rows, root) -> map
         if annotated
           state = emit_annotation(state, reg, annotation, :Parameter, name_text)
         end
-        parameters = [@parameters, {:role -> to_symbol(name_text), :restriction -> restriction}]
+        parameters = [@parameters, {:role -> to_symbol(name_text), :restriction -> restriction, :mode -> parameter_mode, :default -> default_value}]
       end
       let [result, emitted] = emit_block(rows, ast_children(rows, item, :body), state)
       state = emit_finish(emitted, result)
-      let signature = [to_symbol(selector), parameters]
+      let signature = [to_symbol(selector), [[parameter[:role], parameter[:restriction], parameter[:mode]] for parameter in parameters]]
       if map_contains_key(signatures, signature)
         state = emit_diagnostic(state, "duplicate verb signature")
       end
@@ -182,6 +208,98 @@ verb emit_program(raw_rows, root) -> map
   let [result, entry] = emit_block(rows, entry_nodes, emit_state(relations, node_kinds, field_relations))
   entry = emit_append(entry, [:Return, [:Register, result]])
   return {:entry -> emit_description(entry), :methods -> methods, :errors -> [@errors, @entry[:errors]]}
+end
+
+// Defaults are values fixed at installation, not expressions run during a call.
+verb emit_parameter_default(rows, node)
+  let kind = ast_kind(rows, node)
+  if kind == :Int_Literal || kind == :Float_Literal || kind == :String_Literal || kind == :Bytes_Literal || kind == :Error_Code_Literal
+    let [_, text] = ast_attr(rows, node, :text)
+    let parsed = from_literal(text)
+    if parsed[0][:case] == :ok
+      return [true, parsed[0][:value]]
+    end
+    return [false, none]
+  end
+  if kind == :Bool_Literal
+    let [_, value] = ast_attr(rows, node, :value)
+    return [true, value]
+  end
+  if kind == :Symbol_Literal || kind == :Identity_Literal
+    let [_, text] = ast_attr(rows, node, :name)
+    let prefix = ":"
+    if kind == :Identity_Literal
+      prefix = "#"
+    end
+    let parsed = from_literal(string_concat(prefix, text))
+    if parsed[0][:case] == :ok
+      return [true, parsed[0][:value]]
+    end
+    return [false, none]
+  end
+  if kind == :Name && string_join(ast_children(rows, node, :part), "/") == "none"
+    return [true, none]
+  end
+  if kind == :Unary
+    let [_, operand] = ast_attr(rows, node, :operand)
+    let [_, operation] = ast_attr(rows, node, :op)
+    let inner_kind = ast_kind(rows, operand)
+    if operation == :neg && (inner_kind == :Int_Literal || inner_kind == :Float_Literal)
+      let [_, text] = ast_attr(rows, operand, :text)
+      let parsed = from_literal(string_concat("-", text))
+      if parsed[0][:case] == :ok
+        return [true, parsed[0][:value]]
+      end
+    end
+    return [false, none]
+  end
+  if kind == :List_Literal
+    let values = []
+    for child in ast_children(rows, node, :element)
+      let [valid, value] = emit_parameter_default(rows, child)
+      if !valid
+        return [false, none]
+      end
+      values = [@values, value]
+    end
+    return [true, values]
+  end
+  if kind == :Map_Literal
+    let values = {}
+    for child in ast_children(rows, node, :entry)
+      let [_, key_node] = ast_attr(rows, child, :key)
+      let [_, value_node] = ast_attr(rows, child, :value)
+      let [key_valid, key] = emit_parameter_default(rows, key_node)
+      let [value_valid, value] = emit_parameter_default(rows, value_node)
+      if !key_valid || !value_valid
+        return [false, none]
+      end
+      values[key] = value
+    end
+    return [true, values]
+  end
+  if kind == :Call
+    let [_, callee] = ast_attr(rows, node, :callee)
+    let arguments = ast_children(rows, node, :arg)
+    if ast_kind(rows, callee) != :Name || len(arguments) != 1
+      return [false, none]
+    end
+    let [named, _] = ast_attr(rows, arguments[0], :role)
+    let [_, child] = ast_attr(rows, arguments[0], :expr)
+    let [valid, value] = emit_parameter_default(rows, child)
+    if named || !valid
+      return [false, none]
+    end
+    let name_text = string_join(ast_children(rows, callee, :part), "/")
+    if name_text == "some"
+      return [true, some(value)]
+    elseif name_text == "ok"
+      return [true, ok(value)]
+    elseif name_text == "err" && is_kind(value, :error)
+      return [true, err(value)]
+    end
+  end
+  return [false, none]
 end
 
 verb emit_parameter_restriction(rows, param, input_state)

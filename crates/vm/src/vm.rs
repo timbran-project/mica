@@ -23,8 +23,8 @@ use crate::{
     RuntimeUnaryOp, SpawnRequest, SpawnTarget, SuspendKind, TypeContract, TypeLiteralContract,
 };
 use mica_relation_kernel::{
-    ApplicableMethodCall, DispatchRead, DispatchRelations, RelationId, RelationMetadata,
-    RelationRead, RelationWorkspace, ScanControl, Transaction, Tuple,
+    ApplicableMethodCall, ApplicablePositionalMethod, DispatchRead, DispatchRelations, RelationId,
+    RelationMetadata, RelationRead, RelationWorkspace, ScanControl, Transaction, Tuple,
     applicable_method_calls_normalized, applicable_positional_methods_cached, method_program_id,
     normalize_dispatch_roles, system_row_source_relation,
 };
@@ -521,7 +521,7 @@ impl DispatchRead for VmHostContext<'_, '_> {
         relations: DispatchRelations,
         selector: &Value,
         args: &[Value],
-    ) -> Result<Option<Arc<[Value]>>, mica_relation_kernel::KernelError> {
+    ) -> Result<Option<Arc<[ApplicablePositionalMethod]>>, mica_relation_kernel::KernelError> {
         let start = self.trace.start();
         let methods = DispatchRead::cached_applicable_positional_methods(
             &*self.tx, relations, selector, args,
@@ -2263,12 +2263,13 @@ impl RegisterVm {
                 )?;
                 let method =
                     select_authorized_method(host.authority(), selector.clone(), &methods)?;
-                let program_id = method_program_id(host, spec.program_relation, &method)?
+                let program_id = method_program_id(host, spec.program_relation, &method.method)?
                     .ok_or_else(|| RuntimeError::MissingMethodProgram {
-                        method: method.clone(),
+                        method: method.method.clone(),
                     })?;
                 let callee_id = self.resolve_program_id(host, spec.program_bytes, &program_id)?;
                 let register_count = self.program_unchecked(callee_id).register_count();
+                let args = method.bind_arguments(args);
                 self.advance_ip_unchecked();
                 self.push_frame(callee_id, register_count, *dst, args)?;
                 Ok(VmHostResponse::Continue)
@@ -2295,12 +2296,13 @@ impl RegisterVm {
                 )?;
                 let method =
                     select_authorized_method(host.authority(), selector.clone(), &methods)?;
-                let program_id = method_program_id(host, spec.program_relation, &method)?
+                let program_id = method_program_id(host, spec.program_relation, &method.method)?
                     .ok_or_else(|| RuntimeError::MissingMethodProgram {
-                        method: method.clone(),
+                        method: method.method.clone(),
                     })?;
                 let callee_id = self.resolve_program_id(host, spec.program_bytes, &program_id)?;
                 let register_count = self.program_unchecked(callee_id).register_count();
+                let args = method.bind_arguments(args);
                 self.advance_ip_unchecked();
                 self.push_frame(callee_id, register_count, *dst, args)?;
                 Ok(VmHostResponse::Continue)
@@ -3720,26 +3722,26 @@ fn normalize_spawn_roles(roles: &mut [(Symbol, Value)]) {
     roles.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
 }
 
-fn select_authorized_method(
+fn select_authorized_method<'a>(
     authority: &AuthorityContext,
     selector: Value,
-    methods: &[Value],
-) -> Result<Value, RuntimeError> {
+    methods: &'a [ApplicablePositionalMethod],
+) -> Result<&'a ApplicablePositionalMethod, RuntimeError> {
     let mut selected = None;
     let mut ambiguous = Vec::new();
     let mut candidate_count = 0usize;
     let mut unauthorized_count = 0usize;
     for method in methods {
         candidate_count += 1;
-        if !authority.can_invoke_method(method) {
+        if !authority.can_invoke_method(&method.method) {
             unauthorized_count += 1;
             continue;
         }
-        if let Some(previous) = selected.replace(method.clone()) {
+        if let Some(previous) = selected.replace(method) {
             if ambiguous.is_empty() {
-                ambiguous.push(previous);
+                ambiguous.push(previous.method.clone());
             }
-            ambiguous.push(selected.as_ref().unwrap().clone());
+            ambiguous.push(method.method.clone());
         }
     }
     if !ambiguous.is_empty() {

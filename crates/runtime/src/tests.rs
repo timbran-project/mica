@@ -1858,6 +1858,8 @@ fn installed_verb_annotations_preserve_primitive_restriction_facts() {
                 Some(Value::symbol(Symbol::intern("value"))),
                 None,
                 None,
+                None,
+                None,
             ],
         )
         .unwrap();
