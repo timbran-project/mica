@@ -477,3 +477,9 @@ The parser accumulates AST facts in 64-row chunks and flattens them at its publi
 Node-kind lookup traverses the chunks. Row order, AST identities, diagnostics, and the public relation/list results retain their existing representation.
 All eleven compiler application tests and workspace clippy pass. The bootstrap still produces byte-identical target artifacts in both modes.
 The debug test run falls from roughly 182 seconds to 52 seconds, but a pinned capture must measure the throughput change independently.
+
+The fact-chunk capture passes all 18 processes at Rust `f3ca3e2` and Odin `bfb368c`.
+Rust frontend latency falls from 36.0 ms to 19.6 ms, approximately 46%. Source-to-artifact latency falls from 23.4 ms to 19.5 ms, approximately 17%.
+Odin measures 37.1 ms and 8.8 ms respectively. Rust now leads on the frontend workload but retains an approximately 2.2-times emission gap.
+Process peak RSS stays similar. Native-enabled Rust execution remains close to the interpreter result.
+The parser change is retained. Public installation, broader compiler capabilities, and the remaining performance workstreams are still open.
