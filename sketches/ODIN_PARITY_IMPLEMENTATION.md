@@ -457,3 +457,9 @@ Rust execution checks confirm the generated program returns `[6, 4]` in both mod
 The Rust benchmark task limit now matches Odin's 1,024 frames; both reports record that limit and the 100-million-instruction budget.
 An initial smoke check hit Rust's 50-frame default. A fixture check also rejected `len(bytes)`; nonempty artifacts now use byte-value comparison.
 Those failed checks contribute no timing evidence. Runner tests, harness contract tests, and workspace clippy pass.
+
+The compiler capture passes all 18 processes at Rust `174e017` and Odin `bfb368c`.
+Source-to-artifact compilation takes 23.4 ms in Rust versus 9.0 ms in Odin, leaving a 2.6-times gap.
+Emission peak RSS is approximately 31.7 MiB versus 34.1 MiB. Rust native-enabled execution remains near its interpreter result.
+The frontend control measures 36.0 ms versus 37.6 ms. Different input sizes prevent subtracting these timings to isolate emitter cost.
+A separate profile finds substantial reference-count traffic and frame cleanup. Nested instruction-list growth is a candidate for bounded application-level improvement.
