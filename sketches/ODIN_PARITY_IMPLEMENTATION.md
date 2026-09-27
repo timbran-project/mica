@@ -421,3 +421,8 @@ Regressions cover out-of-order insertions, assert/retract cycles, Unicode overfl
 Both regressions fail before the change. The profiled run is diagnostic evidence, not an accepted timing sample.
 
 Workspace tests and clippy pass with retained local scan indexes, including the compiler bootstrap and ingestion recovery tests.
+
+The retained-index ingestion capture passes all 12 processes at Rust `f09d390`.
+The strict 1,001-subject OWL median falls from 162.6 ms to 33.8 ms, approximately 4.8 times faster.
+Odin measures 15.4 ms in this capture, leaving an approximately 2.2-times gap. Rust RSS increases by roughly 0.3 MiB.
+CycL census timing remains approximately 12.2 ms. Larger-load scaling remains under investigation.

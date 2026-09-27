@@ -1,0 +1,58 @@
+{
+  "owl-rust": {
+    "passed": true,
+    "median_ms": 33.796008,
+    "elapsed_ms": [
+      33.796008,
+      35.882168,
+      32.625112
+    ],
+    "peak_rss_kib": [
+      21408,
+      21412,
+      21472
+    ]
+  },
+  "owl-odin": {
+    "passed": true,
+    "median_ms": 15.448484,
+    "elapsed_ms": [
+      16.742676,
+      15.377363,
+      15.448484
+    ],
+    "peak_rss_kib": [
+      11120,
+      11116,
+      11120
+    ]
+  },
+  "cycl-rust": {
+    "passed": true,
+    "median_ms": 12.159667,
+    "elapsed_ms": [
+      12.033571,
+      12.159667,
+      12.206819
+    ],
+    "peak_rss_kib": [
+      4876,
+      4876,
+      4996
+    ]
+  },
+  "cycl-odin": {
+    "passed": true,
+    "median_ms": 93.328934,
+    "elapsed_ms": [
+      96.667702,
+      93.328934,
+      83.522755
+    ],
+    "peak_rss_kib": [
+      115396,
+      115460,
+      115460
+    ]
+  }
+}
