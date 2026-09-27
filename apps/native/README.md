@@ -310,6 +310,7 @@ apps/native/value/string_search.mica
 apps/native/value/heap.mica
 apps/native/value/compare.mica
 apps/native/value/maps.mica
+apps/native/value/collections.mica
 ```
 
 `native_value/program()` returns its IR. `native/emit_module(native_value/program(), "value")` returns the C artifacts.
@@ -340,6 +341,25 @@ Comparison ignores absent range ends, error messages, and error payloads.
 Construction takes O(n log n) comparisons and O(n) arena storage. Lookup takes O(log n) comparisons.
 `mica_value_map_get` returns `{false, 0}` for a missing key or a non-map input.
 Failed construction can retain temporary storage until arena release. It never publishes a partial map or changes the input.
+
+Lists support `value_list_length`, `value_list_get`, `value_list_slice`, `value_list_append`, and `value_list_set`.
+Indices start at zero. Slices exclude the end position and permit empty ranges, including the end of a list.
+Invalid types, reversed ranges, and out-of-range indices return `ok = false`.
+Length returns `IdResult`. The other operations return `ValueResult`.
+
+List slices allocate a header and share the backing array. Replacement copies the array before it writes the element.
+Append claims spare capacity only at the backing's current tail. Otherwise, it copies the visible prefix into another backing with geometric growth.
+Every earlier view retains its elements and length. Nested lists can share a backing because arena release does not traverse their elements.
+
+Serialize arena mutation, including list append. All borrowed child values and shared backings must outlive the result's use.
+The ownership contracts tie these borrows to the destination arena. The caller must enforce the lifetime when it calls generated C directly.
+Cross-arena operations can borrow from a longer-lived source. They do not copy nested values into the destination arena.
+Allocation failure leaves published views unchanged. Internal allocation helpers must not publish a header before its elements are initialized.
+
+Maps support `value_map_length` and `value_map_set` in addition to construction and lookup.
+Length returns `IdResult`. Set returns a `ValueResult` containing a map with the supplied key and value.
+Set searches for the key, copies the sorted entries, and inserts or replaces one entry without another sort.
+Existing maps remain unchanged. Keys use canonical comparison, including nested values and distinct integer and float keys.
 
 Strings contain valid UTF-8. Byte values can contain arbitrary bytes. Neither type requires a terminating zero byte.
 `mica_unicode_scalar` rejects surrogates and numbers greater than U+10FFFF.
@@ -420,7 +440,7 @@ To run these tests with ThreadSanitizer instead of address and undefined-behavio
 MICA_NATIVE_THREAD_SANITIZER=1 CC=clang cargo test -p mica-runtime --test native_codegen native_value_layer_executes_on_both_mica_tiers
 ```
 
-This module is in progress. Relations, recursive hash/copy, display, codecs, and list operations beyond construction and comparison remain unimplemented.
+This module is in progress. Relations, recursive hash/copy, display, and codecs remain unimplemented.
 Comparison supports the empty relation sentinel; other relation comparisons remain unimplemented and return `ok = false`.
 Heap layouts are local to this implementation. Matching immediate tags does not make heap pointers interchangeable with Odin or Rust.
 
@@ -429,6 +449,8 @@ Heap layouts are local to this implementation. Matching immediate tags does not 
 The [comparison harness](../../crates/testing/value-comparison/src/main.rs) constructs equivalent values independently in Rust and generated C.
 It compares complete semantic results through a test protocol. It does not exchange heap pointers or use the persistence codec.
 The harness covers implemented constructors, recursive comparison, mixed numeric comparison, arithmetic, map lookup, and map construction.
+Collection checks cover nested values, indexing, slicing, append chains, replacement, and map updates.
+Use `--collections` to select only collection property cases.
 String checks cover malformed bytes, Unicode scalars, indexing, slicing, search, concatenation, and append chains.
 Symbol sequences compare interning, deduplication, reverse lookup, and cached metadata against Rust `Symbol`.
 The comparison normalizes Rust IDs by first occurrence because IDs belong to their table.
@@ -444,16 +466,16 @@ cargo run --release -p mica-value-comparison -- --seed 7 --cases 512
 
 A mismatch exits with failure and prints a reduced JSON case. Pass that JSON to `--case` to replay it.
 Add `--sanitize` for C address and undefined-behaviour checks, or set `CC=clang` to select Clang.
-The test suite checks passing cases and verifies detection of a known floating-point remainder discrepancy:
+The test suite includes float remainder regressions with subnormal divisors and large exponent differences:
 
 ```sh
 cargo test -p mica-value-comparison
 ```
 
-Rust computes float remainder with `%`. The generated implementation uses Odin's `a - trunc(a / b) * b` calculation.
-These calculations differ for some finite inputs. Random arithmetic cases can expose this discrepancy; the harness does not suppress it.
+Generated float remainder uses `fmodf`, which matches Rust `%` for finite operands.
+A zero divisor fails. The value constructor canonicalizes negative zero.
 
-Use the string corpus to exercise this module independently of arithmetic discrepancies:
+Use the string corpus to focus generated cases on strings and Unicode:
 
 ```sh
 cargo run --release -p mica-value-comparison -- --strings --cases 2048 --seed 17 --sanitize

@@ -217,6 +217,37 @@ static struct Outcome run(const struct Prepared *p, struct mica_ValueArena *aren
             result=mica_value_string_concat(arena,result.f_value,parts.f_header->f_data[i]);
         break;
     }
+    case 20: case 25: {
+        struct mica_IdResult n=p->op==20 ? mica_value_list_length(a) : mica_value_map_length(a);
+        if(n.f_ok && n.f_number<=INT64_MAX) result=mica_value_int((int64_t)n.f_number);
+        break;
+    }
+    case 21: {
+        struct mica_IntResult index=mica_value_as_int(b);
+        if(index.f_ok && index.f_number>=0) result=mica_value_list_get(a,(uint64_t)index.f_number);
+        break;
+    }
+    case 22: case 24: case 26: {
+        struct mica_HeapListResult args=mica_value_as_list(b);
+        if(!args.f_ok || args.f_header->f_length!=2) break;
+        mica_type_Value first=args.f_header->f_data[0],second=args.f_header->f_data[1];
+        if(p->op==26) { result=mica_value_map_set(arena,a,first,second); break; }
+        struct mica_IntResult index=mica_value_as_int(first);
+        if(!index.f_ok || index.f_number<0) break;
+        if(p->op==24) { result=mica_value_list_set(arena,a,(uint64_t)index.f_number,second); break; }
+        struct mica_IntResult end=mica_value_as_int(second);
+        if(end.f_ok && end.f_number>=0) result=mica_value_list_slice(arena,a,(uint64_t)index.f_number,(uint64_t)end.f_number);
+        break;
+    }
+    case 23: result=mica_value_list_append(arena,a,b); break;
+    case 27: {
+        struct mica_HeapListResult args=mica_value_as_list(b);
+        if(!args.f_ok) break;
+        result=(struct mica_ValueResult){true,a};
+        for(uint64_t i=0;i<args.f_header->f_length && result.f_ok;i++)
+            result=mica_value_list_append(arena,result.f_value,args.f_header->f_data[i]);
+        break;
+    }
     default: fail("unknown operation");
     }
     return (struct Outcome){false,result.f_ok,0,result.f_value};

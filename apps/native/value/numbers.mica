@@ -38,12 +38,6 @@ verb native_value/binary_number(input: map, spec: list) -> map
     floats = [@floats, [:If, [:Equal, "y", "float_zero"], failure, []]]
   end
   let expression = [spec[2], "x", "y"]
-  if spec[0] == "rem"
-    floats = [@floats, [:Note, :Invariant, "Remainder follows Omica: x - trunc(x/y)*y; it differs from C fmod."],
-      [:Let, "quotient", :F32, [:Divide, "x", "y"]], [:Let, "truncated", :F32, [:Truncate, "quotient"]],
-      [:Let, "product", :F32, [:Multiply, "truncated", "y"]]]
-    expression = [:Subtract, "x", "product"]
-  end
   floats = [@floats, [:Let, "number", :F32, expression], [:Return, [:Call, "value_float", "number"]]]
   context = native_value/body(context, name, [
     [:Let, "ltag", :U8, [:Tag, "left"]], [:Let, "rtag", :U8, [:Tag, "right"]],

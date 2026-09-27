@@ -168,6 +168,14 @@ pub enum Operation {
     StringConcat,
     StringFind,
     StringAppendChain,
+    ListLength,
+    ListGet,
+    ListSlice,
+    ListAppend,
+    ListSet,
+    MapLength,
+    MapSet,
+    ListAppendChain,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -302,6 +310,49 @@ impl Prepared {
             Operation::Multiply => left.checked_mul(right),
             Operation::Divide => left.checked_div(right),
             Operation::Remainder => left.checked_rem(right),
+            Operation::ListLength => left.list_len().and_then(|n| Value::int(n as i64).ok()),
+            Operation::MapLength => left.map_len().and_then(|n| Value::int(n as i64).ok()),
+            Operation::ListGet => right
+                .as_int()
+                .and_then(|n| usize::try_from(n).ok())
+                .and_then(|n| left.list_get(n)),
+            Operation::ListSlice => right
+                .with_list(|args| {
+                    let [start, end] = args else {
+                        return None;
+                    };
+                    left.list_slice(
+                        usize::try_from(start.as_int()?).ok()?,
+                        usize::try_from(end.as_int()?).ok()?,
+                    )
+                })
+                .flatten(),
+            Operation::ListAppend => left.list_append(right.clone()),
+            Operation::ListSet => right
+                .with_list(|args| {
+                    let [index, value] = args else {
+                        return None;
+                    };
+                    left.list_set(usize::try_from(index.as_int()?).ok()?, value.clone())
+                })
+                .flatten(),
+            Operation::MapSet => right
+                .with_list(|args| {
+                    let [key, value] = args else {
+                        return None;
+                    };
+                    left.map_set(key.clone(), value.clone())
+                })
+                .flatten(),
+            Operation::ListAppendChain => right
+                .with_list(|parts| {
+                    let mut result = left.clone();
+                    for part in parts {
+                        result = result.list_append(part.clone())?;
+                    }
+                    Some(result)
+                })
+                .flatten(),
             Operation::MapGet => left.map_get(right),
             Operation::MapBuild => left
                 .with_list(|items| {
@@ -420,7 +471,7 @@ fn encode_value(value: &Value, out: &mut Vec<u8>) {
     }
 }
 
-pub fn strategy() -> BoxedStrategy<Case> {
+fn input_strategy() -> BoxedStrategy<Input> {
     let leaf = prop_oneof![
         Just(Input::Empty),
         any::<bool>().prop_map(Input::Bool),
@@ -436,23 +487,26 @@ pub fn strategy() -> BoxedStrategy<Case> {
         "[a-zé😀\\x00]{0,12}".prop_map(Input::String),
         prop::collection::vec(any::<u8>(), 0..16).prop_map(Input::Bytes),
     ];
-    let value = leaf
-        .prop_recursive(3, 48, 6, |inner| {
-            prop_oneof![
-                prop::collection::vec(inner.clone(), 0..6).prop_map(Input::List),
-                prop::collection::vec((inner.clone(), inner.clone()), 0..6).prop_map(Input::Map),
-                (inner.clone(), prop::option::of(inner.clone()))
-                    .prop_map(|(a, b)| Input::Range(Box::new(a), b.map(Box::new))),
-                (
-                    0..32u32,
-                    prop::option::of("[a-zé\\x00]{0,8}"),
-                    prop::option::of(inner.clone())
-                )
-                    .prop_map(|(a, b, c)| Input::Error(a, b, c.map(Box::new))),
-                (0..(1u64 << 56), inner).prop_map(|(a, b)| Input::Frob(a, Box::new(b))),
-            ]
-        })
-        .boxed();
+    leaf.prop_recursive(3, 48, 6, |inner| {
+        prop_oneof![
+            prop::collection::vec(inner.clone(), 0..6).prop_map(Input::List),
+            prop::collection::vec((inner.clone(), inner.clone()), 0..6).prop_map(Input::Map),
+            (inner.clone(), prop::option::of(inner.clone()))
+                .prop_map(|(a, b)| Input::Range(Box::new(a), b.map(Box::new))),
+            (
+                0..32u32,
+                prop::option::of("[a-zé\\x00]{0,8}"),
+                prop::option::of(inner.clone())
+            )
+                .prop_map(|(a, b, c)| Input::Error(a, b, c.map(Box::new))),
+            (0..(1u64 << 56), inner).prop_map(|(a, b)| Input::Frob(a, Box::new(b))),
+        ]
+    })
+    .boxed()
+}
+
+pub fn strategy() -> BoxedStrategy<Case> {
+    let value = input_strategy();
     let op = prop::sample::select(vec![
         Operation::Construct,
         Operation::Compare,
@@ -463,6 +517,11 @@ pub fn strategy() -> BoxedStrategy<Case> {
         Operation::Divide,
         Operation::Remainder,
         Operation::MapGet,
+        Operation::ListGet,
+        Operation::ListSlice,
+        Operation::ListAppend,
+        Operation::ListSet,
+        Operation::MapSet,
     ]);
     let general =
         (op, value.clone(), value.clone()).prop_map(|(op, left, right)| Case { op, left, right });
@@ -498,7 +557,7 @@ pub fn strategy() -> BoxedStrategy<Case> {
     // A small key domain deliberately produces duplicates. Lookup alternates
     // between keys present in the input and keys outside that domain.
     let maps = (
-        prop::collection::vec(((-8i64..8).prop_map(Input::Int), value), 0..16),
+        prop::collection::vec(((-8i64..8).prop_map(Input::Int), value.clone()), 0..16),
         any::<usize>(),
         any::<bool>(),
     )
@@ -515,6 +574,7 @@ pub fn strategy() -> BoxedStrategy<Case> {
             }
         });
     prop_oneof![
+        collection_strategy(),
         general,
         equal,
         construct,
@@ -523,6 +583,44 @@ pub fn strategy() -> BoxedStrategy<Case> {
         string_strategy()
     ]
     .boxed()
+}
+
+pub fn collection_strategy() -> BoxedStrategy<Case> {
+    let value = input_strategy();
+    (
+        prop::collection::vec(value.clone(), 0..24),
+        value.clone(),
+        -2i64..28,
+        -2i64..28,
+        prop::sample::select(vec![
+            Operation::ListLength,
+            Operation::ListGet,
+            Operation::ListSlice,
+            Operation::ListAppend,
+            Operation::ListSet,
+            Operation::MapLength,
+            Operation::MapSet,
+            Operation::ListAppendChain,
+        ]),
+    )
+        .prop_map(|(items, element, index, end, op)| {
+            let right = match op {
+                Operation::ListGet => Input::Int(index),
+                Operation::ListSlice => Input::List(vec![Input::Int(index), Input::Int(end)]),
+                Operation::ListSet => Input::List(vec![Input::Int(index), element]),
+                Operation::MapSet => Input::List(vec![element.clone(), element]),
+                Operation::ListAppendChain => Input::List(vec![element; 32]),
+                _ => element,
+            };
+            let left = match op {
+                Operation::MapLength | Operation::MapSet => {
+                    Input::Map(items.into_iter().map(|v| (v.clone(), v)).collect())
+                }
+                _ => Input::List(items),
+            };
+            Case { op, left, right }
+        })
+        .boxed()
 }
 
 fn unicode_text(maximum: usize) -> BoxedStrategy<String> {
@@ -737,6 +835,72 @@ pub fn fixed_cases() -> Vec<Case> {
             right: Input::Empty,
         });
     }
+    for (left, right) in [
+        (636431709, 2147483651),
+        (1974337459, 1),
+        (0x7f7fffff, 3),
+        (0xff7fffff, 3),
+        (1, 3),
+        (0x80000001, 3),
+    ] {
+        cases.push(Case {
+            op: Operation::Remainder,
+            left: Input::Float(left),
+            right: Input::Float(right),
+        });
+    }
+    for length in [0, 1, 7, 32] {
+        let elements: Vec<_> = (0..length)
+            .map(|i| Input::List(vec![Input::Int(i), Input::String("é".into())]))
+            .collect();
+        let list = Input::List(elements.clone());
+        let map = Input::Map(elements.iter().cloned().map(|v| (v.clone(), v)).collect());
+        for op in [
+            Operation::ListLength,
+            Operation::ListAppend,
+            Operation::ListAppendChain,
+        ] {
+            cases.push(Case {
+                op,
+                left: list.clone(),
+                right: Input::List(vec![map.clone(); 3]),
+            });
+        }
+        cases.push(Case {
+            op: Operation::MapLength,
+            left: map.clone(),
+            right: Input::Empty,
+        });
+        for index in [-1, 0, length - 1, length, length + 1] {
+            cases.push(Case {
+                op: Operation::ListGet,
+                left: list.clone(),
+                right: Input::Int(index),
+            });
+            cases.push(Case {
+                op: Operation::ListSet,
+                left: list.clone(),
+                right: Input::List(vec![Input::Int(index), map.clone()]),
+            });
+            for end in [0, length, length + 1] {
+                cases.push(Case {
+                    op: Operation::ListSlice,
+                    left: list.clone(),
+                    right: Input::List(vec![Input::Int(index), Input::Int(end)]),
+                });
+            }
+        }
+        for key in [
+            Input::Int(42),
+            Input::List(vec![Input::Int(0), Input::String("é".into())]),
+        ] {
+            cases.push(Case {
+                op: Operation::MapSet,
+                left: map.clone(),
+                right: Input::List(vec![key, list.clone()]),
+            });
+        }
+    }
     cases
 }
 
@@ -807,6 +971,39 @@ pub fn workloads() -> Vec<(String, Vec<Case>)> {
             ],
         ),
     ];
+    for (name, op) in [
+        ("list_index", Operation::ListGet),
+        ("list_slice", Operation::ListSlice),
+        ("list_replace", Operation::ListSet),
+        ("list_append", Operation::ListAppend),
+        ("list_append_chain", Operation::ListAppendChain),
+        ("map_set", Operation::MapSet),
+    ] {
+        workloads.push((
+            name,
+            (0..16)
+                .map(|i| {
+                    let left = if matches!(op, Operation::MapSet) {
+                        Input::Map(pairs.clone())
+                    } else {
+                        Input::List((0..128).map(Input::Int).collect())
+                    };
+                    let right = match op {
+                        Operation::ListGet => Input::Int(i),
+                        Operation::ListSlice => Input::List(vec![Input::Int(i), Input::Int(120)]),
+                        Operation::ListSet | Operation::MapSet => {
+                            Input::List(vec![Input::Int(i), Input::Int(999)])
+                        }
+                        Operation::ListAppendChain => {
+                            Input::List((0..256).map(Input::Int).collect())
+                        }
+                        _ => Input::Int(999),
+                    };
+                    Case { op, left, right }
+                })
+                .collect(),
+        ));
+    }
     let mut workloads: Vec<_> = workloads
         .drain(..)
         .map(|(name, cases)| (String::from(name), cases))

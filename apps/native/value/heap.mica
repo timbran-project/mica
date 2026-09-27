@@ -9,8 +9,9 @@ verb native_value/heap(input: map) -> map
   let state = context[:state]
   state = native/record_type(state, "ValueMapEntry", [["key", word], ["value", word]])[1]
   state = native/record_type(state, "HeapMap", [["data", [:Pointer, [:Record, "ValueMapEntry"], :Mutable]], ["length", :U64]])[1]
+  state = native/record_type(state, "ListStorage", [["data", values], ["used", :U64], ["capacity", :U64]])[1]
   for spec in [["HeapBytes", [["data", bytes], ["length", :U64]]],
-               ["HeapList", [["data", values], ["length", :U64]]],
+               ["HeapList", [["data", values], ["length", :U64], ["storage", [:Pointer, [:Record, "ListStorage"], :Mutable]]]],
                ["HeapRange", [["start", word], ["has_end", :Bool], ["end", word]]],
                ["HeapFrob", [["delegate", :U64], ["value", word]]],
                ["HeapError", [["code", :U32], ["has_message", :Bool], ["message", word], ["has_value", :Bool], ["value", word]]]]
@@ -18,7 +19,9 @@ verb native_value/heap(input: map) -> map
   end
   context[:state] = state
   for spec in [["bytes", "HeapBytes", :U8], ["list", "HeapList", word]]
-    context = native_value/sequence_constructor(context, spec)
+    if spec[0] == "bytes"
+      context = native_value/bytes_constructor(context)
+    end
     context = native_value/heap_accessor(context, spec[0], [:Record, spec[1]])
   end
   for spec in [["range", "HeapRange", [["start", word, [:Borrow, "arena"]], ["has_end", :Bool, :Value], ["end", word, [:Borrow, "arena"]]]],
@@ -31,58 +34,34 @@ verb native_value/heap(input: map) -> map
   return context
 end
 
-// Headers and their backing arrays occupy one aligned arena allocation.
-// Child values in a list must already share the destination arena lifetime.
-verb native_value/sequence_constructor(input: map, spec: list) -> map
+// The bytes header and copied bytes occupy one aligned arena allocation.
+verb native_value/bytes_constructor(input: map) -> map
   let context: map = input
-  let name: string = string_concat("value_", spec[0])
-  let word: list = native_value/word()
-  let header: list = [:Record, spec[1]]
-  let pointer: list = [:Pointer, header, :Mutable]
-  let data: list = [:Pointer, spec[2], :Mutable]
-  let source: list = [:Pointer, spec[2], :Const]
+  let header: list = [:Record, "HeapBytes"]
   let bytes: list = [:Pointer, :U8, :Mutable]
-  let result: list = [:Record, "ValueResult"]
-  let mode = :Borrow
-  if spec[0] == "list"
-    mode = [:Borrow, "arena"]
-  end
+  let source: list = [:Pointer, :U8, :Const]
   let [source_null: int, state: map] = native/add_constant(context[:state], source, "null")
   let constants: map = context[:constants]
-  let null_name: string = string_concat(name, "_null")
-  constants[null_name] = source_null
+  constants["value_bytes_null"] = source_null
   context[:constants] = constants
   context[:state] = state
-  context = native_value/function(context, name, result,
-    [["arena", [:Pointer, [:Record, "ValueArena"], :Mutable], :Borrow], ["source", source, mode], ["length", :U64, :Value]],
+  context = native_value/function(context, "value_bytes", [:Record, "ValueResult"],
+    [["arena", [:Pointer, [:Record, "ValueArena"], :Mutable], :Borrow], ["source", source, :Borrow], ["length", :U64, :Value]],
     [], [:Allocate, :ReadMemory, :WriteMemory], :Borrow, "arena")
   let failure: list = [[:Return, [:Zero]]]
-  let statements: list = [
-    [:If, [:Equal, "length", "zero"], [], [[:If, [:Equal, "source", null_name], failure, []]]],
-    [:Let, "header_size", :U64, [:SizeOf, header]], [:Let, "element_size", :U64, [:SizeOf, spec[2]]],
+  context = native_value/body(context, "value_bytes", [
+    [:If, [:Equal, "length", "zero"], [], [[:If, [:Equal, "source", "value_bytes_null"], failure, []]]],
+    [:Let, "header_size", :U64, [:SizeOf, header]],
     [:Let, "limit", :U64, [:Subtract, "allocation_limit", "header_size"]],
-    [:Set, "limit", [:Divide, "limit", "element_size"]], [:If, [:Less, "limit", "length"], failure, []],
-    [:Let, "byte_count", :U64, [:Multiply, "length", "element_size"]],
-    [:Let, "total", :U64, [:Add, "header_size", "byte_count"]],
+    [:If, [:Less, "limit", "length"], failure, []],
+    [:Let, "total", :U64, [:Add, "header_size", "length"]],
     [:Let, "allocation", bytes, [:Call, "value_arena_allocate", "arena", "total"]],
     [:If, [:Equal, "allocation", "null_bytes"], failure, []],
-    [:Let, "pointer", pointer, [:PointerCast, "allocation"]],
-    [:Let, "raw_data", bytes, [:Offset, "allocation", "header_size"]],
-    [:Let, "data", data, [:PointerCast, "raw_data"]]]
-  if spec[0] == "list"
-    statements = [@statements, [:Note, :Invariant, "List elements share the destination arena lifetime."],
-      [:Let, "index", :U64, "zero"], [:While, [:Less, "index", "length"], [
-        [:Let, "src_element", source, [:Offset, "source", "index"]],
-        [:Let, "dst_element", data, [:Offset, "data", "index"]],
-        [:Let, "element", spec[2], [:Load, "src_element"]],
-        [:Do, [:Store, "dst_element", "element"]], [:Set, "index", [:Add, "index", "one"]]]]]
-  else
-    statements = [@statements, [:Do, [:CopyBytes, "data", "source", "length"]]]
-  end
-  context = native_value/body(context, name, [@statements,
-    [:Note, :Invariant, "Publish the tagged value only after its backing and header are initialized."],
+    [:Let, "pointer", [:Pointer, header, :Mutable], [:PointerCast, "allocation"]],
+    [:Let, "data", bytes, [:Offset, "allocation", "header_size"]],
+    [:Do, [:CopyBytes, "data", "source", "length"]],
     [:Let, "header", header, [:Record, "data", "length"]], [:Do, [:Store, "pointer", "header"]],
-    [:Return, [:Record, "true", [:Expr, word, [:PackPointer, "pointer", string_concat("tag_", spec[0])]]]]])
+    [:Return, [:Record, "true", [:Expr, native_value/word(), [:PackPointer, "pointer", "tag_bytes"]]]]])
   return context
 end
 

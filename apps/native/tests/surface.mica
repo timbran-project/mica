@@ -22,6 +22,7 @@ verb native/surface_program()
                ["left_shift", :ShiftLeft, :U64, :U64], ["right_shift", :ShiftRight, :U64, :U64],
                ["float_add", :Add, :F32, :F32], ["float_sub", :Subtract, :F32, :F32],
                ["float_mul", :Multiply, :F32, :F32], ["float_div", :Divide, :F32, :F32],
+               ["float_rem", :Remainder, :F32, :F32],
                ["float_less", :Less, :F32, :Bool], ["float_equal", :Equal, :F32, :Bool]]
     let [fn2, v2, next_state] = native/function_scope(state, spec[0], spec[3],
       [["left", spec[2], :Value], ["right", spec[2], :Value]], [["result", spec[3]]], ["entry"])

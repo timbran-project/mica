@@ -33,6 +33,9 @@ struct Options {
     /// Generate only UTF-8 and string property cases.
     #[arg(long)]
     strings: bool,
+    /// Generate only list and map property cases.
+    #[arg(long, conflicts_with_all = ["strings", "symbol_loads"])]
+    collections: bool,
     /// Run paired timings after correctness checks. Requires a release build.
     #[arg(long)]
     bench: bool,
@@ -134,6 +137,7 @@ impl Native {
             "value/string_search",
             "value/compare",
             "value/maps",
+            "value/collections",
         ] {
             let text = fs::read_to_string(root.join(format!("apps/native/{source}.mica")))?;
             let reports = runner
@@ -286,7 +290,13 @@ impl Native {
     }
 }
 
-fn check_generated(native: &Native, count: u32, seed: u64, strings: bool) -> Result<()> {
+fn check_generated(
+    native: &Native,
+    count: u32,
+    seed: u64,
+    strings: bool,
+    collections: bool,
+) -> Result<()> {
     let mut runner = TestRunner::new(Config {
         cases: count,
         rng_seed: RngSeed::Fixed(seed),
@@ -294,7 +304,9 @@ fn check_generated(native: &Native, count: u32, seed: u64, strings: bool) -> Res
         max_shrink_iters: 2048,
         ..Config::default()
     });
-    let strategy = if strings {
+    let strategy = if collections {
+        cases::collection_strategy()
+    } else if strings {
         cases::string_strategy()
     } else {
         cases::strategy()
@@ -496,7 +508,13 @@ fn run() -> Result<()> {
             .check(std::slice::from_ref(case))
             .map_err(|e| format!("{e}\ncase={}", serde_json::to_string(case).unwrap()))?;
     }
-    check_generated(&native, options.cases, options.seed, options.strings)?;
+    check_generated(
+        &native,
+        options.cases,
+        options.seed,
+        options.strings,
+        options.collections,
+    )?;
     symbols::check(&native, options.cases, options.seed)?;
     symbol_loads::check(&native, options.cases, options.seed, &threads)?;
     for (_, cases) in cases::workloads() {
@@ -504,7 +522,7 @@ fn run() -> Result<()> {
     }
     println!(
         "{}",
-        json!({"correctness":"passed","fixed_cases":fixed.len(),"generated_cases":options.cases,"string_corpus":options.strings,"symbol_sequences":options.cases,"symbol_load_cases":options.cases,"symbol_threads":threads,"seed":options.seed,"sanitizers":options.sanitize,"thread_sanitizer":options.thread_sanitize})
+        json!({"correctness":"passed","fixed_cases":fixed.len(),"generated_cases":options.cases,"string_corpus":options.strings,"collection_corpus":options.collections,"symbol_sequences":options.cases,"symbol_load_cases":options.cases,"symbol_threads":threads,"seed":options.seed,"sanitizers":options.sanitize,"thread_sanitizer":options.thread_sanitize})
     );
     if options.bench {
         benchmark(
@@ -540,26 +558,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn checks_shared_values_and_detects_remainder_divergence() -> Result<()> {
+    fn checks_shared_values_and_collections() -> Result<()> {
         let native = Native::build(Sanitizer::Address, None)?;
         native.check(&cases::fixed_cases())?;
-        check_generated(&native, 64, 1, false)?;
-        check_generated(&native, 128, 1, true)?;
+        check_generated(&native, 64, 1, false, false)?;
+        check_generated(&native, 256, 17, false, true)?;
+        check_generated(&native, 128, 1, true, false)?;
         symbols::check(&native, 128, 1)?;
         symbol_loads::check(&native, 16, 1, &[1, 2, 4, 8])?;
         symbol_loads::detects_incorrect_metadata(&native)?;
-        let mismatch = Case {
-            op: cases::Operation::Remainder,
-            left: cases::Input::Float(636431709),
-            right: cases::Input::Float(2147483651),
-        };
-        let error = native
-            .check(&[mismatch])
-            .expect_err("known floating remainder divergence must be detected");
-        assert!(
-            error.to_string().contains("semantic result mismatch"),
-            "{error}"
-        );
         for (_, cases) in cases::workloads() {
             native.check(&cases)?;
         }

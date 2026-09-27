@@ -576,7 +576,89 @@ static void utf8_cases(struct mica_ValueArena *arena) {
     assert(!mica_utf8_encode(UINT32_MAX).f_ok && !mica_unicode_scalar(0x110000).f_ok);
 }
 
+static void collection_cases(void) {
+    struct mica_ValueArena arena={0};
+    mica_type_Value input[]={integer(1),integer(2),integer(3)};
+    struct mica_ValueResult list=mica_value_list(&arena,input,3);
+    assert(list.f_ok && mica_value_list_length(list.f_value).f_number==3);
+    input[0]=integer(99);
+    assert(mica_value_list_get(list.f_value,0).f_value==integer(1));
+    assert(!mica_value_list_get(list.f_value,3).f_ok);
+    assert(!mica_value_list_get(list.f_value,UINT64_MAX).f_ok);
+    assert(!mica_value_list_length(integer(0)).f_ok);
+    assert(!mica_value_map_length(list.f_value).f_ok);
+    assert(!mica_value_list_set(&arena,list.f_value,3,integer(9)).f_ok);
+    assert(!mica_value_list_slice(&arena,list.f_value,2,1).f_ok);
+    assert(!mica_value_list_slice(&arena,list.f_value,0,UINT64_MAX).f_ok);
+    struct mica_ValueResult empty=mica_value_list_slice(&arena,list.f_value,3,3);
+    assert(empty.f_ok && mica_value_list_length(empty.f_value).f_number==0);
+    struct mica_ValueResult slice=mica_value_list_slice(&arena,list.f_value,1,3);
+    assert(slice.f_ok && mica_value_list_get(slice.f_value,0).f_value==integer(2));
+    struct mica_ValueResult versions[129];
+    versions[0]=list;
+    for(unsigned i=0;i<128;i++) {
+        // Appending an earlier view as a child must not change that view or
+        // introduce a logical cycle, even when the backing contains that child.
+        versions[i+1]=mica_value_list_append(&arena,versions[i].f_value,versions[i].f_value);
+        assert(versions[i+1].f_ok);
+    }
+    for(unsigned i=0;i<129;i++) {
+        assert(mica_value_list_length(versions[i].f_value).f_number==3+i);
+        assert(mica_value_list_get(versions[i].f_value,0).f_value==integer(1));
+        if(i) assert(mica_value_list_get(versions[i].f_value,2+i).f_value==versions[i-1].f_value);
+    }
+    struct mica_ValueResult branch=mica_value_list_append(&arena,versions[10].f_value,integer(42));
+    assert(branch.f_ok && mica_value_list_get(branch.f_value,13).f_value==integer(42));
+    assert(mica_value_list_get(versions[11].f_value,13).f_value==versions[10].f_value);
+    struct mica_ValueResult changed=mica_value_list_set(&arena,slice.f_value,0,branch.f_value);
+    assert(changed.f_ok && mica_value_list_get(changed.f_value,0).f_value==branch.f_value);
+    assert(mica_value_list_get(slice.f_value,0).f_value==integer(2));
+    // A tail slice shares capacity; a non-tail slice must allocate another backing.
+    struct mica_ValueResult tail=mica_value_list_slice(&arena,versions[128].f_value,2,131);
+    struct mica_ValueResult tail_append=mica_value_list_append(&arena,tail.f_value,integer(55));
+    assert(tail_append.f_ok && mica_value_list_get(tail_append.f_value,129).f_value==integer(55));
+    assert(mica_value_list_length(versions[128].f_value).f_number==131);
+    struct mica_ValueMapEntry entries[]={{integer(2),list.f_value},{integer(4),slice.f_value}};
+    struct mica_ValueResult map=mica_value_map(&arena,entries,2);
+    assert(map.f_ok);
+    for(int key=1;key<=5;key++) {
+        struct mica_ValueResult updated=mica_value_map_set(&arena,map.f_value,integer(key),changed.f_value);
+        assert(updated.f_ok);
+        assert(mica_value_map_length(updated.f_value).f_number==(key==2 || key==4 ? 2 : 3));
+        assert(mica_value_map_get(updated.f_value,integer(key)).f_value==changed.f_value);
+        assert(mica_value_map_get(map.f_value,integer(2)).f_value==list.f_value);
+        assert(mica_value_map_length(map.f_value).f_number==2);
+    }
+    struct mica_ValueResult nested=mica_value_map_set(&arena,map.f_value,slice.f_value,branch.f_value);
+    assert(nested.f_ok && mica_value_map_get(nested.f_value,slice.f_value).f_value==branch.f_value);
+    // Fresh destination arenas force the allocator path. Failure must not alter
+    // either the source values or the reusable tail's published used count.
+    struct mica_ValueArena failed={0};
+    struct mica_HeapListResult current=mica_value_as_list(tail_append.f_value);
+    uint64_t used=current.f_header->f_storage->f_used;
+    fail_allocation=true;
+    assert(!mica_value_list(&failed,input,3).f_ok);
+    assert(!mica_value_list_append(&failed,tail_append.f_value,integer(0)).f_ok);
+    assert(!mica_value_list_append(&failed,list.f_value,integer(0)).f_ok);
+    assert(!mica_value_list_set(&failed,list.f_value,0,integer(0)).f_ok);
+    assert(!mica_value_list_slice(&failed,list.f_value,0,1).f_ok);
+    assert(!mica_value_map_set(&failed,map.f_value,integer(3),integer(0)).f_ok);
+    fail_allocation=false;
+    assert(failed.f_head==NULL && current.f_header->f_storage->f_used==used);
+    assert(mica_value_list_get(list.f_value,0).f_value==integer(1));
+    assert(!mica_value_list(&failed,input,UINT64_MAX).f_ok);
+    assert(!mica_value_list(&failed,NULL,1).f_ok);
+    // A shorter-lived destination can borrow children from this arena. Releasing
+    // the destination leaves all source views intact.
+    struct mica_ValueResult borrowed=mica_value_list_set(&failed,list.f_value,0,slice.f_value);
+    assert(borrowed.f_ok && mica_value_list_get(borrowed.f_value,0).f_value==slice.f_value);
+    mica_value_arena_release(&failed);
+    assert(mica_value_list_get(slice.f_value,0).f_value==integer(2));
+    mica_value_arena_release(&arena);
+}
+
 int main(void) {
+    collection_cases();
     const int64_t minimum = -(INT64_C(1) << 55);
     const int64_t maximum = (INT64_C(1) << 55) - 1;
     assert(mica_value_empty_relation() == 0);
@@ -631,6 +713,8 @@ int main(void) {
     assert(!mica_value_checked_mul(floating(FLT_MAX), floating(2.0f)).f_ok);
     assert(!mica_value_checked_div(floating(1), floating(-0.0f)).f_ok);
     assert(mica_value_checked_rem(floating(-7.5f), floating(2)).f_value == floating(-1.5f));
+    assert(mica_value_checked_rem(floating(0x1p120f), floating(0x1p-149f)).f_value == floating(0));
+    assert(mica_value_checked_rem(floating(-4), floating(2)).f_value == floating(0));
     assert(mica_value_to_float(integer(16777217)).f_value == floating(16777216.0f));
     assert(mica_value_to_int(floating(-0x1p55f)).f_value == integer(minimum));
     assert(!mica_value_to_int(floating(0x1p55f)).f_ok);

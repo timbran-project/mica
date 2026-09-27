@@ -65,7 +65,7 @@ verb native/check_numeric_instruction(index, fn_id, row, result_type)
     return true
   end
   native/ensure(result_type == left, "arithmetic result type mismatch")
-  if native/contains([:Add, :Subtract, :Multiply, :Divide], op) && left == :F32
+  if native/contains([:Add, :Subtract, :Multiply, :Divide, :Remainder], op) && left == :F32
     return true
   end
   native/ensure(native/is_unsigned(left), "operation requires unsigned operands")
@@ -135,6 +135,9 @@ verb native/c_numeric_statement(index, row)
   end
   let left = native/c_value(index, args[0])
   let right = native/c_value(index, args[1])
+  if op == :Remainder && type_id == :F32
+    return string_concat(dst, " = fmodf(", left, ", ", right, ");")
+  end
   let guard = ""
   if native/is_unsigned(type_id)
     // Widen before arithmetic to prevent signed integer promotions of U8/U16.

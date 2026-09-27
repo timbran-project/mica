@@ -86,6 +86,10 @@ int main(int argc, char **argv) {
     assert(mica_float_sub(1.25f, 2.5f) == -1.25f);
     assert(mica_float_mul(1.25f, 2.5f) == 3.125f);
     assert(mica_float_div(1.0f, 4.0f) == 0.25f);
+    assert(mica_float_rem(-7.5f, 2.0f) == -1.5f);
+    assert(mica_float_rem(0x1p120f, 0x1p-149f) == 0.0f);
+    assert(mica_float_rem(0x1p-148f, 0x1.8p-148f) == 0x1p-148f);
+    assert(mica_float_bits(mica_float_rem(-4.0f, 2.0f)) == UINT32_C(0x80000000));
     assert(mica_float_neg(-2.5f) == 2.5f);
     assert(mica_float_trunc(-2.5f) == -2.0f);
     assert(mica_float_less(-2.5f, 1.0f));

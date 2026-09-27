@@ -969,6 +969,7 @@ fn native_value_layer_executes_on_both_mica_tiers() {
             include_str!("../../../apps/native/value/string_search.mica"),
             include_str!("../../../apps/native/value/compare.mica"),
             include_str!("../../../apps/native/value/maps.mica"),
+            include_str!("../../../apps/native/value/collections.mica"),
         ] {
             runner.run_filein(source).unwrap_or_else(|error| {
                 panic!("{}", runner.render_source_task_error(&error));
