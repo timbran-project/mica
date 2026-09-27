@@ -31,45 +31,69 @@ verb native_value/list_allocation(input: map) -> map
     ["arena", [:Pointer, [:Record, "ValueArena"], :Mutable], :Borrow],
     ["length", :U64, :Value], ["capacity", :U64, :Value]], [],
     [:Allocate, :ReadMemory, :WriteMemory], :Borrow, "arena")
-  context = native/define_function(context, "list_allocate", [
-    [:If, [:Less, "capacity", "length"], [[:Return, "null_list_header"]], []],
-    [:Let, "header_size", :U64, [:SizeOf, header]],
-    [:Let, "storage_size", :U64, [:SizeOf, storage]],
-    [:Let, "prefix", :U64, [:Add, "header_size", "storage_size"]],
-    [:Let, "element_size", :U64, [:SizeOf, word]],
-    [:Let, "limit", :U64, [:Subtract, "allocation_limit", "prefix"]],
-    [:Set, "limit", [:Divide, "limit", "element_size"]],
-    [:If, [:Less, "limit", "capacity"], [[:Return, "null_list_header"]], []],
-    [:Let, "bytes", :U64, [:Multiply, "capacity", "element_size"]],
-    [:Let, "total", :U64, [:Add, "prefix", "bytes"]],
-    [:Let, "raw", [:Pointer, :U8, :Mutable], [:Call, "value_arena_allocate", "arena", "total"]],
-    [:If, [:Equal, "raw", "null_bytes"], [[:Return, "null_list_header"]], []],
-    [:Let, "target", pointer, [:PointerCast, "raw"]],
-    [:Let, "storage_raw", [:Pointer, :U8, :Mutable], [:Offset, "raw", "header_size"]],
-    [:Let, "backing", [:Pointer, storage, :Mutable], [:PointerCast, "storage_raw"]],
-    [:Let, "data_raw", [:Pointer, :U8, :Mutable], [:Offset, "raw", "prefix"]],
-    [:Let, "data", values, [:PointerCast, "data_raw"]],
-    [:Do, [:Store, "backing", [:Expr, storage, [:Record, "data", "length", "capacity"]]]],
-    [:Do, [:Store, "target", [:Expr, header, [:Record, "data", "length", "backing"]]]],
-    [:Return, "target"]])
+  context = native/define_function(
+    context,
+    "list_allocate",
+    [
+      native/when_statement(
+        native/binary_expression(:Less, "capacity", "length"),
+        [native/return_value("null_list_header")]
+      ),
+      native/let_statement("header_size", :U64, native/unary_expression(:SizeOf, header)),
+      native/let_statement("storage_size", :U64, native/unary_expression(:SizeOf, storage)),
+      native/let_statement("prefix", :U64, native/binary_expression(:Add, "header_size", "storage_size")),
+      native/let_statement("element_size", :U64, native/unary_expression(:SizeOf, word)),
+      native/let_statement("limit", :U64, native/binary_expression(:Subtract, "allocation_limit", "prefix")),
+      native/set_statement("limit", native/binary_expression(:Divide, "limit", "element_size")),
+      native/when_statement(
+        native/binary_expression(:Less, "limit", "capacity"),
+        [native/return_value("null_list_header")]
+      ),
+      native/let_statement("bytes", :U64, native/binary_expression(:Multiply, "capacity", "element_size")),
+      native/let_statement("total", :U64, native/binary_expression(:Add, "prefix", "bytes")),
+      native/let_call("raw", [:Pointer, :U8, :Mutable], "value_arena_allocate", ["arena", "total"]),
+      native/when_statement(
+        native/binary_expression(:Equal, "raw", "null_bytes"),
+        [native/return_value("null_list_header")]
+      ),
+      native/let_statement("target", pointer, native/unary_expression(:PointerCast, "raw")),
+      native/let_offset("storage_raw", [:Pointer, :U8, :Mutable], "raw", "header_size"),
+      native/let_statement(
+        "backing",
+        [:Pointer, storage, :Mutable],
+        native/unary_expression(:PointerCast, "storage_raw")
+      ),
+      native/let_offset("data_raw", [:Pointer, :U8, :Mutable], "raw", "prefix"),
+      native/let_statement("data", values, native/unary_expression(:PointerCast, "data_raw")),
+      native/store_statement("backing", native/typed_record(storage, ["data", "length", "capacity"])),
+      native/store_statement("target", native/typed_record(header, ["data", "length", "backing"])),
+      native/return_value("target")
+    ]
+  )
   context = native/declare_function(context, "value_list", [:Record, "ValueResult"], [
     ["arena", [:Pointer, [:Record, "ValueArena"], :Mutable], :Borrow],
     ["source", [:Pointer, word, :Const], [:Borrow, "arena"]], ["length", :U64, :Value]], [],
     [:Allocate, :ReadMemory, :WriteMemory], :Borrow, "arena")
   context = native/define_function(context, "value_list", [
-    [:If, [:Equal, "length", "zero"], [], [
-      [:If, [:Equal, "source", "null_values"], [[:Return, [:Zero]]], []]]],
-    [:Let, "target", pointer, [:Call, "list_allocate", "arena", "length", "length"]],
-    [:If, [:Equal, "target", "null_list_header"], [[:Return, [:Zero]]], []],
-    [:Let, "header", header, [:Load, "target"]],
-    [:Let, "data", values, [:Field, "header", "data"]],
-    [:Let, "i", :U64, "zero"],
-    [:While, [:Less, "i", "length"], [
-      [:Let, "src", [:Pointer, word, :Const], [:Offset, "source", "i"]],
-      [:Let, "dst", values, [:Offset, "data", "i"]],
-      [:Do, [:Store, "dst", [:Expr, word, [:Load, "src"]]]],
-      [:Set, "i", [:Add, "i", "one"]]]],
-    [:Return, [:Record, "true", [:Expr, word, [:PackPointer, "target", "tag_list"]]]]])
+    native/unless_statement(
+      native/binary_expression(:Equal, "length", "zero"),
+      [ native/when_statement(native/binary_expression(:Equal, "source", "null_values"), [native/return_zero()])]
+    ),
+    native/let_call("target", pointer, "list_allocate", ["arena", "length", "length"]),
+    native/when_statement(native/binary_expression(:Equal, "target", "null_list_header"), [native/return_zero()]),
+    native/let_load("header", header, "target"),
+    native/let_field("data", values, "header", "data"),
+    native/let_statement("i", :U64, "zero"),
+    native/while_statement(native/binary_expression(:Less, "i", "length"), [
+      native/let_offset("src", [:Pointer, word, :Const], "source", "i"),
+      native/let_offset("dst", values, "data", "i"),
+      native/store_statement("dst", native/typed_load(word, "src")),
+      native/set_statement("i", native/binary_expression(:Add, "i", "one"))
+    ]),
+    native/return_record(
+      ["true", native/typed_expression(word, native/binary_expression(:PackPointer, "target", "tag_list"))]
+    )
+  ])
   return context
 end
 
@@ -88,92 +112,125 @@ verb native_value/list_operations(input: map) -> map
     let name: string = string_concat("value_", kind, "_length")
     context = native/declare_function(context, name, [:Record, "IdResult"], [["value", word, :Borrow]], [], [:ReadMemory], :Value, "")
     context = native/define_function(context, name, [
-      [:If, [:Equal, [:Expr, :U8, [:Tag, "value"]], string_concat("tag_", kind)], [], [[:Return, [:Zero]]]],
-      [:Let, "pointer", [:Pointer, record, :Const], [:UnpackPointer, "value"]],
-      [:Let, "header", record, [:Load, "pointer"]],
-      [:Return, [:Record, "true", [:Expr, :U64, [:Field, "header", "length"]]]]])
+      native/unless_statement(
+        native/binary_expression(
+          :Equal,
+          native/typed_expression(:U8, native/unary_expression(:Tag, "value")),
+          string_concat("tag_", kind)
+        ),
+        [native/return_zero()]
+      ),
+      native/let_statement("pointer", [:Pointer, record, :Const], native/unary_expression(:UnpackPointer, "value")),
+      native/let_load("header", record, "pointer"),
+      native/return_record(["true", native/typed_field(:U64, "header", "length")])
+    ])
   end
   let read: list = [
-    [:If, [:Equal, [:Expr, :U8, [:Tag, "value"]], "tag_list"], [], [[:Return, [:Zero]]]],
-    [:Let, "pointer", [:Pointer, header, :Const], [:UnpackPointer, "value"]],
-    [:Let, "header", header, [:Load, "pointer"]],
-    [:Let, "data", values, [:Field, "header", "data"]],
-    [:Let, "length", :U64, [:Field, "header", "length"]]]
+    native/unless_statement(
+      native/binary_expression(:Equal, native/typed_expression(:U8, native/unary_expression(:Tag, "value")), "tag_list"),
+      [native/return_zero()]
+    ),
+    native/let_statement("pointer", [:Pointer, header, :Const], native/unary_expression(:UnpackPointer, "value")),
+    native/let_load("header", header, "pointer"),
+    native/let_field("data", values, "header", "data"),
+    native/let_field("length", :U64, "header", "length")
+  ]
   context = native/declare_function(context, "value_list_get", result, [["value", word, :Borrow], ["index", :U64, :Value]], [], [:ReadMemory], :Borrow, "value")
-  context = native/define_function(context, "value_list_get", [@read,
-    [:If, [:Less, "index", "length"], [], [[:Return, [:Zero]]]],
-    [:Let, "slot", values, [:Offset, "data", "index"]],
-    [:Return, [:Record, "true", [:Expr, word, [:Load, "slot"]]]]])
+  context = native/define_function(context, "value_list_get", [
+    @read,
+    native/unless_statement(native/binary_expression(:Less, "index", "length"), [native/return_zero()]),
+    native/let_offset("slot", values, "data", "index"),
+    native/return_record(["true", native/typed_load(word, "slot")])
+  ])
   context = native/declare_function(context, "value_list_slice", result, [arena, ["value", word, [:Borrow, "arena"]],
     ["start", :U64, :Value], ["end", :U64, :Value]], [], [:Allocate, :ReadMemory, :WriteMemory], :Borrow, "arena")
-  context = native/define_function(context, "value_list_slice", [@read,
-    [:If, [:Less, "end", "start"], [[:Return, [:Zero]]], []],
-    [:If, [:Less, "length", "end"], [[:Return, [:Zero]]], []],
-    [:Let, "size", :U64, [:SizeOf, header]],
-    [:Let, "raw", [:Pointer, :U8, :Mutable], [:Call, "value_arena_allocate", "arena", "size"]],
-    [:If, [:Equal, "raw", "null_bytes"], [[:Return, [:Zero]]], []],
-    [:Let, "target", [:Pointer, header, :Mutable], [:PointerCast, "raw"]],
-    [:Set, "data", [:Offset, "data", "start"]],
-    [:Set, "length", [:Subtract, "end", "start"]],
-    [:Let, "storage", [:Pointer, [:Record, "ListStorage"], :Mutable], [:Field, "header", "storage"]],
-    [:Do, [:Store, "target", [:Expr, header, [:Record, "data", "length", "storage"]]]],
-    [:Return, [:Record, "true", [:Expr, word, [:PackPointer, "target", "tag_list"]]]]])
+  context = native/define_function(context, "value_list_slice", [
+    @read,
+    native/when_statement(native/binary_expression(:Less, "end", "start"), [native/return_zero()]),
+    native/when_statement(native/binary_expression(:Less, "length", "end"), [native/return_zero()]),
+    native/let_statement("size", :U64, native/unary_expression(:SizeOf, header)),
+    native/let_call("raw", [:Pointer, :U8, :Mutable], "value_arena_allocate", ["arena", "size"]),
+    native/when_statement(native/binary_expression(:Equal, "raw", "null_bytes"), [native/return_zero()]),
+    native/let_statement("target", [:Pointer, header, :Mutable], native/unary_expression(:PointerCast, "raw")),
+    native/set_statement("data", native/offset_expression("data", "start")),
+    native/set_statement("length", native/binary_expression(:Subtract, "end", "start")),
+    native/let_field("storage", [:Pointer, [:Record, "ListStorage"], :Mutable], "header", "storage"),
+    native/store_statement("target", native/typed_record(header, ["data", "length", "storage"])),
+    native/return_record(
+      ["true", native/typed_expression(word, native/binary_expression(:PackPointer, "target", "tag_list"))]
+    )
+  ])
   context = native/declare_function(context, "value_list_set", result, [arena, ["value", word, [:Borrow, "arena"]],
     ["index", :U64, :Value], ["element", word, [:Borrow, "arena"]]], [], [:Allocate, :ReadMemory, :WriteMemory], :Borrow, "arena")
-  context = native/define_function(context, "value_list_set", [@read,
-    [:If, [:Less, "index", "length"], [], [[:Return, [:Zero]]]],
-    [:Let, "source", [:Pointer, word, :Const], [:Freeze, "data"]],
-    [:Let, "copied", result, [:Call, "value_list", "arena", "source", "length"]],
-    [:If, [:Field, "copied", "ok"], [], [[:Return, [:Zero]]]],
-    [:Let, "updated", word, [:Field, "copied", "value"]],
-    [:Let, "target", [:Pointer, header, :Mutable], [:UnpackPointer, "updated"]],
-    [:Set, "header", [:Load, "target"]],
-    [:Set, "data", [:Field, "header", "data"]],
-    [:Let, "slot", values, [:Offset, "data", "index"]],
-    [:Do, [:Store, "slot", "element"]], [:Return, "copied"]])
+  context = native/define_function(context, "value_list_set", [
+    @read,
+    native/unless_statement(native/binary_expression(:Less, "index", "length"), [native/return_zero()]),
+    native/let_statement("source", [:Pointer, word, :Const], native/unary_expression(:Freeze, "data")),
+    native/let_call("copied", result, "value_list", ["arena", "source", "length"]),
+    native/unless_statement(native/field_expression("copied", "ok"), [native/return_zero()]),
+    native/let_field("updated", word, "copied", "value"),
+    native/let_statement("target", [:Pointer, header, :Mutable], native/unary_expression(:UnpackPointer, "updated")),
+    native/set_statement("header", native/load_expression("target")),
+    native/set_statement("data", native/field_expression("header", "data")),
+    native/let_offset("slot", values, "data", "index"),
+    native/store_statement("slot", "element"),
+    native/return_value("copied")
+  ])
   context = native/declare_function(context, "value_list_append", result, [arena, ["value", word, [:Borrow, "arena"]],
     ["element", word, [:Borrow, "arena"]]], [], [:Allocate, :ReadMemory, :WriteMemory], :Borrow, "arena")
-  context = native/define_function(context, "value_list_append", [@read,
-    [:Let, "storage", [:Pointer, [:Record, "ListStorage"], :Mutable], [:Field, "header", "storage"]],
-    [:Let, "backing", [:Record, "ListStorage"], [:Load, "storage"]],
-    [:Let, "base", values, [:Field, "backing", "data"]],
-    [:Let, "used", :U64, [:Field, "backing", "used"]],
-    [:Let, "capacity", :U64, [:Field, "backing", "capacity"]],
-    [:Let, "end", values, [:Offset, "data", "length"]],
-    [:Let, "tail", values, [:Offset, "base", "used"]],
-    [:Let, "reuse", :Bool, "false"],
-    [:If, [:Equal, "end", "tail"], [[:Set, "reuse", [:Less, "used", "capacity"]]], []],
-    [:Let, "total", :U64, [:Add, "length", "one"]],
-    [:If, "reuse", [
-      [:Let, "size", :U64, [:SizeOf, header]],
-      [:Let, "raw", [:Pointer, :U8, :Mutable], [:Call, "value_arena_allocate", "arena", "size"]],
-      [:If, [:Equal, "raw", "null_bytes"], [[:Return, [:Zero]]], []],
-      [:Let, "target", [:Pointer, header, :Mutable], [:PointerCast, "raw"]],
-      [:Do, [:Store, "tail", "element"]],
-      [:Let, "used_slot", [:Pointer, :U64, :Mutable], [:FieldPointer, "storage", "used"]],
-      [:Do, [:Store, "used_slot", [:Expr, :U64, [:Add, "used", "one"]]]]
+  context = native/define_function(context, "value_list_append", [
+    @read,
+    native/let_field("storage", [:Pointer, [:Record, "ListStorage"], :Mutable], "header", "storage"),
+    native/let_load("backing", [:Record, "ListStorage"], "storage"),
+    native/let_field("base", values, "backing", "data"),
+    native/let_field("used", :U64, "backing", "used"),
+    native/let_field("capacity", :U64, "backing", "capacity"),
+    native/let_offset("end", values, "data", "length"),
+    native/let_offset("tail", values, "base", "used"),
+    native/let_statement("reuse", :Bool, "false"),
+    native/when_statement(
+      native/binary_expression(:Equal, "end", "tail"),
+      [native/set_statement("reuse", native/binary_expression(:Less, "used", "capacity"))]
+    ),
+    native/let_statement("total", :U64, native/binary_expression(:Add, "length", "one")),
+    native/if_statement("reuse", [
+      native/let_statement("size", :U64, native/unary_expression(:SizeOf, header)),
+      native/let_call("raw", [:Pointer, :U8, :Mutable], "value_arena_allocate", ["arena", "size"]),
+      native/when_statement(native/binary_expression(:Equal, "raw", "null_bytes"), [native/return_zero()]),
+      native/let_statement("target", [:Pointer, header, :Mutable], native/unary_expression(:PointerCast, "raw")),
+      native/store_statement("tail", "element"),
+      native/let_statement("used_slot", [:Pointer, :U64, :Mutable], native/field_pointer_expression("storage", "used")),
+      native/store_statement("used_slot", native/typed_expression(:U64, native/binary_expression(:Add, "used", "one")))
     ], [
-      [:Set, "capacity", [:Add, "total", "total"]],
-      [:Set, "target", [:Call, "list_allocate", "arena", "total", "capacity"]],
-      [:If, [:Equal, "target", "null_list_header"], [
-        [:Set, "target", [:Call, "list_allocate", "arena", "total", "total"]],
-        [:If, [:Equal, "target", "null_list_header"], [[:Return, [:Zero]]], []]], []],
-      [:Let, "new_header", header, [:Load, "target"]],
-      [:Let, "destination", values, [:Field, "new_header", "data"]],
-      [:Let, "i", :U64, "zero"],
-      [:While, [:Less, "i", "length"], [
-        [:Let, "src", values, [:Offset, "data", "i"]],
-        [:Let, "dst", values, [:Offset, "destination", "i"]],
-        [:Do, [:Store, "dst", [:Expr, word, [:Load, "src"]]]],
-        [:Set, "i", [:Add, "i", "one"]]]],
-      [:Set, "tail", [:Offset, "destination", "length"]],
-      [:Do, [:Store, "tail", "element"]],
-      [:Set, "data", "destination"],
-      [:Set, "storage", [:Field, "new_header", "storage"]]
-    ]],
-    [:Note, :Invariant, "Tail writes are outside every published view. Nested values retain the arena lifetime."],
-    [:Do, [:Store, "target", [:Expr, header, [:Record, "data", "total", "storage"]]]],
-    [:Return, [:Record, "true", [:Expr, word, [:PackPointer, "target", "tag_list"]]]]])
+      native/set_statement("capacity", native/binary_expression(:Add, "total", "total")),
+      native/set_statement("target", native/call_expression("list_allocate", ["arena", "total", "capacity"])),
+      native/when_statement(native/binary_expression(:Equal, "target", "null_list_header"), [
+        native/set_statement("target", native/call_expression("list_allocate", ["arena", "total", "total"])),
+        native/when_statement(native/binary_expression(:Equal, "target", "null_list_header"), [native/return_zero()])
+      ]),
+      native/let_load("new_header", header, "target"),
+      native/let_field("destination", values, "new_header", "data"),
+      native/let_statement("i", :U64, "zero"),
+      native/while_statement(native/binary_expression(:Less, "i", "length"), [
+        native/let_offset("src", values, "data", "i"),
+        native/let_offset("dst", values, "destination", "i"),
+        native/store_statement("dst", native/typed_load(word, "src")),
+        native/set_statement("i", native/binary_expression(:Add, "i", "one"))
+      ]),
+      native/set_statement("tail", native/offset_expression("destination", "length")),
+      native/store_statement("tail", "element"),
+      native/set_statement("data", "destination"),
+      native/set_statement("storage", native/field_expression("new_header", "storage"))
+    ]),
+    native/note_statement(
+      :Invariant,
+      "Tail writes are outside every published view. Nested values retain the arena lifetime."
+    ),
+    native/store_statement("target", native/typed_record(header, ["data", "total", "storage"])),
+    native/return_record(
+      ["true", native/typed_expression(word, native/binary_expression(:PackPointer, "target", "tag_list"))]
+    )
+  ])
   return context
 end
 
@@ -188,54 +245,75 @@ verb native_value/map_update(input: map) -> map
     ["value", word, [:Borrow, "arena"]], ["key", word, [:Borrow, "arena"]],
     ["element", word, [:Borrow, "arena"]]], [], [:Allocate, :ReadMemory, :WriteMemory], :Borrow, "arena")
   context = native/define_function(context, "value_map_set", [
-    [:If, [:Equal, [:Expr, :U8, [:Tag, "value"]], "tag_map"], [], [[:Return, [:Zero]]]],
-    [:Let, "pointer", [:Pointer, header, :Const], [:UnpackPointer, "value"]],
-    [:Let, "header", header, [:Load, "pointer"]],
-    [:Let, "data", entries, [:Field, "header", "data"]],
-    [:Let, "length", :U64, [:Field, "header", "length"]],
-    [:Let, "low", :U64, "zero"], [:Let, "high", :U64, "length"],
-    [:Let, "replace", :Bool, "false"],
-    [:While, [:Less, "low", "high"], [
-      [:Let, "distance", :U64, [:Subtract, "high", "low"]],
-      [:Set, "distance", [:Divide, "distance", "two"]],
-      [:Let, "middle", :U64, [:Add, "low", "distance"]],
-      [:Let, "slot", entries, [:Offset, "data", "middle"]],
-      [:Let, "candidate", entry, [:Load, "slot"]],
-      [:Let, "comparison", [:Record, "IntResult"], [:Call, "value_compare", [:Expr, word, [:Field, "candidate", "key"]], "key"]],
-      [:If, [:Field, "comparison", "ok"], [], [[:Return, [:Zero]]]],
-      [:Let, "order", :I64, [:Field, "comparison", "number"]],
-      [:If, [:Equal, "order", "int_zero"], [[:Set, "low", "middle"], [:Set, "replace", "true"], [:Break]], []],
-      [:If, [:Less, "order", "int_zero"], [[:Set, "low", [:Add, "middle", "one"]]], [[:Set, "high", "middle"]]]
-    ]],
-    [:Let, "count", :U64, "length"],
-    [:If, "replace", [], [[:Set, "count", [:Add, "count", "one"]]]],
-    [:Let, "header_size", :U64, [:SizeOf, header]],
-    [:Let, "entry_size", :U64, [:SizeOf, entry]],
-    [:Let, "limit", :U64, [:Subtract, "allocation_limit", "header_size"]],
-    [:Set, "limit", [:Divide, "limit", "entry_size"]],
-    [:If, [:Less, "limit", "count"], [[:Return, [:Zero]]], []],
-    [:Let, "bytes", :U64, [:Multiply, "count", "entry_size"]],
-    [:Let, "total", :U64, [:Add, "header_size", "bytes"]],
-    [:Let, "raw", [:Pointer, :U8, :Mutable], [:Call, "value_arena_allocate", "arena", "total"]],
-    [:If, [:Equal, "raw", "null_bytes"], [[:Return, [:Zero]]], []],
-    [:Let, "target", [:Pointer, header, :Mutable], [:PointerCast, "raw"]],
-    [:Let, "raw_data", [:Pointer, :U8, :Mutable], [:Offset, "raw", "header_size"]],
-    [:Let, "destination", entries, [:PointerCast, "raw_data"]],
-    [:Let, "i", :U64, "zero"], [:Let, "read", :U64, "zero"],
-    [:While, [:Less, "i", "count"], [
-      [:Let, "output", entry, [:Record, "key", "element"]],
-      [:If, [:Equal, "i", "low"], [
-        [:If, "replace", [[:Set, "read", [:Add, "read", "one"]]], []]
+    native/unless_statement(
+      native/binary_expression(:Equal, native/typed_expression(:U8, native/unary_expression(:Tag, "value")), "tag_map"),
+      [native/return_zero()]
+    ),
+    native/let_statement("pointer", [:Pointer, header, :Const], native/unary_expression(:UnpackPointer, "value")),
+    native/let_load("header", header, "pointer"),
+    native/let_field("data", entries, "header", "data"),
+    native/let_field("length", :U64, "header", "length"),
+    native/let_statement("low", :U64, "zero"),
+    native/let_statement("high", :U64, "length"),
+    native/let_statement("replace", :Bool, "false"),
+    native/while_statement(native/binary_expression(:Less, "low", "high"), [
+      native/let_statement("distance", :U64, native/binary_expression(:Subtract, "high", "low")),
+      native/set_statement("distance", native/binary_expression(:Divide, "distance", "two")),
+      native/let_statement("middle", :U64, native/binary_expression(:Add, "low", "distance")),
+      native/let_offset("slot", entries, "data", "middle"),
+      native/let_load("candidate", entry, "slot"),
+      native/let_call(
+        "comparison",
+        [:Record, "IntResult"],
+        "value_compare",
+        [native/typed_field(word, "candidate", "key"), "key"]
+      ),
+      native/unless_statement(native/field_expression("comparison", "ok"), [native/return_zero()]),
+      native/let_field("order", :I64, "comparison", "number"),
+      native/when_statement(native/binary_expression(:Equal, "order", "int_zero"), [
+        native/set_statement("low", "middle"),
+        native/set_statement("replace", "true"),
+        native/break_statement()
+      ]),
+      native/if_statement(
+        native/binary_expression(:Less, "order", "int_zero"),
+        [native/set_statement("low", native/binary_expression(:Add, "middle", "one"))],
+        [native/set_statement("high", "middle")]
+      )
+    ]),
+    native/let_statement("count", :U64, "length"),
+    native/unless_statement("replace", [native/set_statement("count", native/binary_expression(:Add, "count", "one"))]),
+    native/let_statement("header_size", :U64, native/unary_expression(:SizeOf, header)),
+    native/let_statement("entry_size", :U64, native/unary_expression(:SizeOf, entry)),
+    native/let_statement("limit", :U64, native/binary_expression(:Subtract, "allocation_limit", "header_size")),
+    native/set_statement("limit", native/binary_expression(:Divide, "limit", "entry_size")),
+    native/when_statement(native/binary_expression(:Less, "limit", "count"), [native/return_zero()]),
+    native/let_statement("bytes", :U64, native/binary_expression(:Multiply, "count", "entry_size")),
+    native/let_statement("total", :U64, native/binary_expression(:Add, "header_size", "bytes")),
+    native/let_call("raw", [:Pointer, :U8, :Mutable], "value_arena_allocate", ["arena", "total"]),
+    native/when_statement(native/binary_expression(:Equal, "raw", "null_bytes"), [native/return_zero()]),
+    native/let_statement("target", [:Pointer, header, :Mutable], native/unary_expression(:PointerCast, "raw")),
+    native/let_offset("raw_data", [:Pointer, :U8, :Mutable], "raw", "header_size"),
+    native/let_statement("destination", entries, native/unary_expression(:PointerCast, "raw_data")),
+    native/let_statement("i", :U64, "zero"),
+    native/let_statement("read", :U64, "zero"),
+    native/while_statement(native/binary_expression(:Less, "i", "count"), [
+      native/let_statement("output", entry, native/record_expression(["key", "element"])),
+      native/if_statement(native/binary_expression(:Equal, "i", "low"), [
+        native/when_statement("replace", [native/set_statement("read", native/binary_expression(:Add, "read", "one"))])
       ], [
-        [:Set, "slot", [:Offset, "data", "read"]],
-        [:Set, "output", [:Load, "slot"]],
-        [:Set, "read", [:Add, "read", "one"]]
-      ]],
-      [:Let, "dst", entries, [:Offset, "destination", "i"]],
-      [:Do, [:Store, "dst", "output"]],
-      [:Set, "i", [:Add, "i", "one"]]
-    ]],
-    [:Do, [:Store, "target", [:Expr, header, [:Record, "destination", "count"]]]],
-    [:Return, [:Record, "true", [:Expr, word, [:PackPointer, "target", "tag_map"]]]]])
+        native/set_statement("slot", native/offset_expression("data", "read")),
+        native/set_statement("output", native/load_expression("slot")),
+        native/set_statement("read", native/binary_expression(:Add, "read", "one"))
+      ]),
+      native/let_offset("dst", entries, "destination", "i"),
+      native/store_statement("dst", "output"),
+      native/set_statement("i", native/binary_expression(:Add, "i", "one"))
+    ]),
+    native/store_statement("target", native/typed_record(header, ["destination", "count"])),
+    native/return_record(
+      ["true", native/typed_expression(word, native/binary_expression(:PackPointer, "target", "tag_map"))]
+    )
+  ])
   return context
 end

@@ -50,39 +50,55 @@ verb native_value/string_allocate(input: map) -> map
     ],
     [], [:Allocate, :ReadMemory, :WriteMemory], :Borrow, "arena")
   context = native/define_function(context, name, [
-    [:If, [:Less, "capacity", "length"], [[:Return, [:Zero]]], []],
-    [:If, [:Less, "length", "scalars"], [[:Return, [:Zero]]], []],
-    [:Let, "header_size", :U64, [:SizeOf, header]],
-    [:Let, "storage_size", :U64, [:SizeOf, storage]],
-    [:Let, "fixed_size", :U64, [:Add, "header_size", "storage_size"]],
-    [:Let, "limit", :U64, [:Subtract, "allocation_limit", "fixed_size"]],
-    [:If, [:Less, "limit", "capacity"], [[:Return, [:Zero]]], []],
-    [:If, [:Less, "capacity", "string_index_min"], [[:Let, "sample_count", :U64, "zero"]], [
-      [:Set, "sample_count", [:Divide, "capacity", "string_stride"]],
-      [:Set, "sample_count", [:Add, "sample_count", "one"]]
-    ]],
-    [:Set, "limit", [:Subtract, "limit", "capacity"]],
-    [:Set, "limit", [:Divide, "limit", "string_index_width"]],
-    [:If, [:Less, "limit", "sample_count"], [[:Return, [:Zero]]], []],
-    [:Let, "sample_bytes", :U64, [:Multiply, "sample_count", "string_index_width"]],
-    [:Let, "total", :U64, [:Add, "fixed_size", "sample_bytes"]],
-    [:Set, "total", [:Add, "total", "capacity"]],
-    [:Let, "allocation", bytes, [:Call, "value_arena_allocate", "arena", "total"]],
-    [:If, [:Equal, "allocation", "null_bytes"], [[:Return, [:Zero]]], []],
-    [:Let, "pointer", [:Pointer, header, :Mutable], [:PointerCast, "allocation"]],
-    [:Let, "cursor", bytes, [:Offset, "allocation", "header_size"]],
-    [:Let, "backing", [:Pointer, storage, :Mutable], [:PointerCast, "cursor"]],
-    [:Set, "cursor", [:Offset, "allocation", "fixed_size"]],
-    [:Let, "data", bytes, [:Offset, "cursor", "sample_bytes"]],
-    [:Let, "index", [:Pointer, :U64, :Mutable], "string_null_index"],
-    [:If, [:Equal, "sample_count", "zero"], [], [[:Set, "index", [:PointerCast, "cursor"]]]],
-    [:Note, :Invariant, "Publish only after initializing both the string header and its backing metadata."],
-    [:Let, "storage", storage, [:Record, "data", "capacity", "length", "index"]],
-    [:Do, [:Store, "backing", "storage"]],
-    [:Let, "header", header, [:Record, "data", "length", "scalars", "ascii", "backing", "zero", "zero"]],
-    [:Do, [:Store, "pointer", "header"]],
-    [:Let, "result", result, [:Record, "true", "pointer"]],
-    [:Return, "result"]
+    native/when_statement(native/binary_expression(:Less, "capacity", "length"), [native/return_zero()]),
+    native/when_statement(native/binary_expression(:Less, "length", "scalars"), [native/return_zero()]),
+    native/let_statement("header_size", :U64, native/unary_expression(:SizeOf, header)),
+    native/let_statement("storage_size", :U64, native/unary_expression(:SizeOf, storage)),
+    native/let_statement("fixed_size", :U64, native/binary_expression(:Add, "header_size", "storage_size")),
+    native/let_statement("limit", :U64, native/binary_expression(:Subtract, "allocation_limit", "fixed_size")),
+    native/when_statement(native/binary_expression(:Less, "limit", "capacity"), [native/return_zero()]),
+    native/if_statement(native/binary_expression(:Less, "capacity", "string_index_min"), [
+      native/let_statement("sample_count", :U64, "zero")
+    ], [
+      native/set_statement("sample_count", native/binary_expression(:Divide, "capacity", "string_stride")),
+      native/set_statement("sample_count", native/binary_expression(:Add, "sample_count", "one"))
+    ]),
+    native/set_statement("limit", native/binary_expression(:Subtract, "limit", "capacity")),
+    native/set_statement("limit", native/binary_expression(:Divide, "limit", "string_index_width")),
+    native/when_statement(native/binary_expression(:Less, "limit", "sample_count"), [native/return_zero()]),
+    native/let_statement(
+      "sample_bytes",
+      :U64,
+      native/binary_expression(:Multiply, "sample_count", "string_index_width")
+    ),
+    native/let_statement("total", :U64, native/binary_expression(:Add, "fixed_size", "sample_bytes")),
+    native/set_statement("total", native/binary_expression(:Add, "total", "capacity")),
+    native/let_call("allocation", bytes, "value_arena_allocate", ["arena", "total"]),
+    native/when_statement(native/binary_expression(:Equal, "allocation", "null_bytes"), [native/return_zero()]),
+    native/let_statement("pointer", [:Pointer, header, :Mutable], native/unary_expression(:PointerCast, "allocation")),
+    native/let_offset("cursor", bytes, "allocation", "header_size"),
+    native/let_statement("backing", [:Pointer, storage, :Mutable], native/unary_expression(:PointerCast, "cursor")),
+    native/set_statement("cursor", native/offset_expression("allocation", "fixed_size")),
+    native/let_offset("data", bytes, "cursor", "sample_bytes"),
+    native/let_statement("index", [:Pointer, :U64, :Mutable], "string_null_index"),
+    native/unless_statement(
+      native/binary_expression(:Equal, "sample_count", "zero"),
+      [native/set_statement("index", native/unary_expression(:PointerCast, "cursor"))]
+    ),
+    native/note_statement(
+      :Invariant,
+      "Publish only after initializing both the string header and its backing metadata."
+    ),
+    native/let_statement("storage", storage, native/record_expression(["data", "capacity", "length", "index"])),
+    native/store_statement("backing", "storage"),
+    native/let_statement(
+      "header",
+      header,
+      native/record_expression(["data", "length", "scalars", "ascii", "backing", "zero", "zero"])
+    ),
+    native/store_statement("pointer", "header"),
+    native/let_statement("result", result, native/record_expression(["true", "pointer"])),
+    native/return_value("result")
   ])
   return context
 end
@@ -101,41 +117,51 @@ verb native_value/string_index(input: map) -> map
       ["ascii", :Bool, :Value]
     ],
     [], [:ReadMemory, :WriteMemory], :Value, "")
-  context = native/define_function(context, name, [
-    [:Let, "backing", storage, [:Load, "storage"]],
-    [:Let, "data", [:Pointer, :U8, :Mutable], [:Field, "backing", "data"]],
-    [:Let, "index", [:Pointer, :U64, :Mutable], [:Field, "backing", "index"]],
-    [:If, [:Equal, "index", "string_null_index"], [[:Return, "true"]], []],
-    [:Let, "position", :U64, "offset"],
-    [:Let, "count", :U64, "scalar"],
-    [:While, "true", [
-      [:If, [:Less, "length", "position"], [[:Return, "false"]], []],
-      [:Let, "remainder", :U64, [:Remainder, "count", "string_stride"]],
-      [:If, [:Equal, "remainder", "zero"], [
-        [:Let, "sample_number", :U64, [:Divide, "count", "string_stride"]],
-        [:Let, "sample", [:Pointer, :U64, :Mutable], [:Offset, "index", "sample_number"]],
-        [:Do, [:Store, "sample", "position"]]
-      ], []],
-      [:If, [:Equal, "position", "length"], [[:Return, "true"]], []],
-      [:If, "ascii", [
-        [:Let, "remaining", :U64, [:Subtract, "length", "position"]],
-        [:Let, "width", :U64, [:Subtract, "string_stride", "remainder"]],
-        [:If, [:Less, "remaining", "width"], [[:Set, "width", "remaining"]], []],
-        [:Set, "position", [:Add, "position", "width"]],
-        [:Set, "count", [:Add, "count", "width"]]
-      ], [
-        [:Let, "source", [:Pointer, :U8, :Mutable], [:Offset, "data", "position"]],
-        [:Let, "text", [:Pointer, :U8, :Const], [:Freeze, "source"]],
-        [:Set, "remaining", [:Subtract, "length", "position"]],
-        [:Let, "decoded", [:Record, "Utf8Decode"], [:Call, "utf8_decode", "text", "remaining"]],
-        [:If, [:Field, "decoded", "ok"], [], [[:Return, "false"]]],
-        [:Set, "width", [:Field, "decoded", "width"]],
-        [:Set, "position", [:Add, "position", "width"]],
-        [:Set, "count", [:Add, "count", "one"]]
-      ]]
-    ]],
-    [:Return, "false"]
-  ])
+  context = native/define_function(
+    context,
+    name,
+    [
+      native/let_load("backing", storage, "storage"),
+      native/let_field("data", [:Pointer, :U8, :Mutable], "backing", "data"),
+      native/let_field("index", [:Pointer, :U64, :Mutable], "backing", "index"),
+      native/when_statement(
+        native/binary_expression(:Equal, "index", "string_null_index"),
+        [native/return_value("true")]
+      ),
+      native/let_statement("position", :U64, "offset"),
+      native/let_statement("count", :U64, "scalar"),
+      native/while_statement("true", [
+        native/when_statement(native/binary_expression(:Less, "length", "position"), [native/return_value("false")]),
+        native/let_statement("remainder", :U64, native/binary_expression(:Remainder, "count", "string_stride")),
+        native/when_statement(native/binary_expression(:Equal, "remainder", "zero"), [
+          native/let_statement("sample_number", :U64, native/binary_expression(:Divide, "count", "string_stride")),
+          native/let_offset("sample", [:Pointer, :U64, :Mutable], "index", "sample_number"),
+          native/store_statement("sample", "position")
+        ]),
+        native/when_statement(native/binary_expression(:Equal, "position", "length"), [native/return_value("true")]),
+        native/if_statement("ascii", [
+          native/let_statement("remaining", :U64, native/binary_expression(:Subtract, "length", "position")),
+          native/let_statement("width", :U64, native/binary_expression(:Subtract, "string_stride", "remainder")),
+          native/when_statement(
+            native/binary_expression(:Less, "remaining", "width"),
+            [native/set_statement("width", "remaining")]
+          ),
+          native/set_statement("position", native/binary_expression(:Add, "position", "width")),
+          native/set_statement("count", native/binary_expression(:Add, "count", "width"))
+        ], [
+          native/let_offset("source", [:Pointer, :U8, :Mutable], "data", "position"),
+          native/let_statement("text", [:Pointer, :U8, :Const], native/unary_expression(:Freeze, "source")),
+          native/set_statement("remaining", native/binary_expression(:Subtract, "length", "position")),
+          native/let_call("decoded", [:Record, "Utf8Decode"], "utf8_decode", ["text", "remaining"]),
+          native/unless_statement(native/field_expression("decoded", "ok"), [native/return_value("false")]),
+          native/set_statement("width", native/field_expression("decoded", "width")),
+          native/set_statement("position", native/binary_expression(:Add, "position", "width")),
+          native/set_statement("count", native/binary_expression(:Add, "count", "one"))
+        ])
+      ]),
+      native/return_value("false")
+    ]
+  )
   return context
 end
 
@@ -151,22 +177,30 @@ verb native_value/string_constructor(input: map) -> map
     ],
     [], [:Allocate, :ReadMemory, :WriteMemory], :Borrow, "arena")
   context = native/define_function(context, name, [
-    [:If, [:Less, "allocation_limit", "length"], [[:Return, [:Zero]]], []],
-    [:Let, "scan", [:Record, "Utf8Scan"], [:Call, "utf8_scan", "source", "length"]],
-    [:If, [:Field, "scan", "ok"], [], [[:Return, [:Zero]]]],
-    [:Let, "scalars", :U64, [:Field, "scan", "scalars"]],
-    [:Let, "ascii", :Bool, [:Field, "scan", "ascii"]],
-    [:Let, "allocation", [:Record, "StringAllocation"], [:Call, "value_string_allocate", "arena", "length", "length", "scalars", "ascii"]],
-    [:If, [:Field, "allocation", "ok"], [], [[:Return, [:Zero]]]],
-    [:Let, "pointer", [:Pointer, header, :Mutable], [:Field, "allocation", "header"]],
-    [:Let, "header", header, [:Load, "pointer"]],
-    [:Let, "data", [:Pointer, :U8, :Mutable], [:Field, "header", "data"]],
-    [:Let, "storage", [:Pointer, [:Record, "StringStorage"], :Mutable], [:Field, "header", "storage"]],
-    [:Do, [:CopyBytes, "data", "source", "length"]],
-    [:If, [:Call, "value_string_index", "storage", "zero", "zero", "length", "ascii"], [], [[:Return, [:Zero]]]],
-    [:Let, "value", native_value/word(), [:PackPointer, "pointer", "tag_string"]],
-    [:Let, "result", result, [:Record, "true", "value"]],
-    [:Return, "result"]
+    native/when_statement(native/binary_expression(:Less, "allocation_limit", "length"), [native/return_zero()]),
+    native/let_call("scan", [:Record, "Utf8Scan"], "utf8_scan", ["source", "length"]),
+    native/unless_statement(native/field_expression("scan", "ok"), [native/return_zero()]),
+    native/let_field("scalars", :U64, "scan", "scalars"),
+    native/let_field("ascii", :Bool, "scan", "ascii"),
+    native/let_call(
+      "allocation",
+      [:Record, "StringAllocation"],
+      "value_string_allocate",
+      ["arena", "length", "length", "scalars", "ascii"]
+    ),
+    native/unless_statement(native/field_expression("allocation", "ok"), [native/return_zero()]),
+    native/let_field("pointer", [:Pointer, header, :Mutable], "allocation", "header"),
+    native/let_load("header", header, "pointer"),
+    native/let_field("data", [:Pointer, :U8, :Mutable], "header", "data"),
+    native/let_field("storage", [:Pointer, [:Record, "StringStorage"], :Mutable], "header", "storage"),
+    native/copy_bytes_statement("data", "source", "length"),
+    native/unless_statement(
+      native/call_expression("value_string_index", ["storage", "zero", "zero", "length", "ascii"]),
+      [native/return_zero()]
+    ),
+    native/let_statement("value", native_value/word(), native/binary_expression(:PackPointer, "pointer", "tag_string")),
+    native/let_statement("result", result, native/record_expression(["true", "value"])),
+    native/return_value("result")
   ])
   return context
 end
@@ -181,77 +215,83 @@ verb native_value/string_access(input: map) -> map
   context = native/declare_function(context, name, result, [["value", word, :Borrow]],
     [], [:ReadMemory], :Value, "")
   context = native/define_function(context, name, [
-    [:Let, "checked", [:Record, "HeapStringResult"], [:Call, "value_as_string", "value"]],
-    [:If, [:Field, "checked", "ok"], [], [[:Return, [:Zero]]]],
-    [:Let, "pointer", header_pointer, [:Field, "checked", "header"]],
-    [:Let, "header", header, [:Load, "pointer"]],
-    [:Let, "count", :U64, [:Field, "header", "scalars"]],
-    [:Let, "result", result, [:Record, "true", "count"]],
-    [:Return, "result"]
+    native/let_call("checked", [:Record, "HeapStringResult"], "value_as_string", ["value"]),
+    native/unless_statement(native/field_expression("checked", "ok"), [native/return_zero()]),
+    native/let_field("pointer", header_pointer, "checked", "header"),
+    native/let_load("header", header, "pointer"),
+    native/let_field("count", :U64, "header", "scalars"),
+    native/let_statement("result", result, native/record_expression(["true", "count"])),
+    native/return_value("result")
   ])
   name = "value_string_byte_offset"
   context = native/declare_function(context, name, result, [["value", word, :Borrow], ["position", :U64, :Value]],
     [], [:ReadMemory], :Value, "")
   context = native/define_function(context, name, [
-    [:Let, "checked", [:Record, "HeapStringResult"], [:Call, "value_as_string", "value"]],
-    [:If, [:Field, "checked", "ok"], [], [[:Return, [:Zero]]]],
-    [:Let, "pointer", header_pointer, [:Field, "checked", "header"]],
-    [:Let, "header", header, [:Load, "pointer"]],
-    [:Let, "length", :U64, [:Field, "header", "length"]],
-    [:Let, "scalars", :U64, [:Field, "header", "scalars"]],
-    [:If, [:Less, "scalars", "position"], [[:Return, [:Zero]]], []],
-    [:If, [:Equal, "position", "scalars"], [[:Let, "result", result, [:Record, "true", "length"]], [:Return, "result"]], []],
-    [:If, [:Field, "header", "ascii"], [[:Set, "result", [:Record, "true", "position"]], [:Return, "result"]], []],
-    [:Let, "backing", [:Pointer, [:Record, "StringStorage"], :Mutable], [:Field, "header", "storage"]],
-    [:Let, "storage", [:Record, "StringStorage"], [:Load, "backing"]],
-    [:Let, "data", [:Pointer, :U8, :Mutable], [:Field, "storage", "data"]],
-    [:Let, "index", [:Pointer, :U64, :Mutable], [:Field, "storage", "index"]],
-    [:Let, "byte_start", :U64, [:Field, "header", "byte_start"]],
-    [:Let, "scalar_start", :U64, [:Field, "header", "scalar_start"]],
-    [:Let, "end", :U64, [:Add, "byte_start", "length"]],
-    [:Let, "target", :U64, [:Add, "scalar_start", "position"]],
-    [:Let, "offset", :U64, "byte_start"],
-    [:Let, "count", :U64, "scalar_start"],
-    [:If, [:Equal, "index", "string_null_index"], [], [
-      [:Let, "sample_number", :U64, [:Divide, "target", "string_stride"]],
-      [:Let, "sample", [:Pointer, :U64, :Mutable], [:Offset, "index", "sample_number"]],
-      [:Set, "offset", [:Load, "sample"]],
-      [:Set, "count", [:Multiply, "sample_number", "string_stride"]]
-    ]],
-    [:Note, :Invariant, "Sample offsets are relative to the immutable backing, including for slices."],
-    [:While, [:Less, "count", "target"], [
-      [:Let, "source", [:Pointer, :U8, :Mutable], [:Offset, "data", "offset"]],
-      [:Let, "text", [:Pointer, :U8, :Const], [:Freeze, "source"]],
-      [:Let, "remaining", :U64, [:Subtract, "end", "offset"]],
-      [:Let, "decoded", [:Record, "Utf8Decode"], [:Call, "utf8_decode", "text", "remaining"]],
-      [:If, [:Field, "decoded", "ok"], [], [[:Return, [:Zero]]]],
-      [:Let, "width", :U64, [:Field, "decoded", "width"]],
-      [:Set, "offset", [:Add, "offset", "width"]],
-      [:Set, "count", [:Add, "count", "one"]]
-    ]],
-    [:Set, "offset", [:Subtract, "offset", "byte_start"]],
-    [:Set, "result", [:Record, "true", "offset"]],
-    [:Return, "result"]
+    native/let_call("checked", [:Record, "HeapStringResult"], "value_as_string", ["value"]),
+    native/unless_statement(native/field_expression("checked", "ok"), [native/return_zero()]),
+    native/let_field("pointer", header_pointer, "checked", "header"),
+    native/let_load("header", header, "pointer"),
+    native/let_field("length", :U64, "header", "length"),
+    native/let_field("scalars", :U64, "header", "scalars"),
+    native/when_statement(native/binary_expression(:Less, "scalars", "position"), [native/return_zero()]),
+    native/when_statement(native/binary_expression(:Equal, "position", "scalars"), [
+      native/let_statement("result", result, native/record_expression(["true", "length"])),
+      native/return_value("result")
+    ]),
+    native/when_statement(native/field_expression("header", "ascii"), [
+      native/set_statement("result", native/record_expression(["true", "position"])),
+      native/return_value("result")
+    ]),
+    native/let_field("backing", [:Pointer, [:Record, "StringStorage"], :Mutable], "header", "storage"),
+    native/let_load("storage", [:Record, "StringStorage"], "backing"),
+    native/let_field("data", [:Pointer, :U8, :Mutable], "storage", "data"),
+    native/let_field("index", [:Pointer, :U64, :Mutable], "storage", "index"),
+    native/let_field("byte_start", :U64, "header", "byte_start"),
+    native/let_field("scalar_start", :U64, "header", "scalar_start"),
+    native/let_statement("end", :U64, native/binary_expression(:Add, "byte_start", "length")),
+    native/let_statement("target", :U64, native/binary_expression(:Add, "scalar_start", "position")),
+    native/let_statement("offset", :U64, "byte_start"),
+    native/let_statement("count", :U64, "scalar_start"),
+    native/unless_statement(native/binary_expression(:Equal, "index", "string_null_index"), [
+      native/let_statement("sample_number", :U64, native/binary_expression(:Divide, "target", "string_stride")),
+      native/let_offset("sample", [:Pointer, :U64, :Mutable], "index", "sample_number"),
+      native/set_statement("offset", native/load_expression("sample")),
+      native/set_statement("count", native/binary_expression(:Multiply, "sample_number", "string_stride"))
+    ]),
+    native/note_statement(:Invariant, "Sample offsets are relative to the immutable backing, including for slices."),
+    native/while_statement(native/binary_expression(:Less, "count", "target"), [
+      native/let_offset("source", [:Pointer, :U8, :Mutable], "data", "offset"),
+      native/let_statement("text", [:Pointer, :U8, :Const], native/unary_expression(:Freeze, "source")),
+      native/let_statement("remaining", :U64, native/binary_expression(:Subtract, "end", "offset")),
+      native/let_call("decoded", [:Record, "Utf8Decode"], "utf8_decode", ["text", "remaining"]),
+      native/unless_statement(native/field_expression("decoded", "ok"), [native/return_zero()]),
+      native/let_field("width", :U64, "decoded", "width"),
+      native/set_statement("offset", native/binary_expression(:Add, "offset", "width")),
+      native/set_statement("count", native/binary_expression(:Add, "count", "one"))
+    ]),
+    native/set_statement("offset", native/binary_expression(:Subtract, "offset", "byte_start")),
+    native/set_statement("result", native/record_expression(["true", "offset"])),
+    native/return_value("result")
   ])
   name = "value_string_scalar_at"
   context = native/declare_function(context, name, [:Record, "RuneResult"], [["value", word, :Borrow], ["position", :U64, :Value]],
     [], [:ReadMemory], :Value, "")
   context = native/define_function(context, name, [
-    [:Let, "offset_result", result, [:Call, "value_string_byte_offset", "value", "position"]],
-    [:If, [:Field, "offset_result", "ok"], [], [[:Return, [:Zero]]]],
-    [:Let, "offset", :U64, [:Field, "offset_result", "number"]],
-    [:Let, "pointer", header_pointer, [:UnpackPointer, "value"]],
-    [:Let, "header", header, [:Load, "pointer"]],
-    [:Let, "length", :U64, [:Field, "header", "length"]],
-    [:Let, "data", [:Pointer, :U8, :Mutable], [:Field, "header", "data"]],
-    [:Let, "source", [:Pointer, :U8, :Mutable], [:Offset, "data", "offset"]],
-    [:Let, "text", [:Pointer, :U8, :Const], [:Freeze, "source"]],
-    [:Set, "length", [:Subtract, "length", "offset"]],
-    [:Let, "decoded", [:Record, "Utf8Decode"], [:Call, "utf8_decode", "text", "length"]],
-    [:If, [:Field, "decoded", "ok"], [], [[:Return, [:Zero]]]],
-    [:Let, "rune", [:Scalar, "Rune", :U32], [:Field, "decoded", "rune"]],
-    [:Let, "result", [:Record, "RuneResult"], [:Record, "true", "rune"]],
-    [:Return, "result"]
+    native/let_call("offset_result", result, "value_string_byte_offset", ["value", "position"]),
+    native/unless_statement(native/field_expression("offset_result", "ok"), [native/return_zero()]),
+    native/let_field("offset", :U64, "offset_result", "number"),
+    native/let_statement("pointer", header_pointer, native/unary_expression(:UnpackPointer, "value")),
+    native/let_load("header", header, "pointer"),
+    native/let_field("length", :U64, "header", "length"),
+    native/let_field("data", [:Pointer, :U8, :Mutable], "header", "data"),
+    native/let_offset("source", [:Pointer, :U8, :Mutable], "data", "offset"),
+    native/let_statement("text", [:Pointer, :U8, :Const], native/unary_expression(:Freeze, "source")),
+    native/set_statement("length", native/binary_expression(:Subtract, "length", "offset")),
+    native/let_call("decoded", [:Record, "Utf8Decode"], "utf8_decode", ["text", "length"]),
+    native/unless_statement(native/field_expression("decoded", "ok"), [native/return_zero()]),
+    native/let_field("rune", [:Scalar, "Rune", :U32], "decoded", "rune"),
+    native/let_statement("result", [:Record, "RuneResult"], native/record_expression(["true", "rune"])),
+    native/return_value("result")
   ])
   context = native_value/string_slice(context)
   return context
@@ -271,37 +311,44 @@ verb native_value/string_slice(input: map) -> map
     ],
     [], [:Allocate, :ReadMemory, :WriteMemory], :Borrow, "arena")
   context = native/define_function(context, name, [
-    [:If, [:Less, "end", "start"], [[:Return, [:Zero]]], []],
-    [:Let, "offset", [:Record, "IdResult"], [:Call, "value_string_byte_offset", "value", "start"]],
-    [:Let, "condition", :Bool, [:Field, "offset", "ok"]],
-    [:Let, "first", :U64, [:Field, "offset", "number"]],
-    [:If, "condition", [], [[:Return, [:Zero]]]],
-    [:Set, "offset", [:Call, "value_string_byte_offset", "value", "end"]],
-    [:Set, "condition", [:Field, "offset", "ok"]],
-    [:Let, "last", :U64, [:Field, "offset", "number"]],
-    [:If, "condition", [], [[:Return, [:Zero]]]],
-    [:Let, "size", :U64, [:SizeOf, header]],
-    [:Let, "allocation", [:Pointer, :U8, :Mutable], [:Call, "value_arena_allocate", "arena", "size"]],
-    [:If, [:Equal, "allocation", "null_bytes"], [[:Return, [:Zero]]], []],
-    [:Note, :Invariant, "Slices retain their backing and sampled index; only the view header is allocated."],
-    [:Let, "target", [:Pointer, header, :Mutable], [:PointerCast, "allocation"]],
-    [:Let, "pointer", [:Pointer, header, :Const], [:UnpackPointer, "value"]],
-    [:Let, "header", header, [:Load, "pointer"]],
-    [:Let, "data", [:Pointer, :U8, :Mutable], [:Field, "header", "data"]],
-    [:Set, "data", [:Offset, "data", "first"]],
-    [:Let, "storage", [:Pointer, [:Record, "StringStorage"], :Mutable], [:Field, "header", "storage"]],
-    [:Let, "byte_start", :U64, [:Field, "header", "byte_start"]],
-    [:Set, "byte_start", [:Add, "byte_start", "first"]],
-    [:Let, "scalar_start", :U64, [:Field, "header", "scalar_start"]],
-    [:Set, "scalar_start", [:Add, "scalar_start", "start"]],
-    [:Let, "length", :U64, [:Subtract, "last", "first"]],
-    [:Let, "scalars", :U64, [:Subtract, "end", "start"]],
-    [:Let, "ascii", :Bool, [:Equal, "length", "scalars"]],
-    [:Let, "slice", header, [:Record, "data", "length", "scalars", "ascii", "storage", "byte_start", "scalar_start"]],
-    [:Do, [:Store, "target", "slice"]],
-    [:Let, "packed", word, [:PackPointer, "target", "tag_string"]],
-    [:Let, "result", result, [:Record, "true", "packed"]],
-    [:Return, "result"]
+    native/when_statement(native/binary_expression(:Less, "end", "start"), [native/return_zero()]),
+    native/let_call("offset", [:Record, "IdResult"], "value_string_byte_offset", ["value", "start"]),
+    native/let_field("condition", :Bool, "offset", "ok"),
+    native/let_field("first", :U64, "offset", "number"),
+    native/unless_statement("condition", [native/return_zero()]),
+    native/set_statement("offset", native/call_expression("value_string_byte_offset", ["value", "end"])),
+    native/set_statement("condition", native/field_expression("offset", "ok")),
+    native/let_field("last", :U64, "offset", "number"),
+    native/unless_statement("condition", [native/return_zero()]),
+    native/let_statement("size", :U64, native/unary_expression(:SizeOf, header)),
+    native/let_call("allocation", [:Pointer, :U8, :Mutable], "value_arena_allocate", ["arena", "size"]),
+    native/when_statement(native/binary_expression(:Equal, "allocation", "null_bytes"), [native/return_zero()]),
+    native/note_statement(
+      :Invariant,
+      "Slices retain their backing and sampled index; only the view header is allocated."
+    ),
+    native/let_statement("target", [:Pointer, header, :Mutable], native/unary_expression(:PointerCast, "allocation")),
+    native/let_statement("pointer", [:Pointer, header, :Const], native/unary_expression(:UnpackPointer, "value")),
+    native/let_load("header", header, "pointer"),
+    native/let_field("data", [:Pointer, :U8, :Mutable], "header", "data"),
+    native/set_statement("data", native/offset_expression("data", "first")),
+    native/let_field("storage", [:Pointer, [:Record, "StringStorage"], :Mutable], "header", "storage"),
+    native/let_field("byte_start", :U64, "header", "byte_start"),
+    native/set_statement("byte_start", native/binary_expression(:Add, "byte_start", "first")),
+    native/let_field("scalar_start", :U64, "header", "scalar_start"),
+    native/set_statement("scalar_start", native/binary_expression(:Add, "scalar_start", "start")),
+    native/let_statement("length", :U64, native/binary_expression(:Subtract, "last", "first")),
+    native/let_statement("scalars", :U64, native/binary_expression(:Subtract, "end", "start")),
+    native/let_statement("ascii", :Bool, native/binary_expression(:Equal, "length", "scalars")),
+    native/let_statement(
+      "slice",
+      header,
+      native/record_expression(["data", "length", "scalars", "ascii", "storage", "byte_start", "scalar_start"])
+    ),
+    native/store_statement("target", "slice"),
+    native/let_statement("packed", word, native/binary_expression(:PackPointer, "target", "tag_string")),
+    native/let_statement("result", result, native/record_expression(["true", "packed"])),
+    native/return_value("result")
   ])
   return context
 end

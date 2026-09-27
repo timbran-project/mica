@@ -19,82 +19,98 @@ verb native_value/string_search(input: map) -> map
   context = native/declare_function(context, name, result, [["value", word, :Borrow], ["needle", word, :Borrow], ["start", :U64, :Value]],
     [], [:ReadMemory, :WriteMemory], :Value, "")
   context = native/define_function(context, name, [
-    [:Let, "offset_result", result, [:Call, "value_string_byte_offset", "value", "start"]],
-    [:Let, "condition", :Bool, [:Field, "offset_result", "ok"]],
-    [:Let, "candidate", :U64, [:Field, "offset_result", "number"]],
-    [:If, "condition", [], [[:Return, [:Zero]]]],
-    [:Let, "checked", [:Record, "HeapStringResult"], [:Call, "value_as_string", "needle"]],
-    [:If, [:Field, "checked", "ok"], [], [[:Return, [:Zero]]]],
-    [:Let, "needle_pointer", [:Pointer, header, :Const], [:Field, "checked", "header"]],
-    [:Let, "pattern", header, [:Load, "needle_pointer"]],
-    [:Let, "hay_pointer", [:Pointer, header, :Const], [:UnpackPointer, "value"]],
-    [:Let, "hay", header, [:Load, "hay_pointer"]],
-    [:Let, "hay_data", [:Pointer, :U8, :Mutable], [:Field, "hay", "data"]],
-    [:Let, "hay_length", :U64, [:Field, "hay", "length"]],
-    [:Let, "needle_data", [:Pointer, :U8, :Mutable], [:Field, "pattern", "data"]],
-    [:Let, "needle_length", :U64, [:Field, "pattern", "length"]],
-    [:If, [:Equal, "needle_length", "zero"], [[:Let, "result", result, [:Record, "true", "start"]], [:Return, "result"]], []],
-    [:Let, "remaining", :U64, [:Subtract, "hay_length", "candidate"]],
-    [:If, [:Less, "remaining", "needle_length"], [[:Return, [:Zero]]], []],
-    [:Let, "limit", :U64, [:Subtract, "hay_length", "needle_length"]],
-    [:Let, "last", :U64, [:Subtract, "needle_length", "one"]],
-    [:Set, "condition", [:Less, "needle_length", "utf64_4"]],
-    [:Let, "skip", :Bool, "false"],
-    [:Let, "table", table, [:Zero]],
-    [:Let, "table_address", [:Pointer, table, :Mutable], [:Address, "table"]],
-    [:If, "condition", [], [
-      [:Set, "skip", "true"],
-      [:Let, "index", :U64, "zero"],
-      [:While, [:Less, "index", "byte_domain"], [
-        [:Let, "table_slot", [:Pointer, :U64, :Mutable], [:ElementPointer, "table_address", "index"]],
-        [:Do, [:Store, "table_slot", "needle_length"]],
-        [:Set, "index", [:Add, "index", "one"]]
-      ]],
-      [:Set, "index", "zero"],
-      [:While, [:Less, "index", "last"], [
-        [:Let, "needle_slot", [:Pointer, :U8, :Mutable], [:Offset, "needle_data", "index"]],
-        [:Let, "needle_byte", :U8, [:Load, "needle_slot"]],
-        [:Let, "byte", :U64, [:Convert, "needle_byte"]],
-        [:Set, "table_slot", [:ElementPointer, "table_address", "byte"]],
-        [:Let, "step", :U64, [:Subtract, "last", "index"]],
-        [:Do, [:Store, "table_slot", "step"]],
-        [:Set, "index", [:Add, "index", "one"]]
-      ]]
-    ]],
-    [:Note, :Invariant, "A valid UTF-8 needle can match only at a scalar boundary."],
-    [:While, "true", [
-      [:Set, "index", "zero"],
-      [:While, [:Less, "index", "needle_length"], [
-        [:Set, "byte", [:Add, "candidate", "index"]],
-        [:Let, "hay_slot", [:Pointer, :U8, :Mutable], [:Offset, "hay_data", "byte"]],
-        [:Let, "hay_byte", :U8, [:Load, "hay_slot"]],
-        [:Set, "needle_slot", [:Offset, "needle_data", "index"]],
-        [:Set, "needle_byte", [:Load, "needle_slot"]],
-        [:If, [:Equal, "hay_byte", "needle_byte"], [], [[:Break]]],
-        [:Set, "index", [:Add, "index", "one"]]
-      ]],
-      [:If, [:Equal, "index", "needle_length"], [
-        [:If, [:Field, "hay", "ascii"], [[:Set, "result", [:Record, "true", "candidate"]], [:Return, "result"]], []],
-        [:Let, "text", [:Pointer, :U8, :Const], [:Freeze, "hay_data"]],
-        [:Let, "scan", [:Record, "Utf8Scan"], [:Call, "utf8_scan", "text", "candidate"]],
-        [:If, [:Field, "scan", "ok"], [], [[:Return, [:Zero]]]],
-        [:Set, "candidate", [:Field, "scan", "scalars"]],
-        [:Set, "result", [:Record, "true", "candidate"]],
-        [:Return, "result"]
-      ], []],
-      [:If, "skip", [
-        [:Set, "byte", [:Add, "candidate", "last"]],
-        [:Set, "hay_slot", [:Offset, "hay_data", "byte"]],
-        [:Set, "hay_byte", [:Load, "hay_slot"]],
-        [:Set, "byte", [:Convert, "hay_byte"]],
-        [:Set, "table_slot", [:ElementPointer, "table_address", "byte"]],
-        [:Set, "step", [:Load, "table_slot"]]
-      ], [[:Set, "step", "one"]]],
-      [:Set, "remaining", [:Subtract, "limit", "candidate"]],
-      [:If, [:Less, "remaining", "step"], [[:Return, [:Zero]]], []],
-      [:Set, "candidate", [:Add, "candidate", "step"]]
-    ]],
-    [:Return, [:Zero]]
+    native/let_call("offset_result", result, "value_string_byte_offset", ["value", "start"]),
+    native/let_field("condition", :Bool, "offset_result", "ok"),
+    native/let_field("candidate", :U64, "offset_result", "number"),
+    native/unless_statement("condition", [native/return_zero()]),
+    native/let_call("checked", [:Record, "HeapStringResult"], "value_as_string", ["needle"]),
+    native/unless_statement(native/field_expression("checked", "ok"), [native/return_zero()]),
+    native/let_field("needle_pointer", [:Pointer, header, :Const], "checked", "header"),
+    native/let_load("pattern", header, "needle_pointer"),
+    native/let_statement("hay_pointer", [:Pointer, header, :Const], native/unary_expression(:UnpackPointer, "value")),
+    native/let_load("hay", header, "hay_pointer"),
+    native/let_field("hay_data", [:Pointer, :U8, :Mutable], "hay", "data"),
+    native/let_field("hay_length", :U64, "hay", "length"),
+    native/let_field("needle_data", [:Pointer, :U8, :Mutable], "pattern", "data"),
+    native/let_field("needle_length", :U64, "pattern", "length"),
+    native/when_statement(native/binary_expression(:Equal, "needle_length", "zero"), [
+      native/let_statement("result", result, native/record_expression(["true", "start"])),
+      native/return_value("result")
+    ]),
+    native/let_statement("remaining", :U64, native/binary_expression(:Subtract, "hay_length", "candidate")),
+    native/when_statement(native/binary_expression(:Less, "remaining", "needle_length"), [native/return_zero()]),
+    native/let_statement("limit", :U64, native/binary_expression(:Subtract, "hay_length", "needle_length")),
+    native/let_statement("last", :U64, native/binary_expression(:Subtract, "needle_length", "one")),
+    native/set_statement("condition", native/binary_expression(:Less, "needle_length", "utf64_4")),
+    native/let_statement("skip", :Bool, "false"),
+    native/let_statement("table", table, native/zero_expression()),
+    native/let_statement("table_address", [:Pointer, table, :Mutable], native/unary_expression(:Address, "table")),
+    native/unless_statement("condition", [
+      native/set_statement("skip", "true"),
+      native/let_statement("index", :U64, "zero"),
+      native/while_statement(native/binary_expression(:Less, "index", "byte_domain"), [
+        native/let_statement(
+          "table_slot",
+          [:Pointer, :U64, :Mutable],
+          native/binary_expression(:ElementPointer, "table_address", "index")
+        ),
+        native/store_statement("table_slot", "needle_length"),
+        native/set_statement("index", native/binary_expression(:Add, "index", "one"))
+      ]),
+      native/set_statement("index", "zero"),
+      native/while_statement(native/binary_expression(:Less, "index", "last"), [
+        native/let_offset("needle_slot", [:Pointer, :U8, :Mutable], "needle_data", "index"),
+        native/let_load("needle_byte", :U8, "needle_slot"),
+        native/let_statement("byte", :U64, native/unary_expression(:Convert, "needle_byte")),
+        native/set_statement("table_slot", native/binary_expression(:ElementPointer, "table_address", "byte")),
+        native/let_statement("step", :U64, native/binary_expression(:Subtract, "last", "index")),
+        native/store_statement("table_slot", "step"),
+        native/set_statement("index", native/binary_expression(:Add, "index", "one"))
+      ])
+    ]),
+    native/note_statement(:Invariant, "A valid UTF-8 needle can match only at a scalar boundary."),
+    native/while_statement("true", [
+      native/set_statement("index", "zero"),
+      native/while_statement(
+        native/binary_expression(:Less, "index", "needle_length"),
+        [
+          native/set_statement("byte", native/binary_expression(:Add, "candidate", "index")),
+          native/let_offset("hay_slot", [:Pointer, :U8, :Mutable], "hay_data", "byte"),
+          native/let_load("hay_byte", :U8, "hay_slot"),
+          native/set_statement("needle_slot", native/offset_expression("needle_data", "index")),
+          native/set_statement("needle_byte", native/load_expression("needle_slot")),
+          native/unless_statement(
+            native/binary_expression(:Equal, "hay_byte", "needle_byte"),
+            [native/break_statement()]
+          ),
+          native/set_statement("index", native/binary_expression(:Add, "index", "one"))
+        ]
+      ),
+      native/when_statement(native/binary_expression(:Equal, "index", "needle_length"), [
+        native/when_statement(native/field_expression("hay", "ascii"), [
+          native/set_statement("result", native/record_expression(["true", "candidate"])),
+          native/return_value("result")
+        ]),
+        native/let_statement("text", [:Pointer, :U8, :Const], native/unary_expression(:Freeze, "hay_data")),
+        native/let_call("scan", [:Record, "Utf8Scan"], "utf8_scan", ["text", "candidate"]),
+        native/unless_statement(native/field_expression("scan", "ok"), [native/return_zero()]),
+        native/set_statement("candidate", native/field_expression("scan", "scalars")),
+        native/set_statement("result", native/record_expression(["true", "candidate"])),
+        native/return_value("result")
+      ]),
+      native/if_statement("skip", [
+        native/set_statement("byte", native/binary_expression(:Add, "candidate", "last")),
+        native/set_statement("hay_slot", native/offset_expression("hay_data", "byte")),
+        native/set_statement("hay_byte", native/load_expression("hay_slot")),
+        native/set_statement("byte", native/unary_expression(:Convert, "hay_byte")),
+        native/set_statement("table_slot", native/binary_expression(:ElementPointer, "table_address", "byte")),
+        native/set_statement("step", native/load_expression("table_slot"))
+      ], [native/set_statement("step", "one")]),
+      native/set_statement("remaining", native/binary_expression(:Subtract, "limit", "candidate")),
+      native/when_statement(native/binary_expression(:Less, "remaining", "step"), [native/return_zero()]),
+      native/set_statement("candidate", native/binary_expression(:Add, "candidate", "step"))
+    ]),
+    native/return_zero()
   ])
   return context
 end

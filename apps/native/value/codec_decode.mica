@@ -18,30 +18,72 @@ verb native_value/codec_decoder(input: map) -> map
   context[:state] = native/record_type(context[:state], "ValueDecodeResult", [["ok", :Bool], ["value", word], ["consumed", :U64]])[1]
   context = native/declare_function(context, "codec_span", span, [["reader", pointer, :Borrow], ["count", :U64, :Value]], [], [:ReadMemory, :WriteMemory], :Borrow, "reader")
   context = native/define_function(context, "codec_span", [
-    [:Let, "header", reader, [:Load, "reader"]], [:Let, "position", :U64, [:Field, "header", "position"]],
-    [:Let, "length", :U64, [:Field, "header", "length"]],
-    [:If, [:Less, [:Expr, :U64, [:Subtract, "length", "position"]], "count"], [[:Return, [:Zero]]], []],
-    [:Let, "data", bytes, [:Field, "header", "data"]],
-    [:If, [:Equal, "count", "zero"], [[:Return, [:Record, "true", "data"]]], []],
-    [:Let, "start", bytes, [:Offset, "data", "position"]],
-    [:Do, [:Store, [:Expr, [:Pointer, :U64, :Mutable], [:FieldPointer, "reader", "position"]], [:Expr, :U64, [:Add, "position", "count"]]]],
-    [:Return, [:Record, "true", "start"]]])
+    native/let_load("header", reader, "reader"),
+    native/let_field("position", :U64, "header", "position"),
+    native/let_field("length", :U64, "header", "length"),
+    native/when_statement(
+      native/binary_expression(
+        :Less,
+        native/typed_expression(:U64, native/binary_expression(:Subtract, "length", "position")),
+        "count"
+      ),
+      [native/return_zero()]
+    ),
+    native/let_field("data", bytes, "header", "data"),
+    native/when_statement(native/binary_expression(:Equal, "count", "zero"), [native/return_record(["true", "data"])]),
+    native/let_offset("start", bytes, "data", "position"),
+    native/store_statement(
+      native/typed_expression([:Pointer, :U64, :Mutable], native/field_pointer_expression("reader", "position")),
+      native/typed_expression(:U64, native/binary_expression(:Add, "position", "count"))
+    ),
+    native/return_record(["true", "start"])
+  ])
   context = native/declare_function(context, "codec_word", [:Record, "IdResult"], [["reader", pointer, :Borrow]], [], [:ReadMemory, :WriteMemory], :Value, "")
   context = native/define_function(context, "codec_word", [
-    [:Let, "span", span, [:Call, "codec_span", "reader", "word_bytes"]],
-    [:If, [:Field, "span", "ok"], [], [[:Return, [:Zero]]]],
-    [:Let, "data", bytes, [:Field, "span", "data"]], [:Let, "number", :U64, "zero"], [:Let, "i", :U64, "zero"],
-    [:While, [:Less, "i", "word_bytes"], [
-      [:Let, "byte", :U8, [:Load, [:Expr, bytes, [:Offset, "data", "i"]]]],
-      [:Let, "shift", :U64, [:Multiply, "i", "word_bytes"]],
-      [:Let, "part", :U64, [:ShiftLeft, [:Expr, :U64, [:Convert, "byte"]], "shift"]],
-      [:Set, "number", [:BitOr, "number", "part"]], [:Set, "i", [:Add, "i", "one"]]]],
-    [:Return, [:Record, "true", "number"]]])
+    native/let_call("span", span, "codec_span", ["reader", "word_bytes"]),
+    native/unless_statement(native/field_expression("span", "ok"), [native/return_zero()]),
+    native/let_field("data", bytes, "span", "data"),
+    native/let_statement("number", :U64, "zero"),
+    native/let_statement("i", :U64, "zero"),
+    native/while_statement(native/binary_expression(:Less, "i", "word_bytes"), [
+      native/let_load("byte", :U8, native/typed_expression(bytes, native/offset_expression("data", "i"))),
+      native/let_statement("shift", :U64, native/binary_expression(:Multiply, "i", "word_bytes")),
+      native/let_statement(
+        "part",
+        :U64,
+        native/binary_expression(
+          :ShiftLeft,
+          native/typed_expression(:U64, native/unary_expression(:Convert, "byte")),
+          "shift"
+        )
+      ),
+      native/set_statement("number", native/binary_expression(:BitOr, "number", "part")),
+      native/set_statement("i", native/binary_expression(:Add, "i", "one"))
+    ]),
+    native/return_record(["true", "number"])
+  ])
   context = native/declare_function(context, "codec_count", :Bool, [["reader", pointer, :Borrow], ["count", :U64, :Value], ["width", :U64, :Value]], [], [:ReadMemory], :Value, "")
   context = native/define_function(context, "codec_count", [
-    [:Let, "header", reader, [:Load, "reader"]],
-    [:Let, "remaining", :U64, [:Subtract, [:Expr, :U64, [:Field, "header", "length"]], [:Expr, :U64, [:Field, "header", "position"]]]],
-    [:If, [:Less, [:Expr, :U64, [:Divide, "remaining", "width"]], "count"], [[:Return, "false"]], []], [:Return, "true"]])
+    native/let_load("header", reader, "reader"),
+    native/let_statement(
+      "remaining",
+      :U64,
+      native/binary_expression(
+        :Subtract,
+        native/typed_field(:U64, "header", "length"),
+        native/typed_field(:U64, "header", "position")
+      )
+    ),
+    native/when_statement(
+      native/binary_expression(
+        :Less,
+        native/typed_expression(:U64, native/binary_expression(:Divide, "remaining", "width")),
+        "count"
+      ),
+      [native/return_value("false")]
+    ),
+    native/return_value("true")
+  ])
   context = native/declare_function(context, "codec_decode", result, [arena, table, ["reader", pointer, :Borrow], options], [],
     [:Allocate, :ReadMemory, :WriteMemory, :Block], :Borrow, "arena")
   context = native_value/decode_relation(context)
@@ -49,37 +91,68 @@ verb native_value/codec_decoder(input: map) -> map
   let parameters: list = [arena, table, ["data", bytes, :Borrow], ["length", :U64, :Value], options]
   context = native/declare_function(context, "value_decode", decoded, parameters, [], [:Allocate, :ReadMemory, :WriteMemory, :Block], :Borrow, "arena")
   context = native/define_function(context, "value_decode", [
-    [:If, [:Equal, "data", [:Expr, bytes, [:Zero]]], [[:If, [:Less, "zero", "length"], [[:Return, [:Zero]]], []]], []],
-    [:Let, "cursor", reader, [:Record, "data", "length", "zero"]],
-    [:Let, "reader", pointer, [:Address, "cursor"]],
-    [:Let, "result", result, [:Call, "codec_decode", "arena", "table", "reader", "options"]],
-    [:If, [:Field, "result", "ok"], [], [[:Return, [:Zero]]]],
-    [:Let, "position", :U64, [:Load, [:Expr, [:Pointer, :U64, :Mutable], [:FieldPointer, "reader", "position"]]]],
-    [:Return, [:Record, "true", [:Expr, word, [:Field, "result", "value"]], "position"]]])
+    native/when_statement(
+      native/binary_expression(:Equal, "data", native/typed_zero(bytes)),
+      [native/when_statement(native/binary_expression(:Less, "zero", "length"), [native/return_zero()])]
+    ),
+    native/let_statement("cursor", reader, native/record_expression(["data", "length", "zero"])),
+    native/let_statement("reader", pointer, native/unary_expression(:Address, "cursor")),
+    native/let_call("result", result, "codec_decode", ["arena", "table", "reader", "options"]),
+    native/unless_statement(native/field_expression("result", "ok"), [native/return_zero()]),
+    native/let_load(
+      "position",
+      :U64,
+      native/typed_expression([:Pointer, :U64, :Mutable], native/field_pointer_expression("reader", "position"))
+    ),
+    native/return_record(["true", native/typed_field(word, "result", "value"), "position"])
+  ])
   context = native/declare_function(context, "value_decode_exact", result, parameters, [], [:Allocate, :ReadMemory, :WriteMemory, :Block], :Borrow, "arena")
   context = native/define_function(context, "value_decode_exact", [
-    [:Let, "result", decoded, [:Call, "value_decode", "arena", "table", "data", "length", "options"]],
-    [:If, [:Field, "result", "ok"], [], [[:Return, [:Zero]]]],
-    [:If, [:Equal, [:Expr, :U64, [:Field, "result", "consumed"]], "length"], [], [[:Return, [:Zero]]]],
-    [:Return, [:Record, "true", [:Expr, word, [:Field, "result", "value"]]]]])
+    native/let_call("result", decoded, "value_decode", ["arena", "table", "data", "length", "options"]),
+    native/unless_statement(native/field_expression("result", "ok"), [native/return_zero()]),
+    native/unless_statement(
+      native/binary_expression(:Equal, native/typed_field(:U64, "result", "consumed"), "length"),
+      [native/return_zero()]
+    ),
+    native/return_record(["true", native/typed_field(word, "result", "value")])
+  ])
   return context
 end
 
 verb native_value/decode_child(name: string) -> list
   let checked: string = string_concat(name, "_checked")
-  return [[:Let, checked, [:Record, "ValueResult"], [:Call, "codec_decode", "arena", "table", "reader", "options"]],
-    [:If, [:Field, checked, "ok"], [], [[:Return, [:Zero]]]],
-    [:Let, name, native_value/word(), [:Field, checked, "value"]]]
+  return [
+    native/let_call(checked, [:Record, "ValueResult"], "codec_decode", ["arena", "table", "reader", "options"]),
+    native/unless_statement(native/field_expression(checked, "ok"), [native/return_zero()]),
+    native/let_field(name, native_value/word(), checked, "value")
+  ]
 end
 
 verb native_value/decode_allocation(name: string, element, count: string) -> list
   let size: string = string_concat(name, "_size")
   let raw: string = string_concat(name, "_raw")
-  return [[:Let, size, :U64, [:SizeOf, element]],
-    [:If, [:Less, [:Expr, :U64, [:Divide, "allocation_limit", size]], count], [[:Return, [:Zero]]], []],
-    [:Let, raw, [:Pointer, :U8, :Mutable], [:Call, "value_arena_allocate", "arena", [:Expr, :U64, [:Multiply, size, count]]]],
-    [:If, [:Less, "zero", count], [[:If, [:Equal, raw, "null_bytes"], [[:Return, [:Zero]]], []]], []],
-    [:Let, name, [:Pointer, element, :Mutable], [:PointerCast, raw]]]
+  return [
+    native/let_statement(size, :U64, native/unary_expression(:SizeOf, element)),
+    native/when_statement(
+      native/binary_expression(
+        :Less,
+        native/typed_expression(:U64, native/binary_expression(:Divide, "allocation_limit", size)),
+        count
+      ),
+      [native/return_zero()]
+    ),
+    native/let_call(
+      raw,
+      [:Pointer, :U8, :Mutable],
+      "value_arena_allocate",
+      ["arena", native/typed_expression(:U64, native/binary_expression(:Multiply, size, count))]
+    ),
+    native/when_statement(
+      native/binary_expression(:Less, "zero", count),
+      [native/when_statement(native/binary_expression(:Equal, raw, "null_bytes"), [native/return_zero()])]
+    ),
+    native/let_statement(name, [:Pointer, element, :Mutable], native/unary_expression(:PointerCast, raw))
+  ]
 end
 
 verb native_value/decode_value(input: map) -> map
@@ -87,51 +160,151 @@ verb native_value/decode_value(input: map) -> map
   let word: list = native_value/word()
   let bytes: list = [:Pointer, :U8, :Const]
   let rows: list = [
-    [:Let, "checked_word", [:Record, "IdResult"], [:Call, "codec_word", "reader"]],
-    [:If, [:Field, "checked_word", "ok"], [], [[:Return, [:Zero]]]],
-    [:Let, "number", :U64, [:Field, "checked_word", "number"]],
-    [:Let, "tag", :U8, [:Convert, [:Expr, :U64, [:ShiftRight, "number", "codec_tag_shift"]]]],
-    [:Let, "payload", :U64, [:BitAnd, "number", "payload_mask"]],
-    [:If, [:Equal, "tag", "zero_tag"], [
-      [:If, [:Equal, "payload", "zero"], [[:Return, [:Record, "true", [:Expr, word, [:Zero]]]]], [[:Return, [:Zero]]]]], []],
-    [:If, [:Equal, "tag", "tag_bool"], [
-      [:If, [:Less, "one", "payload"], [[:Return, [:Zero]]], []],
-      [:Return, [:Record, "true", [:Expr, word, [:PackImmediate, "payload", "tag_bool"]]]]], []],
-    [:If, [:Equal, "tag", "tag_int"], [[:Return, [:Record, "true", [:Expr, word, [:PackImmediate, "payload", "tag_int"]]]]], []],
-    [:If, [:Equal, "tag", "tag_float"], [
-      [:If, [:Less, "codec_u32_max", "payload"], [[:Return, [:Zero]]], []],
-      [:Return, [:Call, "value_float_from_bits", [:Expr, :U32, [:Convert, "payload"]]]]], []],
-    [:If, [:Equal, "tag", "tag_identity"], [[:Return, [:Call, "value_identity", "payload"]]], []],
-    [:If, [:Equal, "tag", "tag_capability"], [
-      [:If, [:Field, "options", "allow_capabilities"], [[:Return, [:Call, "value_capability", "payload"]]], [[:Return, [:Zero]]]]], []]]
+    native/let_call("checked_word", [:Record, "IdResult"], "codec_word", ["reader"]),
+    native/unless_statement(native/field_expression("checked_word", "ok"), [native/return_zero()]),
+    native/let_field("number", :U64, "checked_word", "number"),
+    native/let_statement(
+      "tag",
+      :U8,
+      native/unary_expression(
+        :Convert,
+        native/typed_expression(:U64, native/binary_expression(:ShiftRight, "number", "codec_tag_shift"))
+      )
+    ),
+    native/let_statement("payload", :U64, native/binary_expression(:BitAnd, "number", "payload_mask")),
+    native/when_statement(
+      native/binary_expression(:Equal, "tag", "zero_tag"),
+      [
+        native/if_statement(
+          native/binary_expression(:Equal, "payload", "zero"),
+          [native/return_record(["true", native/typed_zero(word)])],
+          [native/return_zero()]
+        )
+      ]
+    ),
+    native/when_statement(native/binary_expression(:Equal, "tag", "tag_bool"), [
+      native/when_statement(native/binary_expression(:Less, "one", "payload"), [native/return_zero()]),
+      native/return_record(
+        ["true", native/typed_expression(word, native/binary_expression(:PackImmediate, "payload", "tag_bool"))]
+      )
+    ]),
+    native/when_statement(
+      native/binary_expression(:Equal, "tag", "tag_int"),
+      [
+        native/return_record(
+          ["true", native/typed_expression(word, native/binary_expression(:PackImmediate, "payload", "tag_int"))]
+        )
+      ]
+    ),
+    native/when_statement(native/binary_expression(:Equal, "tag", "tag_float"), [
+      native/when_statement(native/binary_expression(:Less, "codec_u32_max", "payload"), [native/return_zero()]),
+      native/return_value(
+        native/call_expression(
+          "value_float_from_bits",
+          [native/typed_expression(:U32, native/unary_expression(:Convert, "payload"))]
+        )
+      )
+    ]),
+    native/when_statement(
+      native/binary_expression(:Equal, "tag", "tag_identity"),
+      [native/return_value(native/call_expression("value_identity", ["payload"]))]
+    ),
+    native/when_statement(
+      native/binary_expression(:Equal, "tag", "tag_capability"),
+      [
+        native/if_statement(
+          native/field_expression("options", "allow_capabilities"),
+          [native/return_value(native/call_expression("value_capability", ["payload"]))],
+          [native/return_zero()]
+        )
+      ]
+    )
+  ]
   for name in ["symbol", "error_code"]
-    rows = [@rows, [:If, [:Equal, "tag", string_concat("tag_", name)], [
-      [:If, [:Field, "options", "symbol_ids"], [], [[:Return, [:Zero]]]],
-      [:If, [:Less, "codec_u32_max", "payload"], [[:Return, [:Zero]]], []],
-      [:Return, [:Call, string_concat("value_", name), [:Expr, :U32, [:Convert, "payload"]]]]], []]]
+    rows = [
+      @rows,
+      native/when_statement(native/binary_expression(:Equal, "tag", string_concat("tag_", name)), [
+        native/unless_statement(native/field_expression("options", "symbol_ids"), [native/return_zero()]),
+        native/when_statement(native/binary_expression(:Less, "codec_u32_max", "payload"), [native/return_zero()]),
+        native/return_value(
+          native/call_expression(
+            string_concat("value_", name),
+            [native/typed_expression(:U32, native/unary_expression(:Convert, "payload"))]
+          )
+        )
+      ])
+    ]
   end
-  rows = [@rows,
-    [:If, [:Equal, [:Expr, :U64, [:Convert, "tag"]], "codec_byte_mask"], [], [[:Return, [:Zero]]]],
-    [:Let, "kind", :U8, [:Convert, [:Expr, :U64, [:ShiftRight, "number", "codec_kind_shift"]]]],
-    [:Let, "aux", :U64, [:BitAnd, "number", "codec_aux_mask"]]]
+  rows = [
+    @rows,
+    native/unless_statement(
+      native/binary_expression(
+        :Equal,
+        native/typed_expression(:U64, native/unary_expression(:Convert, "tag")),
+        "codec_byte_mask"
+      ),
+      [native/return_zero()]
+    ),
+    native/let_statement(
+      "kind",
+      :U8,
+      native/unary_expression(
+        :Convert,
+        native/typed_expression(:U64, native/binary_expression(:ShiftRight, "number", "codec_kind_shift"))
+      )
+    ),
+    native/let_statement("aux", :U64, native/binary_expression(:BitAnd, "number", "codec_aux_mask"))
+  ]
   for name in ["string", "bytes", "symbol", "error_code"]
     let span: string = string_concat(name, "_span")
     let body: list = []
     if name == "symbol" || name == "error_code"
-      body = [[:If, [:Field, "options", "symbol_ids"], [[:Return, [:Zero]]], []],
-        [:If, [:Equal, "table", [:Expr, [:Pointer, [:Record, "SymbolTable"], :Mutable], [:Zero]]], [[:Return, [:Zero]]], []]]
+      body = [
+        native/when_statement(native/field_expression("options", "symbol_ids"), [native/return_zero()]),
+        native/when_statement(
+          native/binary_expression(:Equal, "table", native/typed_zero([:Pointer, [:Record, "SymbolTable"], :Mutable])),
+          [native/return_zero()]
+        )
+      ]
     end
-    body = [@body, [:Let, span, [:Record, "CodecSpan"], [:Call, "codec_span", "reader", "aux"]],
-      [:If, [:Field, span, "ok"], [], [[:Return, [:Zero]]]]]
+    body = [
+      @body,
+      native/let_call(span, [:Record, "CodecSpan"], "codec_span", ["reader", "aux"]),
+      native/unless_statement(native/field_expression(span, "ok"), [native/return_zero()])
+    ]
     if name == "symbol" || name == "error_code"
       let id: string = string_concat(name, "_id")
-      body = [@body, [:Let, id, [:Record, "IdResult"], [:Call, "value_symbol_intern", "table", [:Expr, bytes, [:Field, span, "data"]], "aux"]],
-        [:If, [:Field, id, "ok"], [], [[:Return, [:Zero]]]],
-        [:Return, [:Call, string_concat("value_", name), [:Expr, :U32, [:Convert, [:Expr, :U64, [:Field, id, "number"]]]]]]]
+      body = [
+        @body,
+        native/let_call(
+          id,
+          [:Record, "IdResult"],
+          "value_symbol_intern",
+          ["table", native/typed_field(bytes, span, "data"), "aux"]
+        ),
+        native/unless_statement(native/field_expression(id, "ok"), [native/return_zero()]),
+        native/return_value(
+          native/call_expression(
+            string_concat("value_", name),
+            [native/typed_expression(:U32, native/unary_expression(:Convert, native/typed_field(:U64, id, "number")))]
+          )
+        )
+      ]
     else
-      body = [@body, [:Return, [:Call, string_concat("value_", name), "arena", [:Expr, bytes, [:Field, span, "data"]], "aux"]]]
+      body = [
+        @body,
+        native/return_value(
+          native/call_expression(
+            string_concat("value_", name),
+            ["arena", native/typed_field(bytes, span, "data"), "aux"]
+          )
+        )
+      ]
     end
-    rows = [@rows, [:If, [:Equal, "kind", string_concat("tag_", name)], body, []]]
+    rows = [
+      @rows,
+      native/when_statement(native/binary_expression(:Equal, "kind", string_concat("tag_", name)), body)
+    ]
   end
   for spec in [["list", word], ["map", [:Record, "ValueMapEntry"]]]
     let name: string = spec[0]
@@ -141,45 +314,153 @@ verb native_value/decode_value(input: map) -> map
     let children: list = native_value/decode_child(element)
     let width: string = "word_bytes"
     if name == "map"
-      children = [@native_value/decode_child("map_key"), @native_value/decode_child("map_value"),
-        [:Let, element, spec[1], [:Record, "map_key", "map_value"]]]
+      children = [
+        @native_value/decode_child("map_key"),
+        @native_value/decode_child("map_value"),
+        native/let_statement(element, spec[1], native/record_expression(["map_key", "map_value"]))
+      ]
     end
-    rows = [@rows, [:If, [:Equal, "kind", string_concat("tag_", name)], [
-      [:If, [:Call, "codec_count", "reader", "aux", width], [], [[:Return, [:Zero]]]],
-      @native_value/decode_allocation(data, spec[1], "aux"),
-      [:Let, index, :U64, "zero"], [:While, [:Less, index, "aux"], [
-        @children, [:Do, [:Store, [:Expr, [:Pointer, spec[1], :Mutable], [:Offset, data, index]], element]],
-        [:Set, index, [:Add, index, "one"]]]],
-      [:Return, [:Call, string_concat("value_", name), "arena", [:Expr, [:Pointer, spec[1], :Const], [:Freeze, data]], "aux"]]], []]]
+    rows = [
+      @rows,
+      native/when_statement(
+        native/binary_expression(:Equal, "kind", string_concat("tag_", name)),
+        [
+          native/unless_statement(
+            native/call_expression("codec_count", ["reader", "aux", width]),
+            [native/return_zero()]
+          ),
+          @native_value/decode_allocation(data, spec[1], "aux"),
+          native/let_statement(index, :U64, "zero"),
+          native/while_statement(native/binary_expression(:Less, index, "aux"), [
+            @children,
+            native/store_statement(
+              native/typed_expression([:Pointer, spec[1], :Mutable], native/offset_expression(data, index)),
+              element
+            ),
+            native/set_statement(index, native/binary_expression(:Add, index, "one"))
+          ]),
+          native/return_value(
+            native/call_expression(
+              string_concat("value_", name),
+              [
+                "arena",
+                native/typed_expression([:Pointer, spec[1], :Const], native/unary_expression(:Freeze, data)),
+                "aux"
+              ]
+            )
+          )
+        ]
+      )
+    ]
   end
-  rows = [@rows, [:If, [:Equal, "kind", "tag_range"], [
-    [:If, [:Less, "one", "aux"], [[:Return, [:Zero]]], []], @native_value/decode_child("range_start"),
-    [:Let, "has_end", :Bool, [:Equal, "aux", "one"]], [:Let, "range_end", word, [:Zero]],
-    [:If, "has_end", [@native_value/decode_child("end_value"), [:Set, "range_end", "end_value"]], []],
-    [:Return, [:Call, "value_range", "arena", "range_start", "has_end", "range_end"]]], []],
-    [:If, [:Equal, "kind", "tag_error"], [
-      [:If, [:Less, "codec_error_flags", "aux"], [[:Return, [:Zero]]], []], @native_value/decode_child("error_code"),
-      [:If, [:Equal, [:Expr, :U8, [:Tag, "error_code"]], "tag_error_code"], [], [[:Return, [:Zero]]]],
-      [:Let, "has_message", :Bool, [:Equal, [:Expr, :U64, [:BitAnd, "aux", "one"]], "one"]],
-      [:Let, "has_value", :Bool, [:Equal, [:Expr, :U64, [:BitAnd, "aux", "two"]], "two"]],
-      [:Let, "message", word, [:Zero]], [:Let, "error_value", word, [:Zero]],
-      [:If, "has_message", [
-        [:Let, "message_length", [:Record, "IdResult"], [:Call, "codec_word", "reader"]],
-        [:If, [:Field, "message_length", "ok"], [], [[:Return, [:Zero]]]],
-        [:Let, "length", :U64, [:Field, "message_length", "number"]],
-        [:Let, "message_span", [:Record, "CodecSpan"], [:Call, "codec_span", "reader", "length"]],
-        [:If, [:Field, "message_span", "ok"], [], [[:Return, [:Zero]]]],
-        [:Let, "checked_message", [:Record, "ValueResult"], [:Call, "value_string", "arena", [:Expr, bytes, [:Field, "message_span", "data"]], "length"]],
-        [:If, [:Field, "checked_message", "ok"], [], [[:Return, [:Zero]]]], [:Set, "message", [:Field, "checked_message", "value"]]], []],
-      [:If, "has_value", [@native_value/decode_child("error_payload"), [:Set, "error_value", "error_payload"]], []],
-      [:Return, [:Call, "value_error", "arena", [:Expr, :U32, [:Convert, [:Expr, :U64, [:Payload, "error_code"]]]], "has_message", "message", "has_value", "error_value"]]], []],
-    [:If, [:Equal, "kind", "tag_frob"], [
-      [:If, [:Equal, "aux", "zero"], [], [[:Return, [:Zero]]]], @native_value/decode_child("delegate"),
-      [:If, [:Equal, [:Expr, :U8, [:Tag, "delegate"]], "tag_identity"], [], [[:Return, [:Zero]]]],
+  rows = [
+    @rows,
+    native/when_statement(native/binary_expression(:Equal, "kind", "tag_range"), [
+      native/when_statement(native/binary_expression(:Less, "one", "aux"), [native/return_zero()]),
+      @native_value/decode_child("range_start"),
+      native/let_statement("has_end", :Bool, native/binary_expression(:Equal, "aux", "one")),
+      native/let_statement("range_end", word, native/zero_expression()),
+      native/when_statement("has_end", [
+        @native_value/decode_child("end_value"),
+        native/set_statement("range_end", "end_value")
+      ]),
+      native/return_value(native/call_expression("value_range", ["arena", "range_start", "has_end", "range_end"]))
+    ]),
+    native/when_statement(native/binary_expression(:Equal, "kind", "tag_error"), [
+      native/when_statement(native/binary_expression(:Less, "codec_error_flags", "aux"), [native/return_zero()]),
+      @native_value/decode_child("error_code"),
+      native/unless_statement(
+        native/binary_expression(
+          :Equal,
+          native/typed_expression(:U8, native/unary_expression(:Tag, "error_code")),
+          "tag_error_code"
+        ),
+        [native/return_zero()]
+      ),
+      native/let_statement(
+        "has_message",
+        :Bool,
+        native/binary_expression(
+          :Equal,
+          native/typed_expression(:U64, native/binary_expression(:BitAnd, "aux", "one")),
+          "one"
+        )
+      ),
+      native/let_statement(
+        "has_value",
+        :Bool,
+        native/binary_expression(
+          :Equal,
+          native/typed_expression(:U64, native/binary_expression(:BitAnd, "aux", "two")),
+          "two"
+        )
+      ),
+      native/let_statement("message", word, native/zero_expression()),
+      native/let_statement("error_value", word, native/zero_expression()),
+      native/when_statement("has_message", [
+        native/let_call("message_length", [:Record, "IdResult"], "codec_word", ["reader"]),
+        native/unless_statement(native/field_expression("message_length", "ok"), [native/return_zero()]),
+        native/let_field("length", :U64, "message_length", "number"),
+        native/let_call("message_span", [:Record, "CodecSpan"], "codec_span", ["reader", "length"]),
+        native/unless_statement(native/field_expression("message_span", "ok"), [native/return_zero()]),
+        native/let_call(
+          "checked_message",
+          [:Record, "ValueResult"],
+          "value_string",
+          ["arena", native/typed_field(bytes, "message_span", "data"), "length"]
+        ),
+        native/unless_statement(native/field_expression("checked_message", "ok"), [native/return_zero()]),
+        native/set_statement("message", native/field_expression("checked_message", "value"))
+      ]),
+      native/when_statement("has_value", [
+        @native_value/decode_child("error_payload"),
+        native/set_statement("error_value", "error_payload")
+      ]),
+      native/return_value(
+        native/call_expression(
+          "value_error",
+          [
+            "arena",
+            native/typed_expression(
+              :U32,
+              native/unary_expression(
+                :Convert,
+                native/typed_expression(:U64, native/unary_expression(:Payload, "error_code"))
+              )
+            ),
+            "has_message",
+            "message",
+            "has_value",
+            "error_value"
+          ]
+        )
+      )
+    ]),
+    native/when_statement(native/binary_expression(:Equal, "kind", "tag_frob"), [
+      native/unless_statement(native/binary_expression(:Equal, "aux", "zero"), [native/return_zero()]),
+      @native_value/decode_child("delegate"),
+      native/unless_statement(
+        native/binary_expression(
+          :Equal,
+          native/typed_expression(:U8, native/unary_expression(:Tag, "delegate")),
+          "tag_identity"
+        ),
+        [native/return_zero()]
+      ),
       @native_value/decode_child("frob_value"),
-      [:Return, [:Call, "value_frob", "arena", [:Expr, :U64, [:Payload, "delegate"]], "frob_value"]]], []],
-    [:If, [:Equal, "kind", "tag_relation"], [[:Return, [:Call, "codec_relation", "arena", "table", "reader", "options", "aux"]]], []],
-    [:Return, [:Zero]]]
+      native/return_value(
+        native/call_expression(
+          "value_frob",
+          ["arena", native/typed_expression(:U64, native/unary_expression(:Payload, "delegate")), "frob_value"]
+        )
+      )
+    ]),
+    native/when_statement(
+      native/binary_expression(:Equal, "kind", "tag_relation"),
+      [native/return_value(native/call_expression("codec_relation", ["arena", "table", "reader", "options", "aux"]))]
+    ),
+    native/return_zero()
+  ]
   context = native/define_function(context, "codec_decode", rows)
   return context
 end
@@ -195,29 +476,78 @@ verb native_value/decode_relation(input: map) -> map
     ["options", [:Record, "ValueCodecOptions"], :Value], ["arity", :U64, :Value]], [],
     [:Allocate, :ReadMemory, :WriteMemory, :Block], :Borrow, "arena")
   context = native/define_function(context, "codec_relation", [
-    [:If, [:Less, "relation_max_arity", "arity"], [[:Return, [:Zero]]], []],
-    [:If, [:Call, "codec_count", "reader", "arity", "word_bytes"], [], [[:Return, [:Zero]]]],
+    native/when_statement(native/binary_expression(:Less, "relation_max_arity", "arity"), [native/return_zero()]),
+    native/unless_statement(
+      native/call_expression("codec_count", ["reader", "arity", "word_bytes"]),
+      [native/return_zero()]
+    ),
     @native_value/decode_allocation("heading", :U32, "arity"),
-    [:Let, "column", :U64, "zero"], [:While, [:Less, "column", "arity"], [
+    native/let_statement("column", :U64, "zero"),
+    native/while_statement(native/binary_expression(:Less, "column", "arity"), [
       @native_value/decode_child("heading_value"),
-      [:If, [:Equal, [:Expr, :U8, [:Tag, "heading_value"]], "tag_symbol"], [], [[:Return, [:Zero]]]],
-      [:Do, [:Store, [:Expr, [:Pointer, :U32, :Mutable], [:Offset, "heading", "column"]], [:Expr, :U32, [:Convert, [:Expr, :U64, [:Payload, "heading_value"]]]]]],
-      [:Set, "column", [:Add, "column", "one"]]]],
-    [:Let, "checked_length", [:Record, "IdResult"], [:Call, "codec_word", "reader"]],
-    [:If, [:Field, "checked_length", "ok"], [], [[:Return, [:Zero]]]],
-    [:Let, "length", :U64, [:Field, "checked_length", "number"]],
-    [:If, [:Equal, "arity", "zero"], [[:If, [:Less, "one", "length"], [[:Return, [:Zero]]], []]], [
-      [:Let, "row_bytes", :U64, [:Multiply, "arity", "word_bytes"]],
-      [:If, [:Call, "codec_count", "reader", "length", "row_bytes"], [], [[:Return, [:Zero]]]]]],
+      native/unless_statement(
+        native/binary_expression(
+          :Equal,
+          native/typed_expression(:U8, native/unary_expression(:Tag, "heading_value")),
+          "tag_symbol"
+        ),
+        [native/return_zero()]
+      ),
+      native/store_statement(
+        native/typed_expression([:Pointer, :U32, :Mutable], native/offset_expression("heading", "column")),
+        native/typed_expression(
+          :U32,
+          native/unary_expression(
+            :Convert,
+            native/typed_expression(:U64, native/unary_expression(:Payload, "heading_value"))
+          )
+        )
+      ),
+      native/set_statement("column", native/binary_expression(:Add, "column", "one"))
+    ]),
+    native/let_call("checked_length", [:Record, "IdResult"], "codec_word", ["reader"]),
+    native/unless_statement(native/field_expression("checked_length", "ok"), [native/return_zero()]),
+    native/let_field("length", :U64, "checked_length", "number"),
+    native/if_statement(native/binary_expression(:Equal, "arity", "zero"), [
+      native/when_statement(native/binary_expression(:Less, "one", "length"), [native/return_zero()])
+    ], [
+      native/let_statement("row_bytes", :U64, native/binary_expression(:Multiply, "arity", "word_bytes")),
+      native/unless_statement(
+        native/call_expression("codec_count", ["reader", "length", "row_bytes"]),
+        [native/return_zero()]
+      )
+    ]),
     @native_value/decode_allocation("rows", tuple, "length"),
-    [:Let, "row", :U64, "zero"], [:While, [:Less, "row", "length"], [
+    native/let_statement("row", :U64, "zero"),
+    native/while_statement(native/binary_expression(:Less, "row", "length"), [
       @native_value/decode_allocation("cells", word, "arity"),
-      [:Set, "column", "zero"], [:While, [:Less, "column", "arity"], [
+      native/set_statement("column", "zero"),
+      native/while_statement(native/binary_expression(:Less, "column", "arity"), [
         @native_value/decode_child("cell"),
-        [:Do, [:Store, [:Expr, [:Pointer, word, :Mutable], [:Offset, "cells", "column"]], "cell"]],
-        [:Set, "column", [:Add, "column", "one"]]]],
-      [:Do, [:Store, [:Expr, [:Pointer, tuple, :Mutable], [:Offset, "rows", "row"]], [:Expr, tuple, [:Record, "cells", "arity"]]]],
-      [:Set, "row", [:Add, "row", "one"]]]],
-    [:Return, [:Call, "value_relation", "arena", [:Expr, [:Pointer, :U32, :Const], [:Freeze, "heading"]], "arity", [:Expr, [:Pointer, tuple, :Const], [:Freeze, "rows"]], "length"]]])
+        native/store_statement(
+          native/typed_expression([:Pointer, word, :Mutable], native/offset_expression("cells", "column")),
+          "cell"
+        ),
+        native/set_statement("column", native/binary_expression(:Add, "column", "one"))
+      ]),
+      native/store_statement(
+        native/typed_expression([:Pointer, tuple, :Mutable], native/offset_expression("rows", "row")),
+        native/typed_record(tuple, ["cells", "arity"])
+      ),
+      native/set_statement("row", native/binary_expression(:Add, "row", "one"))
+    ]),
+    native/return_value(
+      native/call_expression(
+        "value_relation",
+        [
+          "arena",
+          native/typed_expression([:Pointer, :U32, :Const], native/unary_expression(:Freeze, "heading")),
+          "arity",
+          native/typed_expression([:Pointer, tuple, :Const], native/unary_expression(:Freeze, "rows")),
+          "length"
+        ]
+      )
+    )
+  ])
   return context
 end

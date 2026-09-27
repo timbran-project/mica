@@ -28,48 +28,84 @@ verb native_value/arena(input: map) -> map
   context[:state] = native/foreign(context[:state], context[:functions]["release"])
   context = native/declare_function(context, "value_arena_allocate", bytes, [["arena", arena_ptr, :Borrow], ["size", :U64, :Value]],
     [["adopted", block_ptr]], [:ReadMemory, :WriteMemory, :Allocate], :Borrow, "arena")
-  let failure: list = [[:Return, "null_bytes"]]
-  context = native/define_function(context, "value_arena_allocate", [
-    [:Note, :Invariant, "Arena allocations remain stable and are aligned to eight bytes."],
-    [:If, [:Equal, "size", "zero"], failure, []],
-    [:If, [:Less, "allocation_limit", "size"], failure, []],
-    [:Let, "header_size", :U64, [:SizeOf, block]],
-    [:Let, "head_slot", [:Pointer, block_ptr, :Mutable], [:FieldPointer, "arena", "head"]],
-    [:Let, "head", block_ptr, [:Load, "head_slot"]],
-    [:Let, "aligned", :U64, "zero"], [:Let, "fits", :Bool, "false"],
-    [:If, [:Equal, "head", "null_block"], [], [
-      [:Let, "existing", block, [:Load, "head"]],
-      [:Let, "used", :U64, [:Field, "existing", "used"]],
-      [:Let, "available", :U64, [:Field, "existing", "capacity"]],
-      [:Set, "aligned", [:Add, "used", "alignment_slack"]],
-      [:Set, "aligned", [:BitAnd, "aligned", "alignment_mask"]],
-      [:If, [:Less, "available", "aligned"], [], [
-        [:Let, "remaining", :U64, [:Subtract, "available", "aligned"]],
-        [:If, [:Less, "remaining", "size"], [], [[:Set, "fits", "true"]]]]]]],
-    [:If, "fits", [[:Set, "adopted", "head"]], [
-      [:Let, "capacity", :U64, "size"],
-      [:If, [:Less, "size", "chunk_size"], [[:Set, "capacity", "chunk_size"]], []],
-      [:Let, "total", :U64, [:Add, "capacity", "header_size"]],
-      [:Let, "owned_bytes", bytes, [:Call, "allocate", "total"]],
-      [:If, [:Equal, "owned_bytes", "null_bytes"], failure, []],
-      [:Let, "owned_block", block_ptr, [:PointerCast, "owned_bytes"]],
-      [:Set, "adopted", [:Adopt, "head_slot", "owned_block"]],
-      [:Let, "header", block, [:Record, "head", "zero", "capacity"]],
-      [:Do, [:Store, "adopted", "header"]], [:Set, "aligned", "zero"]]],
-    [:Let, "base", bytes, [:PointerCast, "adopted"]],
-    [:Let, "data", bytes, [:Offset, "base", "header_size"]],
-    [:Let, "next_used", :U64, [:Add, "aligned", "size"]],
-    [:Let, "used_slot", [:Pointer, :U64, :Mutable], [:FieldPointer, "adopted", "used"]],
-    [:Do, [:Store, "used_slot", "next_used"]], [:Return, [:Offset, "data", "aligned"]]])
+  let failure: list = [native/return_value("null_bytes")]
+  context = native/define_function(
+    context,
+    "value_arena_allocate",
+    [
+      native/note_statement(:Invariant, "Arena allocations remain stable and are aligned to eight bytes."),
+      native/when_statement(native/binary_expression(:Equal, "size", "zero"), failure),
+      native/when_statement(native/binary_expression(:Less, "allocation_limit", "size"), failure),
+      native/let_statement("header_size", :U64, native/unary_expression(:SizeOf, block)),
+      native/let_statement(
+        "head_slot",
+        [:Pointer, block_ptr, :Mutable],
+        native/field_pointer_expression("arena", "head")
+      ),
+      native/let_load("head", block_ptr, "head_slot"),
+      native/let_statement("aligned", :U64, "zero"),
+      native/let_statement("fits", :Bool, "false"),
+      native/unless_statement(native/binary_expression(:Equal, "head", "null_block"), [
+        native/let_load("existing", block, "head"),
+        native/let_field("used", :U64, "existing", "used"),
+        native/let_field("available", :U64, "existing", "capacity"),
+        native/set_statement("aligned", native/binary_expression(:Add, "used", "alignment_slack")),
+        native/set_statement("aligned", native/binary_expression(:BitAnd, "aligned", "alignment_mask")),
+        native/unless_statement(native/binary_expression(:Less, "available", "aligned"), [
+          native/let_statement("remaining", :U64, native/binary_expression(:Subtract, "available", "aligned")),
+          native/unless_statement(
+            native/binary_expression(:Less, "remaining", "size"),
+            [native/set_statement("fits", "true")]
+          )
+        ])
+      ]),
+      native/if_statement("fits", [native/set_statement("adopted", "head")], [
+        native/let_statement("capacity", :U64, "size"),
+        native/when_statement(
+          native/binary_expression(:Less, "size", "chunk_size"),
+          [native/set_statement("capacity", "chunk_size")]
+        ),
+        native/let_statement("total", :U64, native/binary_expression(:Add, "capacity", "header_size")),
+        native/let_call("owned_bytes", bytes, "allocate", ["total"]),
+        native/when_statement(native/binary_expression(:Equal, "owned_bytes", "null_bytes"), failure),
+        native/let_statement("owned_block", block_ptr, native/unary_expression(:PointerCast, "owned_bytes")),
+        native/set_statement("adopted", native/binary_expression(:Adopt, "head_slot", "owned_block")),
+        native/let_statement("header", block, native/record_expression(["head", "zero", "capacity"])),
+        native/store_statement("adopted", "header"),
+        native/set_statement("aligned", "zero")
+      ]),
+      native/let_statement("base", bytes, native/unary_expression(:PointerCast, "adopted")),
+      native/let_offset("data", bytes, "base", "header_size"),
+      native/let_statement("next_used", :U64, native/binary_expression(:Add, "aligned", "size")),
+      native/let_statement("used_slot", [:Pointer, :U64, :Mutable], native/field_pointer_expression("adopted", "used")),
+      native/store_statement("used_slot", "next_used"),
+      native/return_value(native/offset_expression("data", "aligned"))
+    ]
+  )
   context = native/declare_function(context, "value_arena_release", :Void, [["arena", arena_ptr, :Consume]], [], [:ReadMemory, :WriteMemory, :Release], :Value, "")
-  context = native/define_function(context, "value_arena_release", [
-    [:Let, "head_slot", [:Pointer, block_ptr, :Mutable], [:FieldPointer, "arena", "head"]],
-    [:Let, "head", block_ptr, [:Load, "head_slot"]],
-    [:While, "true", [
-      [:If, [:Equal, "head", "null_block"], [[:Break]], []],
-      [:Note, :Invariant, "Read the next block before releasing the current block."],
-      [:Let, "header", block, [:Load, "head"]], [:Let, "next", block_ptr, [:Field, "header", "next"]],
-      [:Let, "bytes", bytes, [:PointerCast, "head"]], [:Do, [:Call, "release", "bytes"]], [:Set, "head", "next"]]],
-    [:Let, "empty", arena, [:Zero]], [:Do, [:Store, "arena", "empty"]], [:Return]])
+  context = native/define_function(
+    context,
+    "value_arena_release",
+    [
+      native/let_statement(
+        "head_slot",
+        [:Pointer, block_ptr, :Mutable],
+        native/field_pointer_expression("arena", "head")
+      ),
+      native/let_load("head", block_ptr, "head_slot"),
+      native/while_statement("true", [
+        native/when_statement(native/binary_expression(:Equal, "head", "null_block"), [native/break_statement()]),
+        native/note_statement(:Invariant, "Read the next block before releasing the current block."),
+        native/let_load("header", block, "head"),
+        native/let_field("next", block_ptr, "header", "next"),
+        native/let_statement("bytes", bytes, native/unary_expression(:PointerCast, "head")),
+        native/do_statement(native/call_expression("release", ["bytes"])),
+        native/set_statement("head", "next")
+      ]),
+      native/let_statement("empty", arena, native/zero_expression()),
+      native/store_statement("arena", "empty"),
+      native/return_void()
+    ]
+  )
   return context
 end

@@ -96,12 +96,14 @@ let [function, names, declared] = native/function_scope(state, "sum", :U64,
 names["zero"] = constants["zero"]
 names["one"] = constants["one"]
 state = native/function_body(declared, function, names, [
-  [:Let, "total", :U64, "zero"],
-  [:Let, "i", :U64, "zero"],
-  [:While, [:Less, "i", "limit"], [
-    [:Set, "total", [:Add, "total", "i"]],
-    [:Set, "i", [:Add, "i", "one"]]]],
-  [:Return, "total"]])
+  native/let_statement("total", :U64, "zero"),
+  native/let_statement("i", :U64, "zero"),
+  native/while_statement(native/binary_expression(:Less, "i", "limit"), [
+    native/set_statement("total", native/binary_expression(:Add, "total", "i")),
+    native/set_statement("i", native/binary_expression(:Add, "i", "one"))
+  ]),
+  native/return_value("total")
+])
 ```
 
 Here, `constants` supplies U64 zero and one from `native/constants`.
@@ -111,23 +113,31 @@ Mica kind annotations check generator interfaces, while explicit IR types descri
 
 | Statement | Behaviour |
 | --- | --- |
-| `[:Let, name, type, expression]` | Declare and initialize a function local |
-| `[:Set, name, expression]` | Assign an existing local |
-| `[:Do, expression]` | Emit an operation with no result |
-| `[:If, condition, yes, no]` | Select one statement list |
-| `[:While, condition, body]` | Re-evaluate the condition before each iteration |
-| `[:Switch, type, selector, cases, fallback]` | Evaluate an integer selector once; select a constant case or the fallback |
-| `[:Break]`, `[:Continue]` | Exit or repeat the innermost loop |
-| `[:Return, expression]` | Return a value; use `[:Return]` for Void |
-| `[:Note, kind, text]` | Annotate the current block |
+| `native/let_statement(name, type, expression)` | Declare and initialize a function local |
+| `native/let_field`, `native/let_load`, `native/let_offset`, `native/let_call` | Bind a field, load, pointer offset, or call result with an explicit type |
+| `native/set_statement(name, expression)` | Assign an existing local |
+| `native/do_statement(expression)` | Emit an operation with no result |
+| `native/store_statement(pointer, value)`, `native/copy_bytes_statement(destination, source, length)` | Write a value or copy bytes |
+| `native/if_statement(condition, yes, no)` | Select one statement list |
+| `native/when_statement(condition, body)`, `native/unless_statement(condition, body)` | Run a body when its condition is true or false, respectively |
+| `native/while_statement(condition, body)` | Re-evaluate the condition before each iteration |
+| `native/switch_statement(type, selector, cases, fallback)` | Evaluate an integer selector once; select a constant case or the fallback |
+| `native/break_statement()`, `native/continue_statement()` | Exit or repeat the innermost loop |
+| `native/return_value(expression)`, `native/return_void()` | Return a value or return from a Void function |
+| `native/return_zero()`, `native/return_record(fields)` | Return a zero-initialized value or a record with the supplied fields |
+| `native/note_statement(kind, text)` | Annotate the current block |
 
-An expression is a binding name or `[opcode, operand, ...]`.
-Nested operands use `[:Expr, type, expression]`. For example, `[:Expr, :U64, [:Call, "next"]]` supplies a typed call result.
+An expression is a binding name or a node from an expression constructor.
+Use named constructors for bodies and expressions. The constructors own the positional list schema consumed by the shared lowering pass.
 
-Named constructors build the same syntax: `native/let_statement`, `native/set_statement`, `native/if_statement`,
-`native/while_statement`, `native/switch_statement`, `native/case_arm`, and `native/return_value`.
-Expressions compose through `native/call_expression`, `native/typed_expression`, `native/field_expression`, and `native/binary_expression`.
-For example:
+`native/unary_expression(op, operand)` and `native/binary_expression(op, left, right)` construct operations.
+`native/field_expression`, `native/field_pointer_expression`, `native/load_expression`, and `native/offset_expression` construct field and memory access.
+`native/call_expression(name, arguments)`, `native/record_expression(fields)`, and `native/zero_expression()` construct calls, records, and zero values.
+
+Nested operands retain explicit types through `native/typed_expression(type, expression)`.
+`native/typed_field`, `native/typed_load`, `native/typed_call`, `native/typed_record`, and `native/typed_zero` take the result type first.
+For example, `native/typed_call(:U64, "next", [])` supplies a typed call result.
+This switch evaluates `next` once:
 
 ```mica
 let cases: list = [native/case_arm(name, [native/return_value(name)]) for name in ["one", "two", "three"]]

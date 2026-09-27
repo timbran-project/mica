@@ -48,20 +48,30 @@ verb native_value/bytes_constructor(input: map) -> map
   context = native/declare_function(context, "value_bytes", [:Record, "ValueResult"],
     [["arena", [:Pointer, [:Record, "ValueArena"], :Mutable], :Borrow], ["source", source, :Borrow], ["length", :U64, :Value]],
     [], [:Allocate, :ReadMemory, :WriteMemory], :Borrow, "arena")
-  let failure: list = [[:Return, [:Zero]]]
+  let failure: list = [native/return_zero()]
   context = native/define_function(context, "value_bytes", [
-    [:If, [:Equal, "length", "zero"], [], [[:If, [:Equal, "source", "value_bytes_null"], failure, []]]],
-    [:Let, "header_size", :U64, [:SizeOf, header]],
-    [:Let, "limit", :U64, [:Subtract, "allocation_limit", "header_size"]],
-    [:If, [:Less, "limit", "length"], failure, []],
-    [:Let, "total", :U64, [:Add, "header_size", "length"]],
-    [:Let, "allocation", bytes, [:Call, "value_arena_allocate", "arena", "total"]],
-    [:If, [:Equal, "allocation", "null_bytes"], failure, []],
-    [:Let, "pointer", [:Pointer, header, :Mutable], [:PointerCast, "allocation"]],
-    [:Let, "data", bytes, [:Offset, "allocation", "header_size"]],
-    [:Do, [:CopyBytes, "data", "source", "length"]],
-    [:Let, "header", header, [:Record, "data", "length"]], [:Do, [:Store, "pointer", "header"]],
-    [:Return, [:Record, "true", [:Expr, native_value/word(), [:PackPointer, "pointer", "tag_bytes"]]]]])
+    native/unless_statement(
+      native/binary_expression(:Equal, "length", "zero"),
+      [native/when_statement(native/binary_expression(:Equal, "source", "value_bytes_null"), failure)]
+    ),
+    native/let_statement("header_size", :U64, native/unary_expression(:SizeOf, header)),
+    native/let_statement("limit", :U64, native/binary_expression(:Subtract, "allocation_limit", "header_size")),
+    native/when_statement(native/binary_expression(:Less, "limit", "length"), failure),
+    native/let_statement("total", :U64, native/binary_expression(:Add, "header_size", "length")),
+    native/let_call("allocation", bytes, "value_arena_allocate", ["arena", "total"]),
+    native/when_statement(native/binary_expression(:Equal, "allocation", "null_bytes"), failure),
+    native/let_statement("pointer", [:Pointer, header, :Mutable], native/unary_expression(:PointerCast, "allocation")),
+    native/let_offset("data", bytes, "allocation", "header_size"),
+    native/copy_bytes_statement("data", "source", "length"),
+    native/let_statement("header", header, native/record_expression(["data", "length"])),
+    native/store_statement("pointer", "header"),
+    native/return_record(
+      [
+        "true",
+        native/typed_expression(native_value/word(), native/binary_expression(:PackPointer, "pointer", "tag_bytes"))
+      ]
+    )
+  ])
   return context
 end
 
@@ -74,22 +84,43 @@ verb native_value/record_constructor(input: map, spec: list) -> map
   context = native/declare_function(context, name, result,
     [["arena", [:Pointer, [:Record, "ValueArena"], :Mutable], :Borrow], @spec[2]],
     [], [:Allocate, :ReadMemory, :WriteMemory], :Borrow, "arena")
-  let failure: list = [[:Return, [:Zero]]]
+  let failure: list = [native/return_zero()]
   let statements: list = []
   if spec[0] == "frob"
-    statements = [[:If, [:Less, "payload_mask", "delegate"], failure, []]]
+    statements = [native/when_statement(native/binary_expression(:Less, "payload_mask", "delegate"), failure)]
   end
   if spec[0] == "error"
-    statements = [[:If, "has_message", [
-      [:If, [:Equal, [:Expr, :U8, [:Tag, "message"]], "tag_string"], [], failure]], []]]
+    statements = [
+      native/when_statement(
+        "has_message",
+        [
+          native/unless_statement(
+            native/binary_expression(
+              :Equal,
+              native/typed_expression(:U8, native/unary_expression(:Tag, "message")),
+              "tag_string"
+            ),
+            failure
+          )
+        ]
+      )
+    ]
   end
-  context = native/define_function(context, name, [@statements,
-    [:Let, "size", :U64, [:SizeOf, header]],
-    [:Let, "allocation", [:Pointer, :U8, :Mutable], [:Call, "value_arena_allocate", "arena", "size"]],
-    [:If, [:Equal, "allocation", "null_bytes"], failure, []],
-    [:Let, "pointer", [:Pointer, header, :Mutable], [:PointerCast, "allocation"]],
-    [:Let, "header", header, [:Record, @[field[0] for field in spec[2]]]], [:Do, [:Store, "pointer", "header"]],
-    [:Return, [:Record, "true", [:Expr, word, [:PackPointer, "pointer", string_concat("tag_", spec[0])]]]]])
+  context = native/define_function(context, name, [
+    @statements,
+    native/let_statement("size", :U64, native/unary_expression(:SizeOf, header)),
+    native/let_call("allocation", [:Pointer, :U8, :Mutable], "value_arena_allocate", ["arena", "size"]),
+    native/when_statement(native/binary_expression(:Equal, "allocation", "null_bytes"), failure),
+    native/let_statement("pointer", [:Pointer, header, :Mutable], native/unary_expression(:PointerCast, "allocation")),
+    native/let_statement("header", header, native/record_expression([@[field[0] for field in spec[2]]])),
+    native/store_statement("pointer", "header"),
+    native/return_record(
+      [
+        "true",
+        native/typed_expression(word, native/binary_expression(:PackPointer, "pointer", string_concat("tag_", spec[0])))
+      ]
+    )
+  ])
   return context
 end
 
@@ -102,7 +133,15 @@ verb native_value/heap_accessor(input: map, kind: string, header: list) -> map
   let name: string = string_concat("value_as_", kind)
   context = native/declare_function(context, name, result, [["value", native_value/word(), :Borrow]], [], [], :Borrow, "value")
   context = native/define_function(context, name, [
-    [:If, [:Equal, [:Expr, :U8, [:Tag, "value"]], string_concat("tag_", kind)], [], [[:Return, [:Zero]]]],
-    [:Return, [:Record, "true", [:Expr, pointer, [:UnpackPointer, "value"]]]]])
+    native/unless_statement(
+      native/binary_expression(
+        :Equal,
+        native/typed_expression(:U8, native/unary_expression(:Tag, "value")),
+        string_concat("tag_", kind)
+      ),
+      [native/return_zero()]
+    ),
+    native/return_record(["true", native/typed_expression(pointer, native/unary_expression(:UnpackPointer, "value"))])
+  ])
   return context
 end

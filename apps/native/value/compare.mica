@@ -4,17 +4,25 @@
 // Return a three-way order for operands of the same ordered scalar type.
 verb native_value/scalar_order(left: string, right: string) -> list
   return [
-    [:If, [:Less, left, right], [[:Return, [:Record, "true", "int_minus_one"]]], []],
-    [:If, [:Less, right, left], [[:Return, [:Record, "true", "int_one"]]], []],
-    [:Return, [:Record, "true", "int_zero"]]]
+    native/when_statement(
+      native/binary_expression(:Less, left, right),
+      [native/return_record(["true", "int_minus_one"])]
+    ),
+    native/when_statement(native/binary_expression(:Less, right, left), [native/return_record(["true", "int_one"])]),
+    native/return_record(["true", "int_zero"])
+  ]
 end
 
 // Recursive comparison propagates failure and stops at the first unequal child.
 verb native_value/child_order(left: string, right: string) -> list
   return [
-    [:Set, "comparison", [:Call, "value_compare", left, right]],
-    [:If, [:Field, "comparison", "ok"], [], [[:Return, "comparison"]]],
-    [:If, [:Equal, [:Expr, :I64, [:Field, "comparison", "number"]], "int_zero"], [], [[:Return, "comparison"]]]]
+    native/set_statement("comparison", native/call_expression("value_compare", [left, right])),
+    native/unless_statement(native/field_expression("comparison", "ok"), [native/return_value("comparison")]),
+    native/unless_statement(
+      native/binary_expression(:Equal, native/typed_field(:I64, "comparison", "number"), "int_zero"),
+      [native/return_value("comparison")]
+    )
+  ]
 end
 
 // Canonical ordering distinguishes numeric kinds. Results are -1, 0, or 1;
@@ -26,23 +34,32 @@ verb native_value/comparison(input: map) -> map
   let name: string = "value_compare"
   context = native/declare_function(context, name, result, [["left", word, :Borrow], ["right", word, :Borrow]],
     [["comparison", result]], [:ReadMemory], :Value, "")
-  let equal: list = [[:Return, [:Record, "true", "int_zero"]]]
+  let equal: list = [native/return_record(["true", "int_zero"])]
   let statements: list = [
-    [:If, [:Equal, "left", "right"], equal, []],
-    [:Let, "left_kind", :U8, [:Call, "value_kind", "left"]],
-    [:Let, "right_kind", :U8, [:Call, "value_kind", "right"]],
-    [:If, [:Equal, "left_kind", "right_kind"], [], native_value/scalar_order("left_kind", "right_kind")]]
+    native/when_statement(native/binary_expression(:Equal, "left", "right"), equal),
+    native/let_call("left_kind", :U8, "value_kind", ["left"]),
+    native/let_call("right_kind", :U8, "value_kind", ["right"]),
+    native/unless_statement(
+      native/binary_expression(:Equal, "left_kind", "right_kind"),
+      native_value/scalar_order("left_kind", "right_kind")
+    )
+  ]
   for spec in [["int", :I64, "IntResult"], ["float", :F32, "FloatResult"]]
     let rows: list = []
     for side in ["left", "right"]
       let value: string = string_concat(side, "_", spec[0])
       let checked: string = string_concat(value, "_result")
-      rows = [@rows,
-        [:Let, checked, [:Record, spec[2]], [:Call, string_concat("value_as_", spec[0]), side]],
-        [:Let, value, spec[1], [:Field, checked, "number"]]]
+      rows = [
+        @rows,
+        native/let_call(checked, [:Record, spec[2]], string_concat("value_as_", spec[0]), [side]),
+        native/let_field(value, spec[1], checked, "number")
+      ]
     end
     rows = [@rows, @native_value/scalar_order(string_concat("left_", spec[0]), string_concat("right_", spec[0]))]
-    statements = [@statements, [:If, [:Equal, "left_kind", string_concat("tag_", spec[0])], rows, []]]
+    statements = [
+      @statements,
+      native/when_statement(native/binary_expression(:Equal, "left_kind", string_concat("tag_", spec[0])), rows)
+    ]
   end
   for spec in [["string", "HeapString", :U8], ["bytes", "HeapBytes", :U8],
                ["list", "HeapList", word], ["map", "HeapMap", [:Record, "ValueMapEntry"]]]
@@ -58,35 +75,64 @@ verb native_value/comparison(input: map) -> map
       let pointer: string = string_concat(base, "_pointer")
       let data: string = string_concat(base, "_data")
       let slot: string = string_concat(base, "_slot")
-      rows = [@rows,
-        [:Let, pointer, [:Pointer, [:Record, spec[1]], :Const], [:UnpackPointer, side]],
-        [:Let, header, [:Record, spec[1]], [:Load, pointer]],
-        [:Let, data, [:Pointer, spec[2], :Mutable], [:Field, header, "data"]],
-        [:Let, string_concat(base, "_length"), :U64, [:Field, header, "length"]]]
-      elements = [@elements,
-        [:Let, slot, [:Pointer, spec[2], :Mutable], [:Offset, data, index]],
-        [:Let, string_concat(base, "_element"), spec[2], [:Load, slot]]]
+      rows = [
+        @rows,
+        native/let_statement(
+          pointer,
+          [:Pointer, [:Record, spec[1]], :Const],
+          native/unary_expression(:UnpackPointer, side)
+        ),
+        native/let_load(header, [:Record, spec[1]], pointer),
+        native/let_field(data, [:Pointer, spec[2], :Mutable], header, "data"),
+        native/let_field(string_concat(base, "_length"), :U64, header, "length")
+      ]
+      elements = [
+        @elements,
+        native/let_offset(slot, [:Pointer, spec[2], :Mutable], data, index),
+        native/let_load(string_concat(base, "_element"), spec[2], slot)
+      ]
     end
     let left_element: string = string_concat(left, "_element")
     let right_element: string = string_concat(right, "_element")
     if prefix == "string" || prefix == "bytes"
-      elements = [@elements, [:If, [:Equal, left_element, right_element], [], native_value/scalar_order(left_element, right_element)]]
+      elements = [
+        @elements,
+        native/unless_statement(
+          native/binary_expression(:Equal, left_element, right_element),
+          native_value/scalar_order(left_element, right_element)
+        )
+      ]
     elseif prefix == "list"
       elements = [@elements, @native_value/child_order(left_element, right_element)]
     else
       for field in ["key", "value"]
         let l: string = string_concat(left, "_", field)
         let r: string = string_concat(right, "_", field)
-        elements = [@elements, [:Let, l, word, [:Field, left_element, field]], [:Let, r, word, [:Field, right_element, field]],
-          @native_value/child_order(l, r)]
+        elements = [
+          @elements,
+          native/let_field(l, word, left_element, field),
+          native/let_field(r, word, right_element, field),
+          @native_value/child_order(l, r)
+        ]
       end
     end
-    rows = [@rows, [:Let, index, :U64, "zero"],
-      [:While, [:Less, index, string_concat(left, "_length")], [
-        [:If, [:Less, index, string_concat(right, "_length")], [], [[:Break]]],
-        @elements, [:Set, index, [:Add, index, "one"]]]],
-      @native_value/scalar_order(string_concat(left, "_length"), string_concat(right, "_length"))]
-    statements = [@statements, [:If, [:Equal, "left_kind", string_concat("tag_", prefix)], rows, []]]
+    rows = [
+      @rows,
+      native/let_statement(index, :U64, "zero"),
+      native/while_statement(native/binary_expression(:Less, index, string_concat(left, "_length")), [
+        native/unless_statement(
+          native/binary_expression(:Less, index, string_concat(right, "_length")),
+          [native/break_statement()]
+        ),
+        @elements,
+        native/set_statement(index, native/binary_expression(:Add, index, "one"))
+      ]),
+      @native_value/scalar_order(string_concat(left, "_length"), string_concat(right, "_length"))
+    ]
+    statements = [
+      @statements,
+      native/when_statement(native/binary_expression(:Equal, "left_kind", string_concat("tag_", prefix)), rows)
+    ]
   end
   let records: list = [
     ["range", "HeapRange", [["start", word, ""], ["has_end", :Bool, ""], ["end", word, "has_end"]]],
@@ -97,11 +143,20 @@ verb native_value/comparison(input: map) -> map
     let rows: list = []
     for side in ["left", "right"]
       let base: string = string_concat(spec[0], "_", side)
-      rows = [@rows,
-        [:Let, string_concat(base, "_pointer"), [:Pointer, [:Record, spec[1]], :Const], [:UnpackPointer, side]],
-        [:Let, string_concat(base, "_header"), [:Record, spec[1]], [:Load, string_concat(base, "_pointer")]]]
+      rows = [
+        @rows,
+        native/let_statement(
+          string_concat(base, "_pointer"),
+          [:Pointer, [:Record, spec[1]], :Const],
+          native/unary_expression(:UnpackPointer, side)
+        ),
+        native/let_load(string_concat(base, "_header"), [:Record, spec[1]], string_concat(base, "_pointer"))
+      ]
       for field in spec[2]
-        rows = [@rows, [:Let, string_concat(base, "_", field[0]), field[1], [:Field, string_concat(base, "_header"), field[0]]]]
+        rows = [
+          @rows,
+          native/let_field(string_concat(base, "_", field[0]), field[1], string_concat(base, "_header"), field[0])
+        ]
       end
     end
     for field in spec[2]
@@ -111,23 +166,46 @@ verb native_value/comparison(input: map) -> map
       if field[1] == word
         comparison = native_value/child_order(left, right)
       elseif field[1] == :Bool
-        comparison = [[:If, [:Equal, left, right], [], [
-          [:If, left, [[:Return, [:Record, "true", "int_one"]]], [[:Return, [:Record, "true", "int_minus_one"]]]]]]]
+        comparison = [
+          native/unless_statement(
+            native/binary_expression(:Equal, left, right),
+            [
+              native/if_statement(
+                left,
+                [native/return_record(["true", "int_one"])],
+                [native/return_record(["true", "int_minus_one"])]
+              )
+            ]
+          )
+        ]
       else
-        comparison = [[:If, [:Equal, left, right], [], native_value/scalar_order(left, right)]]
+        comparison = [
+          native/unless_statement(native/binary_expression(:Equal, left, right), native_value/scalar_order(left, right))
+        ]
       end
       if field[2] != ""
-        comparison = [[:If, string_concat(spec[0], "_left_", field[2]), comparison, []]]
+        comparison = [native/when_statement(string_concat(spec[0], "_left_", field[2]), comparison)]
       end
       rows = [@rows, @comparison]
     end
-    statements = [@statements, [:If, [:Equal, "left_kind", string_concat("tag_", spec[0])], [@rows, @equal], []]]
+    statements = [
+      @statements,
+      native/when_statement(
+        native/binary_expression(:Equal, "left_kind", string_concat("tag_", spec[0])),
+        [@rows, @equal]
+      )
+    ]
   end
-  context = native/define_function(context, name, [@statements,
-    [:If, [:Equal, "left_kind", "tag_relation"], [[:Return, [:Call, "value_relation_compare", "left", "right"]]], []],
-    [:Let, "left_payload", :U64, [:Payload, "left"]],
-    [:Let, "right_payload", :U64, [:Payload, "right"]],
-    @native_value/scalar_order("left_payload", "right_payload")])
+  context = native/define_function(context, name, [
+    @statements,
+    native/when_statement(
+      native/binary_expression(:Equal, "left_kind", "tag_relation"),
+      [native/return_value(native/call_expression("value_relation_compare", ["left", "right"]))]
+    ),
+    native/let_statement("left_payload", :U64, native/unary_expression(:Payload, "left")),
+    native/let_statement("right_payload", :U64, native/unary_expression(:Payload, "right")),
+    @native_value/scalar_order("left_payload", "right_payload")
+  ])
   return context
 end
 
@@ -140,44 +218,97 @@ verb native_value/language_comparison(input: map) -> map
   let name: string = "value_compare_int_float"
   context = native/declare_function(context, name, result, [["integer", :I64, :Value], ["float", :F32, :Value]], [], [], :Value, "")
   context = native/define_function(context, name, [
-    [:Note, :Invariant, "Compare the integer part before the fraction; rounding the integer to f32 would lose precision."],
-    [:If, [:IsFinite, "float"], [], [[:Return, [:Zero]]]],
-    [:If, [:Less, "float", "float_lower"], [[:Return, [:Record, "true", "int_one"]]], []],
-    [:If, [:Less, "float", "float_upper"], [], [[:Return, [:Record, "true", "int_minus_one"]]]],
-    [:Let, "converted", result, [:CheckedFloatToInt, "float"]],
-    [:If, [:Field, "converted", "ok"], [], [[:Return, [:Zero]]]],
-    [:Let, "truncated", :I64, [:Field, "converted", "number"]],
-    [:If, [:Less, "integer", "truncated"], [[:Return, [:Record, "true", "int_minus_one"]]], []],
-    [:If, [:Less, "truncated", "integer"], [[:Return, [:Record, "true", "int_one"]]], []],
-    [:Let, "integral_float", :F32, [:Convert, "truncated"]],
-    @native_value/scalar_order("integral_float", "float")])
+    native/note_statement(
+      :Invariant,
+      "Compare the integer part before the fraction; rounding the integer to f32 would lose precision."
+    ),
+    native/unless_statement(native/unary_expression(:IsFinite, "float"), [native/return_zero()]),
+    native/when_statement(
+      native/binary_expression(:Less, "float", "float_lower"),
+      [native/return_record(["true", "int_one"])]
+    ),
+    native/unless_statement(
+      native/binary_expression(:Less, "float", "float_upper"),
+      [native/return_record(["true", "int_minus_one"])]
+    ),
+    native/let_statement("converted", result, native/unary_expression(:CheckedFloatToInt, "float")),
+    native/unless_statement(native/field_expression("converted", "ok"), [native/return_zero()]),
+    native/let_field("truncated", :I64, "converted", "number"),
+    native/when_statement(
+      native/binary_expression(:Less, "integer", "truncated"),
+      [native/return_record(["true", "int_minus_one"])]
+    ),
+    native/when_statement(
+      native/binary_expression(:Less, "truncated", "integer"),
+      [native/return_record(["true", "int_one"])]
+    ),
+    native/let_statement("integral_float", :F32, native/unary_expression(:Convert, "truncated")),
+    @native_value/scalar_order("integral_float", "float")
+  ])
   name = "value_language_compare"
   context = native/declare_function(context, name, result, [["left", word, :Borrow], ["right", word, :Borrow]], [], [:ReadMemory], :Value, "")
-  let statements: list = [[:Let, "left_kind", :U8, [:Tag, "left"]], [:Let, "right_kind", :U8, [:Tag, "right"]]]
+  let statements: list = [
+    native/let_statement("left_kind", :U8, native/unary_expression(:Tag, "left")),
+    native/let_statement("right_kind", :U8, native/unary_expression(:Tag, "right"))
+  ]
   for spec in [["forward", "left", "right"], ["reverse", "right", "left"]]
     let prefix: string = spec[0]
     let integer: string = string_concat(prefix, "_integer")
     let float: string = string_concat(prefix, "_float")
     let comparison: string = string_concat(prefix, "_comparison")
     let rows: list = [
-      [:Let, integer, result, [:Call, "value_as_int", spec[1]]],
-      [:Let, float, [:Record, "FloatResult"], [:Call, "value_as_float", spec[2]]],
-      [:Let, comparison, result, [:Call, "value_compare_int_float",
-        [:Expr, :I64, [:Field, integer, "number"]], [:Expr, :F32, [:Field, float, "number"]]]]]
+      native/let_call(integer, result, "value_as_int", [spec[1]]),
+      native/let_call(float, [:Record, "FloatResult"], "value_as_float", [spec[2]]),
+      native/let_call(
+        comparison,
+        result,
+        "value_compare_int_float",
+        [native/typed_field(:I64, integer, "number"), native/typed_field(:F32, float, "number")]
+      )
+    ]
     if prefix == "reverse"
-      rows = [@rows, [:If, [:Field, comparison, "ok"], [
-        [:Return, [:CheckedNegate, [:Expr, :I64, [:Field, comparison, "number"]]]]], []]]
+      rows = [
+        @rows,
+        native/when_statement(
+          native/field_expression(comparison, "ok"),
+          [
+            native/return_value(native/unary_expression(:CheckedNegate, native/typed_field(:I64, comparison, "number")))
+          ]
+        )
+      ]
     end
-    statements = [@statements, [:If, [:Equal, string_concat(spec[1], "_kind"), "tag_int"], [
-      [:If, [:Equal, string_concat(spec[2], "_kind"), "tag_float"], [@rows, [:Return, comparison]], []]], []]]
+    statements = [
+      @statements,
+      native/when_statement(
+        native/binary_expression(:Equal, string_concat(spec[1], "_kind"), "tag_int"),
+        [
+          native/when_statement(native/binary_expression(:Equal, string_concat(spec[2], "_kind"), "tag_float"), [
+            @rows,
+            native/return_value(comparison)
+          ])
+        ]
+      )
+    ]
   end
-  context = native/define_function(context, name, [@statements, [:Return, [:Call, "value_compare", "left", "right"]]])
+  context = native/define_function(context, name, [
+    @statements,
+    native/return_value(native/call_expression("value_compare", ["left", "right"]))
+  ])
   for spec in [["value_equal", "value_compare"], ["value_language_equal", "value_language_compare"]]
     context = native/declare_function(context, spec[0], [:Record, "BoolResult"], [["left", word, :Borrow], ["right", word, :Borrow]], [], [:ReadMemory], :Value, "")
     context = native/define_function(context, spec[0], [
-      [:Let, "comparison", result, [:Call, spec[1], "left", "right"]],
-      [:If, [:Field, "comparison", "ok"], [], [[:Return, [:Zero]]]],
-      [:Return, [:Record, "true", [:Expr, :Bool, [:Equal, [:Expr, :I64, [:Field, "comparison", "number"]], "int_zero"]]]]])
+      native/let_call("comparison", result, spec[1], ["left", "right"]),
+      native/unless_statement(native/field_expression("comparison", "ok"), [native/return_zero()]),
+      native/return_record(
+        [
+          "true",
+          native/typed_expression(
+            :Bool,
+            native/binary_expression(:Equal, native/typed_field(:I64, "comparison", "number"), "int_zero")
+          )
+        ]
+      )
+    ])
   end
   return context
 end

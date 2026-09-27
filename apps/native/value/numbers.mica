@@ -21,28 +21,57 @@ verb native_value/binary_number(input: map, spec: list) -> map
   let result = [:Record, "ValueResult"]
   let ir = [:Record, "IntResult"]
   let fr = [:Record, "FloatResult"]
-  let failure: list = [[:Return, [:Zero]]]
+  let failure: list = [native/return_zero()]
   context = native/declare_function(context, name, result, [["left", word, :Borrow], ["right", word, :Borrow]], [], [], :Immediate, "")
-  let integers: list = [[:Let, "li", ir, [:Call, "value_as_int", "left"]], [:Let, "ri", ir, [:Call, "value_as_int", "right"]],
-    [:Let, "a", :I64, [:Field, "li", "number"]], [:Let, "b", :I64, [:Field, "ri", "number"]]]
+  let integers: list = [
+    native/let_call("li", ir, "value_as_int", ["left"]),
+    native/let_call("ri", ir, "value_as_int", ["right"]),
+    native/let_field("a", :I64, "li", "number"),
+    native/let_field("b", :I64, "ri", "number")
+  ]
   if spec[0] == "div"
-    integers = [@integers, [:Note, :Invariant, "Integer division succeeds only for an exact quotient."],
-      [:Let, "remainder", ir, [:CheckedRemainder, "a", "b"]], [:If, [:Field, "remainder", "ok"], [], failure],
-      [:If, [:Equal, [:Expr, :I64, [:Field, "remainder", "number"]], "int_zero"], [], failure]]
+    integers = [
+      @integers,
+      native/note_statement(:Invariant, "Integer division succeeds only for an exact quotient."),
+      native/let_statement("remainder", ir, native/binary_expression(:CheckedRemainder, "a", "b")),
+      native/unless_statement(native/field_expression("remainder", "ok"), failure),
+      native/unless_statement(
+        native/binary_expression(:Equal, native/typed_field(:I64, "remainder", "number"), "int_zero"),
+        failure
+      )
+    ]
   end
-  integers = [@integers, [:Let, "checked", ir, [spec[1], "a", "b"]],
-    [:If, [:Field, "checked", "ok"], [], failure], [:Return, [:Call, "value_int", [:Expr, :I64, [:Field, "checked", "number"]]]]]
-  let floats: list = [[:Let, "lf", fr, [:Call, "value_as_float", "left"]], [:Let, "rf", fr, [:Call, "value_as_float", "right"]],
-    [:Let, "x", :F32, [:Field, "lf", "number"]], [:Let, "y", :F32, [:Field, "rf", "number"]]]
+  integers = [
+    @integers,
+    native/let_statement("checked", ir, native/binary_expression(spec[1], "a", "b")),
+    native/unless_statement(native/field_expression("checked", "ok"), failure),
+    native/return_value(native/call_expression("value_int", [native/typed_field(:I64, "checked", "number")]))
+  ]
+  let floats: list = [
+    native/let_call("lf", fr, "value_as_float", ["left"]),
+    native/let_call("rf", fr, "value_as_float", ["right"]),
+    native/let_field("x", :F32, "lf", "number"),
+    native/let_field("y", :F32, "rf", "number")
+  ]
   if spec[0] == "div" || spec[0] == "rem"
-    floats = [@floats, [:If, [:Equal, "y", "float_zero"], failure, []]]
+    floats = [
+      @floats,
+      native/when_statement(native/binary_expression(:Equal, "y", "float_zero"), failure)
+    ]
   end
-  let expression = [spec[2], "x", "y"]
-  floats = [@floats, [:Let, "number", :F32, expression], [:Return, [:Call, "value_float", "number"]]]
+  let expression = native/binary_expression(spec[2], "x", "y")
+  floats = [
+    @floats,
+    native/let_statement("number", :F32, expression),
+    native/return_value(native/call_expression("value_float", ["number"]))
+  ]
   context = native/define_function(context, name, [
-    [:Let, "ltag", :U8, [:Tag, "left"]], [:Let, "rtag", :U8, [:Tag, "right"]],
-    [:If, [:Equal, "ltag", "rtag"], [], failure], [:If, [:Equal, "ltag", "tag_int"], integers, []],
-    [:If, [:Equal, "ltag", "tag_float"], floats, failure]])
+    native/let_statement("ltag", :U8, native/unary_expression(:Tag, "left")),
+    native/let_statement("rtag", :U8, native/unary_expression(:Tag, "right")),
+    native/unless_statement(native/binary_expression(:Equal, "ltag", "rtag"), failure),
+    native/when_statement(native/binary_expression(:Equal, "ltag", "tag_int"), integers),
+    native/if_statement(native/binary_expression(:Equal, "ltag", "tag_float"), floats, failure)
+  ])
   return context
 end
 
@@ -52,31 +81,65 @@ verb native_value/unary_number(input: map, name: string) -> map
   let result = [:Record, "ValueResult"]
   let ir = [:Record, "IntResult"]
   let fr = [:Record, "FloatResult"]
-  let failure: list = [[:Return, [:Zero]]]
+  let failure: list = [native/return_zero()]
   context = native/declare_function(context, name, result, [["value", word, :Borrow]], [], [], :Immediate, "")
-  let integers: list = [[:Let, "ir", ir, [:Call, "value_as_int", "value"]], [:Let, "integer", :I64, [:Field, "ir", "number"]]]
+  let integers: list = [
+    native/let_call("ir", ir, "value_as_int", ["value"]),
+    native/let_field("integer", :I64, "ir", "number")
+  ]
   if name == "value_to_float"
-    integers = [@integers, [:Return, [:Call, "value_float", [:Expr, :F32, [:Convert, "integer"]]]]]
+    integers = [
+      @integers,
+      native/return_value(
+        native/call_expression(
+          "value_float",
+          [native/typed_expression(:F32, native/unary_expression(:Convert, "integer"))]
+        )
+      )
+    ]
   else
     if name == "value_checked_neg"
-      integers = [@integers, [:Note, :Invariant, "Every valid integer fits 56 bits, so I64 negation cannot overflow."],
-        [:Let, "negated", ir, [:CheckedNegate, "integer"]], [:Set, "integer", [:Field, "negated", "number"]]]
+      integers = [
+        @integers,
+        native/note_statement(:Invariant, "Every valid integer fits 56 bits, so I64 negation cannot overflow."),
+        native/let_statement("negated", ir, native/unary_expression(:CheckedNegate, "integer")),
+        native/set_statement("integer", native/field_expression("negated", "number"))
+      ]
     end
-    integers = [@integers, [:Return, [:Call, "value_int", "integer"]]]
+    integers = [
+      @integers,
+      native/return_value(native/call_expression("value_int", ["integer"]))
+    ]
   end
-  let floats: list = [[:Let, "fr", fr, [:Call, "value_as_float", "value"]], [:Let, "number", :F32, [:Field, "fr", "number"]]]
+  let floats: list = [
+    native/let_call("fr", fr, "value_as_float", ["value"]),
+    native/let_field("number", :F32, "fr", "number")
+  ]
   if name == "value_to_int"
-    floats = [@floats, [:Let, "converted", :F32, [:Truncate, "number"]],
-      [:If, [:Equal, "number", "converted"], [], failure],
-      [:Let, "checked", ir, [:CheckedFloatToInt, "number"]], [:If, [:Field, "checked", "ok"], [], failure],
-      [:Return, [:Call, "value_int", [:Expr, :I64, [:Field, "checked", "number"]]]]]
+    floats = [
+      @floats,
+      native/let_statement("converted", :F32, native/unary_expression(:Truncate, "number")),
+      native/unless_statement(native/binary_expression(:Equal, "number", "converted"), failure),
+      native/let_statement("checked", ir, native/unary_expression(:CheckedFloatToInt, "number")),
+      native/unless_statement(native/field_expression("checked", "ok"), failure),
+      native/return_value(native/call_expression("value_int", [native/typed_field(:I64, "checked", "number")]))
+    ]
   else
     if name == "value_checked_neg"
-      floats = [@floats, [:Set, "number", [:Negate, "number"]]]
+      floats = [
+        @floats,
+        native/set_statement("number", native/unary_expression(:Negate, "number"))
+      ]
     end
-    floats = [@floats, [:Return, [:Call, "value_float", "number"]]]
+    floats = [
+      @floats,
+      native/return_value(native/call_expression("value_float", ["number"]))
+    ]
   end
-  context = native/define_function(context, name, [[:Let, "tag", :U8, [:Tag, "value"]],
-    [:If, [:Equal, "tag", "tag_int"], integers, []], [:If, [:Equal, "tag", "tag_float"], floats, failure]])
+  context = native/define_function(context, name, [
+    native/let_statement("tag", :U8, native/unary_expression(:Tag, "value")),
+    native/when_statement(native/binary_expression(:Equal, "tag", "tag_int"), integers),
+    native/if_statement(native/binary_expression(:Equal, "tag", "tag_float"), floats, failure)
+  ])
   return context
 end

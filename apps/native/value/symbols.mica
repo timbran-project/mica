@@ -44,40 +44,98 @@ verb native_value/symbol_lookup(input: map) -> map
   context = native/declare_function(context, "symbol_hash", :U64,
     [["source", bytes, :Borrow], ["length", :U64, :Value]], [], [:ReadMemory], :Value, "")
   context = native/define_function(context, "symbol_hash", [
-    [:Let, "hash", :U64, "symbol_hash_basis"], [:Let, "position", :U64, "zero"],
-    [:While, [:Less, "position", "length"], [
-      [:Let, "byte", :U8, [:Load, [:Expr, bytes, [:Offset, "source", "position"]]]],
-      [:Set, "hash", [:BitXor, "hash", [:Expr, :U64, [:Convert, "byte"]]]],
-      [:Set, "hash", [:Multiply, "hash", "symbol_hash_prime"]],
-      [:Set, "position", [:Add, "position", "one"]]]], [:Return, "hash"]])
+    native/let_statement("hash", :U64, "symbol_hash_basis"),
+    native/let_statement("position", :U64, "zero"),
+    native/while_statement(native/binary_expression(:Less, "position", "length"), [
+      native/let_load("byte", :U8, native/typed_expression(bytes, native/offset_expression("source", "position"))),
+      native/set_statement(
+        "hash",
+        native/binary_expression(
+          :BitXor,
+          "hash",
+          native/typed_expression(:U64, native/unary_expression(:Convert, "byte"))
+        )
+      ),
+      native/set_statement("hash", native/binary_expression(:Multiply, "hash", "symbol_hash_prime")),
+      native/set_statement("position", native/binary_expression(:Add, "position", "one"))
+    ]),
+    native/return_value("hash")
+  ])
   context = native/declare_function(context, "symbol_slot", :U64,
     [["table", [:Pointer, table, :Mutable], :Borrow], ["source", bytes, :Borrow],
      ["length", :U64, :Value], ["hash", :U64, :Value]], [], [:ReadMemory], :Value, "")
   context = native/define_function(context, "symbol_slot", [
-    [:Note, :Invariant, "Capacity is nonzero; at least half the buckets are empty."],
-    [:Let, "header", table, [:Load, "table"]],
-    [:Let, "entries", [:Pointer, entry, :Mutable], [:Field, "header", "entries"]],
-    [:Let, "buckets", [:Pointer, :U64, :Mutable], [:Field, "header", "buckets"]],
-    [:Let, "mask", :U64, [:Multiply, [:Expr, :U64, [:Field, "header", "capacity"]], "symbol_two"]],
-    [:Set, "mask", [:Subtract, "mask", "one"]],
-    [:Let, "slot", :U64, [:BitAnd, "hash", "mask"]],
-    [:While, "true", [
-      [:Let, "id", :U64, [:Load, [:Expr, [:Pointer, :U64, :Mutable], [:Offset, "buckets", "slot"]]]],
-      [:If, [:Equal, "id", "zero"], [[:Return, "slot"]], []],
-      [:Let, "candidate", entry, [:Load, [:Expr, [:Pointer, entry, :Mutable],
-        [:Offset, "entries", [:Expr, :U64, [:Subtract, "id", "one"]]]]]],
-      [:If, [:Equal, "hash", [:Expr, :U64, [:Field, "candidate", "hash"]]], [
-        [:If, [:Equal, "length", [:Expr, :U64, [:Field, "candidate", "length"]]], [
-          [:Let, "data", bytes, [:Field, "candidate", "data"]],
-          [:Let, "position", :U64, "zero"],
-          [:While, [:Less, "position", "length"], [
-            [:Let, "left_byte", :U8, [:Load, [:Expr, bytes, [:Offset, "source", "position"]]]],
-            [:Let, "right_byte", :U8, [:Load, [:Expr, bytes, [:Offset, "data", "position"]]]],
-            [:If, [:Equal, "left_byte", "right_byte"], [], [[:Break]]],
-            [:Set, "position", [:Add, "position", "one"]]]],
-          [:If, [:Equal, "position", "length"], [[:Return, "slot"]], []]] , []]], []],
-      [:Set, "slot", [:BitAnd, [:Expr, :U64, [:Add, "slot", "one"]], "mask"]]]],
-    [:Return, "zero"]])
+    native/note_statement(:Invariant, "Capacity is nonzero; at least half the buckets are empty."),
+    native/let_load("header", table, "table"),
+    native/let_field("entries", [:Pointer, entry, :Mutable], "header", "entries"),
+    native/let_field("buckets", [:Pointer, :U64, :Mutable], "header", "buckets"),
+    native/let_statement(
+      "mask",
+      :U64,
+      native/binary_expression(:Multiply, native/typed_field(:U64, "header", "capacity"), "symbol_two")
+    ),
+    native/set_statement("mask", native/binary_expression(:Subtract, "mask", "one")),
+    native/let_statement("slot", :U64, native/binary_expression(:BitAnd, "hash", "mask")),
+    native/while_statement("true", [
+      native/let_load(
+        "id",
+        :U64,
+        native/typed_expression([:Pointer, :U64, :Mutable], native/offset_expression("buckets", "slot"))
+      ),
+      native/when_statement(native/binary_expression(:Equal, "id", "zero"), [native/return_value("slot")]),
+      native/let_load(
+        "candidate",
+        entry,
+        native/typed_expression(
+          [:Pointer, entry, :Mutable],
+          native/offset_expression(
+            "entries",
+            native/typed_expression(:U64, native/binary_expression(:Subtract, "id", "one"))
+          )
+        )
+      ),
+      native/when_statement(
+        native/binary_expression(:Equal, "hash", native/typed_field(:U64, "candidate", "hash")),
+        [
+          native/when_statement(native/binary_expression(
+            :Equal,
+            "length",
+            native/typed_field(:U64, "candidate", "length")
+          ), [
+            native/let_field("data", bytes, "candidate", "data"),
+            native/let_statement("position", :U64, "zero"),
+            native/while_statement(native/binary_expression(:Less, "position", "length"), [
+              native/let_load(
+                "left_byte",
+                :U8,
+                native/typed_expression(bytes, native/offset_expression("source", "position"))
+              ),
+              native/let_load(
+                "right_byte",
+                :U8,
+                native/typed_expression(bytes, native/offset_expression("data", "position"))
+              ),
+              native/unless_statement(
+                native/binary_expression(:Equal, "left_byte", "right_byte"),
+                [native/break_statement()]
+              ),
+              native/set_statement("position", native/binary_expression(:Add, "position", "one"))
+            ]),
+            native/when_statement(native/binary_expression(:Equal, "position", "length"), [native/return_value("slot")])
+          ])
+        ]
+      ),
+      native/set_statement(
+        "slot",
+        native/binary_expression(
+          :BitAnd,
+          native/typed_expression(:U64, native/binary_expression(:Add, "slot", "one")),
+          "mask"
+        )
+      )
+    ]),
+    native/return_value("zero")
+  ])
   return context
 end
 
@@ -91,44 +149,117 @@ verb native_value/symbol_grow(input: map) -> map
   context = native/declare_function(context, "symbol_grow", :Bool,
     [["table", [:Pointer, table, :Mutable], :Borrow]], [], [:ReadMemory, :WriteMemory, :Allocate], :Value, "")
   context = native/define_function(context, "symbol_grow", [
-    [:Let, "header", table, [:Load, "table"]],
-    [:Let, "capacity", :U64, [:Field, "header", "capacity"]],
-    [:If, [:Less, "capacity", "symbol_id_limit"], [], [[:Return, "false"]]],
-    [:Set, "capacity", [:Multiply, "capacity", "symbol_two"]],
-    [:If, [:Equal, "capacity", "zero"], [[:Set, "capacity", "symbol_initial_capacity"]], []],
-    [:Let, "count", :U64, [:Field, "header", "count"]],
-    [:Let, "entry_size", :U64, [:SizeOf, entry]],
-    [:Let, "entry_bytes", :U64, [:Multiply, "capacity", "entry_size"]],
-    [:Let, "bucket_count", :U64, [:Multiply, "capacity", "symbol_two"]],
-    [:Let, "bucket_bytes", :U64, [:Multiply, "bucket_count", [:Expr, :U64, [:SizeOf, :U64]]]],
-    [:Let, "arena", [:Pointer, [:Record, "ValueArena"], :Mutable], [:FieldPointer, "table", "arena"]],
-    [:Let, "allocation", bytes, [:Call, "value_arena_allocate", "arena", [:Expr, :U64, [:Add, "entry_bytes", "bucket_bytes"]]]],
-    [:If, [:Equal, "allocation", "null_bytes"], [[:Return, "false"]], []],
-    [:Let, "new_entries", entries, [:PointerCast, "allocation"]],
-    [:Let, "new_buckets", buckets, [:PointerCast, [:Expr, bytes, [:Offset, "allocation", "entry_bytes"]]]],
-    [:Let, "position", :U64, "zero"],
-    [:While, [:Less, "position", "bucket_count"], [
-      [:Do, [:Store, [:Expr, buckets, [:Offset, "new_buckets", "position"]], "zero"]],
-      [:Set, "position", [:Add, "position", "one"]]]],
-    [:If, [:Equal, "count", "zero"], [], [
-      [:Let, "previous", entries, [:Field, "header", "entries"]],
-      [:Do, [:CopyBytes, "allocation", [:Expr, bytes, [:PointerCast, "previous"]], [:Expr, :U64, [:Multiply, "count", "entry_size"]]]]]],
-    [:Let, "mask", :U64, [:Subtract, "bucket_count", "one"]],
-    [:Set, "position", "zero"],
-    [:While, [:Less, "position", "count"], [
-      [:Let, "item", entry, [:Load, [:Expr, entries, [:Offset, "new_entries", "position"]]]],
-      [:Let, "slot", :U64, [:BitAnd, [:Expr, :U64, [:Field, "item", "hash"]], "mask"]],
-      [:While, "true", [
-        [:Let, "occupied", :U64, [:Load, [:Expr, buckets, [:Offset, "new_buckets", "slot"]]]],
-        [:If, [:Equal, "occupied", "zero"], [[:Break]], []],
-        [:Set, "slot", [:BitAnd, [:Expr, :U64, [:Add, "slot", "one"]], "mask"]]]],
-      [:Do, [:Store, [:Expr, buckets, [:Offset, "new_buckets", "slot"]], [:Expr, :U64, [:Add, "position", "one"]]]],
-      [:Set, "position", [:Add, "position", "one"]]]],
-    [:Note, :Purpose, "Publish rebuilt tables only after allocation and rehashing succeed."],
-    [:Do, [:Store, [:Expr, [:Pointer, entries, :Mutable], [:FieldPointer, "table", "entries"]], "new_entries"]],
-    [:Do, [:Store, [:Expr, [:Pointer, buckets, :Mutable], [:FieldPointer, "table", "buckets"]], "new_buckets"]],
-    [:Do, [:Store, [:Expr, buckets, [:FieldPointer, "table", "capacity"]], "capacity"]],
-    [:Return, "true"]])
+    native/let_load("header", table, "table"),
+    native/let_field("capacity", :U64, "header", "capacity"),
+    native/unless_statement(
+      native/binary_expression(:Less, "capacity", "symbol_id_limit"),
+      [native/return_value("false")]
+    ),
+    native/set_statement("capacity", native/binary_expression(:Multiply, "capacity", "symbol_two")),
+    native/when_statement(
+      native/binary_expression(:Equal, "capacity", "zero"),
+      [native/set_statement("capacity", "symbol_initial_capacity")]
+    ),
+    native/let_field("count", :U64, "header", "count"),
+    native/let_statement("entry_size", :U64, native/unary_expression(:SizeOf, entry)),
+    native/let_statement("entry_bytes", :U64, native/binary_expression(:Multiply, "capacity", "entry_size")),
+    native/let_statement("bucket_count", :U64, native/binary_expression(:Multiply, "capacity", "symbol_two")),
+    native/let_statement(
+      "bucket_bytes",
+      :U64,
+      native/binary_expression(
+        :Multiply,
+        "bucket_count",
+        native/typed_expression(:U64, native/unary_expression(:SizeOf, :U64))
+      )
+    ),
+    native/let_statement(
+      "arena",
+      [:Pointer, [:Record, "ValueArena"], :Mutable],
+      native/field_pointer_expression("table", "arena")
+    ),
+    native/let_call(
+      "allocation",
+      bytes,
+      "value_arena_allocate",
+      ["arena", native/typed_expression(:U64, native/binary_expression(:Add, "entry_bytes", "bucket_bytes"))]
+    ),
+    native/when_statement(native/binary_expression(:Equal, "allocation", "null_bytes"), [native/return_value("false")]),
+    native/let_statement("new_entries", entries, native/unary_expression(:PointerCast, "allocation")),
+    native/let_statement(
+      "new_buckets",
+      buckets,
+      native/unary_expression(
+        :PointerCast,
+        native/typed_expression(bytes, native/offset_expression("allocation", "entry_bytes"))
+      )
+    ),
+    native/let_statement("position", :U64, "zero"),
+    native/while_statement(native/binary_expression(:Less, "position", "bucket_count"), [
+      native/store_statement(
+        native/typed_expression(buckets, native/offset_expression("new_buckets", "position")),
+        "zero"
+      ),
+      native/set_statement("position", native/binary_expression(:Add, "position", "one"))
+    ]),
+    native/unless_statement(native/binary_expression(:Equal, "count", "zero"), [
+      native/let_field("previous", entries, "header", "entries"),
+      native/copy_bytes_statement(
+        "allocation",
+        native/typed_expression(bytes, native/unary_expression(:PointerCast, "previous")),
+        native/typed_expression(:U64, native/binary_expression(:Multiply, "count", "entry_size"))
+      )
+    ]),
+    native/let_statement("mask", :U64, native/binary_expression(:Subtract, "bucket_count", "one")),
+    native/set_statement("position", "zero"),
+    native/while_statement(native/binary_expression(:Less, "position", "count"), [
+      native/let_load(
+        "item",
+        entry,
+        native/typed_expression(entries, native/offset_expression("new_entries", "position"))
+      ),
+      native/let_statement(
+        "slot",
+        :U64,
+        native/binary_expression(:BitAnd, native/typed_field(:U64, "item", "hash"), "mask")
+      ),
+      native/while_statement("true", [
+        native/let_load(
+          "occupied",
+          :U64,
+          native/typed_expression(buckets, native/offset_expression("new_buckets", "slot"))
+        ),
+        native/when_statement(native/binary_expression(:Equal, "occupied", "zero"), [native/break_statement()]),
+        native/set_statement(
+          "slot",
+          native/binary_expression(
+            :BitAnd,
+            native/typed_expression(:U64, native/binary_expression(:Add, "slot", "one")),
+            "mask"
+          )
+        )
+      ]),
+      native/store_statement(
+        native/typed_expression(buckets, native/offset_expression("new_buckets", "slot")),
+        native/typed_expression(:U64, native/binary_expression(:Add, "position", "one"))
+      ),
+      native/set_statement("position", native/binary_expression(:Add, "position", "one"))
+    ]),
+    native/note_statement(:Purpose, "Publish rebuilt tables only after allocation and rehashing succeed."),
+    native/store_statement(
+      native/typed_expression([:Pointer, entries, :Mutable], native/field_pointer_expression("table", "entries")),
+      "new_entries"
+    ),
+    native/store_statement(
+      native/typed_expression([:Pointer, buckets, :Mutable], native/field_pointer_expression("table", "buckets")),
+      "new_buckets"
+    ),
+    native/store_statement(
+      native/typed_expression(buckets, native/field_pointer_expression("table", "capacity")),
+      "capacity"
+    ),
+    native/return_value("true")
+  ])
   return context
 end
 
@@ -144,42 +275,86 @@ verb native_value/symbol_intern(input: map) -> map
     [["table", [:Pointer, table, :Mutable], :Borrow], ["source", bytes, :Borrow],
      ["length", :U64, :Value]], [], [:ReadMemory, :WriteMemory, :Allocate], :Value, "")
   context = native/define_function(context, "symbol_intern_locked", [
-    [:If, [:Less, "allocation_limit", "length"], [[:Return, [:Zero]]], []],
-    [:If, [:Equal, "length", "zero"], [], [
-      [:If, [:Equal, "source", [:Expr, bytes, [:Zero]]], [[:Return, [:Zero]]], []]]],
-    [:Let, "hash", :U64, [:Call, "symbol_hash", "source", "length"]],
-    [:Let, "header", table, [:Load, "table"]],
-    [:Let, "capacity", :U64, [:Field, "header", "capacity"]],
-    [:Let, "count", :U64, [:Field, "header", "count"]],
-    [:Let, "slot", :U64, "zero"],
-    [:If, [:Equal, "capacity", "zero"], [], [
-      [:Set, "slot", [:Call, "symbol_slot", "table", "source", "length", "hash"]],
-      [:Let, "existing_buckets", buckets, [:Field, "header", "buckets"]],
-      [:Let, "existing", :U64, [:Load, [:Expr, buckets, [:Offset, "existing_buckets", "slot"]]]],
-      [:If, [:Equal, "existing", "zero"], [], [
-        [:Return, [:Record, "true", [:Expr, :U64, [:Subtract, "existing", "one"]]]]]]]],
-    [:If, [:Less, "count", "symbol_id_limit"], [], [[:Return, [:Zero]]]],
-    [:Let, "scan", [:Record, "Utf8Scan"], [:Call, "utf8_scan", "source", "length"]],
-    [:If, [:Field, "scan", "ok"], [], [[:Return, [:Zero]]]],
-    [:If, [:Equal, "count", "capacity"], [
-      [:If, [:Call, "symbol_grow", "table"], [], [[:Return, [:Zero]]]],
-      [:Set, "header", [:Load, "table"]],
-      [:Set, "slot", [:Call, "symbol_slot", "table", "source", "length", "hash"]]], []],
-    [:Let, "arena", [:Pointer, [:Record, "ValueArena"], :Mutable], [:FieldPointer, "table", "arena"]],
-    [:Let, "size", :U64, "length"],
-    [:If, [:Equal, "size", "zero"], [[:Set, "size", "one"]], []],
-    [:Let, "data", mutable_bytes, [:Call, "value_arena_allocate", "arena", "size"]],
-    [:If, [:Equal, "data", "null_bytes"], [[:Return, [:Zero]]], []],
-    [:If, [:Equal, "length", "zero"], [], [[:Do, [:CopyBytes, "data", "source", "length"]]]],
-    [:Let, "item", entry, [:Record, [:Expr, bytes, [:Freeze, "data"]], "length",
-      [:Expr, :U64, [:Field, "scan", "scalars"]], "hash", [:Expr, :Bool, [:Field, "scan", "ascii"]]]],
-    [:Let, "entries", [:Pointer, entry, :Mutable], [:Field, "header", "entries"]],
-    [:Do, [:Store, [:Expr, [:Pointer, entry, :Mutable], [:Offset, "entries", "count"]], "item"]],
-    [:Let, "buckets", buckets, [:Field, "header", "buckets"]],
-    [:Let, "next_count", :U64, [:Add, "count", "one"]],
-    [:Do, [:Store, [:Expr, buckets, [:Offset, "buckets", "slot"]], "next_count"]],
-    [:Do, [:Store, [:Expr, buckets, [:FieldPointer, "table", "count"]], "next_count"]],
-    [:Return, [:Record, "true", "count"]]])
+    native/when_statement(native/binary_expression(:Less, "allocation_limit", "length"), [native/return_zero()]),
+    native/unless_statement(
+      native/binary_expression(:Equal, "length", "zero"),
+      [
+        native/when_statement(
+          native/binary_expression(:Equal, "source", native/typed_zero(bytes)),
+          [native/return_zero()]
+        )
+      ]
+    ),
+    native/let_call("hash", :U64, "symbol_hash", ["source", "length"]),
+    native/let_load("header", table, "table"),
+    native/let_field("capacity", :U64, "header", "capacity"),
+    native/let_field("count", :U64, "header", "count"),
+    native/let_statement("slot", :U64, "zero"),
+    native/unless_statement(native/binary_expression(:Equal, "capacity", "zero"), [
+      native/set_statement("slot", native/call_expression("symbol_slot", ["table", "source", "length", "hash"])),
+      native/let_field("existing_buckets", buckets, "header", "buckets"),
+      native/let_load(
+        "existing",
+        :U64,
+        native/typed_expression(buckets, native/offset_expression("existing_buckets", "slot"))
+      ),
+      native/unless_statement(
+        native/binary_expression(:Equal, "existing", "zero"),
+        [
+          native/return_record(
+            ["true", native/typed_expression(:U64, native/binary_expression(:Subtract, "existing", "one"))]
+          )
+        ]
+      )
+    ]),
+    native/unless_statement(native/binary_expression(:Less, "count", "symbol_id_limit"), [native/return_zero()]),
+    native/let_call("scan", [:Record, "Utf8Scan"], "utf8_scan", ["source", "length"]),
+    native/unless_statement(native/field_expression("scan", "ok"), [native/return_zero()]),
+    native/when_statement(native/binary_expression(:Equal, "count", "capacity"), [
+      native/unless_statement(native/call_expression("symbol_grow", ["table"]), [native/return_zero()]),
+      native/set_statement("header", native/load_expression("table")),
+      native/set_statement("slot", native/call_expression("symbol_slot", ["table", "source", "length", "hash"]))
+    ]),
+    native/let_statement(
+      "arena",
+      [:Pointer, [:Record, "ValueArena"], :Mutable],
+      native/field_pointer_expression("table", "arena")
+    ),
+    native/let_statement("size", :U64, "length"),
+    native/when_statement(native/binary_expression(:Equal, "size", "zero"), [native/set_statement("size", "one")]),
+    native/let_call("data", mutable_bytes, "value_arena_allocate", ["arena", "size"]),
+    native/when_statement(native/binary_expression(:Equal, "data", "null_bytes"), [native/return_zero()]),
+    native/unless_statement(
+      native/binary_expression(:Equal, "length", "zero"),
+      [native/copy_bytes_statement("data", "source", "length")]
+    ),
+    native/let_statement(
+      "item",
+      entry,
+      native/record_expression(
+        [
+          native/typed_expression(bytes, native/unary_expression(:Freeze, "data")),
+          "length",
+          native/typed_field(:U64, "scan", "scalars"),
+          "hash",
+          native/typed_field(:Bool, "scan", "ascii")
+        ]
+      )
+    ),
+    native/let_field("entries", [:Pointer, entry, :Mutable], "header", "entries"),
+    native/store_statement(
+      native/typed_expression([:Pointer, entry, :Mutable], native/offset_expression("entries", "count")),
+      "item"
+    ),
+    native/let_field("buckets", buckets, "header", "buckets"),
+    native/let_statement("next_count", :U64, native/binary_expression(:Add, "count", "one")),
+    native/store_statement(native/typed_expression(buckets, native/offset_expression("buckets", "slot")), "next_count"),
+    native/store_statement(
+      native/typed_expression(buckets, native/field_pointer_expression("table", "count")),
+      "next_count"
+    ),
+    native/return_record(["true", "count"])
+  ])
   return context
 end
 
@@ -191,23 +366,52 @@ verb native_value/symbol_access(input: map) -> map
   context = native/declare_function(context, "symbol_text_locked", [:Record, "SymbolText"],
     [["table", pointer, :Borrow], ["id", :U32, :Value]], [], [:ReadMemory], :Borrow, "table")
   context = native/define_function(context, "symbol_text_locked", [
-    [:Let, "header", table, [:Load, "table"]],
-    [:Let, "index", :U64, [:Convert, "id"]],
-    [:If, [:Less, "index", [:Expr, :U64, [:Field, "header", "count"]]], [], [[:Return, [:Zero]]]],
-    [:Let, "entries", [:Pointer, entry, :Mutable], [:Field, "header", "entries"]],
-    [:Let, "item", entry, [:Load, [:Expr, [:Pointer, entry, :Mutable], [:Offset, "entries", "index"]]]],
-    [:Return, [:Record, "true", [:Expr, [:Pointer, :U8, :Const], [:Field, "item", "data"]],
-      [:Expr, :U64, [:Field, "item", "length"]], [:Expr, :U64, [:Field, "item", "scalars"]],
-      [:Expr, :Bool, [:Field, "item", "ascii"]]]]])
+    native/let_load("header", table, "table"),
+    native/let_statement("index", :U64, native/unary_expression(:Convert, "id")),
+    native/unless_statement(
+      native/binary_expression(:Less, "index", native/typed_field(:U64, "header", "count")),
+      [native/return_zero()]
+    ),
+    native/let_field("entries", [:Pointer, entry, :Mutable], "header", "entries"),
+    native/let_load(
+      "item",
+      entry,
+      native/typed_expression([:Pointer, entry, :Mutable], native/offset_expression("entries", "index"))
+    ),
+    native/return_record(
+      [
+        "true",
+        native/typed_field([:Pointer, :U8, :Const], "item", "data"),
+        native/typed_field(:U64, "item", "length"),
+        native/typed_field(:U64, "item", "scalars"),
+        native/typed_field(:Bool, "item", "ascii")
+      ]
+    )
+  ])
   context = native/declare_function(context, "value_symbol_table_release", :Void,
     [["table", pointer, :Consume]], [], [:ReadMemory, :WriteMemory, :Release], :Value, "")
   context = native/define_function(context, "value_symbol_table_release", [
-    [:Let, "arena", [:Pointer, [:Record, "ValueArena"], :Mutable], [:FieldPointer, "table", "arena"]],
-    [:Do, [:Call, "value_arena_release", "arena"]],
-    [:Let, "mutex", [:Pointer, :U8, :Mutable], [:Load,
-      [:Expr, [:Pointer, [:Pointer, :U8, :Mutable], :Mutable], [:FieldPointer, "table", "mutex"]]]],
-    [:If, [:Equal, "mutex", "null_bytes"], [], [[:Do, [:Call, "mutex_destroy", "mutex"]]]],
-    [:Do, [:Store, "table", [:Expr, table, [:Zero]]]], [:Return]])
+    native/let_statement(
+      "arena",
+      [:Pointer, [:Record, "ValueArena"], :Mutable],
+      native/field_pointer_expression("table", "arena")
+    ),
+    native/do_statement(native/call_expression("value_arena_release", ["arena"])),
+    native/let_load(
+      "mutex",
+      [:Pointer, :U8, :Mutable],
+      native/typed_expression(
+        [:Pointer, [:Pointer, :U8, :Mutable], :Mutable],
+        native/field_pointer_expression("table", "mutex")
+      )
+    ),
+    native/unless_statement(
+      native/binary_expression(:Equal, "mutex", "null_bytes"),
+      [native/do_statement(native/call_expression("mutex_destroy", ["mutex"]))]
+    ),
+    native/store_statement("table", native/typed_zero(table)),
+    native/return_void()
+  ])
   return context
 end
 
@@ -228,12 +432,14 @@ verb native_value/symbol_synchronization(input: map) -> map
   context = native/declare_function(context, "value_symbol_table_init", :Bool,
     [["table", pointer, :Borrow]], [], [:ReadMemory, :WriteMemory, :Allocate, :Release], :Value, "")
   context = native/define_function(context, "value_symbol_table_init", [
-    [:Let, "slot", [:Pointer, bytes, :Mutable], [:FieldPointer, "table", "mutex"]],
-    [:Let, "existing", bytes, [:Load, "slot"]],
-    [:If, [:Equal, "existing", "null_bytes"], [], [[:Return, "false"]]],
-    [:Let, "owned", bytes, [:Call, "mutex_create"]],
-    [:If, [:Equal, "owned", "null_bytes"], [[:Return, "false"]], []],
-    [:Let, "adopted", bytes, [:Adopt, "slot", "owned"]], [:Return, "true"]])
+    native/let_statement("slot", [:Pointer, bytes, :Mutable], native/field_pointer_expression("table", "mutex")),
+    native/let_load("existing", bytes, "slot"),
+    native/unless_statement(native/binary_expression(:Equal, "existing", "null_bytes"), [native/return_value("false")]),
+    native/let_call("owned", bytes, "mutex_create", []),
+    native/when_statement(native/binary_expression(:Equal, "owned", "null_bytes"), [native/return_value("false")]),
+    native/let_statement("adopted", bytes, native/binary_expression(:Adopt, "slot", "owned")),
+    native/return_value("true")
+  ])
   return context
 end
 
@@ -250,11 +456,17 @@ verb native_value/symbol_synchronized_access(input: map) -> map
        [["id", :U32, :Value]], ["id"], [:ReadMemory, :WriteMemory, :Block], :Borrow, "table"]]
     context = native/declare_function(context, spec[0], spec[2], [["table", pointer, :Borrow], @spec[3]], [], spec[5], spec[6], spec[7])
     context = native/define_function(context, spec[0], [
-      [:Let, "mutex", bytes, [:Load, [:Expr, [:Pointer, bytes, :Mutable], [:FieldPointer, "table", "mutex"]]]],
-      [:If, [:Equal, "mutex", "null_bytes"], [[:Return, [:Zero]]], []],
-      [:Do, [:Call, "mutex_lock", "mutex"]],
-      [:Let, "result", spec[2], [:Call, spec[1], "table", @spec[4]]],
-      [:Do, [:Call, "mutex_unlock", "mutex"]], [:Return, "result"]])
+      native/let_load(
+        "mutex",
+        bytes,
+        native/typed_expression([:Pointer, bytes, :Mutable], native/field_pointer_expression("table", "mutex"))
+      ),
+      native/when_statement(native/binary_expression(:Equal, "mutex", "null_bytes"), [native/return_zero()]),
+      native/do_statement(native/call_expression("mutex_lock", ["mutex"])),
+      native/let_call("result", spec[2], spec[1], ["table", @spec[4]]),
+      native/do_statement(native/call_expression("mutex_unlock", ["mutex"])),
+      native/return_value("result")
+    ])
   end
   return context
 end

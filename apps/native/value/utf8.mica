@@ -33,13 +33,21 @@ verb native_value/utf8(input: map) -> map
   let name: string = "unicode_scalar"
   context = native/declare_function(context, name, [:Record, "RuneResult"], [["number", :U32, :Value]],
     [], [], :Value, "")
-  context[:state] = native/annotate(context[:state], context[:functions][name], :Source, "apps/native/value/utf8.mica: native_value/utf8")
+  context[:state] = native/annotate(
+    context[:state],
+    context[:functions][name],
+    :Source,
+    "apps/native/value/utf8.mica: native_value/utf8"
+  )
   context[:state] = native/annotate(context[:state], context[:functions][name], :Invariant, "A successful Rune is at most U+10FFFF and excludes U+D800 through U+DFFF.")
-  let failure: list = [[:Return, [:Zero]]]
+  let failure: list = [native/return_zero()]
   context = native/define_function(context, name, [
-    [:If, [:Less, "number", "utf32_1114112"], [], failure],
-    [:If, [:Less, "number", "utf32_55296"], [], [[:If, [:Less, "number", "utf32_57344"], failure, []]]],
-    [:Return, [:Record, "true", [:Expr, rune, [:Wrap, "number"]]]]
+    native/unless_statement(native/binary_expression(:Less, "number", "utf32_1114112"), failure),
+    native/unless_statement(
+      native/binary_expression(:Less, "number", "utf32_55296"),
+      [native/when_statement(native/binary_expression(:Less, "number", "utf32_57344"), failure)]
+    ),
+    native/return_record(["true", native/typed_expression(rune, native/unary_expression(:Wrap, "number"))])
   ])
   context = native_value/utf8_decode(context)
   context = native_value/utf8_encode(context)
@@ -55,47 +63,57 @@ verb native_value/utf8_decode(input: map) -> map
   context = native/declare_function(context, name, result, [["source", pointer, :Borrow], ["length", :U64, :Value]],
     [], [:ReadMemory], :Value, "")
   context = native/define_function(context, name, [
-    [:Note, :Invariant, "Reject overlong encodings, surrogate scalars, and incomplete sequences without consuming input."],
-    [:If, [:Equal, "length", "zero"], [[:Return, [:Zero]]], []],
-    [:If, [:Equal, "source", "utf8_null"], [[:Return, [:Zero]]], []],
-    [:Let, "byte", :U8, [:Load, "source"]],
-    [:Let, "first", :U32, [:Convert, "byte"]],
-    [:If, [:Less, "first", "utf32_128"], [[:Let, "number", :U32, "first"], [:Let, "width", :U64, "one"]], [
-      [:If, [:Less, "first", "utf32_194"], [[:Return, [:Zero]]], []],
-      [:If, [:Less, "first", "utf32_224"], [
-        [:Set, "width", "utf64_2"],
-        [:Set, "number", [:BitAnd, "first", "utf32_31"]],
-        [:Let, "minimum", :U32, "utf32_128"]
+    native/note_statement(
+      :Invariant,
+      "Reject overlong encodings, surrogate scalars, and incomplete sequences without consuming input."
+    ),
+    native/when_statement(native/binary_expression(:Equal, "length", "zero"), [native/return_zero()]),
+    native/when_statement(native/binary_expression(:Equal, "source", "utf8_null"), [native/return_zero()]),
+    native/let_load("byte", :U8, "source"),
+    native/let_statement("first", :U32, native/unary_expression(:Convert, "byte")),
+    native/if_statement(native/binary_expression(:Less, "first", "utf32_128"), [
+      native/let_statement("number", :U32, "first"),
+      native/let_statement("width", :U64, "one")
+    ], [
+      native/when_statement(native/binary_expression(:Less, "first", "utf32_194"), [native/return_zero()]),
+      native/if_statement(native/binary_expression(:Less, "first", "utf32_224"), [
+        native/set_statement("width", "utf64_2"),
+        native/set_statement("number", native/binary_expression(:BitAnd, "first", "utf32_31")),
+        native/let_statement("minimum", :U32, "utf32_128")
       ], [
-        [:If, [:Less, "first", "utf32_240"], [[:Set, "width", "utf64_3"], [:Set, "number", [:BitAnd, "first", "utf32_15"]], [:Set, "minimum", "utf32_2048"]], [
-          [:If, [:Less, "first", "utf32_245"], [
-            [:Set, "width", "utf64_4"],
-            [:Set, "number", [:BitAnd, "first", "utf32_7"]],
-            [:Set, "minimum", "utf32_65536"]
-          ], [[:Return, [:Zero]]]]
-        ]]
-      ]],
-      [:Let, "condition", :Bool, [:Less, "length", "width"]],
-      [:Let, "index", :U64, "one"],
-      [:If, "condition", [[:Return, [:Zero]]], []],
-      [:While, [:Less, "index", "width"], [
-        [:Let, "slot", pointer, [:Offset, "source", "index"]],
-        [:Set, "byte", [:Load, "slot"]],
-        [:Let, "part", :U32, [:Convert, "byte"]],
-        [:Set, "first", [:BitAnd, "part", "utf32_192"]],
-        [:If, [:Equal, "first", "utf32_128"], [], [[:Return, [:Zero]]]],
-        [:Set, "part", [:BitAnd, "part", "utf32_63"]],
-        [:Set, "number", [:ShiftLeft, "number", "utf32_6"]],
-        [:Set, "number", [:BitOr, "number", "part"]],
-        [:Set, "index", [:Add, "index", "one"]]
-      ]],
-      [:If, [:Less, "number", "minimum"], [[:Return, [:Zero]]], []]
-    ]],
-    [:Let, "scalar", [:Record, "RuneResult"], [:Call, "unicode_scalar", "number"]],
-    [:If, [:Field, "scalar", "ok"], [], [[:Return, [:Zero]]]],
-    [:Let, "rune", [:Scalar, "Rune", :U32], [:Field, "scalar", "rune"]],
-    [:Let, "result", result, [:Record, "true", "rune", "width"]],
-    [:Return, "result"]
+        native/if_statement(native/binary_expression(:Less, "first", "utf32_240"), [
+          native/set_statement("width", "utf64_3"),
+          native/set_statement("number", native/binary_expression(:BitAnd, "first", "utf32_15")),
+          native/set_statement("minimum", "utf32_2048")
+        ], [
+          native/if_statement(native/binary_expression(:Less, "first", "utf32_245"), [
+            native/set_statement("width", "utf64_4"),
+            native/set_statement("number", native/binary_expression(:BitAnd, "first", "utf32_7")),
+            native/set_statement("minimum", "utf32_65536")
+          ], [native/return_zero()])
+        ])
+      ]),
+      native/let_statement("condition", :Bool, native/binary_expression(:Less, "length", "width")),
+      native/let_statement("index", :U64, "one"),
+      native/when_statement("condition", [native/return_zero()]),
+      native/while_statement(native/binary_expression(:Less, "index", "width"), [
+        native/let_offset("slot", pointer, "source", "index"),
+        native/set_statement("byte", native/load_expression("slot")),
+        native/let_statement("part", :U32, native/unary_expression(:Convert, "byte")),
+        native/set_statement("first", native/binary_expression(:BitAnd, "part", "utf32_192")),
+        native/unless_statement(native/binary_expression(:Equal, "first", "utf32_128"), [native/return_zero()]),
+        native/set_statement("part", native/binary_expression(:BitAnd, "part", "utf32_63")),
+        native/set_statement("number", native/binary_expression(:ShiftLeft, "number", "utf32_6")),
+        native/set_statement("number", native/binary_expression(:BitOr, "number", "part")),
+        native/set_statement("index", native/binary_expression(:Add, "index", "one"))
+      ]),
+      native/when_statement(native/binary_expression(:Less, "number", "minimum"), [native/return_zero()])
+    ]),
+    native/let_call("scalar", [:Record, "RuneResult"], "unicode_scalar", ["number"]),
+    native/unless_statement(native/field_expression("scalar", "ok"), [native/return_zero()]),
+    native/let_field("rune", [:Scalar, "Rune", :U32], "scalar", "rune"),
+    native/let_statement("result", result, native/record_expression(["true", "rune", "width"])),
+    native/return_value("result")
   ])
   return context
 end
@@ -108,32 +126,48 @@ verb native_value/utf8_encode(input: map) -> map
   context = native/declare_function(context, name, result, [["rune", [:Scalar, "Rune", :U32], :Value]],
     [], [:WriteMemory], :Value, "")
   context = native/define_function(context, name, [
-    [:Let, "number", :U32, [:Unwrap, "rune"]],
-    [:Let, "scalar", [:Record, "RuneResult"], [:Call, "unicode_scalar", "number"]],
-    [:If, [:Field, "scalar", "ok"], [], [[:Return, [:Zero]]]],
-    [:If, [:Less, "number", "utf32_128"], [[:Let, "width", :U64, "one"], [:Let, "prefix", :U32, "utf32_0"]], [
-      [:If, [:Less, "number", "utf32_2048"], [[:Set, "width", "utf64_2"], [:Set, "prefix", "utf32_192"]], [
-        [:If, [:Less, "number", "utf32_65536"], [[:Set, "width", "utf64_3"], [:Set, "prefix", "utf32_224"]], [[:Set, "width", "utf64_4"], [:Set, "prefix", "utf32_240"]]]
-      ]]
-    ]],
-    [:Let, "bytes", bytes, [:Zero]],
-    [:Let, "address", [:Pointer, bytes, :Mutable], [:Address, "bytes"]],
-    [:Let, "index", :U64, [:Subtract, "width", "one"]],
-    [:While, [:Less, "zero", "index"], [
-      [:Let, "part", :U32, [:BitAnd, "number", "utf32_63"]],
-      [:Set, "part", [:BitOr, "part", "utf32_128"]],
-      [:Let, "byte", :U8, [:Convert, "part"]],
-      [:Let, "slot", [:Pointer, :U8, :Mutable], [:ElementPointer, "address", "index"]],
-      [:Do, [:Store, "slot", "byte"]],
-      [:Set, "number", [:ShiftRight, "number", "utf32_6"]],
-      [:Set, "index", [:Subtract, "index", "one"]]
-    ]],
-    [:Set, "part", [:BitOr, "number", "prefix"]],
-    [:Set, "byte", [:Convert, "part"]],
-    [:Set, "slot", [:ElementPointer, "address", "zero"]],
-    [:Do, [:Store, "slot", "byte"]],
-    [:Let, "result", result, [:Record, "true", "bytes", "width"]],
-    [:Return, "result"]
+    native/let_statement("number", :U32, native/unary_expression(:Unwrap, "rune")),
+    native/let_call("scalar", [:Record, "RuneResult"], "unicode_scalar", ["number"]),
+    native/unless_statement(native/field_expression("scalar", "ok"), [native/return_zero()]),
+    native/if_statement(native/binary_expression(:Less, "number", "utf32_128"), [
+      native/let_statement("width", :U64, "one"),
+      native/let_statement("prefix", :U32, "utf32_0")
+    ], [
+      native/if_statement(native/binary_expression(:Less, "number", "utf32_2048"), [
+        native/set_statement("width", "utf64_2"),
+        native/set_statement("prefix", "utf32_192")
+      ], [
+        native/if_statement(native/binary_expression(:Less, "number", "utf32_65536"), [
+          native/set_statement("width", "utf64_3"),
+          native/set_statement("prefix", "utf32_224")
+        ], [
+          native/set_statement("width", "utf64_4"),
+          native/set_statement("prefix", "utf32_240")
+        ])
+      ])
+    ]),
+    native/let_statement("bytes", bytes, native/zero_expression()),
+    native/let_statement("address", [:Pointer, bytes, :Mutable], native/unary_expression(:Address, "bytes")),
+    native/let_statement("index", :U64, native/binary_expression(:Subtract, "width", "one")),
+    native/while_statement(native/binary_expression(:Less, "zero", "index"), [
+      native/let_statement("part", :U32, native/binary_expression(:BitAnd, "number", "utf32_63")),
+      native/set_statement("part", native/binary_expression(:BitOr, "part", "utf32_128")),
+      native/let_statement("byte", :U8, native/unary_expression(:Convert, "part")),
+      native/let_statement(
+        "slot",
+        [:Pointer, :U8, :Mutable],
+        native/binary_expression(:ElementPointer, "address", "index")
+      ),
+      native/store_statement("slot", "byte"),
+      native/set_statement("number", native/binary_expression(:ShiftRight, "number", "utf32_6")),
+      native/set_statement("index", native/binary_expression(:Subtract, "index", "one"))
+    ]),
+    native/set_statement("part", native/binary_expression(:BitOr, "number", "prefix")),
+    native/set_statement("byte", native/unary_expression(:Convert, "part")),
+    native/set_statement("slot", native/binary_expression(:ElementPointer, "address", "zero")),
+    native/store_statement("slot", "byte"),
+    native/let_statement("result", result, native/record_expression(["true", "bytes", "width"])),
+    native/return_value("result")
   ])
   return context
 end
@@ -145,40 +179,63 @@ verb native_value/utf8_scan(input: map) -> map
   let result: list = [:Record, "Utf8Scan"]
   context = native/declare_function(context, name, result, [["source", pointer, :Borrow], ["length", :U64, :Value]],
     [], [:ReadMemory, :WriteMemory], :Value, "")
-  context[:state] = native/annotate(context[:state], context[:functions][name], :Source, "apps/native/value/utf8.mica: native_value/utf8_scan")
+  context[:state] = native/annotate(
+    context[:state],
+    context[:functions][name],
+    :Source,
+    "apps/native/value/utf8.mica: native_value/utf8_scan"
+  )
   context[:state] = native/annotate(context[:state], context[:functions][name], :Purpose, "Validate UTF-8 and count Unicode scalars, with an eight-byte ASCII fast path.")
-  let failure: list = [[:Return, [:Zero]]]
+  let failure: list = [native/return_zero()]
   context = native/define_function(context, name, [
-    [:If, [:Equal, "length", "zero"], [[:Return, [:Record, "true", "zero", "true"]]], []],
-    [:If, [:Equal, "source", "utf8_null"], failure, []],
-    [:Let, "offset", :U64, "zero"],
-    [:Let, "scalars", :U64, "zero"],
-    [:Let, "ascii", :Bool, "true"],
-    [:Let, "chunk", :U64, [:Zero]],
-    [:Let, "chunk_address", [:Pointer, :U64, :Mutable], [:Address, "chunk"]],
-    [:Let, "chunk_bytes", [:Pointer, :U8, :Mutable], [:PointerCast, "chunk_address"]],
-    [:While, [:Less, "offset", "length"], [
-      [:Note, :Invariant, "offset is a scalar boundary within the supplied byte extent."],
-      [:Let, "remaining", :U64, [:Subtract, "length", "offset"]],
-      [:Let, "slot", pointer, [:Offset, "source", "offset"]],
-      [:If, [:Less, "remaining", "utf64_8"], [], [
-        [:Note, :Purpose, "Copy eight readable bytes to an aligned local; the high-bit mask is endian neutral."],
-        [:Do, [:CopyBytes, "chunk_bytes", "slot", "utf64_8"]],
-        [:Set, "chunk", [:Load, "chunk_address"]],
-        [:Let, "high", :U64, [:BitAnd, "chunk", "utf8_high_bits"]],
-        [:If, [:Equal, "high", "zero"], [[:Set, "offset", [:Add, "offset", "utf64_8"]], [:Set, "scalars", [:Add, "scalars", "utf64_8"]], [:Continue]], []]
-      ]],
-      [:Let, "byte", :U8, [:Load, "slot"]],
-      [:Let, "first", :U32, [:Convert, "byte"]],
-      [:If, [:Less, "first", "utf32_128"], [[:Set, "offset", [:Add, "offset", "one"]], [:Set, "scalars", [:Add, "scalars", "one"]], [:Continue]], []],
-      [:Let, "decoded", [:Record, "Utf8Decode"], [:Call, "utf8_decode", "slot", "remaining"]],
-      [:If, [:Field, "decoded", "ok"], [], failure],
-      [:Let, "width", :U64, [:Field, "decoded", "width"]],
-      [:Set, "ascii", "false"],
-      [:Set, "offset", [:Add, "offset", "width"]],
-      [:Set, "scalars", [:Add, "scalars", "one"]]
-    ]],
-    [:Return, [:Record, "true", "scalars", "ascii"]]
+    native/when_statement(
+      native/binary_expression(:Equal, "length", "zero"),
+      [native/return_record(["true", "zero", "true"])]
+    ),
+    native/when_statement(native/binary_expression(:Equal, "source", "utf8_null"), failure),
+    native/let_statement("offset", :U64, "zero"),
+    native/let_statement("scalars", :U64, "zero"),
+    native/let_statement("ascii", :Bool, "true"),
+    native/let_statement("chunk", :U64, native/zero_expression()),
+    native/let_statement("chunk_address", [:Pointer, :U64, :Mutable], native/unary_expression(:Address, "chunk")),
+    native/let_statement(
+      "chunk_bytes",
+      [:Pointer, :U8, :Mutable],
+      native/unary_expression(:PointerCast, "chunk_address")
+    ),
+    native/while_statement(native/binary_expression(:Less, "offset", "length"), [
+      native/note_statement(:Invariant, "offset is a scalar boundary within the supplied byte extent."),
+      native/let_statement("remaining", :U64, native/binary_expression(:Subtract, "length", "offset")),
+      native/let_offset("slot", pointer, "source", "offset"),
+      native/unless_statement(native/binary_expression(:Less, "remaining", "utf64_8"), [
+        native/note_statement(
+          :Purpose,
+          "Copy eight readable bytes to an aligned local; the high-bit mask is endian neutral."
+        ),
+        native/copy_bytes_statement("chunk_bytes", "slot", "utf64_8"),
+        native/set_statement("chunk", native/load_expression("chunk_address")),
+        native/let_statement("high", :U64, native/binary_expression(:BitAnd, "chunk", "utf8_high_bits")),
+        native/when_statement(native/binary_expression(:Equal, "high", "zero"), [
+          native/set_statement("offset", native/binary_expression(:Add, "offset", "utf64_8")),
+          native/set_statement("scalars", native/binary_expression(:Add, "scalars", "utf64_8")),
+          native/continue_statement()
+        ])
+      ]),
+      native/let_load("byte", :U8, "slot"),
+      native/let_statement("first", :U32, native/unary_expression(:Convert, "byte")),
+      native/when_statement(native/binary_expression(:Less, "first", "utf32_128"), [
+        native/set_statement("offset", native/binary_expression(:Add, "offset", "one")),
+        native/set_statement("scalars", native/binary_expression(:Add, "scalars", "one")),
+        native/continue_statement()
+      ]),
+      native/let_call("decoded", [:Record, "Utf8Decode"], "utf8_decode", ["slot", "remaining"]),
+      native/unless_statement(native/field_expression("decoded", "ok"), failure),
+      native/let_field("width", :U64, "decoded", "width"),
+      native/set_statement("ascii", "false"),
+      native/set_statement("offset", native/binary_expression(:Add, "offset", "width")),
+      native/set_statement("scalars", native/binary_expression(:Add, "scalars", "one"))
+    ]),
+    native/return_record(["true", "scalars", "ascii"])
   ])
   return context
 end

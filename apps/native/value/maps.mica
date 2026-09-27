@@ -23,116 +23,136 @@ verb native_value/maps(input: map) -> map
     ],
     [], [:Allocate, :ReadMemory, :WriteMemory], :Borrow, "arena")
   context = native/define_function(context, name, [
-    [:If, [:Equal, "length", "zero"], [], [[:If, [:Equal, "source", "null_map_entries"], [[:Return, [:Zero]]], []]]],
-    [:Let, "header_size", :U64, [:SizeOf, header]],
-    [:Let, "size", :U64, [:SizeOf, entry]],
-    [:Let, "limit", :U64, [:Subtract, "allocation_limit", "header_size"]],
-    [:Set, "limit", [:Divide, "limit", "size"]],
-    [:If, [:Less, "limit", "length"], [[:Return, [:Zero]]], []],
-    [:Let, "bytes", :U64, [:Multiply, "length", "size"]],
-    [:Let, "total", :U64, [:Add, "header_size", "bytes"]],
-    [:Let, "allocation", [:Pointer, :U8, :Mutable], [:Call, "value_arena_allocate", "arena", "total"]],
-    [:If, [:Equal, "allocation", "null_bytes"], [[:Return, [:Zero]]], []],
-    [:Let, "pointer", [:Pointer, header, :Mutable], [:PointerCast, "allocation"]],
-    [:Let, "raw_data", [:Pointer, :U8, :Mutable], [:Offset, "allocation", "header_size"]],
-    [:Let, "src", entries, [:PointerCast, "raw_data"]],
-    [:Let, "read", :U64, "zero"],
-    [:Let, "write", :U64, "length"],
-    [:While, [:Less, "read", "length"], [
-      [:Let, "input_slot", [:Pointer, entry, :Const], [:Offset, "source", "read"]],
-      [:Let, "right_entry", entry, [:Load, "input_slot"]],
-      [:Let, "out_slot", entries, [:Offset, "src", "read"]],
-      [:Do, [:Store, "out_slot", "right_entry"]],
-      [:Set, "read", [:Add, "read", "one"]]
-    ]],
-    [:If, [:Less, "one", "length"], [
-      [:Set, "size", [:SizeOf, entry]],
-      [:Set, "bytes", [:Multiply, "length", "size"]],
-      [:Set, "allocation", [:Call, "value_arena_allocate", "arena", "bytes"]],
-      [:If, [:Equal, "allocation", "null_bytes"], [[:Return, [:Zero]]], []],
-      [:Let, "dst", entries, [:PointerCast, "allocation"]],
-      [:Let, "width", :U64, "one"],
-      [:Note, :Invariant, "Choose the left run on equality to preserve input order before keeping the last duplicate."],
-      [:While, [:Less, "width", "length"], [
-        [:Let, "base", :U64, "zero"],
-        [:While, [:Less, "base", "length"], [
-          [:Let, "middle", :U64, [:Add, "base", "width"]],
-          [:If, [:Less, "length", "middle"], [[:Set, "middle", "length"]], []],
-          [:Let, "end", :U64, [:Add, "middle", "width"]],
-          [:If, [:Less, "length", "end"], [[:Set, "end", "length"]], []],
-          [:Let, "left", :U64, "base"],
-          [:Let, "right", :U64, "middle"],
-          [:Let, "out", :U64, "base"],
-          [:While, [:Less, "out", "end"], [
-            [:Let, "take_left", :Bool, "true"],
-            [:If, [:Less, "right", "end"], [
-              [:If, [:Less, "left", "middle"], [
-                [:Let, "left_slot", entries, [:Offset, "src", "left"]],
-                [:Let, "left_entry", entry, [:Load, "left_slot"]],
-                [:Let, "right_slot", entries, [:Offset, "src", "right"]],
-                [:Set, "right_entry", [:Load, "right_slot"]],
-                [:Let, "left_key", word, [:Field, "left_entry", "key"]],
-                [:Let, "right_key", word, [:Field, "right_entry", "key"]],
-                [:Let, "comparison", [:Record, "IntResult"], [:Call, "value_compare", "left_key", "right_key"]],
-                [:If, [:Field, "comparison", "ok"], [], [[:Return, [:Zero]]]],
-                [:Let, "order", :I64, [:Field, "comparison", "number"]],
-                [:If, [:Less, "int_zero", "order"], [[:Set, "take_left", "false"]], []]
-              ], [[:Set, "take_left", "false"]]]
-            ], []],
-            [:If, "take_left", [
-              [:Set, "left_slot", [:Offset, "src", "left"]],
-              [:Set, "left_entry", [:Load, "left_slot"]],
-              [:Set, "out_slot", [:Offset, "dst", "out"]],
-              [:Do, [:Store, "out_slot", "left_entry"]],
-              [:Set, "left", [:Add, "left", "one"]]
+    native/unless_statement(
+      native/binary_expression(:Equal, "length", "zero"),
+      [native/when_statement(native/binary_expression(:Equal, "source", "null_map_entries"), [native/return_zero()])]
+    ),
+    native/let_statement("header_size", :U64, native/unary_expression(:SizeOf, header)),
+    native/let_statement("size", :U64, native/unary_expression(:SizeOf, entry)),
+    native/let_statement("limit", :U64, native/binary_expression(:Subtract, "allocation_limit", "header_size")),
+    native/set_statement("limit", native/binary_expression(:Divide, "limit", "size")),
+    native/when_statement(native/binary_expression(:Less, "limit", "length"), [native/return_zero()]),
+    native/let_statement("bytes", :U64, native/binary_expression(:Multiply, "length", "size")),
+    native/let_statement("total", :U64, native/binary_expression(:Add, "header_size", "bytes")),
+    native/let_call("allocation", [:Pointer, :U8, :Mutable], "value_arena_allocate", ["arena", "total"]),
+    native/when_statement(native/binary_expression(:Equal, "allocation", "null_bytes"), [native/return_zero()]),
+    native/let_statement("pointer", [:Pointer, header, :Mutable], native/unary_expression(:PointerCast, "allocation")),
+    native/let_offset("raw_data", [:Pointer, :U8, :Mutable], "allocation", "header_size"),
+    native/let_statement("src", entries, native/unary_expression(:PointerCast, "raw_data")),
+    native/let_statement("read", :U64, "zero"),
+    native/let_statement("write", :U64, "length"),
+    native/while_statement(native/binary_expression(:Less, "read", "length"), [
+      native/let_offset("input_slot", [:Pointer, entry, :Const], "source", "read"),
+      native/let_load("right_entry", entry, "input_slot"),
+      native/let_offset("out_slot", entries, "src", "read"),
+      native/store_statement("out_slot", "right_entry"),
+      native/set_statement("read", native/binary_expression(:Add, "read", "one"))
+    ]),
+    native/when_statement(native/binary_expression(:Less, "one", "length"), [
+      native/set_statement("size", native/unary_expression(:SizeOf, entry)),
+      native/set_statement("bytes", native/binary_expression(:Multiply, "length", "size")),
+      native/set_statement("allocation", native/call_expression("value_arena_allocate", ["arena", "bytes"])),
+      native/when_statement(native/binary_expression(:Equal, "allocation", "null_bytes"), [native/return_zero()]),
+      native/let_statement("dst", entries, native/unary_expression(:PointerCast, "allocation")),
+      native/let_statement("width", :U64, "one"),
+      native/note_statement(
+        :Invariant,
+        "Choose the left run on equality to preserve input order before keeping the last duplicate."
+      ),
+      native/while_statement(native/binary_expression(:Less, "width", "length"), [
+        native/let_statement("base", :U64, "zero"),
+        native/while_statement(native/binary_expression(:Less, "base", "length"), [
+          native/let_statement("middle", :U64, native/binary_expression(:Add, "base", "width")),
+          native/when_statement(
+            native/binary_expression(:Less, "length", "middle"),
+            [native/set_statement("middle", "length")]
+          ),
+          native/let_statement("end", :U64, native/binary_expression(:Add, "middle", "width")),
+          native/when_statement(
+            native/binary_expression(:Less, "length", "end"),
+            [native/set_statement("end", "length")]
+          ),
+          native/let_statement("left", :U64, "base"),
+          native/let_statement("right", :U64, "middle"),
+          native/let_statement("out", :U64, "base"),
+          native/while_statement(native/binary_expression(:Less, "out", "end"), [
+            native/let_statement("take_left", :Bool, "true"),
+            native/when_statement(
+              native/binary_expression(:Less, "right", "end"),
+              [
+                native/if_statement(native/binary_expression(:Less, "left", "middle"), [
+                  native/let_offset("left_slot", entries, "src", "left"),
+                  native/let_load("left_entry", entry, "left_slot"),
+                  native/let_offset("right_slot", entries, "src", "right"),
+                  native/set_statement("right_entry", native/load_expression("right_slot")),
+                  native/let_field("left_key", word, "left_entry", "key"),
+                  native/let_field("right_key", word, "right_entry", "key"),
+                  native/let_call("comparison", [:Record, "IntResult"], "value_compare", ["left_key", "right_key"]),
+                  native/unless_statement(native/field_expression("comparison", "ok"), [native/return_zero()]),
+                  native/let_field("order", :I64, "comparison", "number"),
+                  native/when_statement(
+                    native/binary_expression(:Less, "int_zero", "order"),
+                    [native/set_statement("take_left", "false")]
+                  )
+                ], [native/set_statement("take_left", "false")])
+              ]
+            ),
+            native/if_statement("take_left", [
+              native/set_statement("left_slot", native/offset_expression("src", "left")),
+              native/set_statement("left_entry", native/load_expression("left_slot")),
+              native/set_statement("out_slot", native/offset_expression("dst", "out")),
+              native/store_statement("out_slot", "left_entry"),
+              native/set_statement("left", native/binary_expression(:Add, "left", "one"))
             ], [
-              [:Set, "right_slot", [:Offset, "src", "right"]],
-              [:Set, "right_entry", [:Load, "right_slot"]],
-              [:Set, "out_slot", [:Offset, "dst", "out"]],
-              [:Do, [:Store, "out_slot", "right_entry"]],
-              [:Set, "right", [:Add, "right", "one"]]
-            ]],
-            [:Set, "out", [:Add, "out", "one"]]
-          ]],
-          [:Set, "base", "end"]
-        ]],
-        [:Let, "swap", entries, "src"],
-        [:Set, "src", "dst"],
-        [:Set, "dst", "swap"],
-        [:Set, "width", [:Add, "width", "width"]]
-      ]],
-      [:Set, "read", "zero"],
-      [:Set, "write", "zero"],
-      [:While, [:Less, "read", "length"], [
-        [:Set, "right_slot", [:Offset, "src", "read"]],
-        [:Set, "right_entry", [:Load, "right_slot"]],
-        [:If, [:Equal, "write", "zero"], [
-          [:Set, "out_slot", [:Offset, "src", "write"]],
-          [:Do, [:Store, "out_slot", "right_entry"]],
-          [:Set, "write", [:Add, "write", "one"]]
+              native/set_statement("right_slot", native/offset_expression("src", "right")),
+              native/set_statement("right_entry", native/load_expression("right_slot")),
+              native/set_statement("out_slot", native/offset_expression("dst", "out")),
+              native/store_statement("out_slot", "right_entry"),
+              native/set_statement("right", native/binary_expression(:Add, "right", "one"))
+            ]),
+            native/set_statement("out", native/binary_expression(:Add, "out", "one"))
+          ]),
+          native/set_statement("base", "end")
+        ]),
+        native/let_statement("swap", entries, "src"),
+        native/set_statement("src", "dst"),
+        native/set_statement("dst", "swap"),
+        native/set_statement("width", native/binary_expression(:Add, "width", "width"))
+      ]),
+      native/set_statement("read", "zero"),
+      native/set_statement("write", "zero"),
+      native/while_statement(native/binary_expression(:Less, "read", "length"), [
+        native/set_statement("right_slot", native/offset_expression("src", "read")),
+        native/set_statement("right_entry", native/load_expression("right_slot")),
+        native/if_statement(native/binary_expression(:Equal, "write", "zero"), [
+          native/set_statement("out_slot", native/offset_expression("src", "write")),
+          native/store_statement("out_slot", "right_entry"),
+          native/set_statement("write", native/binary_expression(:Add, "write", "one"))
         ], [
-          [:Let, "previous", :U64, [:Subtract, "write", "one"]],
-          [:Set, "left_slot", [:Offset, "src", "previous"]],
-          [:Set, "left_entry", [:Load, "left_slot"]],
-          [:Set, "left_key", [:Field, "left_entry", "key"]],
-          [:Set, "right_key", [:Field, "right_entry", "key"]],
-          [:Set, "comparison", [:Call, "value_compare", "left_key", "right_key"]],
-          [:If, [:Field, "comparison", "ok"], [], [[:Return, [:Zero]]]],
-          [:Set, "order", [:Field, "comparison", "number"]],
-          [:If, [:Equal, "order", "int_zero"], [[:Do, [:Store, "left_slot", "right_entry"]]], [
-            [:Set, "out_slot", [:Offset, "src", "write"]],
-            [:Do, [:Store, "out_slot", "right_entry"]],
-            [:Set, "write", [:Add, "write", "one"]]
-          ]]
-        ]],
-        [:Set, "read", [:Add, "read", "one"]]
-      ]]
-    ], []],
-    [:Let, "header", header, [:Record, "src", "write"]],
-    [:Do, [:Store, "pointer", "header"]],
-    [:Let, "value", word, [:PackPointer, "pointer", "tag_map"]],
-    [:Let, "result", result, [:Record, "true", "value"]],
-    [:Return, "result"]
+          native/let_statement("previous", :U64, native/binary_expression(:Subtract, "write", "one")),
+          native/set_statement("left_slot", native/offset_expression("src", "previous")),
+          native/set_statement("left_entry", native/load_expression("left_slot")),
+          native/set_statement("left_key", native/field_expression("left_entry", "key")),
+          native/set_statement("right_key", native/field_expression("right_entry", "key")),
+          native/set_statement("comparison", native/call_expression("value_compare", ["left_key", "right_key"])),
+          native/unless_statement(native/field_expression("comparison", "ok"), [native/return_zero()]),
+          native/set_statement("order", native/field_expression("comparison", "number")),
+          native/if_statement(native/binary_expression(:Equal, "order", "int_zero"), [
+            native/store_statement("left_slot", "right_entry")
+          ], [
+            native/set_statement("out_slot", native/offset_expression("src", "write")),
+            native/store_statement("out_slot", "right_entry"),
+            native/set_statement("write", native/binary_expression(:Add, "write", "one"))
+          ])
+        ]),
+        native/set_statement("read", native/binary_expression(:Add, "read", "one"))
+      ])
+    ]),
+    native/let_statement("header", header, native/record_expression(["src", "write"])),
+    native/store_statement("pointer", "header"),
+    native/let_statement("value", word, native/binary_expression(:PackPointer, "pointer", "tag_map")),
+    native/let_statement("result", result, native/record_expression(["true", "value"])),
+    native/return_value("result")
   ])
   context = native_value/map_lookup(context)
   return context
@@ -152,31 +172,39 @@ verb native_value/map_lookup(input: map) -> map
   context = native/declare_function(context, name, result, [["map", word, :Borrow], ["key", word, :Borrow]],
     [], [:ReadMemory], :Borrow, "map")
   context = native/define_function(context, name, [
-    [:Let, "tag", :U8, [:Tag, "map"]],
-    [:If, [:Equal, "tag", "tag_map"], [], [[:Return, [:Zero]]]],
-    [:Let, "pointer", [:Pointer, [:Record, "HeapMap"], :Const], [:UnpackPointer, "map"]],
-    [:Let, "header", [:Record, "HeapMap"], [:Load, "pointer"]],
-    [:Let, "data", [:Pointer, entry, :Mutable], [:Field, "header", "data"]],
-    [:Let, "high", :U64, [:Field, "header", "length"]],
-    [:Let, "low", :U64, "zero"],
-    [:While, [:Less, "low", "high"], [
-      [:Let, "distance", :U64, [:Subtract, "high", "low"]],
-      [:Set, "distance", [:Divide, "distance", "two"]],
-      [:Let, "middle", :U64, [:Add, "low", "distance"]],
-      [:Let, "slot", [:Pointer, entry, :Mutable], [:Offset, "data", "middle"]],
-      [:Let, "entry", entry, [:Load, "slot"]],
-      [:Let, "candidate", word, [:Field, "entry", "key"]],
-      [:Let, "comparison", [:Record, "IntResult"], [:Call, "value_compare", "candidate", "key"]],
-      [:If, [:Field, "comparison", "ok"], [], [[:Return, [:Zero]]]],
-      [:Let, "order", :I64, [:Field, "comparison", "number"]],
-      [:If, [:Equal, "order", "int_zero"], [
-        [:Let, "value", word, [:Field, "entry", "value"]],
-        [:Let, "result", result, [:Record, "true", "value"]],
-        [:Return, "result"]
-      ], []],
-      [:If, [:Less, "order", "int_zero"], [[:Set, "low", [:Add, "middle", "one"]]], [[:Set, "high", "middle"]]]
-    ]],
-    [:Return, [:Zero]]
+    native/let_statement("tag", :U8, native/unary_expression(:Tag, "map")),
+    native/unless_statement(native/binary_expression(:Equal, "tag", "tag_map"), [native/return_zero()]),
+    native/let_statement(
+      "pointer",
+      [:Pointer, [:Record, "HeapMap"], :Const],
+      native/unary_expression(:UnpackPointer, "map")
+    ),
+    native/let_load("header", [:Record, "HeapMap"], "pointer"),
+    native/let_field("data", [:Pointer, entry, :Mutable], "header", "data"),
+    native/let_field("high", :U64, "header", "length"),
+    native/let_statement("low", :U64, "zero"),
+    native/while_statement(native/binary_expression(:Less, "low", "high"), [
+      native/let_statement("distance", :U64, native/binary_expression(:Subtract, "high", "low")),
+      native/set_statement("distance", native/binary_expression(:Divide, "distance", "two")),
+      native/let_statement("middle", :U64, native/binary_expression(:Add, "low", "distance")),
+      native/let_offset("slot", [:Pointer, entry, :Mutable], "data", "middle"),
+      native/let_load("entry", entry, "slot"),
+      native/let_field("candidate", word, "entry", "key"),
+      native/let_call("comparison", [:Record, "IntResult"], "value_compare", ["candidate", "key"]),
+      native/unless_statement(native/field_expression("comparison", "ok"), [native/return_zero()]),
+      native/let_field("order", :I64, "comparison", "number"),
+      native/when_statement(native/binary_expression(:Equal, "order", "int_zero"), [
+        native/let_field("value", word, "entry", "value"),
+        native/let_statement("result", result, native/record_expression(["true", "value"])),
+        native/return_value("result")
+      ]),
+      native/if_statement(
+        native/binary_expression(:Less, "order", "int_zero"),
+        [native/set_statement("low", native/binary_expression(:Add, "middle", "one"))],
+        [native/set_statement("high", "middle")]
+      )
+    ]),
+    native/return_zero()
   ])
   return context
 end

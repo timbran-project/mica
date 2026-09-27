@@ -20,41 +20,92 @@ verb native_value/buffers(input: map) -> map
   let arena: list = ["arena", [:Pointer, [:Record, "ValueArena"], :Mutable], :Borrow]
   context = native/declare_function(context, "value_buffer", pointer, [arena], [], [:Allocate, :ReadMemory, :WriteMemory], :Borrow, "arena")
   context = native/define_function(context, "value_buffer", [
-    [:Let, "raw", bytes, [:Call, "value_arena_allocate", "arena", [:Expr, :U64, [:SizeOf, buffer]]]],
-    [:If, [:Equal, "raw", "null_bytes"], [[:Return, "null_buffer"]], []],
-    [:Let, "buffer", pointer, [:PointerCast, "raw"]], [:Do, [:Store, "buffer", [:Expr, buffer, [:Zero]]]], [:Return, "buffer"]])
+    native/let_call(
+      "raw",
+      bytes,
+      "value_arena_allocate",
+      ["arena", native/typed_expression(:U64, native/unary_expression(:SizeOf, buffer))]
+    ),
+    native/when_statement(native/binary_expression(:Equal, "raw", "null_bytes"), [native/return_value("null_buffer")]),
+    native/let_statement("buffer", pointer, native/unary_expression(:PointerCast, "raw")),
+    native/store_statement("buffer", native/typed_zero(buffer)),
+    native/return_value("buffer")
+  ])
   context = native/declare_function(context, "buffer_append", :Bool, [arena, ["buffer", pointer, [:Borrow, "arena"]],
     ["source", [:Pointer, :U8, :Const], :Borrow], ["count", :U64, :Value]], [], [:Allocate, :ReadMemory, :WriteMemory], :Value, "")
   context = native/define_function(context, "buffer_append", [
-    [:Let, "header", buffer, [:Load, "buffer"]],
-    [:Let, "length", :U64, [:Field, "header", "length"]],
-    [:If, [:Less, [:Expr, :U64, [:Subtract, "allocation_limit", "length"]], "count"], [[:Return, "false"]], []],
-    [:Let, "needed", :U64, [:Add, "length", "count"]],
-    [:Let, "capacity", :U64, [:Field, "header", "capacity"]],
-    [:Let, "data", bytes, [:Field, "header", "data"]],
-    [:If, [:Less, "capacity", "needed"], [
-      [:Let, "grown", :U64, [:Multiply, "capacity", "two"]],
-      [:If, [:Less, "grown", "buffer_initial_capacity"], [[:Set, "grown", "buffer_initial_capacity"]], []],
-      [:If, [:Less, "allocation_limit", "grown"], [[:Set, "grown", "allocation_limit"]], []],
-      [:If, [:Less, "grown", "needed"], [[:Set, "grown", "needed"]], []],
-      [:Let, "allocation", bytes, [:Call, "value_arena_allocate", "arena", "grown"]],
-      [:If, [:Equal, "allocation", "null_bytes"], [[:Return, "false"]], []],
-      [:Do, [:CopyBytes, "allocation", [:Expr, [:Pointer, :U8, :Const], [:Freeze, "data"]], "length"]],
-      [:Set, "data", "allocation"], [:Set, "capacity", "grown"]], []],
-    [:If, [:Less, "zero", "count"], [
-      [:Let, "tail", bytes, [:Offset, "data", "length"]], [:Do, [:CopyBytes, "tail", "source", "count"]]], []],
-    [:Do, [:Store, "buffer", [:Expr, buffer, [:Record, "data", "needed", "capacity"]]]], [:Return, "true"]])
+    native/let_load("header", buffer, "buffer"),
+    native/let_field("length", :U64, "header", "length"),
+    native/when_statement(
+      native/binary_expression(
+        :Less,
+        native/typed_expression(:U64, native/binary_expression(:Subtract, "allocation_limit", "length")),
+        "count"
+      ),
+      [native/return_value("false")]
+    ),
+    native/let_statement("needed", :U64, native/binary_expression(:Add, "length", "count")),
+    native/let_field("capacity", :U64, "header", "capacity"),
+    native/let_field("data", bytes, "header", "data"),
+    native/when_statement(native/binary_expression(:Less, "capacity", "needed"), [
+      native/let_statement("grown", :U64, native/binary_expression(:Multiply, "capacity", "two")),
+      native/when_statement(
+        native/binary_expression(:Less, "grown", "buffer_initial_capacity"),
+        [native/set_statement("grown", "buffer_initial_capacity")]
+      ),
+      native/when_statement(
+        native/binary_expression(:Less, "allocation_limit", "grown"),
+        [native/set_statement("grown", "allocation_limit")]
+      ),
+      native/when_statement(
+        native/binary_expression(:Less, "grown", "needed"),
+        [native/set_statement("grown", "needed")]
+      ),
+      native/let_call("allocation", bytes, "value_arena_allocate", ["arena", "grown"]),
+      native/when_statement(
+        native/binary_expression(:Equal, "allocation", "null_bytes"),
+        [native/return_value("false")]
+      ),
+      native/copy_bytes_statement(
+        "allocation",
+        native/typed_expression([:Pointer, :U8, :Const], native/unary_expression(:Freeze, "data")),
+        "length"
+      ),
+      native/set_statement("data", "allocation"),
+      native/set_statement("capacity", "grown")
+    ]),
+    native/when_statement(native/binary_expression(:Less, "zero", "count"), [
+      native/let_offset("tail", bytes, "data", "length"),
+      native/copy_bytes_statement("tail", "source", "count")
+    ]),
+    native/store_statement("buffer", native/typed_record(buffer, ["data", "needed", "capacity"])),
+    native/return_value("true")
+  ])
   context = native/declare_function(context, "buffer_word", :Bool, [arena, ["buffer", pointer, [:Borrow, "arena"]],
     ["number", :U64, :Value]], [], [:Allocate, :ReadMemory, :WriteMemory], :Value, "")
   context = native/define_function(context, "buffer_word", [
-    [:Let, "storage", [:Array, :U8, 8], [:Zero]],
-    [:Let, "array", [:Pointer, [:Array, :U8, 8], :Mutable], [:Address, "storage"]],
-    [:Let, "remaining", :U64, "number"], [:Let, "i", :U64, "zero"],
-    [:While, [:Less, "i", "word_bytes"], [
-      [:Let, "slot", bytes, [:ElementPointer, "array", "i"]],
-      [:Do, [:Store, "slot", [:Expr, :U8, [:Convert, "remaining"]]]],
-      [:Set, "remaining", [:ShiftRight, "remaining", "word_bytes"]], [:Set, "i", [:Add, "i", "one"]]]],
-    [:Let, "first", bytes, [:ElementPointer, "array", "zero"]],
-    [:Return, [:Call, "buffer_append", "arena", "buffer", [:Expr, [:Pointer, :U8, :Const], [:Freeze, "first"]], "word_bytes"]]])
+    native/let_statement("storage", [:Array, :U8, 8], native/zero_expression()),
+    native/let_statement("array", [:Pointer, [:Array, :U8, 8], :Mutable], native/unary_expression(:Address, "storage")),
+    native/let_statement("remaining", :U64, "number"),
+    native/let_statement("i", :U64, "zero"),
+    native/while_statement(native/binary_expression(:Less, "i", "word_bytes"), [
+      native/let_statement("slot", bytes, native/binary_expression(:ElementPointer, "array", "i")),
+      native/store_statement("slot", native/typed_expression(:U8, native/unary_expression(:Convert, "remaining"))),
+      native/set_statement("remaining", native/binary_expression(:ShiftRight, "remaining", "word_bytes")),
+      native/set_statement("i", native/binary_expression(:Add, "i", "one"))
+    ]),
+    native/let_statement("first", bytes, native/binary_expression(:ElementPointer, "array", "zero")),
+    native/return_value(
+      native/call_expression(
+        "buffer_append",
+        [
+          "arena",
+          "buffer",
+          native/typed_expression([:Pointer, :U8, :Const], native/unary_expression(:Freeze, "first")),
+          "word_bytes"
+        ]
+      )
+    )
+  ])
   return context
 end

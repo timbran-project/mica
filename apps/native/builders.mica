@@ -42,12 +42,60 @@ verb native/let_statement(name: string, type_id, expression) -> list
   return [:Let, name, type_id, expression]
 end
 
+verb native/let_field(name: string, type_id, value, field: string) -> list
+  return [:Let, name, type_id, [:Field, value, field]]
+end
+
+verb native/let_load(name: string, type_id, pointer) -> list
+  return [:Let, name, type_id, [:Load, pointer]]
+end
+
+verb native/let_offset(name: string, type_id, pointer, offset) -> list
+  return [:Let, name, type_id, [:Offset, pointer, offset]]
+end
+
+verb native/let_call(name: string, type_id, function: string, arguments: list) -> list
+  return [:Let, name, type_id, [:Call, function, @arguments]]
+end
+
 verb native/set_statement(name: string, expression) -> list
   return [:Set, name, expression]
 end
 
 verb native/if_statement(condition, yes: list, no: list) -> list
   return [:If, condition, yes, no]
+end
+
+verb native/when_statement(condition, body: list) -> list
+  return [:If, condition, body, []]
+end
+
+verb native/unless_statement(condition, body: list) -> list
+  return [:If, condition, [], body]
+end
+
+verb native/do_statement(expression) -> list
+  return [:Do, expression]
+end
+
+verb native/store_statement(pointer, value) -> list
+  return [:Do, [:Store, pointer, value]]
+end
+
+verb native/copy_bytes_statement(destination, source, length) -> list
+  return [:Do, [:CopyBytes, destination, source, length]]
+end
+
+verb native/break_statement() -> list
+  return [:Break]
+end
+
+verb native/continue_statement() -> list
+  return [:Continue]
+end
+
+verb native/note_statement(kind: symbol, text: string) -> list
+  return [:Note, kind, text]
 end
 
 verb native/while_statement(condition, body: list) -> list
@@ -66,6 +114,26 @@ verb native/return_value(value) -> list
   return [:Return, value]
 end
 
+verb native/return_void() -> list
+  return [:Return]
+end
+
+verb native/return_zero() -> list
+  return [:Return, [:Zero]]
+end
+
+verb native/return_record(fields: list) -> list
+  return [:Return, [:Record, @fields]]
+end
+
+verb native/zero_expression() -> list
+  return [:Zero]
+end
+
+verb native/record_expression(fields: list) -> list
+  return [:Record, @fields]
+end
+
 verb native/call_expression(name: string, arguments: list) -> list
   return [:Call, name, @arguments]
 end
@@ -74,8 +142,44 @@ verb native/typed_expression(type_id, expression) -> list
   return [:Expr, type_id, expression]
 end
 
+verb native/typed_field(type_id, value, field: string) -> list
+  return [:Expr, type_id, [:Field, value, field]]
+end
+
+verb native/typed_load(type_id, pointer) -> list
+  return [:Expr, type_id, [:Load, pointer]]
+end
+
+verb native/typed_call(type_id, function: string, arguments: list) -> list
+  return [:Expr, type_id, [:Call, function, @arguments]]
+end
+
+verb native/typed_record(type_id, fields: list) -> list
+  return [:Expr, type_id, [:Record, @fields]]
+end
+
+verb native/typed_zero(type_id) -> list
+  return [:Expr, type_id, [:Zero]]
+end
+
 verb native/field_expression(value, name: string) -> list
   return [:Field, value, name]
+end
+
+verb native/field_pointer_expression(value, name: string) -> list
+  return [:FieldPointer, value, name]
+end
+
+verb native/load_expression(pointer) -> list
+  return [:Load, pointer]
+end
+
+verb native/offset_expression(pointer, offset) -> list
+  return [:Offset, pointer, offset]
+end
+
+verb native/unary_expression(op: symbol, operand) -> list
+  return [op, operand]
 end
 
 verb native/binary_expression(op: symbol, left, right) -> list

@@ -9,7 +9,10 @@ verb native_value/persistence(input: map) -> map
   context = native/declare_function(context, "value_is_persistable", :Bool, [["value", word, :Borrow]], [], [:ReadMemory], :Value, "")
   let cases: list = [native/case_arm("zero_tag", [native/return_value("true")])]
   for name in ["bool", "int", "float", "identity", "symbol", "error_code", "string", "bytes"]
-    cases = [@cases, native/case_arm(string_concat("tag_", name), [native/return_value("true")])]
+    cases = [
+      @cases,
+      native/case_arm(string_concat("tag_", name), [native/return_value("true")])
+    ]
   end
   for spec in [["list", "HeapList", word], ["map", "HeapMap", [:Record, "ValueMapEntry"]]]
     let name: string = spec[0]
@@ -20,44 +23,130 @@ verb native_value/persistence(input: map) -> map
     let element: string = string_concat(name, "_element")
     let children: list = []
     if name == "list"
-      children = [[:If, [:Call, "value_is_persistable", element], [], [[:Return, "false"]]]]
+      children = [
+        native/unless_statement(
+          native/call_expression("value_is_persistable", [element]),
+          [native/return_value("false")]
+        )
+      ]
     else
       for field in ["key", "value"]
-        children = [@children, [:If, [:Call, "value_is_persistable", [:Expr, word, [:Field, element, field]]], [], [[:Return, "false"]]]]
+        children = [
+          @children,
+          native/unless_statement(
+            native/call_expression("value_is_persistable", [native/typed_field(word, element, field)]),
+            [native/return_value("false")]
+          )
+        ]
       end
     end
-    cases = [@cases, native/case_arm(string_concat("tag_", name), [
-      [:Let, header, [:Record, spec[1]], [:Load, [:Expr, [:Pointer, [:Record, spec[1]], :Const], [:UnpackPointer, "value"]]]],
-      [:Let, data, [:Pointer, spec[2], :Mutable], [:Field, header, "data"]], [:Let, length, :U64, [:Field, header, "length"]],
-      [:Let, index, :U64, "zero"], [:While, [:Less, index, length], [
-        [:Let, element, spec[2], [:Load, [:Expr, [:Pointer, spec[2], :Mutable], [:Offset, data, index]]]],
-        @children, [:Set, index, [:Add, index, "one"]]]], native/return_value("true")])]
+    cases = [
+      @cases,
+      native/case_arm(string_concat("tag_", name), [
+        native/let_load(
+          header,
+          [:Record, spec[1]],
+          native/typed_expression(
+            [:Pointer, [:Record, spec[1]], :Const],
+            native/unary_expression(:UnpackPointer, "value")
+          )
+        ),
+        native/let_field(data, [:Pointer, spec[2], :Mutable], header, "data"),
+        native/let_field(length, :U64, header, "length"),
+        native/let_statement(index, :U64, "zero"),
+        native/while_statement(native/binary_expression(:Less, index, length), [
+          native/let_load(
+            element,
+            spec[2],
+            native/typed_expression([:Pointer, spec[2], :Mutable], native/offset_expression(data, index))
+          ),
+          @children,
+          native/set_statement(index, native/binary_expression(:Add, index, "one"))
+        ]),
+        native/return_value("true")
+      ])
+    ]
   end
   for spec in [["range", "HeapRange", [["start", ""], ["end", "has_end"]]],
     ["error", "HeapError", [["value", "has_value"]]], ["frob", "HeapFrob", [["value", ""]]]]
     let header: string = string_concat(spec[0], "_header")
-    let body: list = [[:Let, header, [:Record, spec[1]], [:Load, [:Expr, [:Pointer, [:Record, spec[1]], :Const], [:UnpackPointer, "value"]]]]]
+    let body: list = [
+      native/let_load(
+        header,
+        [:Record, spec[1]],
+        native/typed_expression(
+          [:Pointer, [:Record, spec[1]], :Const],
+          native/unary_expression(:UnpackPointer, "value")
+        )
+      )
+    ]
     for field in spec[2]
-      let step: list = [[:If, [:Call, "value_is_persistable", [:Expr, word, [:Field, header, field[0]]]], [], [[:Return, "false"]]]]
+      let step: list = [
+        native/unless_statement(
+          native/call_expression("value_is_persistable", [native/typed_field(word, header, field[0])]),
+          [native/return_value("false")]
+        )
+      ]
       if field[1] != ""
-        step = [[:If, [:Field, header, field[1]], step, []]]
+        step = [native/when_statement(native/field_expression(header, field[1]), step)]
       end
       body = [@body, @step]
     end
-    cases = [@cases, native/case_arm(string_concat("tag_", spec[0]), [@body, native/return_value("true")])]
+    cases = [
+      @cases,
+      native/case_arm(string_concat("tag_", spec[0]), [
+        @body,
+        native/return_value("true")
+      ])
+    ]
   end
-  cases = [@cases, native/case_arm("tag_relation", [
-    [:Let, "relation", [:Record, "HeapRelation"], [:Load, [:Expr, [:Pointer, [:Record, "HeapRelation"], :Const], [:UnpackPointer, "value"]]]],
-    [:Let, "arity", :U64, [:Field, "relation", "arity"]], [:Let, "length", :U64, [:Field, "relation", "length"]],
-    [:Let, "tuples", [:Pointer, [:Record, "ValueTuple"], :Mutable], [:Field, "relation", "rows"]],
-    [:Let, "row", :U64, "zero"], [:While, [:Less, "row", "length"], [
-      [:Let, "tuple", [:Record, "ValueTuple"], [:Load, [:Expr, [:Pointer, [:Record, "ValueTuple"], :Mutable], [:Offset, "tuples", "row"]]]],
-      [:Let, "cells", [:Pointer, word, :Mutable], [:Field, "tuple", "data"]],
-      [:Let, "column", :U64, "zero"], [:While, [:Less, "column", "arity"], [
-        [:Let, "cell", word, [:Load, [:Expr, [:Pointer, word, :Mutable], [:Offset, "cells", "column"]]]],
-        [:If, [:Call, "value_is_persistable", "cell"], [], [[:Return, "false"]]],
-        [:Set, "column", [:Add, "column", "one"]]]], [:Set, "row", [:Add, "row", "one"]]]], native/return_value("true")])]
-  context = native/define_function(context, "value_is_persistable", [
-    native/switch_statement(:U8, [:Tag, "value"], cases, [native/return_value("false")])])
+  cases = [
+    @cases,
+    native/case_arm("tag_relation", [
+      native/let_load(
+        "relation",
+        [:Record, "HeapRelation"],
+        native/typed_expression(
+          [:Pointer, [:Record, "HeapRelation"], :Const],
+          native/unary_expression(:UnpackPointer, "value")
+        )
+      ),
+      native/let_field("arity", :U64, "relation", "arity"),
+      native/let_field("length", :U64, "relation", "length"),
+      native/let_field("tuples", [:Pointer, [:Record, "ValueTuple"], :Mutable], "relation", "rows"),
+      native/let_statement("row", :U64, "zero"),
+      native/while_statement(native/binary_expression(:Less, "row", "length"), [
+        native/let_load(
+          "tuple",
+          [:Record, "ValueTuple"],
+          native/typed_expression(
+            [:Pointer, [:Record, "ValueTuple"], :Mutable],
+            native/offset_expression("tuples", "row")
+          )
+        ),
+        native/let_field("cells", [:Pointer, word, :Mutable], "tuple", "data"),
+        native/let_statement("column", :U64, "zero"),
+        native/while_statement(native/binary_expression(:Less, "column", "arity"), [
+          native/let_load(
+            "cell",
+            word,
+            native/typed_expression([:Pointer, word, :Mutable], native/offset_expression("cells", "column"))
+          ),
+          native/unless_statement(
+            native/call_expression("value_is_persistable", ["cell"]),
+            [native/return_value("false")]
+          ),
+          native/set_statement("column", native/binary_expression(:Add, "column", "one"))
+        ]),
+        native/set_statement("row", native/binary_expression(:Add, "row", "one"))
+      ]),
+      native/return_value("true")
+    ])
+  ]
+  context = native/define_function(
+    context,
+    "value_is_persistable",
+    [ native/switch_statement(:U8, native/unary_expression(:Tag, "value"), cases, [native/return_value("false")])]
+  )
   return context
 end

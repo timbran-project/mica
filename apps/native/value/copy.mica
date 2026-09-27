@@ -14,12 +14,36 @@ verb native_value/copying(input: map) -> map
     [:Allocate, :ReadMemory, :WriteMemory], :Borrow, "arena")
   context = native_value/copy_tuple(context)
   context = native_value/copy_relation(context)
-  let rows: list = [[:Let, "tag", :U8, [:Tag, "value"]],
-    [:If, [:Equal, "tag", "zero_tag"], [[:Return, [:Record, "true", [:Expr, word, [:Call, "value_empty_relation"]]]]], []]]
+  let rows: list = [
+    native/let_statement("tag", :U8, native/unary_expression(:Tag, "value")),
+    native/when_statement(
+      native/binary_expression(:Equal, "tag", "zero_tag"),
+      [native/return_record(["true", native/typed_call(word, "value_empty_relation", [])])]
+    )
+  ]
   for kind in native_value/kinds()
     if !kind[2]
-      rows = [@rows, [:If, [:Equal, "tag", string_concat("tag_", kind[0])], [
-        [:Return, [:Record, "true", [:Expr, word, [:PackImmediate, [:Expr, :U64, [:Payload, "value"]], string_concat("tag_", kind[0])]]]]], []]]
+      rows = [
+        @rows,
+        native/when_statement(
+          native/binary_expression(:Equal, "tag", string_concat("tag_", kind[0])),
+          [
+            native/return_record(
+              [
+                "true",
+                native/typed_expression(
+                  word,
+                  native/binary_expression(
+                    :PackImmediate,
+                    native/typed_expression(:U64, native/unary_expression(:Payload, "value")),
+                    string_concat("tag_", kind[0])
+                  )
+                )
+              ]
+            )
+          ]
+        )
+      ]
     end
   end
   for spec in [["string", "HeapString"], ["bytes", "HeapBytes"]]
@@ -28,13 +52,25 @@ verb native_value/copying(input: map) -> map
     let header: string = string_concat(prefix, "_header")
     let data: string = string_concat(prefix, "_data")
     let length: string = string_concat(prefix, "_length")
-    rows = [@rows, [:If, [:Equal, "tag", string_concat("tag_", prefix)], [
-      [:Let, pointer, [:Pointer, [:Record, spec[1]], :Const], [:UnpackPointer, "value"]],
-      [:Let, header, [:Record, spec[1]], [:Load, pointer]],
-      [:Let, data, [:Pointer, :U8, :Mutable], [:Field, header, "data"]],
-      [:Let, length, :U64, [:Field, header, "length"]],
-      [:Return, [:Call, string_concat("value_", prefix), "arena", [:Expr, [:Pointer, :U8, :Const], [:Freeze, data]], length]]
-    ], []]]
+    rows = [
+      @rows,
+      native/when_statement(native/binary_expression(:Equal, "tag", string_concat("tag_", prefix)), [
+        native/let_statement(
+          pointer,
+          [:Pointer, [:Record, spec[1]], :Const],
+          native/unary_expression(:UnpackPointer, "value")
+        ),
+        native/let_load(header, [:Record, spec[1]], pointer),
+        native/let_field(data, [:Pointer, :U8, :Mutable], header, "data"),
+        native/let_field(length, :U64, header, "length"),
+        native/return_value(
+          native/call_expression(
+            string_concat("value_", prefix),
+            ["arena", native/typed_expression([:Pointer, :U8, :Const], native/unary_expression(:Freeze, data)), length]
+          )
+        )
+      ])
+    ]
   end
   for spec in [["list", "HeapList", word], ["map", "HeapMap", [:Record, "ValueMapEntry"]]]
     let prefix: string = spec[0]
@@ -47,30 +83,43 @@ verb native_value/copying(input: map) -> map
     let destination: string = string_concat(prefix, "_destination")
     let elements: list = [:Pointer, spec[2], :Mutable]
     let body: list = [
-      [:Let, pointer, [:Pointer, header_type, :Const], [:UnpackPointer, "value"]],
-      [:Let, header, header_type, [:Load, pointer]],
-      [:Let, source, elements, [:Field, header, "data"]],
-      [:Let, length, :U64, [:Field, header, "length"]]]
+      native/let_statement(pointer, [:Pointer, header_type, :Const], native/unary_expression(:UnpackPointer, "value")),
+      native/let_load(header, header_type, pointer),
+      native/let_field(source, elements, header, "data"),
+      native/let_field(length, :U64, header, "length")
+    ]
     if prefix == "list"
-      body = [@body,
-        [:Let, target, [:Pointer, header_type, :Mutable], [:Call, "list_allocate", "arena", length, length]],
-        [:If, [:Equal, target, "null_list_header"], [[:Return, [:Zero]]], []],
-        [:Let, "list_output_header", header_type, [:Load, target]],
-        [:Let, destination, elements, [:Field, "list_output_header", "data"]]]
+      body = [
+        @body,
+        native/let_call(target, [:Pointer, header_type, :Mutable], "list_allocate", ["arena", length, length]),
+        native/when_statement(native/binary_expression(:Equal, target, "null_list_header"), [native/return_zero()]),
+        native/let_load("list_output_header", header_type, target),
+        native/let_field(destination, elements, "list_output_header", "data")
+      ]
     else
-      body = [@body,
-        [:Let, "map_header_size", :U64, [:SizeOf, header_type]],
-        [:Let, "map_entry_size", :U64, [:SizeOf, spec[2]]],
-        [:Let, "map_limit", :U64, [:Subtract, "allocation_limit", "map_header_size"]],
-        [:Set, "map_limit", [:Divide, "map_limit", "map_entry_size"]],
-        [:If, [:Less, "map_limit", length], [[:Return, [:Zero]]], []],
-        [:Let, "map_bytes", :U64, [:Multiply, length, "map_entry_size"]],
-        [:Let, "map_total", :U64, [:Add, "map_header_size", "map_bytes"]],
-        [:Let, "map_raw", [:Pointer, :U8, :Mutable], [:Call, "value_arena_allocate", "arena", "map_total"]],
-        [:If, [:Equal, "map_raw", "null_bytes"], [[:Return, [:Zero]]], []],
-        [:Let, target, [:Pointer, header_type, :Mutable], [:PointerCast, "map_raw"]],
-        [:Let, "map_raw_data", [:Pointer, :U8, :Mutable], [:Offset, "map_raw", "map_header_size"]],
-        [:Let, destination, elements, [:PointerCast, "map_raw_data"]]]
+      body = [
+        @body,
+        native/let_statement("map_header_size", :U64, native/unary_expression(:SizeOf, header_type)),
+        native/let_statement("map_entry_size", :U64, native/unary_expression(:SizeOf, spec[2])),
+        native/let_statement(
+          "map_limit",
+          :U64,
+          native/binary_expression(:Subtract, "allocation_limit", "map_header_size")
+        ),
+        native/set_statement("map_limit", native/binary_expression(:Divide, "map_limit", "map_entry_size")),
+        native/when_statement(native/binary_expression(:Less, "map_limit", length), [native/return_zero()]),
+        native/let_statement("map_bytes", :U64, native/binary_expression(:Multiply, length, "map_entry_size")),
+        native/let_statement("map_total", :U64, native/binary_expression(:Add, "map_header_size", "map_bytes")),
+        native/let_call("map_raw", [:Pointer, :U8, :Mutable], "value_arena_allocate", ["arena", "map_total"]),
+        native/when_statement(native/binary_expression(:Equal, "map_raw", "null_bytes"), [native/return_zero()]),
+        native/let_statement(
+          target,
+          [:Pointer, header_type, :Mutable],
+          native/unary_expression(:PointerCast, "map_raw")
+        ),
+        native/let_offset("map_raw_data", [:Pointer, :U8, :Mutable], "map_raw", "map_header_size"),
+        native/let_statement(destination, elements, native/unary_expression(:PointerCast, "map_raw_data"))
+      ]
     end
     let index: string = string_concat(prefix, "_i")
     let slot: string = string_concat(prefix, "_slot")
@@ -84,60 +133,119 @@ verb native_value/copying(input: map) -> map
       for field in ["key", "value"]
         let child: string = string_concat(prefix, "_", field)
         let copied: string = string_concat(child, "_copy")
-        children = [@children, [:Let, child, word, [:Field, element, field]], @native_value/copy_child(child, copied)]
+        children = [
+          @children,
+          native/let_field(child, word, element, field),
+          @native_value/copy_child(child, copied)
+        ]
       end
-      children = [@children, [:Let, output, spec[2], [:Record, "map_key_copy", "map_value_copy"]]]
+      children = [
+        @children,
+        native/let_statement(output, spec[2], native/record_expression(["map_key_copy", "map_value_copy"]))
+      ]
     end
-    body = [@body, [:Let, index, :U64, "zero"], [:While, [:Less, index, length], [
-      [:Let, slot, elements, [:Offset, source, index]], [:Let, element, spec[2], [:Load, slot]],
-      @children, [:Let, output_slot, elements, [:Offset, destination, index]],
-      [:Do, [:Store, output_slot, output]], [:Set, index, [:Add, index, "one"]]]]]
+    body = [
+      @body,
+      native/let_statement(index, :U64, "zero"),
+      native/while_statement(native/binary_expression(:Less, index, length), [
+        native/let_offset(slot, elements, source, index),
+        native/let_load(element, spec[2], slot),
+        @children,
+        native/let_offset(output_slot, elements, destination, index),
+        native/store_statement(output_slot, output),
+        native/set_statement(index, native/binary_expression(:Add, index, "one"))
+      ])
+    ]
     if prefix == "map"
-      body = [@body, [:Do, [:Store, target, [:Expr, header_type, [:Record, destination, length]]]]]
+      body = [
+        @body,
+        native/store_statement(target, native/typed_record(header_type, [destination, length]))
+      ]
     end
-    body = [@body, [:Return, [:Record, "true", [:Expr, word, [:PackPointer, target, string_concat("tag_", prefix)]]]]]
-    rows = [@rows, [:If, [:Equal, "tag", string_concat("tag_", prefix)], body, []]]
+    body = [
+      @body,
+      native/return_record(
+        [
+          "true",
+          native/typed_expression(word, native/binary_expression(:PackPointer, target, string_concat("tag_", prefix)))
+        ]
+      )
+    ]
+    rows = [
+      @rows,
+      native/when_statement(native/binary_expression(:Equal, "tag", string_concat("tag_", prefix)), body)
+    ]
   end
   for spec in [["range", "HeapRange", [["start", word, ""], ["has_end", :Bool, ""], ["end", word, "has_end"]]],
     ["error", "HeapError", [["code", :U32, ""], ["has_message", :Bool, ""], ["message", word, "has_message"], ["has_value", :Bool, ""], ["value", word, "has_value"]]],
     ["frob", "HeapFrob", [["delegate", :U64, ""], ["value", word, ""]]]]
     let pointer: string = string_concat(spec[0], "_pointer")
     let header: string = string_concat(spec[0], "_header")
-    let body: list = [[:Let, pointer, [:Pointer, [:Record, spec[1]], :Const], [:UnpackPointer, "value"]],
-      [:Let, header, [:Record, spec[1]], [:Load, pointer]]]
+    let body: list = [
+      native/let_statement(
+        pointer,
+        [:Pointer, [:Record, spec[1]], :Const],
+        native/unary_expression(:UnpackPointer, "value")
+      ),
+      native/let_load(header, [:Record, spec[1]], pointer)
+    ]
     let arguments: list = ["arena"]
     for field in spec[2]
       let local: string = string_concat(spec[0], "_", field[0])
-      body = [@body, [:Let, local, field[1], [:Field, header, field[0]]]]
+      body = [
+        @body,
+        native/let_field(local, field[1], header, field[0])
+      ]
       if field[1] == word
         let copied: string = string_concat(local, "_copy")
         if field[2] == ""
           body = [@body, @native_value/copy_child(local, copied)]
         else
-          body = [@body, [:Let, copied, word, [:Zero]],
-            [:If, string_concat(spec[0], "_", field[2]), [
-              [:Let, string_concat(copied, "_checked"), result, [:Call, "value_copy", "arena", local]],
-              [:If, [:Field, string_concat(copied, "_checked"), "ok"], [], [[:Return, [:Zero]]]],
-              [:Set, copied, [:Field, string_concat(copied, "_checked"), "value"]]], []]]
+          body = [
+            @body,
+            native/let_statement(copied, word, native/zero_expression()),
+            native/when_statement(string_concat(spec[0], "_", field[2]), [
+              native/let_call(string_concat(copied, "_checked"), result, "value_copy", ["arena", local]),
+              native/unless_statement(
+                native/field_expression(string_concat(copied, "_checked"), "ok"),
+                [native/return_zero()]
+              ),
+              native/set_statement(copied, native/field_expression(string_concat(copied, "_checked"), "value"))
+            ])
+          ]
         end
         arguments = [@arguments, copied]
       else
         arguments = [@arguments, local]
       end
     end
-    rows = [@rows, [:If, [:Equal, "tag", string_concat("tag_", spec[0])],
-      [@body, [:Return, [:Call, string_concat("value_", spec[0]), @arguments]]], []]]
+    rows = [
+      @rows,
+      native/when_statement(native/binary_expression(:Equal, "tag", string_concat("tag_", spec[0])), [
+        @body,
+        native/return_value(native/call_expression(string_concat("value_", spec[0]), [@arguments]))
+      ])
+    ]
   end
-  rows = [@rows, [:If, [:Equal, "tag", "tag_relation"], [[:Return, [:Call, "value_relation_copy", "arena", "value"]]], []], [:Return, [:Zero]]]
+  rows = [
+    @rows,
+    native/when_statement(
+      native/binary_expression(:Equal, "tag", "tag_relation"),
+      [native/return_value(native/call_expression("value_relation_copy", ["arena", "value"]))]
+    ),
+    native/return_zero()
+  ]
   context = native/define_function(context, "value_copy", rows)
   return context
 end
 
 verb native_value/copy_child(source: string, destination: string) -> list
   let checked: string = string_concat(destination, "_checked")
-  return [[:Let, checked, [:Record, "ValueResult"], [:Call, "value_copy", "arena", source]],
-    [:If, [:Field, checked, "ok"], [], [[:Return, [:Zero]]]],
-    [:Let, destination, native_value/word(), [:Field, checked, "value"]]]
+  return [
+    native/let_call(checked, [:Record, "ValueResult"], "value_copy", ["arena", source]),
+    native/unless_statement(native/field_expression(checked, "ok"), [native/return_zero()]),
+    native/let_field(destination, native_value/word(), checked, "value")
+  ]
 end
 
 verb native_value/copy_tuple(input: map) -> map
@@ -146,23 +254,30 @@ verb native_value/copy_tuple(input: map) -> map
   let values: list = [:Pointer, word, :Mutable]
   let tuple: list = [:Record, "ValueTuple"]
   context = native/define_function(context, "value_tuple_copy", [
-    [:Let, "arity", :U64, [:Field, "tuple", "arity"]],
-    [:If, [:Equal, "arity", "zero"], [[:Return, [:Record, "true", [:Expr, tuple, [:Zero]]]]], []],
-    [:Let, "source", values, [:Field, "tuple", "data"]],
-    [:Let, "size", :U64, [:SizeOf, word]],
-    [:Let, "limit", :U64, [:Divide, "allocation_limit", "size"]],
-    [:If, [:Less, "limit", "arity"], [[:Return, [:Zero]]], []],
-    [:Let, "bytes", :U64, [:Multiply, "arity", "size"]],
-    [:Let, "raw", [:Pointer, :U8, :Mutable], [:Call, "value_arena_allocate", "arena", "bytes"]],
-    [:If, [:Equal, "raw", "null_bytes"], [[:Return, [:Zero]]], []],
-    [:Let, "data", values, [:PointerCast, "raw"]],
-    [:Let, "i", :U64, "zero"],
-    [:While, [:Less, "i", "arity"], [
-      [:Let, "input_slot", values, [:Offset, "source", "i"]],
-      [:Let, "child", word, [:Load, "input_slot"]], @native_value/copy_child("child", "copied"),
-      [:Let, "output_slot", values, [:Offset, "data", "i"]], [:Do, [:Store, "output_slot", "copied"]],
-      [:Set, "i", [:Add, "i", "one"]]]],
-    [:Return, [:Record, "true", [:Expr, tuple, [:Record, "data", "arity"]]]]])
+    native/let_field("arity", :U64, "tuple", "arity"),
+    native/when_statement(
+      native/binary_expression(:Equal, "arity", "zero"),
+      [native/return_record(["true", native/typed_zero(tuple)])]
+    ),
+    native/let_field("source", values, "tuple", "data"),
+    native/let_statement("size", :U64, native/unary_expression(:SizeOf, word)),
+    native/let_statement("limit", :U64, native/binary_expression(:Divide, "allocation_limit", "size")),
+    native/when_statement(native/binary_expression(:Less, "limit", "arity"), [native/return_zero()]),
+    native/let_statement("bytes", :U64, native/binary_expression(:Multiply, "arity", "size")),
+    native/let_call("raw", [:Pointer, :U8, :Mutable], "value_arena_allocate", ["arena", "bytes"]),
+    native/when_statement(native/binary_expression(:Equal, "raw", "null_bytes"), [native/return_zero()]),
+    native/let_statement("data", values, native/unary_expression(:PointerCast, "raw")),
+    native/let_statement("i", :U64, "zero"),
+    native/while_statement(native/binary_expression(:Less, "i", "arity"), [
+      native/let_offset("input_slot", values, "source", "i"),
+      native/let_load("child", word, "input_slot"),
+      @native_value/copy_child("child", "copied"),
+      native/let_offset("output_slot", values, "data", "i"),
+      native/store_statement("output_slot", "copied"),
+      native/set_statement("i", native/binary_expression(:Add, "i", "one"))
+    ]),
+    native/return_record(["true", native/typed_record(tuple, ["data", "arity"])])
+  ])
   return context
 end
 
@@ -177,50 +292,70 @@ verb native_value/copy_relation(input: map) -> map
     ["arena", [:Pointer, [:Record, "ValueArena"], :Mutable], :Borrow], ["value", word, :Borrow]], [],
     [:Allocate, :ReadMemory, :WriteMemory], :Borrow, "arena")
   context = native/define_function(context, "value_relation_copy", [
-    [:Let, "checked", [:Record, "RelationResult"], [:Call, "value_relation_view", "value"]],
-    [:If, [:Field, "checked", "ok"], [], [[:Return, [:Zero]]]],
-    [:Let, "original", relation, [:Field, "checked", "relation"]],
-    [:Let, "arity", :U64, [:Field, "original", "arity"]],
-    [:Let, "length", :U64, [:Field, "original", "length"]],
-    [:If, [:Equal, "arity", "zero"], [[:If, [:Equal, "length", "zero"], [
-      [:Return, [:Record, "true", [:Expr, word, [:Call, "value_empty_relation"]]]]], []]], []],
-    [:Let, "header_size", :U64, [:SizeOf, relation]],
-    [:Let, "symbol_size", :U64, [:SizeOf, :U32]],
-    [:Let, "heading_size", :U64, [:Multiply, "arity", "symbol_size"]],
-    [:Set, "heading_size", [:Add, "heading_size", "alignment_slack"]],
-    [:Set, "heading_size", [:BitAnd, "heading_size", "alignment_mask"]],
-    [:Let, "prefix", :U64, [:Add, "header_size", "heading_size"]],
-    [:Let, "tuple_size", :U64, [:SizeOf, tuple]],
-    [:Let, "limit", :U64, [:Subtract, "allocation_limit", "prefix"]],
-    [:Set, "limit", [:Divide, "limit", "tuple_size"]],
-    [:If, [:Less, "limit", "length"], [[:Return, [:Zero]]], []],
-    [:Let, "rows_size", :U64, [:Multiply, "length", "tuple_size"]],
-    [:Let, "total", :U64, [:Add, "prefix", "rows_size"]],
-    [:Let, "raw", bytes, [:Call, "value_arena_allocate", "arena", "total"]],
-    [:If, [:Equal, "raw", "null_bytes"], [[:Return, [:Zero]]], []],
-    [:Let, "target", [:Pointer, relation, :Mutable], [:PointerCast, "raw"]],
-    [:Let, "raw_heading", bytes, [:Offset, "raw", "header_size"]],
-    [:Let, "heading", [:Pointer, :U32, :Mutable], [:PointerCast, "raw_heading"]],
-    [:Let, "source_heading", [:Pointer, :U32, :Mutable], [:Field, "original", "heading"]],
-    [:Let, "i", :U64, "zero"],
-    [:While, [:Less, "i", "arity"], [
-      [:Let, "source_column", [:Pointer, :U32, :Mutable], [:Offset, "source_heading", "i"]],
-      [:Let, "target_column", [:Pointer, :U32, :Mutable], [:Offset, "heading", "i"]],
-      [:Do, [:Store, "target_column", [:Expr, :U32, [:Load, "source_column"]]]],
-      [:Set, "i", [:Add, "i", "one"]]]],
-    [:Let, "raw_rows", bytes, [:Offset, "raw", "prefix"]],
-    [:Let, "rows", tuples, [:PointerCast, "raw_rows"]],
-    [:Let, "source_rows", tuples, [:Field, "original", "rows"]],
-    [:Set, "i", "zero"],
-    [:While, [:Less, "i", "length"], [
-      [:Let, "source_row", tuples, [:Offset, "source_rows", "i"]],
-      [:Let, "copied", [:Record, "TupleResult"], [:Call, "value_tuple_copy", "arena", [:Expr, tuple, [:Load, "source_row"]]]],
-      [:If, [:Field, "copied", "ok"], [], [[:Return, [:Zero]]]],
-      [:Let, "target_row", tuples, [:Offset, "rows", "i"]],
-      [:Do, [:Store, "target_row", [:Expr, tuple, [:Field, "copied", "tuple"]]]],
-      [:Set, "i", [:Add, "i", "one"]]]],
-    [:Note, :Invariant, "Copy canonical rows without sorting. No destination pointer borrows the source arena."],
-    [:Do, [:Store, "target", [:Expr, relation, [:Record, "heading", "arity", "rows", "length"]]]],
-    [:Return, [:Record, "true", [:Expr, word, [:PackPointer, "target", "tag_relation"]]]]])
+    native/let_call("checked", [:Record, "RelationResult"], "value_relation_view", ["value"]),
+    native/unless_statement(native/field_expression("checked", "ok"), [native/return_zero()]),
+    native/let_field("original", relation, "checked", "relation"),
+    native/let_field("arity", :U64, "original", "arity"),
+    native/let_field("length", :U64, "original", "length"),
+    native/when_statement(
+      native/binary_expression(:Equal, "arity", "zero"),
+      [
+        native/when_statement(
+          native/binary_expression(:Equal, "length", "zero"),
+          [ native/return_record(["true", native/typed_call(word, "value_empty_relation", [])])]
+        )
+      ]
+    ),
+    native/let_statement("header_size", :U64, native/unary_expression(:SizeOf, relation)),
+    native/let_statement("symbol_size", :U64, native/unary_expression(:SizeOf, :U32)),
+    native/let_statement("heading_size", :U64, native/binary_expression(:Multiply, "arity", "symbol_size")),
+    native/set_statement("heading_size", native/binary_expression(:Add, "heading_size", "alignment_slack")),
+    native/set_statement("heading_size", native/binary_expression(:BitAnd, "heading_size", "alignment_mask")),
+    native/let_statement("prefix", :U64, native/binary_expression(:Add, "header_size", "heading_size")),
+    native/let_statement("tuple_size", :U64, native/unary_expression(:SizeOf, tuple)),
+    native/let_statement("limit", :U64, native/binary_expression(:Subtract, "allocation_limit", "prefix")),
+    native/set_statement("limit", native/binary_expression(:Divide, "limit", "tuple_size")),
+    native/when_statement(native/binary_expression(:Less, "limit", "length"), [native/return_zero()]),
+    native/let_statement("rows_size", :U64, native/binary_expression(:Multiply, "length", "tuple_size")),
+    native/let_statement("total", :U64, native/binary_expression(:Add, "prefix", "rows_size")),
+    native/let_call("raw", bytes, "value_arena_allocate", ["arena", "total"]),
+    native/when_statement(native/binary_expression(:Equal, "raw", "null_bytes"), [native/return_zero()]),
+    native/let_statement("target", [:Pointer, relation, :Mutable], native/unary_expression(:PointerCast, "raw")),
+    native/let_offset("raw_heading", bytes, "raw", "header_size"),
+    native/let_statement("heading", [:Pointer, :U32, :Mutable], native/unary_expression(:PointerCast, "raw_heading")),
+    native/let_field("source_heading", [:Pointer, :U32, :Mutable], "original", "heading"),
+    native/let_statement("i", :U64, "zero"),
+    native/while_statement(native/binary_expression(:Less, "i", "arity"), [
+      native/let_offset("source_column", [:Pointer, :U32, :Mutable], "source_heading", "i"),
+      native/let_offset("target_column", [:Pointer, :U32, :Mutable], "heading", "i"),
+      native/store_statement("target_column", native/typed_load(:U32, "source_column")),
+      native/set_statement("i", native/binary_expression(:Add, "i", "one"))
+    ]),
+    native/let_offset("raw_rows", bytes, "raw", "prefix"),
+    native/let_statement("rows", tuples, native/unary_expression(:PointerCast, "raw_rows")),
+    native/let_field("source_rows", tuples, "original", "rows"),
+    native/set_statement("i", "zero"),
+    native/while_statement(native/binary_expression(:Less, "i", "length"), [
+      native/let_offset("source_row", tuples, "source_rows", "i"),
+      native/let_call(
+        "copied",
+        [:Record, "TupleResult"],
+        "value_tuple_copy",
+        ["arena", native/typed_load(tuple, "source_row")]
+      ),
+      native/unless_statement(native/field_expression("copied", "ok"), [native/return_zero()]),
+      native/let_offset("target_row", tuples, "rows", "i"),
+      native/store_statement("target_row", native/typed_field(tuple, "copied", "tuple")),
+      native/set_statement("i", native/binary_expression(:Add, "i", "one"))
+    ]),
+    native/note_statement(
+      :Invariant,
+      "Copy canonical rows without sorting. No destination pointer borrows the source arena."
+    ),
+    native/store_statement("target", native/typed_record(relation, ["heading", "arity", "rows", "length"])),
+    native/return_record(
+      ["true", native/typed_expression(word, native/binary_expression(:PackPointer, "target", "tag_relation"))]
+    )
+  ])
   return context
 end

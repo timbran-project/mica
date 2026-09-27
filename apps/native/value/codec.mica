@@ -25,36 +25,63 @@ verb native_value/codec(input: map) -> map
   context = native/declare_function(context, "codec_header", :Bool, [arena, buffer, ["kind", :U8, :Value], ["aux", :U64, :Value]], [],
     [:Allocate, :ReadMemory, :WriteMemory], :Value, "")
   context = native/define_function(context, "codec_header", [
-    [:If, [:Less, "codec_aux_mask", "aux"], [[:Return, "false"]], []],
-    [:Let, "kind_bits", :U64, [:ShiftLeft, [:Expr, :U64, [:Convert, "kind"]], "codec_kind_shift"]],
-    [:Let, "header", :U64, [:BitOr, "codec_extended", "kind_bits"]], [:Set, "header", [:BitOr, "header", "aux"]],
-    [:Return, [:Call, "buffer_word", "arena", "buffer", "header"]]])
+    native/when_statement(native/binary_expression(:Less, "codec_aux_mask", "aux"), [native/return_value("false")]),
+    native/let_statement(
+      "kind_bits",
+      :U64,
+      native/binary_expression(
+        :ShiftLeft,
+        native/typed_expression(:U64, native/unary_expression(:Convert, "kind")),
+        "codec_kind_shift"
+      )
+    ),
+    native/let_statement("header", :U64, native/binary_expression(:BitOr, "codec_extended", "kind_bits")),
+    native/set_statement("header", native/binary_expression(:BitOr, "header", "aux")),
+    native/return_value(native/call_expression("buffer_word", ["arena", "buffer", "header"]))
+  ])
   context = native/declare_function(context, "codec_encode", :Bool, [arena, table, buffer, ["value", word, :Borrow], ["options", options, :Value]], [],
     [:Allocate, :ReadMemory, :WriteMemory, :Block], :Value, "")
   context = native_value/codec_encode(context)
   context = native/declare_function(context, "value_encode", [:Record, "ValueResult"], [arena, table, ["value", word, :Borrow], ["options", options, :Value]], [],
     [:Allocate, :ReadMemory, :WriteMemory, :Block], :Borrow, "arena")
   context = native/define_function(context, "value_encode", [
-    [:Let, "buffer", [:Pointer, [:Record, "ValueBuffer"], :Mutable], [:Call, "value_buffer", "arena"]],
-    [:If, [:Equal, "buffer", "null_buffer"], [[:Return, [:Zero]]], []],
-    [:If, [:Call, "codec_encode", "arena", "table", "buffer", "value", "options"], [], [[:Return, [:Zero]]]],
-    [:Let, "output", [:Record, "ValueBuffer"], [:Load, "buffer"]],
-    [:Let, "data", [:Pointer, :U8, :Mutable], [:Field, "output", "data"]],
-    [:Let, "length", :U64, [:Field, "output", "length"]],
-    [:Let, "raw", [:Pointer, :U8, :Mutable], [:Call, "value_arena_allocate", "arena", [:Expr, :U64, [:SizeOf, [:Record, "HeapBytes"]]]]],
-    [:If, [:Equal, "raw", "null_bytes"], [[:Return, [:Zero]]], []],
-    [:Let, "header", [:Pointer, [:Record, "HeapBytes"], :Mutable], [:PointerCast, "raw"]],
-    [:Do, [:Store, "header", [:Expr, [:Record, "HeapBytes"], [:Record, "data", "length"]]]],
-    [:Return, [:Record, "true", [:Expr, word, [:PackPointer, "header", "tag_bytes"]]]]])
+    native/let_call("buffer", [:Pointer, [:Record, "ValueBuffer"], :Mutable], "value_buffer", ["arena"]),
+    native/when_statement(native/binary_expression(:Equal, "buffer", "null_buffer"), [native/return_zero()]),
+    native/unless_statement(
+      native/call_expression("codec_encode", ["arena", "table", "buffer", "value", "options"]),
+      [native/return_zero()]
+    ),
+    native/let_load("output", [:Record, "ValueBuffer"], "buffer"),
+    native/let_field("data", [:Pointer, :U8, :Mutable], "output", "data"),
+    native/let_field("length", :U64, "output", "length"),
+    native/let_call(
+      "raw",
+      [:Pointer, :U8, :Mutable],
+      "value_arena_allocate",
+      ["arena", native/typed_expression(:U64, native/unary_expression(:SizeOf, [:Record, "HeapBytes"]))]
+    ),
+    native/when_statement(native/binary_expression(:Equal, "raw", "null_bytes"), [native/return_zero()]),
+    native/let_statement(
+      "header",
+      [:Pointer, [:Record, "HeapBytes"], :Mutable],
+      native/unary_expression(:PointerCast, "raw")
+    ),
+    native/store_statement("header", native/typed_record([:Record, "HeapBytes"], ["data", "length"])),
+    native/return_record(
+      ["true", native/typed_expression(word, native/binary_expression(:PackPointer, "header", "tag_bytes"))]
+    )
+  ])
   return context
 end
 
 verb native_value/encode_step(call: list) -> list
-  return [[:If, call, [], [[:Return, "false"]]]]
+  return [native/unless_statement(call, [native/return_value("false")])]
 end
 
 verb native_value/encode_child(value: string) -> list
-  let rows: list = native_value/encode_step([:Call, "codec_encode", "arena", "table", "buffer", value, "options"])
+  let rows: list = native_value/encode_step(
+    native/call_expression("codec_encode", ["arena", "table", "buffer", value, "options"])
+  )
   return rows
 end
 
@@ -62,28 +89,93 @@ verb native_value/codec_encode(input: map) -> map
   let context: map = input
   let word: list = native_value/word()
   let bytes: list = [:Pointer, :U8, :Mutable]
-  let rows: list = [[:Let, "tag", :U8, [:Tag, "value"]],
-    [:Let, "payload", :U64, "zero"],
-    [:If, [:Less, "tag", "tag_string"], [[:Set, "payload", [:Payload, "value"]]], []],
-    [:If, [:Equal, "tag", "tag_capability"], [[:Set, "payload", [:Payload, "value"]]], []],
-    [:Let, "inline_word", :U64, [:ShiftLeft, [:Expr, :U64, [:Convert, "tag"]], "codec_tag_shift"]],
-    [:Set, "inline_word", [:BitOr, "inline_word", "payload"]],
-    [:If, [:Equal, "tag", "zero_tag"], [[:Return, [:Call, "buffer_word", "arena", "buffer", "zero"]]], []]]
+  let rows: list = [
+    native/let_statement("tag", :U8, native/unary_expression(:Tag, "value")),
+    native/let_statement("payload", :U64, "zero"),
+    native/when_statement(
+      native/binary_expression(:Less, "tag", "tag_string"),
+      [native/set_statement("payload", native/unary_expression(:Payload, "value"))]
+    ),
+    native/when_statement(
+      native/binary_expression(:Equal, "tag", "tag_capability"),
+      [native/set_statement("payload", native/unary_expression(:Payload, "value"))]
+    ),
+    native/let_statement(
+      "inline_word",
+      :U64,
+      native/binary_expression(
+        :ShiftLeft,
+        native/typed_expression(:U64, native/unary_expression(:Convert, "tag")),
+        "codec_tag_shift"
+      )
+    ),
+    native/set_statement("inline_word", native/binary_expression(:BitOr, "inline_word", "payload")),
+    native/when_statement(
+      native/binary_expression(:Equal, "tag", "zero_tag"),
+      [native/return_value(native/call_expression("buffer_word", ["arena", "buffer", "zero"]))]
+    )
+  ]
   for name in ["bool", "int", "float", "identity"]
-    rows = [@rows, [:If, [:Equal, "tag", string_concat("tag_", name)], [[:Return, [:Call, "buffer_word", "arena", "buffer", "inline_word"]]], []]]
+    rows = [
+      @rows,
+      native/when_statement(
+        native/binary_expression(:Equal, "tag", string_concat("tag_", name)),
+        [native/return_value(native/call_expression("buffer_word", ["arena", "buffer", "inline_word"]))]
+      )
+    ]
   end
-  rows = [@rows, [:If, [:Equal, "tag", "tag_capability"], [
-    [:If, [:Field, "options", "allow_capabilities"], [[:Return, [:Call, "buffer_word", "arena", "buffer", "inline_word"]]], [[:Return, "false"]]]], []]]
+  rows = [
+    @rows,
+    native/when_statement(
+      native/binary_expression(:Equal, "tag", "tag_capability"),
+      [
+        native/if_statement(
+          native/field_expression("options", "allow_capabilities"),
+          [native/return_value(native/call_expression("buffer_word", ["arena", "buffer", "inline_word"]))],
+          [native/return_value("false")]
+        )
+      ]
+    )
+  ]
   for name in ["symbol", "error_code"]
-    rows = [@rows, [:If, [:Equal, "tag", string_concat("tag_", name)], [
-      [:If, [:Field, "options", "symbol_ids"], [[:Return, [:Call, "buffer_word", "arena", "buffer", "inline_word"]]], []],
-      [:If, [:Equal, "table", [:Expr, [:Pointer, [:Record, "SymbolTable"], :Mutable], [:Zero]]], [[:Return, "false"]], []],
-      [:Let, string_concat(name, "_text"), [:Record, "SymbolText"], [:Call, "value_symbol_text", "table", [:Expr, :U32, [:Convert, "payload"]]]],
-      [:If, [:Field, string_concat(name, "_text"), "ok"], [], [[:Return, "false"]]],
-      [:Let, string_concat(name, "_length"), :U64, [:Field, string_concat(name, "_text"), "length"]],
-      @native_value/encode_step([:Call, "codec_header", "arena", "buffer", "tag", string_concat(name, "_length")]),
-      [:Return, [:Call, "buffer_append", "arena", "buffer", [:Expr, [:Pointer, :U8, :Const], [:Field, string_concat(name, "_text"), "data"]], string_concat(name, "_length")]]
-    ], []]]
+    rows = [
+      @rows,
+      native/when_statement(native/binary_expression(:Equal, "tag", string_concat("tag_", name)), [
+        native/when_statement(
+          native/field_expression("options", "symbol_ids"),
+          [native/return_value(native/call_expression("buffer_word", ["arena", "buffer", "inline_word"]))]
+        ),
+        native/when_statement(
+          native/binary_expression(:Equal, "table", native/typed_zero([:Pointer, [:Record, "SymbolTable"], :Mutable])),
+          [native/return_value("false")]
+        ),
+        native/let_call(
+          string_concat(name, "_text"),
+          [:Record, "SymbolText"],
+          "value_symbol_text",
+          ["table", native/typed_expression(:U32, native/unary_expression(:Convert, "payload"))]
+        ),
+        native/unless_statement(
+          native/field_expression(string_concat(name, "_text"), "ok"),
+          [native/return_value("false")]
+        ),
+        native/let_field(string_concat(name, "_length"), :U64, string_concat(name, "_text"), "length"),
+        @native_value/encode_step(
+          native/call_expression("codec_header", ["arena", "buffer", "tag", string_concat(name, "_length")])
+        ),
+        native/return_value(
+          native/call_expression(
+            "buffer_append",
+            [
+              "arena",
+              "buffer",
+              native/typed_field([:Pointer, :U8, :Const], string_concat(name, "_text"), "data"),
+              string_concat(name, "_length")
+            ]
+          )
+        )
+      ])
+    ]
   end
   for spec in [["string", "HeapString", :U8], ["bytes", "HeapBytes", :U8], ["list", "HeapList", word], ["map", "HeapMap", [:Record, "ValueMapEntry"]]]
     let name: string = spec[0]
@@ -92,13 +184,31 @@ verb native_value/codec_encode(input: map) -> map
     let data: string = string_concat(name, "_data")
     let length: string = string_concat(name, "_length")
     let body: list = [
-      [:Let, pointer, [:Pointer, [:Record, spec[1]], :Const], [:UnpackPointer, "value"]],
-      [:Let, header, [:Record, spec[1]], [:Load, pointer]],
-      [:Let, data, [:Pointer, spec[2], :Mutable], [:Field, header, "data"]],
-      [:Let, length, :U64, [:Field, header, "length"]],
-      @native_value/encode_step([:Call, "codec_header", "arena", "buffer", "tag", length])]
+      native/let_statement(
+        pointer,
+        [:Pointer, [:Record, spec[1]], :Const],
+        native/unary_expression(:UnpackPointer, "value")
+      ),
+      native/let_load(header, [:Record, spec[1]], pointer),
+      native/let_field(data, [:Pointer, spec[2], :Mutable], header, "data"),
+      native/let_field(length, :U64, header, "length"),
+      @native_value/encode_step(native/call_expression("codec_header", ["arena", "buffer", "tag", length]))
+    ]
     if spec[2] == :U8
-      body = [@body, [:Return, [:Call, "buffer_append", "arena", "buffer", [:Expr, [:Pointer, :U8, :Const], [:Freeze, data]], length]]]
+      body = [
+        @body,
+        native/return_value(
+          native/call_expression(
+            "buffer_append",
+            [
+              "arena",
+              "buffer",
+              native/typed_expression([:Pointer, :U8, :Const], native/unary_expression(:Freeze, data)),
+              length
+            ]
+          )
+        )
+      ]
     else
       let index: string = string_concat(name, "_i")
       let element: string = string_concat(name, "_element")
@@ -108,60 +218,198 @@ verb native_value/codec_encode(input: map) -> map
       else
         for field in ["key", "value"]
           let child: string = string_concat(name, "_", field)
-          children = [@children, [:Let, child, word, [:Field, element, field]], @native_value/encode_child(child)]
+          children = [
+            @children,
+            native/let_field(child, word, element, field),
+            @native_value/encode_child(child)
+          ]
         end
       end
-      body = [@body, [:Let, index, :U64, "zero"], [:While, [:Less, index, length], [
-        [:Let, element, spec[2], [:Load, [:Expr, [:Pointer, spec[2], :Mutable], [:Offset, data, index]]]],
-        @children, [:Set, index, [:Add, index, "one"]]]], [:Return, "true"]]
+      body = [
+        @body,
+        native/let_statement(index, :U64, "zero"),
+        native/while_statement(native/binary_expression(:Less, index, length), [
+          native/let_load(
+            element,
+            spec[2],
+            native/typed_expression([:Pointer, spec[2], :Mutable], native/offset_expression(data, index))
+          ),
+          @children,
+          native/set_statement(index, native/binary_expression(:Add, index, "one"))
+        ]),
+        native/return_value("true")
+      ]
     end
-    rows = [@rows, [:If, [:Equal, "tag", string_concat("tag_", name)], body, []]]
+    rows = [
+      @rows,
+      native/when_statement(native/binary_expression(:Equal, "tag", string_concat("tag_", name)), body)
+    ]
   end
-  rows = [@rows, [:If, [:Equal, "tag", "tag_range"], [
-    [:Let, "range", [:Record, "HeapRange"], [:Load, [:Expr, [:Pointer, [:Record, "HeapRange"], :Const], [:UnpackPointer, "value"]]]],
-    [:Let, "has_end", :Bool, [:Field, "range", "has_end"]], [:Let, "range_flags", :U64, "zero"],
-    [:If, "has_end", [[:Set, "range_flags", "one"]], []],
-    @native_value/encode_step([:Call, "codec_header", "arena", "buffer", "tag", "range_flags"]),
-    [:Let, "start", word, [:Field, "range", "start"]], @native_value/encode_child("start"),
-    [:If, "has_end", [[:Let, "end", word, [:Field, "range", "end"]], @native_value/encode_child("end")], []], [:Return, "true"]], []],
-    [:If, [:Equal, "tag", "tag_error"], [
-      [:Let, "error", [:Record, "HeapError"], [:Load, [:Expr, [:Pointer, [:Record, "HeapError"], :Const], [:UnpackPointer, "value"]]]],
-      [:Let, "has_message", :Bool, [:Field, "error", "has_message"]], [:Let, "has_value", :Bool, [:Field, "error", "has_value"]],
-      [:Let, "error_flags", :U64, "zero"], [:If, "has_message", [[:Set, "error_flags", "one"]], []],
-      [:If, "has_value", [[:Set, "error_flags", [:Add, "error_flags", "two"]]], []],
-      @native_value/encode_step([:Call, "codec_header", "arena", "buffer", "tag", "error_flags"]),
-      [:Let, "code", word, [:PackImmediate, [:Expr, :U64, [:Convert, [:Expr, :U32, [:Field, "error", "code"]]]], "tag_error_code"]], @native_value/encode_child("code"),
-      [:If, "has_message", [
-        [:Let, "message", word, [:Field, "error", "message"]],
-        [:Let, "message_header", [:Record, "HeapString"], [:Load, [:Expr, [:Pointer, [:Record, "HeapString"], :Const], [:UnpackPointer, "message"]]]],
-        [:Let, "message_length", :U64, [:Field, "message_header", "length"]],
-        @native_value/encode_step([:Call, "buffer_word", "arena", "buffer", "message_length"]),
-        @native_value/encode_step([:Call, "buffer_append", "arena", "buffer", [:Expr, [:Pointer, :U8, :Const], [:Freeze, [:Expr, bytes, [:Field, "message_header", "data"]]]], "message_length"])], []],
-      [:If, "has_value", [[:Let, "error_value", word, [:Field, "error", "value"]], @native_value/encode_child("error_value")], []], [:Return, "true"]], []],
-    [:If, [:Equal, "tag", "tag_frob"], [
-      [:Let, "frob", [:Record, "HeapFrob"], [:Load, [:Expr, [:Pointer, [:Record, "HeapFrob"], :Const], [:UnpackPointer, "value"]]]],
-      @native_value/encode_step([:Call, "codec_header", "arena", "buffer", "tag", "zero"]),
-      [:Let, "delegate", word, [:PackImmediate, [:Expr, :U64, [:Field, "frob", "delegate"]], "tag_identity"]], @native_value/encode_child("delegate"),
-      [:Let, "frob_value", word, [:Field, "frob", "value"]], @native_value/encode_child("frob_value"), [:Return, "true"]], []],
-    [:If, [:Equal, "tag", "tag_relation"], [
-      [:Let, "relation", [:Record, "HeapRelation"], [:Load, [:Expr, [:Pointer, [:Record, "HeapRelation"], :Const], [:UnpackPointer, "value"]]]],
-      [:Let, "arity", :U64, [:Field, "relation", "arity"]],
-      [:Let, "heading", [:Pointer, :U32, :Mutable], [:Field, "relation", "heading"]],
-      @native_value/encode_step([:Call, "codec_header", "arena", "buffer", "tag", "arity"]),
-      [:Let, "column", :U64, "zero"], [:While, [:Less, "column", "arity"], [
-        [:Let, "column_id", :U32, [:Load, [:Expr, [:Pointer, :U32, :Mutable], [:Offset, "heading", "column"]]]],
-        [:Let, "column_value", word, [:PackImmediate, [:Expr, :U64, [:Convert, "column_id"]], "tag_symbol"]], @native_value/encode_child("column_value"),
-        [:Set, "column", [:Add, "column", "one"]]]],
-      [:Let, "length", :U64, [:Field, "relation", "length"]],
-      @native_value/encode_step([:Call, "buffer_word", "arena", "buffer", "length"]),
-      [:Let, "tuples", [:Pointer, [:Record, "ValueTuple"], :Mutable], [:Field, "relation", "rows"]],
-      [:Let, "row", :U64, "zero"], [:While, [:Less, "row", "length"], [
-        [:Let, "tuple", [:Record, "ValueTuple"], [:Load, [:Expr, [:Pointer, [:Record, "ValueTuple"], :Mutable], [:Offset, "tuples", "row"]]]],
-        [:Let, "cells", [:Pointer, word, :Mutable], [:Field, "tuple", "data"]],
-        [:Set, "column", "zero"], [:While, [:Less, "column", "arity"], [
-          [:Let, "cell", word, [:Load, [:Expr, [:Pointer, word, :Mutable], [:Offset, "cells", "column"]]]], @native_value/encode_child("cell"),
-          [:Set, "column", [:Add, "column", "one"]]]], [:Set, "row", [:Add, "row", "one"]]]], [:Return, "true"]], []],
-    [:Return, "false"]]
+  rows = [
+    @rows,
+    native/when_statement(native/binary_expression(:Equal, "tag", "tag_range"), [
+      native/let_load(
+        "range",
+        [:Record, "HeapRange"],
+        native/typed_expression(
+          [:Pointer, [:Record, "HeapRange"], :Const],
+          native/unary_expression(:UnpackPointer, "value")
+        )
+      ),
+      native/let_field("has_end", :Bool, "range", "has_end"),
+      native/let_statement("range_flags", :U64, "zero"),
+      native/when_statement("has_end", [native/set_statement("range_flags", "one")]),
+      @native_value/encode_step(native/call_expression("codec_header", ["arena", "buffer", "tag", "range_flags"])),
+      native/let_field("start", word, "range", "start"),
+      @native_value/encode_child("start"),
+      native/when_statement("has_end", [
+        native/let_field("end", word, "range", "end"),
+        @native_value/encode_child("end")
+      ]),
+      native/return_value("true")
+    ]),
+    native/when_statement(native/binary_expression(:Equal, "tag", "tag_error"), [
+      native/let_load(
+        "error",
+        [:Record, "HeapError"],
+        native/typed_expression(
+          [:Pointer, [:Record, "HeapError"], :Const],
+          native/unary_expression(:UnpackPointer, "value")
+        )
+      ),
+      native/let_field("has_message", :Bool, "error", "has_message"),
+      native/let_field("has_value", :Bool, "error", "has_value"),
+      native/let_statement("error_flags", :U64, "zero"),
+      native/when_statement("has_message", [native/set_statement("error_flags", "one")]),
+      native/when_statement(
+        "has_value",
+        [native/set_statement("error_flags", native/binary_expression(:Add, "error_flags", "two"))]
+      ),
+      @native_value/encode_step(native/call_expression("codec_header", ["arena", "buffer", "tag", "error_flags"])),
+      native/let_statement(
+        "code",
+        word,
+        native/binary_expression(
+          :PackImmediate,
+          native/typed_expression(:U64, native/unary_expression(:Convert, native/typed_field(:U32, "error", "code"))),
+          "tag_error_code"
+        )
+      ),
+      @native_value/encode_child("code"),
+      native/when_statement("has_message", [
+        native/let_field("message", word, "error", "message"),
+        native/let_load(
+          "message_header",
+          [:Record, "HeapString"],
+          native/typed_expression(
+            [:Pointer, [:Record, "HeapString"], :Const],
+            native/unary_expression(:UnpackPointer, "message")
+          )
+        ),
+        native/let_field("message_length", :U64, "message_header", "length"),
+        @native_value/encode_step(native/call_expression("buffer_word", ["arena", "buffer", "message_length"])),
+        @native_value/encode_step(
+          native/call_expression(
+            "buffer_append",
+            [
+              "arena",
+              "buffer",
+              native/typed_expression(
+                [:Pointer, :U8, :Const],
+                native/unary_expression(:Freeze, native/typed_field(bytes, "message_header", "data"))
+              ),
+              "message_length"
+            ]
+          )
+        )
+      ]),
+      native/when_statement("has_value", [
+        native/let_field("error_value", word, "error", "value"),
+        @native_value/encode_child("error_value")
+      ]),
+      native/return_value("true")
+    ]),
+    native/when_statement(native/binary_expression(:Equal, "tag", "tag_frob"), [
+      native/let_load(
+        "frob",
+        [:Record, "HeapFrob"],
+        native/typed_expression(
+          [:Pointer, [:Record, "HeapFrob"], :Const],
+          native/unary_expression(:UnpackPointer, "value")
+        )
+      ),
+      @native_value/encode_step(native/call_expression("codec_header", ["arena", "buffer", "tag", "zero"])),
+      native/let_statement(
+        "delegate",
+        word,
+        native/binary_expression(:PackImmediate, native/typed_field(:U64, "frob", "delegate"), "tag_identity")
+      ),
+      @native_value/encode_child("delegate"),
+      native/let_field("frob_value", word, "frob", "value"),
+      @native_value/encode_child("frob_value"),
+      native/return_value("true")
+    ]),
+    native/when_statement(native/binary_expression(:Equal, "tag", "tag_relation"), [
+      native/let_load(
+        "relation",
+        [:Record, "HeapRelation"],
+        native/typed_expression(
+          [:Pointer, [:Record, "HeapRelation"], :Const],
+          native/unary_expression(:UnpackPointer, "value")
+        )
+      ),
+      native/let_field("arity", :U64, "relation", "arity"),
+      native/let_field("heading", [:Pointer, :U32, :Mutable], "relation", "heading"),
+      @native_value/encode_step(native/call_expression("codec_header", ["arena", "buffer", "tag", "arity"])),
+      native/let_statement("column", :U64, "zero"),
+      native/while_statement(native/binary_expression(:Less, "column", "arity"), [
+        native/let_load(
+          "column_id",
+          :U32,
+          native/typed_expression([:Pointer, :U32, :Mutable], native/offset_expression("heading", "column"))
+        ),
+        native/let_statement(
+          "column_value",
+          word,
+          native/binary_expression(
+            :PackImmediate,
+            native/typed_expression(:U64, native/unary_expression(:Convert, "column_id")),
+            "tag_symbol"
+          )
+        ),
+        @native_value/encode_child("column_value"),
+        native/set_statement("column", native/binary_expression(:Add, "column", "one"))
+      ]),
+      native/let_field("length", :U64, "relation", "length"),
+      @native_value/encode_step(native/call_expression("buffer_word", ["arena", "buffer", "length"])),
+      native/let_field("tuples", [:Pointer, [:Record, "ValueTuple"], :Mutable], "relation", "rows"),
+      native/let_statement("row", :U64, "zero"),
+      native/while_statement(native/binary_expression(:Less, "row", "length"), [
+        native/let_load(
+          "tuple",
+          [:Record, "ValueTuple"],
+          native/typed_expression(
+            [:Pointer, [:Record, "ValueTuple"], :Mutable],
+            native/offset_expression("tuples", "row")
+          )
+        ),
+        native/let_field("cells", [:Pointer, word, :Mutable], "tuple", "data"),
+        native/set_statement("column", "zero"),
+        native/while_statement(native/binary_expression(:Less, "column", "arity"), [
+          native/let_load(
+            "cell",
+            word,
+            native/typed_expression([:Pointer, word, :Mutable], native/offset_expression("cells", "column"))
+          ),
+          @native_value/encode_child("cell"),
+          native/set_statement("column", native/binary_expression(:Add, "column", "one"))
+        ]),
+        native/set_statement("row", native/binary_expression(:Add, "row", "one"))
+      ]),
+      native/return_value("true")
+    ]),
+    native/return_value("false")
+  ]
   context = native/define_function(context, "codec_encode", rows)
   return context
 end
