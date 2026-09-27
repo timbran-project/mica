@@ -1,0 +1,428 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+// Declarations precede value_compare because tuples can contain relations.
+verb native_value/relation_types(input: map) -> map
+  let context: map = input
+  let word: list = native_value/word()
+  let tuple: list = [:Record, "ValueTuple"]
+  let relation: list = [:Record, "HeapRelation"]
+  let state: map = context[:state]
+  state = native/record_type(state, "ValueTuple", [["data", [:Pointer, word, :Mutable]], ["arity", :U64]])[1]
+  state = native/record_type(state, "TupleResult", [["ok", :Bool], ["tuple", tuple]])[1]
+  state = native/record_type(state, "RelationColumn", [["symbol", :U32], ["source", :U64]])[1]
+  state = native/record_type(state, "HeapRelation", [["heading", [:Pointer, :U32, :Mutable]], ["arity", :U64],
+    ["rows", [:Pointer, tuple, :Mutable]], ["length", :U64]])[1]
+  state = native/record_type(state, "RelationResult", [["ok", :Bool], ["relation", relation]])[1]
+  let [constants, next] = native/constants(state, [
+    ["relation_max_arity", :U64, "000000000000ffff"],
+    ["null_heading", [:Pointer, :U32, :Const], "null"],
+    ["null_rows", [:Pointer, tuple, :Const], "null"]])
+  context[:state] = next
+  let bindings: map = context[:constants]
+  for name, id in constants
+    bindings[name] = id
+  end
+  context[:constants] = bindings
+  context = native_value/function(context, "value_tuple_compare", [:Record, "IntResult"],
+    [["left", tuple, :Borrow], ["right", tuple, :Borrow]], [], [:ReadMemory], :Value, "")
+  context = native_value/function(context, "value_relation_compare", [:Record, "IntResult"],
+    [["left", word, :Borrow], ["right", word, :Borrow]], [], [:ReadMemory], :Value, "")
+  return context
+end
+
+verb native_value/relations(input: map) -> map
+  let context: map = input
+  context = native_value/tuple_operations(context)
+  context = native_value/relation_accessors(context)
+  context = native_value/relation_order(context)
+  context = native_value/relation_sort(context, "columns", [:Record, "RelationColumn"])
+  context = native_value/relation_sort(context, "rows", [:Record, "ValueTuple"])
+  context = native_value/relation_constructor(context)
+  return context
+end
+
+verb native_value/tuple_operations(input: map) -> map
+  let context: map = input
+  let word: list = native_value/word()
+  let values: list = [:Pointer, word, :Mutable]
+  let tuple: list = [:Record, "ValueTuple"]
+  context = native_value/function(context, "value_tuple", [:Record, "TupleResult"], [
+    ["arena", [:Pointer, [:Record, "ValueArena"], :Mutable], :Borrow],
+    ["source", [:Pointer, word, :Const], [:Borrow, "arena"]], ["arity", :U64, :Value]], [],
+    [:Allocate, :ReadMemory, :WriteMemory], :Borrow, "arena")
+  context = native_value/body(context, "value_tuple", [
+    [:If, [:Equal, "arity", "zero"], [[:Return, [:Record, "true", [:Expr, tuple, [:Zero]]]]], []],
+    [:If, [:Equal, "source", "null_values"], [[:Return, [:Zero]]], []],
+    [:Let, "size", :U64, [:SizeOf, word]],
+    [:Let, "limit", :U64, [:Divide, "allocation_limit", "size"]],
+    [:If, [:Less, "limit", "arity"], [[:Return, [:Zero]]], []],
+    [:Let, "bytes", :U64, [:Multiply, "arity", "size"]],
+    [:Let, "raw", [:Pointer, :U8, :Mutable], [:Call, "value_arena_allocate", "arena", "bytes"]],
+    [:If, [:Equal, "raw", "null_bytes"], [[:Return, [:Zero]]], []],
+    [:Let, "data", values, [:PointerCast, "raw"]],
+    [:Let, "i", :U64, "zero"],
+    [:While, [:Less, "i", "arity"], [
+      [:Let, "src", [:Pointer, word, :Const], [:Offset, "source", "i"]],
+      [:Let, "dst", values, [:Offset, "data", "i"]],
+      [:Do, [:Store, "dst", [:Expr, word, [:Load, "src"]]]], [:Set, "i", [:Add, "i", "one"]]]],
+    [:Return, [:Record, "true", [:Expr, tuple, [:Record, "data", "arity"]]]]])
+  context = native_value/function(context, "value_tuple_get", [:Record, "ValueResult"],
+    [["tuple", tuple, :Borrow], ["index", :U64, :Value]], [], [:ReadMemory], :Borrow, "tuple")
+  context = native_value/body(context, "value_tuple_get", [
+    [:Let, "arity", :U64, [:Field, "tuple", "arity"]],
+    [:If, [:Less, "index", "arity"], [], [[:Return, [:Zero]]]],
+    [:Let, "data", values, [:Field, "tuple", "data"]],
+    [:Let, "slot", values, [:Offset, "data", "index"]],
+    [:Return, [:Record, "true", [:Expr, word, [:Load, "slot"]]]]])
+  context = native_value/body(context, "value_tuple_compare", [
+    [:Let, "left_data", values, [:Field, "left", "data"]],
+    [:Let, "right_data", values, [:Field, "right", "data"]],
+    [:Let, "left_arity", :U64, [:Field, "left", "arity"]],
+    [:Let, "right_arity", :U64, [:Field, "right", "arity"]],
+    [:Let, "i", :U64, "zero"],
+    [:While, [:Less, "i", "left_arity"], [
+      [:If, [:Less, "i", "right_arity"], [], [[:Break]]],
+      [:Let, "left_slot", values, [:Offset, "left_data", "i"]],
+      [:Let, "right_slot", values, [:Offset, "right_data", "i"]],
+      [:Let, "comparison", [:Record, "IntResult"], [:Call, "value_compare",
+        [:Expr, word, [:Load, "left_slot"]], [:Expr, word, [:Load, "right_slot"]]]],
+      [:If, [:Field, "comparison", "ok"], [], [[:Return, "comparison"]]],
+      [:If, [:Equal, [:Expr, :I64, [:Field, "comparison", "number"]], "int_zero"], [], [[:Return, "comparison"]]],
+      [:Set, "i", [:Add, "i", "one"]]]],
+    @native_value/scalar_order("left_arity", "right_arity")])
+  return context
+end
+
+// Returning a header by value gives the immediate empty relation a normal view
+// without a fabricated heap pointer or a process-global mutable sentinel.
+verb native_value/relation_accessors(input: map) -> map
+  let context: map = input
+  let word: list = native_value/word()
+  let relation: list = [:Record, "HeapRelation"]
+  let tuple: list = [:Record, "ValueTuple"]
+  let result: list = [:Record, "RelationResult"]
+  context = native_value/function(context, "value_relation_view", result, [["value", word, :Borrow]], [], [:ReadMemory], :Borrow, "value")
+  context = native_value/body(context, "value_relation_view", [
+    [:Let, "tag", :U8, [:Tag, "value"]],
+    [:If, [:Equal, "tag", "zero_tag"], [[:Return, [:Record, "true", [:Expr, relation, [:Zero]]]]], []],
+    [:If, [:Equal, "tag", "tag_relation"], [], [[:Return, [:Zero]]]],
+    [:Let, "pointer", [:Pointer, relation, :Const], [:UnpackPointer, "value"]],
+    [:Return, [:Record, "true", [:Expr, relation, [:Load, "pointer"]]]]])
+  let read: list = [
+    [:Let, "checked", result, [:Call, "value_relation_view", "value"]],
+    [:If, [:Field, "checked", "ok"], [], [[:Return, [:Zero]]]],
+    [:Let, "relation", relation, [:Field, "checked", "relation"]]]
+  for field in ["arity", "length"]
+    let name: string = string_concat("value_relation_", field)
+    context = native_value/function(context, name, [:Record, "IdResult"], [["value", word, :Borrow]], [], [:ReadMemory], :Value, "")
+    context = native_value/body(context, name, [@read,
+      [:Return, [:Record, "true", [:Expr, :U64, [:Field, "relation", field]]]]])
+  end
+  context = native_value/function(context, "value_is_unit", :Bool, [["value", word, :Borrow]], [], [:ReadMemory], :Value, "")
+  context = native_value/body(context, "value_is_unit", [@read,
+    [:If, [:Equal, [:Expr, :U64, [:Field, "relation", "arity"]], "zero"], [], [[:Return, "false"]]],
+    [:Return, [:Equal, [:Expr, :U64, [:Field, "relation", "length"]], "one"]]])
+  context = native_value/function(context, "value_relation_row", [:Record, "TupleResult"],
+    [["value", word, :Borrow], ["index", :U64, :Value]], [], [:ReadMemory], :Borrow, "value")
+  context = native_value/body(context, "value_relation_row", [@read,
+    [:If, [:Less, "index", [:Expr, :U64, [:Field, "relation", "length"]]], [], [[:Return, [:Zero]]]],
+    [:Let, "rows", [:Pointer, tuple, :Mutable], [:Field, "relation", "rows"]],
+    [:Let, "slot", [:Pointer, tuple, :Mutable], [:Offset, "rows", "index"]],
+    [:Return, [:Record, "true", [:Expr, tuple, [:Load, "slot"]]]]])
+  context = native_value/function(context, "value_relation_column_at", [:Record, "IdResult"],
+    [["value", word, :Borrow], ["index", :U64, :Value]], [], [:ReadMemory], :Value, "")
+  context = native_value/body(context, "value_relation_column_at", [@read,
+    [:If, [:Less, "index", [:Expr, :U64, [:Field, "relation", "arity"]]], [], [[:Return, [:Zero]]]],
+    [:Let, "heading", [:Pointer, :U32, :Mutable], [:Field, "relation", "heading"]],
+    [:Let, "slot", [:Pointer, :U32, :Mutable], [:Offset, "heading", "index"]],
+    [:Let, "symbol", :U32, [:Load, "slot"]],
+    [:Return, [:Record, "true", [:Expr, :U64, [:Convert, "symbol"]]]]])
+  context = native_value/function(context, "value_relation_column", [:Record, "IdResult"],
+    [["value", word, :Borrow], ["symbol", :U32, :Value]], [], [:ReadMemory], :Value, "")
+  context = native_value/body(context, "value_relation_column", [@read,
+    [:Let, "heading", [:Pointer, :U32, :Mutable], [:Field, "relation", "heading"]],
+    [:Let, "low", :U64, "zero"], [:Let, "high", :U64, [:Field, "relation", "arity"]],
+    [:While, [:Less, "low", "high"], [
+      [:Let, "distance", :U64, [:Subtract, "high", "low"]], [:Set, "distance", [:Divide, "distance", "two"]],
+      [:Let, "middle", :U64, [:Add, "low", "distance"]],
+      [:Let, "slot", [:Pointer, :U32, :Mutable], [:Offset, "heading", "middle"]],
+      [:Let, "candidate", :U32, [:Load, "slot"]],
+      [:If, [:Equal, "candidate", "symbol"], [[:Return, [:Record, "true", "middle"]]], []],
+      [:If, [:Less, "candidate", "symbol"], [[:Set, "low", [:Add, "middle", "one"]]], [[:Set, "high", "middle"]]]]],
+    [:Return, [:Zero]]])
+  return context
+end
+
+verb native_value/relation_order(input: map) -> map
+  let context: map = input
+  let tuple: list = [:Record, "ValueTuple"]
+  let relation: list = [:Record, "HeapRelation"]
+  let rows: list = []
+  for side in ["left", "right"]
+    rows = [@rows,
+      [:Let, string_concat(side, "_checked"), [:Record, "RelationResult"], [:Call, "value_relation_view", side]],
+      [:If, [:Field, string_concat(side, "_checked"), "ok"], [], [[:Return, [:Zero]]]],
+      [:Let, string_concat(side, "_view"), relation, [:Field, string_concat(side, "_checked"), "relation"]]]
+  end
+  // Rust orders headings lexicographically, then the canonical tuple sequence.
+  for spec in [["heading", :U32, "arity"], ["rows", tuple, "length"]]
+    for side in ["left", "right"]
+      rows = [@rows,
+        [:Let, string_concat(side, "_", spec[0]), [:Pointer, spec[1], :Mutable], [:Field, string_concat(side, "_view"), spec[0]]],
+        [:Let, string_concat(side, "_", spec[2]), :U64, [:Field, string_concat(side, "_view"), spec[2]]]]
+    end
+    let index: string = string_concat(spec[0], "_i")
+    let elements: list = []
+    for side in ["left", "right"]
+      let slot: string = string_concat(side, "_", spec[0], "_slot")
+      elements = [@elements,
+        [:Let, slot, [:Pointer, spec[1], :Mutable], [:Offset, string_concat(side, "_", spec[0]), index]],
+        [:Let, string_concat(side, "_", spec[0], "_element"), spec[1], [:Load, slot]]]
+    end
+    let left: string = string_concat("left_", spec[0], "_element")
+    let right: string = string_concat("right_", spec[0], "_element")
+    if spec[0] == "heading"
+      elements = [@elements, [:If, [:Equal, left, right], [], native_value/scalar_order(left, right)]]
+    else
+      elements = [@elements,
+        [:Let, "comparison", [:Record, "IntResult"], [:Call, "value_tuple_compare", left, right]],
+        [:If, [:Field, "comparison", "ok"], [], [[:Return, "comparison"]]],
+        [:If, [:Equal, [:Expr, :I64, [:Field, "comparison", "number"]], "int_zero"], [], [[:Return, "comparison"]]]]
+    end
+    let left_count: string = string_concat("left_", spec[2])
+    let right_count: string = string_concat("right_", spec[2])
+    rows = [@rows, [:Let, index, :U64, "zero"],
+      [:While, [:Less, index, left_count], [
+        [:If, [:Less, index, right_count], [], [[:Break]]], @elements, [:Set, index, [:Add, index, "one"]]]],
+      [:If, [:Equal, left_count, right_count], [], native_value/scalar_order(left_count, right_count)]]
+  end
+  context = native_value/body(context, "value_relation_compare", [@rows, [:Return, [:Record, "true", "int_zero"]]])
+  return context
+end
+
+// Sort descriptors, not their cell arrays. Each merge pass is linear and stable.
+verb native_value/relation_sort(input: map, kind: string, element: list) -> map
+  let context: map = input
+  let pointer: list = [:Pointer, element, :Mutable]
+  let name: string = string_concat("relation_sort_", kind)
+  context = native_value/function(context, name, :Bool, [
+    ["arena", [:Pointer, [:Record, "ValueArena"], :Mutable], :Borrow],
+    ["data", pointer, [:Borrow, "arena"]], ["length", :U64, :Value]], [],
+    [:Allocate, :ReadMemory, :WriteMemory], :Value, "")
+  let comparison: list = []
+  if kind == "columns"
+    comparison = [
+      [:Let, "left_symbol", :U32, [:Field, "left_element", "symbol"]],
+      [:Let, "right_symbol", :U32, [:Field, "right_element", "symbol"]],
+      [:Set, "take_left", [:Less, "right_symbol", "left_symbol"]],
+      [:If, "take_left", [[:Set, "take_left", "false"]], [[:Set, "take_left", "true"]]]]
+  else
+    comparison = [
+      [:Let, "comparison", [:Record, "IntResult"], [:Call, "value_tuple_compare", "left_element", "right_element"]],
+      [:If, [:Field, "comparison", "ok"], [], [[:Return, "false"]]],
+      [:If, [:Less, "int_zero", [:Expr, :I64, [:Field, "comparison", "number"]]], [[:Set, "take_left", "false"]], []]]
+  end
+  let ordered_test: list = []
+  if kind == "columns"
+    ordered_test = [[:If, [:Less, [:Expr, :U32, [:Field, "scan_right", "symbol"]], [:Expr, :U32, [:Field, "scan_left", "symbol"]]],
+      [[:Set, "ordered", "false"], [:Break]], []]]
+  else
+    ordered_test = [
+      [:Let, "scan_comparison", [:Record, "IntResult"], [:Call, "value_tuple_compare", "scan_left", "scan_right"]],
+      [:If, [:Field, "scan_comparison", "ok"], [], [[:Return, "false"]]],
+      [:If, [:Less, "int_zero", [:Expr, :I64, [:Field, "scan_comparison", "number"]]], [[:Set, "ordered", "false"], [:Break]], []]]
+  end
+  context = native_value/body(context, name, [
+    [:If, [:Less, "one", "length"], [], [[:Return, "true"]]],
+    [:Let, "size", :U64, [:SizeOf, element]],
+    [:Let, "limit", :U64, [:Divide, "allocation_limit", "size"]],
+    [:If, [:Less, "limit", "length"], [[:Return, "false"]], []],
+    [:Let, "ordered", :Bool, "true"],
+    [:Let, "scan", :U64, "one"],
+    [:While, [:Less, "scan", "length"], [
+      [:Let, "previous", :U64, [:Subtract, "scan", "one"]],
+      [:Let, "scan_left_slot", pointer, [:Offset, "data", "previous"]],
+      [:Let, "scan_right_slot", pointer, [:Offset, "data", "scan"]],
+      [:Let, "scan_left", element, [:Load, "scan_left_slot"]],
+      [:Let, "scan_right", element, [:Load, "scan_right_slot"]], @ordered_test,
+      [:Set, "scan", [:Add, "scan", "one"]]]],
+    [:If, "ordered", [[:Return, "true"]], []],
+    [:Let, "bytes", :U64, [:Multiply, "length", "size"]],
+    [:Let, "raw", [:Pointer, :U8, :Mutable], [:Call, "value_arena_allocate", "arena", "bytes"]],
+    [:If, [:Equal, "raw", "null_bytes"], [[:Return, "false"]], []],
+    [:Let, "src", pointer, "data"], [:Let, "dst", pointer, [:PointerCast, "raw"]],
+    [:Let, "width", :U64, "one"],
+    [:While, [:Less, "width", "length"], [
+      [:Let, "base", :U64, "zero"],
+      [:While, [:Less, "base", "length"], [
+        [:Let, "middle", :U64, [:Add, "base", "width"]],
+        [:If, [:Less, "length", "middle"], [[:Set, "middle", "length"]], []],
+        [:Let, "end", :U64, [:Add, "middle", "width"]],
+        [:If, [:Less, "length", "end"], [[:Set, "end", "length"]], []],
+        [:Let, "left", :U64, "base"], [:Let, "right", :U64, "middle"], [:Let, "out", :U64, "base"],
+        [:While, [:Less, "out", "end"], [
+          [:Let, "take_left", :Bool, "true"],
+          [:If, [:Less, "right", "end"], [
+            [:If, [:Less, "left", "middle"], [
+              [:Let, "left_slot", pointer, [:Offset, "src", "left"]],
+              [:Let, "right_slot", pointer, [:Offset, "src", "right"]],
+              [:Let, "left_element", element, [:Load, "left_slot"]],
+              [:Let, "right_element", element, [:Load, "right_slot"]], @comparison
+            ], [[:Set, "take_left", "false"]]]
+          ], []],
+          [:Let, "chosen", :U64, "right"],
+          [:If, "take_left", [[:Set, "chosen", "left"], [:Set, "left", [:Add, "left", "one"]]], [[:Set, "right", [:Add, "right", "one"]]]],
+          [:Let, "source_slot", pointer, [:Offset, "src", "chosen"]],
+          [:Let, "destination_slot", pointer, [:Offset, "dst", "out"]],
+          [:Do, [:Store, "destination_slot", [:Expr, element, [:Load, "source_slot"]]]],
+          [:Set, "out", [:Add, "out", "one"]]]],
+        [:Set, "base", "end"]]],
+      [:Let, "swap", pointer, "src"], [:Set, "src", "dst"], [:Set, "dst", "swap"],
+      [:Set, "width", [:Add, "width", "width"]]]],
+    [:If, [:Equal, "src", "data"], [], [
+      [:Let, "i", :U64, "zero"],
+      [:While, [:Less, "i", "length"], [
+        [:Set, "source_slot", [:Offset, "src", "i"]],
+        [:Set, "destination_slot", [:Offset, "data", "i"]],
+        [:Do, [:Store, "destination_slot", [:Expr, element, [:Load, "source_slot"]]]],
+        [:Set, "i", [:Add, "i", "one"]]]]
+    ]],
+    [:Return, "true"]])
+  return context
+end
+
+verb native_value/relation_constructor(input: map) -> map
+  let context: map = input
+  let word: list = native_value/word()
+  let tuple: list = [:Record, "ValueTuple"]
+  let relation: list = [:Record, "HeapRelation"]
+  let column: list = [:Record, "RelationColumn"]
+  let tuples: list = [:Pointer, tuple, :Mutable]
+  let columns: list = [:Pointer, column, :Mutable]
+  let values: list = [:Pointer, word, :Mutable]
+  let bytes: list = [:Pointer, :U8, :Mutable]
+  let fail: list = [[:Return, [:Zero]]]
+  context = native_value/function(context, "value_relation", [:Record, "ValueResult"], [
+    ["arena", [:Pointer, [:Record, "ValueArena"], :Mutable], :Borrow],
+    ["heading", [:Pointer, :U32, :Const], :Borrow], ["arity", :U64, :Value],
+    ["source", [:Pointer, tuple, :Const], [:Borrow, "arena"]], ["length", :U64, :Value]], [],
+    [:Allocate, :ReadMemory, :WriteMemory], :Borrow, "arena")
+  context = native_value/body(context, "value_relation", [
+    [:If, [:Less, "relation_max_arity", "arity"], fail, []],
+    [:If, [:Equal, "arity", "zero"], [], [[:If, [:Equal, "heading", "null_heading"], fail, []]]],
+    [:If, [:Equal, "length", "zero"], [], [[:If, [:Equal, "source", "null_rows"], fail, []]]],
+    [:Let, "header_size", :U64, [:SizeOf, relation]],
+    [:Let, "symbol_size", :U64, [:SizeOf, :U32]],
+    [:Let, "heading_size", :U64, [:Multiply, "arity", "symbol_size"]],
+    [:Set, "heading_size", [:Add, "heading_size", "alignment_slack"]],
+    [:Set, "heading_size", [:BitAnd, "heading_size", "alignment_mask"]],
+    [:Let, "prefix", :U64, [:Add, "header_size", "heading_size"]],
+    [:Let, "tuple_size", :U64, [:SizeOf, tuple]],
+    [:Let, "word_size", :U64, [:SizeOf, word]],
+    [:Let, "cell_size", :U64, [:Multiply, "arity", "word_size"]],
+    [:Let, "row_size", :U64, [:Add, "tuple_size", "cell_size"]],
+    [:Let, "limit", :U64, [:Subtract, "allocation_limit", "prefix"]],
+    [:Set, "limit", [:Divide, "limit", "row_size"]],
+    [:If, [:Less, "limit", "length"], fail, []],
+    [:Let, "i", :U64, "zero"],
+    [:While, [:Less, "i", "length"], [
+      [:Let, "source_slot", [:Pointer, tuple, :Const], [:Offset, "source", "i"]],
+      [:Let, "row", tuple, [:Load, "source_slot"]],
+      [:If, [:Equal, [:Expr, :U64, [:Field, "row", "arity"]], "arity"], [], fail],
+      [:If, [:Equal, "arity", "zero"], [], [
+        [:Let, "row_data", values, [:Field, "row", "data"]],
+        [:Let, "borrowed", [:Pointer, word, :Const], [:Freeze, "row_data"]],
+        [:If, [:Equal, "borrowed", "null_values"], fail, []]]],
+      [:Set, "i", [:Add, "i", "one"]]]],
+    [:Let, "count", :U64, "length"],
+    [:If, [:Equal, "arity", "zero"], [
+      [:If, [:Equal, "length", "zero"], [[:Return, [:Record, "true", [:Expr, word, [:Call, "value_empty_relation"]]]]], []],
+      [:Set, "count", "one"]
+    ], []],
+    [:Let, "order", columns, [:Zero]],
+    [:If, [:Equal, "arity", "zero"], [], [
+      [:Let, "column_size", :U64, [:SizeOf, column]],
+      [:Let, "order_bytes", :U64, [:Multiply, "arity", "column_size"]],
+      [:Let, "raw_order", bytes, [:Call, "value_arena_allocate", "arena", "order_bytes"]],
+      [:If, [:Equal, "raw_order", "null_bytes"], fail, []],
+      [:Set, "order", [:PointerCast, "raw_order"]],
+      [:Set, "i", "zero"],
+      [:While, [:Less, "i", "arity"], [
+        [:Let, "heading_slot", [:Pointer, :U32, :Const], [:Offset, "heading", "i"]],
+        [:Let, "symbol", :U32, [:Load, "heading_slot"]],
+        [:Let, "column_slot", columns, [:Offset, "order", "i"]],
+        [:Do, [:Store, "column_slot", [:Expr, column, [:Record, "symbol", "i"]]]],
+        [:Set, "i", [:Add, "i", "one"]]]],
+      [:If, [:Call, "relation_sort_columns", "arena", "order", "arity"], [], fail],
+      [:Set, "i", "one"],
+      [:While, [:Less, "i", "arity"], [
+        [:Let, "previous", :U64, [:Subtract, "i", "one"]],
+        [:Let, "previous_slot", columns, [:Offset, "order", "previous"]],
+        [:Let, "previous_column", column, [:Load, "previous_slot"]],
+        [:Set, "column_slot", [:Offset, "order", "i"]],
+        [:Let, "current_column", column, [:Load, "column_slot"]],
+        [:If, [:Equal, [:Expr, :U32, [:Field, "previous_column", "symbol"]], [:Expr, :U32, [:Field, "current_column", "symbol"]]], fail, []],
+        [:Set, "i", [:Add, "i", "one"]]]]
+    ]],
+    [:Let, "rows_size", :U64, [:Multiply, "count", "row_size"]],
+    [:Let, "total", :U64, [:Add, "prefix", "rows_size"]],
+    [:Let, "raw", bytes, [:Call, "value_arena_allocate", "arena", "total"]],
+    [:If, [:Equal, "raw", "null_bytes"], fail, []],
+    [:Let, "target", [:Pointer, relation, :Mutable], [:PointerCast, "raw"]],
+    [:Let, "raw_heading", bytes, [:Offset, "raw", "header_size"]],
+    [:Let, "canonical_heading", [:Pointer, :U32, :Mutable], [:PointerCast, "raw_heading"]],
+    [:Let, "raw_rows", bytes, [:Offset, "raw", "prefix"]],
+    [:Let, "rows", tuples, [:PointerCast, "raw_rows"]],
+    [:Let, "tuple_bytes", :U64, [:Multiply, "count", "tuple_size"]],
+    [:Let, "raw_cells", bytes, [:Offset, "raw_rows", "tuple_bytes"]],
+    [:Let, "cells", values, [:PointerCast, "raw_cells"]],
+    [:Set, "i", "zero"],
+    [:While, [:Less, "i", "arity"], [
+      [:Set, "column_slot", [:Offset, "order", "i"]],
+      [:Set, "current_column", [:Load, "column_slot"]],
+      [:Let, "destination_symbol", [:Pointer, :U32, :Mutable], [:Offset, "canonical_heading", "i"]],
+      [:Do, [:Store, "destination_symbol", [:Expr, :U32, [:Field, "current_column", "symbol"]]]],
+      [:Set, "i", [:Add, "i", "one"]]]],
+    [:Set, "i", "zero"],
+    [:While, [:Less, "i", "count"], [
+      [:Set, "source_slot", [:Offset, "source", "i"]],
+      [:Set, "row", [:Load, "source_slot"]],
+      [:Set, "row_data", [:Field, "row", "data"]],
+      [:Let, "j", :U64, "zero"],
+      [:While, [:Less, "j", "arity"], [
+        [:Set, "column_slot", [:Offset, "order", "j"]],
+        [:Set, "current_column", [:Load, "column_slot"]],
+        [:Let, "position", :U64, [:Field, "current_column", "source"]],
+        [:Let, "input_cell", values, [:Offset, "row_data", "position"]],
+        [:Let, "output_cell", values, [:Offset, "cells", "j"]],
+        [:Do, [:Store, "output_cell", [:Expr, word, [:Load, "input_cell"]]]],
+        [:Set, "j", [:Add, "j", "one"]]]],
+      [:Let, "output_row", tuples, [:Offset, "rows", "i"]],
+      [:Do, [:Store, "output_row", [:Expr, tuple, [:Record, "cells", "arity"]]]],
+      [:Set, "cells", [:Offset, "cells", "arity"]],
+      [:Set, "i", [:Add, "i", "one"]]]],
+    [:If, [:Call, "relation_sort_rows", "arena", "rows", "count"], [], fail],
+    [:Let, "write", :U64, "zero"], [:Set, "i", "zero"],
+    [:While, [:Less, "i", "count"], [
+      [:Let, "input_row", tuples, [:Offset, "rows", "i"]],
+      [:Set, "row", [:Load, "input_row"]],
+      [:Let, "keep", :Bool, "true"],
+      [:If, [:Equal, "write", "zero"], [], [
+        [:Set, "previous", [:Subtract, "write", "one"]],
+        [:Set, "output_row", [:Offset, "rows", "previous"]],
+        [:Let, "previous_row", tuple, [:Load, "output_row"]],
+        [:Let, "comparison", [:Record, "IntResult"], [:Call, "value_tuple_compare", "previous_row", "row"]],
+        [:If, [:Field, "comparison", "ok"], [], fail],
+        [:If, [:Equal, [:Expr, :I64, [:Field, "comparison", "number"]], "int_zero"], [[:Set, "keep", "false"]], []]
+      ]],
+      [:If, "keep", [
+        [:Set, "output_row", [:Offset, "rows", "write"]], [:Do, [:Store, "output_row", "row"]],
+        [:Set, "write", [:Add, "write", "one"]]
+      ], []],
+      [:Set, "i", [:Add, "i", "one"]]]],
+    [:Note, :Invariant, "Publish only canonical headings and sorted unique rows. Child values retain the arena lifetime."],
+    [:Do, [:Store, "target", [:Expr, relation, [:Record, "canonical_heading", "arity", "rows", "write"]]]],
+    [:Return, [:Record, "true", [:Expr, word, [:PackPointer, "target", "tag_relation"]]]]])
+  return context
+end

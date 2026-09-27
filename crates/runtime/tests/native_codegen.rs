@@ -955,7 +955,11 @@ fn native_value_layer_executes_on_both_mica_tiers() {
     };
     let mut previous = None;
     for interpreter_only in [true, false] {
-        let mut runner = runner(interpreter_only);
+        // Match the comparison harness budget for the complete value module.
+        let mut runner = runner(interpreter_only).with_task_limits(TaskLimits {
+            instruction_budget: 500_000_000,
+            ..TaskLimits::default()
+        });
         for source in [
             include_str!("../../../apps/native/value/program.mica"),
             include_str!("../../../apps/native/value/immediates.mica"),
@@ -970,6 +974,7 @@ fn native_value_layer_executes_on_both_mica_tiers() {
             include_str!("../../../apps/native/value/compare.mica"),
             include_str!("../../../apps/native/value/maps.mica"),
             include_str!("../../../apps/native/value/collections.mica"),
+            include_str!("../../../apps/native/value/relations.mica"),
         ] {
             runner.run_filein(source).unwrap_or_else(|error| {
                 panic!("{}", runner.render_source_task_error(&error));

@@ -93,10 +93,12 @@ verb native_value/program() -> map
   context = native_value/strings(context)
   context = native_value/symbols(context)
   context = native_value/heap(context)
+  context = native_value/relation_types(context)
   context = native_value/comparison(context)
   context = native_value/language_comparison(context)
   context = native_value/maps(context)
   context = native_value/collections(context)
+  context = native_value/relations(context)
   let state: map = context[:state]
   return state
 end

@@ -657,7 +657,130 @@ static void collection_cases(void) {
     mica_value_arena_release(&arena);
 }
 
+static void relation_cases(void) {
+    struct mica_ValueArena arena={0};
+    struct mica_ValueTuple empty_rows[3]={{0},{0},{0}};
+    struct mica_ValueResult empty=mica_value_relation(&arena,NULL,0,NULL,0);
+    struct mica_ValueResult unit=mica_value_relation(&arena,NULL,0,empty_rows,3);
+    assert(empty.f_ok && empty.f_value==0 && unit.f_ok && unit.f_value!=0);
+    assert(!mica_value_is_unit(empty.f_value) && mica_value_is_unit(unit.f_value));
+    assert(!mica_value_is_unit(integer(0)));
+    assert(mica_value_relation_length(unit.f_value).f_number==1);
+    assert(mica_value_relation_arity(unit.f_value).f_number==0);
+    assert(mica_value_relation_row(unit.f_value,0).f_ok);
+    assert(!mica_value_relation_row(unit.f_value,1).f_ok);
+    assert(!mica_value_relation_row(empty.f_value,0).f_ok);
+    assert(mica_value_compare(empty.f_value,unit.f_value).f_number==-1);
+    assert(mica_value_compare(unit.f_value,empty.f_value).f_number==1);
+    assert(!mica_value_relation_arity(integer(0)).f_ok);
+    assert(!mica_value_relation_column_at(unit.f_value,0).f_ok);
+    assert(!mica_value_relation_column(unit.f_value,0).f_ok);
+    uint32_t heading[]={9,3,6};
+    mica_type_Value cells[][3]={{integer(2),integer(1),unit.f_value},{integer(0),integer(4),empty.f_value},{integer(2),integer(1),unit.f_value}};
+    struct mica_ValueTuple rows[3];
+    for(unsigned i=0;i<3;i++) rows[i]=(struct mica_ValueTuple){cells[i],3};
+    struct mica_ValueResult relation=mica_value_relation(&arena,heading,3,rows,3);
+    assert(relation.f_ok);
+    struct mica_RelationResult view=mica_value_relation_view(relation.f_value);
+    assert(view.f_ok && view.f_relation.f_arity==3 && view.f_relation.f_length==2);
+    assert(view.f_relation.f_heading[0]==3 && view.f_relation.f_heading[1]==6 && view.f_relation.f_heading[2]==9);
+    assert(mica_value_relation_column(relation.f_value,6).f_number==1);
+    assert(!mica_value_relation_column(relation.f_value,5).f_ok);
+    assert(mica_value_relation_column_at(relation.f_value,2).f_number==9);
+    assert(!mica_value_relation_column_at(relation.f_value,UINT64_MAX).f_ok);
+    struct mica_TupleResult first=mica_value_relation_row(relation.f_value,0);
+    assert(first.f_ok && first.f_tuple.f_arity==3);
+    assert(mica_value_tuple_get(first.f_tuple,0).f_value==integer(1));
+    assert(mica_value_tuple_get(first.f_tuple,1).f_value==unit.f_value);
+    assert(mica_value_tuple_get(first.f_tuple,2).f_value==integer(2));
+    assert(!mica_value_tuple_get(first.f_tuple,3).f_ok);
+    assert(heading[0]==9 && cells[0][0]==integer(2));
+    // The relation owns its heading, tuple descriptors, and cell array.
+    heading[0]=99; cells[0][0]=integer(99); rows[0].f_arity=0;
+    assert(mica_value_relation_column_at(relation.f_value,2).f_number==9);
+    assert(mica_value_tuple_get(first.f_tuple,2).f_value==integer(2));
+    struct mica_ValueResult rebuilt=mica_value_relation(&arena,view.f_relation.f_heading,3,view.f_relation.f_rows,2);
+    assert(rebuilt.f_ok && mica_value_compare(relation.f_value,rebuilt.f_value).f_number==0);
+    // Empty relations with headings are not the zero-column empty sentinel.
+    struct mica_ValueResult headed=mica_value_relation(&arena,heading,3,NULL,0);
+    assert(headed.f_ok && headed.f_value!=0 && mica_value_relation_length(headed.f_value).f_number==0);
+    assert(!mica_value_is_unit(headed.f_value));
+    uint32_t duplicates[]={3,3};
+    assert(!mica_value_relation(&arena,duplicates,2,NULL,0).f_ok);
+    assert(!mica_value_relation(&arena,NULL,1,NULL,0).f_ok);
+    assert(!mica_value_relation(&arena,heading,3,rows,3).f_ok);
+    assert(!mica_value_relation(&arena,NULL,0,NULL,1).f_ok);
+    assert(!mica_value_relation(&arena,heading,65536,NULL,0).f_ok);
+    assert(!mica_value_relation(&arena,heading,3,rows,UINT64_MAX).f_ok);
+    struct mica_ValueTuple null_cells={NULL,1};
+    assert(!mica_value_relation(&arena,heading,1,&null_cells,1).f_ok);
+    // Tuple construction copies its source words, but borrows nested values.
+    struct mica_TupleResult copied=mica_value_tuple(&arena,first.f_tuple.f_data,3);
+    assert(copied.f_ok && mica_value_tuple_compare(copied.f_tuple,first.f_tuple).f_number==0);
+    assert(mica_value_tuple(&arena,NULL,0).f_ok);
+    assert(!mica_value_tuple(&arena,NULL,1).f_ok);
+    assert(!mica_value_tuple(&arena,first.f_tuple.f_data,UINT64_MAX).f_ok);
+    assert(mica_value_tuple_compare((struct mica_ValueTuple){NULL,0},first.f_tuple).f_number==-1);
+    // Exercise the accepted width boundary as well as the rejected 65,536 case.
+    uint32_t *wide_heading=calloc(UINT16_MAX,sizeof(*wide_heading));
+    assert(wide_heading);
+    for(uint32_t i=0;i<UINT16_MAX;i++) wide_heading[i]=UINT16_MAX-i;
+    struct mica_ValueResult wide=mica_value_relation(&arena,wide_heading,UINT16_MAX,NULL,0);
+    assert(wide.f_ok && mica_value_relation_arity(wide.f_value).f_number==UINT16_MAX);
+    assert(mica_value_relation_column_at(wide.f_value,0).f_number==1);
+    assert(mica_value_relation_column_at(wide.f_value,UINT16_MAX-1).f_number==UINT16_MAX);
+    free(wide_heading);
+    mica_type_Value *wide_cells=calloc(65536,sizeof(*wide_cells));
+    assert(wide_cells);
+    struct mica_TupleResult wide_tuple=mica_value_tuple(&arena,wide_cells,65536);
+    assert(wide_tuple.f_ok && wide_tuple.f_tuple.f_arity==65536);
+    assert(mica_value_tuple_get(wide_tuple.f_tuple,65535).f_value==0);
+    free(wide_cells);
+    // Force failures at each allocation of a large reverse-ordered relation.
+    // No failed attempt may modify the input or publish a partial relation.
+    const uint64_t count=8192;
+    mica_type_Value *large_cells=calloc(count*3,sizeof(*large_cells));
+    struct mica_ValueTuple *large_rows=calloc(count,sizeof(*large_rows));
+    assert(large_cells && large_rows);
+    uint32_t large_heading[]={3,2,1};
+    for(uint64_t i=0;i<count;i++) {
+        large_cells[i*3]=integer((int64_t)i);
+        large_cells[i*3+1]=integer(0);
+        large_cells[i*3+2]=integer((int64_t)(count-i));
+        large_rows[i]=(struct mica_ValueTuple){large_cells+i*3,3};
+    }
+    bool succeeded=false;
+    for(size_t allowance=0;allowance<12;allowance++) {
+        struct mica_ValueArena destination={0};
+        allocation_allowance=allowance;
+        struct mica_ValueResult attempt=mica_value_relation(&destination,large_heading,3,large_rows,count);
+        allocation_allowance=SIZE_MAX;
+        assert(large_heading[0]==3 && large_cells[2]==integer((int64_t)count));
+        if(attempt.f_ok) {
+            assert(mica_value_relation_length(attempt.f_value).f_number==count);
+            struct mica_TupleResult row=mica_value_relation_row(attempt.f_value,0);
+            assert(mica_value_tuple_get(row.f_tuple,0).f_value==integer(1));
+            succeeded=true;
+        }
+        mica_value_arena_release(&destination);
+        if(succeeded) break;
+    }
+    assert(succeeded);
+    free(large_rows); free(large_cells);
+    struct mica_ValueArena destination={0};
+    fail_allocation=true;
+    assert(!mica_value_tuple(&destination,first.f_tuple.f_data,3).f_ok);
+    assert(!mica_value_relation(&destination,NULL,0,empty_rows,1).f_ok);
+    fail_allocation=false;
+    struct mica_ValueResult borrowed=mica_value_relation(&destination,view.f_relation.f_heading,3,view.f_relation.f_rows,2);
+    assert(borrowed.f_ok && mica_value_compare(borrowed.f_value,relation.f_value).f_number==0);
+    mica_value_arena_release(&destination);
+    assert(mica_value_tuple_get(first.f_tuple,1).f_value==unit.f_value);
+    mica_value_arena_release(&arena);
+}
+
 int main(void) {
+    relation_cases();
     collection_cases();
     const int64_t minimum = -(INT64_C(1) << 55);
     const int64_t maximum = (INT64_C(1) << 55) - 1;

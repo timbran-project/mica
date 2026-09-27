@@ -124,8 +124,7 @@ verb native_value/comparison(input: map) -> map
     statements = [@statements, [:If, [:Equal, "left_kind", string_concat("tag_", spec[0])], [@rows, @equal], []]]
   end
   context = native_value/body(context, name, [@statements,
-    [:Note, :Invariant, "Relation values have no heap constructor; reject them before extracting an immediate payload."],
-    [:If, [:Equal, "left_kind", "tag_relation"], [[:Return, [:Zero]]], []],
+    [:If, [:Equal, "left_kind", "tag_relation"], [[:Return, [:Call, "value_relation_compare", "left", "right"]]], []],
     [:Let, "left_payload", :U64, [:Payload, "left"]],
     [:Let, "right_payload", :U64, [:Payload, "right"]],
     @native_value/scalar_order("left_payload", "right_payload")])

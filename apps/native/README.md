@@ -311,6 +311,7 @@ apps/native/value/heap.mica
 apps/native/value/compare.mica
 apps/native/value/maps.mica
 apps/native/value/collections.mica
+apps/native/value/relations.mica
 ```
 
 `native_value/program()` returns its IR. `native/emit_module(native_value/program(), "value")` returns the C artifacts.
@@ -398,6 +399,39 @@ Serialize mutation of an arena and its string backings, including append. This m
 All views become invalid when their owning arena is released. Allocation errors can retain temporary storage until release.
 The allocation and index-building helpers are internal construction steps; callers must not publish incomplete headers.
 
+Finite relations contain a symbol heading and a canonical set of tuples.
+`value_relation(arena, heading, arity, rows, length)` copies the heading, tuple descriptors, and cell arrays into the arena.
+Child values remain borrowed under the arena lifetime contract.
+The constructor sorts columns by symbol ID and permutes every row to match.
+It sorts rows lexicographically and removes duplicates. Duplicate column names and rows with the wrong arity fail.
+Headings can contain at most 65,535 columns. Allocation failure returns `{false, 0}` without changes to the input.
+
+`ValueTuple` contains `data` and `arity` fields. `value_tuple` copies a supplied cell array and returns `TupleResult { ok, tuple }`.
+`value_tuple_get` returns a checked cell. `value_tuple_compare` compares cells lexicographically, then compares the arities.
+A tuple has no standalone value tag or heading.
+
+| Function after `mica_` | Result |
+| --- | --- |
+| `value_relation_view(value)` | `RelationResult { ok, relation }`, with the header returned by value |
+| `value_relation_arity(value)` | Column count as `IdResult` |
+| `value_relation_length(value)` | Unique row count as `IdResult` |
+| `value_relation_column(value, symbol)` | Canonical column position as `IdResult` |
+| `value_relation_column_at(value, index)` | Column symbol ID as `IdResult` |
+| `value_relation_row(value, index)` | Borrowed `TupleResult` |
+| `value_is_unit(value)` | True for exactly one zero-column row |
+
+The zero-column relation with no rows uses the immediate empty sentinel.
+The zero-column relation with at least one input row canonicalizes to unit: exactly one empty tuple.
+An empty relation with a nonempty heading retains its heading and has a heap representation.
+The relation view handles the immediate sentinel without a heap pointer.
+Invalid kinds, missing columns, and out-of-range indices return `ok = false`.
+
+Relation comparison orders the canonical headings first, then the canonical tuple sequences.
+Nested relations participate in list, map, range, error, and frob comparison.
+Column and row sorts use stable merge passes over descriptors. They skip merge storage when the descriptors are already ordered.
+Construction costs O(columns log columns + rows log rows × tuple comparison), plus the cost of copying cells.
+Temporary sort storage remains arena-owned until release. Published views remain immutable.
+
 The [symbol table](value/symbols.mica) interns UTF-8 names into stable 32-bit IDs.
 Start with a zero-initialized `struct mica_SymbolTable`, then call `value_symbol_table_init` before sharing it.
 Its API uses these generated functions:
@@ -440,8 +474,7 @@ To run these tests with ThreadSanitizer instead of address and undefined-behavio
 MICA_NATIVE_THREAD_SANITIZER=1 CC=clang cargo test -p mica-runtime --test native_codegen native_value_layer_executes_on_both_mica_tiers
 ```
 
-This module is in progress. Relations, recursive hash/copy, display, and codecs remain unimplemented.
-Comparison supports the empty relation sentinel; other relation comparisons remain unimplemented and return `ok = false`.
+This module is in progress. Recursive hash/copy, display, and codecs remain unimplemented.
 Heap layouts are local to this implementation. Matching immediate tags does not make heap pointers interchangeable with Odin or Rust.
 
 ## Rust and generated C comparison
@@ -456,7 +489,8 @@ Symbol sequences compare interning, deduplication, reverse lookup, and cached me
 The comparison normalizes Rust IDs by first occurrence because IDs belong to their table.
 These checks read every name after the complete sequence, including growth, and include malformed UTF-8 and repeated names.
 Use `--symbol-case` to replay the JSON byte arrays from a failed sequence.
-Nonempty relations, value hashing, and codecs remain outside its coverage.
+Relation checks cover reordered columns, duplicate rows, nested values, empty relations, unit, accessors, and invalid headings or row widths.
+Use `--relations` to select relation property cases. Value hashing and codecs remain outside the harness coverage.
 
 Run fixed boundary cases and a seeded corpus with shrinking:
 

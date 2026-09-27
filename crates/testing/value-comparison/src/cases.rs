@@ -3,7 +3,7 @@
 
 use std::cmp::Ordering;
 
-use mica_var::{CapabilityId, FunctionId, Identity, Symbol, Value, ValueRef, language_cmp};
+use mica_var::{CapabilityId, FunctionId, Identity, Symbol, Tuple, Value, ValueRef, language_cmp};
 use proptest::prelude::*;
 use serde::{Deserialize, Serialize};
 
@@ -27,12 +27,24 @@ pub enum Input {
     Capability(u64),
     Frob(u64, Box<Input>),
     Function(u64),
+    Relation(Vec<u32>, Vec<Vec<Input>>),
 }
 
 impl Input {
     pub fn build(&self) -> Option<Value> {
         Some(match self {
             Self::Empty => Value::empty_relation(),
+            Self::Relation(heading, rows) => Value::relation(
+                heading.iter().copied().map(Symbol::from_id),
+                rows.iter()
+                    .map(|row| {
+                        Some(Tuple::new(
+                            row.iter().map(Self::build).collect::<Option<Vec<_>>>()?,
+                        ))
+                    })
+                    .collect::<Option<Vec<_>>>()?,
+            )
+            .ok()?,
             Self::Bool(v) => Value::bool(*v),
             Self::Int(v) => Value::int(*v).ok()?,
             Self::Float(v) => Value::float(f32::from_bits(*v)).ok()?,
@@ -86,9 +98,23 @@ impl Input {
             Self::Capability(_) => 13,
             Self::Frob(..) => 14,
             Self::Function(_) => 15,
+            Self::Relation(..) => 16,
         };
         out.push(tag);
         match self {
+            Self::Relation(heading, rows) => {
+                count(out, heading.len());
+                for symbol in heading {
+                    out.extend(symbol.to_le_bytes());
+                }
+                count(out, rows.len());
+                for row in rows {
+                    count(out, row.len());
+                    for cell in row {
+                        cell.encode(out);
+                    }
+                }
+            }
             Self::Empty => {}
             Self::Bool(v) => out.push(u8::from(*v)),
             Self::Int(v) => out.extend(v.to_le_bytes()),
@@ -176,6 +202,13 @@ pub enum Operation {
     MapLength,
     MapSet,
     ListAppendChain,
+    RelationArity,
+    RelationLength,
+    RelationColumn,
+    RelationColumnAt,
+    RelationRow,
+    IsUnit,
+    RelationBuild,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -217,6 +250,40 @@ impl Prepared {
             return Outcome::Value(None);
         };
         let value = match self.op {
+            Operation::RelationArity => left
+                .with_relation(|r| Value::int(r.arity() as i64).ok())
+                .flatten(),
+            Operation::RelationLength => left
+                .with_relation(|r| Value::int(r.len() as i64).ok())
+                .flatten(),
+            Operation::RelationColumn => right
+                .as_symbol()
+                .and_then(|s| left.with_relation(|r| r.column_position(s)))
+                .flatten()
+                .and_then(|n| Value::int(n as i64).ok()),
+            Operation::RelationColumnAt => right
+                .as_int()
+                .and_then(|n| usize::try_from(n).ok())
+                .and_then(|n| left.with_relation(|r| r.heading().get(n).copied()))
+                .flatten()
+                .map(Value::symbol),
+            Operation::RelationRow => right
+                .as_int()
+                .and_then(|n| usize::try_from(n).ok())
+                .and_then(|n| {
+                    left.with_relation(|r| {
+                        r.rows()
+                            .get(n)
+                            .map(|row| Value::list(row.values().iter().cloned()))
+                    })
+                })
+                .flatten(),
+            Operation::IsUnit => Some(Value::bool(left.is_unit())),
+            Operation::RelationBuild => left
+                .with_relation(|r| {
+                    Value::relation(r.heading().iter().copied(), r.rows().iter().cloned()).ok()
+                })
+                .flatten(),
             Operation::Construct => Some(left.clone()),
             Operation::StringFromBytes => left
                 .with_bytes(|bytes| std::str::from_utf8(bytes).ok().map(Value::string))
@@ -398,7 +465,13 @@ impl Outcome {
                 ValueRef::Range { .. } => 11,
                 ValueRef::Error { .. } => 12,
                 ValueRef::Frob { .. } => 14,
-                ValueRef::Relation(_) => 0,
+                ValueRef::Relation(r) => {
+                    if r.arity() == 0 && r.is_empty() {
+                        0
+                    } else {
+                        16 ^ r.len() as u64
+                    }
+                }
                 _ => v.raw_bits(),
             },
         }
@@ -407,7 +480,24 @@ impl Outcome {
 
 fn encode_value(value: &Value, out: &mut Vec<u8>) {
     match value.as_value_ref() {
-        ValueRef::Relation(_) => Input::Empty.encode(out),
+        ValueRef::Relation(r) => {
+            if r.arity() == 0 && r.is_empty() {
+                Input::Empty.encode(out);
+                return;
+            }
+            out.push(16);
+            count(out, r.arity());
+            for symbol in r.heading() {
+                out.extend(symbol.id().to_le_bytes());
+            }
+            count(out, r.len());
+            for row in r.rows() {
+                count(out, row.arity());
+                for cell in row.values() {
+                    encode_value(cell, out);
+                }
+            }
+        }
         ValueRef::Bool(v) => Input::Bool(v).encode(out),
         ValueRef::Int(v) => Input::Int(v).encode(out),
         ValueRef::Float(v) => Input::Float(v.to_bits()).encode(out),
@@ -575,6 +665,7 @@ pub fn strategy() -> BoxedStrategy<Case> {
         });
     prop_oneof![
         collection_strategy(),
+        relation_strategy(),
         general,
         equal,
         construct,
@@ -621,6 +712,66 @@ pub fn collection_strategy() -> BoxedStrategy<Case> {
             Case { op, left, right }
         })
         .boxed()
+}
+
+pub fn relation_strategy() -> BoxedStrategy<Case> {
+    let relation = (0usize..6)
+        .prop_flat_map(|arity| {
+            (
+                prop::collection::vec(0..16u32, arity),
+                prop::collection::vec(prop::collection::vec(input_strategy(), arity), 0..20),
+            )
+        })
+        .prop_map(|(heading, rows)| Input::Relation(heading, rows));
+    let access = (
+        relation.clone(),
+        -1i64..24,
+        prop::sample::select(vec![
+            Operation::Construct,
+            Operation::RelationArity,
+            Operation::RelationLength,
+            Operation::RelationColumn,
+            Operation::RelationColumnAt,
+            Operation::RelationRow,
+            Operation::IsUnit,
+            Operation::RelationBuild,
+        ]),
+    )
+        .prop_map(|(left, index, op)| Case {
+            op,
+            left,
+            right: if matches!(op, Operation::RelationColumn) {
+                Input::Symbol(index.max(0) as u32)
+            } else {
+                Input::Int(index)
+            },
+        });
+    let compare = (relation.clone(), relation.clone()).prop_map(|(left, right)| Case {
+        op: Operation::Compare,
+        left,
+        right,
+    });
+    let equivalent = relation.prop_map(|left| {
+        let Input::Relation(heading, rows) = &left else {
+            unreachable!()
+        };
+        let mut reversed_heading = heading.clone();
+        reversed_heading.reverse();
+        let mut reversed_rows = rows.clone();
+        reversed_rows.reverse();
+        for row in &mut reversed_rows {
+            row.reverse();
+        }
+        if let Some(row) = reversed_rows.first().cloned() {
+            reversed_rows.push(row);
+        }
+        Case {
+            op: Operation::Compare,
+            left,
+            right: Input::Relation(reversed_heading, reversed_rows),
+        }
+    });
+    prop_oneof![access, compare, equivalent].boxed()
 }
 
 fn unicode_text(maximum: usize) -> BoxedStrategy<String> {
@@ -849,6 +1000,66 @@ pub fn fixed_cases() -> Vec<Case> {
             right: Input::Float(right),
         });
     }
+    let relations = vec![
+        Input::Empty,
+        Input::Relation(vec![], vec![]),
+        Input::Relation(vec![], vec![vec![], vec![]]),
+        Input::Relation(vec![3], vec![]),
+        Input::Relation(
+            vec![3, 1],
+            vec![
+                vec![Input::Int(2), Input::String("é".into())],
+                vec![Input::Int(1), Input::String("a".into())],
+                vec![Input::Int(2), Input::String("é".into())],
+            ],
+        ),
+        Input::Relation(vec![3, 3], vec![]),
+        Input::Relation(vec![1], vec![vec![]]),
+        Input::Relation(vec![], vec![vec![Input::Int(0)]]),
+        Input::Relation(
+            vec![1],
+            vec![
+                vec![Input::Relation(vec![], vec![vec![]])],
+                vec![Input::Empty],
+            ],
+        ),
+    ];
+    for left in &relations {
+        for right in &relations {
+            cases.push(Case {
+                op: Operation::Compare,
+                left: left.clone(),
+                right: right.clone(),
+            });
+        }
+        for op in [
+            Operation::Construct,
+            Operation::RelationArity,
+            Operation::RelationLength,
+            Operation::IsUnit,
+            Operation::RelationBuild,
+        ] {
+            cases.push(Case {
+                op,
+                left: left.clone(),
+                right: Input::Empty,
+            });
+        }
+        for index in [-1, 0, 1, 2, 3, 99] {
+            for op in [Operation::RelationColumnAt, Operation::RelationRow] {
+                cases.push(Case {
+                    op,
+                    left: left.clone(),
+                    right: Input::Int(index),
+                });
+            }
+            cases.push(Case {
+                op: Operation::RelationColumn,
+                left: left.clone(),
+                right: Input::Symbol(index.max(0) as u32),
+            });
+        }
+    }
     for length in [0, 1, 7, 32] {
         let elements: Vec<_> = (0..length)
             .map(|i| Input::List(vec![Input::Int(i), Input::String("é".into())]))
@@ -1000,6 +1211,39 @@ pub fn workloads() -> Vec<(String, Vec<Case>)> {
                         _ => Input::Int(999),
                     };
                     Case { op, left, right }
+                })
+                .collect(),
+        ));
+    }
+    for (name, op) in [
+        ("relation_construct", Operation::RelationBuild),
+        ("relation_compare", Operation::Compare),
+        ("relation_column", Operation::RelationColumn),
+    ] {
+        let relation = Input::Relation(
+            vec![9, 3, 6],
+            (0..128)
+                .rev()
+                .map(|i| {
+                    vec![
+                        Input::Int(i),
+                        Input::String("row".into()),
+                        Input::List(vec![Input::Int(i)]),
+                    ]
+                })
+                .collect(),
+        );
+        workloads.push((
+            name,
+            (0..16)
+                .map(|_| Case {
+                    op,
+                    left: relation.clone(),
+                    right: if matches!(op, Operation::Compare) {
+                        relation.clone()
+                    } else {
+                        Input::Symbol(6)
+                    },
                 })
                 .collect(),
         ));

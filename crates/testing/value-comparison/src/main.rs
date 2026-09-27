@@ -36,6 +36,9 @@ struct Options {
     /// Generate only list and map property cases.
     #[arg(long, conflicts_with_all = ["strings", "symbol_loads"])]
     collections: bool,
+    /// Generate only relation property cases.
+    #[arg(long, conflicts_with_all = ["strings", "collections", "symbol_loads"])]
+    relations: bool,
     /// Run paired timings after correctness checks. Requires a release build.
     #[arg(long)]
     bench: bool,
@@ -138,6 +141,7 @@ impl Native {
             "value/compare",
             "value/maps",
             "value/collections",
+            "value/relations",
         ] {
             let text = fs::read_to_string(root.join(format!("apps/native/{source}.mica")))?;
             let reports = runner
@@ -296,6 +300,7 @@ fn check_generated(
     seed: u64,
     strings: bool,
     collections: bool,
+    relations: bool,
 ) -> Result<()> {
     let mut runner = TestRunner::new(Config {
         cases: count,
@@ -304,7 +309,9 @@ fn check_generated(
         max_shrink_iters: 2048,
         ..Config::default()
     });
-    let strategy = if collections {
+    let strategy = if relations {
+        cases::relation_strategy()
+    } else if collections {
         cases::collection_strategy()
     } else if strings {
         cases::string_strategy()
@@ -514,6 +521,7 @@ fn run() -> Result<()> {
         options.seed,
         options.strings,
         options.collections,
+        options.relations,
     )?;
     symbols::check(&native, options.cases, options.seed)?;
     symbol_loads::check(&native, options.cases, options.seed, &threads)?;
@@ -522,7 +530,7 @@ fn run() -> Result<()> {
     }
     println!(
         "{}",
-        json!({"correctness":"passed","fixed_cases":fixed.len(),"generated_cases":options.cases,"string_corpus":options.strings,"collection_corpus":options.collections,"symbol_sequences":options.cases,"symbol_load_cases":options.cases,"symbol_threads":threads,"seed":options.seed,"sanitizers":options.sanitize,"thread_sanitizer":options.thread_sanitize})
+        json!({"correctness":"passed","fixed_cases":fixed.len(),"generated_cases":options.cases,"string_corpus":options.strings,"collection_corpus":options.collections,"relation_corpus":options.relations,"symbol_sequences":options.cases,"symbol_load_cases":options.cases,"symbol_threads":threads,"seed":options.seed,"sanitizers":options.sanitize,"thread_sanitizer":options.thread_sanitize})
     );
     if options.bench {
         benchmark(
@@ -561,9 +569,10 @@ mod tests {
     fn checks_shared_values_and_collections() -> Result<()> {
         let native = Native::build(Sanitizer::Address, None)?;
         native.check(&cases::fixed_cases())?;
-        check_generated(&native, 64, 1, false, false)?;
-        check_generated(&native, 256, 17, false, true)?;
-        check_generated(&native, 128, 1, true, false)?;
+        check_generated(&native, 64, 1, false, false, false)?;
+        check_generated(&native, 256, 41, false, false, true)?;
+        check_generated(&native, 256, 17, false, true, false)?;
+        check_generated(&native, 128, 1, true, false, false)?;
         symbols::check(&native, 128, 1)?;
         symbol_loads::check(&native, 16, 1, &[1, 2, 4, 8])?;
         symbol_loads::detects_incorrect_metadata(&native)?;

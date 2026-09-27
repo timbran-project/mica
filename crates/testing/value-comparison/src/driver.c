@@ -98,6 +98,24 @@ static struct mica_ValueResult read_value(struct mica_ValueArena *arena) {
         return mica_value_frob(arena,n,value.f_value);
     }
     case 15: return mica_value_function(read_number(8));
+    case 16: {
+        uint64_t arity=read_number(8);
+        uint32_t *heading=allocate_array(arity,sizeof(*heading));
+        for(uint64_t i=0;i<arity;i++) heading[i]=(uint32_t)read_number(4);
+        n=read_number(8);
+        struct mica_ValueTuple *rows=allocate_array(n,sizeof(*rows));
+        bool ok=true;
+        for(uint64_t i=0;i<n;i++) {
+            rows[i].f_arity=read_number(8);
+            rows[i].f_data=allocate_array(rows[i].f_arity,sizeof(*rows[i].f_data));
+            for(uint64_t j=0;j<rows[i].f_arity;j++) {
+                struct mica_ValueResult cell=read_value(arena); ok &= cell.f_ok; rows[i].f_data[j]=cell.f_value;
+            }
+        }
+        struct mica_ValueResult result=ok ? mica_value_relation(arena,heading,arity,rows,n) : (struct mica_ValueResult){false,0};
+        for(uint64_t i=0;i<n;i++) free(rows[i].f_data);
+        free(rows); free(heading); return result;
+    }
     default: fail("unknown test value tag");
     }
     return (struct mica_ValueResult){false,0};
@@ -131,6 +149,17 @@ static void write_value(mica_type_Value v) {
         write_number(h->f_has_value,1); if(h->f_has_value) write_value(h->f_value); return; }
     case 14: { const struct mica_HeapFrob *h = mica_value_as_frob(v).f_header;
         write_number(h->f_delegate,8); write_value(h->f_value); return; }
+    case 16: {
+        struct mica_HeapRelation r=mica_value_relation_view(v).f_relation;
+        write_number(r.f_arity,8);
+        for(uint64_t i=0;i<r.f_arity;i++) write_number(r.f_heading[i],4);
+        write_number(r.f_length,8);
+        for(uint64_t i=0;i<r.f_length;i++) {
+            write_number(r.f_rows[i].f_arity,8);
+            for(uint64_t j=0;j<r.f_rows[i].f_arity;j++) write_value(r.f_rows[i].f_data[j]);
+        }
+        return;
+    }
     default: fail("unsupported output kind");
     }
 }
@@ -248,6 +277,36 @@ static struct Outcome run(const struct Prepared *p, struct mica_ValueArena *aren
             result=mica_value_list_append(arena,result.f_value,args.f_header->f_data[i]);
         break;
     }
+    case 28: case 29: {
+        struct mica_IdResult n=p->op==28 ? mica_value_relation_arity(a) : mica_value_relation_length(a);
+        if(n.f_ok && n.f_number<=INT64_MAX) result=mica_value_int((int64_t)n.f_number);
+        break;
+    }
+    case 30: {
+        struct mica_IdResult symbol=mica_value_as_symbol(b);
+        if(!symbol.f_ok) break;
+        struct mica_IdResult position=mica_value_relation_column(a,(uint32_t)symbol.f_number);
+        if(position.f_ok) result=mica_value_int((int64_t)position.f_number);
+        break;
+    }
+    case 31: case 32: {
+        struct mica_IntResult index=mica_value_as_int(b);
+        if(!index.f_ok || index.f_number<0) break;
+        if(p->op==31) {
+            struct mica_IdResult column=mica_value_relation_column_at(a,(uint64_t)index.f_number);
+            if(column.f_ok) result=mica_value_symbol((uint32_t)column.f_number);
+        } else {
+            struct mica_TupleResult row=mica_value_relation_row(a,(uint64_t)index.f_number);
+            if(row.f_ok) result=mica_value_list(arena,row.f_tuple.f_data,row.f_tuple.f_arity);
+        }
+        break;
+    }
+    case 33: result=(struct mica_ValueResult){true,mica_value_bool(mica_value_is_unit(a))}; break;
+    case 34: {
+        struct mica_RelationResult view=mica_value_relation_view(a);
+        if(view.f_ok) result=mica_value_relation(arena,view.f_relation.f_heading,view.f_relation.f_arity,view.f_relation.f_rows,view.f_relation.f_length);
+        break;
+    }
     default: fail("unknown operation");
     }
     return (struct Outcome){false,result.f_ok,0,result.f_value};
@@ -263,6 +322,7 @@ static uint64_t checksum(struct Outcome r) {
     case 11: return 11;
     case 12: return 12;
     case 14: return 14;
+    case 16: return 16 ^ mica_value_relation_length(r.value).f_number;
     default: return r.value;
     }
 }
