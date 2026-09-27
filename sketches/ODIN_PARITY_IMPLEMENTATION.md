@@ -413,3 +413,11 @@ Peak RSS is approximately 20.7 MiB versus 10.9 MiB. This capture excludes rules 
 The 100,000-assertion CycL census takes 12.1 ms versus 94.7 ms, with approximately 4.8 MiB versus 112.8 MiB peak RSS.
 Odin includes schema initialization. Its pinned schema conflicts with `Arity/2`, so the capture records a namespaced-schema adaptation.
 The initial failed verification and schema runs remain in the evidence. They do not contribute accepted timing summaries.
+
+Profiling a 10,001-subject OWL load found repeated construction of transaction-local scan indexes.
+Every pending write cleared the indexes and their probe history. Interleaved reads rebuilt indexes from all pending tuples.
+The overlay now updates each retained index for the changed tuple and preserves repeated-probe history across writes.
+Regressions cover out-of-order insertions, assert/retract cycles, Unicode overflow keys, canonical ordering, and compact-to-radix promotion.
+Both regressions fail before the change. The profiled run is diagnostic evidence, not an accepted timing sample.
+
+Workspace tests and clippy pass with retained local scan indexes, including the compiler bootstrap and ingestion recovery tests.

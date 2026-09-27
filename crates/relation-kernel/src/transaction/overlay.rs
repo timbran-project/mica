@@ -26,11 +26,12 @@ impl RelationWriteOverlay {
     }
 
     pub(super) fn insert(&mut self, tuple: Tuple, change: LocalChange) {
+        for (positions, index) in self.scan_indexes.get_mut() {
+            index.record_change(positions, &tuple, change);
+        }
         if self.changes.insert(tuple, change) {
             self.change_count += 1;
         }
-        self.scan_indexes.get_mut().clear();
-        self.scan_requests.get_mut().clear();
     }
 
     pub(super) fn for_each(&self, mut visitor: impl FnMut(&Tuple, LocalChange)) {
@@ -307,6 +308,22 @@ struct LocalScanIndex {
     rows: AdaptiveRadixTree<RadixTupleKey, Vec<(Tuple, LocalChange)>>,
 }
 
+impl LocalScanIndex {
+    fn record_change(&mut self, positions: &[u16], tuple: &Tuple, change: LocalChange) {
+        let key = projected_key(tuple, positions);
+        self.rows.update_k(&key, |slot| match slot {
+            Slot::Vacant => SlotUpdate::Insert(vec![(tuple.clone(), change)]),
+            Slot::Occupied(rows) => {
+                match rows.binary_search_by(|(candidate, _)| candidate.cmp(tuple)) {
+                    Ok(index) => rows[index].1 = change,
+                    Err(index) => rows.insert(index, (tuple.clone(), change)),
+                }
+                SlotUpdate::Keep
+            }
+        });
+    }
+}
+
 pub(super) struct FunctionalVisibleMap {
     positions: Vec<u16>,
     tuples: AdaptiveRadixTree<RadixTupleKey, FunctionalVisibleEntry>,
@@ -434,4 +451,98 @@ pub(super) fn projected_key(tuple: &Tuple, positions: &[u16]) -> RadixTupleKey {
             .iter()
             .map(|position| &tuple.values()[*position as usize]),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mica_var::{Identity, Symbol};
+
+    fn matches(
+        overlay: &RelationWriteOverlay,
+        metadata: &RelationMetadata,
+        bindings: &[Option<Value>],
+    ) -> Vec<(Tuple, LocalChange)> {
+        let mut rows = Vec::new();
+        overlay.visit_matches(metadata, bindings, &mut |tuple, change| {
+            if tuple.matches_bindings(bindings) {
+                rows.push((tuple.clone(), change));
+            }
+        });
+        rows
+    }
+
+    #[test]
+    fn local_indexes_survive_writes_and_preserve_order_through_radix_promotion() {
+        let metadata =
+            RelationMetadata::new(Identity::new(1).unwrap(), Symbol::intern("LocalIndexed"), 2)
+                .with_index([1]);
+        let mut overlay = RelationWriteOverlay::default();
+        let mut expected = BTreeMap::new();
+        let bindings = [Some(Value::int(2).unwrap()), None];
+        for _ in 0..2 {
+            assert!(matches(&overlay, &metadata, &bindings).is_empty());
+        }
+        assert_eq!(overlay.scan_indexes.borrow().len(), 1);
+        let second = [None, Some(Value::string("é🦀"))];
+        for _ in 0..2 {
+            assert!(matches(&overlay, &metadata, &second).is_empty());
+        }
+        assert_eq!(overlay.scan_indexes.borrow().len(), 2);
+
+        // A permuted insertion order crosses the compact overlay threshold.
+        // Later rounds replace existing changes, including retract/assert cycles.
+        for round in 0..3 {
+            for index in 0..160 {
+                let value = (index * 73) % 160;
+                let tuple = Tuple::from([
+                    Value::int(value % 5).unwrap(),
+                    Value::string(format!("é🦀/{value:03}/{}", "x".repeat(80))),
+                ]);
+                let change = if round == 1 {
+                    LocalChange::Retract
+                } else {
+                    LocalChange::Assert
+                };
+                expected.insert(tuple.clone(), change);
+                overlay.insert(tuple.clone(), change);
+                assert_eq!(
+                    overlay.scan_indexes.borrow().len(),
+                    2,
+                    "a write discarded a maintained index"
+                );
+                for probe in [
+                    bindings.clone(),
+                    [None, Some(tuple.values()[1].clone())],
+                    [None, Some(Value::string("absent"))],
+                ] {
+                    let wanted = expected
+                        .iter()
+                        .filter(|(tuple, _)| tuple.matches_bindings(&probe))
+                        .map(|(tuple, change)| (tuple.clone(), *change))
+                        .collect::<Vec<_>>();
+                    assert_eq!(matches(&overlay, &metadata, &probe), wanted);
+                }
+            }
+        }
+        assert_eq!(overlay.len(), 160);
+    }
+
+    #[test]
+    fn repeated_probes_across_writes_build_an_index() {
+        let metadata = RelationMetadata::new(Identity::new(1).unwrap(), Symbol::intern("Local"), 2);
+        let mut overlay = RelationWriteOverlay::default();
+        let bindings = [Some(Value::int(1).unwrap()), None];
+        assert!(matches(&overlay, &metadata, &bindings).is_empty());
+        overlay.insert(
+            Tuple::from([Value::int(1).unwrap(), Value::int(2).unwrap()]),
+            LocalChange::Assert,
+        );
+        assert_eq!(matches(&overlay, &metadata, &bindings).len(), 1);
+        assert_eq!(
+            overlay.scan_indexes.borrow().len(),
+            1,
+            "writes reset repeated-probe history"
+        );
+    }
 }
