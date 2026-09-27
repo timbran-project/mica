@@ -98,7 +98,7 @@ verb emit_source(source) -> map
 end
 
 verb emit_state(relations, node_kinds, field_relations)
-  return {:code -> [], :next -> 0, :scopes -> [{}], :loops -> [], :errors -> [], :result_annotation -> "", :binding_types -> {}, :relations -> relations, :node_kinds -> node_kinds, :field_relations -> field_relations, :self_name -> ""}
+  return {:code -> [], :next -> 0, :scopes -> [{}], :loops -> [], :errors -> [], :result_annotation -> "", :binding_types -> {}, :relations -> relations, :node_kinds -> node_kinds, :field_relations -> field_relations}
 end
 
 verb emit_program(raw_rows, root) -> map
@@ -1150,9 +1150,6 @@ verb emit_call(rows, node, input_state)
     callee_reg = reg
   end
   if callee_kind == :Name && !is_function
-    if name_text == state[:self_name]
-      return emit_error(state, "self-recursive local functions are not supported")
-    end
     let target = index_or(state[:relations], to_symbol(name_text), none)
     if target != none
       return emit_relation_call(rows, node, target, :ScanDynamic, state)
@@ -1520,15 +1517,17 @@ verb emit_function(rows, node, input_state)
   let state = input_state
   let nested = emit_state(state[:relations], state[:node_kinds], state[:field_relations])
   let [has_name, name_text] = ast_attr(rows, node, :name)
-  if has_name
-    nested[:self_name] = name_text
-  end
   let [has_result, result_text] = ast_attr(rows, node, :result)
   if has_result
     nested[:result_annotation] = result_text
   end
   let captures = []
-  for name, referenced in emit_referenced_names(rows, node, state[:node_kinds])
+  let references = emit_referenced_names(rows, node, state[:node_kinds])
+  let bind_self = has_name && map_contains_key(references, name_text)
+  for name, referenced in references
+    if has_name && name == name_text
+      continue
+    end
     let [found, outer_reg, immutable] = emit_local(state, name)
     if found
       let [reg, allocated] = emit_register(nested)
@@ -1538,6 +1537,10 @@ verb emit_function(rows, node, input_state)
       nested[:binding_types] = types
       captures = [@captures, [:Register, outer_reg]]
     end
+  end
+  if bind_self
+    let [reg, allocated] = emit_register(nested)
+    nested = emit_declare(allocated, name_text, reg, false)
   end
   let [actuals, after_actuals] = emit_register(nested)
   let [length, after_length] = emit_register(after_actuals)
@@ -1607,7 +1610,7 @@ verb emit_function(rows, node, input_state)
     maximum = 65535
   end
   let [dst, allocated] = emit_register(state)
-  return [dst, emit_append(allocated, [:LoadFunction, dst, emit_description(nested), captures, minimum, maximum])]
+  return [dst, emit_append(allocated, [:LoadFunction, dst, emit_description(nested), captures, minimum, maximum, bind_self])]
 end
 
 verb emit_relation_call(rows, node, target, operation, input_state)

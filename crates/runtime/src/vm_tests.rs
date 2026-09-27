@@ -1327,7 +1327,7 @@ fn program_artifact_round_trips_kind_checks_and_rejects_stale_magic() {
     .unwrap();
     let bytes = program.to_bytes().unwrap();
 
-    assert_eq!(&bytes[..9], b"MICAPRG10");
+    assert_eq!(&bytes[..9], b"MICAPRG11");
     assert_eq!(
         program.kind_fact_after(0),
         Some((reg(0), ValueKind::Relation)),
@@ -1369,7 +1369,7 @@ fn program_artifact_round_trips_structural_type_contracts() {
     .unwrap();
     let bytes = program.to_bytes().unwrap();
 
-    assert_eq!(&bytes[..9], b"MICAPRG10");
+    assert_eq!(&bytes[..9], b"MICAPRG11");
     assert_eq!(
         program.kind_fact_after(0),
         Some((reg(0), ValueKind::Relation))
@@ -2797,6 +2797,7 @@ fn dynamic_function_value_call_expands_argument_splices() {
                 captures: Vec::new(),
                 min_arity: 3,
                 max_arity: 3,
+                bind_self: false,
             },
             Instruction::CallValueDynamic {
                 dst: reg(2),

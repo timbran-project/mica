@@ -70,7 +70,7 @@ An `items` list contains operands or `[:Splice, operand]` entries.
 | `[:SpawnDispatch, dst, selector_operand, roles, delay_operand]` | Request a child invocation with named role pairs. |
 | `[:SpawnDispatchDynamic, dst, selector_operand, roles_operand, delay_operand]` | Request a child invocation with a role map; resume with the child task identifier in `dst`. |
 | `[:SpawnPositionalDispatch, dst, selector_operand, items, delay_operand]` | Request a child invocation with positional arguments, including splices. |
-| `[:LoadFunction, dst, description, captures, min_arity, max_arity]` | Create a function from a nested program and capture operands. |
+| `[:LoadFunction, dst, description, captures, min_arity, max_arity, bind_self]` | Create a function from a nested program and capture operands. |
 | `[:CallValue, dst, callee_operand, items]` | Call a function value. |
 | `[:ScanDynamic, dst, relation, arguments]` | Scan a relation identity with dynamic arguments. |
 | `[:AssertDynamic, relation, arguments]` | Assert a tuple with dynamic arguments. |
@@ -108,6 +108,8 @@ The finally target can be `none`. Exception targets belong to the containing pro
 Spawn instructions suspend through the ordinary task interface. The delay is in seconds; `none` means no specified delay.
 Child invocation checks and continuation authority remain the host task driver's responsibility.
 
-A function receives its captures in the first registers, followed by one register containing its complete argument list.
+A function receives its captures in the first registers, followed by its own callable value when `bind_self` is `true`.
+The next register contains its complete argument list. `bind_self` must be a boolean.
 Its nested program must reserve those registers and unpack the argument list itself.
 The arity bounds must be ordered. A maximum arity of 65,535 means no upper bound.
+The self value is supplied at invocation, so the capture storage contains no cycle.

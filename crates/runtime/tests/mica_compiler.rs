@@ -820,6 +820,71 @@ fn mica_emitter_artifacts_agree_with_rust_execution() {
 }
 
 #[test]
+fn mica_emitter_named_recursion_preserves_self_captures_and_argument_binding() {
+    for interpreter_only in [true, false] {
+        let mut runner = compiler(interpreter_only);
+        for source in [
+            "fn factorial(n: int)\nif n <= 1\nreturn 1\nend\nreturn n * factorial(n - 1)\nend\nrequire factorial(5) == 120\nreturn factorial(5)",
+            "let step = [2]\nfn sum(n)\nif n == 0\nreturn 0\nend\nreturn step[0] + sum(n - 1)\nend\nstep[0] = 9\nrequire sum(3) == 6\nreturn sum(3)",
+            "fn identity() => identity\nlet alias = identity\nidentity = fn() => 0\nrequire alias() == alias\nreturn alias() == alias",
+            "fn count(n)\nif n == 0\nreturn 0\nend\nreturn 1 + count(n - 1)\nend\nlet saved = count\ncount = fn(n) => 99\nrequire saved(4) == 4\nreturn [saved(4), count(4)]",
+            "fn sum(n, ?total = 0, @rest)\nif n == 0\nreturn [total, rest]\nend\nreturn sum(@[n - 1, total + n, @rest])\nend\nrequire sum(3, 10, 7, 8) == [16, [7, 8]]\nreturn sum(3)",
+            "fn build(n)\nif n == 0\nreturn fn() => build(2)\nend\nreturn n\nend\nlet escaped = build(0)\nbuild = fn(n) => 99\nrequire escaped() == 2\nreturn escaped()",
+            "fn descend(n)\nif n == 0\nraise E_RECURSION_TEST\nend\nreturn descend(n - 1)\nend\ntry\ndescend(3)\ncatch E_RECURSION_TEST as problem\nreturn problem.code\nend",
+            "let shadow = fn(n) => 99\nbegin\nfn shadow(n)\nif n == 0\nreturn 0\nend\nreturn 1 + shadow(n - 1)\nend\nrequire shadow(3) == 3\nend\nreturn shadow(3)",
+        ] {
+            assert_emitted_agrees(&mut runner, source);
+        }
+    }
+}
+
+#[test]
+fn mica_emitter_named_recursion_survives_suspension_and_enforces_depth() {
+    let source = "let step = 2\nfn climb(n)\nif n == 0\nsuspend(0)\nreturn 0\nend\nreturn step + climb(n - 1)\nend\nreturn climb(4)";
+    for interpreter_only in [true, false] {
+        let mut runner = compiler(interpreter_only);
+        let module = invoke(&mut runner, "emit_source", source);
+        install_emitted(&mut runner, module);
+        for entry in [source, "return :compiler_test_entry()"] {
+            let report = runner.run_source(entry).unwrap();
+            assert!(
+                matches!(report.outcome, TaskOutcome::Suspended { .. }),
+                "{}",
+                report.render()
+            );
+            let resumed = runner
+                .resume_task(TaskRequest {
+                    input: TaskInput::Continuation {
+                        task_id: report.task_id,
+                        value: Value::unit(),
+                    },
+                    ..SourceRunner::root_source_request("")
+                })
+                .unwrap();
+            assert!(
+                matches!(&resumed, TaskOutcome::Complete { value, .. } if *value == Value::int(8).unwrap()),
+                "{resumed:?}"
+            );
+        }
+        let source = "fn recurse(n) => recurse(n + 1)\nreturn recurse(0)";
+        let module = invoke(&mut runner, "emit_source", source);
+        install_emitted(&mut runner, module);
+        let mut runner = runner.with_task_limits(TaskLimits {
+            max_call_depth: 16,
+            ..TaskLimits::default()
+        });
+        for entry in [source, "return :compiler_test_entry()"] {
+            assert!(matches!(
+                runner.run_source(entry),
+                Err(SourceTaskError::TaskManager(TaskManagerError::Task(
+                    TaskError::Runtime(RuntimeError::MaxCallDepthExceeded { max_depth: 16 })
+                )))
+            ));
+        }
+    }
+}
+
+#[test]
 fn mica_compiler_installs_overloads_and_replaces_only_owned_methods() {
     const INITIAL: &str = r#"
         verb compiler_pick(value)
@@ -1126,6 +1191,13 @@ fn mica_compiler_bootstrap_preserves_artifacts_and_execution() {
         end
         let adjust = fn(base) => fn(value, ?extra = base, @rest) => value + extra + len(rest)
         let finish = adjust(2)
+        fn local_sum(n)
+          if n == 0
+            return 0
+          end
+          return n + local_sum(n - 1)
+        end
+        require local_sum(3) == 6
         let exactly {adjustment} = [:adjustment] {[2]}
         let values = [a for {a} in [{:a -> 3}, {:a -> 1}] sort -a]
         (1).compilerBootstrap = values[0]
@@ -1238,7 +1310,6 @@ fn mica_emitter_rejects_invalid_function_parameters_and_preserves_arity_errors()
             "return fn(@first, @second) => first",
             "return fn(?first = 1, second) => second",
             "return fn(@rest: int) => rest",
-            "fn recur(value) => recur(value - 1)\nreturn recur(2)",
         ] {
             let module = invoke(&mut runner, "emit_source", source);
             assert_eq!(

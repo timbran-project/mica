@@ -467,22 +467,21 @@ fn instruction(
             program_relation: methods.method_program,
             program_bytes: methods.program_bytes,
         },
-        (Some("LoadFunction"), [dst, description, captures, min, max]) => {
+        (Some("LoadFunction"), [dst, description, captures, min, max, bind_self]) => {
             let program = program(description, depth + 1, remaining)?;
             let captures = operands(captures)?;
             let min_arity = integer(min)? as u16;
             let max_arity = integer(max)? as u16;
-            if min_arity > max_arity || captures.len() >= program.register_count() {
-                return Err(invalid(
-                    "function requires ordered arity bounds and registers for captures plus the argument list",
-                ));
-            }
+            let bind_self = bind_self
+                .as_bool()
+                .ok_or_else(|| invalid("function self binding must be a boolean"))?;
             Instruction::LoadFunction {
                 dst: register(dst)?,
                 program: Arc::new(program),
                 captures,
                 min_arity,
                 max_arity,
+                bind_self,
             }
         }
         (Some("CallValue"), [dst, callee, args]) => Instruction::CallValueDynamic {
@@ -816,12 +815,45 @@ mod tests {
           [:Load, 0, 40],
           [:LoadFunction, 1, {:registers -> 4, :code -> [
             [:Index, 2, 1, [:Constant, 0]], [:Binary, 3, :Add, 0, 2], [:Return, [:Register, 3]]
-          ]}, [[:Register, 0]], 1, 1],
+          ]}, [[:Register, 0]], 1, 1, false],
           [:CallValue, 2, [:Register, 1], [[:Constant, 2]]],
           [:Return, [:Register, 2]]
         ]})"#,
         );
         assert_eq!(execute(program), Value::int(42).unwrap());
+    }
+
+    #[test]
+    fn assembly_function_self_binding_preserves_captures_and_round_trips() {
+        let program = assembled(
+            r#"return assemble({:registers -> 2, :code -> [
+              [:LoadFunction, 0, {:registers -> 7, :code -> [
+                [:Index, 3, 2, [:Constant, 0]],
+                [:Load, 4, 0],
+                [:Binary, 5, :Eq, 3, 4],
+                [:Branch, 5, 4, 5],
+                [:Return, [:Register, 0]],
+                [:Load, 4, 1],
+                [:Binary, 5, :Sub, 3, 4],
+                [:CallValue, 6, [:Register, 1], [[:Register, 5]]],
+                [:Binary, 6, :Add, 6, 3],
+                [:Return, [:Register, 6]]
+              ]}, [[:Constant, 10]], 1, 1, true],
+              [:CallValue, 1, [:Register, 0], [[:Constant, 4]]],
+              [:Return, [:Register, 1]]
+            ]})"#,
+        );
+        let mut bytes = program.to_bytes().unwrap();
+        let restored = Program::from_bytes(&bytes).unwrap();
+        assert_eq!(restored, program);
+        assert_eq!(execute(restored), Value::int(20).unwrap());
+        // Header, register count, instruction count, opcode, destination, and arity bounds.
+        let flag = b"MICAPRG11".len() + 4 + 4 + 1 + 2 + 2 + 2;
+        bytes[flag] = 2;
+        assert!(matches!(
+            Program::from_bytes(&bytes),
+            Err(RuntimeError::ProgramArtifact(message)) if message == "invalid function self-binding flag"
+        ));
     }
 
     #[test]
@@ -1008,8 +1040,10 @@ mod tests {
             "{:registers -> 1, :code -> [[:CollectionFieldAt, 0, 0, 1, [:a], :a]]}",
             "{:registers -> 1, :code -> [[:CollectionFieldAt, 0, 0, 0, [1], :a]]}",
             "{:registers -> 1, :code -> [[:Load, 0, fn() => 1]]}",
-            "{:registers -> 1, :code -> [[:LoadFunction, 0, {:registers -> 1, :code -> [[:Return, [:Constant, true]]]}, [], 2, 1]]}",
-            "{:registers -> 1, :code -> [[:LoadFunction, 0, {:registers -> 0, :code -> [[:Return, [:Constant, true]]]}, [], 0, 0]]}",
+            "{:registers -> 1, :code -> [[:LoadFunction, 0, {:registers -> 1, :code -> [[:Return, [:Constant, true]]]}, [], 2, 1, false]]}",
+            "{:registers -> 1, :code -> [[:LoadFunction, 0, {:registers -> 0, :code -> [[:Return, [:Constant, true]]]}, [], 0, 0, false]]}",
+            "{:registers -> 1, :code -> [[:LoadFunction, 0, {:registers -> 1, :code -> [[:Return, [:Constant, true]]]}, [], 0, 0, true]]}",
+            "{:registers -> 1, :code -> [[:LoadFunction, 0, {:registers -> 2, :code -> [[:Return, [:Constant, true]]]}, [], 0, 0, :yes]]}",
         ] {
             let source = format!(
                 "try\n assemble({description})\n return false\ncatch E_INVARG\n return true\nend"
@@ -1050,6 +1084,7 @@ mod tests {
                     Value::list([]),
                     Value::int(0).unwrap(),
                     Value::int(0).unwrap(),
+                    Value::bool(false),
                 ]),
                 instruction.clone(),
             ]));

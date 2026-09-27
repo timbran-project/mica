@@ -1393,6 +1393,7 @@ struct FunctionInfo {
     program: Arc<Program>,
     params: Vec<FunctionParamInfo>,
     captures: Vec<BindingId>,
+    bind_self: bool,
     min_arity: usize,
     max_arity: Option<usize>,
     result_kinds: KindSet,
@@ -2576,6 +2577,15 @@ impl<'a> ProgramCompiler<'a> {
             });
         }
 
+        let bind_self = name.is_some_and(|name| captures.contains(&name));
+        let mut captures = captures
+            .iter()
+            .copied()
+            .filter(|capture| Some(*capture) != *name)
+            .collect::<Vec<_>>();
+        if bind_self {
+            captures.push(name.expect("recursive function has a name"));
+        }
         let mut compiler = ProgramCompiler::new(self.semantic, self.context);
         compiler.next_register = (captures.len() + params.len()) as u16;
         for (idx, capture) in captures.iter().enumerate() {
@@ -2619,7 +2629,8 @@ impl<'a> ProgramCompiler<'a> {
         Ok(FunctionInfo {
             program: Arc::new(program),
             params: param_info,
-            captures: captures.clone(),
+            captures,
+            bind_self,
             min_arity,
             max_arity,
             result_kinds: inferred,
@@ -2648,6 +2659,7 @@ impl<'a> ProgramCompiler<'a> {
         let captures = function
             .captures
             .iter()
+            .take(function.captures.len() - usize::from(function.bind_self))
             .map(|capture| {
                 self.locals
                     .get(capture)
@@ -2668,6 +2680,7 @@ impl<'a> ProgramCompiler<'a> {
             captures,
             min_arity,
             max_arity,
+            bind_self: function.bind_self,
         });
         Ok(dst)
     }

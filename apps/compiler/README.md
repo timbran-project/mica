@@ -46,10 +46,11 @@ Comprehensions support lazy filters, value sorting, and keyed sorting. Sort keys
 The accumulator and captured iteration values survive suspension. Loop exits retain ordinary `finally` handling.
 `raise` and `try` support error-code catches, error bindings, and `finally`. Error fields retain Rust's option-valued message and payload.
 Local functions support nested closures, typed parameters, dependent optional defaults, and rest arguments.
+Named local functions can recurse and return their own callable value. Reassigning the outer name leaves existing aliases and recursive calls bound to the original function.
 Closures capture referenced outer names at creation time. A shadowed name can add an unused capture, but unrelated locals are excluded.
 The parser accepts function result annotations and places parameter annotations before optional defaults.
 Basic type annotations produce runtime checks. The emitter does not implement Rust's static type analysis.
-Unsupported syntax produces diagnostics, including declarations, self-recursive local functions, catch patterns and guards, default verb parameters, and rest verb parameters.
+Unsupported syntax produces diagnostics, including declarations, catch patterns and guards, default verb parameters, and rest verb parameters.
 The emitter reads `RelationName` once per compilation and resolves existing relations in that snapshot.
 Functional field syntax also reads `Arity` and `FunctionalKey` once, then uses the cached metadata throughout compilation.
 Fields require a binary relation functional on position zero. Reads require exactly one fact; assignments replace the fact within the transaction.

@@ -467,6 +467,7 @@ pub enum Instruction {
         captures: Vec<Operand>,
         min_arity: u16,
         max_arity: u16,
+        bind_self: bool,
     },
     CallValue {
         dst: Register,
@@ -830,6 +831,7 @@ pub(crate) enum Opcode {
         captures: TableRange,
         min_arity: u16,
         max_arity: u16,
+        bind_self: bool,
     },
     CallValue {
         dst: Register,
@@ -2833,7 +2835,7 @@ impl Program {
 
     pub fn to_bytes(&self) -> Result<Vec<u8>, RuntimeError> {
         let mut out = Vec::new();
-        out.extend_from_slice(b"MICAPRG10");
+        out.extend_from_slice(b"MICAPRG11");
         write_u32(&mut out, self.register_count as u32);
         write_u32(&mut out, self.opcodes.len() as u32);
         for instruction in self.instructions() {
@@ -2847,7 +2849,7 @@ impl Program {
 
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, RuntimeError> {
         let mut input = ByteReader::new(bytes);
-        input.expect_magic(b"MICAPRG10")?;
+        input.expect_magic(b"MICAPRG11")?;
         let register_count = input.read_u32()? as usize;
         let instruction_count = input.read_u32()? as usize;
         let mut instructions = Vec::with_capacity(instruction_count);
@@ -3258,6 +3260,7 @@ impl Program {
                 captures,
                 min_arity,
                 max_arity,
+                bind_self,
             } => Instruction::LoadFunction {
                 dst: *dst,
                 program: Arc::clone(self.program(*program)),
@@ -3268,6 +3271,7 @@ impl Program {
                     .collect(),
                 min_arity: *min_arity,
                 max_arity: *max_arity,
+                bind_self: *bind_self,
             },
             Opcode::CallValue { dst, callee, args } => Instruction::CallValue {
                 dst: *dst,
@@ -3946,12 +3950,14 @@ impl ProgramBuilder {
                 captures,
                 min_arity,
                 max_arity,
+                bind_self,
             } => Opcode::LoadFunction {
                 dst,
                 program: self.program(program)?,
                 captures: self.operands(captures)?,
                 min_arity,
                 max_arity,
+                bind_self,
             },
             Instruction::CallValue { dst, callee, args } => Opcode::CallValue {
                 dst,
@@ -4600,7 +4606,21 @@ fn validate_instruction(
             validate_operands(register_count, message.iter())?;
             validate_operands(register_count, value.iter())
         }
-        Instruction::LoadFunction { dst, captures, .. } => {
+        Instruction::LoadFunction {
+            dst,
+            program,
+            captures,
+            min_arity,
+            max_arity,
+            bind_self,
+        } => {
+            if min_arity > max_arity
+                || captures.len() + usize::from(*bind_self) >= program.register_count()
+            {
+                return Err(artifact_error(
+                    "function requires ordered arity bounds and registers for captures, self binding, and arguments",
+                ));
+            }
             validate_register(register_count, *dst)?;
             validate_operands(register_count, captures.iter())
         }
@@ -5412,11 +5432,13 @@ fn write_instruction(out: &mut Vec<u8>, instruction: &Instruction) -> Result<(),
             captures,
             min_arity,
             max_arity,
+            bind_self,
         } => {
             out.push(INST_LOAD_FUNCTION);
             write_register(out, *dst);
             write_u16(out, *min_arity);
             write_u16(out, *max_arity);
+            out.push(u8::from(*bind_self));
             write_bytes(out, &program.to_bytes()?);
             write_operands(out, captures)?;
             Ok(())
@@ -6142,6 +6164,11 @@ impl<'a> ByteReader<'a> {
                 dst: self.read_register()?,
                 min_arity: self.read_u16()?,
                 max_arity: self.read_u16()?,
+                bind_self: match self.read_u8()? {
+                    0 => false,
+                    1 => true,
+                    _ => return Err(artifact_error("invalid function self-binding flag")),
+                },
                 program: Arc::new(Program::from_bytes(&self.read_bytes()?)?),
                 captures: self.read_operands()?,
             },

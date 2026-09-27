@@ -177,6 +177,7 @@ struct CallableInfo {
     captures: Vec<Value>,
     min_arity: usize,
     max_arity: Option<usize>,
+    bind_self: bool,
 }
 
 impl VmState {
@@ -2109,6 +2110,7 @@ impl RegisterVm {
                 captures,
                 min_arity,
                 max_arity,
+                bind_self,
             } => {
                 let callee = program.program(*callee);
                 let callee_id = self.intern_program(Arc::clone(callee));
@@ -2118,6 +2120,7 @@ impl RegisterVm {
                     captures,
                     min_arity: *min_arity as usize,
                     max_arity: (*max_arity != u16::MAX).then_some(*max_arity as usize),
+                    bind_self: *bind_self,
                 })?;
                 self.write_register_unchecked(*dst, Value::function(function));
                 self.advance_ip_unchecked();
@@ -2832,6 +2835,9 @@ impl RegisterVm {
         }
         let register_count = self.program_unchecked(callable.program).register_count();
         let mut args = callable.captures;
+        if callable.bind_self {
+            args.push(callee);
+        }
         args.push(Value::list(user_args));
         self.advance_ip_unchecked();
         self.push_frame(callable.program, register_count, dst, args)?;
