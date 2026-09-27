@@ -1,0 +1,27 @@
+{
+  "implementation": "odin",
+  "revision": "bfb368c0b7586ab98c3915c0ae7cd3b46843fc8f",
+  "binary_sha256": "d37ca04de8160de7ca961e82f5dbfc0d599db99029328c1c04bee4afea4360e4",
+  "fixture_sha256": "d5ded0ded239bff2b7c3dddaf94a971474570ac1e9be015ce078d1c3334f22a6",
+  "command": [
+    "gdb",
+    "--batch",
+    "-ex",
+    "set debuginfod enabled off",
+    "-ex",
+    "run",
+    "-ex",
+    "bt",
+    "--args",
+    "/tmp/mica-parity-02653be-applications/odin-bench",
+    "/tmp/mica-parity-02653be-applications/fixtures/editor_tagged_input-odin.mica",
+    "64",
+    "1",
+    "1",
+    "0",
+    "1",
+    "yes"
+  ],
+  "backtrace": "Thread 2 \"odin-bench\" received signal SIGSEGV, Segmentation fault.\n[Switching to Thread 0xfffff7132980 (LWP 1315674)]\n0x0000aaaaaab3a4f8 in var::string_scalar_count ()\n#0  0x0000aaaaaab3a4f8 in var::string_scalar_count ()\n#1  0x0000aaaaaaad9d94 in mica_runtime::[builtins.odin]::builtin_string_len ()\n#2  0x0000aaaaaab68bb8 in vm::vm_run ()\n#3  0x0000aaaaaab3a6d4 in mica_runtime::task_run ()\n#4  0x0000aaaaaab9100c in mica_runtime::[scheduler.odin]::scheduler_worker_proc ()\n#5  0x0000aaaaaabb9104 in thread::[thread_unix.odin]::_create..unix_thread_entry_proc-0 ()\n#6  0x0000fffff7db582c in start_thread (arg=0xfffff7ff1760) at ./nptl/pthread_create.c:447\n#7  0x0000fffff7e1ba0c in thread_start () at ../sysdeps/unix/sysv/linux/aarch64/clone3.S:76\n",
+  "scope": "Diagnostic run after timing. The three measured Odin editor processes also exited 139. No successful timing or RSS comparison is reported for this case."
+}
