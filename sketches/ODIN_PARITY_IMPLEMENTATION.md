@@ -433,3 +433,9 @@ Fresh runtime catalogues now declare the `[1, 0]` index. Identity allocation ret
 Persisted catalogues keep their stored index definitions. No schema migration or compatibility path is introduced.
 
 All 325 runtime library tests, OWL/CycL application tests, runner tests, and workspace clippy pass after the catalogue-index change.
+
+The larger ingestion comparison passes all 24 processes across Rust `f09d390` and `dfebf6d`, both against Odin `bfb368c`.
+For 10,001 subjects and 20,001 facts, the identity-value index reduces Rust's median from 596.8 ms to 231.8 ms.
+Peak RSS increases by approximately 2.2 MiB. Odin remains near 61.8 ms, leaving a roughly 3.8-times gap at this size.
+This improvement applies to fresh catalogues. The separate census control passes with overlapping Rust process timing ranges.
+Further OWL execution costs, rule derivation, resumed large stores, and concurrent ingestion remain separate measurement questions.
