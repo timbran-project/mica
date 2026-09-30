@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use mica_runtime::{SourceRunner, TaskLimits, TaskOutcome};
 use proptest::test_runner::{Config, RngSeed, TestCaseError, TestError, TestRunner};
 use serde_json::json;
@@ -26,7 +26,7 @@ use cases::{Case, Prepared};
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
 #[derive(Parser)]
-#[command(about = "Compare Rust values with Mica-generated C values")]
+#[command(about = "Compare Rust values with Mica-generated native values")]
 struct Options {
     #[arg(long, default_value_t = 256)]
     cases: u32,
@@ -47,6 +47,9 @@ struct Options {
     /// Generate codec interoperability, malformed input, and persistence cases.
     #[arg(long, conflicts_with_all = ["strings", "collections", "relations", "traversal", "symbol_loads"])]
     codecs: bool,
+    /// Check every existing property corpus against the selected backend.
+    #[arg(long, conflicts_with_all = ["strings", "collections", "relations", "traversal", "codecs", "symbol_loads"])]
+    all_corpora: bool,
     /// Run paired timings after correctness checks. Requires a release build.
     #[arg(long)]
     bench: bool,
@@ -83,9 +86,21 @@ struct Options {
     symbol_load_worker: bool,
     #[arg(long, hide = true)]
     symbol_load_verify: bool,
+    /// Compare a separately compiled value module produced by native-backend.
+    #[arg(long)]
+    native_module: Option<PathBuf>,
+    /// Select how to compile the supplied module. GCC JIT requires --native-module.
+    #[arg(long, value_enum, default_value_t = Backend::C)]
+    backend: Backend,
     /// Save the generated standalone C source at this path.
     #[arg(long)]
     emit_c: Option<PathBuf>,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum Backend {
+    C,
+    Gccjit,
 }
 
 struct Scratch(PathBuf);
@@ -116,16 +131,166 @@ enum Sanitizer {
 struct Native {
     scratch: Scratch,
     compiler: String,
+    separate_module: bool,
 }
 impl Native {
-    fn build(sanitizer: Sanitizer, emit_c: Option<&Path>) -> Result<Self> {
+    fn build(
+        sanitizer: Sanitizer,
+        emit_c: Option<&Path>,
+        native_module: Option<&Path>,
+        backend: Backend,
+    ) -> Result<Self> {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..");
+        let generated = if native_module.is_none() || emit_c.is_some() {
+            Some(Self::generate(&root)?)
+        } else {
+            None
+        };
+        let scratch = Scratch::new()?;
+        if let Some(generated) = &generated {
+            fs::write(scratch.0.join("value.c"), generated)?;
+            if let Some(path) = emit_c {
+                fs::write(path, generated)?;
+            }
+        }
+        let mut backend_metadata = None;
+        if let Some(module) = native_module {
+            fs::copy(module.join("module.h"), scratch.0.join("value.c"))?;
+            if matches!(backend, Backend::C) {
+                fs::copy(module.join("module.h"), scratch.0.join("module.h"))?;
+                fs::copy(module.join("module.c"), scratch.0.join("module.c"))?;
+            }
+        }
+        if let Some(module) = native_module.filter(|_| matches!(backend, Backend::Gccjit)) {
+            let metadata: serde_json::Value =
+                serde_json::from_slice(&fs::read(module.join("compilation.json"))?)?;
+            if metadata["failed"] != false {
+                return Err("libgccjit module did not compile successfully".into());
+            }
+            if metadata["sanitized"].as_bool() != Some(matches!(sanitizer, Sanitizer::Address)) {
+                return Err("libgccjit module sanitizer setting does not match this run".into());
+            }
+            fs::copy(module.join("module.o"), scratch.0.join("module.o"))?;
+            backend_metadata = Some(metadata);
+        }
+        fs::copy(
+            root.join("native/platform/allocation.c"),
+            scratch.0.join("allocation.c"),
+        )?;
+        fs::copy(
+            root.join("native/platform/mutex.c"),
+            scratch.0.join("mutex.c"),
+        )?;
+        fs::write(
+            scratch.0.join("symbol_loads.c"),
+            include_str!("symbol_loads.c"),
+        )?;
+        fs::write(scratch.0.join("driver.c"), include_str!("driver.c"))?;
+        fs::write(scratch.0.join("memory.c"), Self::memory_platform(&root)?)?;
+        let cc = std::env::var_os("CC").unwrap_or_else(|| "cc".into());
+        let version = Command::new(&cc).arg("--version").output()?;
+        if !version.status.success() {
+            return Err("C compiler version query failed".into());
+        }
+        let mut compiler = String::from_utf8_lossy(&version.stdout)
+            .lines()
+            .next()
+            .unwrap_or("unknown")
+            .to_owned();
+        if let Some(metadata) = backend_metadata {
+            compiler = format!(
+                "libgccjit {} (C driver: {compiler})",
+                metadata["gccjit_version"].as_str().unwrap_or("unknown")
+            );
+        }
+        let mut command = Command::new(&cc);
+        command.current_dir(&scratch.0).args([
+            "-std=c11",
+            "-pthread",
+            "-O3",
+            "-Wall",
+            "-Wextra",
+            "-Werror",
+            "-pedantic",
+            "-ffp-contract=off",
+            "-fno-fast-math",
+        ]);
+        if !matches!(sanitizer, Sanitizer::None) {
+            command.args([
+                "-g",
+                match sanitizer {
+                    Sanitizer::Address => "-fsanitize=address,undefined,float-cast-overflow",
+                    Sanitizer::Thread => "-fsanitize=thread",
+                    Sanitizer::None => unreachable!(),
+                },
+                "-fno-sanitize-recover=all",
+                "-fno-omit-frame-pointer",
+            ]);
+        }
+        if native_module.is_some() {
+            if matches!(backend, Backend::C) {
+                let mut compile = Command::new(&cc);
+                compile.current_dir(&scratch.0).args(command.get_args());
+                let output = compile
+                    .args(["-fPIC", "-c", "module.c", "-o", "module.o"])
+                    .output()?;
+                if !output.status.success() {
+                    return Err(format!(
+                        "C module compilation failed:\n{}",
+                        String::from_utf8_lossy(&output.stderr)
+                    )
+                    .into());
+                }
+                compiler.push_str(" (separate module; -fPIC)");
+            }
+            command.arg("module.o");
+        }
+        let output = command
+            .args(["driver.c", "-lm", "-o", "compare"])
+            .output()?;
+        if !output.status.success() {
+            return Err(format!(
+                "C compilation failed:\n{}",
+                String::from_utf8_lossy(&output.stderr)
+            )
+            .into());
+        }
+        Ok(Self {
+            scratch,
+            compiler,
+            separate_module: native_module.is_some(),
+        })
+    }
+
+    fn memory_platform(root: &Path) -> Result<String> {
+        let mut runner = SourceRunner::new_empty().with_interpreter_only(true);
+        let source = fs::read_to_string(root.join("apps/native/memory/platform.mica"))?;
+        let reports = runner
+            .run_filein(&source)
+            .map_err(|error| runner.render_source_task_error(&error))?;
+        for report in reports {
+            if !matches!(report.outcome, TaskOutcome::Complete { .. }) {
+                return Err(report.render().into());
+            }
+        }
+        let report = runner
+            .run_source("return native_memory/platform()")
+            .map_err(|error| runner.render_source_task_error(&error))?;
+        let TaskOutcome::Complete { value, .. } = report.outcome else {
+            return Err(report.render().into());
+        };
+        value
+            .with_str(str::to_owned)
+            .ok_or_else(|| "memory platform generator did not return source".into())
+    }
+
+    fn generate(root: &Path) -> Result<String> {
         let mut runner = SourceRunner::new_empty()
             .with_interpreter_only(true)
             .with_task_limits(TaskLimits {
                 instruction_budget: 500_000_000,
                 ..TaskLimits::default()
             });
-        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..");
         for source in [
             "ir",
             "builders",
@@ -134,16 +299,24 @@ impl Native {
             "layout",
             "storage",
             "contracts",
+            "execution",
             "check",
             "flow",
             "c_syntax",
             "c_scopes",
             "c_flow",
             "c",
+            "memory/program",
+            "memory/allocation",
+            "memory/collection",
+            "memory/lifecycle",
+            "memory/platform",
             "value/program",
             "value/immediates",
             "value/numbers",
-            "value/arena",
+            "value/symbol_storage",
+            "value/memory",
+            "value/tracing",
             "value/heap",
             "value/utf8",
             "value/strings",
@@ -177,72 +350,9 @@ impl Native {
         let TaskOutcome::Complete { ref value, .. } = report.outcome else {
             return Err(report.render().into());
         };
-        let generated = value
+        value
             .with_str(str::to_owned)
-            .ok_or("C generator did not return source")?;
-        let scratch = Scratch::new()?;
-        fs::write(scratch.0.join("value.c"), &generated)?;
-        if let Some(path) = emit_c {
-            fs::write(path, &generated)?;
-        }
-        fs::copy(
-            root.join("native/platform/allocation.c"),
-            scratch.0.join("allocation.c"),
-        )?;
-        fs::copy(
-            root.join("native/platform/mutex.c"),
-            scratch.0.join("mutex.c"),
-        )?;
-        fs::write(
-            scratch.0.join("symbol_loads.c"),
-            include_str!("symbol_loads.c"),
-        )?;
-        fs::write(scratch.0.join("driver.c"), include_str!("driver.c"))?;
-        let cc = std::env::var_os("CC").unwrap_or_else(|| "cc".into());
-        let version = Command::new(&cc).arg("--version").output()?;
-        if !version.status.success() {
-            return Err("C compiler version query failed".into());
-        }
-        let compiler = String::from_utf8_lossy(&version.stdout)
-            .lines()
-            .next()
-            .unwrap_or("unknown")
-            .to_owned();
-        let mut command = Command::new(&cc);
-        command.current_dir(&scratch.0).args([
-            "-std=c11",
-            "-pthread",
-            "-O3",
-            "-Wall",
-            "-Wextra",
-            "-Werror",
-            "-pedantic",
-            "-ffp-contract=off",
-            "-fno-fast-math",
-        ]);
-        if !matches!(sanitizer, Sanitizer::None) {
-            command.args([
-                "-g",
-                match sanitizer {
-                    Sanitizer::Address => "-fsanitize=address,undefined,float-cast-overflow",
-                    Sanitizer::Thread => "-fsanitize=thread",
-                    Sanitizer::None => unreachable!(),
-                },
-                "-fno-sanitize-recover=all",
-                "-fno-omit-frame-pointer",
-            ]);
-        }
-        let output = command
-            .args(["driver.c", "-lm", "-o", "compare"])
-            .output()?;
-        if !output.status.success() {
-            return Err(format!(
-                "C compilation failed:\n{}",
-                String::from_utf8_lossy(&output.stderr)
-            )
-            .into());
-        }
-        Ok(Self { scratch, compiler })
+            .ok_or_else(|| "C generator did not return source".into())
     }
 
     fn run(&self, cases: &[Case], iterations: u64) -> Result<Vec<u8>> {
@@ -404,8 +514,10 @@ fn benchmark_metadata(
         "{}",
         json!({"metadata": {"c_compiler":native.compiler,"rust_compiler":String::from_utf8_lossy(&rustc.stdout).trim(),
         "c_flags":"-std=c11 -pthread -O3 -ffp-contract=off -fno-fast-math", "rust_profile":"release",
+        "value_compilation":if native.separate_module { "separate module; -fPIC; no LTO" } else { "same translation unit as C driver" },
         "os":std::env::consts::OS,"arch":std::env::consts::ARCH,"cpu_affinity":affinity,"samples":samples,"minimum_rounds":minimum_rounds,"target_sample_ms":sample_ms,
         "rustflags":std::env::var("RUSTFLAGS").unwrap_or_default(),
+        "value_memory":"C: worker heap nursery and shared mark-and-sweep; safepoint polls and final collection timed; worker setup excluded. Rust: result destruction timed.",
         "timing":"monotonic wall time; input preparation and subprocess startup excluded; alternating implementation order"}})
     );
     Ok(())
@@ -485,7 +597,20 @@ fn run() -> Result<()> {
     } else {
         Sanitizer::None
     };
-    let native = Native::build(sanitizer, options.emit_c.as_deref())?;
+    if matches!(options.backend, Backend::Gccjit)
+        && (options.native_module.is_none() || options.thread_sanitize)
+    {
+        return Err(
+            "--backend gccjit requires --native-module and does not support --thread-sanitize"
+                .into(),
+        );
+    }
+    let native = Native::build(
+        sanitizer,
+        options.emit_c.as_deref(),
+        options.native_module.as_deref(),
+        options.backend,
+    )?;
     let threads: Vec<_> = options.symbol_threads.iter().map(|n| n.get()).collect();
     if let Some(case) = &options.symbol_load_case {
         symbol_loads::replay(&native, case)?;
@@ -549,7 +674,20 @@ fn run() -> Result<()> {
     } else {
         Corpus::General
     };
-    check_generated(&native, options.cases, options.seed, corpus)?;
+    if options.all_corpora {
+        for corpus in [
+            Corpus::General,
+            Corpus::Strings,
+            Corpus::Collections,
+            Corpus::Relations,
+            Corpus::Traversal,
+            Corpus::Codecs,
+        ] {
+            check_generated(&native, options.cases, options.seed, corpus)?;
+        }
+    } else {
+        check_generated(&native, options.cases, options.seed, corpus)?;
+    }
     symbols::check(&native, options.cases, options.seed)?;
     symbol_loads::check(&native, options.cases, options.seed, &threads)?;
     for (_, cases) in cases::workloads() {
@@ -557,7 +695,7 @@ fn run() -> Result<()> {
     }
     println!(
         "{}",
-        json!({"correctness":"passed","fixed_cases":fixed.len(),"generated_cases":options.cases,"string_corpus":options.strings,"collection_corpus":options.collections,"relation_corpus":options.relations,"traversal_corpus":options.traversal,"codec_corpus":options.codecs,"symbol_sequences":options.cases,"symbol_load_cases":options.cases,"symbol_threads":threads,"seed":options.seed,"sanitizers":options.sanitize,"thread_sanitizer":options.thread_sanitize})
+        json!({"correctness":"passed","fixed_cases":fixed.len(),"generated_cases_per_corpus":options.cases,"all_corpora":options.all_corpora,"string_corpus":options.strings,"collection_corpus":options.collections,"relation_corpus":options.relations,"traversal_corpus":options.traversal,"codec_corpus":options.codecs,"symbol_sequences":options.cases,"symbol_load_cases":options.cases,"symbol_threads":threads,"seed":options.seed,"sanitizers":options.sanitize,"thread_sanitizer":options.thread_sanitize})
     );
     if options.bench {
         benchmark(
@@ -594,7 +732,7 @@ mod tests {
 
     #[test]
     fn checks_shared_values_and_collections() -> Result<()> {
-        let native = Native::build(Sanitizer::Address, None)?;
+        let native = Native::build(Sanitizer::Address, None, None, Backend::C)?;
         native.check(&cases::fixed_cases())?;
         codecs::check_names(&native)?;
         check_generated(&native, 128, 19, Corpus::Codecs)?;

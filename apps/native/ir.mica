@@ -7,7 +7,7 @@
 verb native/program()
   return {:next -> 0, :functions -> [], :parameters -> [], :locals -> [],
           :blocks -> [], :instructions -> [], :terminators -> [], :constants -> [],
-          :records -> [], :fields -> [], :globals -> [], :foreign -> [], :contracts -> [], :parameter_contracts -> [], :annotations -> []}
+          :records -> [], :fields -> [], :globals -> [], :foreign -> [], :contracts -> [], :parameter_contracts -> [], :annotations -> [], :function_types -> [], :executions -> [], :execution_types -> []}
 end
 
 verb native/append(input_state, table, row)
@@ -61,6 +61,9 @@ verb native/relations(state)
     :Annotation -> relation_from_rows([:node, :kind, :text], state[:annotations]),
     :Global -> relation_from_rows([:id, :spelling, :type_id, :storage, :initializer], state[:globals]),
     :Function -> relation_from_rows([:id, :spelling, :result_type], state[:functions]),
+    :FunctionType -> relation_from_rows([:spelling, :result_type, :parameters, :effects, :result_mode, :owner], state[:function_types]),
+    :Execution -> relation_from_rows([:id, :policy], state[:executions]),
+    :ExecutionType -> relation_from_rows([:spelling, :policy], state[:execution_types]),
     :Parameter -> relation_from_rows([:id, :owner, :position, :spelling, :type_id], state[:parameters]),
     :Local -> relation_from_rows([:id, :owner, :spelling, :type_id], state[:locals]),
     :Block -> relation_from_rows([:id, :owner, :spelling, :entry], state[:blocks]),
@@ -209,6 +212,12 @@ verb native/constants(input_state, declarations)
     bindings[declaration[0]] = id
   end
   return [bindings, state]
+end
+
+// Callable signatures use the same named parameter and ownership forms as
+// function declarations. Code pointers carry no captured data environment.
+verb native/function_pointer_type(state: map, name: string, result, parameters: list, effects: list, mode: symbol, owner: string) -> list
+  return [[:FunctionPointer, name], native/append(state, :function_types, [name, result, parameters, effects, mode, owner])]
 end
 
 // Notes describe source intent; they do not establish optimizer assumptions.

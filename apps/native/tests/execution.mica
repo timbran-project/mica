@@ -1,0 +1,40 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+// A bounded execution segment retains its state through the real heap and root API.
+verb native/execution_example() -> map
+  let context: map = native_memory/test_context()
+  let worker: list = native_memory/record_pointer("MemoryWorker")
+  let root: list = native_memory/record_pointer("MemoryRoot")
+  let bytes: list = native_memory/pointer(:U8)
+  let state: list = [:Record, "ExecutionState"]
+  let pointer: list = native_memory/pointer(state)
+  context[:state] = native/record_type(context[:state], "ExecutionState", [["remaining", :U64], ["sum", :U64]])[1]
+  let parameters: list = [["worker", worker, :Borrow], ["root", root, :Borrow], ["budget", :U64, :Value]]
+  let effects: list = [:ReadMemory, :WriteMemory, :Allocate, :Release, :Relocate]
+  let [entry, declared] = native/execution_pointer_type(context[:state], "ExecutionEntry", :U64, parameters, effects, :Tail)
+  context[:state] = declared
+  context = native/declare_function(context, "execution_step", :U64, parameters, [], effects, :Value, "")
+  context = native/execution_function(context, "execution_step", :Tail)
+  context = native/define_function(context, "execution_step", [
+    native_memory/bind("raw", bytes, native_memory/root(bytes, "root", "pointer")),
+    native/let_statement("saved", pointer, native/unary_expression(:PointerCast, "raw")),
+    native_memory/bind("remaining", :U64, native_memory/field(:U64, "saved", "remaining")),
+    native_memory/bind("sum", :U64, native_memory/field(:U64, "saved", "sum")),
+    native/when_statement(native/binary_expression(:Equal, "remaining", "memory_n0"), [native/return_value("sum")]),
+    native/when_statement(native/binary_expression(:Equal, "budget", "memory_n0"), [native/return_value("sum")]),
+    native/let_statement("size", :U64, native/unary_expression(:SizeOf, state)),
+    native/let_call("allocation", bytes, "memory_allocate", ["worker", "size", "memory_n0"]),
+    native/when_statement(native/binary_expression(:Equal, "allocation", "memory_null_bytes"), [native/return_value("memory_allocation_limit")]),
+    native/let_statement("next_state", pointer, native/unary_expression(:PointerCast, "allocation")),
+    native/store_statement("next_state", native/typed_record(state, [
+      native/typed_expression(:U64, native/binary_expression(:Subtract, "remaining", "memory_n1")),
+      native/typed_expression(:U64, native/binary_expression(:Add, "sum", "remaining"))])),
+    native_memory/store_root(bytes, "root", "pointer", "allocation"),
+    native/unless_statement(native/call_expression("memory_safepoint", ["worker", "memory_false"]), [native/return_value("memory_allocation_limit")]),
+    native/let_statement("next", entry, native/function_address_expression("execution_step")),
+    native/let_statement("available", :U64, native/binary_expression(:Subtract, "budget", "memory_n1")),
+    native/tail_call_statement("next", ["worker", "root", "available"])])
+  let result: map = context[:state]
+  return result
+end

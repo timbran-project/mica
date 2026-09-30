@@ -25,9 +25,9 @@ verb native_value/relation_types(input: map) -> map
   end
   context[:constants] = bindings
   context = native/declare_function(context, "value_tuple_compare", [:Record, "IntResult"],
-    [["left", tuple, :Borrow], ["right", tuple, :Borrow]], [], [:ReadMemory], :Value, "")
+    [["left", tuple, :Gc], ["right", tuple, :Gc]], [], [:ReadMemory], :Value, "")
   context = native/declare_function(context, "value_relation_compare", [:Record, "IntResult"],
-    [["left", word, :Borrow], ["right", word, :Borrow]], [], [:ReadMemory], :Value, "")
+    [["left", word, :Gc], ["right", word, :Gc]], [], [:ReadMemory], :Value, "")
   return context
 end
 
@@ -48,9 +48,9 @@ verb native_value/tuple_operations(input: map) -> map
   let values: list = [:Pointer, word, :Mutable]
   let tuple: list = [:Record, "ValueTuple"]
   context = native/declare_function(context, "value_tuple", [:Record, "TupleResult"], [
-    ["arena", [:Pointer, [:Record, "ValueArena"], :Mutable], :Borrow],
-    ["source", [:Pointer, word, :Const], [:Borrow, "arena"]], ["arity", :U64, :Value]], [],
-    [:Allocate, :ReadMemory, :WriteMemory], :Borrow, "arena")
+    ["worker", [:Pointer, [:Record, "MemoryWorker"], :Mutable], :Borrow],
+    ["source", [:Pointer, word, :Const], :Gc], ["arity", :U64, :Value]], [],
+    [:Allocate, :ReadMemory, :WriteMemory], :Gc, "")
   context = native/define_function(context, "value_tuple", [
     native/when_statement(
       native/binary_expression(:Equal, "arity", "zero"),
@@ -61,7 +61,7 @@ verb native_value/tuple_operations(input: map) -> map
     native/let_statement("limit", :U64, native/binary_expression(:Divide, "allocation_limit", "size")),
     native/when_statement(native/binary_expression(:Less, "limit", "arity"), [native/return_zero()]),
     native/let_statement("bytes", :U64, native/binary_expression(:Multiply, "arity", "size")),
-    native/let_call("raw", [:Pointer, :U8, :Mutable], "value_arena_allocate", ["arena", "bytes"]),
+    native/let_call("raw", [:Pointer, :U8, :Mutable], "memory_allocate", ["worker", "bytes", "layout_values"]),
     native/when_statement(native/binary_expression(:Equal, "raw", "null_bytes"), [native/return_zero()]),
     native/let_statement("data", values, native/unary_expression(:PointerCast, "raw")),
     native/let_statement("i", :U64, "zero"),
@@ -74,7 +74,7 @@ verb native_value/tuple_operations(input: map) -> map
     native/return_record(["true", native/typed_record(tuple, ["data", "arity"])])
   ])
   context = native/declare_function(context, "value_tuple_get", [:Record, "ValueResult"],
-    [["tuple", tuple, :Borrow], ["index", :U64, :Value]], [], [:ReadMemory], :Borrow, "tuple")
+    [["tuple", tuple, :Gc], ["index", :U64, :Value]], [], [:ReadMemory], :Gc, "")
   context = native/define_function(context, "value_tuple_get", [
     native/let_field("arity", :U64, "tuple", "arity"),
     native/unless_statement(native/binary_expression(:Less, "index", "arity"), [native/return_zero()]),
@@ -118,7 +118,7 @@ verb native_value/relation_accessors(input: map) -> map
   let relation: list = [:Record, "HeapRelation"]
   let tuple: list = [:Record, "ValueTuple"]
   let result: list = [:Record, "RelationResult"]
-  context = native/declare_function(context, "value_relation_view", result, [["value", word, :Borrow]], [], [:ReadMemory], :Borrow, "value")
+  context = native/declare_function(context, "value_relation_view", result, [["value", word, :Gc]], [], [:ReadMemory], :Gc, "")
   context = native/define_function(context, "value_relation_view", [
     native/let_statement("tag", :U8, native/unary_expression(:Tag, "value")),
     native/when_statement(
@@ -136,13 +136,13 @@ verb native_value/relation_accessors(input: map) -> map
   ]
   for field in ["arity", "length"]
     let name: string = string_concat("value_relation_", field)
-    context = native/declare_function(context, name, [:Record, "IdResult"], [["value", word, :Borrow]], [], [:ReadMemory], :Value, "")
+    context = native/declare_function(context, name, [:Record, "IdResult"], [["value", word, :Gc]], [], [:ReadMemory], :Value, "")
     context = native/define_function(context, name, [
       @read,
       native/return_record(["true", native/typed_field(:U64, "relation", field)])
     ])
   end
-  context = native/declare_function(context, "value_is_unit", :Bool, [["value", word, :Borrow]], [], [:ReadMemory], :Value, "")
+  context = native/declare_function(context, "value_is_unit", :Bool, [["value", word, :Gc]], [], [:ReadMemory], :Value, "")
   context = native/define_function(context, "value_is_unit", [
     @read,
     native/unless_statement(
@@ -152,7 +152,7 @@ verb native_value/relation_accessors(input: map) -> map
     native/return_value(native/binary_expression(:Equal, native/typed_field(:U64, "relation", "length"), "one"))
   ])
   context = native/declare_function(context, "value_relation_row", [:Record, "TupleResult"],
-    [["value", word, :Borrow], ["index", :U64, :Value]], [], [:ReadMemory], :Borrow, "value")
+    [["value", word, :Gc], ["index", :U64, :Value]], [], [:ReadMemory], :Gc, "")
   context = native/define_function(context, "value_relation_row", [
     @read,
     native/unless_statement(
@@ -164,7 +164,7 @@ verb native_value/relation_accessors(input: map) -> map
     native/return_record(["true", native/typed_load(tuple, "slot")])
   ])
   context = native/declare_function(context, "value_relation_column_at", [:Record, "IdResult"],
-    [["value", word, :Borrow], ["index", :U64, :Value]], [], [:ReadMemory], :Value, "")
+    [["value", word, :Gc], ["index", :U64, :Value]], [], [:ReadMemory], :Value, "")
   context = native/define_function(context, "value_relation_column_at", [
     @read,
     native/unless_statement(
@@ -177,7 +177,7 @@ verb native_value/relation_accessors(input: map) -> map
     native/return_record(["true", native/typed_expression(:U64, native/unary_expression(:Convert, "symbol"))])
   ])
   context = native/declare_function(context, "value_relation_column", [:Record, "IdResult"],
-    [["value", word, :Borrow], ["symbol", :U32, :Value]], [], [:ReadMemory], :Value, "")
+    [["value", word, :Gc], ["symbol", :U32, :Value]], [], [:ReadMemory], :Value, "")
   context = native/define_function(context, "value_relation_column", [
     @read,
     native/let_field("heading", [:Pointer, :U32, :Mutable], "relation", "heading"),
@@ -288,8 +288,8 @@ verb native_value/relation_sort(input: map, kind: string, element: list) -> map
   let pointer: list = [:Pointer, element, :Mutable]
   let name: string = string_concat("relation_sort_", kind)
   context = native/declare_function(context, name, :Bool, [
-    ["arena", [:Pointer, [:Record, "ValueArena"], :Mutable], :Borrow],
-    ["data", pointer, [:Borrow, "arena"]], ["length", :U64, :Value]], [],
+    ["worker", [:Pointer, [:Record, "MemoryWorker"], :Mutable], :Borrow],
+    ["data", pointer, :Gc], ["length", :U64, :Value]], [],
     [:Allocate, :ReadMemory, :WriteMemory], :Value, "")
   let comparison: list = []
   if kind == "columns"
@@ -357,7 +357,7 @@ verb native_value/relation_sort(input: map, kind: string, element: list) -> map
     ]),
     native/when_statement("ordered", [native/return_value("true")]),
     native/let_statement("bytes", :U64, native/binary_expression(:Multiply, "length", "size")),
-    native/let_call("raw", [:Pointer, :U8, :Mutable], "value_arena_allocate", ["arena", "bytes"]),
+    native/let_call("raw", [:Pointer, :U8, :Mutable], "memory_allocate", ["worker", "bytes", "layout_opaque"]),
     native/when_statement(native/binary_expression(:Equal, "raw", "null_bytes"), [native/return_value("false")]),
     native/let_statement("src", pointer, "data"),
     native/let_statement("dst", pointer, native/unary_expression(:PointerCast, "raw")),
@@ -438,10 +438,10 @@ verb native_value/relation_constructor(input: map) -> map
   let bytes: list = [:Pointer, :U8, :Mutable]
   let fail: list = [native/return_zero()]
   context = native/declare_function(context, "value_relation", [:Record, "ValueResult"], [
-    ["arena", [:Pointer, [:Record, "ValueArena"], :Mutable], :Borrow],
+    ["worker", [:Pointer, [:Record, "MemoryWorker"], :Mutable], :Borrow],
     ["heading", [:Pointer, :U32, :Const], :Borrow], ["arity", :U64, :Value],
-    ["source", [:Pointer, tuple, :Const], [:Borrow, "arena"]], ["length", :U64, :Value]], [],
-    [:Allocate, :ReadMemory, :WriteMemory], :Borrow, "arena")
+    ["source", [:Pointer, tuple, :Const], :Gc], ["length", :U64, :Value]], [],
+    [:Allocate, :ReadMemory, :WriteMemory], :Gc, "")
   context = native/define_function(context, "value_relation", [
     native/when_statement(native/binary_expression(:Less, "relation_max_arity", "arity"), fail),
     native/unless_statement(
@@ -495,7 +495,7 @@ verb native_value/relation_constructor(input: map) -> map
     native/unless_statement(native/binary_expression(:Equal, "arity", "zero"), [
       native/let_statement("column_size", :U64, native/unary_expression(:SizeOf, column)),
       native/let_statement("order_bytes", :U64, native/binary_expression(:Multiply, "arity", "column_size")),
-      native/let_call("raw_order", bytes, "value_arena_allocate", ["arena", "order_bytes"]),
+      native/let_call("raw_order", bytes, "memory_allocate", ["worker", "order_bytes", "layout_opaque"]),
       native/when_statement(native/binary_expression(:Equal, "raw_order", "null_bytes"), fail),
       native/set_statement("order", native/unary_expression(:PointerCast, "raw_order")),
       native/set_statement("i", "zero"),
@@ -506,7 +506,7 @@ verb native_value/relation_constructor(input: map) -> map
         native/store_statement("column_slot", native/typed_record(column, ["symbol", "i"])),
         native/set_statement("i", native/binary_expression(:Add, "i", "one"))
       ]),
-      native/unless_statement(native/call_expression("relation_sort_columns", ["arena", "order", "arity"]), fail),
+      native/unless_statement(native/call_expression("relation_sort_columns", ["worker", "order", "arity"]), fail),
       native/set_statement("i", "one"),
       native/while_statement(native/binary_expression(:Less, "i", "arity"), [
         native/let_statement("previous", :U64, native/binary_expression(:Subtract, "i", "one")),
@@ -527,7 +527,7 @@ verb native_value/relation_constructor(input: map) -> map
     ]),
     native/let_statement("rows_size", :U64, native/binary_expression(:Multiply, "count", "row_size")),
     native/let_statement("total", :U64, native/binary_expression(:Add, "prefix", "rows_size")),
-    native/let_call("raw", bytes, "value_arena_allocate", ["arena", "total"]),
+    native/let_call("raw", bytes, "memory_allocate", ["worker", "total", "layout_relation"]),
     native/when_statement(native/binary_expression(:Equal, "raw", "null_bytes"), fail),
     native/let_statement("target", [:Pointer, relation, :Mutable], native/unary_expression(:PointerCast, "raw")),
     native/let_offset("raw_heading", bytes, "raw", "header_size"),
@@ -569,7 +569,7 @@ verb native_value/relation_constructor(input: map) -> map
       native/set_statement("cells", native/offset_expression("cells", "arity")),
       native/set_statement("i", native/binary_expression(:Add, "i", "one"))
     ]),
-    native/unless_statement(native/call_expression("relation_sort_rows", ["arena", "rows", "count"]), fail),
+    native/unless_statement(native/call_expression("relation_sort_rows", ["worker", "rows", "count"]), fail),
     native/let_statement("write", :U64, "zero"),
     native/set_statement("i", "zero"),
     native/while_statement(native/binary_expression(:Less, "i", "count"), [
@@ -596,7 +596,7 @@ verb native_value/relation_constructor(input: map) -> map
     ]),
     native/note_statement(
       :Invariant,
-      "Publish only canonical headings and sorted unique rows. Child values retain the arena lifetime."
+      "Publish canonical headings and sorted unique rows. The collector traces child values."
     ),
     native/store_statement("target", native/typed_record(relation, ["canonical_heading", "arity", "rows", "write"])),
     native/return_record(

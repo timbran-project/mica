@@ -42,13 +42,13 @@ verb native_value/string_allocate(input: map) -> map
   let bytes: list = [:Pointer, :U8, :Mutable]
   let result: list = [:Record, "StringAllocation"]
   context = native/declare_function(context, name, result, [
-      ["arena", [:Pointer, [:Record, "ValueArena"], :Mutable], :Borrow],
+      ["worker", [:Pointer, [:Record, "MemoryWorker"], :Mutable], :Borrow],
       ["length", :U64, :Value],
       ["capacity", :U64, :Value],
       ["scalars", :U64, :Value],
       ["ascii", :Bool, :Value]
     ],
-    [], [:Allocate, :ReadMemory, :WriteMemory], :Borrow, "arena")
+    [], [:Allocate, :ReadMemory, :WriteMemory], :Gc, "")
   context = native/define_function(context, name, [
     native/when_statement(native/binary_expression(:Less, "capacity", "length"), [native/return_zero()]),
     native/when_statement(native/binary_expression(:Less, "length", "scalars"), [native/return_zero()]),
@@ -73,7 +73,7 @@ verb native_value/string_allocate(input: map) -> map
     ),
     native/let_statement("total", :U64, native/binary_expression(:Add, "fixed_size", "sample_bytes")),
     native/set_statement("total", native/binary_expression(:Add, "total", "capacity")),
-    native/let_call("allocation", bytes, "value_arena_allocate", ["arena", "total"]),
+    native/let_call("allocation", bytes, "memory_allocate", ["worker", "total", "layout_string"]),
     native/when_statement(native/binary_expression(:Equal, "allocation", "null_bytes"), [native/return_zero()]),
     native/let_statement("pointer", [:Pointer, header, :Mutable], native/unary_expression(:PointerCast, "allocation")),
     native/let_offset("cursor", bytes, "allocation", "header_size"),
@@ -171,11 +171,11 @@ verb native_value/string_constructor(input: map) -> map
   let header: list = [:Record, "HeapString"]
   let result: list = [:Record, "ValueResult"]
   context = native/declare_function(context, name, result, [
-      ["arena", [:Pointer, [:Record, "ValueArena"], :Mutable], :Borrow],
+      ["worker", [:Pointer, [:Record, "MemoryWorker"], :Mutable], :Borrow],
       ["source", [:Pointer, :U8, :Const], :Borrow],
       ["length", :U64, :Value]
     ],
-    [], [:Allocate, :ReadMemory, :WriteMemory], :Borrow, "arena")
+    [], [:Allocate, :ReadMemory, :WriteMemory], :Gc, "")
   context = native/define_function(context, name, [
     native/when_statement(native/binary_expression(:Less, "allocation_limit", "length"), [native/return_zero()]),
     native/let_call("scan", [:Record, "Utf8Scan"], "utf8_scan", ["source", "length"]),
@@ -186,7 +186,7 @@ verb native_value/string_constructor(input: map) -> map
       "allocation",
       [:Record, "StringAllocation"],
       "value_string_allocate",
-      ["arena", "length", "length", "scalars", "ascii"]
+      ["worker", "length", "length", "scalars", "ascii"]
     ),
     native/unless_statement(native/field_expression("allocation", "ok"), [native/return_zero()]),
     native/let_field("pointer", [:Pointer, header, :Mutable], "allocation", "header"),
@@ -212,7 +212,7 @@ verb native_value/string_access(input: map) -> map
   let header_pointer: list = [:Pointer, header, :Const]
   let result: list = [:Record, "IdResult"]
   let name: string = "value_string_length"
-  context = native/declare_function(context, name, result, [["value", word, :Borrow]],
+  context = native/declare_function(context, name, result, [["value", word, :Gc]],
     [], [:ReadMemory], :Value, "")
   context = native/define_function(context, name, [
     native/let_call("checked", [:Record, "HeapStringResult"], "value_as_string", ["value"]),
@@ -224,7 +224,7 @@ verb native_value/string_access(input: map) -> map
     native/return_value("result")
   ])
   name = "value_string_byte_offset"
-  context = native/declare_function(context, name, result, [["value", word, :Borrow], ["position", :U64, :Value]],
+  context = native/declare_function(context, name, result, [["value", word, :Gc], ["position", :U64, :Value]],
     [], [:ReadMemory], :Value, "")
   context = native/define_function(context, name, [
     native/let_call("checked", [:Record, "HeapStringResult"], "value_as_string", ["value"]),
@@ -274,7 +274,7 @@ verb native_value/string_access(input: map) -> map
     native/return_value("result")
   ])
   name = "value_string_scalar_at"
-  context = native/declare_function(context, name, [:Record, "RuneResult"], [["value", word, :Borrow], ["position", :U64, :Value]],
+  context = native/declare_function(context, name, [:Record, "RuneResult"], [["value", word, :Gc], ["position", :U64, :Value]],
     [], [:ReadMemory], :Value, "")
   context = native/define_function(context, name, [
     native/let_call("offset_result", result, "value_string_byte_offset", ["value", "position"]),
@@ -304,12 +304,12 @@ verb native_value/string_slice(input: map) -> map
   let header: list = [:Record, "HeapString"]
   let result: list = [:Record, "ValueResult"]
   context = native/declare_function(context, name, result, [
-      ["arena", [:Pointer, [:Record, "ValueArena"], :Mutable], :Borrow],
-      ["value", word, [:Borrow, "arena"]],
+      ["worker", [:Pointer, [:Record, "MemoryWorker"], :Mutable], :Borrow],
+      ["value", word, :Gc],
       ["start", :U64, :Value],
       ["end", :U64, :Value]
     ],
-    [], [:Allocate, :ReadMemory, :WriteMemory], :Borrow, "arena")
+    [], [:Allocate, :ReadMemory, :WriteMemory], :Gc, "")
   context = native/define_function(context, name, [
     native/when_statement(native/binary_expression(:Less, "end", "start"), [native/return_zero()]),
     native/let_call("offset", [:Record, "IdResult"], "value_string_byte_offset", ["value", "start"]),
@@ -321,7 +321,7 @@ verb native_value/string_slice(input: map) -> map
     native/let_field("last", :U64, "offset", "number"),
     native/unless_statement("condition", [native/return_zero()]),
     native/let_statement("size", :U64, native/unary_expression(:SizeOf, header)),
-    native/let_call("allocation", [:Pointer, :U8, :Mutable], "value_arena_allocate", ["arena", "size"]),
+    native/let_call("allocation", [:Pointer, :U8, :Mutable], "memory_allocate", ["worker", "size", "layout_string_view"]),
     native/when_statement(native/binary_expression(:Equal, "allocation", "null_bytes"), [native/return_zero()]),
     native/note_statement(
       :Invariant,

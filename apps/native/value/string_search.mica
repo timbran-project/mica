@@ -16,7 +16,7 @@ verb native_value/string_search(input: map) -> map
   let constants: map = context[:constants]
   constants["byte_domain"] = constant
   context[:constants] = constants
-  context = native/declare_function(context, name, result, [["value", word, :Borrow], ["needle", word, :Borrow], ["start", :U64, :Value]],
+  context = native/declare_function(context, name, result, [["value", word, :Gc], ["needle", word, :Gc], ["start", :U64, :Value]],
     [], [:ReadMemory, :WriteMemory], :Value, "")
   context = native/define_function(context, name, [
     native/let_call("offset_result", result, "value_string_byte_offset", ["value", "start"]),

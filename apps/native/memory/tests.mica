@@ -1,0 +1,50 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+// These descriptors exercise the collector independently of value semantics.
+verb native_memory/test_context() -> map
+  let context: map = native_memory/context(native/module_context(native/program(), {}))
+  context = native_memory/allocation(context)
+  context = native_memory/collection(context)
+  context = native_memory/lifecycle(context)
+  let bytes: list = native_memory/pointer(:U8)
+  let collection: list = native_memory/record_pointer("MemoryCollection")
+  let object: list = native_memory/record_pointer("MemoryObject")
+  let pair: list = [:Record, "MemoryTestPair"]
+  let view: list = [:Record, "MemoryTestView"]
+  context[:state] = native/record_type(context[:state], "MemoryTestPair", [["left", bytes], ["right", bytes], ["value", :U64]])[1]
+  context[:state] = native/record_type(context[:state], "MemoryTestView", [["base", bytes], ["offset", :U64], ["data", bytes]])[1]
+  context = native_memory/declare(context, "memory_test_trace", :Void,
+    [["collection", collection, :Borrow], ["object", object, :Gc]],
+    [:ReadMemory, :WriteMemory, :Allocate, :Release], :Value, "")
+  let edges: list = []
+  for name in ["left", "right"]
+    edges = [@edges,
+      native_memory/bind(name, bytes, native_memory/field(bytes, "pair", name)),
+      native/let_call(string_concat("visited_", name), bytes, "memory_visit", ["collection", name]),
+      native_memory/store(bytes, "pair", name, string_concat("visited_", name))]
+  end
+  context = native/define_function(context, "memory_test_trace", [
+    native_memory/bind("layout", :U64, native_memory/field(:U64, "object", "layout")),
+    native/when_statement(native/binary_expression(:Equal, "layout", "memory_n0"), [native/return_void()]),
+    native/let_call("payload", bytes, "memory_payload", ["object"]),
+    native/when_statement(native/binary_expression(:Equal, "layout", "memory_n1"), [
+      native_memory/bind("pair", native_memory/pointer(pair), native/unary_expression(:PointerCast, "payload")),
+      @edges, native/return_void()]),
+    native/when_statement(native/binary_expression(:Equal, "layout", "memory_n2"), [
+      native_memory/bind("view", native_memory/pointer(view), native/unary_expression(:PointerCast, "payload")),
+      native_memory/bind("base", bytes, native_memory/field(bytes, "view", "base")),
+      native_memory/bind("offset", :U64, native_memory/field(:U64, "view", "offset")),
+      native/let_call("relocated", bytes, "memory_visit", ["collection", "base"]),
+      native_memory/store(bytes, "view", "base", "relocated"),
+      native_memory/store(bytes, "view", "data", native/typed_expression(bytes, native/offset_expression("relocated", "offset"))),
+      native/return_void()]),
+    native_memory/store(:Bool, "collection", "failed", "memory_true"), native/return_void()])
+  return context
+end
+
+verb native_memory/test_program() -> map
+  let context: map = native_memory/test_context()
+  let result: map = context[:state]
+  return result
+end

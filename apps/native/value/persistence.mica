@@ -6,7 +6,7 @@
 verb native_value/persistence(input: map) -> map
   let context: map = input
   let word: list = native_value/word()
-  context = native/declare_function(context, "value_is_persistable", :Bool, [["value", word, :Borrow]], [], [:ReadMemory], :Value, "")
+  context = native/declare_function(context, "value_is_persistable", :Bool, [["value", word, :Gc]], [], [:ReadMemory], :Value, "")
   let cases: list = [native/case_arm("zero_tag", [native/return_value("true")])]
   for name in ["bool", "int", "float", "identity", "symbol", "error_code", "string", "bytes"]
     cases = [

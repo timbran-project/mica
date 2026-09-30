@@ -25,6 +25,27 @@ void mica_foreign_release(uint8_t *pointer) {
     native_test_release(pointer);
 }
 
+uint8_t *mica_foreign_memory_platform_allocate(uint64_t size) { return mica_foreign_allocate(size); }
+void mica_foreign_memory_platform_release(uint8_t *pointer) { mica_foreign_release(pointer); }
+
+// Semantic fixtures keep locals live until scope exit. Separate GC fixtures
+// exercise roots, relocation, publication, and reclamation at safepoints.
+static void test_worker_init(struct mica_MemoryWorker *worker, uint64_t capacity) {
+    struct mica_MemoryHeap *heap = calloc(1, sizeof(*heap));
+    assert(heap && mica_value_heap_init(heap));
+    assert(mica_memory_worker_init(worker, heap, capacity));
+    assert(mica_memory_enter(worker));
+}
+
+static void test_worker_release(struct mica_MemoryWorker *worker) {
+    struct mica_MemoryHeap *heap = worker->f_heap;
+    if (!heap) return;
+    assert(mica_memory_leave(worker));
+    assert(mica_memory_worker_release(worker));
+    assert(mica_memory_heap_release(heap));
+    free(heap);
+}
+
 static mica_type_Value integer(int64_t number) {
     struct mica_ValueResult result = mica_value_int(number);
     assert(result.f_ok);
@@ -59,7 +80,7 @@ static void symbol_cases(void) {
     const size_t widths[] = {2, 3, 4};
     for (size_t i = 0; i < 3; ++i)
         assert(!mica_value_symbol_intern(&table, invalid[i], widths[i]).f_ok);
-    assert(table.f_count == 0 && table.f_arena.f_head == NULL);
+    assert(table.f_count == 0 && table.f_storage.f_head == NULL);
     fail_allocation = true;
     assert(!mica_value_symbol_intern(&table, NULL, 0).f_ok);
     assert(table.f_count == 0 && table.f_capacity == 0);
@@ -77,14 +98,14 @@ static void symbol_cases(void) {
     original[0] = 'x';
     assert(stable[0] == 0xc3);
     size_t before = allocations;
-    uint64_t used_before = table.f_arena.f_head->f_used;
+    uint64_t used_before = table.f_storage.f_head->f_used;
     fail_allocation = true;
     assert(mica_value_symbol_intern(&table, stable, 7).f_number == 1);
     empty = mica_value_symbol_intern(&table, NULL, 0);
     assert(empty.f_ok && empty.f_number == 0);
     fail_allocation = false;
     assert(allocations == before && table.f_count == 2);
-    assert(table.f_arena.f_head->f_used == used_before);
+    assert(table.f_storage.f_head->f_used == used_before);
     assert(mica_value_symbol_intern(&table, (const uint8_t *)"Name", 4).f_number == 2);
     assert(mica_value_symbol_intern(&table, (const uint8_t *)"name", 4).f_number == 3);
     // Equal hash and length are insufficient: the candidate bytes must match.
@@ -147,7 +168,7 @@ static void symbol_cases(void) {
             assert(id.f_ok && id.f_number == n);
         }
         // Exhaust the current chunk so growth and the new name each allocate.
-        struct mica_ValueArenaBlock *head = table.f_arena.f_head;
+        struct mica_SymbolStorageBlock *head = table.f_storage.f_head;
         head->f_used = head->f_capacity;
         large[0] = 'b';
         allocation_allowance = allowance;
@@ -247,7 +268,7 @@ static void concurrent_symbol_cases(void) {
     mica_value_symbol_table_release(&table);
 }
 
-static void map_cases(struct mica_ValueArena *arena) {
+static void map_cases(struct mica_MemoryWorker *arena) {
     const size_t sizes[] = {0, 1, 2, 3, 7, 32, 257, 4096};
     for (size_t n = 0; n < sizeof(sizes) / sizeof(sizes[0]); ++n) {
         size_t length = sizes[n];
@@ -283,19 +304,19 @@ static void map_cases(struct mica_ValueArena *arena) {
     }
     assert(!mica_value_map(arena, NULL, 1).f_ok);
     assert(!mica_value_map_get(integer(0), integer(0)).f_ok);
-    struct mica_ValueArena failed = {0};
+    struct mica_MemoryWorker failed = {0}; test_worker_init(&failed, 0);
     fail_allocation = true;
     assert(!mica_value_map(&failed, NULL, 0).f_ok);
     fail_allocation = false;
-    assert(failed.f_head == NULL);
+    assert(failed.f_heap->f_pages == NULL);
     struct mica_ValueMapEntry *large = calloc(4096, sizeof(*large));
     assert(large != NULL);
     allocation_allowance = 1;
     assert(!mica_value_map(&failed, large, 4096).f_ok);
     allocation_allowance = SIZE_MAX;
-    // The first buffer remains arena-owned when scratch allocation fails.
-    assert(failed.f_head != NULL);
-    mica_value_arena_release(&failed);
+    // The first buffer remains managed when scratch allocation fails.
+    assert(failed.f_heap->f_pages != NULL);
+    test_worker_release(&failed);
     free(large);
     struct mica_ValueMapEntry dummy = {integer(0), integer(0)};
     assert(!mica_value_map(arena, &dummy, UINT64_MAX).f_ok);
@@ -322,7 +343,7 @@ static void map_cases(struct mica_ValueArena *arena) {
     assert(mica_value_map_get(outer.f_value, equivalent.f_value).f_value == integer(99));
 }
 
-static void comparison_cases(struct mica_ValueArena *arena) {
+static void comparison_cases(struct mica_MemoryWorker *arena) {
     assert(compare(integer(-1), integer(0)) == -1);
     assert(compare(integer(1), floating(1)) == -1);
     struct mica_BoolResult canonical = mica_value_equal(integer(1), floating(1));
@@ -379,7 +400,7 @@ static uint64_t mixed_offset(uint64_t scalar) {
     return (scalar / 4) * 8 + offsets[scalar % 4];
 }
 
-static void string_cases(struct mica_ValueArena *arena) {
+static void string_cases(struct mica_MemoryWorker *arena) {
     const uint8_t pattern[] = {'a',0xc3,0xa9,0xf0,0x9f,0x98,0x80,0};
     const uint32_t runes[] = {'a',0xe9,0x1f600,0};
     const uint64_t sizes[] = {1,15,16,17,64};
@@ -424,7 +445,7 @@ static void string_cases(struct mica_ValueArena *arena) {
     assert(!mica_value_string_scalar_at(integer(1),0).f_ok);
 }
 
-static void append_cases(struct mica_ValueArena *arena) {
+static void append_cases(struct mica_MemoryWorker *arena) {
     uint8_t ascii[129]; memset(ascii,'a',sizeof(ascii));
     struct mica_ValueResult original=mica_value_string(arena,ascii,sizeof(ascii));
     assert(original.f_ok);
@@ -476,13 +497,14 @@ static void append_cases(struct mica_ValueArena *arena) {
     assert(!mica_value_string_concat(arena,first.f_value,integer(1)).f_ok);
     assert(!mica_value_string_concat(arena,integer(1),first.f_value).f_ok);
     // Header allocation can fail even when backing storage has spare capacity.
-    struct mica_ValueArena failed={0}; fail_allocation=true;
+    struct mica_MemoryWorker failed={0}; test_worker_init(&failed, 0); fail_allocation=true;
     assert(!mica_value_string_append(&failed,versions[99],emoji,4).f_ok);
     fail_allocation=false;
-    assert(failed.f_head==NULL && mica_value_string_length(versions[99]).f_number==228);
+    assert(failed.f_heap->f_pages==NULL && mica_value_string_length(versions[99]).f_number==228);
+    test_worker_release(&failed);
 }
 
-static void search_cases(struct mica_ValueArena *arena) {
+static void search_cases(struct mica_MemoryWorker *arena) {
     const uint8_t bytes[]={'a',0xc3,0xa9,0xf0,0x9f,0x98,0x80,0};
     uint8_t text[1024];
     for(unsigned i=0;i<128;i++) memcpy(text+i*8,bytes,8);
@@ -514,7 +536,7 @@ static void search_cases(struct mica_ValueArena *arena) {
     assert(!mica_value_string_find(hay.f_value,integer(1),0).f_ok);
 }
 
-static void utf8_cases(struct mica_ValueArena *arena) {
+static void utf8_cases(struct mica_MemoryWorker *arena) {
     const struct { uint32_t scalar; uint8_t bytes[4]; uint64_t width; } valid[] = {
         {0, {0}, 1}, {0x7f, {0x7f}, 1}, {0x80, {0xc2, 0x80}, 2},
         {0x7ff, {0xdf, 0xbf}, 2}, {0x800, {0xe0, 0xa0, 0x80}, 3},
@@ -540,14 +562,14 @@ static void utf8_cases(struct mica_ValueArena *arena) {
         {{0xf0,0x8f,0xbf,0xbf},4}, {{0xf4,0x90,0x80,0x80},4}, {{0xf5,0x80,0x80,0x80},4},
         {{0xff},1}, {{0xc2,0x7f},2}, {{0xe1,0x80,0xc0},3}, {{0xf1,0x80,0x80,0xff},4}
     };
-    struct mica_ValueArenaBlock *head = arena->f_head;
-    uint64_t used = head->f_used;
+    struct mica_MemoryPage *head = arena->f_heap->f_pages;
+    uint64_t used = arena->f_used;
     for (size_t i = 0; i < sizeof(invalid) / sizeof(invalid[0]); ++i) {
         struct mica_Utf8Decode decoded = mica_utf8_decode(invalid[i].bytes, invalid[i].width);
         assert(!decoded.f_ok && decoded.f_width == 0 && decoded.f_rune == 0);
         assert(!mica_utf8_scan(invalid[i].bytes, invalid[i].width).f_ok);
         assert(!mica_value_string(arena, invalid[i].bytes, invalid[i].width).f_ok);
-        assert(arena->f_head == head && head->f_used == used);
+        assert(arena->f_heap->f_pages == head && arena->f_used == used);
     }
     uint8_t aligned_test[34]; memset(aligned_test,'a',sizeof(aligned_test));
     for(uint64_t length=0;length<=32;length++) {
@@ -577,7 +599,7 @@ static void utf8_cases(struct mica_ValueArena *arena) {
 }
 
 static void collection_cases(void) {
-    struct mica_ValueArena arena={0};
+    struct mica_MemoryWorker arena={0}; test_worker_init(&arena, 4 * 1024 * 1024);
     mica_type_Value input[]={integer(1),integer(2),integer(3)};
     struct mica_ValueResult list=mica_value_list(&arena,input,3);
     assert(list.f_ok && mica_value_list_length(list.f_value).f_number==3);
@@ -631,9 +653,9 @@ static void collection_cases(void) {
     }
     struct mica_ValueResult nested=mica_value_map_set(&arena,map.f_value,slice.f_value,branch.f_value);
     assert(nested.f_ok && mica_value_map_get(nested.f_value,slice.f_value).f_value==branch.f_value);
-    // Fresh destination arenas force the allocator path. Failure must not alter
+    // Fresh destination workers force the allocator path. Failure must not alter
     // either the source values or the reusable tail's published used count.
-    struct mica_ValueArena failed={0};
+    struct mica_MemoryWorker failed={0}; test_worker_init(&failed, 0);
     struct mica_HeapListResult current=mica_value_as_list(tail_append.f_value);
     uint64_t used=current.f_header->f_storage->f_used;
     fail_allocation=true;
@@ -644,7 +666,7 @@ static void collection_cases(void) {
     assert(!mica_value_list_slice(&failed,list.f_value,0,1).f_ok);
     assert(!mica_value_map_set(&failed,map.f_value,integer(3),integer(0)).f_ok);
     fail_allocation=false;
-    assert(failed.f_head==NULL && current.f_header->f_storage->f_used==used);
+    assert(failed.f_heap->f_pages==NULL && current.f_header->f_storage->f_used==used);
     assert(mica_value_list_get(list.f_value,0).f_value==integer(1));
     assert(!mica_value_list(&failed,input,UINT64_MAX).f_ok);
     assert(!mica_value_list(&failed,NULL,1).f_ok);
@@ -652,13 +674,13 @@ static void collection_cases(void) {
     // the destination leaves all source views intact.
     struct mica_ValueResult borrowed=mica_value_list_set(&failed,list.f_value,0,slice.f_value);
     assert(borrowed.f_ok && mica_value_list_get(borrowed.f_value,0).f_value==slice.f_value);
-    mica_value_arena_release(&failed);
+    test_worker_release(&failed);
     assert(mica_value_list_get(slice.f_value,0).f_value==integer(2));
-    mica_value_arena_release(&arena);
+    test_worker_release(&arena);
 }
 
 static void relation_cases(void) {
-    struct mica_ValueArena arena={0};
+    struct mica_MemoryWorker arena={0}; test_worker_init(&arena, 4 * 1024 * 1024);
     struct mica_ValueTuple empty_rows[3]={{0},{0},{0}};
     struct mica_ValueResult empty=mica_value_relation(&arena,NULL,0,NULL,0);
     struct mica_ValueResult unit=mica_value_relation(&arena,NULL,0,empty_rows,3);
@@ -751,7 +773,7 @@ static void relation_cases(void) {
     }
     bool succeeded=false;
     for(size_t allowance=0;allowance<12;allowance++) {
-        struct mica_ValueArena destination={0};
+        struct mica_MemoryWorker destination={0}; test_worker_init(&destination, 0);
         allocation_allowance=allowance;
         struct mica_ValueResult attempt=mica_value_relation(&destination,large_heading,3,large_rows,count);
         allocation_allowance=SIZE_MAX;
@@ -762,25 +784,25 @@ static void relation_cases(void) {
             assert(mica_value_tuple_get(row.f_tuple,0).f_value==integer(1));
             succeeded=true;
         }
-        mica_value_arena_release(&destination);
+        test_worker_release(&destination);
         if(succeeded) break;
     }
     assert(succeeded);
     free(large_rows); free(large_cells);
-    struct mica_ValueArena destination={0};
+    struct mica_MemoryWorker destination={0}; test_worker_init(&destination, 0);
     fail_allocation=true;
     assert(!mica_value_tuple(&destination,first.f_tuple.f_data,3).f_ok);
     assert(!mica_value_relation(&destination,NULL,0,empty_rows,1).f_ok);
     fail_allocation=false;
     struct mica_ValueResult borrowed=mica_value_relation(&destination,view.f_relation.f_heading,3,view.f_relation.f_rows,2);
     assert(borrowed.f_ok && mica_value_compare(borrowed.f_value,relation.f_value).f_number==0);
-    mica_value_arena_release(&destination);
+    test_worker_release(&destination);
     assert(mica_value_tuple_get(first.f_tuple,1).f_value==unit.f_value);
-    mica_value_arena_release(&arena);
+    test_worker_release(&arena);
 }
 
 static void traversal_cases(void) {
-    struct mica_ValueArena source={0}, destination={0};
+    struct mica_MemoryWorker source={0}, destination={0}; test_worker_init(&source, 4 * 1024 * 1024); test_worker_init(&destination, 0);
     mica_type_Value roots[20]={0};
     roots[1]=mica_value_bool(true);
     roots[2]=integer(-1234567);
@@ -837,7 +859,7 @@ static void traversal_cases(void) {
     // partially populated destination must reclaim every recursive allocation.
     bool succeeded=false;
     for(size_t allowance=0;allowance<128;allowance++) {
-        struct mica_ValueArena failed={0};
+        struct mica_MemoryWorker failed={0}; test_worker_init(&failed, 0);
         allocation_allowance=allowance;
         struct mica_ValueResult attempt=mica_value_copy(&failed,roots[16]);
         allocation_allowance=SIZE_MAX;
@@ -846,11 +868,11 @@ static void traversal_cases(void) {
             assert(mica_value_hash(attempt.f_value).f_number==mica_value_hash(roots[16]).f_number);
             succeeded=true;
         } else assert(attempt.f_value==0);
-        mica_value_arena_release(&failed);
+        test_worker_release(&failed);
         if(succeeded) break;
     }
     assert(succeeded);
-    mica_value_arena_release(&source);
+    test_worker_release(&source);
     assert(mica_value_hash(copied.f_value).f_number==expected.f_number);
     assert(mica_value_tuple_hash(copied_tuple.f_tuple).f_number==expected_tuple.f_number);
     struct mica_ValueResult string=mica_value_list_get(copied.f_value,7);
@@ -867,20 +889,20 @@ static void traversal_cases(void) {
     assert(mica_value_list_get(appended.f_value,20).f_value==integer(99));
     assert(!mica_value_hash(UINT64_C(255)<<56).f_ok);
     assert(!mica_value_copy(&destination,UINT64_C(255)<<56).f_ok);
-    mica_value_arena_release(&destination);
+    test_worker_release(&destination);
     // Deep nesting traverses child values rather than pointer bits.
-    struct mica_ValueArena deep_source={0},deep_destination={0};
+    struct mica_MemoryWorker deep_source={0},deep_destination={0}; test_worker_init(&deep_source, 4 * 1024 * 1024); test_worker_init(&deep_destination, 4 * 1024 * 1024);
     mica_type_Value deep=integer(17);
     for(unsigned i=0;i<256;i++) deep=mica_value_frob(&deep_source,1,deep).f_value;
     uint64_t deep_hash=mica_value_hash(deep).f_number;
     copied=mica_value_copy(&deep_destination,deep); assert(copied.f_ok);
-    mica_value_arena_release(&deep_source);
+    test_worker_release(&deep_source);
     assert(mica_value_hash(copied.f_value).f_number==deep_hash);
-    mica_value_arena_release(&deep_destination);
+    test_worker_release(&deep_destination);
 }
 
 static void codec_cases(void) {
-    struct mica_ValueArena source={0},encoded={0},decoded={0};
+    struct mica_MemoryWorker source={0},encoded={0},decoded={0}; test_worker_init(&source, 4 * 1024 * 1024); test_worker_init(&encoded, 4 * 1024 * 1024); test_worker_init(&decoded, 4 * 1024 * 1024);
     struct mica_ValueCodecOptions ids={true,false},names={0},caps={true,true};
     uint8_t *text=malloc(20000); assert(text);
     for(size_t i=0;i<20000;i+=2) { text[i]=0xc3; text[i+1]=0xa9; }
@@ -908,11 +930,11 @@ static void codec_cases(void) {
     assert(!mica_value_decode_exact(&decoded,NULL,stream,sizeof(stream),ids).f_ok);
     assert(!mica_value_decode_exact(&decoded,NULL,NULL,1,ids).f_ok);
     assert(!mica_value_decode_exact(&decoded,NULL,NULL,0,ids).f_ok);
-    // Each foreign allocation failure can leave arena scratch, but publishes no value.
+    // Each foreign allocation failure can leave unrooted scratch, but publishes no value.
     for(unsigned operation=0;operation<2;operation++) {
         bool succeeded=false;
         for(size_t allowance=0;allowance<128;allowance++) {
-            struct mica_ValueArena attempt_arena={0};
+            struct mica_MemoryWorker attempt_arena={0}; test_worker_init(&attempt_arena, 0);
             allocation_allowance=allowance;
             struct mica_ValueResult attempt=operation==0
                 ? mica_value_encode(&attempt_arena,NULL,relation,ids)
@@ -927,15 +949,19 @@ static void codec_cases(void) {
                 succeeded=true;
             } else assert(attempt.f_value==0);
             assert(mica_value_hash(relation).f_number==hash);
-            mica_value_arena_release(&attempt_arena);
+            test_worker_release(&attempt_arena);
             if(succeeded) break;
         }
         assert(succeeded);
     }
-    mica_value_arena_release(&source);
-    mica_value_arena_release(&encoded);
+    test_worker_release(&source);
+    test_worker_release(&encoded);
     assert(mica_value_hash(prefix.f_value).f_number==hash);
-    mica_value_arena_release(&decoded);
+    test_worker_release(&decoded);
+
+    test_worker_init(&source, 4 * 1024 * 1024);
+    test_worker_init(&encoded, 4 * 1024 * 1024);
+    test_worker_init(&decoded, 4 * 1024 * 1024);
 
     // Source and destination symbol tables have unrelated IDs. Encoded names
     // and decoded heap storage must outlive the source bytes and symbol table.
@@ -959,12 +985,15 @@ static void codec_cases(void) {
     assert(named.f_ok);
     uint32_t target_id=(uint32_t)mica_value_as_symbol(named.f_value).f_number;
     assert(target_id!=id.f_number);
-    mica_value_arena_release(&encoded);
+    test_worker_release(&encoded);
     struct mica_SymbolText name=mica_value_symbol_text(&target_symbols,target_id);
     assert(name.f_ok && name.f_length==sizeof(spelling));
     assert(memcmp(name.f_data,spelling,sizeof(spelling))==0);
     mica_value_symbol_table_release(&target_symbols);
-    mica_value_arena_release(&decoded);
+    test_worker_release(&decoded);
+
+    test_worker_init(&encoded, 4 * 1024 * 1024);
+    test_worker_init(&decoded, 4 * 1024 * 1024);
 
     // Restrictions recurse, but absent optional fields do not count as children.
     mica_type_Value cap=mica_value_capability(1).f_value;
@@ -987,9 +1016,9 @@ static void codec_cases(void) {
     assert(!mica_value_decode_exact(&decoded,NULL,invalid,8,ids).f_ok);
     memset(invalid,0,16); invalid[7]=255; invalid[6]=16; invalid[8]=2;
     assert(!mica_value_decode_exact(&decoded,NULL,invalid,16,ids).f_ok);
-    mica_value_arena_release(&source);
-    mica_value_arena_release(&encoded);
-    mica_value_arena_release(&decoded);
+    test_worker_release(&source);
+    test_worker_release(&encoded);
+    test_worker_release(&decoded);
 }
 
 int main(void) {
@@ -1059,27 +1088,28 @@ int main(void) {
     assert(!mica_value_to_int(floating(1.5f)).f_ok);
     assert(mica_value_to_int(floating(-17)).f_value == integer(-17));
     assert(!mica_value_to_float(mica_value_bool(true)).f_ok);
-    struct mica_ValueArena arena = {0};
-    uint8_t *first = mica_value_arena_allocate(&arena, 3);
+    struct mica_MemoryWorker arena = {0}; test_worker_init(&arena, 4 * 1024 * 1024);
+    uint8_t *first = mica_memory_allocate(&arena, 3, 0);
     assert(first != NULL && (uintptr_t)first % 8 == 0);
     memcpy(first, "abc", 3);
     for (unsigned i = 0; i < 1000; ++i) {
-        uint8_t *allocation = mica_value_arena_allocate(&arena, 1000);
+        uint8_t *allocation = mica_memory_allocate(&arena, 1000, 0);
         assert(allocation != NULL && (uintptr_t)allocation % 8 == 0);
         memset(allocation, (int)(i & 255), 1000);
     }
     assert(memcmp(first, "abc", 3) == 0);
-    struct mica_ValueArenaBlock *head_before_failure = arena.f_head;
-    uint64_t used_before_failure = arena.f_head->f_used;
+    struct mica_MemoryPage *head_before_failure = arena.f_heap->f_pages;
+    uint64_t used_before_failure = arena.f_used;
     fail_allocation = true;
-    assert(mica_value_arena_allocate(&arena, UINT64_C(1) << 20) == NULL);
-    assert(arena.f_head == head_before_failure && arena.f_head->f_used == used_before_failure);
-    struct mica_ValueArena empty_arena = {0};
+    assert(mica_memory_allocate(&arena, UINT64_C(1) << 23, 0) == NULL);
+    assert(arena.f_heap->f_pages == head_before_failure && arena.f_used == used_before_failure);
+    struct mica_MemoryWorker empty_arena = {0}; test_worker_init(&empty_arena, 0);
     assert(!mica_value_string(&empty_arena, (const uint8_t *)"abc", 3).f_ok);
-    assert(empty_arena.f_head == NULL);
+    assert(empty_arena.f_heap->f_pages == NULL);
     fail_allocation = false;
-    assert(mica_value_arena_allocate(&arena, UINT64_MAX) == NULL);
-    assert(mica_value_arena_allocate(&arena, 0) == NULL);
+    test_worker_release(&empty_arena);
+    assert(mica_memory_allocate(&arena, UINT64_MAX, 0) == NULL);
+    assert(mica_memory_allocate(&arena, 0, 0) == NULL);
     struct mica_ValueResult composed = mica_test_composed(&arena);
     assert(composed.f_ok && mica_value_as_range(composed.f_value).f_header->f_start == integer(3));
     uint8_t original[] = {0xc3, 0xa9, 0, 0x78};
@@ -1120,9 +1150,9 @@ int main(void) {
     map_cases(&arena);
     symbol_cases();
     concurrent_symbol_cases();
-    mica_value_arena_release(&arena);
-    assert(arena.f_head == NULL);
-    mica_value_arena_release(&arena);
+    test_worker_release(&arena);
+    assert(arena.f_heap == NULL);
+    test_worker_release(&arena);
     assert(allocations == releases);
     return 0;
 }

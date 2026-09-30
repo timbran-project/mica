@@ -1,0 +1,77 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+// Returning value helpers never collect. Their callers root live results and
+// reach a safepoint between operations; allocation can spill into mature pages.
+verb native_value/memory(input: map) -> map
+  let context: map = native_memory/context(input)
+  context = native_memory/allocation(context)
+  context = native_memory/collection(context)
+  context = native_memory/lifecycle(context)
+  let layouts: list = [["opaque", 0], ["string", 7], ["bytes", 8], ["list", 9],
+    ["map", 10], ["range", 11], ["error", 12], ["frob", 14], ["relation", 16],
+    ["string_view", 17], ["list_view", 18], ["bytes_view", 19], ["values", 20],
+    ["buffer", 23], ["relation_copy", 24]]
+  let declarations: list = [[string_concat("layout_", spec[0]), :U64, native_value/hex(spec[1])] for spec in layouts]
+  let [constants, state] = native/constants(context[:state],
+    [@declarations, ["value_tag_shift", :U64, "0000000000000038"]])
+  context[:state] = state
+  let bindings: map = context[:constants]
+  for name, id in constants
+    bindings[name] = id
+  end
+  context[:constants] = bindings
+  let bytes: list = native_memory/pointer(:U8)
+  let heap: list = native_memory/record_pointer("MemoryHeap")
+  let object: list = native_memory/record_pointer("MemoryObject")
+  let collection: list = native_memory/record_pointer("MemoryCollection")
+  let root: list = native_memory/record_pointer("MemoryRoot")
+  let word: list = native_value/word()
+  context = native_memory/declare(context, "value_trace", :Void,
+    [["collection", collection, :Borrow], ["object", object, :Gc]],
+    [:ReadMemory, :WriteMemory, :Allocate, :Release], :Value, "")
+  context = native_memory/declare(context, "value_heap_init", :Bool,
+    [["heap", heap, :Borrow]], [:ReadMemory, :WriteMemory, :Allocate, :Release], :Value, "")
+  context = native/define_function(context, "value_heap_init", [
+    native/return_value(native/call_expression("memory_heap_init", ["heap",
+      native/typed_expression([:FunctionPointer, "MemoryTrace"], native/function_address_expression("value_trace"))]))])
+  context = native_memory/declare(context, "value_storage_private", :Bool,
+    [["storage", bytes, :Gc], ["header_size", :U64, :Value]], [:ReadMemory], :Value, "")
+  context = native/define_function(context, "value_storage_private", [
+    native/let_statement("offset", :I64, native/unary_expression(:Bitcast, native/typed_expression(:U64, native/binary_expression(:Subtract, "zero", "header_size")))),
+    native/let_offset("base", bytes, "storage", "offset"),
+    native/let_call("object", object, "memory_object", ["base"]),
+    native/return_value(native/binary_expression(:Equal, native_memory/field(:U64, "object", "state"), "memory_n1"))])
+  context = native_memory/declare(context, "value_root_set", :Void,
+    [["root", root, :Borrow], ["value", word, :Gc]], [:ReadMemory, :WriteMemory], :Value, "")
+  context = native_memory/declare(context, "value_root_get", word,
+    [["root", root, :Borrow]], [:ReadMemory], :Gc, "")
+  let cases: list = []
+  for kind in native_value/kinds()
+    if kind[2]
+      cases = [@cases, native/when_statement(native/binary_expression(:Equal, "tag", string_concat("tag_", kind[0])), [
+        native_memory/store(:U64, "root", "bits", "tag_bits"),
+        native_memory/store_root(bytes, "root", "pointer", native/typed_expression(bytes, native/unary_expression(:UnpackPointer, "value"))),
+        native/return_void()])]
+    end
+  end
+  context = native/define_function(context, "value_root_set", [
+    native/let_statement("tag", :U8, native/unary_expression(:Tag, "value")),
+    native/let_statement("tag_bits", :U64, native/unary_expression(:Convert, "tag")),
+    native/set_statement("tag_bits", native/binary_expression(:ShiftLeft, "tag_bits", "value_tag_shift")),
+    native_memory/store_root(bytes, "root", "pointer", "null_bytes"),
+    @cases,
+    native/let_statement("payload", :U64, native/unary_expression(:Payload, "value")),
+    native_memory/store(:U64, "root", "bits", native/typed_expression(:U64, native/binary_expression(:BitOr, "tag_bits", "payload"))),
+    native/return_void()])
+  context = native/define_function(context, "value_root_get", [
+    native_memory/bind("bits", :U64, native_memory/field(:U64, "root", "bits")),
+    native/let_statement("tag", :U8, native/unary_expression(:Convert,
+      native/typed_expression(:U64, native/binary_expression(:ShiftRight, "bits", "value_tag_shift")))),
+    native_memory/bind("pointer", bytes, native_memory/root(bytes, "root", "pointer")),
+    native/when_statement(native/binary_expression(:Equal, "pointer", "null_bytes"), [
+      native/return_value(native/binary_expression(:PackImmediate,
+        native/typed_expression(:U64, native/binary_expression(:BitAnd, "bits", "payload_mask")), "tag"))]),
+    native/return_value(native/binary_expression(:PackPointer, "pointer", "tag"))])
+  return context
+end

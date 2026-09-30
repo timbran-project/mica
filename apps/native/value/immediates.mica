@@ -8,9 +8,9 @@ verb native_value/immediates(input: map) -> map
   let failure: list = [native/return_zero()]
   context = native/declare_function(context, "value_empty_relation", word, [], [], [], :Immediate, "")
   context = native/define_function(context, "value_empty_relation", [native/return_zero()])
-  context = native/declare_function(context, "value_tag", :U8, [["value", word, :Borrow]], [], [], :Value, "")
+  context = native/declare_function(context, "value_tag", :U8, [["value", word, :Gc]], [], [], :Value, "")
   context = native/define_function(context, "value_tag", [native/return_value(native/unary_expression(:Tag, "value"))])
-  context = native/declare_function(context, "value_kind", :U8, [["value", word, :Borrow]], [], [], :Value, "")
+  context = native/declare_function(context, "value_kind", :U8, [["value", word, :Gc]], [], [], :Value, "")
   context = native/define_function(context, "value_kind", [
     native/let_statement("tag", :U8, native/unary_expression(:Tag, "value")),
     native/when_statement(native/binary_expression(:Equal, "tag", "zero_tag"), [native/return_value("tag_relation")]),
@@ -113,7 +113,7 @@ verb native_value/immediate_accessor(input: map, spec: list) -> map
   let context: map = input
   let name = string_concat("value_as_", spec[0])
   let result = [:Record, spec[2]]
-  context = native/declare_function(context, name, result, [["value", native_value/word(), :Borrow]], [], [], :Value, "")
+  context = native/declare_function(context, name, result, [["value", native_value/word(), :Gc]], [], [], :Value, "")
   let statements: list = [
     native/let_statement("tag", :U8, native/unary_expression(:Tag, "value")),
     native/unless_statement(

@@ -24,9 +24,9 @@ verb native_value/heap(input: map) -> map
     end
     context = native_value/heap_accessor(context, spec[0], [:Record, spec[1]])
   end
-  for spec in [["range", "HeapRange", [["start", word, [:Borrow, "arena"]], ["has_end", :Bool, :Value], ["end", word, [:Borrow, "arena"]]]],
-               ["frob", "HeapFrob", [["delegate", :U64, :Value], ["value", word, [:Borrow, "arena"]]]],
-               ["error", "HeapError", [["code", :U32, :Value], ["has_message", :Bool, :Value], ["message", word, [:Borrow, "arena"]], ["has_value", :Bool, :Value], ["value", word, [:Borrow, "arena"]]]]]
+  for spec in [["range", "HeapRange", [["start", word, :Gc], ["has_end", :Bool, :Value], ["end", word, :Gc]]],
+               ["frob", "HeapFrob", [["delegate", :U64, :Value], ["value", word, :Gc]]],
+               ["error", "HeapError", [["code", :U32, :Value], ["has_message", :Bool, :Value], ["message", word, :Gc], ["has_value", :Bool, :Value], ["value", word, :Gc]]]]
     context = native_value/record_constructor(context, spec)
     context = native_value/heap_accessor(context, spec[0], [:Record, spec[1]])
   end
@@ -34,7 +34,7 @@ verb native_value/heap(input: map) -> map
   return context
 end
 
-// The bytes header and copied bytes occupy one aligned arena allocation.
+// The bytes header and copied bytes occupy one aligned worker allocation.
 verb native_value/bytes_constructor(input: map) -> map
   let context: map = input
   let header: list = [:Record, "HeapBytes"]
@@ -46,8 +46,8 @@ verb native_value/bytes_constructor(input: map) -> map
   context[:constants] = constants
   context[:state] = state
   context = native/declare_function(context, "value_bytes", [:Record, "ValueResult"],
-    [["arena", [:Pointer, [:Record, "ValueArena"], :Mutable], :Borrow], ["source", source, :Borrow], ["length", :U64, :Value]],
-    [], [:Allocate, :ReadMemory, :WriteMemory], :Borrow, "arena")
+    [["worker", [:Pointer, [:Record, "MemoryWorker"], :Mutable], :Borrow], ["source", source, :Borrow], ["length", :U64, :Value]],
+    [], [:Allocate, :ReadMemory, :WriteMemory], :Gc, "")
   let failure: list = [native/return_zero()]
   context = native/define_function(context, "value_bytes", [
     native/unless_statement(
@@ -58,7 +58,7 @@ verb native_value/bytes_constructor(input: map) -> map
     native/let_statement("limit", :U64, native/binary_expression(:Subtract, "allocation_limit", "header_size")),
     native/when_statement(native/binary_expression(:Less, "limit", "length"), failure),
     native/let_statement("total", :U64, native/binary_expression(:Add, "header_size", "length")),
-    native/let_call("allocation", bytes, "value_arena_allocate", ["arena", "total"]),
+    native/let_call("allocation", bytes, "memory_allocate", ["worker", "total", "layout_bytes"]),
     native/when_statement(native/binary_expression(:Equal, "allocation", "null_bytes"), failure),
     native/let_statement("pointer", [:Pointer, header, :Mutable], native/unary_expression(:PointerCast, "allocation")),
     native/let_offset("data", bytes, "allocation", "header_size"),
@@ -82,8 +82,8 @@ verb native_value/record_constructor(input: map, spec: list) -> map
   let header: list = [:Record, spec[1]]
   let result: list = [:Record, "ValueResult"]
   context = native/declare_function(context, name, result,
-    [["arena", [:Pointer, [:Record, "ValueArena"], :Mutable], :Borrow], @spec[2]],
-    [], [:Allocate, :ReadMemory, :WriteMemory], :Borrow, "arena")
+    [["worker", [:Pointer, [:Record, "MemoryWorker"], :Mutable], :Borrow], @spec[2]],
+    [], [:Allocate, :ReadMemory, :WriteMemory], :Gc, "")
   let failure: list = [native/return_zero()]
   let statements: list = []
   if spec[0] == "frob"
@@ -109,7 +109,7 @@ verb native_value/record_constructor(input: map, spec: list) -> map
   context = native/define_function(context, name, [
     @statements,
     native/let_statement("size", :U64, native/unary_expression(:SizeOf, header)),
-    native/let_call("allocation", [:Pointer, :U8, :Mutable], "value_arena_allocate", ["arena", "size"]),
+    native/let_call("allocation", [:Pointer, :U8, :Mutable], "memory_allocate", ["worker", "size", string_concat("layout_", spec[0])]),
     native/when_statement(native/binary_expression(:Equal, "allocation", "null_bytes"), failure),
     native/let_statement("pointer", [:Pointer, header, :Mutable], native/unary_expression(:PointerCast, "allocation")),
     native/let_statement("header", header, native/record_expression([@[field[0] for field in spec[2]]])),
@@ -131,7 +131,7 @@ verb native_value/heap_accessor(input: map, kind: string, header: list) -> map
   let result: list = [:Record, result_name]
   context[:state] = native/record_type(context[:state], result_name, [["ok", :Bool], ["header", pointer]])[1]
   let name: string = string_concat("value_as_", kind)
-  context = native/declare_function(context, name, result, [["value", native_value/word(), :Borrow]], [], [], :Borrow, "value")
+  context = native/declare_function(context, name, result, [["value", native_value/word(), :Gc]], [], [], :Gc, "")
   context = native/define_function(context, name, [
     native/unless_statement(
       native/binary_expression(

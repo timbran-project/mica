@@ -1,0 +1,90 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+verb native_jit/define_instructions(input: map) -> map
+  let context: map = input
+  let h: list = native_jit/handle()
+  let scratch = native/typed_expression([:Pointer, h, :Mutable], native/offset_expression("cache", native_jit/slot(6, "n0")))
+  let cases: list = [@native_jit/extended_cases(), @native_jit/checked_cases()]
+  let expressions: map = {
+    :Manage -> "left",
+    :RootLoad -> native_jit/j("value", [native_jit/j("dereference", ["left"])]),
+    :Copy -> "left", :Zero -> native_jit/invoke("zero", ["type_id"], h),
+    :Equal -> native_jit/j("eq", ["ctx", "left", "right"]),
+    :Less -> native_jit/j("lt", ["ctx", "left", "right"]),
+    :Convert -> native_jit/j("cast", ["ctx", "left", "type"]),
+    :Bitcast -> native_jit/j("bitcast", ["ctx", "left", "type"]),
+    :Wrap -> native_jit/j("cast", ["ctx", "left", "type"]),
+    :Unwrap -> native_jit/j("cast", ["ctx", "left", "type"]),
+    :Negate -> native_jit/j("neg", ["ctx", "type", "left"]),
+    :Field -> native_jit/j("field_value", ["left", native_jit/cached(5, "b")]),
+    :FieldPointer -> native_jit/j("address", [native_jit/j("field_local", ["left", native_jit/cached(5, "b")])]),
+    :Address -> native_jit/j("address", [native_jit/cached(2, "a")]),
+    :Load -> native_jit/j("value", [native_jit/j("dereference", ["left"])]),
+    :Offset -> native_jit/j("address", [native_jit/j("element", ["ctx", "left", "right"])]),
+    :Freeze -> native_jit/j("cast", ["ctx", "left", "type"]),
+    :SizeOf -> native_jit/j("cast", ["ctx", native_jit/j("sizeof", ["ctx", native_jit/cached(3, "a")]), "type"]),
+    :GlobalAddress -> native_jit/j("address", [native_jit/cached(2, "a")]),
+    :FunctionAddress -> native_jit/j("function_address", [native_jit/cached(0, "a")])}
+  for op, expression in expressions
+    cases = [@cases, native/case_arm(native_jit/n(native_jit/position(native_jit/opcodes(), op)), [native_jit/set("value", expression)])]
+  end
+  for spec in [[:Add, "add"], [:Subtract, "sub"], [:Multiply, "mul"], [:BitAnd, "and"], [:BitOr, "or"], [:BitXor, "xor"]]
+    let unsigned_type = native_jit/cached(3, "n4")
+    let widened = native_jit/j(spec[1], ["ctx", unsigned_type, native_jit/j("cast", ["ctx", "left", unsigned_type]), native_jit/j("cast", ["ctx", "right", unsigned_type])])
+    cases = [@cases, native/case_arm(native_jit/n(native_jit/position(native_jit/opcodes(), spec[0])), [
+      native/if_statement(native/binary_expression(:Equal, "kind", "n6"), [native_jit/set("value", native_jit/j(spec[1], ["ctx", "type", "left", "right"]))], [native_jit/set("value", native_jit/j("cast", ["ctx", widened, "type"]))])])]
+  end
+  for opcode in [:Call, :Record]
+    let first: int = 5
+    let expression = native_jit/j("record", ["ctx", "type", "argument_count", scratch])
+    if opcode == :Call
+      first = 6
+      expression = native_jit/j("call", ["ctx", native_jit/cached(0, "a"), "argument_count", scratch])
+    end
+    // Each switch arm receives distinct native local names.
+    let body: list = [native_jit/bind("argument", :U64, native_jit/n(first)), native_jit/bind("argument_count", :U64, "n0"),
+      native/while_statement(native/binary_expression(:Less, "argument", native_jit/word("row", 0)), [
+        native_jit/save(6, "argument_count", native_jit/cached(1, native_jit/at("row", "argument", :U64))),
+        native_jit/set("argument", native_jit/binary(:Add, "argument", "n1")), native_jit/set("argument_count", native_jit/binary(:Add, "argument_count", "n1"))]), native_jit/set("value", expression)]
+    let names: map = {"argument" -> string_concat("argument", to_literal(first)), "argument_count" -> string_concat("argument_count", to_literal(first))}
+    cases = [@cases, native/case_arm(native_jit/n(native_jit/position(native_jit/opcodes(), opcode)), native_jit/rename(body, names))]
+  end
+  for op in [:Store, :RootStore]
+    cases = [@cases, native/case_arm(native_jit/n(native_jit/position(native_jit/opcodes(), op)), [
+      native/do_statement(native/call_expression("j_assign", ["block", native_jit/j("dereference", ["left"]), "right"])), native_jit/ret("n0")])]
+  end
+  context = native_jit/define(context, "instruction", [
+    native_jit/bind("block_id", :U64, native_jit/word("row", 2)), native_jit/bind("block", h, native_jit/cached(7, "block_id")),
+    native_jit/bind("op", :U64, native_jit/word("row", 3)), native_jit/bind("destination", :U64, native_jit/word("row", 4)),
+    native_jit/bind("type_id", :U64, native_jit/meta(0, "destination")), native_jit/bind("type", h, native_jit/cached(3, "type_id")),
+    native_jit/bind("type_row", native_jit/words(), native/offset_expression("data", native_jit/meta(1, "type_id"))), native_jit/bind("kind", :U64, native_jit/word("type_row", 2)),
+    native_jit/bind("a", :U64, "n0"), native_jit/bind("b", :U64, "n0"),
+    native/when_statement(native/binary_expression(:Less, "n5", native_jit/word("row", 0)), [native_jit/set("a", native_jit/word("row", 5))]),
+    native/when_statement(native/binary_expression(:Less, "n6", native_jit/word("row", 0)), [native_jit/set("b", native_jit/word("row", 6))]),
+    native_jit/bind("left", h, native_jit/cached(1, "a")), native_jit/bind("right", h, native_jit/cached(1, "b")), native_jit/bind("value", h, "null"),
+    native/switch_statement(:U64, "op", cases, [native_jit/ret(native_jit/binary(:Add, "op", "n1"))]),
+    native/if_statement(native/binary_expression(:Equal, "destination", native_jit/binary(:Subtract, native_jit/word("data", 2), "n1")), [
+      native/do_statement(native/call_expression("j_eval", ["block", "value"]))], [native/do_statement(native/call_expression("j_assign", ["block", native_jit/cached(2, "destination"), "value"]))]), native_jit/ret("n0")])
+  context = native_jit/define(context, "instructions", [@native_jit/scan(6, [native_jit/bind("status", :U64, native_jit/invoke("instruction", ["row"], :U64)), native_jit/unless(native/binary_expression(:Equal, "status", "n0"), [native_jit/ret("status")])]), native_jit/ret("n0")])
+  context = native_jit/define(context, "terminators", [@native_jit/scan(7, [
+    native_jit/bind("block_id", :U64, native_jit/word("row", 1)),
+    native_jit/bind("block", h, native_jit/cached(7, "block_id")), native_jit/bind("op", :U64, native_jit/word("row", 2)),
+    native/switch_statement(:U64, "op", [
+      native/case_arm("n0", [native/if_statement(native/binary_expression(:Equal, native_jit/word("row", 0), "n3"), [
+        native/do_statement(native/call_expression("j_return_void", ["block"]))], [
+        native/do_statement(native/call_expression("j_return", ["block", native_jit/cached(1, native_jit/word("row", 3))]))])]),
+      native/case_arm("n1", [native/do_statement(native/call_expression("j_jump", ["block", native_jit/cached(0, native_jit/word("row", 3))]))]),
+      native/case_arm("n2", [native/do_statement(native/call_expression("j_branch", ["block", native_jit/cached(1, native_jit/word("row", 3)), native_jit/cached(0, native_jit/word("row", 4)), native_jit/cached(0, native_jit/word("row", 5))]))])], [
+      native_jit/bind("callee", h, native_jit/cached(1, native_jit/word("row", 3))),
+      native_jit/bind("valid", h, native_jit/j("ne", ["ctx", "callee", native_jit/j("null", ["ctx", native_jit/j("value_type", ["callee"])])])),
+      native_jit/set("block", native_jit/invoke("guard", ["block_id", "valid"], h)),
+      native_jit/bind("argument", :U64, "n4"),
+      native/while_statement(native/binary_expression(:Less, "argument", native_jit/word("row", 0)), [
+        native_jit/save(6, native_jit/binary(:Subtract, "argument", "n4"), native_jit/cached(1, native_jit/at("row", "argument", :U64))),
+        native_jit/set("argument", native_jit/binary(:Add, "argument", "n1"))]),
+      native_jit/bind("call", h, native_jit/j("call_indirect", ["ctx", "callee", native_jit/binary(:Subtract, "argument", "n4"), scratch])),
+      native/do_statement(native/call_expression("j_require_tail", ["call"])),
+      native/do_statement(native/call_expression("j_return", ["block", "call"]))])]), native/return_void()])
+  return context
+end

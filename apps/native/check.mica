@@ -70,10 +70,20 @@ verb native/check(state)
   end
   let index = {:records -> records, :functions -> functions, :variables -> variables, :constants -> constants,
                :blocks -> blocks, :terms -> terms}
+  index[:function_types] = native/index_function_types(state, records)
   index[:annotations] = native/check_annotations(state, ids)
   index[:globals] = native/check_globals(state, index)
   index[:type_order] = native/check_layouts(state, index)
+  native/check_function_type_contracts(index)
   index = native/check_contracts(state, index)
+  index = native/check_execution_declarations(state, index)
+  let signatures: map = {}
+  for row in state[:instructions]
+    if row[3] == :FunctionAddress && len(row[5]) == 1 && map_contains_key(functions, row[5][0]) && !map_contains_key(signatures, row[5][0])
+      signatures[row[5][0]] = native/function_signature(state, index, row[5][0])
+    end
+  end
+  index[:function_signatures] = signatures
   for fn_row in state[:functions]
     try
       native/check_function(state, index, fn_row)
@@ -82,7 +92,8 @@ verb native/check(state)
     end
   end
   native/check_effects(state, index)
-  native/check_ownership(state, index)
+  let origins: map = native/check_ownership(state, index)
+  native/check_relocation_liveness(state, index, origins)
   return index
 end
 
@@ -106,6 +117,9 @@ verb native/check_instruction(index, fn_id, row)
     result_type = native/value_type(index, fn_id, dst)
     native/ensure(index[:variables][dst][3] == :Local, "cannot assign a parameter")
   end
+  if native/check_execution_instruction(index, fn_id, row, result_type)
+    return
+  end
   if native/check_layout_instruction(index, fn_id, row, result_type) || native/check_memory_instruction(index, fn_id, row, result_type)
     return
   end
@@ -113,6 +127,29 @@ verb native/check_instruction(index, fn_id, row)
     native/ensure(len(args) > 0 && map_contains_key(index[:functions], args[0]), "unknown callee")
     let callee = index[:functions][args[0]]
     native/ensure(result_type == callee[2], "call result type mismatch")
+    return
+  end
+  if op == :FunctionAddress
+    native/ensure(len(args) == 1 && map_contains_key(index[:functions], args[0]), "FunctionAddress requires a function")
+    native/ensure(native/is_function_pointer(result_type), "FunctionAddress requires function pointer result")
+    native/check_execution_address(index, result_type[1], args[0])
+    let expected: list = index[:function_types][result_type[1]]
+    let actual: list = index[:function_signatures][args[0]]
+    native/ensure(native/signature_shape(actual) == native/signature_shape(expected), "function address signature mismatch")
+    for effect in actual[2]
+      native/ensure(native/contains(expected[2], effect), "function address effect exceeds callable contract")
+    end
+    return
+  end
+  if op == :CallIndirect
+    let signature: list = native/indirect_signature(index, fn_id, row)
+    native/ensure(result_type == signature[0], "indirect call result type mismatch")
+    native/ensure(len(args) == len(signature[1]) + 1, "indirect call arity mismatch")
+    let position: int = 1
+    for parameter in signature[1]
+      native/ensure(native/value_type(index, fn_id, args[position]) == parameter[1], "indirect call argument type mismatch")
+      position = position + 1
+    end
     return
   end
   if op == :Copy
@@ -134,7 +171,7 @@ verb native/targets(term)
 end
 
 verb native/reads(row)
-  if native/contains([:Zero, :SizeOf, :AlignOf, :GlobalAddress], row[3])
+  if native/contains([:Zero, :SizeOf, :AlignOf, :GlobalAddress, :FunctionAddress], row[3])
     return []
   end
   if row[3] == :Field || row[3] == :FieldPointer
@@ -177,8 +214,10 @@ verb native/check_function(state, index, fn_row)
     native/ensure(map_contains_key(index[:terms], id), "block has no terminator")
     let term = index[:terms][id]
     let args = term[2]
-    native/ensure(native/contains([:Return, :Jump, :Branch], term[1]), "unsupported terminator")
-    if term[1] == :Branch
+    native/ensure(native/contains([:Return, :Jump, :Branch, :TailCall], term[1]), "unsupported terminator")
+    if native/is_transfer(term)
+      native/check_transfer(state, index, fn_id, term)
+    elseif term[1] == :Branch
       native/ensure(len(args) == 3, "Branch expects condition and two targets")
       native/ensure(native/value_type(index, fn_id, args[0]) == :Bool, "branch condition must be Bool")
     else
@@ -278,8 +317,8 @@ verb native/check_function(state, index, fn_row)
       end
     end
     let term = index[:terms][block[0]]
-    if term[1] != :Jump && len(term[2]) > 0
-      native/assigned(index, assigned, term[2][0])
+    for operand in native/term_reads(term)
+      native/assigned(index, assigned, operand)
     end
   end
 end

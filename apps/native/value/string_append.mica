@@ -3,7 +3,7 @@
 
 // Appending through the current tail can claim spare capacity. Earlier views
 // retain their lengths and offsets; a competing append from an earlier tail
-// receives another backing allocation. Arena mutation requires serialization.
+// receives another backing allocation. Promoted storage is immutable.
 verb native_value/string_append(input: map) -> map
   let context: map = input
   let name: string = "value_string_append"
@@ -13,12 +13,12 @@ verb native_value/string_append(input: map) -> map
   let bytes: list = [:Pointer, :U8, :Mutable]
   let result: list = [:Record, "ValueResult"]
   context = native/declare_function(context, name, result, [
-      ["arena", [:Pointer, [:Record, "ValueArena"], :Mutable], :Borrow],
-      ["value", word, [:Borrow, "arena"]],
+      ["worker", [:Pointer, [:Record, "MemoryWorker"], :Mutable], :Borrow],
+      ["value", word, :Gc],
       ["suffix", [:Pointer, :U8, :Const], :Borrow],
       ["suffix_length", :U64, :Value]
     ],
-    [], [:Allocate, :ReadMemory, :WriteMemory], :Borrow, "arena")
+    [], [:Allocate, :ReadMemory, :WriteMemory], :Gc, "")
   context = native/define_function(context, name, [
     native/let_call("checked", [:Record, "HeapStringResult"], "value_as_string", ["value"]),
     native/unless_statement(native/field_expression("checked", "ok"), [native/return_zero()]),
@@ -61,9 +61,12 @@ verb native_value/string_append(input: map) -> map
       :Invariant,
       "Only the current tail may claim spare capacity; existing views retain their extents."
     ),
+    native/unless_statement(native/call_expression("value_storage_private", [
+      native/typed_expression(bytes, native/unary_expression(:PointerCast, "backing")),
+      native/typed_expression(:U64, native/unary_expression(:SizeOf, header))]), [native/set_statement("reuse_tail", "false")]),
     native/if_statement("reuse_tail", [
       native/let_statement("header_size", :U64, native/unary_expression(:SizeOf, header)),
-      native/let_call("raw", bytes, "value_arena_allocate", ["arena", "header_size"]),
+      native/let_call("raw", bytes, "memory_allocate", ["worker", "header_size", "layout_string_view"]),
       native/when_statement(native/binary_expression(:Equal, "raw", "null_bytes"), [native/return_zero()]),
       native/let_statement("target", [:Pointer, header, :Mutable], native/unary_expression(:PointerCast, "raw")),
       native/let_offset("destination", bytes, "base", "old_end"),
@@ -85,14 +88,14 @@ verb native_value/string_append(input: map) -> map
         "allocation",
         [:Record, "StringAllocation"],
         "value_string_allocate",
-        ["arena", "total_length", "capacity", "total_scalars", "ascii"]
+        ["worker", "total_length", "capacity", "total_scalars", "ascii"]
       ),
       native/unless_statement(native/field_expression("allocation", "ok"), [
         native/set_statement(
           "allocation",
           native/call_expression(
             "value_string_allocate",
-            ["arena", "total_length", "total_length", "total_scalars", "ascii"]
+            ["worker", "total_length", "total_length", "total_scalars", "ascii"]
           )
         ),
         native/unless_statement(native/field_expression("allocation", "ok"), [native/return_zero()])
@@ -126,11 +129,11 @@ verb native_value/string_append(input: map) -> map
   ])
   name = "value_string_concat"
   context = native/declare_function(context, name, result, [
-      ["arena", [:Pointer, [:Record, "ValueArena"], :Mutable], :Borrow],
-      ["left", word, [:Borrow, "arena"]],
-      ["right", word, :Borrow]
+      ["worker", [:Pointer, [:Record, "MemoryWorker"], :Mutable], :Borrow],
+      ["left", word, :Gc],
+      ["right", word, :Gc]
     ],
-    [], [:Allocate, :ReadMemory, :WriteMemory], :Borrow, "arena")
+    [], [:Allocate, :ReadMemory, :WriteMemory], :Gc, "")
   context = native/define_function(context, name, [
     native/let_call("checked", [:Record, "HeapStringResult"], "value_as_string", ["right"]),
     native/unless_statement(native/field_expression("checked", "ok"), [native/return_zero()]),
@@ -139,7 +142,7 @@ verb native_value/string_append(input: map) -> map
     native/let_field("data", bytes, "header", "data"),
     native/let_field("length", :U64, "header", "length"),
     native/let_statement("source", [:Pointer, :U8, :Const], native/unary_expression(:Freeze, "data")),
-    native/let_call("result", result, "value_string_append", ["arena", "left", "source", "length"]),
+    native/let_call("result", result, "value_string_append", ["worker", "left", "source", "length"]),
     native/return_value("result")
   ])
   return context

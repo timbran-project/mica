@@ -1,0 +1,233 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+// Each row describes one GCC API call and its ABI conversions. Opaque GCC
+// objects are byte pointers here; they are never dereferenced by the backend.
+// The generated adapter owns the IR traversal and operation lowering.
+verb native_jit/api() -> list
+  let h = [:Pointer, :U8, :Mutable]
+  let text = [:Pointer, :U8, :Const]
+  let handles = [:Pointer, h, :Mutable]
+  let api: list = []
+  for item in [["voidptr", "VOID_PTR"], ["void", "VOID"], ["u8", "UINT8_T"], ["u16", "UINT16_T"], ["u32", "UINT32_T"], ["u64", "UINT64_T"], ["i64", "INT64_T"], ["f32", "FLOAT"], ["bool", "BOOL"]]
+    api = [@api, [string_concat("j_type_", item[0]), h, [["ctx", h, "gcc_jit_context *"]], "gcc_jit_context_get_type", ["ctx", string_concat("GCC_JIT_TYPE_", item[1])]]]
+  end
+  api = [@api,
+    ["j_pointer", h, [["type", h, "gcc_jit_type *"]], "gcc_jit_type_get_pointer", ["type"]],
+    ["j_const_type", h, [["type", h, "gcc_jit_type *"]], "gcc_jit_type_get_const", ["type"]],
+    ["j_struct", h, [["ctx", h, "gcc_jit_context *"], ["name", text, "const char *"]], "gcc_jit_context_new_opaque_struct", ["ctx", "NULL", "name"]],
+    ["j_struct_type", h, [["structure", h, "gcc_jit_struct *"]], "gcc_jit_struct_as_type", ["structure"]],
+    ["j_field", h, [["ctx", h, "gcc_jit_context *"], ["type", h, "gcc_jit_type *"], ["name", text, "const char *"]], "gcc_jit_context_new_field", ["ctx", "NULL", "type", "name"]],
+    ["j_fields", :Void, [["structure", h, "gcc_jit_struct *"], ["count", :U64, "int"], ["fields", handles, "gcc_jit_field **"]], "gcc_jit_struct_set_fields", ["structure", "NULL", "count", "fields"]],
+    ["j_array", h, [["ctx", h, "gcc_jit_context *"], ["type", h, "gcc_jit_type *"], ["count", :U64, "int"]], "gcc_jit_context_new_array_type", ["ctx", "NULL", "type", "count"]],
+    ["j_function_type", h, [["ctx", h, "gcc_jit_context *"], ["result", h, "gcc_jit_type *"], ["count", :U64, "int"], ["types", handles, "gcc_jit_type **"]], "gcc_jit_context_new_function_ptr_type", ["ctx", "NULL", "result", "count", "types", "0"]],
+    ["j_parameter", h, [["ctx", h, "gcc_jit_context *"], ["type", h, "gcc_jit_type *"], ["name", text, "const char *"]], "gcc_jit_context_new_param", ["ctx", "NULL", "type", "name"]],
+    ["j_parameter_value", h, [["parameter", h, "gcc_jit_param *"]], "gcc_jit_param_as_rvalue", ["parameter"]],
+    ["j_function", h, [["ctx", h, "gcc_jit_context *"], ["result", h, "gcc_jit_type *"], ["name", text, "const char *"], ["imported", :Bool, "bool"], ["count", :U64, "int"], ["params", handles, "gcc_jit_param **"]], "gcc_jit_context_new_function", ["ctx", "NULL", "imported ? GCC_JIT_FUNCTION_IMPORTED : GCC_JIT_FUNCTION_EXPORTED", "result", "name", "count", "params", "0"]],
+    ["j_local", h, [["function", h, "gcc_jit_function *"], ["type", h, "gcc_jit_type *"], ["name", text, "const char *"]], "gcc_jit_function_new_local", ["function", "NULL", "type", "name"]],
+    ["j_block", h, [["function", h, "gcc_jit_function *"], ["name", text, "const char *"]], "gcc_jit_function_new_block", ["function", "name"]],
+    ["j_value", h, [["local", h, "gcc_jit_lvalue *"]], "gcc_jit_lvalue_as_rvalue", ["local"]],
+    ["j_value_type", h, [["value", h, "gcc_jit_rvalue *"]], "gcc_jit_rvalue_get_type", ["value"]],
+    ["j_integer", h, [["ctx", h, "gcc_jit_context *"], ["type", h, "gcc_jit_type *"], ["value", :I64, "long"]], "gcc_jit_context_new_rvalue_from_long", ["ctx", "type", "value"]],
+    ["j_null", h, [["ctx", h, "gcc_jit_context *"], ["type", h, "gcc_jit_type *"]], "gcc_jit_context_null", ["ctx", "type"]],
+    ["j_zero", h, [["ctx", h, "gcc_jit_context *"], ["type", h, "gcc_jit_type *"]], "gcc_jit_context_zero", ["ctx", "type"]],
+    ["j_record", h, [["ctx", h, "gcc_jit_context *"], ["type", h, "gcc_jit_type *"], ["count", :U64, "size_t"], ["values", handles, "gcc_jit_rvalue **"]], "gcc_jit_context_new_struct_constructor", ["ctx", "NULL", "type", "count", "NULL", "values"]],
+    ["j_array_value", h, [["ctx", h, "gcc_jit_context *"], ["type", h, "gcc_jit_type *"], ["count", :U64, "size_t"], ["values", handles, "gcc_jit_rvalue **"]], "gcc_jit_context_new_array_constructor", ["ctx", "NULL", "type", "count", "values"]],
+    ["j_cast", h, [["ctx", h, "gcc_jit_context *"], ["value", h, "gcc_jit_rvalue *"], ["type", h, "gcc_jit_type *"]], "gcc_jit_context_new_cast", ["ctx", "NULL", "value", "type"]],
+    ["j_bitcast", h, [["ctx", h, "gcc_jit_context *"], ["value", h, "gcc_jit_rvalue *"], ["type", h, "gcc_jit_type *"]], "gcc_jit_context_new_bitcast", ["ctx", "NULL", "value", "type"]],
+    ["j_sizeof", h, [["ctx", h, "gcc_jit_context *"], ["type", h, "gcc_jit_type *"]], "gcc_jit_context_new_sizeof", ["ctx", "type"]],
+    ["j_call", h, [["ctx", h, "gcc_jit_context *"], ["function", h, "gcc_jit_function *"], ["count", :U64, "int"], ["args", handles, "gcc_jit_rvalue **"]], "gcc_jit_context_new_call", ["ctx", "NULL", "function", "count", "args"]],
+    ["j_call_indirect", h, [["ctx", h, "gcc_jit_context *"], ["function", h, "gcc_jit_rvalue *"], ["count", :U64, "int"], ["args", handles, "gcc_jit_rvalue **"]], "gcc_jit_context_new_call_through_ptr", ["ctx", "NULL", "function", "count", "args"]],
+    ["j_function_address", h, [["function", h, "gcc_jit_function *"]], "gcc_jit_function_get_address", ["function", "NULL"]],
+    ["j_address", h, [["local", h, "gcc_jit_lvalue *"]], "gcc_jit_lvalue_get_address", ["local", "NULL"]],
+    ["j_dereference", h, [["value", h, "gcc_jit_rvalue *"]], "gcc_jit_rvalue_dereference", ["value", "NULL"]],
+    ["j_field_value", h, [["value", h, "gcc_jit_rvalue *"], ["field", h, "gcc_jit_field *"]], "gcc_jit_rvalue_access_field", ["value", "NULL", "field"]],
+    ["j_field_local", h, [["pointer", h, "gcc_jit_rvalue *"], ["field", h, "gcc_jit_field *"]], "gcc_jit_rvalue_dereference_field", ["pointer", "NULL", "field"]],
+    ["j_element", h, [["ctx", h, "gcc_jit_context *"], ["pointer", h, "gcc_jit_rvalue *"], ["index", h, "gcc_jit_rvalue *"]], "gcc_jit_context_new_array_access", ["ctx", "NULL", "pointer", "index"]],
+    ["j_assign", :Void, [["block", h, "gcc_jit_block *"], ["local", h, "gcc_jit_lvalue *"], ["value", h, "gcc_jit_rvalue *"]], "gcc_jit_block_add_assignment", ["block", "NULL", "local", "value"]],
+    ["j_eval", :Void, [["block", h, "gcc_jit_block *"], ["value", h, "gcc_jit_rvalue *"]], "gcc_jit_block_add_eval", ["block", "NULL", "value"]],
+    ["j_require_tail", :Void, [["call", h, "gcc_jit_rvalue *"]], "gcc_jit_rvalue_set_bool_require_tail_call", ["call", "1"]],
+    ["j_return", :Void, [["block", h, "gcc_jit_block *"], ["value", h, "gcc_jit_rvalue *"]], "gcc_jit_block_end_with_return", ["block", "NULL", "value"]],
+    ["j_return_void", :Void, [["block", h, "gcc_jit_block *"]], "gcc_jit_block_end_with_void_return", ["block", "NULL"]],
+    ["j_jump", :Void, [["block", h, "gcc_jit_block *"], ["target", h, "gcc_jit_block *"]], "gcc_jit_block_end_with_jump", ["block", "NULL", "target"]],
+    ["j_branch", :Void, [["block", h, "gcc_jit_block *"], ["test", h, "gcc_jit_rvalue *"], ["yes", h, "gcc_jit_block *"], ["no", h, "gcc_jit_block *"]], "gcc_jit_block_end_with_conditional", ["block", "NULL", "test", "yes", "no"]],
+    ["j_builtin", h, [["ctx", h, "gcc_jit_context *"], ["name", text, "const char *"]], "gcc_jit_context_get_builtin_function", ["ctx", "name"]],
+    ["j_global", h, [["ctx", h, "gcc_jit_context *"], ["type", h, "gcc_jit_type *"], ["name", text, "const char *"]], "gcc_jit_context_new_global", ["ctx", "NULL", "GCC_JIT_GLOBAL_EXPORTED", "type", "name"]],
+    ["j_global_init", h, [["global", h, "gcc_jit_lvalue *"], ["value", h, "gcc_jit_rvalue *"]], "gcc_jit_global_set_initializer_rvalue", ["global", "value"]],
+    ["j_tls", :Void, [["global", h, "gcc_jit_lvalue *"]], "gcc_jit_lvalue_set_tls_model", ["global", "GCC_JIT_TLS_MODEL_GLOBAL_DYNAMIC"]]]
+  for item in [["add", "PLUS"], ["sub", "MINUS"], ["mul", "MULT"], ["div", "DIVIDE"], ["rem", "MODULO"], ["and", "BITWISE_AND"], ["or", "BITWISE_OR"], ["xor", "BITWISE_XOR"], ["shl", "LSHIFT"], ["shr", "RSHIFT"], ["logical_and", "LOGICAL_AND"], ["logical_or", "LOGICAL_OR"]]
+    api = [@api, [string_concat("j_", item[0]), h, [["ctx", h, "gcc_jit_context *"], ["type", h, "gcc_jit_type *"], ["left", h, "gcc_jit_rvalue *"], ["right", h, "gcc_jit_rvalue *"]], "gcc_jit_context_new_binary_op", ["ctx", "NULL", string_concat("GCC_JIT_BINARY_OP_", item[1]), "type", "left", "right"]]]
+  end
+  for item in [["eq", "EQ"], ["ne", "NE"], ["lt", "LT"], ["le", "LE"], ["gt", "GT"], ["ge", "GE"]]
+    api = [@api, [string_concat("j_", item[0]), h, [["ctx", h, "gcc_jit_context *"], ["left", h, "gcc_jit_rvalue *"], ["right", h, "gcc_jit_rvalue *"]], "gcc_jit_context_new_comparison", ["ctx", "NULL", string_concat("GCC_JIT_COMPARISON_", item[1]), "left", "right"]]]
+  end
+  for item in [["neg", "MINUS"], ["not", "LOGICAL_NEGATE"]]
+    api = [@api, [string_concat("j_", item[0]), h, [["ctx", h, "gcc_jit_context *"], ["type", h, "gcc_jit_type *"], ["value", h, "gcc_jit_rvalue *"]], "gcc_jit_context_new_unary_op", ["ctx", "NULL", string_concat("GCC_JIT_UNARY_OP_", item[1]), "type", "value"]]]
+  end
+  return api
+end
+
+verb native_jit/bindings(input: map) -> map
+  let context: map = input
+  for api in native_jit/api()
+    let parameters: list = []
+    for parameter in api[2]
+      let mode = :Value
+      if native/is_pointer(parameter[1])
+        mode = :Borrow
+      end
+      parameters = [@parameters, [parameter[0], parameter[1], mode]]
+    end
+    let mode: symbol = :Value
+    let owner: string = ""
+    if native/is_pointer(api[1])
+      mode = :Borrow
+      owner = api[2][0][0]
+    end
+    context = native/declare_function(context, api[0], api[1], parameters, [], [:ReadMemory, :WriteMemory, :Allocate], mode, owner)
+    context[:state] = native/foreign(context[:state], context[:functions][api[0]])
+  end
+  return context
+end
+
+verb native_jit/bindings_c() -> string
+  let lines: list = ["#include <libgccjit.h>", "_Static_assert(sizeof(long) == 8, \"native backend requires LP64\");", "/* GCC 14 exports this API; the bootstrap machine also has GCC 13 headers. */",
+    "extern gcc_jit_rvalue *gcc_jit_context_new_sizeof(gcc_jit_context *, gcc_jit_type *);"]
+  for api in native_jit/api()
+    let parameters: list = [string_concat(native/c_type(p[1]), " ", p[0]) for p in api[2]]
+    let arguments: list = []
+    for arg in api[4]
+      let expression: string = arg
+      for parameter in api[2]
+        if parameter[0] == arg
+          expression = string_concat("(", parameter[2], ")", arg)
+        end
+      end
+      arguments = [@arguments, expression]
+    end
+    let prefix: string = ""
+    if api[1] != :Void
+      prefix = string_concat("return (", native/c_type(api[1]), ")")
+    end
+    lines = [@lines, string_concat(native/c_type(api[1]), " mica_foreign_", api[0], "(", string_join(parameters, ", "), ") { ", prefix, api[3], "(", string_join(arguments, ", "), "); }")]
+  end
+  return string_concat(string_join(lines, "\n"), "\n")
+end
+
+// The bootstrap driver owns files and GCC contexts. The generated IR backend
+// owns all module translation; this driver also links unchanged with B1/B2.
+verb native_jit/driver_c() -> string
+  return string_concat(string_join([
+    "#include <stdio.h>",
+    "#include <time.h>",
+    "#include <dlfcn.h>",
+    "#include <unistd.h>",
+    "#if defined(__GLIBC__)",
+    "#include <malloc.h>",
+    "#endif",
+    "static double seconds(void) { struct timespec t; if (clock_gettime(CLOCK_MONOTONIC, &t)) abort(); return t.tv_sec + t.tv_nsec * 1e-9; }",
+    "static uint64_t resident_bytes(void) {",
+    "#if defined(__linux__)",
+    "  FILE *f = fopen(\"/proc/self/statm\", \"r\");",
+    "  unsigned long pages = 0, resident = 0;",
+    "  if (!f) return 0;",
+    "  int fields = fscanf(f, \"%lu %lu\", &pages, &resident);",
+    "  fclose(f);",
+    "  long page_size = sysconf(_SC_PAGESIZE);",
+    "  if (fields == 2 && page_size > 0) return (uint64_t)resident * (uint64_t)page_size;",
+    "#endif",
+    "  return 0;",
+    "}",
+    "static uint64_t allocator_bytes(void) {",
+    "#if defined(__GLIBC__)",
+    "  struct mallinfo2 info = mallinfo2();",
+    "  return (uint64_t)info.uordblks + (uint64_t)info.hblkhd;",
+    "#else",
+    "  return 0;",
+    "#endif",
+    "}",
+    "int main(int argc, char **argv) {",
+    "  if (argc != 3) { fprintf(stderr, \"usage: backend module.ir output.o\\n\"); return 2; }",
+    "#if __BYTE_ORDER__ != __ORDER_LITTLE_ENDIAN__",
+    "#error The experiment input currently requires a little-endian host.",
+    "#endif",
+    "  FILE *f = fopen(argv[1], \"rb\");",
+    "  if (!f || fseek(f, 0, SEEK_END)) return 2;",
+    "  long length = ftell(f);",
+    "  if (length < 22 * 8 || length > 256 * 1024 * 1024 || fseek(f, 0, SEEK_SET)) return 2;",
+    "  uint64_t *data = malloc((size_t)length);",
+    "  if (!data || fread(data, 1, (size_t)length, f) != (size_t)length) return 2;",
+    "  fclose(f);",
+    "  if (data[0] != 1296646977 || data[1] >= ((uint64_t)length + 7) / 8) return 2;",
+    "  for (unsigned i = 6; i < 22; i += 2) {",
+    "    if (data[i] < 22 || data[i] > data[i+1] || data[i+1] > data[1]) return 2;",
+    "    for (uint64_t p = data[i]; p < data[i+1]; p += data[p]) {",
+    "      if (!data[p] || data[p] > data[i+1] - p) return 2;",
+    "    }",
+    "  }",
+    "  uint64_t capacity = data[5];",
+    "  if (capacity < data[2] || capacity < data[3] || capacity < data[4] || capacity > 1000000) return 2;",
+    "  const char *repeat = getenv(\"MICA_JIT_ITERATIONS\"), *symbol = getenv(\"MICA_JIT_LOAD_SYMBOL\");",
+    "  char *end = NULL;",
+    "  unsigned long iterations = repeat ? strtoul(repeat, &end, 10) : 1;",
+    "  if (!iterations || iterations > 1000 || (repeat && (!*repeat || *end))) return 2;",
+    "  const char *probe_input = getenv(\"MICA_JIT_PROBE_INPUT\"), *probe_expected = getenv(\"MICA_JIT_PROBE_EXPECTED\");",
+    "  if (probe_input && (!symbol || !probe_expected)) return 2;",
+    "  for (unsigned long iteration = 0; iteration < iterations; ++iteration) {",
+    "    uint64_t rss_before = resident_bytes(), heap_before = allocator_bytes();",
+    "    uint8_t **cache = calloc((size_t)capacity * 10, sizeof(*cache));",
+    "    uint64_t *meta = calloc((size_t)capacity * 4, sizeof(*meta));",
+    "    gcc_jit_context *ctx = gcc_jit_context_acquire();",
+    "    if (!cache || !meta || !ctx) return 2;",
+    "    gcc_jit_context_set_int_option(ctx, GCC_JIT_INT_OPTION_OPTIMIZATION_LEVEL, 3);",
+    "    gcc_jit_context_add_command_line_option(ctx, \"-ffp-contract=off\");",
+    "    gcc_jit_context_add_command_line_option(ctx, \"-fno-fast-math\");",
+    "    gcc_jit_context_add_command_line_option(ctx, \"-fPIC\");",
+    "    if (getenv(\"MICA_JIT_SANITIZE\")) {",
+    "      gcc_jit_context_add_command_line_option(ctx, \"-fsanitize=address,undefined,float-cast-overflow\");",
+    "      gcc_jit_context_add_command_line_option(ctx, \"-fno-sanitize-recover=all\");",
+    "    }",
+    "    double begin = seconds();",
+    "    uint64_t status = mica_jit_build((uint8_t *)ctx, data, cache, meta);",
+    "    double constructed = seconds();",
+    "    int failed = status != 0 || gcc_jit_context_get_first_error(ctx) != NULL;",
+    "    if (status != 0) fprintf(stderr, \"native backend rejected input: status %llu (opcode index + 1, or 128 for types)\\n\", (unsigned long long)status);",
+    "    if (!failed) {",
+    "      gcc_jit_context_compile_to_file(ctx, symbol ? GCC_JIT_OUTPUT_KIND_DYNAMIC_LIBRARY : GCC_JIT_OUTPUT_KIND_OBJECT_FILE, argv[2]);",
+    "      failed = gcc_jit_context_get_first_error(ctx) != NULL;",
+    "    }",
+    "    double compiled = seconds();",
+    "    gcc_jit_context_release(ctx);",
+    "    double context_released = seconds();",
+    "    void *module = NULL, *code = NULL;",
+    "    if (!failed && symbol) {",
+    "      module = dlopen(argv[2], RTLD_NOW | RTLD_LOCAL);",
+    "      if (!module) { fprintf(stderr, \"dlopen: %s\\n\", dlerror()); failed = 1; }",
+    "      else {",
+    "        code = dlsym(module, symbol);",
+    "        if (!code) { fprintf(stderr, \"dlsym: %s\\n\", dlerror()); failed = 1; }",
+    "      }",
+    "    }",
+    "    double loaded = seconds();",
+    "    /* Optional test ABI: uint64_t(uint64_t). The caller supplies its oracle. */",
+    "    if (!failed && probe_input) {",
+    "      uint64_t (*probe)(uint64_t) = NULL;",
+    "      _Static_assert(sizeof(probe) == sizeof(code), \"POSIX function pointer representation required\");",
+    "      memcpy(&probe, &code, sizeof(probe));",
+    "      if (probe(strtoull(probe_input, NULL, 0)) != strtoull(probe_expected, NULL, 0)) {",
+    "        fprintf(stderr, \"loaded module probe mismatch\\n\"); failed = 1;",
+    "      }",
+    "    }",
+    "    double executed = seconds();",
+    "    if (module && dlclose(module)) { fprintf(stderr, \"dlclose: %s\\n\", dlerror()); failed = 1; }",
+    "    free(meta); free(cache);",
+    "    double released = seconds();",
+    "    fprintf(stdout, \"{\\\"gccjit_version\\\":\\\"%d.%d.%d\\\",\\\"iteration\\\":%lu,\\\"construction_ms\\\":%.3f,\\\"compilation_ms\\\":%.3f,\\\"loading_ms\\\":%.3f,\\\"execution_ms\\\":%.3f,\\\"release_ms\\\":%.3f,\\\"rss_before\\\":%llu,\\\"rss_after\\\":%llu,\\\"allocator_before\\\":%llu,\\\"allocator_after\\\":%llu,\\\"shared\\\":%s,\\\"sanitized\\\":%s,\\\"probe\\\":%s,\\\"failed\\\":%s}\\n\", gcc_jit_version_major(), gcc_jit_version_minor(), gcc_jit_version_patchlevel(), iteration, (constructed-begin)*1000, (compiled-constructed)*1000, (loaded-context_released)*1000, (executed-loaded)*1000, ((context_released-compiled)+(released-executed))*1000, (unsigned long long)rss_before, (unsigned long long)resident_bytes(), (unsigned long long)heap_before, (unsigned long long)allocator_bytes(), symbol ? \"true\" : \"false\", getenv(\"MICA_JIT_SANITIZE\") ? \"true\" : \"false\", probe_input ? \"true\" : \"false\", failed ? \"true\" : \"false\");",
+    "    fflush(stdout);",
+    "    if (failed) { free(data); return 1; }",
+    "  }",
+    "  free(data);",
+    "  return 0;",
+    "}"
+  ], "\n"), "\n")
+end

@@ -19,6 +19,7 @@ const SOURCES: &[&str] = &[
     include_str!("../../../apps/native/layout.mica"),
     include_str!("../../../apps/native/storage.mica"),
     include_str!("../../../apps/native/contracts.mica"),
+    include_str!("../../../apps/native/execution.mica"),
     include_str!("../../../apps/native/check.mica"),
     include_str!("../../../apps/native/flow.mica"),
     include_str!("../../../apps/native/c_syntax.mica"),
@@ -48,6 +49,408 @@ fn runner(interpreter_only: bool) -> SourceRunner {
         }
     }
     runner
+}
+
+fn callable_runner(interpreter_only: bool) -> SourceRunner {
+    let mut runner = runner(interpreter_only);
+    runner
+        .run_filein(include_str!("../../../apps/native/tests/callables.mica"))
+        .unwrap_or_else(|error| panic!("{}", runner.render_source_task_error(&error)));
+    runner
+}
+
+#[test]
+fn typed_callables_execute_and_preserve_aggregate_layout() {
+    let mut previous = None;
+    for interpreter_only in [true, false] {
+        let mut runner = callable_runner(interpreter_only);
+        let generated = eval(
+            &mut runner,
+            r#"
+let state = native/callable_example()
+let expected = native/emit_c(state)
+for key, rows in state
+  if is_kind(rows, :list)
+    let reversed = []
+    for row in rows
+      reversed = [row, @reversed]
+    end
+    state[key] = reversed
+  end
+end
+native/ensure(native/emit_c(state) == expected, "callable emission depends on table order")
+return expected
+"#,
+        )
+        .with_str(str::to_owned)
+        .unwrap();
+        if let Some(previous) = &previous {
+            assert_eq!(&generated, previous);
+        }
+        assert!(generated.contains("typedef uint64_t (*mica_function_type_Unary)"));
+        assert!(
+            generated.find("uint64_t mica_z_increment(").unwrap()
+                < generated
+                    .find("mica_function_type_Unary mica_a_factory(")
+                    .unwrap()
+        );
+        let scratch = Scratch::new();
+        fs::write(
+            scratch.0.join("callables.c"),
+            format!(
+                "{generated}\n{}",
+                include_str!("../../../apps/native/tests/callables.c")
+            ),
+        )
+        .unwrap();
+        let mut compilers = vec![std::env::var("CC").unwrap_or_else(|_| "cc".to_owned())];
+        if compilers[0] != "clang"
+            && Command::new("clang")
+                .arg("--version")
+                .output()
+                .is_ok_and(|output| output.status.success())
+        {
+            compilers.push("clang".to_owned());
+        }
+        for (index, compiler) in compilers.iter().enumerate() {
+            let binary = scratch.0.join(format!("callables-{index}"));
+            let output = Command::new(compiler)
+                .current_dir(&scratch.0)
+                .args([
+                    "-std=c11",
+                    "-O2",
+                    "-Wall",
+                    "-Wextra",
+                    "-Werror",
+                    "-pedantic",
+                    "-fsanitize=address,undefined",
+                    "-fno-omit-frame-pointer",
+                    "callables.c",
+                    "-o",
+                ])
+                .arg(&binary)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{compiler}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let output = Command::new(&binary).output().unwrap();
+            assert!(output.status.success(), "{compiler}: {output:?}");
+            assert!(output.stderr.is_empty(), "{compiler}: {output:?}");
+            let output = Command::new(&binary).arg("null").output().unwrap();
+            #[cfg(unix)]
+            assert_eq!(output.status.signal(), Some(6), "{compiler}: {output:?}");
+            assert!(!output.status.success(), "{compiler}: {output:?}");
+        }
+        previous = Some(generated);
+    }
+}
+
+#[test]
+fn typed_callables_check_effects_types_and_borrow_regions() {
+    let cases = [
+        (
+            r#"state[:function_types] = [@state[:function_types], state[:function_types][0]]"#,
+            "duplicate function pointer type",
+        ),
+        (
+            r#"state = native/add_local(state, state[:functions][0][0], "unknown", [:FunctionPointer, "Missing"])[1]"#,
+            "unknown function pointer type",
+        ),
+        (
+            r#"state = native/function_pointer_type(state, "Cycle", [:FunctionPointer, "Cycle"], [], [], :Value, "")[1]"#,
+            "function pointer cycle",
+        ),
+        (
+            r#"let record = [:Record, "Cycle"]
+state = native/record_type(state, "Cycle", [["child", record]])[1]
+state = native/function_pointer_type(state, "Cycle", record, [], [], :Value, "")[1]"#,
+            "record contains a by-value cycle",
+        ),
+        (
+            r#"state = native/function_pointer_type(state, "MissingOwner", [:Pointer, :U8, :Mutable], [], [], :Borrow, "missing")[1]"#,
+            "function pointer result requires borrowed owner",
+        ),
+        (
+            r#"let pointer = [:Pointer, :U8, :Mutable]
+state = native/function_pointer_type(state, "CycleRegion", :Void, [["x", pointer, [:Borrow, "y"]], ["y", pointer, [:Borrow, "x"]]], [], :Value, "")[1]"#,
+            "function pointer borrow region requires root Borrow parameter",
+        ),
+        (
+            r#"let rows = []
+for row in state[:function_types]
+  if row[0] == "Reader"
+    row[3] = []
+  end
+  rows = [@rows, row]
+end
+state[:function_types] = rows"#,
+            "function address effect exceeds callable contract",
+        ),
+        (
+            r#"let target = [row[0] for row in state[:functions] if row[1] == "memory_dispatch"][0]
+let rows = []
+for row in state[:contracts]
+  if row[0] == target
+    row[1] = []
+  end
+  rows = [@rows, row]
+end
+state[:contracts] = rows"#,
+            "exceeds contract of memory_dispatch",
+        ),
+        (
+            r#"let rows = []
+for row in state[:function_types]
+  if row[0] == "Unary"
+    row[1] = :U8
+  end
+  rows = [@rows, row]
+end
+state[:function_types] = rows"#,
+            "function address signature mismatch",
+        ),
+        (
+            r#"let context = native/module_context(state, {})
+context = native/declare_function(context, "bad", :U64, [["f", [:FunctionPointer, "Unary"], :Value]], [], [], :Value, "")
+context = native/define_function(context, "bad", [native/return_value(native/indirect_call_expression("f", []))])
+state = context[:state]"#,
+            "indirect call arity mismatch",
+        ),
+        (
+            r#"let context = native/module_context(state, {})
+context = native/declare_function(context, "bad", :U64, [["f", [:FunctionPointer, "Unary"], :Value], ["x", :U8, :Value]], [], [], :Value, "")
+context = native/define_function(context, "bad", [native/return_value(native/indirect_call_expression("f", ["x"]))])
+state = context[:state]"#,
+            "indirect call argument type mismatch",
+        ),
+        (
+            r#"let pointer = [:Pointer, :U64, :Mutable]
+let context = native/module_context(state, {})
+context = native/declare_function(context, "bad", pointer, [["f", [:FunctionPointer, "Borrower"], :Value], ["x", pointer, :Borrow], ["y", pointer, :Borrow]], [], [], :Borrow, "y")
+context = native/define_function(context, "bad", [native/return_value(native/indirect_call_expression("f", ["x"]))])
+state = context[:state]"#,
+            "result ownership mismatch",
+        ),
+        (
+            r#"let pointer = [:Pointer, :U64, :Mutable]
+let [callback, next] = native/function_pointer_type(state, "Destroy", :Void, [["x", pointer, :Consume]], [:Release], :Value, "")
+let context = native/module_context(next, {})
+context = native/declare_function(context, "bad", :Void, [["f", callback, :Value], ["x", pointer, :Borrow]], [], [:Release], :Value, "")
+context = native/define_function(context, "bad", [native/do_statement(native/indirect_call_expression("f", ["x"])), native/return_void()])
+state = context[:state]"#,
+            "cannot consume borrowed storage in indirect call",
+        ),
+        (
+            r#"let pointer = [:Pointer, :U64, :Mutable]
+let [callback, next] = native/function_pointer_type(state, "Region", :Void, [["owner", pointer, :Borrow], ["member", pointer, [:Borrow, "owner"]]], [], :Value, "")
+let context = native/module_context(next, {})
+context = native/declare_function(context, "bad", :Void, [["f", callback, :Value], ["x", pointer, :Borrow], ["y", pointer, :Borrow]], [], [], :Value, "")
+context = native/define_function(context, "bad", [native/do_statement(native/indirect_call_expression("f", ["x", "y"])), native/return_void()])
+state = context[:state]"#,
+            "indirect argument does not share borrow region",
+        ),
+        (
+            r#"let context = native/module_context(state, {})
+context = native/declare_function(context, "bad", [:FunctionPointer, "Unary"], [["x", [:Pointer, :U8, :Mutable], :Borrow]], [], [], :Value, "")
+context = native/define_function(context, "bad", [native/return_value(native/unary_expression(:PointerCast, "x"))])
+state = context[:state]"#,
+            "PointerCast requires pointer result",
+        ),
+    ];
+    for interpreter_only in [true, false] {
+        let mut runner = callable_runner(interpreter_only);
+        for (change, expected) in cases {
+            let source = format!(
+                "let state = native/callable_example()\n{change}\nreturn native/emit_c(state)"
+            );
+            let report = runner.run_source(&source).unwrap_or_else(|error| {
+                panic!("{change}: {}", runner.render_source_task_error(&error));
+            });
+            assert!(
+                matches!(report.outcome, TaskOutcome::Aborted { .. }),
+                "{change}: {}",
+                report.render()
+            );
+            assert!(
+                report.render().contains(expected),
+                "{change}: expected {expected}: {}",
+                report.render()
+            );
+        }
+    }
+}
+
+// These programs isolate contracts that cannot be inferred from ordinary C calls.
+const EXECUTION_PROGRAM: &str = r#"
+let pointer = [:Pointer, :U64, :Mutable]
+let slot = [:Pointer, pointer, :Mutable]
+let parameters = [["root", slot, :Borrow], ["value", pointer, :Gc], ["condition", :Bool, :Value]]
+let effects = [:ReadMemory, :WriteMemory, :Relocate]
+let [entry, state] = native/execution_pointer_type(native/program(), "Entry", :U64, parameters, effects, :Tail)
+let [constants, declared] = native/constants(state, [["zero", :U64, "0000000000000000"]])
+let context = native/module_context(declared, constants)
+context = native/declare_function(context, "collect", :Void, [["root", slot, :Borrow]], [], [:ReadMemory, :WriteMemory, :Relocate], :Value, "")
+context[:state] = native/foreign(context[:state], context[:functions]["collect"])
+context = native/declare_function(context, "entry", :U64, parameters, [], effects, :Value, "")
+context = native/execution_function(context, "entry", :Tail)
+let prefix = [native/let_statement("next", entry, native/function_address_expression("entry"))]
+let transfer = native/tail_call_statement("next", ["root", "value", "condition"])
+let body = [@prefix, transfer]
+"#;
+
+#[test]
+fn execution_contracts_reject_invalid_transfers_and_stale_roots() {
+    let cases = [
+        (
+            r#"state = context[:state]
+state[:executions] = [[context[:functions]["entry"], :Unknown]]
+context[:state] = state"#,
+            "invalid execution policy",
+        ),
+        (
+            r#"state = context[:state]
+state[:executions] = []
+context[:state] = state
+body = [@prefix, native/return_value("zero")]"#,
+            "function address execution policy mismatch",
+        ),
+        (
+            r#"body = [@prefix, native/tail_call_statement("next", ["root", "value"])]"#,
+            "transfer arity mismatch",
+        ),
+        (
+            r#"body = [@prefix, native/let_statement("local", pointer, "value"),
+  native/let_statement("address", slot, native/unary_expression(:Address, "local")),
+  native/tail_call_statement("next", ["address", "value", "condition"])]"#,
+            "required tail call cannot retain frame addresses",
+        ),
+        (
+            r#"body = [native/let_statement("managed", pointer, native/manage_expression("value")), native/return_value("zero")]"#,
+            "tail entries allocate through collector helpers",
+        ),
+        (
+            r#"body = [native/let_statement("local", :U64, "zero"),
+  native/let_statement("address", pointer, native/unary_expression(:Address, "local")),
+  native/root_store_statement("root", "address"), native/return_value("zero")]"#,
+            "RootStore requires managed references",
+        ),
+        (
+            r#"body = [native/store_statement("root", "value"), native/return_value("zero")]"#,
+            "managed reference requires a managed object or RootStore",
+        ),
+        (
+            r#"body = [native/root_store_statement("root", "value"),
+  native/do_statement(native/call_expression("collect", ["root"])),
+  native/return_value(native/load_expression("value"))]"#,
+            "managed reference used after relocation",
+        ),
+        (
+            r#"body = [native/root_store_statement("root", "value"),
+  native/if_statement("condition", [native/do_statement(native/call_expression("collect", ["root"]))], []),
+  native/return_value(native/load_expression("value"))]"#,
+            "managed reference used after relocation",
+        ),
+        (
+            r#"body = [@prefix, native/do_statement(native/call_expression("collect", ["root"])), transfer]"#,
+            "transfer or return uses stale managed reference",
+        ),
+        (
+            r#"context = native/declare_function(context, "caller", :U64, parameters, [], [], :Value, "")
+context = native/define_function(context, "caller", [native/return_value(native/call_expression("entry", ["root", "value", "condition"]))])"#,
+            "exceeds contract of caller",
+        ),
+        (
+            r#"state = context[:state]
+state[:executions] = [[context[:functions]["entry"], :Collector]]
+context[:state] = state
+body = [native/let_statement("local", :U64, "zero"),
+  native/let_statement("address", pointer, native/unary_expression(:Address, "local")),
+  native/let_statement("managed", pointer, native/manage_expression("address")),
+  native/return_value("zero")]"#,
+            "stack storage cannot become managed",
+        ),
+    ];
+    for interpreter_only in [true, false] {
+        let mut runner = runner(interpreter_only);
+        for (change, expected) in cases {
+            let source = format!(
+                "{EXECUTION_PROGRAM}\n{change}\ncontext = native/define_function(context, \"entry\", body)\nreturn native/emit_c(context[:state])"
+            );
+            let report = runner.run_source(&source).unwrap_or_else(|error| {
+                panic!("{change}: {}", runner.render_source_task_error(&error));
+            });
+            assert!(matches!(report.outcome, TaskOutcome::Aborted { .. }));
+            assert!(
+                report.render().contains(expected),
+                "{change}: expected {expected}: {}",
+                report.render()
+            );
+        }
+    }
+}
+
+#[test]
+fn ordinary_helpers_preserve_managed_argument_and_relocation_contracts() {
+    let cases = [
+        (
+            r#"
+let pointer = [:Pointer, :U64, :Mutable]
+let [callback, declared] = native/function_pointer_type(native/program(), "Managed", :Void, [["value", pointer, :Gc]], [], :Value, "")
+let context = native/module_context(declared, {})
+context = native/declare_function(context, "bad", :Void, [["callback", callback, :Value], ["value", pointer, :Borrow]], [], [], :Value, "")
+context = native/define_function(context, "bad", [native/do_statement(native/indirect_call_expression("callback", ["value"])), native/return_void()])
+return native/emit_c(context[:state])
+"#,
+            "managed argument requires Manage or RootLoad",
+        ),
+        (
+            r#"
+let context = native/module_context(native/program(), {})
+context = native/declare_function(context, "collect", :Void, [], [], [:Relocate], :Value, "")
+context = native/define_function(context, "collect", [native/return_void()])
+context = native/declare_function(context, "caller", :Void, [], [], [], :Value, "")
+context = native/define_function(context, "caller", [native/do_statement(native/call_expression("collect", [])), native/return_void()])
+return native/emit_c(context[:state])
+"#,
+            "exceeds contract of caller",
+        ),
+    ];
+    for interpreter_only in [true, false] {
+        let mut runner = runner(interpreter_only);
+        for (source, expected) in cases {
+            let report = runner.run_source(source).unwrap();
+            assert!(matches!(report.outcome, TaskOutcome::Aborted { .. }));
+            assert!(report.render().contains(expected), "{}", report.render());
+        }
+    }
+}
+
+#[test]
+fn managed_roots_reload_after_relocation_and_tail_calls_remain_required() {
+    for interpreter_only in [true, false] {
+        let mut runner = runner(interpreter_only);
+        let tail = eval(&mut runner, &format!(
+            "{EXECUTION_PROGRAM}\ncontext = native/define_function(context, \"entry\", body)\nreturn native/emit_c(context[:state])"
+        )).with_str(str::to_owned).unwrap();
+        assert!(tail.contains("__attribute__((musttail)) return"));
+        let source = format!(
+            r#"{EXECUTION_PROGRAM}
+body = [native/root_store_statement("root", "value"),
+  native/if_statement("condition", [native/do_statement(native/call_expression("collect", ["root"]))], []),
+  native/let_statement("current", pointer, native/root_load_expression("root")),
+  native/return_value(native/load_expression("current"))]
+context = native/define_function(context, "entry", body)
+return native/emit_c(context[:state])"#
+        );
+        assert!(
+            eval(&mut runner, &source)
+                .with_str(|text| text.contains("mica_entry("))
+                .unwrap()
+        );
+    }
 }
 
 #[test]
@@ -1070,7 +1473,14 @@ fn native_value_layer_executes_on_both_mica_tiers() {
             include_str!("../../../apps/native/value/program.mica"),
             include_str!("../../../apps/native/value/immediates.mica"),
             include_str!("../../../apps/native/value/numbers.mica"),
-            include_str!("../../../apps/native/value/arena.mica"),
+            include_str!("../../../apps/native/value/symbol_storage.mica"),
+            include_str!("../../../apps/native/memory/program.mica"),
+            include_str!("../../../apps/native/memory/allocation.mica"),
+            include_str!("../../../apps/native/memory/collection.mica"),
+            include_str!("../../../apps/native/memory/lifecycle.mica"),
+            include_str!("../../../apps/native/memory/platform.mica"),
+            include_str!("../../../apps/native/value/memory.mica"),
+            include_str!("../../../apps/native/value/tracing.mica"),
             include_str!("../../../apps/native/value/heap.mica"),
             include_str!("../../../apps/native/value/utf8.mica"),
             include_str!("../../../apps/native/value/strings.mica"),
@@ -1103,9 +1513,9 @@ let result = [:Record, "ValueResult"]
 let [number, s0] = native/add_constant(state, :I64, "0000000000000003")
 let [has_end, s1] = native/add_constant(s0, :Bool, "false")
 let [fn_id, v, s2] = native/function_scope(s1, "test_composed", result,
-  [["arena", [:Pointer, [:Record, "ValueArena"], :Mutable], :Borrow]],
+  [["arena", [:Pointer, [:Record, "MemoryWorker"], :Mutable], :Borrow]],
   [["integer", result], ["value", word], ["empty", word], ["result", result]], ["entry"])
-state = native/contract(s2, fn_id, [:Allocate, :ReadMemory, :WriteMemory], :Borrow, "arena")
+state = native/contract(s2, fn_id, [:Allocate, :ReadMemory, :WriteMemory], :Gc, "")
 state = native/block_body(state, v["entry"], [[:Call, v["integer"], [functions["value_int"], number]],
   [:Field, v["value"], [v["integer"], "value"]], [:Zero, v["empty"], []],
   [:Call, v["result"], [functions["value_range"], v["arena"], v["value"], has_end, v["empty"]]]], :Return, [v["result"]])
@@ -1127,52 +1537,63 @@ return native/emit_c(state)
             assert_eq!(&generated, previous);
         }
         previous = Some(generated.clone());
-        let scratch = Scratch::new();
-        let source = scratch.0.join("value.c");
-        let binary = scratch.0.join("value");
-        fs::write(
-            &source,
-            format!(
-                "{generated}\n#define mica_foreign_allocate native_test_allocate\n#define mica_foreign_release native_test_release\n{}\n#undef mica_foreign_allocate\n#undef mica_foreign_release\n{}\n{}",
-                include_str!("../../../native/platform/allocation.c"),
-                include_str!("../../../native/platform/mutex.c"),
-                include_str!("../../../apps/native/value/tests.c")
-            ),
-        )
-        .unwrap();
-        let compiled = Command::new(std::env::var_os("CC").unwrap_or_else(|| "cc".into()))
-            .args([
-                "-std=c11",
-                "-pthread",
-                "-O2",
-                "-g",
-                "-Wall",
-                "-Wextra",
-                "-Werror",
-                "-pedantic",
-                "-ffp-contract=off",
-                "-fno-fast-math",
-                sanitizer,
-                "-fno-sanitize-recover=all",
-                "-fno-omit-frame-pointer",
-            ])
-            .arg(&source)
-            .args(["-lm", "-o"])
-            .arg(&binary)
-            .output()
+        let platform = eval(&mut runner, "return native_memory/platform()")
+            .with_str(str::to_owned)
             .unwrap();
-        assert!(
-            compiled.status.success(),
-            "{}",
-            String::from_utf8_lossy(&compiled.stderr)
+        let semantic = format!(
+            "#define MICA_MEMORY_TEST_ALLOCATOR\n{platform}\n\
+             #define mica_foreign_allocate native_test_allocate\n\
+             #define mica_foreign_release native_test_release\n{}\n\
+             #undef mica_foreign_allocate\n#undef mica_foreign_release\n{}\n{}",
+            include_str!("../../../native/platform/allocation.c"),
+            include_str!("../../../native/platform/mutex.c"),
+            include_str!("../../../apps/native/value/tests.c")
         );
-        let executed = Command::new(binary)
-            .env("ASAN_OPTIONS", "detect_leaks=1:halt_on_error=1")
-            .env("TSAN_OPTIONS", "halt_on_error=1")
-            .output()
-            .unwrap();
-        assert!(executed.status.success(), "{executed:?}");
-        assert!(executed.stderr.is_empty(), "{executed:?}");
+        let collected = format!(
+            "{platform}\n{}\n{}\n{}",
+            include_str!("../../../native/platform/allocation.c"),
+            include_str!("../../../native/platform/mutex.c"),
+            include_str!("../../../apps/native/value/gc_tests.c")
+        );
+        for oracle in [semantic, collected] {
+            let scratch = Scratch::new();
+            let source = scratch.0.join("value.c");
+            let binary = scratch.0.join("value");
+            fs::write(&source, format!("{generated}\n{oracle}")).unwrap();
+            let compiled = Command::new(std::env::var_os("CC").unwrap_or_else(|| "cc".into()))
+                .args([
+                    "-std=c11",
+                    "-pthread",
+                    "-O2",
+                    "-g",
+                    "-Wall",
+                    "-Wextra",
+                    "-Werror",
+                    "-pedantic",
+                    "-ffp-contract=off",
+                    "-fno-fast-math",
+                    sanitizer,
+                    "-fno-sanitize-recover=all",
+                    "-fno-omit-frame-pointer",
+                ])
+                .arg(&source)
+                .args(["-lm", "-o"])
+                .arg(&binary)
+                .output()
+                .unwrap();
+            assert!(
+                compiled.status.success(),
+                "{}",
+                String::from_utf8_lossy(&compiled.stderr)
+            );
+            let executed = Command::new(binary)
+                .env("ASAN_OPTIONS", "detect_leaks=1:halt_on_error=1")
+                .env("TSAN_OPTIONS", "halt_on_error=1")
+                .output()
+                .unwrap();
+            assert!(executed.status.success(), "{executed:?}");
+            assert!(executed.stderr.is_empty(), "{executed:?}");
+        }
     }
 }
 

@@ -1,7 +1,9 @@
-# C generator
+# Native code generator
 
-This Mica library constructs typed programs and emits C11 source. Rust Mica is the host.
-The library has no dependency on the Mica compiler app or a runtime value layout.
+This Mica library constructs typed programs for C11 and libgccjit. Rust Mica supplies the bootstrap host.
+The core IR has no dependency on the Mica compiler app or a runtime value layout.
+The [managed heap](memory/program.mica) and [value library](value/program.mica) use that IR to define their implementations.
+Task scheduling, transactions, and general native source execution remain separate runtime work.
 
 The [value examples](examples/values.mica) implement three operations:
 
@@ -133,6 +135,8 @@ Use named constructors for bodies and expressions. The constructors own the posi
 `native/unary_expression(op, operand)` and `native/binary_expression(op, left, right)` construct operations.
 `native/field_expression`, `native/field_pointer_expression`, `native/load_expression`, and `native/offset_expression` construct field and memory access.
 `native/call_expression(name, arguments)`, `native/record_expression(fields)`, and `native/zero_expression()` construct calls, records, and zero values.
+`native/function_address_expression(name)` takes a declared function's address.
+`native/indirect_call_expression(callee, arguments)` calls a typed function pointer; the callee can itself be a typed expression.
 
 Nested operands retain explicit types through `native/typed_expression(type, expression)`.
 `native/typed_field`, `native/typed_load`, `native/typed_call`, `native/typed_record`, and `native/typed_zero` take the result type first.
@@ -173,7 +177,7 @@ Output ordering uses semantic names and annotation text, independent of node IDs
 
 ### Declaration order and control flow
 
-Standalone C places callees before callers. Prototypes remain for foreign functions and backward calls within recursive cycles.
+Standalone C places callees and address targets before callers. Prototypes remain for foreign functions and backward references within recursive cycles.
 Self-recursion needs no separate prototype. Module headers retain public function declarations for callers in other translation units.
 Record and array definitions follow their layout dependencies; pointer fields can refer to incomplete struct tags.
 
@@ -226,6 +230,7 @@ Scalar types are `:U8`, `:U16`, `:U32`, `:U64`, `:I64`, `:F32`, and `:Bool`.
 | `[:Array, element, count]` | Fixed array with value semantics, emitted as a struct containing `elements[count]` |
 | `[:Scalar, name, representation]` | Distinct scalar type with explicit wrapping and unwrapping |
 | `[:Tagged, name, access, heap_tags]` | Nominal U64 word with an eight-bit tag and 56-bit payload |
+| `[:FunctionPointer, name]` | Named callable signature with argument, result, effect, and ownership contracts |
 
 Heap tags are increasing, unique byte values. Zero remains an immediate tag, so zero initialization is valid.
 The tagged type's access controls unpacked pointers. Mutable access permits updates to heap metadata, such as append ownership and string indexes.
@@ -265,6 +270,8 @@ Bool constants are `"true"` or `"false"`. Pointer constants are `"null"`.
 | `:PackImmediate`, `:Payload`, `:Tag` | Construct an immediate word, extract an immediate payload, or extract any tag |
 | `:GlobalAddress` | Address module state, thread-local state, or constant data |
 | `:Call` | Call a declared function, with its ID before the argument values |
+| `:FunctionAddress` | Take a declared function's address, with its ID as the only operand |
+| `:CallIndirect` | Call a function pointer, with its value ID before the argument values |
 
 Checked operations return a record with fields `ok: Bool` and `number: I64`, in that order.
 Failure returns `{false, 0}` without evaluating an invalid C arithmetic expression.
@@ -280,6 +287,33 @@ These checks enforce primitive preconditions. They do not replace language-level
 The target has eight-bit bytes, binary32 floats, and 64-bit pointers, `size_t`, and `ptrdiff_t`.
 C floating-point operations assume the default rounding environment. Fast-math transformations and floating-point contraction must remain disabled.
 There are no raw C fragments or implicit pointer conversions.
+
+### Typed function pointers
+
+Declare a signature before validation:
+
+```mica
+let [unary, state] = native/function_pointer_type(native/program(), "Unary", :U64,
+  [["input", :U64, :Value]], [], :Value, "")
+```
+
+The arguments after the name match function declarations: result type, parameters, allowed effects, result ownership, and result owner.
+Each parameter contains its name, type, and ownership mode. Borrow regions can name a root parameter in that signature.
+Taking an address checks argument types, result type, and ownership regions by parameter position.
+The target's declared effects must fit within the signature's allowed effects.
+Indirect calls check their arguments and use the signature's full effect allowance when checking the caller.
+Borrowed results retain their argument's origin; consuming calls reject borrowed or stack storage.
+
+Function pointers can appear in parameters, results, records, arrays, and globals.
+They support copying, equality, zero initialization, and `"null"` constants. Calling null aborts before invocation.
+C uses named function-pointer typedefs; recursive typedef dependencies are rejected.
+Callbacks can refer to records that contain callbacks. Forward struct declarations preserve those types during C emission.
+
+A code address has no captured data and uses `:Value` ownership. Pass a captured environment as a separate, explicitly borrowed argument.
+Data-pointer casts and tagged-pointer packing do not accept code pointers.
+The caller must keep the defining module loaded while any code address remains reachable.
+This checker does not manage code lifetimes or establish continuation, suspension, collection, or tail-call semantics.
+The [callable fixture](tests/callables.mica) exercises aggregate storage, nested calls, borrowed results, and memory effects.
 
 ## Module state and C artifacts
 
@@ -361,7 +395,14 @@ The [value module](value/program.mica) builds on this generator. Load its files 
 apps/native/value/program.mica
 apps/native/value/immediates.mica
 apps/native/value/numbers.mica
-apps/native/value/arena.mica
+apps/native/memory/program.mica
+apps/native/memory/allocation.mica
+apps/native/memory/collection.mica
+apps/native/memory/lifecycle.mica
+apps/native/memory/platform.mica
+apps/native/value/symbol_storage.mica
+apps/native/value/memory.mica
+apps/native/value/tracing.mica
 apps/native/value/utf8.mica
 apps/native/value/strings.mica
 apps/native/value/symbols.mica
@@ -382,21 +423,51 @@ apps/native/value/persistence.mica
 
 `native_value/program()` returns its IR. `native/emit_module(native_value/program(), "value")` returns the C artifacts.
 The platform boundary uses [allocation wrappers](../../native/platform/allocation.c) and [POSIX mutex wrappers](../../native/platform/mutex.c).
-Link the value module with both shims and `-pthread`.
+`native_memory/platform()` emits the allocation and pthread bindings for the managed heap.
+Link these bindings, both symbol-table shims, and the value module with `-pthread`.
 
 Implemented behaviour includes:
 
 - All immediate constructors and accessors, signed 56-bit bounds, finite binary32 values, and canonical positive zero.
 - Checked numeric operations, exact integer division, float remainder, and explicit numeric conversions.
-- A growing arena with stable addresses, eight-byte alignment, and release of all chunks.
+- Per-worker bump nurseries, copying promotion, and a shared non-moving mark-and-sweep heap.
 - UTF-8 validation, scalar encoding and decoding, indexed strings, slicing, append, concatenation, and substring search.
 - Copying byte and list constructors, plus range, error, and frob constructors and checked accessors.
 - Recursive canonical comparison for these values and maps, with separate exact integer/float comparison for language expressions.
 - Map construction with stable key sorting, the last duplicate value retained, and binary-search lookup.
 
-Initialize `struct mica_ValueArena` to zero before use. Release it with `mica_value_arena_release` after its last borrowed value becomes unused.
-Allocation failure returns a null pointer or `{false, 0}`. Failed arena growth preserves the existing allocation list and cursor.
-Child values stored in a container must share the destination arena's lifetime. Strings and bytes copy their input storage.
+Initialize zeroed heap and worker controls with `mica_value_heap_init` and `mica_memory_worker_init`.
+Heap, worker, and registered root controls must keep stable addresses until released.
+The worker initializer accepts the nursery capacity in bytes. Zero capacity sends allocations directly to mature pages for allocation-failure tests.
+Enter the worker with `mica_memory_enter` before accessing managed values.
+Each worker has one mutator thread at a time. Workers in the same heap can execute concurrently.
+
+Value helpers do not collect. Nursery exhaustion uses mature storage and requests collection at the next safepoint.
+Allocation failure returns a null pointer or `{false, 0}`.
+Before a safepoint, register live values with `mica_memory_root_push` and `mica_value_root_set`.
+Start each root control zeroed. A raw root pointer must identify an allocation base, not an interior address.
+After a safepoint, reload them with `mica_value_root_get`.
+Direct value pointers remain valid between safepoints. Promotion can change their addresses.
+
+`mica_memory_safepoint(worker, false)` joins a pending collection or collects after allocation pressure.
+An explicit `true` requests collection. Collection waits for active workers to reach a safepoint or leave.
+Idle workers retain their registered roots but do not join this wait.
+Promotion reserves destinations before it rewrites references. Failed reservation preserves the original graph, roots, and nursery contents.
+
+Child values must belong to the same managed heap. Worker-private nursery values cannot cross thread boundaries.
+`mica_memory_publish` promotes a registered root and retains it in the shared root registry.
+Another worker uses `mica_memory_acquire` to obtain its own registered root.
+`mica_memory_unpublish` removes the shared root. Acquired roots continue to retain the graph.
+Published graphs must be immutable. Mutable scratch buffers remain private to their owning worker.
+Promoted strings and lists have immutable backing storage. Their append operations allocate fresh backing storage.
+
+Remove private roots in reverse registration order with `mica_memory_root_pop`.
+Leave the worker with `mica_memory_leave` before blocking outside the runtime.
+An inactive worker cannot access managed payloads or change its roots.
+Release an inactive worker without roots with `mica_memory_worker_release`.
+Release the heap after all workers and shared roots are gone, using `mica_memory_heap_release`.
+
+Strings and bytes copy their input storage.
 Error messages are string values. Their presence and the optional error payload have separate flags.
 
 `mica_value_compare` and `mica_value_language_compare` return `IntResult { ok, number }`, where `number` is −1, 0, or 1.
@@ -405,9 +476,9 @@ Comparison ignores absent range ends, error messages, and error payloads.
 `mica_value_equal` and `mica_value_language_equal` return the corresponding equality result as `BoolResult { ok, value }`.
 
 `mica_value_map` copies its input and uses a stable merge sort before duplicate compaction.
-Construction takes O(n log n) comparisons and O(n) arena storage. Lookup takes O(log n) comparisons.
+Construction takes O(n log n) comparisons and O(n) temporary storage. Lookup takes O(log n) comparisons.
 `mica_value_map_get` returns `{false, 0}` for a missing key or a non-map input.
-Failed construction can retain temporary storage until arena release. It never publishes a partial map or changes the input.
+Failed construction leaves temporary storage for the next collection. It never publishes a partial map or changes the input.
 
 Lists support `value_list_length`, `value_list_get`, `value_list_slice`, `value_list_append`, and `value_list_set`.
 Indices start at zero. Slices exclude the end position and permit empty ranges, including the end of a list.
@@ -415,12 +486,13 @@ Invalid types, reversed ranges, and out-of-range indices return `ok = false`.
 Length returns `IdResult`. The other operations return `ValueResult`.
 
 List slices allocate a header and share the backing array. Replacement copies the array before it writes the element.
-Append claims spare capacity only at the backing's current tail. Otherwise, it copies the visible prefix into another backing with geometric growth.
-Every earlier view retains its elements and length. Nested lists can share a backing because arena release does not traverse their elements.
+Append claims spare capacity only at the current tail of private nursery storage.
+Otherwise, it copies the visible prefix into another backing with geometric growth.
+Every earlier view retains its elements and length. The collector preserves shared backing storage and traces its initialized elements.
 
-Serialize arena mutation, including list append. All borrowed child values and shared backings must outlive the result's use.
-The ownership contracts tie these borrows to the destination arena. The caller must enforce the lifetime when it calls generated C directly.
-Cross-arena operations can borrow from a longer-lived source. They do not copy nested values into the destination arena.
+The IR uses `:Gc` contracts for managed values. It rejects managed locals that survive a relocating call without a root reload.
+Callers of generated C must obey the same root and safepoint rules.
+Nested children share storage within one heap. `mica_value_copy` creates independent storage in the destination worker's heap.
 Allocation failure leaves published views unchanged. Internal allocation helpers must not publish a header before its elements are initialized.
 
 Maps support `value_map_length` and `value_map_set` in addition to construction and lookup.
@@ -442,9 +514,9 @@ String positions count Unicode scalars, not grapheme clusters. The APIs use thes
 | `value_string_length(value)` | Scalar count as `IdResult { ok, number }` |
 | `value_string_byte_offset(value, position)` | Byte offset, including the end position |
 | `value_string_scalar_at(value, position)` | `RuneResult { ok, rune }`; the end position fails |
-| `value_string_slice(arena, value, start, end)` | Shared view of the end-exclusive scalar range |
-| `value_string_append(arena, value, bytes, length)` | String with validated suffix bytes |
-| `value_string_concat(arena, left, right)` | String with the right string appended |
+| `value_string_slice(worker, value, start, end)` | Shared view of the end-exclusive scalar range |
+| `value_string_append(worker, value, bytes, length)` | String with validated suffix bytes |
+| `value_string_concat(worker, left, right)` | String with the right string appended |
 | `value_string_find(value, needle, start)` | First matching scalar position at or after `start` |
 
 Invalid types, reversed ranges, and out-of-range positions return `ok = false`.
@@ -458,16 +530,16 @@ Samples use eight bytes each. Capacity reserves enough samples for an eventual A
 ASCII indexing uses direct offsets. Non-ASCII indexing starts at a sample and decodes at most 31 preceding scalars.
 Slices share the backing bytes and samples. Small backings without samples use a bounded scan.
 
-Append allocates a separate view header. It reuses spare capacity only when the input view ends at the backing's current tail.
+Append allocates a separate view header. Only a view at the current tail of private nursery storage can reuse spare capacity.
 Other appends allocate another backing with geometric growth. Earlier views retain their bytes and lengths.
 Overlapping suffix bytes are valid. Invalid UTF-8 leaves the input unchanged.
-Serialize mutation of an arena and its string backings, including append. This module does not provide concurrent arena mutation.
-All views become invalid when their owning arena is released. Allocation errors can retain temporary storage until release.
+The owning worker controls nursery mutation. Other workers receive promoted values through shared roots.
+The collector preserves backing storage while a live view retains it. Allocation errors can leave temporary storage for collection.
 The allocation and index-building helpers are internal construction steps; callers must not publish incomplete headers.
 
 Finite relations contain a symbol heading and a canonical set of tuples.
-`value_relation(arena, heading, arity, rows, length)` copies the heading, tuple descriptors, and cell arrays into the arena.
-Child values remain borrowed under the arena lifetime contract.
+`value_relation(worker, heading, arity, rows, length)` copies the heading, tuple descriptors, and cell arrays into managed storage.
+The collector traces child values and repairs interior row pointers during promotion.
 The constructor sorts columns by symbol ID and permutes every row to match.
 It sorts rows lexicographically and removes duplicates. Duplicate column names and rows with the wrong arity fail.
 Headings can contain at most 65,535 columns. Allocation failure returns `{false, 0}` without changes to the input.
@@ -475,6 +547,8 @@ Headings can contain at most 65,535 columns. Allocation failure returns `{false,
 `ValueTuple` contains `data` and `arity` fields. `value_tuple` copies a supplied cell array and returns `TupleResult { ok, tuple }`.
 `value_tuple_get` returns a checked cell. `value_tuple_compare` compares cells lexicographically, then compares the arities.
 A tuple has no standalone value tag or heading.
+Relation row views borrow their cell arrays. Root the relation across a safepoint, then obtain the row view again.
+Raw `MemoryRoot.pointer` slots contain allocation bases, not interior pointers.
 
 | Function after `mica_` | Result |
 | --- | --- |
@@ -496,7 +570,7 @@ Relation comparison orders the canonical headings first, then the canonical tupl
 Nested relations participate in list, map, range, error, and frob comparison.
 Column and row sorts use stable merge passes over descriptors. They skip merge storage when the descriptors are already ordered.
 Construction costs O(columns log columns + rows log rows × tuple comparison), plus the cost of copying cells.
-Temporary sort storage remains arena-owned until release. Published views remain immutable.
+The next collection reclaims unreachable sort storage. Published views remain immutable.
 
 The [symbol table](value/symbols.mica) interns UTF-8 names into stable 32-bit IDs.
 Start with a zero-initialized `struct mica_SymbolTable`, then call `value_symbol_table_init` before sharing it.
@@ -519,7 +593,8 @@ The table copies new names and caches their byte length, scalar count, and ASCII
 Repeated interning does not allocate. Text addresses and IDs stay valid through table growth.
 FNV-1a hashes select buckets with linear probing. Matching hashes still require equal bytes.
 At most half the buckets contain entries. Reverse lookup indexes entries directly.
-The arena retains earlier table arrays until release. Geometric growth keeps their total size below twice the current array size.
+Pinned symbol storage retains names and earlier table arrays until table release. Symbol IDs do not retain pointers into the managed heap.
+Geometric growth keeps the total array size below twice the current array size.
 Allocation failure preserves published names and IDs, but can retain unused capacity until release.
 
 Interning and reverse lookup acquire the table's mutex internally. Concurrent calls share one namespace and cannot publish duplicate IDs for equal names.
@@ -541,44 +616,208 @@ MICA_NATIVE_THREAD_SANITIZER=1 CC=clang cargo test -p mica-runtime --test native
 ```
 
 `value_hash(value)` and `value_tuple_hash(tuple)` return `IdResult { ok, number }` with a 64-bit hash.
-The hash follows Omica's canonical value algorithm. Equal values in one symbol namespace have equal hashes, regardless of their arena or backing storage.
+The hash follows Omica's canonical value algorithm. Equal values in one symbol namespace have equal hashes, regardless of their allocation or backing storage.
 Integer and float kinds remain distinct. Absent optional fields do not contribute their stored contents.
 Hashes are neither cryptographic identifiers nor persistence encodings. Unknown tags return `ok = false`.
 
-`value_copy(arena, value)` and `value_tuple_copy(arena, tuple)` recursively copy visible heap storage into the destination arena.
-The result can outlive the source arena. Strings rebuild their scalar indexes, and lists receive independent append storage.
+`value_copy(worker, value)` and `value_tuple_copy(worker, tuple)` recursively copy visible storage into the destination heap.
+The result can outlive the source heap. Strings rebuild their scalar indexes, and lists receive independent append storage.
 Maps and relations retain canonical order without another sort. Absent optional fields become zero instead of retaining source pointers.
 Immediate IDs retain their original symbol, identity, capability, or function namespace.
 
 Copy returns `ValueResult` or `TupleResult`. Allocation failure returns `ok = false` and leaves the source unchanged.
-Partial allocations remain in the destination arena until release. The caller must serialize destination arena mutation.
+The next collection reclaims unreachable partial allocations. The caller must use its active worker for destination allocation.
 Traversal uses native recursion. Copy duplicates shared subtrees and does not preserve source aliasing or spare capacity.
 
 `value_is_persistable(value)` rejects capabilities and function handles, including nested children.
 It ignores absent optional fields. This predicate does not check whether symbols have registered names.
 
-`value_encode(arena, table, value, options)` returns a `ValueResult` containing owned bytes.
+`value_encode(worker, table, value, options)` returns a `ValueResult` containing managed bytes.
 `ValueCodecOptions { symbol_ids, allow_capabilities }` defaults to persistence-safe options when zero-initialized: names, with capabilities disabled.
 The format matches Rust's owned value codec: little-endian words, structural heap records, and UTF-8 symbol names.
 Heap pointers are never encoded. Function handles are always rejected.
 Set `symbol_ids` only when producer and consumer share the same symbol namespace.
 Set `allow_capabilities` only for transient transfer within the same authority namespace; this does not make capabilities persistable.
 
-`value_decode(arena, table, data, length, options)` returns `ValueDecodeResult { ok, value, consumed }`.
+`value_decode(worker, table, data, length, options)` returns `ValueDecodeResult { ok, value, consumed }`.
 `value_decode_exact` returns `ValueResult` and rejects trailing bytes.
 Decoding checks tags, flags, lengths, UTF-8, and relation headings before publishing a value.
 Maps and relations use their ordinary constructors to normalize order and duplicates.
 Names require an initialized symbol table. ID mode permits a null table.
 Named decoding interns into the destination table, so resulting IDs can differ from the source IDs.
 
-Encoded bytes and decoded heap storage belong to the destination arena. Neither borrows source storage or symbol-name bytes.
-The caller must serialize destination arena mutation; symbol-table access uses its existing lock.
-A failure returns `ok = false` without publishing a partial result. Partial arena allocations remain until release.
+Encoded bytes and decoded values belong to the destination heap. Neither borrows source storage or symbol-name bytes.
+The owning worker controls destination allocation. Symbol-table access uses its existing lock.
+A failure returns `ok = false` without publishing a partial result. The next collection reclaims unreachable partial allocations.
 Names interned before a decode failure remain in the symbol table.
 The codec uses native recursion, with no separate nesting limit. Callers must bound untrusted input depth before using it.
 
 This module is in progress. Display remains unimplemented.
 Heap layouts are local to this implementation. Matching immediate tags does not make heap pointers interchangeable with Odin or Rust.
+
+## libgccjit backend
+
+The [libgccjit generator](gccjit/program.mica) describes a general backend in native IR.
+The C emitter bootstraps that backend into an executable, called B0.
+B0 accepts different modules as data without recompilation.
+
+Mica owns serialization, declaration ordering, type construction, operation lowering, and control flow.
+The [API bindings](gccjit/bindings.mica) also come from Mica.
+Rust only hosts the generators, writes artifacts, invokes compilers, and runs the comparison harness.
+The platform shims supply allocation and mutex operations.
+
+`native_jit/data(state)` validates the module and serializes its tables, names, and types.
+The binary input contains IR operations, not a sequence of libgccjit API calls.
+B0 trusts this locally generated input. The format is not an external module protocol.
+The current target requires a little-endian LP64 host and libgccjit 14 or later.
+The qualified host uses AArch64 and libgccjit 14.2.0.
+
+The backend covers the native IR, including checked arithmetic, tagged pointers, aggregates, globals, TLS, roots, and indirect calls.
+Array wrappers preserve the C ABI. Pointer casts and tagged operations retain their runtime guards.
+GCC 14 supplies `sizeof` but no `alignof` construction API.
+For the supported natural C types, the backend derives alignment from a padded probe record.
+
+The backend uses `gcc_jit_context_compile_to_file` to produce objects and shared libraries.
+It does not use `gcc_jit_context_compile` or implement code-module retention.
+The shared-library check measures `dlopen(RTLD_NOW)` and symbol lookup separately from compilation.
+The fixture consumers also execute shared-library code.
+The same backend compiles the managed heap and value library. Task scheduling and transaction execution remain unimplemented.
+
+Build B0 and run the backend, memory, value, and execution fixtures:
+
+```sh
+cargo run --release -p mica-value-comparison --bin native-backend -- \
+  --sanitize --check-fixtures
+```
+
+Each fixture runs through emitted C, a libgccjit object, and a libgccjit shared library.
+The checks cover allocation failures, ABI layouts, TLS isolation, deliberate aborts, tracing, publication, and required tail calls.
+The execution fixture requires Clang for emitted C. `CLANG` selects that compiler.
+
+Compile the complete value module with the same B0:
+
+```sh
+cargo run --release -p mica-value-comparison --bin native-backend -- \
+  --reuse-backend --sanitize --module 'native_value/program()' \
+  --load-symbol mica_value_tag
+cargo run --release -p mica-value-comparison -- \
+  --backend gccjit --native-module target/native-gccjit \
+  --all-corpora --cases 128 --seed 19 --sanitize
+```
+
+`--reuse-backend` reuses the executable. Rebuild it after changes to the backend sources or its compilation flags.
+Artifacts stay under `target/native-gccjit`.
+The bootstrap produces `backend.ir`, `backend.c`, `backend.h`, `support.c`, their objects, platform objects, and the `backend` executable.
+Each input module produces `module.ir`, `module.h`, `module.c`, `module.o`, and optional `module.so`.
+Timing metadata and compiler diagnostics also stay there.
+`GCCJIT_INCLUDE` can select the directory containing `libgccjit.h`.
+
+On the qualified host, LeakSanitizer reports retained allocations inside libgccjit after context release.
+The harness suppresses those library stacks only in the compiler process.
+The generated programs retain ASan, UBSan, and leak checks without that suppression.
+This result does not establish bounded memory use for a persistent compiler service.
+
+For unsanitized measurements, build a separate B0 and value module:
+
+```sh
+cargo run --release -p mica-value-comparison --bin native-backend -- \
+  --output target/native-gccjit/performance --module 'native_value/program()' \
+  --load-symbol mica_value_tag
+```
+
+Use a C compiler that matches the libgccjit version. Apply the same CPU affinity to both runs.
+The supplied module keeps both value implementations in a separate translation unit, with `-O3`, `-fPIC`, and no LTO.
+
+```sh
+CC=gcc-14 cargo run --release -p mica-value-comparison -- \
+  --backend c --native-module target/native-gccjit/performance \
+  --all-corpora --cases 128 --seed 19 --bench --samples 7 --sample-ms 50
+CC=gcc-14 cargo run --release -p mica-value-comparison -- \
+  --backend gccjit --native-module target/native-gccjit/performance \
+  --all-corpora --cases 128 --seed 19 --bench --samples 7 --sample-ms 50
+```
+
+Both runs compare results and checksums against Rust.
+The existing `c_*` timing fields refer to the selected native backend.
+Without `--native-module`, the harness retains its existing single-translation-unit C comparison.
+The [design document](../../sketches/NATIVE_TASKS_AND_MEMORY_DESIGN.md#151-can-the-existing-native-ir-drive-libgccjit) records the experiment findings and limits.
+
+### Backend reproduction
+
+The harness uses B0 to compile its own IR into B1. B1 compiles the same IR into B2.
+B2 compiles that input once more to check reproduction.
+All three executables link the same generated bindings, driver, and platform objects.
+Each rebuilt backend independently compiles all maintained fixtures and the complete value module.
+The harness checks the fixtures through C, objects, and shared libraries, then compares the value object against Rust.
+
+Build both harness executables and run the experiment:
+
+```sh
+cargo build --release -p mica-value-comparison --bins
+target/release/native-backend --self-rebuild \
+  --output target/native-gccjit/rebuild
+```
+
+By default, each compiler performs 40 cycles for each of three inputs: its backend, the value module, and the callable fixture.
+Each cycle constructs and releases a fresh GCC context, then loads and unloads its shared library.
+The callable cycle also executes `mica_chain(41)` and checks that it returns 42.
+The other cycles resolve their entry symbols without execution.
+`--lifecycle-rounds` accepts 1 through 1,000. Apply CPU affinity when comparing timings.
+
+For sanitizer qualification, use a separate output directory:
+
+```sh
+target/release/native-backend --self-rebuild --sanitize \
+  --output target/native-gccjit/rebuild-sanitized
+```
+
+On the tested libgccjit 14.2.0, both rebuilt backends pass the sanitized corpus.
+The subsequent repeated callable compilation fails on its second cycle with a GCC internal error in `assemble_external_libcall`.
+The command exits unsuccessfully and records the lifecycle failure separately from successful reproduction.
+`--lifecycle-rounds 1` limits that phase to one cycle, but does not qualify repeated sanitized compilation.
+
+Each output directory contains `b1/`, `b2/`, and `lifecycles/`, plus `self-rebuild.json`.
+Lifecycle JSON lines record construction, compilation, loading, execution, release, RSS, and allocator measurements.
+RSS requires Linux. Allocator measurements require glibc and report only malloc-managed storage.
+Sanitized runs exercise only the callable cycles. Their memory figures are unsuitable for retention measurements.
+
+The unsanitized backend objects reproduce byte-for-byte on the tested host.
+The 40-cycle tests pass, but compiler RSS rises to about 310 MiB.
+A 120-cycle object-only control reaches 317 MiB, with most growth in its first 12 cycles.
+This result establishes backend reproduction from fixed IR. Native source compilation and persistent compiler-service qualification remain separate work.
+The [experiment 2 results](../../sketches/NATIVE_TASKS_AND_MEMORY_DESIGN.md#152-can-the-generated-backend-rebuild-itself) give the measurements and remaining limits.
+
+### Execution regression
+
+The [execution fixture](tests/execution.mica) uses the current managed heap, explicit roots, safepoints, and required tail calls.
+It runs a million steps on a 256 KiB native stack.
+One thread publishes a checkpoint and releases its worker. A fresh thread resumes from that checkpoint.
+The checks cover the result, checkpoint immutability, repeated collection, and final reclamation.
+They run through emitted C, a libgccjit object, and a libgccjit shared library under `--check-fixtures`.
+
+This fixture checks execution and memory primitives. It does not implement a task scheduler, transactions, or code-module lifetime management.
+The [recorded continuation comparison](../../sketches/NATIVE_TASKS_AND_MEMORY_DESIGN.md#153-which-continuation-and-nursery-model-works) explains the choice of heap nurseries and required tail calls.
+
+### Execution contracts
+
+The [execution checker](execution.mica) distinguishes `:Tail` and `:Collector` functions.
+`native/execution_function` assigns a policy. `native/execution_pointer_type` declares a callable with a matching transfer policy.
+
+`native/tail_call_statement` requires identical signatures and rejects arguments that retain stack addresses.
+The C backend requires Clang `musttail`; the libgccjit backend marks the call as required-tail.
+
+`:Gc` parameter and result contracts describe managed provenance.
+`native/manage_expression` introduces that provenance in collector code.
+Collector code cannot manage its own stack storage. Tail entries allocate through collector helpers.
+`native/root_store_statement` publishes managed references through explicit root slots.
+`native/root_load_expression` reloads them after collection.
+Ordinary stores retain their existing stack-escape checks.
+
+The `:Relocate` effect invalidates managed locals and derived addresses across a call.
+A fresh assignment restores the destination. Control-flow joins reject a reference invalidated on either incoming path.
+These checks require declared provenance and relocation effects.
+Collector code remains responsible for root registration, descriptors, bounds, and complete relocation.
+They do not prove that an arbitrary raw load refers to registered GC storage.
 
 ## Rust and generated C comparison
 
@@ -601,7 +840,7 @@ Name-mode checks decode and re-encode with a different C symbol namespace, then 
 Codec lifetime checks release source storage before inspecting results. Codec benchmarks use ID mode.
 
 `--traversal` selects hash and copy cases across all value kinds, including nested relations.
-Copy checks release the actual decoded source arena before they inspect the result under AddressSanitizer.
+Copy checks remove the source roots and release the source worker before they collect and inspect the result under AddressSanitizer.
 The Rust hash reference implements Omica's algorithm over Rust values. It does not use Rust's unspecified standard hash algorithm.
 The Rust copy reference recursively reconstructs values. Copy benchmarks include this reconstruction and result destruction, rather than an `Arc` clone.
 
@@ -702,7 +941,8 @@ Samples include operation dispatch and result consumption, so very small operati
 These are workload measurements, not isolated instruction costs or whole-runtime benchmarks.
 
 Generation, compilation, subprocess startup, input decoding, and input construction stay outside timed intervals.
-Operation workloads reuse prepared values. Construction, slice, and append workloads include Rust result destruction and C arena release on each iteration.
+Operation workloads reuse prepared values. Timings include Rust result destruction and C safepoint polls.
+Each C sample includes a final collection to reclaim its temporary outputs. Worker initialization stays outside the timer.
 C uses `-O3` without sanitizers; Rust requires a release build. Sanitizer mode cannot run benchmarks.
 For stable comparisons, use the same idle machine and CPU affinity for the parent process and its children.
 

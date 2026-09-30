@@ -18,6 +18,13 @@ end
 
 verb native/check_layouts(state, index)
   let types = []
+  for row in state[:function_types]
+    types = native/collect_type(types, [:FunctionPointer, row[0]])
+    types = native/collect_type(types, row[1])
+    for parameter in row[2]
+      types = native/collect_type(types, parameter[1])
+    end
+  end
   for row in state[:functions]
     types = native/collect_type(types, row[2])
   end
@@ -49,7 +56,10 @@ verb native/check_layouts(state, index)
   let names = {}
   let pending = []
   for type_id in types
-    if native/is_record(type_id) || native/is_array(type_id) || native/is_scalar(type_id) || native/is_tagged(type_id)
+    if native/is_function_pointer(type_id)
+      native/ensure(map_contains_key(index[:function_types], type_id[1]), "unknown function pointer type")
+    end
+    if native/is_record(type_id) || native/is_array(type_id) || native/is_scalar(type_id) || native/is_tagged(type_id) || native/is_function_pointer(type_id)
       let spelling = native/c_type(type_id)
       native/ensure(!map_contains_key(names, spelling) || names[spelling] == type_id, "conflicting emitted type name")
       names[spelling] = type_id
@@ -67,6 +77,13 @@ verb native/check_layouts(state, index)
       end
       if native/is_array(type_id)
         dependencies = [type_id[1]]
+      end
+      if native/is_function_pointer(type_id)
+        let signature: list = index[:function_types][type_id[1]]
+        // Forward struct declarations suffice for function typedefs, even
+        // when the function accepts or returns the aggregate by value.
+        dependencies = [signature[0], @[parameter[1] for parameter in signature[1]]]
+        dependencies = [item for item in dependencies if !native/is_record(item) && !native/is_array(item)]
       end
       let ready = true
       for dependency in dependencies
@@ -87,7 +104,10 @@ verb native/check_layouts(state, index)
         remaining = [@remaining, type_id]
       end
     end
-    native/ensure(len(remaining) < len(pending), "record contains a by-value cycle")
+    if len(remaining) == len(pending)
+      native/ensure(len([item for item in remaining if native/is_function_pointer(item)]) == 0, "function pointer cycle in type declarations")
+      raise E_INVARG, "native: record contains a by-value cycle"
+    end
     pending = remaining
   end
   return ordered

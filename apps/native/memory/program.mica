@@ -1,0 +1,165 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+verb native_memory/pointer(type_id) -> list
+  return [:Pointer, type_id, :Mutable]
+end
+
+verb native_memory/record_pointer(name: string) -> list
+  let result: list = native_memory/pointer([:Record, name])
+  return result
+end
+
+verb native_memory/field(type_id, pointer, name: string) -> list
+  let result: list = native/typed_load(type_id,
+    native/typed_expression(native_memory/pointer(type_id), native/field_pointer_expression(pointer, name)))
+  return result
+end
+
+verb native_memory/store(type_id, pointer, name: string, value) -> list
+  let result: list = native/store_statement(
+    native/typed_expression(native_memory/pointer(type_id), native/field_pointer_expression(pointer, name)), value)
+  return result
+end
+
+verb native_memory/root(type_id, pointer, name: string) -> list
+  let result: list = native/typed_expression(type_id, native/root_load_expression(
+    native/typed_expression(native_memory/pointer(type_id), native/field_pointer_expression(pointer, name))))
+  return result
+end
+
+verb native_memory/store_root(type_id, pointer, name: string, value) -> list
+  let result: list = native/root_store_statement(
+    native/typed_expression(native_memory/pointer(type_id), native/field_pointer_expression(pointer, name)), value)
+  return result
+end
+
+verb native_memory/number(value: int) -> string
+  return string_concat("memory_n", to_literal(value))
+end
+
+verb native_memory/bind(name: string, type_id, expression) -> list
+  let body = expression
+  if is_kind(body, :list) && body[0] == :Expr
+    body = body[2]
+  end
+  let result: list = native/let_statement(name, type_id, body)
+  return result
+end
+
+verb native_memory/set(name: string, expression) -> list
+  let body = expression
+  if is_kind(body, :list) && body[0] == :Expr
+    body = body[2]
+  end
+  let result: list = native/set_statement(name, body)
+  return result
+end
+
+verb native_memory/when(condition, body: list) -> list
+  let test = condition
+  if is_kind(test, :list) && test[0] == :Expr
+    test = test[2]
+  end
+  let result: list = native/when_statement(test, body)
+  return result
+end
+
+verb native_memory/call(name: string, arguments: list) -> list
+  let result: list = native/do_statement(native/call_expression(name, arguments))
+  return result
+end
+
+verb native_memory/declare(context: map, name: string, result, parameters: list, effects: list, mode: symbol, owner: string) -> map
+  let declared: map = native/declare_function(context, name, result, parameters, [], effects, mode, owner)
+  let with_contract: map = native/execution_function(declared, name, :Collector)
+  return with_contract
+end
+
+// Allocation never relocates. Only explicit safepoints can rewrite roots.
+// Worker and heap controls remain outside the nursery. Published payloads are immutable.
+verb native_memory/context(input: map) -> map
+  let context: map = input
+  let bytes: list = native_memory/pointer(:U8)
+  let object: list = native_memory/record_pointer("MemoryObject")
+  let page: list = native_memory/record_pointer("MemoryPage")
+  let heap: list = native_memory/record_pointer("MemoryHeap")
+  let worker: list = native_memory/record_pointer("MemoryWorker")
+  let root: list = native_memory/record_pointer("MemoryRoot")
+  let collection: list = native_memory/record_pointer("MemoryCollection")
+  let effects: list = [:ReadMemory, :WriteMemory, :Allocate, :Release]
+  let [trace, initial] = native/function_pointer_type(context[:state], "MemoryTrace", :Void,
+    [["collection", collection, :Borrow], ["object", object, :Gc]], effects, :Value, "")
+  let state: map = initial
+  state = native/record_type(state, "MemoryObject", [
+    ["next", object], ["work", object], ["forward", object], ["page", page], ["heap", heap],
+    ["size", :U64], ["layout", :U64], ["mark", :U64], ["state", :U64]])[1]
+  state = native/record_type(state, "MemoryPage", [
+    ["next", page], ["stride", :U64], ["capacity", :U64], ["live", :U64], ["bucket", :U64]])[1]
+  state = native/record_type(state, "MemoryRoot", [
+    ["next", root], ["pointer", bytes], ["bits", :U64], ["registration", :U64]])[1]
+  state = native/record_type(state, "MemoryWorker", [
+    ["next", worker], ["heap", heap], ["roots", root], ["nursery", bytes],
+    ["capacity", :U64], ["used", :U64], ["active", :Bool], ["pressure", :Bool]])[1]
+  state = native/record_type(state, "MemoryHeap", [
+    ["pages", page], ["free", [:Array, object, 10]], ["workers", worker], ["roots", root], ["trace", trace],
+    ["mutex", bytes], ["collecting", :Bool], ["collection_ok", :Bool], ["epoch", :U64],
+    ["allocated", :U64], ["retained", :U64], ["copied", :U64], ["collections", :U64]])[1]
+  state = native/record_type(state, "MemoryCollection", [
+    ["heap", heap], ["work", object], ["phase", :U64], ["failed", :Bool], ["copied", :U64]])[1]
+  let declarations: list = [
+    ["memory_null_bytes", bytes, "null"], ["memory_null_object", object, "null"],
+    ["memory_null_page", page, "null"], ["memory_null_worker", worker, "null"],
+    ["memory_null_root", root, "null"], ["memory_null_trace", trace, "null"],
+    ["memory_null_heap", heap, "null"], ["memory_true", :Bool, "true"], ["memory_false", :Bool, "false"],
+    ["memory_previous", :I64, "-0000000000000001"],
+    ["memory_cell_size", :U64, "0000000000000080"],
+    ["memory_page_size", :U64, "0000000000010000"],
+    ["memory_alignment_mask", :U64, "fffffffffffffff8"],
+    ["memory_allocation_limit", :U64, "7fffffffffff0000"]]
+  let n: int = 0
+  while n <= 16
+    declarations = [@declarations, [native_memory/number(n), :U64, native_value/hex(n)]]
+    n = n + 1
+  end
+  let [constants, declared] = native/constants(state, declarations)
+  context[:state] = declared
+  let bindings: map = context[:constants]
+  for name, id in constants
+    bindings[name] = id
+  end
+  context[:constants] = bindings
+  for spec in [
+    ["memory_platform_allocate", bytes, [["size", :U64, :Value]], [:Allocate], :Owned],
+    ["memory_platform_release", :Void, [["pointer", bytes, :Gc]], [:Release], :Value]]
+    context = native/declare_function(context, spec[0], spec[1], spec[2], [], spec[3], spec[4], "")
+    context[:state] = native/foreign(context[:state], context[:functions][spec[0]])
+  end
+  context = native_memory/declare(context, "memory_object", object, [["pointer", bytes, :Gc]], [], :Gc, "")
+  context = native_memory/declare(context, "memory_payload", bytes, [["object", object, :Gc]], [], :Gc, "")
+  context = native_memory/declare(context, "memory_original", bytes, [["object", object, :Gc]], [:ReadMemory], :Gc, "")
+  context = native_memory/declare(context, "memory_nursery_allocate", bytes,
+    [["worker", worker, :Borrow], ["size", :U64, :Value], ["layout", :U64, :Value]],
+    [:ReadMemory, :WriteMemory], :Gc, "")
+  context = native_memory/declare(context, "memory_mature_allocate", object,
+    [["heap", heap, :Borrow], ["size", :U64, :Value], ["layout", :U64, :Value]],
+    [:ReadMemory, :WriteMemory, :Allocate], :Gc, "")
+  context = native_memory/declare(context, "memory_visit", bytes,
+    [["collection", collection, :Borrow], ["pointer", bytes, :Gc]], effects, :Gc, "")
+  context = native_memory/declare(context, "memory_sweep", :Void,
+    [["heap", heap, :Borrow], ["reclaim", :Bool, :Value]], [:ReadMemory, :WriteMemory, :Release], :Value, "")
+  context = native_memory/declare(context, "memory_rollback_nursery", :Void,
+    [["worker", worker, :Borrow]], [:ReadMemory, :WriteMemory], :Value, "")
+  context = native_memory/declare(context, "memory_collect_stopped", :Bool,
+    [["heap", heap, :Borrow]], [@effects, :Relocate], :Value, "")
+  return context
+end
+
+verb native_memory/program() -> map
+  let context: map = native_memory/context(native/module_context(native/program(), {}))
+  context = native_memory/allocation(context)
+  context = native_memory/collection(context)
+  context = native_memory/lifecycle(context)
+  let result: map = context[:state]
+  return result
+end

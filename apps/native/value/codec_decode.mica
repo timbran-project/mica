@@ -10,7 +10,7 @@ verb native_value/codec_decoder(input: map) -> map
   let word: list = native_value/word()
   let result: list = [:Record, "ValueResult"]
   let decoded: list = [:Record, "ValueDecodeResult"]
-  let arena: list = ["arena", [:Pointer, [:Record, "ValueArena"], :Mutable], :Borrow]
+  let worker: list = ["worker", [:Pointer, [:Record, "MemoryWorker"], :Mutable], :Borrow]
   let table: list = ["table", [:Pointer, [:Record, "SymbolTable"], :Mutable], :Borrow]
   let options: list = ["options", [:Record, "ValueCodecOptions"], :Value]
   context[:state] = native/record_type(context[:state], "ValueReader", [["data", bytes], ["length", :U64], ["position", :U64]])[1]
@@ -84,12 +84,12 @@ verb native_value/codec_decoder(input: map) -> map
     ),
     native/return_value("true")
   ])
-  context = native/declare_function(context, "codec_decode", result, [arena, table, ["reader", pointer, :Borrow], options], [],
-    [:Allocate, :ReadMemory, :WriteMemory, :Block], :Borrow, "arena")
+  context = native/declare_function(context, "codec_decode", result, [worker, table, ["reader", pointer, :Borrow], options], [],
+    [:Allocate, :ReadMemory, :WriteMemory, :Block], :Gc, "")
   context = native_value/decode_relation(context)
   context = native_value/decode_value(context)
-  let parameters: list = [arena, table, ["data", bytes, :Borrow], ["length", :U64, :Value], options]
-  context = native/declare_function(context, "value_decode", decoded, parameters, [], [:Allocate, :ReadMemory, :WriteMemory, :Block], :Borrow, "arena")
+  let parameters: list = [worker, table, ["data", bytes, :Borrow], ["length", :U64, :Value], options]
+  context = native/declare_function(context, "value_decode", decoded, parameters, [], [:Allocate, :ReadMemory, :WriteMemory, :Block], :Gc, "")
   context = native/define_function(context, "value_decode", [
     native/when_statement(
       native/binary_expression(:Equal, "data", native/typed_zero(bytes)),
@@ -97,7 +97,7 @@ verb native_value/codec_decoder(input: map) -> map
     ),
     native/let_statement("cursor", reader, native/record_expression(["data", "length", "zero"])),
     native/let_statement("reader", pointer, native/unary_expression(:Address, "cursor")),
-    native/let_call("result", result, "codec_decode", ["arena", "table", "reader", "options"]),
+    native/let_call("result", result, "codec_decode", ["worker", "table", "reader", "options"]),
     native/unless_statement(native/field_expression("result", "ok"), [native/return_zero()]),
     native/let_load(
       "position",
@@ -106,9 +106,9 @@ verb native_value/codec_decoder(input: map) -> map
     ),
     native/return_record(["true", native/typed_field(word, "result", "value"), "position"])
   ])
-  context = native/declare_function(context, "value_decode_exact", result, parameters, [], [:Allocate, :ReadMemory, :WriteMemory, :Block], :Borrow, "arena")
+  context = native/declare_function(context, "value_decode_exact", result, parameters, [], [:Allocate, :ReadMemory, :WriteMemory, :Block], :Gc, "")
   context = native/define_function(context, "value_decode_exact", [
-    native/let_call("result", decoded, "value_decode", ["arena", "table", "data", "length", "options"]),
+    native/let_call("result", decoded, "value_decode", ["worker", "table", "data", "length", "options"]),
     native/unless_statement(native/field_expression("result", "ok"), [native/return_zero()]),
     native/unless_statement(
       native/binary_expression(:Equal, native/typed_field(:U64, "result", "consumed"), "length"),
@@ -122,7 +122,7 @@ end
 verb native_value/decode_child(name: string) -> list
   let checked: string = string_concat(name, "_checked")
   return [
-    native/let_call(checked, [:Record, "ValueResult"], "codec_decode", ["arena", "table", "reader", "options"]),
+    native/let_call(checked, [:Record, "ValueResult"], "codec_decode", ["worker", "table", "reader", "options"]),
     native/unless_statement(native/field_expression(checked, "ok"), [native/return_zero()]),
     native/let_field(name, native_value/word(), checked, "value")
   ]
@@ -144,8 +144,8 @@ verb native_value/decode_allocation(name: string, element, count: string) -> lis
     native/let_call(
       raw,
       [:Pointer, :U8, :Mutable],
-      "value_arena_allocate",
-      ["arena", native/typed_expression(:U64, native/binary_expression(:Multiply, size, count))]
+      "memory_allocate",
+      ["worker", native/typed_expression(:U64, native/binary_expression(:Multiply, size, count)), "layout_opaque"]
     ),
     native/when_statement(
       native/binary_expression(:Less, "zero", count),
@@ -296,7 +296,7 @@ verb native_value/decode_value(input: map) -> map
         native/return_value(
           native/call_expression(
             string_concat("value_", name),
-            ["arena", native/typed_field(bytes, span, "data"), "aux"]
+            ["worker", native/typed_field(bytes, span, "data"), "aux"]
           )
         )
       ]
@@ -343,7 +343,7 @@ verb native_value/decode_value(input: map) -> map
             native/call_expression(
               string_concat("value_", name),
               [
-                "arena",
+                "worker",
                 native/typed_expression([:Pointer, spec[1], :Const], native/unary_expression(:Freeze, data)),
                 "aux"
               ]
@@ -364,7 +364,7 @@ verb native_value/decode_value(input: map) -> map
         @native_value/decode_child("end_value"),
         native/set_statement("range_end", "end_value")
       ]),
-      native/return_value(native/call_expression("value_range", ["arena", "range_start", "has_end", "range_end"]))
+      native/return_value(native/call_expression("value_range", ["worker", "range_start", "has_end", "range_end"]))
     ]),
     native/when_statement(native/binary_expression(:Equal, "kind", "tag_error"), [
       native/when_statement(native/binary_expression(:Less, "codec_error_flags", "aux"), [native/return_zero()]),
@@ -407,7 +407,7 @@ verb native_value/decode_value(input: map) -> map
           "checked_message",
           [:Record, "ValueResult"],
           "value_string",
-          ["arena", native/typed_field(bytes, "message_span", "data"), "length"]
+          ["worker", native/typed_field(bytes, "message_span", "data"), "length"]
         ),
         native/unless_statement(native/field_expression("checked_message", "ok"), [native/return_zero()]),
         native/set_statement("message", native/field_expression("checked_message", "value"))
@@ -420,7 +420,7 @@ verb native_value/decode_value(input: map) -> map
         native/call_expression(
           "value_error",
           [
-            "arena",
+            "worker",
             native/typed_expression(
               :U32,
               native/unary_expression(
@@ -451,13 +451,13 @@ verb native_value/decode_value(input: map) -> map
       native/return_value(
         native/call_expression(
           "value_frob",
-          ["arena", native/typed_expression(:U64, native/unary_expression(:Payload, "delegate")), "frob_value"]
+          ["worker", native/typed_expression(:U64, native/unary_expression(:Payload, "delegate")), "frob_value"]
         )
       )
     ]),
     native/when_statement(
       native/binary_expression(:Equal, "kind", "tag_relation"),
-      [native/return_value(native/call_expression("codec_relation", ["arena", "table", "reader", "options", "aux"]))]
+      [native/return_value(native/call_expression("codec_relation", ["worker", "table", "reader", "options", "aux"]))]
     ),
     native/return_zero()
   ]
@@ -470,11 +470,11 @@ verb native_value/decode_relation(input: map) -> map
   let word: list = native_value/word()
   let tuple: list = [:Record, "ValueTuple"]
   context = native/declare_function(context, "codec_relation", [:Record, "ValueResult"], [
-    ["arena", [:Pointer, [:Record, "ValueArena"], :Mutable], :Borrow],
+    ["worker", [:Pointer, [:Record, "MemoryWorker"], :Mutable], :Borrow],
     ["table", [:Pointer, [:Record, "SymbolTable"], :Mutable], :Borrow],
     ["reader", [:Pointer, [:Record, "ValueReader"], :Mutable], :Borrow],
     ["options", [:Record, "ValueCodecOptions"], :Value], ["arity", :U64, :Value]], [],
-    [:Allocate, :ReadMemory, :WriteMemory, :Block], :Borrow, "arena")
+    [:Allocate, :ReadMemory, :WriteMemory, :Block], :Gc, "")
   context = native/define_function(context, "codec_relation", [
     native/when_statement(native/binary_expression(:Less, "relation_max_arity", "arity"), [native/return_zero()]),
     native/unless_statement(
@@ -540,7 +540,7 @@ verb native_value/decode_relation(input: map) -> map
       native/call_expression(
         "value_relation",
         [
-          "arena",
+          "worker",
           native/typed_expression([:Pointer, :U32, :Const], native/unary_expression(:Freeze, "heading")),
           "arity",
           native/typed_expression([:Pointer, tuple, :Const], native/unary_expression(:Freeze, "rows")),

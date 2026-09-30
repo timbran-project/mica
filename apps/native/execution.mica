@@ -1,0 +1,286 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+// Execution contracts are distinct from ordinary borrowing. Collector code
+// owns descriptor correctness and root registration. The checker prevents
+// stack escape through tail calls and stale managed locals.
+verb native/execution_function(input: map, name: string, policy: symbol) -> map
+  let context: map = input
+  context[:state] = native/append(context[:state], :executions, [context[:functions][name], policy])
+  return context
+end
+
+verb native/execution_pointer_type(state: map, name: string, result, parameters: list, effects: list, policy: symbol) -> list
+  let [type_id, declared] = native/function_pointer_type(state, name, result, parameters, effects, :Value, "")
+  return [type_id, native/append(declared, :execution_types, [name, policy])]
+end
+
+verb native/tail_call_statement(callee: string, arguments: list) -> list
+  return [:TailCall, callee, arguments]
+end
+verb native/manage_expression(pointer) -> list
+  return [:Manage, pointer]
+end
+verb native/root_load_expression(slot) -> list
+  return [:RootLoad, slot]
+end
+verb native/root_store_statement(slot, value) -> list
+  let result: list = native/do_statement([:RootStore, slot, value])
+  return result
+end
+
+verb native/is_transfer(term: list) -> bool
+  return term[1] == :TailCall
+end
+verb native/term_reads(term: list) -> list
+  if native/is_transfer(term)
+    let operands: list = term[2]
+    return operands
+  end
+  if term[1] != :Jump && len(term[2]) > 0
+    return [term[2][0]]
+  end
+  return []
+end
+verb native/execution_type(index: map, name: string) -> symbol
+  if map_contains_key(index[:execution_types], name)
+    let result: symbol = index[:execution_types][name]
+    return result
+  end
+  return :Ordinary
+end
+verb native/check_execution_declarations(state: map, input: map) -> map
+  let index: map = input
+  let functions: map = {}
+  for row in state[:executions]
+    native/ensure(len(row) == 2 && map_contains_key(index[:functions], row[0]), "execution requires a known function")
+    native/ensure(!map_contains_key(functions, row[0]), "duplicate execution contract")
+    native/ensure(native/contains([:Tail, :Collector], row[1]), "invalid execution policy")
+    functions[row[0]] = row[1]
+  end
+  let signatures: map = {}
+  for row in state[:execution_types]
+    native/ensure(len(row) == 2 && map_contains_key(index[:function_types], row[0]), "execution requires a known function pointer type")
+    native/ensure(!map_contains_key(signatures, row[0]), "duplicate execution pointer contract")
+    native/ensure(row[1] == :Tail, "invalid execution pointer policy")
+    signatures[row[0]] = row[1]
+  end
+  index[:executions] = functions
+  index[:execution_types] = signatures
+  let has_gc: bool = len([row for row in state[:parameter_contracts] if row[1] == :Gc]) > 0 || len([row for row in state[:contracts] if row[2] == :Gc]) > 0
+  for name, signature in index[:function_types]
+    if signature[3] == :Gc || len([parameter for parameter in signature[1] if parameter[2] == :Gc]) > 0
+      has_gc = true
+    end
+  end
+  index[:has_gc] = has_gc
+  return index
+end
+verb native/check_execution_address(index: map, type_name: string, function: int)
+  let actual: symbol = :Ordinary
+  if map_contains_key(index[:executions], function) && index[:executions][function] != :Collector
+    actual = index[:executions][function]
+  end
+  native/ensure(actual == native/execution_type(index, type_name), "function address execution policy mismatch")
+end
+verb native/transfer_signature(index: map, function: int, term: list) -> list
+  let result: list = native/indirect_signature(index, function, [0, term[0], 0, :CallIndirect, :Discard, term[2]])
+  return result
+end
+verb native/check_transfer(state: map, index: map, function: int, term: list)
+  native/ensure(map_contains_key(index[:executions], function), "transfer requires execution function")
+  let policy: symbol = :Tail
+  native/ensure(index[:executions][function] == policy, "transfer does not match execution policy")
+  let signature: list = native/transfer_signature(index, function, term)
+  native/ensure(native/execution_type(index, native/value_type(index, function, term[2][0])[1]) == policy, "transfer target policy mismatch")
+  native/ensure(len(term[2]) == len(signature[1]) + 1, "transfer arity mismatch")
+  let position: int = 1
+  for parameter in signature[1]
+    native/ensure(native/value_type(index, function, term[2][position]) == parameter[1], "transfer argument type mismatch")
+    position = position + 1
+  end
+  native/ensure(signature[0] == index[:functions][function][2] && signature[0] != :Void, "execution transfer requires matching non-void results")
+  native/ensure(native/signature_shape(native/function_signature(state, index, function)) == native/signature_shape(signature), "required tail call requires identical ABI and ownership")
+end
+verb native/check_execution_instruction(index: map, function: int, row: list, result_type) -> bool
+  if !native/contains([:Manage, :RootLoad, :RootStore], row[3])
+    return false
+  end
+  native/ensure(map_contains_key(index[:executions], function), "managed operation requires execution or collector contract")
+  if row[3] == :Manage
+    native/ensure(len(row[5]) == 1 && native/is_pointer(result_type) && native/value_type(index, function, row[5][0]) == result_type, "Manage requires an unchanged pointer type")
+    native/ensure(index[:executions][function] != :Tail, "tail entries allocate through collector helpers")
+    return true
+  end
+  let op: symbol = :Load
+  if row[3] == :RootStore
+    op = :Store
+  end
+  native/check_memory_instruction(index, function, [row[0], row[1], row[2], op, row[4], row[5]], result_type)
+  let pointer_type = native/value_type(index, function, row[5][0])
+  native/ensure(native/has_pointer(index, pointer_type[1]), "root slot must contain managed references")
+  return true
+end
+verb native/gc_origins(origins: list) -> bool
+  for origin in origins
+    if origin[0] == :Gc
+      return true
+    end
+  end
+  return false
+end
+verb native/check_gc_arguments(signature: list, arguments: list, origins: map)
+  let position: int = 1
+  for parameter in signature[1]
+    if parameter[2] == :Gc
+      for origin in origins[arguments[position]]
+        native/ensure(origin[0] == :Gc, "managed argument requires Manage or RootLoad")
+      end
+    end
+    position = position + 1
+  end
+end
+verb native/check_execution_ownership(state: map, index: map, origins: map)
+  if len(state[:executions]) == 0 && len(state[:execution_types]) == 0 && !index[:has_gc]
+    return
+  end
+  for row in state[:instructions]
+    let function: int = index[:blocks][row[1]][1]
+    if row[3] == :RootStore
+      for origin in origins[row[5][1]]
+        native/ensure(origin[0] == :Gc, "RootStore requires managed references")
+      end
+    end
+    if row[3] == :Call
+      try
+        native/check_gc_arguments(native/function_signature(state, index, row[5][0]), row[5], origins)
+      catch E_INVARG as problem
+        raise E_INVARG, string_concat(native/instruction_location(index, row), ": ", native/error_message(problem))
+      end
+    end
+    if row[3] == :CallIndirect
+      native/check_gc_arguments(native/indirect_signature(index, function, row), row[5], origins)
+    end
+  end
+  for term in state[:terminators]
+    if native/is_transfer(term)
+      let function: int = index[:blocks][term[0]][1]
+      let signature: list = native/transfer_signature(index, function, term)
+      native/check_gc_arguments(signature, term[2], origins)
+      let position: int = 1
+      for parameter in signature[1]
+        for origin in origins[term[2][position]]
+          if parameter[2] == :Consume
+            native/ensure(origin[0] == :Owned || origin[0] == :Consume, "transfer cannot consume borrowed storage")
+          end
+          if is_kind(parameter[2], :list)
+            let owner: int = native/signature_owner(signature, parameter[2][1])
+            native/ensure(origin[0] == :Static || native/contains(origins[term[2][owner + 1]], origin), "transfer argument does not share borrow region")
+          end
+        end
+        position = position + 1
+      end
+      if term[1] == :TailCall
+        for operand in term[2]
+          for origin in origins[operand]
+            native/ensure(origin[0] != :Stack, "required tail call cannot retain frame addresses")
+          end
+        end
+      end
+    end
+  end
+end
+verb native/relocates(index: map, row: list) -> bool
+  if row[3] == :Call
+    let result: bool = native/contains(index[:contracts][row[5][0]][1], :Relocate)
+    return result
+  end
+  if row[3] == :CallIndirect
+    let result: bool = native/contains(native/indirect_signature(index, index[:blocks][row[1]][1], row)[2], :Relocate)
+    return result
+  end
+  return false
+end
+
+// A forward may-analysis tracks managed locals invalidated on any incoming path.
+// A fresh assignment (normally RootLoad) re-establishes its current address.
+verb native/check_relocation_liveness(state: map, index: map, origins: map)
+  let managed: list = [id for id, sources in origins if native/gc_origins(sources)]
+  if len(managed) == 0
+    return
+  end
+  for function in state[:functions]
+    let blocks: list = native/owned(state[:blocks], 1, function[0])
+    if len(blocks) == 0
+      continue
+    end
+    let universe: list = [id for id in managed if map_contains_key(index[:variables], id) && index[:variables][id][0] == function[0]]
+    if len(universe) == 0
+      continue
+    end
+    let invalid: map = {}
+    let predecessors: map = {}
+    let instructions: map = {}
+    for block in blocks
+      invalid[block[0]] = []
+      predecessors[block[0]] = []
+      instructions[block[0]] = native/ordered(native/owned(state[:instructions], 1, block[0]), 2)
+    end
+    for block in blocks
+      for target in native/targets(index[:terms][block[0]])
+        predecessors[target] = [@predecessors[target], block[0]]
+      end
+    end
+    let changed: bool = true
+    while changed
+      changed = false
+      for block in blocks
+        let dead: list = []
+        for previous in predecessors[block[0]]
+          dead = native/union(dead, invalid[previous])
+        end
+        for row in instructions[block[0]]
+          if native/relocates(index, row)
+            dead = universe
+          end
+          dead = [id for id in dead if id != row[4]]
+        end
+        if sort(dead) != sort(invalid[block[0]])
+          invalid[block[0]] = dead
+          changed = true
+        end
+      end
+    end
+    for block in blocks
+      let dead: list = []
+      for previous in predecessors[block[0]]
+        dead = native/union(dead, invalid[previous])
+      end
+      for row in instructions[block[0]]
+        for operand in native/reads(row)
+          native/ensure(!native/contains(dead, operand), string_concat("managed reference used after relocation at ", native/instruction_location(index, row)))
+        end
+        if native/relocates(index, row)
+          dead = universe
+        end
+        dead = [id for id in dead if id != row[4]]
+      end
+      for operand in native/term_reads(index[:terms][block[0]])
+        native/ensure(!native/contains(dead, operand), "transfer or return uses stale managed reference")
+      end
+    end
+  end
+end
+
+verb native/c_transfer(index: map, term: list) -> string
+  let callee: string = native/c_value(index, term[2][0])
+  let arguments: list = []
+  let position: int = 1
+  while position < len(term[2])
+    arguments = [@arguments, native/c_value(index, term[2][position])]
+    position = position + 1
+  end
+  let call: string = string_concat(callee, "(", string_join(arguments, ", "), ")")
+  let guard: string = string_concat("if (", callee, " == NULL) abort();\n")
+  return string_concat(guard, "#if defined(__clang__) && __has_attribute(musttail)\n__attribute__((musttail)) return ", call, ";\n#else\n#error Required tail calls need Clang musttail or the libgccjit backend.\n#endif")
+end

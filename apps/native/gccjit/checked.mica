@@ -1,0 +1,77 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+verb native_jit/both(left, right) -> list
+  let result: list = native_jit/j("logical_and", ["ctx", native_jit/cached(3, "n7"), left, right])
+  return result
+end
+verb native_jit/either(left, right) -> list
+  let result: list = native_jit/j("logical_or", ["ctx", native_jit/cached(3, "n7"), left, right])
+  return result
+end
+verb native_jit/checked_cases() -> list
+  let h: list = native_jit/handle()
+  let integer = native_jit/cached(3, "n5")
+  let boolean = native_jit/cached(3, "n7")
+  let float_type = native_jit/cached(3, "n6")
+  let zero = native_jit/j("zero", ["ctx", integer])
+  let minimum = native_jit/j("integer", ["ctx", integer, "signed_min"])
+  let maximum = native_jit/j("integer", ["ctx", integer, "signed_max"])
+  let minus_one = native_jit/j("integer", ["ctx", integer, "signed_minus_one"])
+  let positive_b = native_jit/j("gt", ["ctx", "right", zero])
+  let negative_b = native_jit/j("lt", ["ctx", "right", zero])
+  let positive_a = native_jit/j("gt", ["ctx", "left", zero])
+  let negative_a = native_jit/j("lt", ["ctx", "left", zero])
+  let add_bad = native_jit/either(
+    native_jit/both(positive_b, native_jit/j("gt", ["ctx", "left", native_jit/j("sub", ["ctx", integer, maximum, "right"])])),
+    native_jit/both(negative_b, native_jit/j("lt", ["ctx", "left", native_jit/j("sub", ["ctx", integer, minimum, "right"])])))
+  let sub_bad = native_jit/either(
+    native_jit/both(negative_b, native_jit/j("gt", ["ctx", "left", native_jit/j("add", ["ctx", integer, maximum, "right"])])),
+    native_jit/both(positive_b, native_jit/j("lt", ["ctx", "left", native_jit/j("add", ["ctx", integer, minimum, "right"])])))
+  let multiply = native_jit/either(
+    native_jit/either(native_jit/j("eq", ["ctx", "left", zero]), native_jit/j("eq", ["ctx", "right", zero])),
+    native_jit/either(
+      native_jit/both(positive_a, native_jit/either(
+        native_jit/both(positive_b, native_jit/j("le", ["ctx", "left", native_jit/j("div", ["ctx", integer, maximum, "right"])])),
+        native_jit/both(negative_b, native_jit/j("ge", ["ctx", "right", native_jit/j("div", ["ctx", integer, minimum, "left"])])))),
+      native_jit/both(negative_a, native_jit/either(
+        native_jit/both(positive_b, native_jit/j("ge", ["ctx", "left", native_jit/j("div", ["ctx", integer, minimum, "right"])])),
+        native_jit/both(negative_b, native_jit/j("ge", ["ctx", "left", native_jit/j("div", ["ctx", integer, maximum, "right"])]))))))
+  let divide_bad = native_jit/both(native_jit/j("eq", ["ctx", "left", minimum]), native_jit/j("eq", ["ctx", "right", minus_one]))
+  let float_lower = native_jit/j("cast", ["ctx", minimum, float_type])
+  let float_upper = native_jit/j("neg", ["ctx", float_type, float_lower])
+  let specs: list = [
+    [:CheckedAdd, native_jit/j("not", ["ctx", boolean, add_bad]), native_jit/j("add", ["ctx", integer, "left", "right"])],
+    [:CheckedSubtract, native_jit/j("not", ["ctx", boolean, sub_bad]), native_jit/j("sub", ["ctx", integer, "left", "right"])],
+    [:CheckedMultiply, multiply, native_jit/j("mul", ["ctx", integer, "left", "right"])],
+    [:CheckedDivide, native_jit/both(native_jit/j("ne", ["ctx", "right", zero]), native_jit/j("not", ["ctx", boolean, divide_bad])), native_jit/j("div", ["ctx", integer, "left", "right"])],
+    [:CheckedRemainder, native_jit/j("ne", ["ctx", "right", zero]), native_jit/j("rem", ["ctx", integer, "left", "right"])],
+    [:CheckedNegate, native_jit/j("ne", ["ctx", "left", minimum]), native_jit/j("neg", ["ctx", integer, "left"])],
+    [:CheckedFloatToInt, native_jit/both(native_jit/j("ge", ["ctx", "left", float_lower]), native_jit/j("lt", ["ctx", "left", float_upper])), native_jit/j("cast", ["ctx", "left", integer])]]
+  let scratch = native/typed_expression([:Pointer, h, :Mutable], native/offset_expression("cache", native_jit/slot(6, "n0")))
+  let truth = native_jit/integer("n1", boolean)
+  let cases: list = []
+  for spec in specs
+    let body: list = [
+      native/do_statement(native/call_expression("j_assign", ["block", native_jit/cached(2, "destination"), native_jit/j("record", ["ctx", "type", "n0", scratch])])),
+      native_jit/bind("function", h, native_jit/cached(0, native_jit/meta(3, "block_id"))),
+      native_jit/bind("success", h, native_jit/j("block", ["function", native_jit/literal("s_ok")])),
+      native_jit/bind("join", h, native_jit/j("block", ["function", native_jit/literal("s_join")])),
+      native/do_statement(native/call_expression("j_branch", ["block", spec[1], "success", "join"]))]
+    if spec[0] == :CheckedRemainder
+      body = [@body,
+        native_jit/bind("ordinary", h, native_jit/j("block", ["function", native_jit/literal("s_ok")])),
+        native_jit/bind("minus_one", h, native_jit/j("block", ["function", native_jit/literal("s_ok")])),
+        native/do_statement(native/call_expression("j_branch", ["success", native_jit/j("eq", ["ctx", "right", minus_one]), "minus_one", "ordinary"])),
+        native_jit/save(6, "n0", truth), native_jit/save(6, "n1", zero),
+        native/do_statement(native/call_expression("j_assign", ["minus_one", native_jit/cached(2, "destination"), native_jit/j("record", ["ctx", "type", "n2", scratch])])),
+        native/do_statement(native/call_expression("j_jump", ["minus_one", "join"])), native_jit/set("success", "ordinary")]
+    end
+    body = [@body,
+      native_jit/save(6, "n0", truth), native_jit/save(6, "n1", spec[2]),
+      native/do_statement(native/call_expression("j_assign", ["success", native_jit/cached(2, "destination"), native_jit/j("record", ["ctx", "type", "n2", scratch])])),
+      native/do_statement(native/call_expression("j_jump", ["success", "join"])), native_jit/save(7, "block_id", "join"), native_jit/ret("n0")]
+    cases = [@cases, native_jit/case(spec[0], body)]
+  end
+  return cases
+end

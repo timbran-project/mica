@@ -1,0 +1,208 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+verb native_jit/handle() -> list
+  return [:Pointer, :U8, :Mutable]
+end
+verb native_jit/words() -> list
+  return [:Pointer, :U64, :Const]
+end
+verb native_jit/common() -> list
+  let h: list = native_jit/handle()
+  return [["ctx", h, :Borrow], ["data", native_jit/words(), :Borrow],
+    ["cache", [:Pointer, h, :Mutable], [:Borrow, "ctx"]], ["meta", [:Pointer, :U64, :Mutable], :Borrow]]
+end
+verb native_jit/n(number: int) -> string
+  return string_concat("n", to_literal(number))
+end
+verb native_jit/at(base, index, type_id) -> list
+  let result: list = native/typed_load(type_id, native/typed_expression([:Pointer, type_id, :Const], native/offset_expression(base, index)))
+  return result
+end
+verb native_jit/word(base, offset: int) -> list
+  let result: list = native_jit/at(base, native_jit/n(offset), :U64)
+  return result
+end
+verb native_jit/number(offset) -> list
+  let result: list = native_jit/at("data", offset, :U64)
+  return result
+end
+verb native_jit/binary(op: symbol, left, right) -> list
+  let result: list = native/typed_expression(:U64, native/binary_expression(op, left, right))
+  return result
+end
+verb native_jit/slot(table: int, id) -> list
+  let result: list = native_jit/binary(:Add, native_jit/binary(:Multiply, "capacity", native_jit/n(table)), id)
+  return result
+end
+verb native_jit/cached(table: int, id) -> list
+  let h: list = native_jit/handle()
+  let result: list = native/typed_load(h, native/typed_expression([:Pointer, h, :Mutable], native/offset_expression("cache", native_jit/slot(table, id))))
+  return result
+end
+verb native_jit/save(table: int, id, expression) -> list
+  let h: list = native_jit/handle()
+  let result: list = native/store_statement(native/typed_expression([:Pointer, h, :Mutable], native/offset_expression("cache", native_jit/slot(table, id))), expression)
+  return result
+end
+verb native_jit/meta(table: int, id) -> list
+  let result: list = native/typed_load(:U64, native/typed_expression([:Pointer, :U64, :Mutable], native/offset_expression("meta", native_jit/slot(table, id))))
+  return result
+end
+verb native_jit/save_meta(table: int, id, value) -> list
+  let result: list = native/store_statement(native/typed_expression([:Pointer, :U64, :Mutable], native/offset_expression("meta", native_jit/slot(table, id))), value)
+  return result
+end
+verb native_jit/j(name: string, args: list) -> list
+  let result: list = native/typed_call(native_jit/handle(), string_concat("j_", name), args)
+  return result
+end
+verb native_jit/invoke(name: string, args: list, type_id) -> list
+  if type_id == :Void
+    let result: list = native/call_expression(string_concat("jit_", name), ["ctx", "data", "cache", "meta", @args])
+    return result
+  end
+  let typed_result: list = native/typed_call(type_id, string_concat("jit_", name), ["ctx", "data", "cache", "meta", @args])
+  return typed_result
+end
+verb native_jit/text(offset) -> list
+  let bytes = [:Pointer, :U8, :Const]
+  let base = native/typed_expression(bytes, native/unary_expression(:PointerCast, "data"))
+  let result: list = native/typed_expression(bytes, native/offset_expression(base, native_jit/binary(:Add, native_jit/binary(:Multiply, native_jit/word("data", 1), "n8"), offset)))
+  return result
+end
+verb native_jit/prologue() -> list
+  return [native_jit/bind("capacity", :U64, native_jit/word("data", 5))]
+end
+verb native_jit/scan(section: int, body: list) -> list
+  return [native_jit/bind("cursor", :U64, native_jit/word("data", 6 + section * 2)),
+    native/while_statement(native/binary_expression(:Less, "cursor", native_jit/word("data", 7 + section * 2)), [
+      native/let_offset("row", native_jit/words(), "data", "cursor"), @body,
+      native_jit/set("cursor", native_jit/binary(:Add, "cursor", native_jit/word("row", 0)))])]
+end
+verb native_jit/declare(input: map, name: string, result, parameters: list) -> map
+  let mode: symbol = :Value
+  let owner: string = ""
+  if native/is_pointer(result)
+    mode = :Borrow
+    owner = "ctx"
+  end
+  let context: map = native/declare_function(input, string_concat("jit_", name), result,
+    [@native_jit/common(), @parameters], [], [:ReadMemory, :WriteMemory, :Allocate], mode, owner)
+  return context
+end
+verb native_jit/define(input: map, name: string, statements: list) -> map
+  let context: map = native/define_function(input, string_concat("jit_", name), [@native_jit/prologue(), @statements])
+  return context
+end
+
+// Cache planes: 0 declarations/blocks, 1 rvalues, 2 lvalues, 3 types,
+// 4 struct handles, 5 fields, 6 argument scratch, 7 current block tails,
+// 8 alignment expressions, 9 underlying array types. Metadata planes hold
+// 0 node type IDs, 1 type row offsets, 2 completed types, 3 block owners.
+verb native_jit/program() -> map
+  let declarations: list = [["true", :Bool, "true"], ["false", :Bool, "false"], ["null", native_jit/handle(), "null"]]
+  let i: int = 0
+  while i <= 128
+    declarations = [@declarations, [native_jit/n(i), :U64, native_value/hex(i)]]
+    i = i + 1
+  end
+  declarations = [@declarations, ["mask56", :U64, "00ffffffffffffff"], ["float_exponent", :U64, "000000007f800000"],
+    ["signed_max", :I64, "7fffffffffffffff"], ["signed_min", :I64, "-8000000000000000"], ["signed_minus_one", :I64, "-0000000000000001"], ["signed_zero", :I64, "0000000000000000"]]
+  let [constants, initial_state] = native/constants(native/program(), declarations)
+  let state: map = initial_state
+  for literal in native_jit/literals()
+    let bytes: list = [@native_jit/ascii(literal[1]), 0]
+    let [id, next] = native/add_global(state, literal[0], [:Array, :U8, len(bytes)], :Constant, bytes)
+    state = next
+    constants[literal[0]] = id
+  end
+  let context: map = native_jit/bindings(native/module_context(state, constants))
+  context = native_jit/declare(context, "types", :Bool, [])
+  context = native_jit/declare(context, "functions", :Void, [])
+  context = native_jit/declare(context, "locals", :Void, [])
+  context = native_jit/declare(context, "blocks", :Void, [])
+  context = native_jit/declare(context, "constants", :Void, [])
+  context = native_jit/declare(context, "globals", :Void, [])
+  context = native_jit/declare(context, "zero", native_jit/handle(), [["type_id", :U64, :Value]])
+  context = native_jit/declare(context, "instruction", :U64, [["row", native_jit/words(), :Borrow]])
+  context = native_jit/declare(context, "instructions", :U64, [])
+  context = native_jit/declare(context, "terminators", :Void, [])
+  context = native_jit/declare(context, "build", :U64, [])
+  context = native_jit/declare(context, "guard", native_jit/handle(), [["block_id", :U64, :Value], ["valid", native_jit/handle(), [:Borrow, "ctx"]]])
+  context = native_jit/declare(context, "align", native_jit/handle(), [["type_id", :U64, :Value]])
+  context = native_jit/declare(context, "heap_test", native_jit/handle(), [["type_id", :U64, :Value], ["tag", native_jit/handle(), [:Borrow, "ctx"]]])
+  context = native_jit/define_helpers(context)
+  context = native_jit/define_types(context)
+  context = native_jit/define_declarations(context)
+  context = native_jit/define_instructions(context)
+  context = native_jit/define(context, "build", [
+    native_jit/unless(native_jit/invoke("types", [], :Bool), [native_jit/ret("n128")]),
+    native/do_statement(native_jit/invoke("functions", [], :Void)),
+    native/do_statement(native_jit/invoke("locals", [], :Void)),
+    native/do_statement(native_jit/invoke("blocks", [], :Void)),
+    native/do_statement(native_jit/invoke("constants", [], :Void)),
+    native/do_statement(native_jit/invoke("globals", [], :Void)),
+    native_jit/bind("status", :U64, native_jit/invoke("instructions", [], :U64)),
+    native_jit/unless(native/binary_expression(:Equal, "status", "n0"), [native_jit/ret("status")]),
+    native/do_statement(native_jit/invoke("terminators", [], :Void)), native_jit/ret("n0")])
+  let program: map = context[:state]
+  return program
+end
+
+// Backend expression helpers retain types on nested operands. Statement roots
+// already receive their expected type from the shared native syntax builder.
+verb native_jit/expression(expression)
+  if is_kind(expression, :list) && expression[0] == :Expr
+    return expression[2]
+  end
+  return expression
+end
+verb native_jit/bind(name: string, type_id, expression) -> list
+  let result: list = native/let_statement(name, type_id, native_jit/expression(expression))
+  return result
+end
+verb native_jit/set(name: string, expression) -> list
+  let result: list = native/set_statement(name, native_jit/expression(expression))
+  return result
+end
+verb native_jit/ret(expression) -> list
+  let result: list = native/return_value(native_jit/expression(expression))
+  return result
+end
+verb native_jit/unless(expression, body: list) -> list
+  let result: list = native/unless_statement(native_jit/expression(expression), body)
+  return result
+end
+
+verb native_jit/literals() -> list
+  return [["s_abort", "__builtin_abort"], ["s_memmove", "__builtin_memmove"], ["s_trunc", "__builtin_truncf"], ["s_fmod", "__builtin_fmodf"],
+    ["s_align", "alignment_probe"], ["s_pad", "pad"], ["s_item", "item"], ["s_ok", "guard_ok"], ["s_fail", "guard_fail"], ["s_join", "checked_join"]]
+end
+verb native_jit/ascii(name: string) -> list
+  let letters: list = string_chars("abcdefghijklmnopqrstuvwxyz")
+  let result: list = []
+  for ch in string_chars(name)
+    let byte: int = 95
+    if ch != "_"
+      byte = 97 + native_jit/position(letters, ch)
+    end
+    result = [@result, byte]
+  end
+  return result
+end
+verb native_jit/literal(name: string) -> list
+  let spelling: string = [row[1] for row in native_jit/literals() if row[0] == name][0]
+  let array: list = [:Array, :U8, string_len(spelling) + 1]
+  let result: list = native/typed_expression([:Pointer, :U8, :Const], native/unary_expression(:PointerCast,
+    native/typed_expression([:Pointer, array, :Const], native/unary_expression(:GlobalAddress, name))))
+  return result
+end
+verb native_jit/integer(number, type_id) -> list
+  let result: list = native_jit/j("integer", ["ctx", type_id, native/typed_expression(:I64, native/unary_expression(:Bitcast, number))])
+  return result
+end
+verb native_jit/trap_unless(valid) -> list
+  let result: list = native_jit/set("block", native_jit/invoke("guard", ["block_id", valid], native_jit/handle()))
+  return result
+end

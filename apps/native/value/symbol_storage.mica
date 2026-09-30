@@ -1,18 +1,18 @@
 // Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-// Eight-byte aligned bump allocation in linked chunks. Addresses remain
-// stable when the arena grows. The C host supplies only malloc/free wrappers.
-verb native_value/arena(input: map) -> map
+// Interned names and symbol indexes have table lifetime and stable addresses.
+// Their pinned storage is separate from traced runtime values.
+verb native_value/symbol_storage(input: map) -> map
   let context: map = input
   let bytes = [:Pointer, :U8, :Mutable]
-  let block = [:Record, "ValueArenaBlock"]
+  let block = [:Record, "SymbolStorageBlock"]
   let block_ptr = [:Pointer, block, :Mutable]
-  let arena = [:Record, "ValueArena"]
-  let arena_ptr = [:Pointer, arena, :Mutable]
+  let storage = [:Record, "SymbolStorage"]
+  let storage_ptr = [:Pointer, storage, :Mutable]
   let state = context[:state]
-  state = native/record_type(state, "ValueArenaBlock", [["next", block_ptr], ["used", :U64], ["capacity", :U64]])[1]
-  state = native/record_type(state, "ValueArena", [["head", block_ptr]])[1]
+  state = native/record_type(state, "SymbolStorageBlock", [["next", block_ptr], ["used", :U64], ["capacity", :U64]])[1]
+  state = native/record_type(state, "SymbolStorage", [["head", block_ptr]])[1]
   let [constants, next] = native/constants(state, [["null_bytes", bytes, "null"], ["null_block", block_ptr, "null"],
     ["chunk_size", :U64, "0000000000010000"], ["alignment_mask", :U64, "fffffffffffffff8"],
     ["alignment_slack", :U64, "0000000000000007"], ["allocation_limit", :U64, "7fffffffffffffc0"]])
@@ -26,21 +26,21 @@ verb native_value/arena(input: map) -> map
   context[:state] = native/foreign(context[:state], context[:functions]["allocate"])
   context = native/declare_function(context, "release", :Void, [["allocation", bytes, :Consume]], [], [:Release], :Value, "")
   context[:state] = native/foreign(context[:state], context[:functions]["release"])
-  context = native/declare_function(context, "value_arena_allocate", bytes, [["arena", arena_ptr, :Borrow], ["size", :U64, :Value]],
-    [["adopted", block_ptr]], [:ReadMemory, :WriteMemory, :Allocate], :Borrow, "arena")
+  context = native/declare_function(context, "symbol_storage_allocate", bytes, [["storage", storage_ptr, :Borrow], ["size", :U64, :Value]],
+    [["adopted", block_ptr]], [:ReadMemory, :WriteMemory, :Allocate], :Borrow, "storage")
   let failure: list = [native/return_value("null_bytes")]
   context = native/define_function(
     context,
-    "value_arena_allocate",
+    "symbol_storage_allocate",
     [
-      native/note_statement(:Invariant, "Arena allocations remain stable and are aligned to eight bytes."),
+      native/note_statement(:Invariant, "Symbol storage remains stable until table release and is aligned to eight bytes."),
       native/when_statement(native/binary_expression(:Equal, "size", "zero"), failure),
       native/when_statement(native/binary_expression(:Less, "allocation_limit", "size"), failure),
       native/let_statement("header_size", :U64, native/unary_expression(:SizeOf, block)),
       native/let_statement(
         "head_slot",
         [:Pointer, block_ptr, :Mutable],
-        native/field_pointer_expression("arena", "head")
+        native/field_pointer_expression("storage", "head")
       ),
       native/let_load("head", block_ptr, "head_slot"),
       native/let_statement("aligned", :U64, "zero"),
@@ -82,15 +82,15 @@ verb native_value/arena(input: map) -> map
       native/return_value(native/offset_expression("data", "aligned"))
     ]
   )
-  context = native/declare_function(context, "value_arena_release", :Void, [["arena", arena_ptr, :Consume]], [], [:ReadMemory, :WriteMemory, :Release], :Value, "")
+  context = native/declare_function(context, "symbol_storage_release", :Void, [["storage", storage_ptr, :Consume]], [], [:ReadMemory, :WriteMemory, :Release], :Value, "")
   context = native/define_function(
     context,
-    "value_arena_release",
+    "symbol_storage_release",
     [
       native/let_statement(
         "head_slot",
         [:Pointer, block_ptr, :Mutable],
-        native/field_pointer_expression("arena", "head")
+        native/field_pointer_expression("storage", "head")
       ),
       native/let_load("head", block_ptr, "head_slot"),
       native/while_statement("true", [
@@ -102,8 +102,8 @@ verb native_value/arena(input: map) -> map
         native/do_statement(native/call_expression("release", ["bytes"])),
         native/set_statement("head", "next")
       ]),
-      native/let_statement("empty", arena, native/zero_expression()),
-      native/store_statement("arena", "empty"),
+      native/let_statement("empty", storage, native/zero_expression()),
+      native/store_statement("storage", "empty"),
       native/return_void()
     ]
   )

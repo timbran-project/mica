@@ -22,7 +22,7 @@ verb native_value/binary_number(input: map, spec: list) -> map
   let ir = [:Record, "IntResult"]
   let fr = [:Record, "FloatResult"]
   let failure: list = [native/return_zero()]
-  context = native/declare_function(context, name, result, [["left", word, :Borrow], ["right", word, :Borrow]], [], [], :Immediate, "")
+  context = native/declare_function(context, name, result, [["left", word, :Gc], ["right", word, :Gc]], [], [], :Immediate, "")
   let integers: list = [
     native/let_call("li", ir, "value_as_int", ["left"]),
     native/let_call("ri", ir, "value_as_int", ["right"]),
@@ -82,7 +82,7 @@ verb native_value/unary_number(input: map, name: string) -> map
   let ir = [:Record, "IntResult"]
   let fr = [:Record, "FloatResult"]
   let failure: list = [native/return_zero()]
-  context = native/declare_function(context, name, result, [["value", word, :Borrow]], [], [], :Immediate, "")
+  context = native/declare_function(context, name, result, [["value", word, :Gc]], [], [], :Immediate, "")
   let integers: list = [
     native/let_call("ir", ir, "value_as_int", ["value"]),
     native/let_field("integer", :I64, "ir", "number")

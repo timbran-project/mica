@@ -138,6 +138,14 @@ verb native/call_expression(name: string, arguments: list) -> list
   return [:Call, name, @arguments]
 end
 
+verb native/function_address_expression(name: string) -> list
+  return [:FunctionAddress, name]
+end
+
+verb native/indirect_call_expression(callee, arguments: list) -> list
+  return [:CallIndirect, callee, @arguments]
+end
+
 verb native/typed_expression(type_id, expression) -> list
   return [:Expr, type_id, expression]
 end
@@ -178,12 +186,43 @@ verb native/offset_expression(pointer, offset) -> list
   return [:Offset, pointer, offset]
 end
 
+// Both pointers must address the same allocation (including one-past-end).
+verb native/pointer_distance_expression(pointer, base) -> list
+  return [:PointerDistance, pointer, base]
+end
+
 verb native/unary_expression(op: symbol, operand) -> list
   return [op, operand]
 end
 
 verb native/binary_expression(op: symbol, left, right) -> list
   return [op, left, right]
+end
+
+// Rename bindings in composed syntax without changing record fields, type
+// names, function names, or source notes.
+verb native/rename_bindings(tree, names: map)
+  if is_kind(tree, :string) && map_contains_key(names, tree)
+    return names[tree]
+  end
+  if !is_kind(tree, :list) || len(tree) == 0
+    return tree
+  end
+  let result: list = []
+  let index: int = 0
+  for item in tree
+    let literal: bool = (tree[0] == :Expr && index == 1) || (tree[0] == :Let && index == 2)
+    literal = literal || ((tree[0] == :Field || tree[0] == :FieldPointer) && index == 2)
+    literal = literal || ((tree[0] == :Call || tree[0] == :FunctionAddress || tree[0] == :GlobalAddress || tree[0] == :SizeOf || tree[0] == :AlignOf) && index == 1)
+    literal = literal || (tree[0] == :Switch && index == 1) || tree[0] == :Note
+    if literal
+      result = [@result, item]
+    else
+      result = [@result, native/rename_bindings(item, names)]
+    end
+    index = index + 1
+  end
+  return result
 end
 
 verb native/function_body(state: map, fn_id: int, bindings: map, statements: list) -> map
@@ -242,7 +281,7 @@ end
 
 verb native/body_local(input: map, spelling: string, type_id) -> list
   let context: map = input
-  native/ensure(!map_contains_key(context[:bindings], spelling), "duplicate structured local name")
+  native/ensure(!map_contains_key(context[:bindings], spelling), string_concat("duplicate structured local name: ", spelling))
   let [id, state] = native/add_local(context[:state], context[:function], spelling, type_id)
   let bindings: map = context[:bindings]
   bindings[spelling] = id
@@ -278,7 +317,7 @@ verb native/body_expression(input: map, destination, input_expression) -> map
       operands = [@operands, operand]
     else
       if is_kind(operand, :list)
-        native/ensure(len(operand) == 3 && operand[0] == :Expr && !(op == :Call && position == 1), "invalid nested expression")
+        native/ensure(len(operand) == 3 && operand[0] == :Expr && !((op == :Call || op == :FunctionAddress) && position == 1), "invalid nested expression")
         let [id, next] = native/body_value(context, operand[1], operand[2])
         context = next
         operands = [@operands, id]
@@ -404,6 +443,16 @@ verb native/body_statements(input: map, statements: list) -> map
     native/ensure(is_kind(statement, :list) && len(statement) > 0, "invalid structured statement")
     let op = statement[0]
     let arities: map = {:Let -> 4, :Set -> 3, :Do -> 2, :If -> 4, :While -> 3, :Switch -> 5, :Break -> 1, :Continue -> 1, :Note -> 3}
+    if op == :TailCall
+      native/ensure(len(statement) == 3, "transfer requires callee and argument list")
+      let args: list = [native/body_binding(context, statement[1])]
+      for argument in statement[2]
+        native/ensure(is_kind(argument, :string), "transfer arguments require named values")
+        args = [@args, native/body_binding(context, argument)]
+      end
+      context = native/body_end(context, op, args)
+      continue
+    end
     if op == :Return
       let arity: int = 2
       if context[:result] == :Void

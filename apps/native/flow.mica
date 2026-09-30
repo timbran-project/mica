@@ -39,7 +39,7 @@ verb native/function_order(state: map, index: map) -> map
     calls[row[0]] = []
   end
   for row in state[:instructions]
-    if row[3] == :Call
+    if row[3] == :Call || row[3] == :FunctionAddress
       let owner: int = index[:blocks][row[1]][1]
       calls[owner] = [@calls[owner], row[5][0]]
     end
@@ -181,15 +181,13 @@ verb native/flow_analysis(state: map, index: map, fn_id: int) -> map
     for target in targets
       predecessors[target] = [@predecessors[target], id]
     end
-    if term[1] == :Return
+    if term[1] == :Return || native/is_transfer(term)
       exits = [@exits, id]
       targets = [:Exit]
     end
     successors[id] = targets
     let reads: list = [native/reads(row) for row in instructions[id]]
-    if term[1] != :Jump && len(term[2]) > 0
-      reads = [@reads, [term[2][0]]]
-    end
+    reads = [@reads, native/term_reads(term)]
     for group in reads
       for operand in group
         let count: int = 0

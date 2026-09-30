@@ -1,0 +1,63 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+// Exercise code addresses separately from captured data and its borrow region.
+verb native/callable_example() -> map
+  let state: map = native/program()
+  let [unary, s0] = native/function_pointer_type(state, "Unary", :U64, [["input", :U64, :Value]], [], :Value, "")
+  let [factory, s1] = native/function_pointer_type(s0, "Factory", unary, [], [], :Value, "")
+  let pointer: list = [:Pointer, :U64, :Mutable]
+  let [reader, s2] = native/function_pointer_type(s1, "Reader", :U64, [["input", pointer, :Borrow]], [:ReadMemory], :Value, "")
+  let [borrower, s3] = native/function_pointer_type(s2, "Borrower", pointer, [["input", pointer, :Borrow]], [], :Borrow, "input")
+  let [writer, s4] = native/function_pointer_type(s3, "Writer", :Void, [["output", pointer, :Borrow], ["value", :U64, :Value]], [:WriteMemory], :Value, "")
+  let packet: list = [:Record, "CallablePacket"]
+  let [transform, s5] = native/function_pointer_type(s4, "Transform", packet, [["packet", packet, :Value]], [], :Value, "")
+  let [packet_type, s6] = native/record_type(s5, "CallablePacket", [["callback", unary], ["value", :U64], ["transform", transform]])
+  let [constants, s7] = native/constants(s6, [["one", :U64, "0000000000000001"], ["zero", :U64, "0000000000000000"], ["no_callback", unary, "null"]])
+  let context: map = native/module_context(s7, constants)
+  // Deliberately declare the address target after its callers.
+  context = native/declare_function(context, "a_factory", unary, [], [], [], :Value, "")
+  context = native/declare_function(context, "z_increment", :U64, [["value", :U64, :Value]], [], [], :Value, "")
+  context = native/declare_function(context, "dispatch", :U64, [["callback", unary, :Value], ["value", :U64, :Value]], [], [], :Value, "")
+  context = native/declare_function(context, "chain", :U64, [["value", :U64, :Value]], [], [], :Value, "")
+  context = native/declare_function(context, "read", :U64, [["value", pointer, :Borrow]], [], [:ReadMemory], :Value, "")
+  context = native/declare_function(context, "borrow", pointer, [["value", pointer, :Borrow]], [], [], :Borrow, "value")
+  context = native/declare_function(context, "borrow_dispatch", pointer, [["value", pointer, :Borrow]], [], [], :Borrow, "value")
+  context = native/declare_function(context, "write", :Void, [["slot", pointer, :Borrow], ["value", :U64, :Value]], [], [:WriteMemory], :Value, "")
+  context = native/declare_function(context, "memory_dispatch", :U64, [["slot", pointer, :Borrow], ["value", :U64, :Value]], [], [:ReadMemory, :WriteMemory], :Value, "")
+  context = native/declare_function(context, "packet_identity", packet, [["packet", packet, :Value]], [], [], :Value, "")
+  context = native/declare_function(context, "aggregates", :U64, [["value", :U64, :Value]], [], [:ReadMemory, :WriteMemory], :Value, "")
+  context = native/declare_function(context, "is_null", :Bool, [["callback", unary, :Value]], [], [], :Value, "")
+  context = native/define_function(context, "a_factory", [native/return_value(native/function_address_expression("z_increment"))])
+  context = native/define_function(context, "z_increment", [native/return_value(native/binary_expression(:Add, "value", "one"))])
+  context = native/define_function(context, "dispatch", [native/return_value(native/indirect_call_expression("callback", ["value"]))])
+  context = native/define_function(context, "chain", [
+    native/let_statement("factory", factory, native/function_address_expression("a_factory")),
+    native/return_value(native/indirect_call_expression(native/typed_expression(unary, native/indirect_call_expression("factory", [])), ["value"]))])
+  context = native/define_function(context, "read", [native/return_value(native/load_expression("value"))])
+  context = native/define_function(context, "borrow", [native/return_value("value")])
+  context = native/define_function(context, "borrow_dispatch", [
+    native/let_statement("callback", borrower, native/function_address_expression("borrow")),
+    native/return_value(native/indirect_call_expression("callback", ["value"]))])
+  context = native/define_function(context, "write", [native/store_statement("slot", "value"), native/return_void()])
+  context = native/define_function(context, "memory_dispatch", [
+    native/let_statement("writer", writer, native/function_address_expression("write")),
+    native/do_statement(native/indirect_call_expression("writer", ["slot", "value"])),
+    native/let_statement("reader", reader, native/function_address_expression("read")),
+    native/return_value(native/indirect_call_expression("reader", ["slot"]))])
+  context = native/define_function(context, "packet_identity", [native/return_value("packet")])
+  let callbacks: list = [:Array, unary, 2]
+  context = native/define_function(context, "aggregates", [
+    native/let_statement("increment", unary, native/function_address_expression("z_increment")),
+    native/let_statement("identity", transform, native/function_address_expression("packet_identity")),
+    native/let_statement("packet", packet, native/record_expression(["increment", "value", "identity"])),
+    native/let_statement("copied", packet, native/indirect_call_expression(native/typed_field(transform, "packet", "transform"), ["packet"])),
+    native/let_statement("callbacks", callbacks, native/zero_expression()),
+    native/let_statement("array", [:Pointer, callbacks, :Mutable], native/unary_expression(:Address, "callbacks")),
+    native/let_statement("slot", [:Pointer, unary, :Mutable], native/binary_expression(:ElementPointer, "array", "zero")),
+    native/store_statement("slot", native/typed_field(unary, "copied", "callback")),
+    native/return_value(native/indirect_call_expression(native/typed_load(unary, "slot"), [native/typed_field(:U64, "copied", "value")]))])
+  context = native/define_function(context, "is_null", [native/return_value(native/binary_expression(:Equal, "callback", "no_callback"))])
+  state = context[:state]
+  return state
+end

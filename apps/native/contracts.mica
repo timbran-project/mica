@@ -1,6 +1,127 @@
 // Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
+// Index signature syntax before layout validation. Ownership traverses record
+// fields only after layout validation has rejected by-value cycles.
+verb native/index_function_types(state: map, records: map) -> map
+  let signatures: map = {}
+  for row in state[:function_types]
+    native/ensure(is_kind(row, :list) && len(row) == 6, "invalid function pointer declaration")
+    native/identifier(row[0])
+    native/ensure(!map_contains_key(signatures, row[0]), "duplicate function pointer type")
+    native/check_type(records, row[1])
+    native/ensure(is_kind(row[2], :list) && is_kind(row[3], :list), "invalid function pointer signature")
+    let names: map = {}
+    for parameter in row[2]
+      native/ensure(is_kind(parameter, :list) && len(parameter) == 3, "invalid function pointer parameter")
+      native/identifier(parameter[0])
+      native/ensure(!map_contains_key(names, parameter[0]), "duplicate function pointer parameter")
+      names[parameter[0]] = true
+      native/check_type(records, parameter[1])
+      native/ensure(parameter[1] != :Void, "Void function pointer parameter")
+    end
+    signatures[row[0]] = [row[1], row[2], row[3], row[4], row[5]]
+  end
+  return signatures
+end
+
+verb native/check_function_type_contracts(index: map)
+  for name, signature in index[:function_types]
+    let names: map = {}
+    for parameter in signature[1]
+      names[parameter[0]] = parameter
+      let mode = parameter[2]
+      if is_kind(mode, :list)
+        native/ensure(len(mode) == 2 && mode[0] == :Borrow && is_kind(mode[1], :string), "invalid function pointer borrow region")
+        mode = :Borrow
+      end
+      if native/has_pointer(index, parameter[1])
+        native/ensure(mode == :Borrow || mode == :Consume || mode == :Gc, "function pointer parameter requires ownership")
+      else
+        native/ensure(mode == :Value, "ownership contract on scalar function pointer parameter")
+      end
+    end
+    for parameter in signature[1]
+      if is_kind(parameter[2], :list)
+        let owner: string = parameter[2][1]
+        native/ensure(map_contains_key(names, owner) && names[owner][2] == :Borrow, "function pointer borrow region requires root Borrow parameter")
+      end
+    end
+    for effect in signature[2]
+      native/ensure(native/contains([:ReadMemory, :WriteMemory, :Allocate, :Release, :Block, :Relocate], effect), "unknown function pointer effect")
+    end
+    native/ensure(native/contains([:Value, :Owned, :Borrow, :Static, :Immediate, :Gc], signature[3]), "invalid function pointer result ownership")
+    native/ensure(native/has_pointer(index, signature[0]) == (signature[3] != :Value), "function pointer result ownership does not match type")
+    if signature[3] == :Immediate
+      native/ensure(!native/has_address(index, signature[0]), "Immediate function pointer result cannot contain addresses")
+    end
+    if signature[3] == :Borrow
+      native/ensure(map_contains_key(names, signature[4]) && (names[signature[4]][2] == :Borrow || is_kind(names[signature[4]][2], :list)), "function pointer result requires borrowed owner")
+    else
+      native/ensure(signature[4] == "", "only borrowed function pointer results name an owner")
+    end
+  end
+end
+
+verb native/function_signature(state: map, index: map, fn_id: int) -> list
+  let parameters: list = []
+  for row in native/ordered(native/owned(state[:parameters], 1, fn_id), 2)
+    let mode = :Value
+    if map_contains_key(index[:parameter_modes], row[0])
+      mode = index[:parameter_modes][row[0]]
+      if map_contains_key(index[:parameter_owners], row[0])
+        mode = [:Borrow, index[:variables][index[:parameter_owners][row[0]]][1]]
+      end
+    end
+    parameters = [@parameters, [row[3], row[4], mode]]
+  end
+  let contract: list = index[:contracts][fn_id]
+  return [index[:functions][fn_id][2], parameters, contract[1], contract[2], contract[3]]
+end
+
+verb native/signature_owner(signature: list, name: string) -> int
+  let root: string = name
+  for parameter in signature[1]
+    if parameter[0] == name && is_kind(parameter[2], :list)
+      root = parameter[2][1]
+    end
+  end
+  let position: int = 0
+  for parameter in signature[1]
+    if parameter[0] == root
+      return position
+    end
+    position = position + 1
+  end
+  raise E_INVARG, "native: unknown callable owner"
+end
+
+// Parameter names are local to a declaration. Ownership regions compare by
+// argument position, while the callable's effect list is an upper bound.
+verb native/signature_shape(signature: list) -> list
+  let parameters: list = []
+  for parameter in signature[1]
+    let mode = parameter[2]
+    if is_kind(mode, :list)
+      mode = [:Borrow, native/signature_owner(signature, mode[1])]
+    end
+    parameters = [@parameters, [parameter[1], mode]]
+  end
+  let owner = -1
+  if signature[3] == :Borrow
+    owner = native/signature_owner(signature, signature[4])
+  end
+  return [signature[0], parameters, signature[3], owner]
+end
+
+verb native/indirect_signature(index: map, fn_id: int, row: list) -> list
+  native/ensure(len(row[5]) > 0, "indirect call requires a callee")
+  let type_id = native/value_type(index, fn_id, row[5][0])
+  native/ensure(native/is_function_pointer(type_id), "indirect call requires a function pointer")
+  let signature: list = index[:function_types][type_id[1]]
+  return signature
+end
+
 verb native/check_contracts(state, input_index)
   let index = input_index
   let foreign = {}
@@ -14,9 +135,9 @@ verb native/check_contracts(state, input_index)
     native/ensure(map_contains_key(index[:functions], row[0]), "contract has unknown function")
     native/ensure(!map_contains_key(contracts, row[0]), "duplicate function contract")
     for effect in row[1]
-      native/ensure(native/contains([:ReadMemory, :WriteMemory, :Allocate, :Release, :Block], effect), "unknown effect")
+      native/ensure(native/contains([:ReadMemory, :WriteMemory, :Allocate, :Release, :Block, :Relocate], effect), "unknown effect")
     end
-    native/ensure(native/contains([:Value, :Owned, :Borrow, :Static, :Immediate], row[2]), "invalid result ownership")
+    native/ensure(native/contains([:Value, :Owned, :Borrow, :Static, :Immediate, :Gc], row[2]), "invalid result ownership")
     contracts[row[0]] = row
   end
   let modes = {}
@@ -31,7 +152,7 @@ verb native/check_contracts(state, input_index)
       owner_names[row[0]] = mode[1]
       mode = :Borrow
     end
-    native/ensure(mode == :Borrow || mode == :Consume, "invalid parameter ownership")
+    native/ensure(mode == :Borrow || mode == :Consume || mode == :Gc, "invalid parameter ownership")
     native/ensure(native/has_pointer(index, index[:variables][row[0]][2]), "ownership contract on scalar parameter")
     modes[row[0]] = mode
   end
@@ -80,7 +201,7 @@ verb native/check_contracts(state, input_index)
     c_names = [@c_names, spelling]
   end
   for type_id in index[:type_order]
-    if native/is_scalar(type_id) || native/is_tagged(type_id)
+    if native/is_scalar(type_id) || native/is_tagged(type_id) || native/is_function_pointer(type_id)
       native/ensure(!native/contains(c_names, native/c_type(type_id)), "function conflicts with C typedef")
     end
   end
@@ -91,10 +212,10 @@ verb native/check_contracts(state, input_index)
 end
 
 verb native/direct_effects(op)
-  if op == :Load
+  if op == :Load || op == :RootLoad
     return [:ReadMemory]
   end
-  if op == :Store || op == :Adopt
+  if op == :Store || op == :Adopt || op == :RootStore
     return [:WriteMemory]
   end
   if op == :CopyBytes
@@ -119,7 +240,21 @@ verb native/check_effects(state, index)
         summary[effect] = string_concat("foreign ", fn_row[1])
       end
     end
+    // Relocation is a collector boundary, even when its body uses plain stores.
+    if native/contains(index[:contracts][fn_row[0]][1], :Relocate)
+      summary[:Relocate] = string_concat("relocation boundary ", fn_row[1])
+    end
     summaries[fn_row[0]] = summary
+  end
+  for term in state[:terminators]
+    if native/is_transfer(term)
+      let fn_id = index[:blocks][term[0]][1]
+      let summary = summaries[fn_id]
+      for effect in native/transfer_signature(index, fn_id, term)[2]
+        summary[effect] = string_concat(index[:functions][fn_id][1], "/", index[:blocks][term[0]][2], " -> execution transfer")
+      end
+      summaries[fn_id] = summary
+    end
   end
   let changed = true
   while changed
@@ -134,6 +269,11 @@ verb native/check_effects(state, index)
       if row[3] == :Call
         for effect, path in summaries[row[5][0]]
           effects[effect] = string_concat(native/instruction_location(index, row), " -> ", path)
+        end
+      end
+      if row[3] == :CallIndirect
+        for effect in native/indirect_signature(index, fn_id, row)[2]
+          effects[effect] = string_concat(native/instruction_location(index, row), " -> indirect call")
         end
       end
       for effect, path in effects
@@ -207,10 +347,36 @@ verb native/check_ownership(state, index)
         native/ensure(origin[0] == :Owned || origin[0] == :Consume, string_concat("cannot adopt borrowed storage at ", native/instruction_location(index, row)))
       end
     end
+    if row[3] == :Manage
+      for origin in origins[row[5][0]]
+        native/ensure(origin[0] != :Stack, "stack storage cannot become managed")
+      end
+    end
     if row[3] == :Store
       for origin in origins[row[5][1]]
+        native/ensure(origin[0] != :Gc || native/gc_origins(origins[row[5][0]]), "managed reference requires a managed object or RootStore")
         native/ensure(origin[0] != :Stack, string_concat("stack address escapes through store at ", native/instruction_location(index, row)))
         native/ensure(origin[0] != :Borrow || native/contains(origins[row[5][0]], origin), string_concat("borrow escapes through store at ", native/instruction_location(index, row)))
+      end
+    end
+    if row[3] == :CallIndirect
+      let fn_id: int = index[:blocks][row[1]][1]
+      let signature: list = native/indirect_signature(index, fn_id, row)
+      let position: int = 1
+      for parameter in signature[1]
+        let sources: list = origins[row[5][position]]
+        if is_kind(parameter[2], :list)
+          let owner: int = native/signature_owner(signature, parameter[2][1])
+          for origin in sources
+            native/ensure(origin[0] == :Static || native/contains(origins[row[5][owner + 1]], origin), string_concat("indirect argument does not share borrow region at ", native/instruction_location(index, row)))
+          end
+        end
+        if parameter[2] == :Consume
+          for origin in sources
+            native/ensure(origin[0] == :Owned || origin[0] == :Consume, string_concat("cannot consume borrowed storage in indirect call at ", native/instruction_location(index, row)))
+          end
+        end
+        position = position + 1
       end
     end
     if row[3] != :Call
@@ -243,6 +409,9 @@ verb native/check_ownership(state, index)
     end
     for origin in origins[term[2][0]]
       let valid = origin[0] == :Owned || origin[0] == :Consume
+      if contract[2] == :Gc
+        valid = origin[0] == :Gc
+      end
       if contract[2] == :Immediate
         valid = false
       end
@@ -259,9 +428,24 @@ verb native/check_ownership(state, index)
       native/ensure(valid, string_concat("result ownership mismatch in ", index[:functions][fn_id][1], "/", index[:blocks][term[0]][2]))
     end
   end
+  native/check_execution_ownership(state, index, origins)
+  return origins
 end
 
 verb native/result_origins(state, index, origins, row)
+  if row[3] == :Manage || row[3] == :RootLoad
+    return [[:Gc, 0]]
+  end
+  if row[3] == :CallIndirect
+    let signature: list = native/indirect_signature(index, index[:blocks][row[1]][1], row)
+    if signature[3] == :Static || signature[3] == :Owned || signature[3] == :Gc
+      return [[signature[3], row[0]]]
+    end
+    if signature[3] == :Borrow
+      return origins[row[5][native/signature_owner(signature, signature[4]) + 1]]
+    end
+    return []
+  end
   if row[3] == :Adopt
     // The owner now keeps the allocation alive; the result borrows its region.
     return origins[row[5][0]]
@@ -270,14 +454,14 @@ verb native/result_origins(state, index, origins, row)
     return [[:Static, row[5][0]]]
   end
   if row[3] == :Address
-    return [[:Stack, row[5][0]]]
+    return native/union([[:Stack, row[5][0]]], origins[row[5][0]])
   end
   if row[3] == :Call
     let contract = index[:contracts][row[5][0]]
     if contract[2] == :Immediate
       return []
     end
-    if contract[2] == :Static || contract[2] == :Owned
+    if contract[2] == :Static || contract[2] == :Owned || contract[2] == :Gc
       return [[contract[2], row[0]]]
     end
     for parameter in native/owned(state[:parameters], 1, row[5][0])

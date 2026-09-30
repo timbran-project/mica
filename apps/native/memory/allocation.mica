@@ -1,0 +1,115 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+verb native_memory/free_slot(heap, bucket) -> list
+  let object: list = native_memory/record_pointer("MemoryObject")
+  let array: list = [:Array, object, 10]
+  let result: list = native/typed_expression(native_memory/pointer(object), native/binary_expression(:ElementPointer,
+    native/typed_expression(native_memory/pointer(array), native/field_pointer_expression(heap, "free")), bucket))
+  return result
+end
+
+verb native_memory/allocation(input: map) -> map
+  let context: map = input
+  let bytes: list = native_memory/pointer(:U8)
+  let object: list = native_memory/record_pointer("MemoryObject")
+  let page: list = native_memory/record_pointer("MemoryPage")
+  let header: list = [:Record, "MemoryObject"]
+  context = native/define_function(context, "memory_object", [
+    native_memory/bind("header", object, native/unary_expression(:PointerCast, "pointer")),
+    native/return_value(native/offset_expression("header", "memory_previous"))])
+  context = native/define_function(context, "memory_payload", [
+    native/let_offset("end", object, "object", "memory_n1"),
+    native/return_value(native/unary_expression(:PointerCast, "end"))])
+  context = native/define_function(context, "memory_original", [
+    native_memory/bind("state", :U64, native_memory/field(:U64, "object", "state")),
+    native/when_statement(native/binary_expression(:Equal, "state", "memory_n2"), [
+      native_memory/bind("source", object, native_memory/field(object, "object", "forward")),
+      native/unless_statement(native/binary_expression(:Equal, "source", "memory_null_object"), [
+        native/return_value(native/call_expression("memory_payload", ["source"]))])]),
+    native/return_value(native/call_expression("memory_payload", ["object"]))])
+  context = native/define_function(context, "memory_nursery_allocate", [
+    native/when_statement(native/binary_expression(:Equal, "size", "memory_n0"), [native/return_value("memory_null_bytes")]),
+    native/when_statement(native/binary_expression(:Less, "memory_allocation_limit", "size"), [native/return_value("memory_null_bytes")]),
+    native_memory/bind("used", :U64, native_memory/field(:U64, "worker", "used")),
+    native_memory/bind("capacity", :U64, native_memory/field(:U64, "worker", "capacity")),
+    native_memory/bind("header_size", :U64, native/unary_expression(:SizeOf, header)),
+    native_memory/bind("total", :U64, native/binary_expression(:Add, "size", "header_size")),
+    native/set_statement("total", native/binary_expression(:Add, "total", "memory_n7")),
+    native/set_statement("total", native/binary_expression(:BitAnd, "total", "memory_alignment_mask")),
+    native/when_statement(native/binary_expression(:Less, "capacity", "used"), [native/return_value("memory_null_bytes")]),
+    native_memory/bind("remaining", :U64, native/binary_expression(:Subtract, "capacity", "used")),
+    native/when_statement(native/binary_expression(:Less, "remaining", "total"), [native/return_value("memory_null_bytes")]),
+    native_memory/bind("nursery", bytes, native_memory/field(bytes, "worker", "nursery")),
+    native/let_offset("allocation", bytes, "nursery", "used"),
+    native_memory/bind("managed", bytes, native/manage_expression("allocation")),
+    native_memory/bind("object", object, native/unary_expression(:PointerCast, "managed")),
+    native_memory/bind("owner", native_memory/record_pointer("MemoryHeap"), native_memory/root(native_memory/record_pointer("MemoryHeap"), "worker", "heap")),
+    native/store_statement("object", native/typed_record(header,
+      ["memory_null_object", "memory_null_object", "memory_null_object", "memory_null_page", "owner",
+        "size", "layout", "memory_n0", "memory_n1"])),
+    native_memory/store(:U64, "worker", "used", native/typed_expression(:U64, native/binary_expression(:Add, "used", "total"))),
+    native/return_value(native/call_expression("memory_payload", ["object"]))])
+
+  // Ten size classes cover 128-byte through 64-KiB cells. Larger objects own
+  // one page. Collection returns unused cells to the class free lists.
+  context = native/define_function(context, "memory_mature_allocate", [
+    native/when_statement(native/binary_expression(:Equal, "size", "memory_n0"), [native/return_value("memory_null_object")]),
+    native/when_statement(native/binary_expression(:Less, "memory_allocation_limit", "size"), [native/return_value("memory_null_object")]),
+    native_memory/bind("header_size", :U64, native/unary_expression(:SizeOf, header)),
+    native_memory/bind("total", :U64, native/binary_expression(:Add, "size", "header_size")),
+    native/set_statement("total", native/binary_expression(:Add, "total", "memory_n7")),
+    native/set_statement("total", native/binary_expression(:BitAnd, "total", "memory_alignment_mask")),
+    native_memory/bind("stride", :U64, "memory_cell_size"),
+    native_memory/bind("bucket", :U64, "memory_n0"),
+    native/while_statement(native/binary_expression(:Less, "stride", "total"), [
+      native/when_statement(native/binary_expression(:Equal, "bucket", "memory_n9"), [native/break_statement()]),
+      native/set_statement("stride", native/binary_expression(:Multiply, "stride", "memory_n2")),
+      native/set_statement("bucket", native/binary_expression(:Add, "bucket", "memory_n1"))]),
+    native_memory/bind("candidate", object, "memory_null_object"),
+    native/unless_statement(native/binary_expression(:Less, "stride", "total"), [
+      native/set_statement("candidate", native/root_load_expression(native_memory/free_slot("heap", "bucket")))]),
+    native/when_statement(native/binary_expression(:Equal, "candidate", "memory_null_object"), [
+      native_memory/bind("count", :U64, native/binary_expression(:Divide, "memory_page_size", "stride")),
+      native/when_statement(native/binary_expression(:Less, "stride", "total"), [
+        native/set_statement("stride", "total"), native/set_statement("count", "memory_n1"), native/set_statement("bucket", "memory_n10")]),
+      native_memory/bind("page_size", :U64, native/unary_expression(:SizeOf, [:Record, "MemoryPage"])),
+      native_memory/bind("payload_size", :U64, native/binary_expression(:Multiply, "count", "stride")),
+      native_memory/bind("allocation_size", :U64, native/binary_expression(:Add, "page_size", "payload_size")),
+      native/let_call("allocation", bytes, "memory_platform_allocate", ["allocation_size"]),
+      native/when_statement(native/binary_expression(:Equal, "allocation", "memory_null_bytes"), [native/return_value("memory_null_object")]),
+      native_memory/bind("owned_page", page, native/unary_expression(:PointerCast, "allocation")),
+      native_memory/bind("previous", page, native_memory/field(page, "heap", "pages")),
+      native_memory/bind("page_slot", native_memory/pointer(page), native/field_pointer_expression("heap", "pages")),
+      native_memory/bind("page", page, native/binary_expression(:Adopt, "page_slot", "owned_page")),
+      native/store_statement("page", native/typed_record([:Record, "MemoryPage"], ["previous", "stride", "count", "memory_n0", "bucket"])),
+      native_memory/bind("managed_page", page, native/manage_expression("page")),
+      native_memory/bind("managed_heap", native_memory/record_pointer("MemoryHeap"), native/manage_expression("heap")),
+      native_memory/bind("page_bytes", bytes, native/unary_expression(:PointerCast, "managed_page")),
+      native/let_offset("cells", bytes, "page_bytes", "page_size"),
+      native_memory/bind("index", :U64, "memory_n0"),
+      native/while_statement(native/binary_expression(:Less, "index", "count"), [
+        native_memory/bind("offset", :U64, native/binary_expression(:Multiply, "index", "stride")),
+        native/let_offset("cell", bytes, "cells", "offset"),
+        native_memory/bind("item", object, native/unary_expression(:PointerCast, "cell")),
+        native/store_statement("item", native/typed_record(header,
+          ["candidate", "memory_null_object", "memory_null_object", "managed_page", "managed_heap", "memory_n0", "memory_n0", "memory_n0", "memory_n0"])),
+        native/set_statement("candidate", "item"),
+        native/set_statement("index", native/binary_expression(:Add, "index", "memory_n1"))]),
+      native_memory/store(:U64, "heap", "allocated", native/typed_expression(:U64,
+        native/binary_expression(:Add, native_memory/field(:U64, "heap", "allocated"), "allocation_size")))]),
+    native/when_statement(native/binary_expression(:Less, "bucket", "memory_n10"), [
+      native/root_store_statement(native_memory/free_slot("heap", "bucket"), native_memory/field(object, "candidate", "next"))]),
+    native_memory/store(:U64, "candidate", "size", "size"),
+    native_memory/store(:U64, "candidate", "layout", "layout"),
+    native_memory/store(:U64, "candidate", "mark", "memory_n0"),
+    native_memory/store(:U64, "candidate", "state", "memory_n2"),
+    native_memory/store(object, "candidate", "next", "memory_null_object"),
+    native_memory/store(object, "candidate", "work", "memory_null_object"),
+    native_memory/store(object, "candidate", "forward", "memory_null_object"),
+    native_memory/bind("owner", page, native_memory/field(page, "candidate", "page")),
+    native_memory/store(:U64, "owner", "live", native/typed_expression(:U64,
+      native/binary_expression(:Add, native_memory/field(:U64, "owner", "live"), "memory_n1"))),
+    native/return_value("candidate")])
+  return context
+end

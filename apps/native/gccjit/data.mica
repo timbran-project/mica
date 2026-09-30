@@ -1,0 +1,284 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+// The binary input contains the checked IR tables, with names and structural
+// types interned. It contains no libgccjit API commands or host addresses.
+verb native_jit/opcodes() -> list
+  return [:Copy, :Zero, :Add, :Subtract, :Multiply, :Divide, :Remainder,
+    :BitAnd, :BitOr, :BitXor, :ShiftLeft, :ShiftRight, :Equal, :Less,
+    :Convert, :Bitcast, :Negate, :Truncate, :IsFinite,
+    :CheckedAdd, :CheckedSubtract, :CheckedMultiply, :CheckedDivide,
+    :CheckedRemainder, :CheckedNegate, :CheckedFloatToInt,
+    :Wrap, :Unwrap, :Record, :Field, :Address, :FieldPointer, :Load, :Store,
+    :Adopt, :Offset, :ElementPointer, :SizeOf, :AlignOf, :PointerCast,
+    :Freeze, :CopyBytes, :PackPointer, :UnpackPointer, :PackImmediate,
+    :Payload, :Tag, :GlobalAddress, :Call, :FunctionAddress, :CallIndirect, :Manage, :RootLoad, :RootStore, :PointerDistance]
+end
+
+verb native_jit/type_kinds() -> list
+  return [:Void, :U8, :U16, :U32, :U64, :I64, :F32, :Bool,
+    :Pointer, :Array, :Record, :Scalar, :Tagged, :FunctionPointer]
+end
+
+verb native_jit/position(items: list, item) -> int
+  let position: int = 0
+  for candidate in items
+    if candidate == item
+      return position
+    end
+    position = position + 1
+  end
+  raise E_INVARG, string_concat("native jit: unknown item ", to_literal(item))
+end
+
+verb native_jit/intern(input: map, name: string) -> list
+  let pool: map = input
+  if map_contains_key(pool[:names], name)
+    let offset: int = pool[:names][name]
+    return [offset, pool]
+  end
+  let offset: int = string_len(pool[:text])
+  let names: map = pool[:names]
+  names[name] = offset
+  pool[:names] = names
+  pool[:text] = string_concat(pool[:text], name, "\0")
+  return [offset, pool]
+end
+
+verb native_jit/hex32(digits: string) -> int
+  let alphabet: list = string_chars("0123456789abcdef")
+  let number: int = 0
+  for ch in string_chars(digits)
+    number = number * 16 + native_jit/position(alphabet, ch)
+  end
+  return number
+end
+
+verb native_jit/data(state: map) -> map
+  let index: map = native/check(state)
+  let types: list = [:Void, :U8, :U16, :U32, :U64, :I64, :F32, :Bool]
+  for type_id in index[:type_order]
+    types = native/collect_type(types, type_id)
+  end
+  for row in state[:functions]
+    types = native/collect_type(types, row[2])
+  end
+  for row in state[:parameters]
+    types = native/collect_type(types, row[4])
+  end
+  for table in [:locals, :constants, :globals]
+    let column: int = 3
+    if table == :constants
+      column = 1
+    end
+    if table == :globals
+      column = 2
+    end
+    for row in state[table]
+      types = native/collect_type(types, row[column])
+    end
+  end
+  for row in state[:fields]
+    types = native/collect_type(types, row[3])
+  end
+  for row in state[:function_types]
+    types = native/collect_type(types, row[1])
+    for parameter in row[2]
+      types = native/collect_type(types, parameter[1])
+    end
+  end
+  for row in state[:instructions]
+    if row[3] == :SizeOf || row[3] == :AlignOf
+      types = native/collect_type(types, row[5][0])
+    end
+  end
+  let type_ids: map = {}
+  let ordinal: int = 0
+  for type_id in types
+    type_ids[type_id] = ordinal
+    ordinal = ordinal + 1
+  end
+  let pool: map = {:names -> {}, :text -> ""}
+  let sections: list = []
+  let rows: list = []
+  let fields: map = {}
+  let field_count: int = 0
+  // Type rows: id, kind, name offset, representation/element, access/extent,
+  // followed by member type/name/field-ID triples (or heap tags).
+  for type_id in types
+    let kind = type_id
+    let name: string = to_literal(type_id)
+    let element: int = 0
+    let detail: int = 0
+    let members: list = []
+    if is_kind(type_id, :list)
+      kind = type_id[0]
+      name = native/type_name(type_id)
+    end
+    if native/is_record(type_id)
+      name = string_concat("mica_", type_id[1])
+      for field in index[:records][type_id[1]]
+        let [offset, next] = native_jit/intern(pool, string_concat("f_", field[2]))
+        pool = next
+        fields[[type_id, field[2]]] = field_count
+        members = [@members, type_ids[field[3]], offset, field_count]
+        field_count = field_count + 1
+      end
+    end
+    if native/is_pointer(type_id) || native/is_array(type_id)
+      element = type_ids[type_id[1]]
+      if native/is_array(type_id)
+        detail = type_id[2]
+        fields[[type_id, "elements"]] = field_count
+        let [element_name, next] = native_jit/intern(pool, "elements")
+        pool = next
+        name = string_concat("mica_", name)
+        members = [field_count, element_name]
+        field_count = field_count + 1
+      else
+        if type_id[2] == :Const
+          detail = 1
+        end
+      end
+    end
+    if native/is_scalar(type_id)
+      element = type_ids[type_id[2]]
+    end
+    if native/is_tagged(type_id)
+      element = type_ids[:U64]
+      members = type_id[3]
+    end
+    if native/is_function_pointer(type_id)
+      let signature: list = index[:function_types][type_id[1]]
+      element = type_ids[signature[0]]
+      members = [type_ids[parameter[1]] for parameter in signature[1]]
+    end
+    let [name_offset, next] = native_jit/intern(pool, name)
+    pool = next
+    rows = [@rows, [type_ids[type_id], native_jit/position(native_jit/type_kinds(), kind), name_offset, element, detail, @members]]
+  end
+  sections = [@sections, rows]
+  // Functions retain ordered parameter triples in their declaration row.
+  rows = []
+  for row in native/ordered(state[:functions], 1)
+    let [name, next] = native_jit/intern(pool, native/c_function(index, row[0]))
+    pool = next
+    let foreign: int = 0
+    if map_contains_key(index[:foreign], row[0])
+      foreign = 1
+    end
+    let parameters: list = []
+    for parameter in native/ordered(native/owned(state[:parameters], 1, row[0]), 2)
+      let [spelling, with_name] = native_jit/intern(pool, parameter[3])
+      pool = with_name
+      parameters = [@parameters, parameter[0], type_ids[parameter[4]], spelling]
+    end
+    rows = [@rows, [row[0], name, type_ids[row[2]], foreign, @parameters]]
+  end
+  sections = [@sections, rows]
+  for table in [:locals, :blocks, :constants, :globals, :instructions, :terminators]
+    rows = []
+    let source_rows: list = state[table]
+    if table == :instructions
+      source_rows = [pair[1] for pair in sort([[[row[1], row[2]], row] for row in source_rows])]
+    end
+    for row in source_rows
+      let encoded: list = []
+      if table == :locals || table == :blocks
+        let [name, next] = native_jit/intern(pool, row[2])
+        pool = next
+        let detail: int = 0
+        if table == :locals
+          detail = type_ids[row[3]]
+        else
+          if row[3]
+            detail = 1
+          end
+        end
+        encoded = [row[0], row[1], name, detail]
+      end
+      if table == :constants
+        let digits: string = row[2]
+        let low: int = 0
+        let high: int = 0
+        let negative: int = 0
+        if native/is_number(row[1])
+          if string_slice(digits, 0, 1) == "-"
+            negative = 1
+            digits = string_slice(digits, 1, string_len(digits))
+          end
+          if string_len(digits) == 16
+            high = native_jit/hex32(string_slice(digits, 0, 8))
+            digits = string_slice(digits, 8, 16)
+          end
+          low = native_jit/hex32(digits)
+        end
+        if digits == "true"
+          low = 1
+        end
+        encoded = [row[0], type_ids[row[1]], low, high, negative]
+      end
+      if table == :globals
+        let [name, next] = native_jit/intern(pool, string_concat("mica_global_", row[1]))
+        pool = next
+        let initializer: list = [0]
+        if is_kind(row[4], :list)
+          initializer = [2, @row[4]]
+        else
+          if row[4] != :Zero
+            initializer = [1, row[4]]
+          end
+        end
+        encoded = [row[0], name, type_ids[row[2]], native_jit/position([:Mutable, :Constant, :ThreadLocal], row[3]), @initializer]
+      end
+      if table == :instructions
+        let arguments: list = row[5]
+        let fn_id: int = index[:blocks][row[1]][1]
+        if row[3] == :Field || row[3] == :FieldPointer
+          let type_id = native/value_type(index, fn_id, arguments[0])
+          if row[3] == :FieldPointer
+            type_id = type_id[1]
+          end
+          arguments[1] = fields[[type_id, arguments[1]]]
+        end
+        if row[3] == :SizeOf || row[3] == :AlignOf
+          arguments[0] = type_ids[arguments[0]]
+        end
+        let destination: int = state[:next]
+        if row[4] != :Discard
+          destination = row[4]
+        end
+        encoded = [row[0], row[1], native_jit/position(native_jit/opcodes(), row[3]), destination, @arguments]
+      end
+      if table == :terminators
+        encoded = [row[0], native_jit/position([:Return, :Jump, :Branch, :TailCall], row[1]), @row[2]]
+      end
+      rows = [@rows, encoded]
+    end
+    sections = [@sections, rows]
+  end
+  // Header holds section spans in words, followed by length-prefixed rows.
+  let capacity: int = state[:next] + len(types) + field_count + 2
+  for section in sections
+    for row in section
+      if len(row) + 1 > capacity
+        capacity = len(row) + 1
+      end
+    end
+  end
+  let words: list = [1296646977, 0, state[:next] + 1, len(types), field_count, capacity]
+  for section in sections
+    words = [@words, 0, 0]
+  end
+  let column: int = 6
+  for section in sections
+    words[column] = len(words)
+    for row in section
+      words = [@words, len(row) + 1, @row]
+    end
+    words[column + 1] = len(words)
+    column = column + 2
+  end
+  words[1] = len(words)
+  return {:words -> words, :strings -> pool[:text]}
+end

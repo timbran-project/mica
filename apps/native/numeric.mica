@@ -58,7 +58,7 @@ verb native/check_numeric_instruction(index, fn_id, row, result_type)
   if op == :Equal || op == :Less
     native/ensure(result_type == :Bool, "comparison result must be Bool")
     if op == :Equal
-      native/ensure(native/is_number(left) || left == :Bool || native/is_pointer(left) || native/is_scalar(left) || native/is_tagged(left), "equality requires scalar operands")
+      native/ensure(native/is_number(left) || left == :Bool || native/is_pointer(left) || native/is_function_pointer(left) || native/is_scalar(left) || native/is_tagged(left), "equality requires scalar operands")
     else
       native/ensure(native/is_number(left), "comparison requires numeric operands")
     end

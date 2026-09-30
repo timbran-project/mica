@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 // Table-local IDs index entries; open-addressed buckets contain ID + 1.
-// The arena owns names and geometric table allocations until table release.
+// The storage owns names and geometric table allocations until table release.
 verb native_value/symbols(input: map) -> map
   let context: map = input
   let entry: list = [:Record, "SymbolEntry"]
@@ -10,7 +10,7 @@ verb native_value/symbols(input: map) -> map
   let state: map = context[:state]
   state = native/record_type(state, "SymbolEntry", [["data", bytes], ["length", :U64],
     ["scalars", :U64], ["hash", :U64], ["ascii", :Bool]])[1]
-  state = native/record_type(state, "SymbolTable", [["mutex", [:Pointer, :U8, :Mutable]], ["arena", [:Record, "ValueArena"]],
+  state = native/record_type(state, "SymbolTable", [["mutex", [:Pointer, :U8, :Mutable]], ["storage", [:Record, "SymbolStorage"]],
     ["entries", [:Pointer, entry, :Mutable]], ["buckets", [:Pointer, :U64, :Mutable]],
     ["count", :U64], ["capacity", :U64]])[1]
   state = native/record_type(state, "SymbolText", [["ok", :Bool], ["data", bytes],
@@ -174,15 +174,15 @@ verb native_value/symbol_grow(input: map) -> map
       )
     ),
     native/let_statement(
-      "arena",
-      [:Pointer, [:Record, "ValueArena"], :Mutable],
-      native/field_pointer_expression("table", "arena")
+      "storage",
+      [:Pointer, [:Record, "SymbolStorage"], :Mutable],
+      native/field_pointer_expression("table", "storage")
     ),
     native/let_call(
       "allocation",
       bytes,
-      "value_arena_allocate",
-      ["arena", native/typed_expression(:U64, native/binary_expression(:Add, "entry_bytes", "bucket_bytes"))]
+      "symbol_storage_allocate",
+      ["storage", native/typed_expression(:U64, native/binary_expression(:Add, "entry_bytes", "bucket_bytes"))]
     ),
     native/when_statement(native/binary_expression(:Equal, "allocation", "null_bytes"), [native/return_value("false")]),
     native/let_statement("new_entries", entries, native/unary_expression(:PointerCast, "allocation")),
@@ -316,13 +316,13 @@ verb native_value/symbol_intern(input: map) -> map
       native/set_statement("slot", native/call_expression("symbol_slot", ["table", "source", "length", "hash"]))
     ]),
     native/let_statement(
-      "arena",
-      [:Pointer, [:Record, "ValueArena"], :Mutable],
-      native/field_pointer_expression("table", "arena")
+      "storage",
+      [:Pointer, [:Record, "SymbolStorage"], :Mutable],
+      native/field_pointer_expression("table", "storage")
     ),
     native/let_statement("size", :U64, "length"),
     native/when_statement(native/binary_expression(:Equal, "size", "zero"), [native/set_statement("size", "one")]),
-    native/let_call("data", mutable_bytes, "value_arena_allocate", ["arena", "size"]),
+    native/let_call("data", mutable_bytes, "symbol_storage_allocate", ["storage", "size"]),
     native/when_statement(native/binary_expression(:Equal, "data", "null_bytes"), [native/return_zero()]),
     native/unless_statement(
       native/binary_expression(:Equal, "length", "zero"),
@@ -392,11 +392,11 @@ verb native_value/symbol_access(input: map) -> map
     [["table", pointer, :Consume]], [], [:ReadMemory, :WriteMemory, :Release], :Value, "")
   context = native/define_function(context, "value_symbol_table_release", [
     native/let_statement(
-      "arena",
-      [:Pointer, [:Record, "ValueArena"], :Mutable],
-      native/field_pointer_expression("table", "arena")
+      "storage",
+      [:Pointer, [:Record, "SymbolStorage"], :Mutable],
+      native/field_pointer_expression("table", "storage")
     ),
-    native/do_statement(native/call_expression("value_arena_release", ["arena"])),
+    native/do_statement(native/call_expression("symbol_storage_release", ["storage"])),
     native/let_load(
       "mutex",
       [:Pointer, :U8, :Mutable],

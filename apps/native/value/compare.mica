@@ -32,7 +32,7 @@ verb native_value/comparison(input: map) -> map
   let word: list = native_value/word()
   let result: list = [:Record, "IntResult"]
   let name: string = "value_compare"
-  context = native/declare_function(context, name, result, [["left", word, :Borrow], ["right", word, :Borrow]],
+  context = native/declare_function(context, name, result, [["left", word, :Gc], ["right", word, :Gc]],
     [["comparison", result]], [:ReadMemory], :Value, "")
   let equal: list = [native/return_record(["true", "int_zero"])]
   let statements: list = [
@@ -246,7 +246,7 @@ verb native_value/language_comparison(input: map) -> map
     @native_value/scalar_order("integral_float", "float")
   ])
   name = "value_language_compare"
-  context = native/declare_function(context, name, result, [["left", word, :Borrow], ["right", word, :Borrow]], [], [:ReadMemory], :Value, "")
+  context = native/declare_function(context, name, result, [["left", word, :Gc], ["right", word, :Gc]], [], [:ReadMemory], :Value, "")
   let statements: list = [
     native/let_statement("left_kind", :U8, native/unary_expression(:Tag, "left")),
     native/let_statement("right_kind", :U8, native/unary_expression(:Tag, "right"))
@@ -295,7 +295,7 @@ verb native_value/language_comparison(input: map) -> map
     native/return_value(native/call_expression("value_compare", ["left", "right"]))
   ])
   for spec in [["value_equal", "value_compare"], ["value_language_equal", "value_language_compare"]]
-    context = native/declare_function(context, spec[0], [:Record, "BoolResult"], [["left", word, :Borrow], ["right", word, :Borrow]], [], [:ReadMemory], :Value, "")
+    context = native/declare_function(context, spec[0], [:Record, "BoolResult"], [["left", word, :Gc], ["right", word, :Gc]], [], [:ReadMemory], :Value, "")
     context = native/define_function(context, spec[0], [
       native/let_call("comparison", result, spec[1], ["left", "right"]),
       native/unless_statement(native/field_expression("comparison", "ok"), [native/return_zero()]),

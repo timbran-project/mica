@@ -46,7 +46,7 @@ end
 verb native/c_value(index, id)
   if map_contains_key(index[:constants], id)
     let row = index[:constants][id]
-    if native/is_pointer(row[1])
+    if native/is_pointer(row[1]) || native/is_function_pointer(row[1])
       return "NULL"
     end
     if row[1] == :F32
@@ -76,12 +76,24 @@ end
 verb native/c_expression(index, row)
   let op = row[3]
   let args = row[5]
-  if op == :Copy
+  if op == :Copy || op == :Manage
     return native/c_value(index, args[0])
   end
   if op == :Call
     let parts = [native/c_value(index, id) for id in native/reads(row)]
     return string_concat(native/c_function(index, args[0]), "(", string_join(parts, ", "), ")")
+  end
+  if op == :FunctionAddress
+    return string_concat("&", native/c_function(index, args[0]))
+  end
+  if op == :CallIndirect
+    let parts: list = []
+    let position: int = 1
+    while position < len(args)
+      parts = [@parts, native/c_value(index, args[position])]
+      position = position + 1
+    end
+    return string_concat(native/c_value(index, args[0]), "(", string_join(parts, ", "), ")")
   end
   if op == :Record
     let type_id = index[:variables][row[4]][2]
@@ -93,11 +105,14 @@ verb native/c_expression(index, row)
   if op == :FieldPointer
     return string_concat("&(", native/c_value(index, args[0]), ")->f_", args[1])
   end
-  if op == :Load
+  if op == :Load || op == :RootLoad
     return string_concat("*(", native/c_value(index, args[0]), ")")
   end
   if op == :Offset
     return string_concat("(", native/c_value(index, args[0]), " + ", native/c_value(index, args[1]), ")")
+  end
+  if op == :PointerDistance
+    return string_concat("((int64_t)(", native/c_value(index, args[0]), " - ", native/c_value(index, args[1]), "))")
   end
   if op == :Freeze
     return native/c_value(index, args[0])
@@ -134,7 +149,31 @@ verb native/c_declarations(state, index, public: bool)
     lines = [@lines, "static inline float mica_internal_f32_bits(uint32_t bits) { float result; memcpy(&result, &bits, sizeof(result)); return result; }"]
   end
   lines = [@lines, @native/c_word_helpers(state, index)]
+  if len(state[:function_types]) > 0
+    // Avoid prototype-scope tags when a callback mentions an aggregate
+    // whose definition depends on the callback typedef itself.
+    for type_id in index[:type_order]
+      if native/is_record(type_id) || native/is_array(type_id)
+        lines = [@lines, string_concat(native/c_type(type_id), ";")]
+      end
+    end
+  end
   for type_id in index[:type_order]
+    if native/is_function_pointer(type_id)
+      let signature: list = index[:function_types][type_id[1]]
+      let parts: list = [string_concat(native/c_type(parameter[1]), " v_", parameter[0]) for parameter in signature[1]]
+      let arguments: string = "void"
+      if len(parts) > 0
+        arguments = string_join(parts, ", ")
+      end
+      lines = [@lines, native/c_comment(string_concat("Callable effects: ", to_literal(signature[2]), "; result: ", to_literal(signature[3]), " ", signature[4]))]
+      for parameter in signature[1]
+        if parameter[2] != :Value
+          lines = [@lines, native/c_comment(string_concat("Parameter ", parameter[0], ": ", to_literal(parameter[2])))]
+        end
+      end
+      lines = [@lines, string_concat("typedef ", native/c_type(signature[0]), " (*", native/c_type(type_id), ")(", arguments, ");")]
+    end
     if native/is_scalar(type_id)
       lines = [@lines, native/c_comment(string_concat("Nominal scalar: ", type_id[1], "; representation: ", to_literal(type_id[2])))]
       lines = [@lines, string_concat("typedef ", native/c_type(type_id[2]), " ", native/c_type(type_id), ";")]
@@ -272,7 +311,7 @@ verb native/c_statement(index, row)
     let allocation = native/c_value(index, args[1])
     return string_concat("if (", allocation, " == NULL) { abort(); } *(", native/c_value(index, args[0]), ") = ", allocation, "; ", native/c_value(index, row[4]), " = ", allocation, ";")
   end
-  if row[3] == :Store
+  if row[3] == :Store || row[3] == :RootStore
     return string_concat("*(", native/c_value(index, args[0]), ") = ", native/c_value(index, args[1]), ";")
   end
   if row[3] == :CopyBytes
@@ -282,6 +321,9 @@ verb native/c_statement(index, row)
   let prefix = ""
   if row[4] != :Discard
     prefix = string_concat(native/c_value(index, row[4]), " = ")
+  end
+  if row[3] == :CallIndirect
+    prefix = string_concat("if (", native/c_value(index, args[0]), " == NULL) { abort(); } ", prefix)
   end
   return string_concat(prefix, native/c_expression(index, row), ";")
 end

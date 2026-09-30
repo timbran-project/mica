@@ -1,0 +1,222 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+// Visit every cell in a page. The body receives a managed `item` pointer.
+verb native_memory/page_cells(body: list, prefix: string) -> list
+  let bytes: list = native_memory/pointer(:U8)
+  let object: list = native_memory/record_pointer("MemoryObject")
+  let statements: list = [
+    native_memory/bind("page_bytes", bytes, native/unary_expression(:PointerCast, "page")),
+    native_memory/bind("managed_bytes", bytes, native/manage_expression("page_bytes")),
+    native/let_offset("cells", bytes, "managed_bytes", native/typed_expression(:U64, native/unary_expression(:SizeOf, [:Record, "MemoryPage"]))),
+    native_memory/bind("count", :U64, native_memory/field(:U64, "page", "capacity")),
+    native_memory/bind("stride", :U64, native_memory/field(:U64, "page", "stride")),
+    native_memory/bind("index", :U64, "memory_n0"),
+    native/while_statement(native/binary_expression(:Less, "index", "count"), [
+      native_memory/bind("offset", :U64, native/binary_expression(:Multiply, "index", "stride")),
+      native/let_offset("cell", bytes, "cells", "offset"),
+      native_memory/bind("item", object, native/unary_expression(:PointerCast, "cell")),
+      @body,
+      native/set_statement("index", native/binary_expression(:Add, "index", "memory_n1"))])]
+  let names: map = {}
+  for name in ["page_bytes", "managed_bytes", "cells", "count", "stride", "index", "offset", "cell", "item"]
+    names[name] = string_concat(prefix, name)
+  end
+  let result: list = native/rename_bindings(statements, names)
+  return result
+end
+
+verb native_memory/collection(input: map) -> map
+  let context: map = input
+  let bytes: list = native_memory/pointer(:U8)
+  let object: list = native_memory/record_pointer("MemoryObject")
+  let page: list = native_memory/record_pointer("MemoryPage")
+  let heap: list = native_memory/record_pointer("MemoryHeap")
+  let worker: list = native_memory/record_pointer("MemoryWorker")
+  let root: list = native_memory/record_pointer("MemoryRoot")
+  let collection: list = [:Record, "MemoryCollection"]
+  let trace: list = [:FunctionPointer, "MemoryTrace"]
+
+  // Preparation reserves and fills destinations without changing payload edges
+  // or roots. Failure can release the destinations and preserve the nursery.
+  context = native/define_function(context, "memory_visit", [
+    native/when_statement(native/binary_expression(:Equal, "pointer", "memory_null_bytes"), [native/return_value("pointer")]),
+    native/let_call("object", object, "memory_object", ["pointer"]),
+    native_memory/bind("heap", heap, native_memory/field(heap, "collection", "heap")),
+    native_memory/bind("owner", heap, native_memory/field(heap, "object", "heap")),
+    native/unless_statement(native/binary_expression(:Equal, "heap", "owner"), [
+      native_memory/store(:Bool, "collection", "failed", "memory_true"), native/return_value("pointer")]),
+    native_memory/bind("state", :U64, native_memory/field(:U64, "object", "state")),
+    native_memory/bind("phase", :U64, native_memory/field(:U64, "collection", "phase")),
+    native/when_statement(native/binary_expression(:Equal, "phase", "memory_n1"), [
+      native/when_statement(native/binary_expression(:Equal, "state", "memory_n1"), [
+        native_memory/bind("forward", object, native_memory/field(object, "object", "forward")),
+        native/return_value(native/call_expression("memory_payload", ["forward"]))]),
+      native/return_value("pointer")]),
+    native/when_statement(native/binary_expression(:Equal, native_memory/field(:U64, "object", "mark"), "memory_n1"), [native/return_value("pointer")]),
+    native/when_statement(native/binary_expression(:Equal, "state", "memory_n0"), [
+      native_memory/store(:Bool, "collection", "failed", "memory_true"), native/return_value("pointer")]),
+    native_memory/store(:U64, "object", "mark", "memory_n1"),
+    native_memory/store(object, "object", "work", native_memory/root(object, "collection", "work")),
+    native_memory/store_root(object, "collection", "work", "object"),
+    native/when_statement(native/binary_expression(:Equal, "state", "memory_n1"), [
+      native_memory/bind("size", :U64, native_memory/field(:U64, "object", "size")),
+      native_memory/bind("layout", :U64, native_memory/field(:U64, "object", "layout")),
+      native/let_call("target", object, "memory_mature_allocate", ["heap", "size", "layout"]),
+      native/when_statement(native/binary_expression(:Equal, "target", "memory_null_object"), [
+        native_memory/store(:Bool, "collection", "failed", "memory_true"), native/return_value("pointer")]),
+      native/let_call("destination", bytes, "memory_payload", ["target"]),
+      native/copy_bytes_statement("destination", "pointer", "size"),
+      native_memory/store(:U64, "target", "mark", "memory_n1"),
+      native_memory/store(object, "target", "forward", "object"),
+      native_memory/store(object, "object", "forward", "target"),
+      native_memory/store(:U64, "collection", "copied", native/typed_expression(:U64,
+        native/binary_expression(:Add, native_memory/field(:U64, "collection", "copied"), "size")))]),
+    native/return_value("pointer")])
+
+  context = native/define_function(context, "memory_rollback_nursery", [
+    native_memory/bind("nursery", bytes, native_memory/field(bytes, "worker", "nursery")),
+    native_memory/bind("used", :U64, native_memory/field(:U64, "worker", "used")),
+    native_memory/bind("position", :U64, "memory_n0"),
+    native_memory/bind("header_size", :U64, native/unary_expression(:SizeOf, [:Record, "MemoryObject"])),
+    native/while_statement(native/binary_expression(:Less, "position", "used"), [
+      native/let_offset("raw", bytes, "nursery", "position"),
+      native_memory/bind("managed", bytes, native/manage_expression("raw")),
+      native_memory/bind("item", object, native/unary_expression(:PointerCast, "managed")),
+      native_memory/bind("forward", object, native_memory/field(object, "item", "forward")),
+      native/unless_statement(native/binary_expression(:Equal, "forward", "memory_null_object"), [
+        native_memory/store(:U64, "forward", "state", "memory_n0"),
+        native_memory/store(object, "item", "forward", "memory_null_object")]),
+      native_memory/store(:U64, "item", "mark", "memory_n0"),
+      native_memory/store(object, "item", "work", "memory_null_object"),
+      native_memory/bind("size", :U64, native_memory/field(:U64, "item", "size")),
+      native_memory/bind("total", :U64, native/binary_expression(:Add, "size", "header_size")),
+      native/set_statement("total", native/binary_expression(:Add, "total", "memory_n7")),
+      native/set_statement("total", native/binary_expression(:BitAnd, "total", "memory_alignment_mask")),
+      native/set_statement("position", native/binary_expression(:Add, "position", "total"))]),
+    native/return_void()])
+
+  context = native/define_function(context, "memory_sweep", [
+    native_memory/bind("bucket", :U64, "memory_n0"),
+    native/while_statement(native/binary_expression(:Less, "bucket", "memory_n10"), [
+      native/root_store_statement(native_memory/free_slot("heap", "bucket"), "memory_null_object"),
+      native/set_statement("bucket", native/binary_expression(:Add, "bucket", "memory_n1"))]),
+    native_memory/store(:U64, "heap", "retained", "memory_n0"),
+    native_memory/bind("link", native_memory/pointer(page), native/field_pointer_expression("heap", "pages")),
+    native/while_statement("memory_true", [
+      native/let_load("page", page, "link"),
+      native/when_statement(native/binary_expression(:Equal, "page", "memory_null_page"), [native/break_statement()]),
+      native_memory/bind("next", page, native_memory/field(page, "page", "next")),
+      native_memory/bind("live", :U64, "memory_n0"),
+      @native_memory/page_cells([
+        native/when_statement("reclaim", [
+          native/when_statement(native/binary_expression(:Equal, native_memory/field(:U64, "item", "mark"), "memory_n0"), [
+            native_memory/store(:U64, "item", "state", "memory_n0")])]),
+        native_memory/store(:U64, "item", "mark", "memory_n0"),
+        native_memory/store(object, "item", "work", "memory_null_object"),
+        native_memory/store(object, "item", "forward", "memory_null_object"),
+        native/when_statement(native/binary_expression(:Equal, native_memory/field(:U64, "item", "state"), "memory_n2"), [
+          native/set_statement("live", native/binary_expression(:Add, "live", "memory_n1")),
+          native_memory/store(:U64, "heap", "retained", native/typed_expression(:U64,
+            native/binary_expression(:Add, native_memory/field(:U64, "heap", "retained"), native_memory/field(:U64, "item", "size"))))])], ""),
+      native/if_statement(native/binary_expression(:Equal, "live", "memory_n0"), [
+        native/store_statement("link", "next"),
+        native_memory/bind("page_size", :U64, native/unary_expression(:SizeOf, [:Record, "MemoryPage"])),
+        native_memory/bind("allocation_size", :U64, native/binary_expression(:Add, "page_size",
+          native/typed_expression(:U64, native/binary_expression(:Multiply, "stride", "count")))),
+        native_memory/store(:U64, "heap", "allocated", native/typed_expression(:U64,
+          native/binary_expression(:Subtract, native_memory/field(:U64, "heap", "allocated"), "allocation_size"))),
+        native_memory/call("memory_platform_release", ["managed_bytes"])
+      ], [
+        native_memory/store(:U64, "page", "live", "live"),
+        native/set_statement("link", native/field_pointer_expression("page", "next"))])]),
+    native_memory/set("page", native_memory/field(page, "heap", "pages")),
+    native/while_statement("memory_true", [
+      native/when_statement(native/binary_expression(:Equal, "page", "memory_null_page"), [native/break_statement()]),
+      native_memory/set("bucket", native_memory/field(:U64, "page", "bucket")),
+      native/when_statement(native/binary_expression(:Less, "bucket", "memory_n10"), [
+        @native_memory/page_cells([
+          native/when_statement(native/binary_expression(:Equal, native_memory/field(:U64, "item", "state"), "memory_n0"), [
+            native_memory/store(object, "item", "next", native/typed_expression(object, native/root_load_expression(native_memory/free_slot("heap", "bucket")))),
+            native/root_store_statement(native_memory/free_slot("heap", "bucket"), "item")])], "free_")]),
+      native_memory/set("next", native_memory/field(page, "page", "next")),
+      native/set_statement("page", "next")]),
+    native/return_void()])
+
+  let visit_roots: list = [
+    native_memory/bind("shared_root", root, native_memory/field(root, "heap", "roots")),
+    native/while_statement("memory_true", [
+      native/when_statement(native/binary_expression(:Equal, "shared_root", "memory_null_root"), [native/break_statement()]),
+      native_memory/bind("shared_pointer", bytes, native_memory/root(bytes, "shared_root", "pointer")),
+      native/let_call("shared_relocated", bytes, "memory_visit", ["collection", "shared_pointer"]),
+      native_memory/store_root(bytes, "shared_root", "pointer", "shared_relocated"),
+      native_memory/bind("shared_next", root, native_memory/field(root, "shared_root", "next")),
+      native/set_statement("shared_root", "shared_next")]),
+    native_memory/bind("worker", worker, native_memory/field(worker, "heap", "workers")),
+    native/while_statement("memory_true", [
+      native/when_statement(native/binary_expression(:Equal, "worker", "memory_null_worker"), [native/break_statement()]),
+      native_memory/bind("root", root, native_memory/field(root, "worker", "roots")),
+      native/while_statement("memory_true", [
+        native/when_statement(native/binary_expression(:Equal, "root", "memory_null_root"), [native/break_statement()]),
+        native_memory/bind("pointer", bytes, native_memory/root(bytes, "root", "pointer")),
+        native/let_call("relocated", bytes, "memory_visit", ["collection", "pointer"]),
+        native_memory/store_root(bytes, "root", "pointer", "relocated"),
+        native_memory/bind("next_root", root, native_memory/field(root, "root", "next")),
+        native/set_statement("root", "next_root")]),
+      native_memory/bind("next_worker", worker, native_memory/field(worker, "worker", "next")),
+      native/set_statement("worker", "next_worker")])]
+  let preparing: map = {}
+  let relocating: map = {}
+  for name in ["worker", "root", "pointer", "relocated", "next_root", "next_worker", "shared_root", "shared_pointer", "shared_relocated", "shared_next"]
+    preparing[name] = string_concat("prepare_", name)
+    relocating[name] = string_concat("relocate_", name)
+  end
+  context = native/define_function(context, "memory_collect_stopped", [
+    native_memory/bind("state", collection, native/record_expression(["heap", "memory_null_object", "memory_n0", "memory_false", "memory_n0"])),
+    native_memory/bind("collection", native_memory/pointer(collection), native/unary_expression(:Address, "state")),
+    native_memory/bind("trace", trace, native_memory/field(trace, "heap", "trace")),
+    @native/rename_bindings(visit_roots, preparing),
+    native/while_statement("memory_true", [
+      native_memory/when(native_memory/field(:Bool, "collection", "failed"), [native/break_statement()]),
+      native_memory/bind("item", object, native_memory/root(object, "collection", "work")),
+      native/when_statement(native/binary_expression(:Equal, "item", "memory_null_object"), [native/break_statement()]),
+      native_memory/store_root(object, "collection", "work", native_memory/field(object, "item", "work")),
+      native/if_statement(native/binary_expression(:Equal, "trace", "memory_null_trace"), [
+        native/unless_statement(native/binary_expression(:Equal, native_memory/field(:U64, "item", "layout"), "memory_n0"), [
+          native_memory/store(:Bool, "collection", "failed", "memory_true")])
+      ], [native/do_statement(native/indirect_call_expression("trace", ["collection", "item"]))])]),
+    native_memory/when(native_memory/field(:Bool, "collection", "failed"), [
+      native_memory/bind("worker", worker, native_memory/field(worker, "heap", "workers")),
+      native/while_statement("memory_true", [
+        native/when_statement(native/binary_expression(:Equal, "worker", "memory_null_worker"), [native/break_statement()]),
+        native_memory/call("memory_rollback_nursery", ["worker"]),
+        native_memory/bind("next_worker", worker, native_memory/field(worker, "worker", "next")),
+        native/set_statement("worker", "next_worker")]),
+      native_memory/call("memory_sweep", ["heap", "memory_false"]),
+      native/return_value("memory_false")]),
+    native_memory/store(:U64, "collection", "phase", "memory_n1"),
+    @native/rename_bindings(visit_roots, relocating),
+    native_memory/bind("page", page, native_memory/field(page, "heap", "pages")),
+    native/while_statement("memory_true", [
+      native/when_statement(native/binary_expression(:Equal, "page", "memory_null_page"), [native/break_statement()]),
+      @native_memory/page_cells([
+        native/when_statement(native/binary_expression(:Equal, native_memory/field(:U64, "item", "mark"), "memory_n1"), [
+          native/unless_statement(native/binary_expression(:Equal, "trace", "memory_null_trace"), [
+            native/do_statement(native/indirect_call_expression("trace", ["collection", "item"]))])])], "rewrite_"),
+      native_memory/bind("next_page", page, native_memory/field(page, "page", "next")),
+      native/set_statement("page", "next_page")]),
+    native_memory/call("memory_sweep", ["heap", "memory_true"]),
+    native_memory/set("worker", native_memory/field(worker, "heap", "workers")),
+    native/while_statement("memory_true", [
+      native/when_statement(native/binary_expression(:Equal, "worker", "memory_null_worker"), [native/break_statement()]),
+      native_memory/store(:U64, "worker", "used", "memory_n0"),
+      native_memory/store(:Bool, "worker", "pressure", "memory_false"),
+      native_memory/set("next_worker", native_memory/field(worker, "worker", "next")),
+      native/set_statement("worker", "next_worker")]),
+    native_memory/store(:U64, "heap", "copied", native/typed_expression(:U64,
+      native/binary_expression(:Add, native_memory/field(:U64, "heap", "copied"), native_memory/field(:U64, "collection", "copied")))),
+    native_memory/store(:U64, "heap", "collections", native/typed_expression(:U64,
+      native/binary_expression(:Add, native_memory/field(:U64, "heap", "collections"), "memory_n1"))),
+    native/return_value("memory_true")])
+  return context
+end

@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 // Bottom-up stable merge sort followed by compaction. Equal keys retain the
-// last input value. Both buffers belong to the arena; the input is never changed.
+// last input value. Both buffers belong to the worker; the input is never changed.
 verb native_value/maps(input: map) -> map
   let context: map = input
   let word: list = native_value/word()
@@ -17,11 +17,11 @@ verb native_value/maps(input: map) -> map
   constants["null_map_entries"] = null
   context[:constants] = constants
   context = native/declare_function(context, name, result, [
-      ["arena", [:Pointer, [:Record, "ValueArena"], :Mutable], :Borrow],
-      ["source", [:Pointer, entry, :Const], [:Borrow, "arena"]],
+      ["worker", [:Pointer, [:Record, "MemoryWorker"], :Mutable], :Borrow],
+      ["source", [:Pointer, entry, :Const], :Gc],
       ["length", :U64, :Value]
     ],
-    [], [:Allocate, :ReadMemory, :WriteMemory], :Borrow, "arena")
+    [], [:Allocate, :ReadMemory, :WriteMemory], :Gc, "")
   context = native/define_function(context, name, [
     native/unless_statement(
       native/binary_expression(:Equal, "length", "zero"),
@@ -34,7 +34,7 @@ verb native_value/maps(input: map) -> map
     native/when_statement(native/binary_expression(:Less, "limit", "length"), [native/return_zero()]),
     native/let_statement("bytes", :U64, native/binary_expression(:Multiply, "length", "size")),
     native/let_statement("total", :U64, native/binary_expression(:Add, "header_size", "bytes")),
-    native/let_call("allocation", [:Pointer, :U8, :Mutable], "value_arena_allocate", ["arena", "total"]),
+    native/let_call("allocation", [:Pointer, :U8, :Mutable], "memory_allocate", ["worker", "total", "layout_map"]),
     native/when_statement(native/binary_expression(:Equal, "allocation", "null_bytes"), [native/return_zero()]),
     native/let_statement("pointer", [:Pointer, header, :Mutable], native/unary_expression(:PointerCast, "allocation")),
     native/let_offset("raw_data", [:Pointer, :U8, :Mutable], "allocation", "header_size"),
@@ -51,7 +51,7 @@ verb native_value/maps(input: map) -> map
     native/when_statement(native/binary_expression(:Less, "one", "length"), [
       native/set_statement("size", native/unary_expression(:SizeOf, entry)),
       native/set_statement("bytes", native/binary_expression(:Multiply, "length", "size")),
-      native/set_statement("allocation", native/call_expression("value_arena_allocate", ["arena", "bytes"])),
+      native/set_statement("allocation", native/call_expression("memory_allocate", ["worker", "bytes", "layout_opaque"])),
       native/when_statement(native/binary_expression(:Equal, "allocation", "null_bytes"), [native/return_zero()]),
       native/let_statement("dst", entries, native/unary_expression(:PointerCast, "allocation")),
       native/let_statement("width", :U64, "one"),
@@ -169,8 +169,8 @@ verb native_value/map_lookup(input: map) -> map
   let constants: map = context[:constants]
   constants["two"] = two
   context[:constants] = constants
-  context = native/declare_function(context, name, result, [["map", word, :Borrow], ["key", word, :Borrow]],
-    [], [:ReadMemory], :Borrow, "map")
+  context = native/declare_function(context, name, result, [["map", word, :Gc], ["key", word, :Gc]],
+    [], [:ReadMemory], :Gc, "")
   context = native/define_function(context, name, [
     native/let_statement("tag", :U8, native/unary_expression(:Tag, "map")),
     native/unless_statement(native/binary_expression(:Equal, "tag", "tag_map"), [native/return_zero()]),

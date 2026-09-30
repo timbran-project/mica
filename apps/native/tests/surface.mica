@@ -47,6 +47,14 @@ verb native/surface_program()
   let symbol = [:Scalar, "Symbol", :U32]
   let bytes = [:Pointer, :U8, :Mutable]
   let const_bytes = [:Pointer, :U8, :Const]
+  let offsets: map = native/module_context(state, {})
+  offsets = native/declare_function(offsets, "signed_offset", bytes,
+    [["base", bytes, :Borrow], ["offset", :I64, :Value]], [], [], :Borrow, "base")
+  offsets = native/define_function(offsets, "signed_offset", [native/return_value(native/offset_expression("base", "offset"))])
+  offsets = native/declare_function(offsets, "pointer_distance", :I64,
+    [["pointer", const_bytes, :Borrow], ["base", bytes, :Borrow]], [], [], :Value, "")
+  offsets = native/define_function(offsets, "pointer_distance", [native/return_value(native/pointer_distance_expression("pointer", "base"))])
+  state = offsets[:state]
   let [header, s1] = native/record_type(state, "StringHeader", [["data", const_bytes], ["length", :U64]])
   let [c, s2] = native/constants(s1, [["tag", :U8, "0000000000000007"], ["one", :U64, "0000000000000001"]])
   let [fn5, v5, s3] = native/function_scope(s2, "string_header", word,
@@ -143,5 +151,14 @@ verb native/surface_program()
                ["ValueArray", [["values", [:Array, word, 8]]]]]
     state = native/record_type(state, spec[0], spec[1])[1]
   end
+  // This pointer type occurs only in layout operands, never in a declaration.
+  let layout_pointer: list = [:Pointer, :U16, :Const]
+  let context: map = native/module_context(state, {})
+  for spec in [["pointer_size", :SizeOf], ["pointer_alignment", :AlignOf]]
+    context = native/declare_function(context, spec[0], :U64, [], [], [], :Value, "")
+    context = native/define_function(context, spec[0], [
+      native/return_value(native/unary_expression(spec[1], layout_pointer))])
+  end
+  state = context[:state]
   return state
 end

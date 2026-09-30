@@ -1,0 +1,132 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+verb native_jit/locals(tree) -> list
+  let names: list = []
+  if !is_kind(tree, :list) || len(tree) == 0
+    return names
+  end
+  if tree[0] == :Let
+    return [tree[1]]
+  end
+  for item in tree
+    names = [@names, @native_jit/locals(item)]
+  end
+  return names
+end
+verb native_jit/case(op: symbol, body: list) -> list
+  let ordinal: int = native_jit/position(native_jit/opcodes(), op)
+  let names: map = {}
+  for name in native_jit/locals(body)
+    names[name] = string_concat("op", to_literal(ordinal), "_", name)
+  end
+  let result: list = native/case_arm(native_jit/n(ordinal), native_jit/rename(body, names))
+  return result
+end
+
+verb native_jit/extended_cases() -> list
+  let cases: list = []
+  let h: list = native_jit/handle()
+  let u64 = native_jit/cached(3, "n4")
+  let bool_type = native_jit/cached(3, "n7")
+  let scratch = native/typed_expression([:Pointer, h, :Mutable], native/offset_expression("cache", native_jit/slot(6, "n0")))
+  let zero = native_jit/j("zero", ["ctx", u64])
+  cases = [@cases, native_jit/case(:PointerDistance, [
+    native_jit/set("value", native_jit/j("bitcast", ["ctx",
+      native_jit/j("sub", ["ctx", u64,
+        native_jit/j("bitcast", ["ctx", "left", u64]),
+        native_jit/j("bitcast", ["ctx", "right", u64])]), "type"]))])]
+  for spec in [[:Divide, "div"], [:Remainder, "rem"], [:ShiftLeft, "shl"], [:ShiftRight, "shr"]]
+    let body: list = [
+      native_jit/bind("wide_left", h, native_jit/j("cast", ["ctx", "left", u64])),
+      native_jit/bind("wide_right", h, native_jit/j("cast", ["ctx", "right", u64]))]
+    if spec[0] == :Divide || spec[0] == :Remainder
+      body = [@body, native_jit/trap_unless(native_jit/j("ne", ["ctx", "wide_right", zero]))]
+    else
+      let width = native_jit/binary(:ShiftLeft, "n4", "kind")
+      body = [@body, native_jit/trap_unless(native_jit/j("lt", ["ctx", "wide_right", native_jit/integer(width, u64)]))]
+    end
+    body = [@body, native_jit/set("value", native_jit/j("cast", ["ctx", native_jit/j(spec[1], ["ctx", u64, "wide_left", "wide_right"]), "type"]))]
+    if spec[0] == :Divide || spec[0] == :Remainder
+      let floating: list = [native_jit/set("value", native_jit/j("div", ["ctx", "type", "left", "right"]))]
+      if spec[0] == :Remainder
+        floating = [native_jit/save(6, "n0", "left"), native_jit/save(6, "n1", "right"), native_jit/set("value", native_jit/j("call", ["ctx", native_jit/j("builtin", ["ctx", native_jit/literal("s_fmod")]), "n2", scratch]))]
+      end
+      body = [native/if_statement(native/binary_expression(:Equal, "kind", "n6"), floating, body)]
+    end
+    cases = [@cases, native_jit/case(spec[0], body)]
+  end
+  cases = [@cases, native_jit/case(:Truncate, [native_jit/save(6, "n0", "left"),
+    native_jit/set("value", native_jit/j("call", ["ctx", native_jit/j("builtin", ["ctx", native_jit/literal("s_trunc")]), "n1", scratch]))])]
+  let u32 = native_jit/cached(3, "n3")
+  let exponent = native_jit/integer("float_exponent", u32)
+  cases = [@cases, native_jit/case(:IsFinite, [native_jit/set("value", native_jit/j("ne", ["ctx", native_jit/j("and", ["ctx", u32, native_jit/j("bitcast", ["ctx", "left", u32]), exponent]), exponent]))])]
+  cases = [@cases, native_jit/case(:AlignOf, [native_jit/set("value", native_jit/invoke("align", ["a"], h))])]
+  cases = [@cases, native_jit/case(:PointerCast, [
+    native_jit/bind("alignment", h, native_jit/invoke("align", [native_jit/word("type_row", 4)], h)),
+    native_jit/bind("bits", h, native_jit/j("bitcast", ["ctx", "left", u64])),
+    native_jit/trap_unless(native_jit/j("eq", ["ctx", native_jit/j("rem", ["ctx", u64, "bits", "alignment"]), zero])),
+    native_jit/set("value", native_jit/j("bitcast", ["ctx", "left", "type"]))])]
+  cases = [@cases, native_jit/case(:ElementPointer, [
+    native_jit/bind("pointer_row", native_jit/words(), native/offset_expression("data", native_jit/meta(1, native_jit/meta(0, "a")))),
+    native_jit/bind("array_row", native_jit/words(), native/offset_expression("data", native_jit/meta(1, native_jit/word("pointer_row", 4)))),
+    native_jit/trap_unless(native_jit/j("lt", ["ctx", "right", native_jit/integer(native_jit/word("array_row", 5), u64)])),
+    native_jit/bind("array", h, native_jit/j("value", [native_jit/j("field_local", ["left", native_jit/cached(5, native_jit/word("array_row", 6))])])),
+    native_jit/set("value", native_jit/j("address", [native_jit/j("element", ["ctx", "array", "right"])]))])]
+  cases = [@cases, native_jit/case(:Adopt, [
+    native_jit/trap_unless(native_jit/j("ne", ["ctx", "right", native_jit/j("null", ["ctx", native_jit/j("value_type", ["right"])])])),
+    native/do_statement(native/call_expression("j_assign", ["block", native_jit/j("dereference", ["left"]), "right"])), native_jit/set("value", "right")])]
+  cases = [@cases, native_jit/case(:CallIndirect, [
+    native_jit/trap_unless(native_jit/j("ne", ["ctx", "left", native_jit/j("null", ["ctx", native_jit/j("value_type", ["left"])])])),
+    native_jit/bind("argument", :U64, "n6"),
+    native/while_statement(native/binary_expression(:Less, "argument", native_jit/word("row", 0)), [
+      native_jit/save(6, native_jit/binary(:Subtract, "argument", "n6"), native_jit/cached(1, native_jit/at("row", "argument", :U64))),
+      native_jit/set("argument", native_jit/binary(:Add, "argument", "n1"))]),
+    native_jit/set("value", native_jit/j("call_indirect", ["ctx", "left", native_jit/binary(:Subtract, "argument", "n6"), scratch]))])]
+  cases = [@cases, native_jit/case(:CopyBytes, [
+    native_jit/bind("length", h, native_jit/cached(1, native_jit/word("row", 7))),
+    native_jit/bind("function", h, native_jit/cached(0, native_jit/meta(3, "block_id"))),
+    native_jit/bind("copy", h, native_jit/j("block", ["function", native_jit/literal("s_ok")])),
+    native_jit/bind("join", h, native_jit/j("block", ["function", native_jit/literal("s_join")])),
+    native/do_statement(native/call_expression("j_branch", ["block", native_jit/j("eq", ["ctx", "length", zero]), "join", "copy"])),
+    native_jit/save(6, "n0", native_jit/j("bitcast", ["ctx", "left", native_jit/j("type_voidptr", ["ctx"])])),
+    native_jit/save(6, "n1", native_jit/j("bitcast", ["ctx", "right", native_jit/j("pointer", [native_jit/j("const_type", [native_jit/cached(3, "n0")])])])),
+    native_jit/save(6, "n2", "length"),
+    native/do_statement(native/call_expression("j_eval", ["copy", native_jit/j("call", ["ctx", native_jit/j("builtin", ["ctx", native_jit/literal("s_memmove")]), "n3", scratch])])),
+    native/do_statement(native/call_expression("j_jump", ["copy", "join"])), native_jit/save(7, "block_id", "join"), native_jit/ret("n0")])]
+  let mask = native_jit/integer("mask56", u64)
+  let shift = native_jit/integer("n56", u64)
+  for op in [:PackPointer, :PackImmediate]
+    let payload = "left"
+    let expected = native_jit/invoke("heap_test", ["type_id", "right"], h)
+    if op == :PackPointer
+      payload = native_jit/j("bitcast", ["ctx", "left", u64])
+    else
+      expected = native_jit/j("not", ["ctx", bool_type, expected])
+    end
+    let body: list = [native_jit/bind("payload", h, payload), native_jit/trap_unless(expected), native_jit/trap_unless(native_jit/j("le", ["ctx", "payload", mask]))]
+    if op == :PackPointer
+      body = [@body, native_jit/trap_unless(native_jit/j("ne", ["ctx", "payload", zero]))]
+    end
+    body = [@body, native_jit/set("value", native_jit/j("or", ["ctx", u64, "payload", native_jit/j("shl", ["ctx", u64, native_jit/j("cast", ["ctx", "right", u64]), shift])]))]
+    cases = [@cases, native_jit/case(op, body)]
+  end
+  for op in [:Tag, :Payload, :UnpackPointer]
+    let body: list = [native_jit/bind("tag", h, native_jit/j("shr", ["ctx", u64, "left", shift]))]
+    if op == :Tag
+      body = [@body, native_jit/set("value", native_jit/j("cast", ["ctx", "tag", "type"]))]
+    else
+      body = [@body, native_jit/bind("heap", h, native_jit/invoke("heap_test", [native_jit/meta(0, "a"), "tag"], h)), native_jit/bind("payload", h, native_jit/j("and", ["ctx", u64, "left", mask]))]
+      if op == :Payload
+        body = [@body, native_jit/trap_unless(native_jit/j("not", ["ctx", bool_type, "heap"])), native_jit/set("value", "payload")]
+      else
+        body = [@body, native_jit/trap_unless("heap"), native_jit/trap_unless(native_jit/j("ne", ["ctx", "payload", zero])),
+          native_jit/bind("alignment", h, native_jit/invoke("align", [native_jit/word("type_row", 4)], h)),
+          native_jit/trap_unless(native_jit/j("eq", ["ctx", native_jit/j("rem", ["ctx", u64, "payload", "alignment"]), zero])),
+          native_jit/set("value", native_jit/j("bitcast", ["ctx", "payload", "type"]))]
+      end
+    end
+    cases = [@cases, native_jit/case(op, body)]
+  end
+  return cases
+end

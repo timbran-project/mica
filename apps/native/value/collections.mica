@@ -1,7 +1,7 @@
 // Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-// List views share immutable prefixes. Mutating an arena, including claiming a
+// List views share immutable prefixes. Mutating an worker, including claiming a
 // list's unused tail, requires serialization just as string append does.
 verb native_value/collections(input: map) -> map
   let context: map = input
@@ -28,9 +28,9 @@ verb native_value/list_allocation(input: map) -> map
   end
   context[:constants] = bindings
   context = native/declare_function(context, "list_allocate", pointer, [
-    ["arena", [:Pointer, [:Record, "ValueArena"], :Mutable], :Borrow],
+    ["worker", [:Pointer, [:Record, "MemoryWorker"], :Mutable], :Borrow],
     ["length", :U64, :Value], ["capacity", :U64, :Value]], [],
-    [:Allocate, :ReadMemory, :WriteMemory], :Borrow, "arena")
+    [:Allocate, :ReadMemory, :WriteMemory], :Gc, "")
   context = native/define_function(
     context,
     "list_allocate",
@@ -51,7 +51,7 @@ verb native_value/list_allocation(input: map) -> map
       ),
       native/let_statement("bytes", :U64, native/binary_expression(:Multiply, "capacity", "element_size")),
       native/let_statement("total", :U64, native/binary_expression(:Add, "prefix", "bytes")),
-      native/let_call("raw", [:Pointer, :U8, :Mutable], "value_arena_allocate", ["arena", "total"]),
+      native/let_call("raw", [:Pointer, :U8, :Mutable], "memory_allocate", ["worker", "total", "layout_list"]),
       native/when_statement(
         native/binary_expression(:Equal, "raw", "null_bytes"),
         [native/return_value("null_list_header")]
@@ -71,15 +71,15 @@ verb native_value/list_allocation(input: map) -> map
     ]
   )
   context = native/declare_function(context, "value_list", [:Record, "ValueResult"], [
-    ["arena", [:Pointer, [:Record, "ValueArena"], :Mutable], :Borrow],
-    ["source", [:Pointer, word, :Const], [:Borrow, "arena"]], ["length", :U64, :Value]], [],
-    [:Allocate, :ReadMemory, :WriteMemory], :Borrow, "arena")
+    ["worker", [:Pointer, [:Record, "MemoryWorker"], :Mutable], :Borrow],
+    ["source", [:Pointer, word, :Const], :Gc], ["length", :U64, :Value]], [],
+    [:Allocate, :ReadMemory, :WriteMemory], :Gc, "")
   context = native/define_function(context, "value_list", [
     native/unless_statement(
       native/binary_expression(:Equal, "length", "zero"),
       [ native/when_statement(native/binary_expression(:Equal, "source", "null_values"), [native/return_zero()])]
     ),
-    native/let_call("target", pointer, "list_allocate", ["arena", "length", "length"]),
+    native/let_call("target", pointer, "list_allocate", ["worker", "length", "length"]),
     native/when_statement(native/binary_expression(:Equal, "target", "null_list_header"), [native/return_zero()]),
     native/let_load("header", header, "target"),
     native/let_field("data", values, "header", "data"),
@@ -103,14 +103,14 @@ verb native_value/list_operations(input: map) -> map
   let header: list = [:Record, "HeapList"]
   let values: list = [:Pointer, word, :Mutable]
   let result: list = [:Record, "ValueResult"]
-  let arena: list = ["arena", [:Pointer, [:Record, "ValueArena"], :Mutable], :Borrow]
+  let worker: list = ["worker", [:Pointer, [:Record, "MemoryWorker"], :Mutable], :Borrow]
   for kind in ["list", "map"]
     let record: list = [:Record, "HeapList"]
     if kind == "map"
       record = [:Record, "HeapMap"]
     end
     let name: string = string_concat("value_", kind, "_length")
-    context = native/declare_function(context, name, [:Record, "IdResult"], [["value", word, :Borrow]], [], [:ReadMemory], :Value, "")
+    context = native/declare_function(context, name, [:Record, "IdResult"], [["value", word, :Gc]], [], [:ReadMemory], :Value, "")
     context = native/define_function(context, name, [
       native/unless_statement(
         native/binary_expression(
@@ -135,21 +135,21 @@ verb native_value/list_operations(input: map) -> map
     native/let_field("data", values, "header", "data"),
     native/let_field("length", :U64, "header", "length")
   ]
-  context = native/declare_function(context, "value_list_get", result, [["value", word, :Borrow], ["index", :U64, :Value]], [], [:ReadMemory], :Borrow, "value")
+  context = native/declare_function(context, "value_list_get", result, [["value", word, :Gc], ["index", :U64, :Value]], [], [:ReadMemory], :Gc, "")
   context = native/define_function(context, "value_list_get", [
     @read,
     native/unless_statement(native/binary_expression(:Less, "index", "length"), [native/return_zero()]),
     native/let_offset("slot", values, "data", "index"),
     native/return_record(["true", native/typed_load(word, "slot")])
   ])
-  context = native/declare_function(context, "value_list_slice", result, [arena, ["value", word, [:Borrow, "arena"]],
-    ["start", :U64, :Value], ["end", :U64, :Value]], [], [:Allocate, :ReadMemory, :WriteMemory], :Borrow, "arena")
+  context = native/declare_function(context, "value_list_slice", result, [worker, ["value", word, :Gc],
+    ["start", :U64, :Value], ["end", :U64, :Value]], [], [:Allocate, :ReadMemory, :WriteMemory], :Gc, "")
   context = native/define_function(context, "value_list_slice", [
     @read,
     native/when_statement(native/binary_expression(:Less, "end", "start"), [native/return_zero()]),
     native/when_statement(native/binary_expression(:Less, "length", "end"), [native/return_zero()]),
     native/let_statement("size", :U64, native/unary_expression(:SizeOf, header)),
-    native/let_call("raw", [:Pointer, :U8, :Mutable], "value_arena_allocate", ["arena", "size"]),
+    native/let_call("raw", [:Pointer, :U8, :Mutable], "memory_allocate", ["worker", "size", "layout_list_view"]),
     native/when_statement(native/binary_expression(:Equal, "raw", "null_bytes"), [native/return_zero()]),
     native/let_statement("target", [:Pointer, header, :Mutable], native/unary_expression(:PointerCast, "raw")),
     native/set_statement("data", native/offset_expression("data", "start")),
@@ -160,13 +160,13 @@ verb native_value/list_operations(input: map) -> map
       ["true", native/typed_expression(word, native/binary_expression(:PackPointer, "target", "tag_list"))]
     )
   ])
-  context = native/declare_function(context, "value_list_set", result, [arena, ["value", word, [:Borrow, "arena"]],
-    ["index", :U64, :Value], ["element", word, [:Borrow, "arena"]]], [], [:Allocate, :ReadMemory, :WriteMemory], :Borrow, "arena")
+  context = native/declare_function(context, "value_list_set", result, [worker, ["value", word, :Gc],
+    ["index", :U64, :Value], ["element", word, :Gc]], [], [:Allocate, :ReadMemory, :WriteMemory], :Gc, "")
   context = native/define_function(context, "value_list_set", [
     @read,
     native/unless_statement(native/binary_expression(:Less, "index", "length"), [native/return_zero()]),
     native/let_statement("source", [:Pointer, word, :Const], native/unary_expression(:Freeze, "data")),
-    native/let_call("copied", result, "value_list", ["arena", "source", "length"]),
+    native/let_call("copied", result, "value_list", ["worker", "source", "length"]),
     native/unless_statement(native/field_expression("copied", "ok"), [native/return_zero()]),
     native/let_field("updated", word, "copied", "value"),
     native/let_statement("target", [:Pointer, header, :Mutable], native/unary_expression(:UnpackPointer, "updated")),
@@ -176,8 +176,8 @@ verb native_value/list_operations(input: map) -> map
     native/store_statement("slot", "element"),
     native/return_value("copied")
   ])
-  context = native/declare_function(context, "value_list_append", result, [arena, ["value", word, [:Borrow, "arena"]],
-    ["element", word, [:Borrow, "arena"]]], [], [:Allocate, :ReadMemory, :WriteMemory], :Borrow, "arena")
+  context = native/declare_function(context, "value_list_append", result, [worker, ["value", word, :Gc],
+    ["element", word, :Gc]], [], [:Allocate, :ReadMemory, :WriteMemory], :Gc, "")
   context = native/define_function(context, "value_list_append", [
     @read,
     native/let_field("storage", [:Pointer, [:Record, "ListStorage"], :Mutable], "header", "storage"),
@@ -193,9 +193,12 @@ verb native_value/list_operations(input: map) -> map
       [native/set_statement("reuse", native/binary_expression(:Less, "used", "capacity"))]
     ),
     native/let_statement("total", :U64, native/binary_expression(:Add, "length", "one")),
+    native/unless_statement(native/call_expression("value_storage_private", [
+      native/typed_expression([:Pointer, :U8, :Mutable], native/unary_expression(:PointerCast, "storage")),
+      native/typed_expression(:U64, native/unary_expression(:SizeOf, header))]), [native/set_statement("reuse", "false")]),
     native/if_statement("reuse", [
       native/let_statement("size", :U64, native/unary_expression(:SizeOf, header)),
-      native/let_call("raw", [:Pointer, :U8, :Mutable], "value_arena_allocate", ["arena", "size"]),
+      native/let_call("raw", [:Pointer, :U8, :Mutable], "memory_allocate", ["worker", "size", "layout_list_view"]),
       native/when_statement(native/binary_expression(:Equal, "raw", "null_bytes"), [native/return_zero()]),
       native/let_statement("target", [:Pointer, header, :Mutable], native/unary_expression(:PointerCast, "raw")),
       native/store_statement("tail", "element"),
@@ -203,9 +206,9 @@ verb native_value/list_operations(input: map) -> map
       native/store_statement("used_slot", native/typed_expression(:U64, native/binary_expression(:Add, "used", "one")))
     ], [
       native/set_statement("capacity", native/binary_expression(:Add, "total", "total")),
-      native/set_statement("target", native/call_expression("list_allocate", ["arena", "total", "capacity"])),
+      native/set_statement("target", native/call_expression("list_allocate", ["worker", "total", "capacity"])),
       native/when_statement(native/binary_expression(:Equal, "target", "null_list_header"), [
-        native/set_statement("target", native/call_expression("list_allocate", ["arena", "total", "total"])),
+        native/set_statement("target", native/call_expression("list_allocate", ["worker", "total", "total"])),
         native/when_statement(native/binary_expression(:Equal, "target", "null_list_header"), [native/return_zero()])
       ]),
       native/let_load("new_header", header, "target"),
@@ -224,7 +227,7 @@ verb native_value/list_operations(input: map) -> map
     ]),
     native/note_statement(
       :Invariant,
-      "Tail writes are outside every published view. Nested values retain the arena lifetime."
+      "Tail writes are outside existing views and require private nursery storage."
     ),
     native/store_statement("target", native/typed_record(header, ["data", "total", "storage"])),
     native/return_record(
@@ -241,9 +244,9 @@ verb native_value/map_update(input: map) -> map
   let entry: list = [:Record, "ValueMapEntry"]
   let entries: list = [:Pointer, entry, :Mutable]
   context = native/declare_function(context, "value_map_set", [:Record, "ValueResult"], [
-    ["arena", [:Pointer, [:Record, "ValueArena"], :Mutable], :Borrow],
-    ["value", word, [:Borrow, "arena"]], ["key", word, [:Borrow, "arena"]],
-    ["element", word, [:Borrow, "arena"]]], [], [:Allocate, :ReadMemory, :WriteMemory], :Borrow, "arena")
+    ["worker", [:Pointer, [:Record, "MemoryWorker"], :Mutable], :Borrow],
+    ["value", word, :Gc], ["key", word, :Gc],
+    ["element", word, :Gc]], [], [:Allocate, :ReadMemory, :WriteMemory], :Gc, "")
   context = native/define_function(context, "value_map_set", [
     native/unless_statement(
       native/binary_expression(:Equal, native/typed_expression(:U8, native/unary_expression(:Tag, "value")), "tag_map"),
@@ -290,7 +293,7 @@ verb native_value/map_update(input: map) -> map
     native/when_statement(native/binary_expression(:Less, "limit", "count"), [native/return_zero()]),
     native/let_statement("bytes", :U64, native/binary_expression(:Multiply, "count", "entry_size")),
     native/let_statement("total", :U64, native/binary_expression(:Add, "header_size", "bytes")),
-    native/let_call("raw", [:Pointer, :U8, :Mutable], "value_arena_allocate", ["arena", "total"]),
+    native/let_call("raw", [:Pointer, :U8, :Mutable], "memory_allocate", ["worker", "total", "layout_map"]),
     native/when_statement(native/binary_expression(:Equal, "raw", "null_bytes"), [native/return_zero()]),
     native/let_statement("target", [:Pointer, header, :Mutable], native/unary_expression(:PointerCast, "raw")),
     native/let_offset("raw_data", [:Pointer, :U8, :Mutable], "raw", "header_size"),

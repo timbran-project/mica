@@ -1,0 +1,215 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+// Relocate a field known to point inside this allocation. The collector keeps
+// the original base until every copied object's interior pointers are repaired.
+verb native_value/trace_internal(record, field: string, type_id) -> list
+  let bytes: list = native_memory/pointer(:U8)
+  let names: map = {}
+  for name in ["address", "raw", "distance", "moved"]
+    names[name] = string_concat(record, "_", field, "_", name)
+  end
+  let body: list = [
+    native_memory/bind("address", type_id, native_memory/field(type_id, record, field)),
+    native/unless_statement(native/binary_expression(:Equal, "address", native/typed_zero(type_id)), [
+    native_memory/bind("raw", bytes, native/unary_expression(:PointerCast, "address")),
+    native_memory/bind("distance", :I64, native/pointer_distance_expression("raw", "original")),
+    native_memory/bind("moved", bytes, native/offset_expression("payload", "distance")),
+    native_memory/store(type_id, record, field, native/typed_expression(type_id, native/unary_expression(:PointerCast, "moved")))])]
+  let result: list = native/rename_bindings(body, names)
+  return result
+end
+
+// Relocate a field that points at the start of another managed allocation.
+verb native_value/trace_external(record, field: string, type_id) -> list
+  let bytes: list = native_memory/pointer(:U8)
+  let names: map = {}
+  for name in ["address", "raw", "moved"]
+    names[name] = string_concat(record, "_", field, "_", name)
+  end
+  let body: list = [
+    native_memory/bind("address", type_id, native_memory/field(type_id, record, field)),
+    native_memory/bind("raw", bytes, native/unary_expression(:PointerCast, "address")),
+    native/let_call("moved", bytes, "memory_visit", ["collection", "raw"]),
+    native_memory/store(type_id, record, field, native/typed_expression(type_id, native/unary_expression(:PointerCast, "moved")))]
+  let result: list = native/rename_bindings(body, names)
+  return result
+end
+
+verb native_value/trace_word_field(record, field: string) -> list
+  let word: list = native_value/word()
+  let name: string = string_concat(record, "_", field, "_visited")
+  return [native/let_call(name, word, "value_trace_word", ["collection", native_memory/field(word, record, field)]),
+    native_memory/store(word, record, field, name)]
+end
+
+verb native_value/trace_view(header: string, storage: string, data_type) -> list
+  let bytes: list = native_memory/pointer(:U8)
+  let backing: list = native_memory/record_pointer(storage)
+  return [
+    native_memory/bind("backing", backing, native_memory/field(backing, "header", "storage")),
+    native_memory/bind("storage_bytes", bytes, native/unary_expression(:PointerCast, "backing")),
+    native_memory/bind("size", :U64, native/unary_expression(:SizeOf, [:Record, header])),
+    native_memory/bind("back", :I64, native/unary_expression(:Bitcast, native/typed_expression(:U64, native/binary_expression(:Subtract, "zero", "size")))),
+    native/let_offset("owner", bytes, "storage_bytes", "back"),
+    native_memory/bind("data", data_type, native_memory/field(data_type, "header", "data")),
+    native_memory/bind("raw_data", bytes, native/unary_expression(:PointerCast, "data")),
+    native_memory/bind("distance", :I64, native/pointer_distance_expression("raw_data", "owner")),
+    native/let_call("moved_owner", bytes, "memory_visit", ["collection", "owner"]),
+    native/let_offset("moved_storage", bytes, "moved_owner", "size"),
+    native/let_offset("moved_data", bytes, "moved_owner", "distance"),
+    native_memory/store(backing, "header", "storage", native/typed_expression(backing, native/unary_expression(:PointerCast, "moved_storage"))),
+    native_memory/store(data_type, "header", "data", native/typed_expression(data_type, native/unary_expression(:PointerCast, "moved_data")))]
+end
+
+verb native_value/tracing(input: map) -> map
+  let context: map = input
+  let word: list = native_value/word()
+  let bytes: list = native_memory/pointer(:U8)
+  let values: list = native_memory/pointer(word)
+  let collection: list = native_memory/record_pointer("MemoryCollection")
+  let object: list = native_memory/record_pointer("MemoryObject")
+  let effects: list = [:ReadMemory, :WriteMemory, :Allocate, :Release]
+  context = native_memory/declare(context, "value_trace_word", word,
+    [["collection", collection, :Borrow], ["value", word, :Gc]], effects, :Gc, "")
+  context = native_memory/declare(context, "value_trace_slots", :Void,
+    [["collection", collection, :Borrow], ["data", values, :Gc], ["length", :U64, :Value]], effects, :Value, "")
+  let branches: list = []
+  for kind in native_value/kinds()
+    if kind[2]
+      branches = [@branches, native/when_statement(native/binary_expression(:Equal, "tag", string_concat("tag_", kind[0])), [native/set_statement("is_pointer", "true")])]
+    end
+  end
+  context = native/define_function(context, "value_trace_word", [
+    native/let_statement("tag", :U8, native/unary_expression(:Tag, "value")),
+    native/let_statement("is_pointer", :Bool, "false"), @branches,
+    native/unless_statement("is_pointer", [native/return_value("value")]),
+    native/let_statement("pointer", bytes, native/unary_expression(:UnpackPointer, "value")),
+    native/let_call("moved", bytes, "memory_visit", ["collection", "pointer"]),
+    native/return_value(native/binary_expression(:PackPointer, "moved", "tag"))])
+  context = native/define_function(context, "value_trace_slots", [
+    native/let_statement("i", :U64, "zero"),
+    native/while_statement(native/binary_expression(:Less, "i", "length"), [
+      native/let_offset("slot", values, "data", "i"),
+      native/let_load("value", word, "slot"),
+      native/let_call("moved", word, "value_trace_word", ["collection", "value"]),
+      native/store_statement("slot", "moved"),
+      native/set_statement("i", native/binary_expression(:Add, "i", "one"))]), native/return_void()])
+
+  let descriptors: list = []
+  for spec in [["bytes", "HeapBytes"], ["string", "HeapString"], ["list", "HeapList"],
+    ["map", "HeapMap"], ["range", "HeapRange"], ["error", "HeapError"], ["frob", "HeapFrob"],
+    ["relation", "HeapRelation"], ["string_view", "HeapString"], ["list_view", "HeapList"],
+    ["bytes_view", "HeapBytes"], ["buffer", "ValueBuffer"], ["relation_copy", "HeapRelation"]]
+    let kind: string = spec[0]
+    let type_id: list = native_memory/record_pointer(spec[1])
+    let body: list = [native_memory/bind("header", type_id, native/unary_expression(:PointerCast, "payload"))]
+    if kind == "bytes" || kind == "string"
+      body = [@body, @native_value/trace_internal("header", "data", bytes)]
+    end
+    if kind == "string"
+      let storage: list = native_memory/record_pointer("StringStorage")
+      body = [@body, @native_value/trace_internal("header", "storage", storage),
+        native_memory/bind("backing", storage, native_memory/field(storage, "header", "storage")),
+        @native_value/trace_internal("backing", "data", bytes),
+        @native_value/trace_internal("backing", "index", native_memory/pointer(:U64))]
+    end
+    if kind == "list"
+      let storage: list = native_memory/record_pointer("ListStorage")
+      body = [@body, @native_value/trace_internal("header", "data", values),
+        @native_value/trace_internal("header", "storage", storage),
+        native_memory/bind("backing", storage, native_memory/field(storage, "header", "storage")),
+        @native_value/trace_internal("backing", "data", values),
+        native_memory/call("value_trace_slots", ["collection", native_memory/field(values, "backing", "data"), native_memory/field(:U64, "backing", "used")])]
+    end
+    if kind == "map"
+      let entries: list = native_memory/record_pointer("ValueMapEntry")
+      let external: list = native_value/trace_external("header", "data", entries)
+      external = native/rename_bindings(external, native_value/trace_bindings(external, "external"))
+      body = [@body,
+        native_memory/bind("data", entries, native_memory/field(entries, "header", "data")),
+        native_memory/bind("raw_data", bytes, native/unary_expression(:PointerCast, "data")),
+        native_memory/bind("header_size", :U64, native/unary_expression(:SizeOf, [:Record, "HeapMap"])),
+        native/let_offset("internal", bytes, "original", "header_size"),
+        native/if_statement(native/binary_expression(:Equal, "raw_data", "internal"),
+          native_value/trace_internal("header", "data", entries), external),
+        native_memory/set("data", native_memory/field(entries, "header", "data")),
+        native_memory/bind("length", :U64, native_memory/field(:U64, "header", "length")),
+        native/let_statement("i", :U64, "zero"),
+        native/while_statement(native/binary_expression(:Less, "i", "length"), [
+          native/let_offset("entry", entries, "data", "i"),
+          @native_value/trace_word_field("entry", "key"), @native_value/trace_word_field("entry", "value"),
+          native/set_statement("i", native/binary_expression(:Add, "i", "one"))])]
+    end
+    if kind == "range"
+      body = [@body, @native_value/trace_word_field("header", "start"),
+        native_memory/when(native_memory/field(:Bool, "header", "has_end"), native_value/trace_word_field("header", "end"))]
+    end
+    if kind == "frob"
+      body = [@body, @native_value/trace_word_field("header", "value")]
+    end
+    if kind == "error"
+      for name in ["message", "value"]
+        body = [@body, native_memory/when(native_memory/field(:Bool, "header", string_concat("has_", name)), native_value/trace_word_field("header", name))]
+      end
+    end
+    if kind == "string_view"
+      body = [@body, @native_value/trace_view("HeapString", "StringStorage", bytes)]
+    end
+    if kind == "list_view"
+      body = [@body, @native_value/trace_view("HeapList", "ListStorage", values)]
+    end
+    if kind == "bytes_view" || kind == "buffer"
+      body = [@body, @native_value/trace_external("header", "data", bytes)]
+    end
+    if kind == "relation" || kind == "relation_copy"
+      let rows: list = native_memory/record_pointer("ValueTuple")
+      let cell_trace: list = native_value/trace_external("row", "data", values)
+      if kind == "relation"
+        cell_trace = [@native_value/trace_internal("row", "data", values),
+          native_memory/call("value_trace_slots", ["collection", native_memory/field(values, "row", "data"), native_memory/field(:U64, "row", "arity")])]
+      end
+      body = [@body,
+        @native_value/trace_internal("header", "heading", native_memory/pointer(:U32)),
+        @native_value/trace_internal("header", "rows", rows),
+        native_memory/bind("rows", rows, native_memory/field(rows, "header", "rows")),
+        native_memory/bind("length", :U64, native_memory/field(:U64, "header", "length")),
+        native/let_statement("i", :U64, "zero"),
+        native/while_statement(native/binary_expression(:Less, "i", "length"), [
+          native/let_offset("row", rows, "rows", "i"), @cell_trace,
+          native/set_statement("i", native/binary_expression(:Add, "i", "one"))])]
+    end
+    // Structured locals have function scope. Prefix each descriptor's bindings.
+    let names: map = native_value/trace_bindings(body, kind)
+    descriptors = [@descriptors, native/when_statement(native/binary_expression(:Equal, "layout", string_concat("layout_", kind)),
+      [@native/rename_bindings(body, names), native/return_void()])]
+  end
+  context = native/define_function(context, "value_trace", [
+    native_memory/bind("layout", :U64, native_memory/field(:U64, "object", "layout")),
+    native/when_statement(native/binary_expression(:Equal, "layout", "layout_opaque"), [native/return_void()]),
+    native/let_call("payload", bytes, "memory_payload", ["object"]),
+    native/let_call("original", bytes, "memory_original", ["object"]),
+    native/when_statement(native/binary_expression(:Equal, "layout", "layout_values"), [
+      native_memory/bind("size", :U64, native_memory/field(:U64, "object", "size")),
+      native/let_statement("width", :U64, native/unary_expression(:SizeOf, word)),
+      native/let_statement("length", :U64, native/binary_expression(:Divide, "size", "width")),
+      native/let_statement("data", values, native/unary_expression(:PointerCast, "payload")),
+      native_memory/call("value_trace_slots", ["collection", "data", "length"]), native/return_void()]),
+    @descriptors, native_memory/store(:Bool, "collection", "failed", "true"), native/return_void()])
+  return context
+end
+
+verb native_value/trace_bindings(tree: list, prefix: string) -> map
+  let names: map = {}
+  if len(tree) > 0 && tree[0] == :Let
+    names[tree[1]] = string_concat(prefix, "_", tree[1])
+  end
+  for child in tree
+    if is_kind(child, :list)
+      for name, renamed in native_value/trace_bindings(child, prefix)
+        names[name] = renamed
+      end
+    end
+  end
+  return names
+end

@@ -31,6 +31,12 @@ static void arithmetic(int64_t a, int64_t b) {
 }
 
 int main(int argc, char **argv) {
+    uint8_t offset_bytes[8] = {0};
+    assert(mica_signed_offset(offset_bytes + 4, -4) == offset_bytes);
+    assert(mica_signed_offset(offset_bytes, 8) == offset_bytes + 8);
+    assert(mica_signed_offset(offset_bytes + 8, -1) == offset_bytes + 7);
+    assert(mica_pointer_distance(offset_bytes, offset_bytes + 8) == -8);
+    assert(mica_pointer_distance(offset_bytes + 8, offset_bytes) == 8);
     if (argc == 2) {
         switch (argv[1][0]) {
         case 'n': (void)mica_adopt_bytes(NULL, NULL); break;
@@ -140,6 +146,8 @@ int main(int argc, char **argv) {
     assert(mica_slot_share(slot, string) == string && *slot == string);
     free(storage);
     assert(mica_header_alignment() == _Alignof(struct mica_StringHeader));
+    assert(mica_pointer_size() == sizeof(const uint16_t *));
+    assert(mica_pointer_alignment() == _Alignof(const uint16_t *));
     assert(mica_counter_next() == 1 && mica_counter_next() == 2);
     assert(mica_global_counter == 2);
     assert(mica_cache_next() == 1);

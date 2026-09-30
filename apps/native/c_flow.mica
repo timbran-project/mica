@@ -160,6 +160,10 @@ verb native/c_region(index: map, flow: map, input: map, start, stop, enter_loop:
       nodes = [@nodes, @[native/c_text(note, false) for note in native/c_notes(index, comparison[0], "")]]
     end
     nodes = [@nodes, @native/c_block_nodes(index, rows)]
+    if native/is_transfer(term)
+      let text: string = native/c_transfer(index, term)
+      return [[@nodes, native/c_references(native/c_text(text, true), term[2])], context]
+    end
     if term[1] == :Return
       let text: string = "return;"
       if len(term[2]) > 0

@@ -5,6 +5,10 @@ verb native/is_pointer(type_id)
   return is_kind(type_id, :list) && len(type_id) == 3 && type_id[0] == :Pointer
 end
 
+verb native/is_function_pointer(type_id)
+  return is_kind(type_id, :list) && len(type_id) == 2 && type_id[0] == :FunctionPointer
+end
+
 verb native/is_record(type_id)
   return is_kind(type_id, :list) && len(type_id) == 2 && type_id[0] == :Record
 end
@@ -22,6 +26,9 @@ verb native/is_array(type_id)
 end
 
 verb native/type_name(type_id)
+  if native/is_function_pointer(type_id)
+    return string_concat("Function_", type_id[1])
+  end
   if native/is_record(type_id)
     return string_concat("Record_", type_id[1])
   end
@@ -41,6 +48,10 @@ verb native/c_type(type_id)
   let scalars = {:U64 -> "uint64_t", :I64 -> "int64_t", :U8 -> "uint8_t", :U16 -> "uint16_t", :U32 -> "uint32_t", :F32 -> "float", :Bool -> "bool", :Void -> "void"}
   if map_contains_key(scalars, type_id)
     return scalars[type_id]
+  end
+  if native/is_function_pointer(type_id)
+    native/identifier(type_id[1])
+    return string_concat("mica_function_type_", type_id[1])
   end
   if native/is_scalar(type_id) || native/is_tagged(type_id)
     native/identifier(type_id[1])
@@ -155,7 +166,7 @@ end
 verb native/check_constant(row)
   let type_id = row[1]
   let encoding = row[2]
-  if native/is_pointer(type_id)
+  if native/is_pointer(type_id) || native/is_function_pointer(type_id)
     native/ensure(encoding == "null", "pointer constant must be null")
     return
   end
@@ -228,6 +239,14 @@ verb native/check_memory_instruction(index, fn_id, row, result_type)
     native/ensure(native/value_type(index, fn_id, args[1]) == result_type, "Adopt allocation type mismatch")
     return true
   end
+  if op == :PointerDistance
+    native/ensure(len(args) == 2 && result_type == :I64, "PointerDistance requires two byte pointers and I64 result")
+    for id in args
+      let pointer = native/value_type(index, fn_id, id)
+      native/ensure(native/is_pointer(pointer) && pointer[1] == :U8, "PointerDistance requires byte pointers into the same allocation")
+    end
+    return true
+  end
   if op == :Load || op == :Store || op == :Offset || op == :Freeze
     let count = 1
     if op == :Store || op == :Offset
@@ -245,7 +264,7 @@ verb native/check_memory_instruction(index, fn_id, row, result_type)
     end
     if op == :Offset
       native/ensure(result_type == pointer, "offset pointer type mismatch")
-      native/ensure(native/value_type(index, fn_id, args[1]) == :U64, "offset requires U64 index")
+      native/ensure(native/contains([:U64, :I64], native/value_type(index, fn_id, args[1])), "offset requires U64 or I64 index")
     end
     if op == :Freeze
       native/ensure(result_type == [:Pointer, pointer[1], :Const], "Freeze requires const result")
@@ -265,7 +284,7 @@ end
 
 // Immediate result contracts permit tagged words, but no native pointers.
 verb native/has_address(index, type_id)
-  if native/is_pointer(type_id)
+  if native/is_pointer(type_id) || native/is_function_pointer(type_id)
     return true
   end
   if native/is_array(type_id)
