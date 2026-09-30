@@ -49,17 +49,17 @@ verb native_memory/collection(input: map) -> map
     native_memory/bind("state", :U64, native_memory/field(:U64, "object", "state")),
     native_memory/bind("phase", :U64, native_memory/field(:U64, "collection", "phase")),
     native/when_statement(native/binary_expression(:Equal, "phase", "memory_n1"), [
-      native/when_statement(native/binary_expression(:Equal, "state", "memory_n1"), [
+      native/when_statement(native/binary_expression(:Equal, "state", "memory_object_nursery"), [
         native_memory/bind("forward", object, native_memory/field(object, "object", "forward")),
         native/return_value(native/call_expression("memory_payload", ["forward"]))]),
       native/return_value("pointer")]),
     native/when_statement(native/binary_expression(:Equal, native_memory/field(:U64, "object", "mark"), "memory_n1"), [native/return_value("pointer")]),
-    native/when_statement(native/binary_expression(:Equal, "state", "memory_n0"), [
+    native/when_statement(native/binary_expression(:Equal, "state", "memory_object_free"), [
       native_memory/store(:Bool, "collection", "failed", "memory_true"), native/return_value("pointer")]),
     native_memory/store(:U64, "object", "mark", "memory_n1"),
     native_memory/store(object, "object", "work", native_memory/root(object, "collection", "work")),
     native_memory/store_root(object, "collection", "work", "object"),
-    native/when_statement(native/binary_expression(:Equal, "state", "memory_n1"), [
+    native/when_statement(native/binary_expression(:Equal, "state", "memory_object_nursery"), [
       native_memory/bind("size", :U64, native_memory/field(:U64, "object", "size")),
       native_memory/bind("layout", :U64, native_memory/field(:U64, "object", "layout")),
       native/let_call("target", object, "memory_mature_allocate", ["heap", "size", "layout"]),
@@ -85,7 +85,7 @@ verb native_memory/collection(input: map) -> map
       native_memory/bind("item", object, native/unary_expression(:PointerCast, "managed")),
       native_memory/bind("forward", object, native_memory/field(object, "item", "forward")),
       native/unless_statement(native/binary_expression(:Equal, "forward", "memory_null_object"), [
-        native_memory/store(:U64, "forward", "state", "memory_n0"),
+        native_memory/store(:U64, "forward", "state", "memory_object_free"),
         native_memory/store(object, "item", "forward", "memory_null_object")]),
       native_memory/store(:U64, "item", "mark", "memory_n0"),
       native_memory/store(object, "item", "work", "memory_null_object"),
@@ -111,11 +111,11 @@ verb native_memory/collection(input: map) -> map
       @native_memory/page_cells([
         native/when_statement("reclaim", [
           native/when_statement(native/binary_expression(:Equal, native_memory/field(:U64, "item", "mark"), "memory_n0"), [
-            native_memory/store(:U64, "item", "state", "memory_n0")])]),
+            native_memory/store(:U64, "item", "state", "memory_object_free")])]),
         native_memory/store(:U64, "item", "mark", "memory_n0"),
         native_memory/store(object, "item", "work", "memory_null_object"),
         native_memory/store(object, "item", "forward", "memory_null_object"),
-        native/when_statement(native/binary_expression(:Equal, native_memory/field(:U64, "item", "state"), "memory_n2"), [
+        native/unless_statement(native/binary_expression(:Equal, native_memory/field(:U64, "item", "state"), "memory_object_free"), [
           native/set_statement("live", native/binary_expression(:Add, "live", "memory_n1")),
           native_memory/store(:U64, "heap", "retained", native/typed_expression(:U64,
             native/binary_expression(:Add, native_memory/field(:U64, "heap", "retained"), native_memory/field(:U64, "item", "size"))))])], ""),
@@ -136,7 +136,7 @@ verb native_memory/collection(input: map) -> map
       native_memory/set("bucket", native_memory/field(:U64, "page", "bucket")),
       native/when_statement(native/binary_expression(:Less, "bucket", "memory_n10"), [
         @native_memory/page_cells([
-          native/when_statement(native/binary_expression(:Equal, native_memory/field(:U64, "item", "state"), "memory_n0"), [
+          native/when_statement(native/binary_expression(:Equal, native_memory/field(:U64, "item", "state"), "memory_object_free"), [
             native_memory/store(object, "item", "next", native/typed_expression(object, native/root_load_expression(native_memory/free_slot("heap", "bucket")))),
             native/root_store_statement(native_memory/free_slot("heap", "bucket"), "item")])], "free_")]),
       native_memory/set("next", native_memory/field(page, "page", "next")),
@@ -202,7 +202,9 @@ verb native_memory/collection(input: map) -> map
       @native_memory/page_cells([
         native/when_statement(native/binary_expression(:Equal, native_memory/field(:U64, "item", "mark"), "memory_n1"), [
           native/unless_statement(native/binary_expression(:Equal, "trace", "memory_null_trace"), [
-            native/do_statement(native/indirect_call_expression("trace", ["collection", "item"]))])])], "rewrite_"),
+            native/do_statement(native/indirect_call_expression("trace", ["collection", "item"]))]),
+          // Freeze overflow storage only after all promotion reservations succeed.
+          native_memory/store(:U64, "item", "state", "memory_object_shared")])], "rewrite_"),
       native_memory/bind("next_page", page, native_memory/field(page, "page", "next")),
       native/set_statement("page", "next_page")]),
     native_memory/call("memory_sweep", ["heap", "memory_true"]),

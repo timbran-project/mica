@@ -1758,6 +1758,11 @@ Mica defines bump allocation, copying promotion, shared mark-and-sweep collectio
 Value descriptors trace managed children and repair interior views.
 The generated platform bindings provide allocation and pthread primitives.
 
+Current collections trace roots across both nursery and mature storage.
+Nursery overflow allocations use mature pages but remain worker-private until collection succeeds.
+They can reference their owner's nursery. Collection repairs these references and freezes surviving string and list backing storage before publication.
+Section 8.5's stricter mature-to-nursery rule is a requirement for the proposed minor collector; the current overflow path does not enforce it.
+
 The maintained execution fixture uses this heap for required tail calls and resumption on a fresh thread.
 It does not establish Mica task, transaction, authority, or delivery semantics.
 The Rust-service task experiment is removed. It provided no accepted evidence for an independent generated runtime.

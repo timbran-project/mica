@@ -443,6 +443,7 @@ Enter the worker with `mica_memory_enter` before accessing managed values.
 Each worker has one mutator thread at a time. Workers in the same heap can execute concurrently.
 
 Value helpers do not collect. Nursery exhaustion uses mature storage and requests collection at the next safepoint.
+These overflow allocations remain worker-private until a successful collection, so string and list appends can reuse their spare capacity.
 Allocation failure returns a null pointer or `{false, 0}`.
 Before a safepoint, register live values with `mica_memory_root_push` and `mica_value_root_set`.
 Start each root control zeroed. A raw root pointer must identify an allocation base, not an interior address.
@@ -453,13 +454,14 @@ Direct value pointers remain valid between safepoints. Promotion can change thei
 An explicit `true` requests collection. Collection waits for active workers to reach a safepoint or leave.
 Idle workers retain their registered roots but do not join this wait.
 Promotion reserves destinations before it rewrites references. Failed reservation preserves the original graph, roots, and nursery contents.
+It also preserves the private state of overflow allocations.
 
-Child values must belong to the same managed heap. Worker-private nursery values cannot cross thread boundaries.
+Child values must belong to the same managed heap. Worker-private values cannot cross thread boundaries.
 `mica_memory_publish` promotes a registered root and retains it in the shared root registry.
 Another worker uses `mica_memory_acquire` to obtain its own registered root.
 `mica_memory_unpublish` removes the shared root. Acquired roots continue to retain the graph.
 Published graphs must be immutable. Mutable scratch buffers remain private to their owning worker.
-Promoted strings and lists have immutable backing storage. Their append operations allocate fresh backing storage.
+A successful collection freezes surviving string and list backing storage, including overflow allocations. Their subsequent append operations allocate fresh backing storage.
 
 Remove private roots in reverse registration order with `mica_memory_root_pop`.
 Leave the worker with `mica_memory_leave` before blocking outside the runtime.
@@ -486,7 +488,7 @@ Invalid types, reversed ranges, and out-of-range indices return `ok = false`.
 Length returns `IdResult`. The other operations return `ValueResult`.
 
 List slices allocate a header and share the backing array. Replacement copies the array before it writes the element.
-Append claims spare capacity only at the current tail of private nursery storage.
+Append claims spare capacity only at the current tail of worker-private storage.
 Otherwise, it copies the visible prefix into another backing with geometric growth.
 Every earlier view retains its elements and length. The collector preserves shared backing storage and traces its initialized elements.
 
@@ -530,10 +532,10 @@ Samples use eight bytes each. Capacity reserves enough samples for an eventual A
 ASCII indexing uses direct offsets. Non-ASCII indexing starts at a sample and decodes at most 31 preceding scalars.
 Slices share the backing bytes and samples. Small backings without samples use a bounded scan.
 
-Append allocates a separate view header. Only a view at the current tail of private nursery storage can reuse spare capacity.
+Append allocates a separate view header. Only a view at the current tail of worker-private storage can reuse spare capacity.
 Other appends allocate another backing with geometric growth. Earlier views retain their bytes and lengths.
 Overlapping suffix bytes are valid. Invalid UTF-8 leaves the input unchanged.
-The owning worker controls nursery mutation. Other workers receive promoted values through shared roots.
+The owning worker controls private storage mutation. Other workers receive collected values through shared roots.
 The collector preserves backing storage while a live view retains it. Allocation errors can leave temporary storage for collection.
 The allocation and index-building helpers are internal construction steps; callers must not publish incomplete headers.
 

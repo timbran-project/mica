@@ -126,6 +126,47 @@ static void page_reuse_and_large_objects(void) {
     assert(!mica_memory_nursery_allocate(&worker, UINT64_MAX, 0));
 }
 
+static void failed_collection_preserves_private_allocations(void) {
+    struct mica_MemoryHeap heap = {0};
+    struct mica_MemoryWorker spill = {0}, nursery = {0};
+    struct mica_MemoryRoot spill_root = {0}, nursery_root = {0};
+    assert(mica_memory_heap_init(&heap, mica_memory_test_trace));
+    assert(mica_memory_worker_init(&spill, &heap, 64));
+    assert(mica_memory_enter(&spill));
+    assert(mica_memory_root_push(&spill, &spill_root));
+    spill_root.f_pointer = mica_memory_allocate(&spill, 27, 0);
+    assert(spill_root.f_pointer);
+    memset(spill_root.f_pointer, 0x37, 27);
+    uint64_t private_state = mica_memory_object(spill_root.f_pointer)->f_state;
+    assert(mica_memory_leave(&spill));
+    assert(mica_memory_worker_init(&nursery, &heap, 8192));
+    assert(mica_memory_enter(&nursery));
+    assert(mica_memory_root_push(&nursery, &nursery_root));
+    nursery_root.f_pointer = mica_memory_allocate(&nursery, 4096, 0);
+    assert(nursery_root.f_pointer);
+    memset(nursery_root.f_pointer, 0x49, 4096);
+    fail_after = 0;
+    assert(!mica_memory_safepoint(&nursery, true));
+    fail_after = SIZE_MAX;
+    assert(heap.f_retained == 27);
+    assert(mica_memory_enter(&spill));
+    assert(mica_memory_object(spill_root.f_pointer)->f_state == private_state);
+    for (unsigned i = 0; i < 27; ++i) assert(spill_root.f_pointer[i] == 0x37);
+    assert(mica_memory_leave(&spill));
+    assert(mica_memory_safepoint(&nursery, true));
+    assert(heap.f_retained == 27 + 4096);
+    assert(mica_memory_root_pop(&nursery, &nursery_root));
+    assert(mica_memory_leave(&nursery));
+    assert(mica_memory_worker_release(&nursery));
+    assert(mica_memory_enter(&spill));
+    assert(mica_memory_root_pop(&spill, &spill_root));
+    assert(mica_memory_safepoint(&spill, true));
+    assert(heap.f_retained == 0 && heap.f_allocated == 0);
+    assert(mica_memory_leave(&spill));
+    assert(mica_memory_worker_release(&spill));
+    assert(mica_memory_heap_release(&heap));
+}
+
 struct worker_test {
     struct mica_MemoryHeap *heap;
     unsigned rounds;
@@ -193,6 +234,7 @@ int main(void) {
     relocation_and_cycles();
     failed_promotion_preserves_roots();
     page_reuse_and_large_objects();
+    failed_collection_preserves_private_allocations();
     worker_lifecycle();
     assert(allocations == releases);
     return 0;

@@ -158,6 +158,9 @@ verb native_memory/lifecycle(input: map) -> map
     native/let_call("object", object, "memory_mature_allocate", ["heap", "size", "layout"]),
     @unlock,
     native/when_statement(native/binary_expression(:Equal, "object", "memory_null_object"), [native/return_value("memory_null_bytes")]),
+    // Overflow storage remains worker-private until a successful collection.
+    // The active worker prevents the collector from observing this initialization.
+    native_memory/store(:U64, "object", "state", "memory_object_private"),
     native/return_value(native/call_expression("memory_payload", ["object"]))])
   context = native/define_function(context, "memory_root_push", [
     native_memory/bind("active", :Bool, native_memory/field(:Bool, "worker", "active")),

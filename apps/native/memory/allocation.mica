@@ -23,7 +23,7 @@ verb native_memory/allocation(input: map) -> map
     native/return_value(native/unary_expression(:PointerCast, "end"))])
   context = native/define_function(context, "memory_original", [
     native_memory/bind("state", :U64, native_memory/field(:U64, "object", "state")),
-    native/when_statement(native/binary_expression(:Equal, "state", "memory_n2"), [
+    native/when_statement(native/binary_expression(:Equal, "state", "memory_object_shared"), [
       native_memory/bind("source", object, native_memory/field(object, "object", "forward")),
       native/unless_statement(native/binary_expression(:Equal, "source", "memory_null_object"), [
         native/return_value(native/call_expression("memory_payload", ["source"]))])]),
@@ -47,7 +47,7 @@ verb native_memory/allocation(input: map) -> map
     native_memory/bind("owner", native_memory/record_pointer("MemoryHeap"), native_memory/root(native_memory/record_pointer("MemoryHeap"), "worker", "heap")),
     native/store_statement("object", native/typed_record(header,
       ["memory_null_object", "memory_null_object", "memory_null_object", "memory_null_page", "owner",
-        "size", "layout", "memory_n0", "memory_n1"])),
+        "size", "layout", "memory_n0", "memory_object_nursery"])),
     native_memory/store(:U64, "worker", "used", native/typed_expression(:U64, native/binary_expression(:Add, "used", "total"))),
     native/return_value(native/call_expression("memory_payload", ["object"]))])
 
@@ -93,7 +93,7 @@ verb native_memory/allocation(input: map) -> map
         native/let_offset("cell", bytes, "cells", "offset"),
         native_memory/bind("item", object, native/unary_expression(:PointerCast, "cell")),
         native/store_statement("item", native/typed_record(header,
-          ["candidate", "memory_null_object", "memory_null_object", "managed_page", "managed_heap", "memory_n0", "memory_n0", "memory_n0", "memory_n0"])),
+          ["candidate", "memory_null_object", "memory_null_object", "managed_page", "managed_heap", "memory_n0", "memory_n0", "memory_n0", "memory_object_free"])),
         native/set_statement("candidate", "item"),
         native/set_statement("index", native/binary_expression(:Add, "index", "memory_n1"))]),
       native_memory/store(:U64, "heap", "allocated", native/typed_expression(:U64,
@@ -103,7 +103,7 @@ verb native_memory/allocation(input: map) -> map
     native_memory/store(:U64, "candidate", "size", "size"),
     native_memory/store(:U64, "candidate", "layout", "layout"),
     native_memory/store(:U64, "candidate", "mark", "memory_n0"),
-    native_memory/store(:U64, "candidate", "state", "memory_n2"),
+    native_memory/store(:U64, "candidate", "state", "memory_object_shared"),
     native_memory/store(object, "candidate", "next", "memory_null_object"),
     native_memory/store(object, "candidate", "work", "memory_null_object"),
     native_memory/store(object, "candidate", "forward", "memory_null_object"),

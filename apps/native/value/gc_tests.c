@@ -135,6 +135,59 @@ static void tuple_and_buffer(void) {
     assert(mica_memory_heap_release(&heap));
 }
 
+static void overflow_append(void) {
+    struct mica_MemoryHeap heap = {0};
+    struct mica_MemoryWorker worker = {0};
+    assert(mica_value_heap_init(&heap));
+    // No object fits: exercise private mature storage without a nursery fast path.
+    assert(mica_memory_worker_init(&worker, &heap, 64));
+    assert(mica_memory_enter(&worker));
+    uint8_t utf8[512];
+    for (unsigned i = 0; i < sizeof(utf8); i += 2) { utf8[i] = 0xc3; utf8[i + 1] = 0xa9; }
+    mica_type_Value text = checked(mica_value_string(&worker, utf8, sizeof(utf8)));
+    text = checked(mica_value_string_append(&worker, text, utf8, 2));
+    mica_type_Value first_text = text;
+    const struct mica_StringStorage *text_storage = mica_value_as_string(text).f_header->f_storage;
+    mica_type_Value items[128];
+    for (unsigned i = 0; i < 128; ++i) items[i] = integer(i);
+    mica_type_Value list = checked(mica_value_list(&worker, items, 128));
+    list = checked(mica_value_list_append(&worker, list, integer(128)));
+    mica_type_Value first_list = list;
+    const struct mica_ListStorage *list_storage = mica_value_as_list(list).f_header->f_storage;
+    for (unsigned i = 0; i < 64; ++i) {
+        text = checked(mica_value_string_append(&worker, text, utf8, 2));
+        list = checked(mica_value_list_append(&worker, list, integer(129 + i)));
+        assert(mica_value_as_string(text).f_header->f_storage == text_storage);
+        assert(mica_value_as_list(list).f_header->f_storage == list_storage);
+    }
+    assert(mica_value_string_length(first_text).f_number == 257);
+    assert(mica_value_list_length(first_list).f_number == 129);
+    assert(mica_value_string_length(text).f_number == 321);
+    assert(mica_value_list_get(list, 192).f_value == integer(192));
+    mica_type_Value values[] = {first_text, text, first_list, list};
+    mica_type_Value graph = checked(mica_value_list(&worker, values, 4));
+    uint64_t hash = mica_value_hash(graph).f_number;
+    struct mica_MemoryRoot root = {0};
+    assert(mica_memory_root_push(&worker, &root));
+    mica_value_root_set(&root, graph);
+    collect(&worker);
+    graph = mica_value_root_get(&root);
+    assert(mica_value_hash(graph).f_number == hash);
+    text = checked(mica_value_list_get(graph, 1));
+    list = checked(mica_value_list_get(graph, 3));
+    mica_type_Value grown_text = checked(mica_value_string_append(&worker, text, utf8, 2));
+    mica_type_Value grown_list = checked(mica_value_list_append(&worker, list, integer(193)));
+    // Collection freezes both spill allocations and promoted nursery allocations.
+    assert(mica_value_as_string(grown_text).f_header->f_storage != mica_value_as_string(text).f_header->f_storage);
+    assert(mica_value_as_list(grown_list).f_header->f_storage != mica_value_as_list(list).f_header->f_storage);
+    assert(mica_memory_root_pop(&worker, &root));
+    collect(&worker);
+    assert(heap.f_retained == 0 && heap.f_allocated == 0);
+    assert(mica_memory_leave(&worker));
+    assert(mica_memory_worker_release(&worker));
+    assert(mica_memory_heap_release(&heap));
+}
+
 struct publication_test {
     struct mica_MemoryHeap *heap;
     struct mica_MemoryRoot *shared;
@@ -151,12 +204,16 @@ static void *consume_publication(void *argument) {
     assert(mica_memory_acquire(&worker, test->shared, &input));
     assert(mica_memory_root_push(&worker, &output));
     for (unsigned i = 0; i < test->rounds; ++i) {
+        mica_type_Value text = checked(mica_value_list_get(mica_value_root_get(&input), 1));
+        mica_type_Value grown = checked(mica_value_string_append(&worker, text, (const uint8_t *)"x", 1));
+        assert(mica_value_as_string(grown).f_header->f_storage != mica_value_as_string(text).f_header->f_storage);
         mica_type_Value value = checked(mica_value_list_append(&worker, mica_value_root_get(&input), integer(i)));
+        assert(mica_value_as_list(value).f_header->f_storage != mica_value_as_list(mica_value_root_get(&input)).f_header->f_storage);
         mica_value_root_set(&output, value);
         assert(mica_memory_safepoint(&worker, i % 19 == 0));
         assert(mica_value_hash(mica_value_root_get(&input)).f_number == test->hash);
         value = mica_value_root_get(&output);
-        assert(mica_value_list_get(value, 2).f_value == integer(i));
+        assert(mica_value_list_get(value, 3).f_value == integer(i));
     }
     assert(mica_memory_root_pop(&worker, &output));
     assert(mica_memory_root_pop(&worker, &input));
@@ -165,14 +222,21 @@ static void *consume_publication(void *argument) {
     return NULL;
 }
 
-static void published_values(void) {
+static void published_values(uint64_t nursery_capacity) {
     struct mica_MemoryHeap heap = {0};
     struct mica_MemoryWorker producer = {0};
     assert(mica_value_heap_init(&heap));
-    assert(mica_memory_worker_init(&producer, &heap, 4096));
+    assert(mica_memory_worker_init(&producer, &heap, nursery_capacity));
     assert(mica_memory_enter(&producer));
     mica_type_Value values[] = {integer(7), checked(mica_value_string(&producer, (const uint8_t *)"shared", 6))};
+    // Leave spare capacity so publication, rather than a full backing, prevents reuse.
+    values[1] = checked(mica_value_string_append(&producer, values[1], (const uint8_t *)"!", 1));
+    const struct mica_StringStorage *text_storage = mica_value_as_string(values[1]).f_header->f_storage;
+    assert(text_storage->f_used < text_storage->f_capacity);
     mica_type_Value value = checked(mica_value_list(&producer, values, 2));
+    value = checked(mica_value_list_append(&producer, value, integer(8)));
+    const struct mica_ListStorage *list_storage = mica_value_as_list(value).f_header->f_storage;
+    assert(list_storage->f_used < list_storage->f_capacity);
     uint64_t hash = mica_value_hash(value).f_number;
     struct mica_MemoryRoot source = {0}, shared = {0};
     assert(mica_memory_root_push(&producer, &source));
@@ -211,6 +275,8 @@ static void published_values(void) {
 int main(void) {
     value_graph();
     tuple_and_buffer();
-    published_values();
+    overflow_append();
+    published_values(4096);
+    published_values(64);
     return 0;
 }

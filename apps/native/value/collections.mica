@@ -227,7 +227,7 @@ verb native_value/list_operations(input: map) -> map
     ]),
     native/note_statement(
       :Invariant,
-      "Tail writes are outside existing views and require private nursery storage."
+      "Tail writes are outside existing views and require worker-private storage."
     ),
     native/store_statement("target", native/typed_record(header, ["data", "total", "storage"])),
     native/return_record(

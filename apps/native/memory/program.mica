@@ -108,6 +108,10 @@ verb native_memory/context(input: map) -> map
   state = native/record_type(state, "MemoryCollection", [
     ["heap", heap], ["work", object], ["phase", :U64], ["failed", :Bool], ["copied", :U64]])[1]
   let declarations: list = [
+    ["memory_object_free", :U64, "0000000000000000"],
+    ["memory_object_nursery", :U64, "0000000000000001"],
+    ["memory_object_shared", :U64, "0000000000000002"],
+    ["memory_object_private", :U64, "0000000000000003"],
     ["memory_null_bytes", bytes, "null"], ["memory_null_object", object, "null"],
     ["memory_null_page", page, "null"], ["memory_null_worker", worker, "null"],
     ["memory_null_root", root, "null"], ["memory_null_trace", trace, "null"],

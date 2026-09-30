@@ -41,7 +41,9 @@ verb native_value/memory(input: map) -> map
     native/let_statement("offset", :I64, native/unary_expression(:Bitcast, native/typed_expression(:U64, native/binary_expression(:Subtract, "zero", "header_size")))),
     native/let_offset("base", bytes, "storage", "offset"),
     native/let_call("object", object, "memory_object", ["base"]),
-    native/return_value(native/binary_expression(:Equal, native_memory/field(:U64, "object", "state"), "memory_n1"))])
+    native_memory/bind("state", :U64, native_memory/field(:U64, "object", "state")),
+    native/when_statement(native/binary_expression(:Equal, "state", "memory_object_nursery"), [native/return_value("true")]),
+    native/return_value(native/binary_expression(:Equal, "state", "memory_object_private"))])
   context = native_memory/declare(context, "value_root_set", :Void,
     [["root", root, :Borrow], ["value", word, :Gc]], [:ReadMemory, :WriteMemory], :Value, "")
   context = native_memory/declare(context, "value_root_get", word,
