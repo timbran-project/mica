@@ -443,6 +443,22 @@ static void string_cases(struct mica_MemoryWorker *arena) {
     }
     assert(!mica_value_string_length(integer(1)).f_ok);
     assert(!mica_value_string_scalar_at(integer(1),0).f_ok);
+    // Three-byte scalars cover both sides of the excluded surrogate range.
+    const uint8_t triples[]={0xe0,0xa0,0x80,0xed,0x9f,0xbf,0xee,0x80,0x80,0xef,0xbf,0xbf};
+    const uint32_t triple_runes[]={0x800,0xd7ff,0xe000,0xffff};
+    uint8_t triple_text[384];
+    for(unsigned i=0;i<32;i++) memcpy(triple_text+i*sizeof(triples),triples,sizeof(triples));
+    struct mica_ValueResult triple=mica_value_string(arena,triple_text,sizeof(triple_text));
+    assert(triple.f_ok);
+    struct mica_ValueResult middle=mica_value_string_slice(arena,triple.f_value,31,99);
+    assert(middle.f_ok);
+    for(uint64_t i=0;i<=68;i++) {
+        struct mica_IdResult offset=mica_value_string_byte_offset(middle.f_value,i);
+        assert(offset.f_ok && offset.f_number==i*3);
+        struct mica_RuneResult scalar=mica_value_string_scalar_at(middle.f_value,i);
+        assert(scalar.f_ok==(i<68));
+        if(scalar.f_ok) assert(scalar.f_rune==triple_runes[(i+31)%4]);
+    }
 }
 
 static void append_cases(struct mica_MemoryWorker *arena) {
@@ -496,8 +512,24 @@ static void append_cases(struct mica_MemoryWorker *arena) {
     assert(joined.f_ok && mica_value_string_length(joined.f_value).f_number==260);
     assert(!mica_value_string_concat(arena,first.f_value,integer(1)).f_ok);
     assert(!mica_value_string_concat(arena,integer(1),first.f_value).f_ok);
+    // Concatenation can use slice metadata, including a suffix borrowed from its own backing.
+    struct mica_ValueResult suffix=mica_value_string_slice(arena,versions[99],129,162);
+    assert(suffix.f_ok);
+    joined=mica_value_string_concat(arena,versions[99],suffix.f_value);
+    assert(joined.f_ok && mica_value_string_length(joined.f_value).f_number==261);
+    assert(mica_value_as_string(joined.f_value).f_header->f_storage==mica_value_as_string(versions[99]).f_header->f_storage);
+    assert(mica_value_string_length(versions[99]).f_number==228);
+    for(uint64_t i=0;i<261;i++) {
+        struct mica_RuneResult scalar=mica_value_string_scalar_at(joined.f_value,i);
+        assert(scalar.f_ok && scalar.f_rune==(i<129 ? 'a' : 0x1f600));
+    }
+    struct mica_ValueResult empty=mica_value_string(arena,NULL,0);
+    assert(empty.f_ok && mica_value_string_concat(arena,joined.f_value,empty.f_value).f_value==joined.f_value);
+    assert(!mica_value_string_concat(arena,integer(1),suffix.f_value).f_ok);
+    assert(!mica_value_string_concat(arena,joined.f_value,integer(1)).f_ok);
     // Header allocation can fail even when backing storage has spare capacity.
     struct mica_MemoryWorker failed={0}; test_worker_init(&failed, 0); fail_allocation=true;
+    assert(!mica_value_string_append(&failed,joined.f_value,emoji,4).f_ok);
     assert(!mica_value_string_append(&failed,versions[99],emoji,4).f_ok);
     fail_allocation=false;
     assert(failed.f_heap->f_pages==NULL && mica_value_string_length(versions[99]).f_number==228);
@@ -534,6 +566,16 @@ static void search_cases(struct mica_MemoryWorker *arena) {
     assert(!mica_value_string_find(hay.f_value,missing.f_value,UINT64_MAX).f_ok);
     assert(!mica_value_string_find(integer(1),missing.f_value,0).f_ok);
     assert(!mica_value_string_find(hay.f_value,integer(1),0).f_ok);
+    // Search positions remain relative to a slice whose backing starts earlier.
+    struct mica_ValueResult slice=mica_value_string_slice(arena,hay.f_value,31,201);
+    struct mica_ValueResult needle=mica_value_string_slice(arena,hay.f_value,32,36);
+    assert(slice.f_ok && needle.f_ok);
+    for(uint64_t start=0;start<=172;start++) {
+        uint64_t expected=start+(5-start%4)%4;
+        struct mica_IdResult found=mica_value_string_find(slice.f_value,needle.f_value,start);
+        assert(found.f_ok==(expected+4<=170));
+        if(found.f_ok) assert(found.f_number==expected);
+    }
 }
 
 static void utf8_cases(struct mica_MemoryWorker *arena) {
@@ -572,6 +614,15 @@ static void utf8_cases(struct mica_MemoryWorker *arena) {
         assert(arena->f_heap->f_pages == head && arena->f_used == used);
     }
     uint8_t aligned_test[34]; memset(aligned_test,'a',sizeof(aligned_test));
+    // Exact allocation ends let ASan detect any wide read past the supplied extent.
+    for(size_t alignment=1;alignment<=16;alignment++) for(size_t length=0;length<=65;length++) {
+        uint8_t *allocation=malloc(alignment+length);
+        assert(allocation);
+        memset(allocation,'a',alignment+length);
+        struct mica_Utf8Scan scan=mica_utf8_scan(allocation+alignment,length);
+        assert(scan.f_ok && scan.f_ascii && scan.f_scalars==length);
+        free(allocation);
+    }
     for(uint64_t length=0;length<=32;length++) {
         struct mica_Utf8Scan scan=mica_utf8_scan(aligned_test+1,length);
         assert(scan.f_ok && scan.f_ascii && scan.f_scalars==length);

@@ -103,8 +103,8 @@ verb native_value/string_allocate(input: map) -> map
   return context
 end
 
-// Fill samples from a known scalar boundary. Appends can fill only their new
-// suffix, leaving every previously published offset unchanged.
+// Fill samples from a known scalar boundary in validated UTF-8. Appends fill
+// only their new suffix, leaving every previously published offset unchanged.
 verb native_value/string_index(input: map) -> map
   let context: map = input
   let name: string = "value_string_index"
@@ -128,36 +128,39 @@ verb native_value/string_index(input: map) -> map
         native/binary_expression(:Equal, "index", "string_null_index"),
         [native/return_value("true")]
       ),
+      native/when_statement(native/binary_expression(:Less, "length", "offset"), [native/return_value("false")]),
+      native/when_statement("ascii", [
+        native/let_statement("rounding", :U64, native/binary_expression(:Subtract, "string_stride", "one")),
+        native/let_statement("rounded", :U64, native/binary_expression(:Add, "scalar", "rounding")),
+        native/let_statement("sample_number", :U64, native/binary_expression(:Divide, "rounded", "string_stride")),
+        native/let_statement("remaining", :U64, native/binary_expression(:Subtract, "length", "offset")),
+        native/let_statement("last_scalar", :U64, native/binary_expression(:Add, "scalar", "remaining")),
+        native/let_statement("last_sample", :U64, native/binary_expression(:Divide, "last_scalar", "string_stride")),
+        native/while_statement("true", [
+          native/when_statement(native/binary_expression(:Less, "last_sample", "sample_number"), [native/return_value("true")]),
+          native/let_statement("sample_scalar", :U64, native/binary_expression(:Multiply, "sample_number", "string_stride")),
+          native/let_statement("relative", :U64, native/binary_expression(:Subtract, "sample_scalar", "scalar")),
+          native/let_statement("sample_offset", :U64, native/binary_expression(:Add, "offset", "relative")),
+          native/let_offset("sample", [:Pointer, :U64, :Mutable], "index", "sample_number"),
+          native/store_statement("sample", "sample_offset"),
+          native/set_statement("sample_number", native/binary_expression(:Add, "sample_number", "one"))])]),
       native/let_statement("position", :U64, "offset"),
       native/let_statement("count", :U64, "scalar"),
       native/while_statement("true", [
         native/when_statement(native/binary_expression(:Less, "length", "position"), [native/return_value("false")]),
         native/let_statement("remainder", :U64, native/binary_expression(:Remainder, "count", "string_stride")),
         native/when_statement(native/binary_expression(:Equal, "remainder", "zero"), [
-          native/let_statement("sample_number", :U64, native/binary_expression(:Divide, "count", "string_stride")),
-          native/let_offset("sample", [:Pointer, :U64, :Mutable], "index", "sample_number"),
+          native/set_statement("sample_number", native/binary_expression(:Divide, "count", "string_stride")),
+          native/set_statement("sample", native/offset_expression("index", "sample_number")),
           native/store_statement("sample", "position")
         ]),
         native/when_statement(native/binary_expression(:Equal, "position", "length"), [native/return_value("true")]),
-        native/if_statement("ascii", [
-          native/let_statement("remaining", :U64, native/binary_expression(:Subtract, "length", "position")),
-          native/let_statement("width", :U64, native/binary_expression(:Subtract, "string_stride", "remainder")),
-          native/when_statement(
-            native/binary_expression(:Less, "remaining", "width"),
-            [native/set_statement("width", "remaining")]
-          ),
-          native/set_statement("position", native/binary_expression(:Add, "position", "width")),
-          native/set_statement("count", native/binary_expression(:Add, "count", "width"))
-        ], [
-          native/let_offset("source", [:Pointer, :U8, :Mutable], "data", "position"),
-          native/let_statement("text", [:Pointer, :U8, :Const], native/unary_expression(:Freeze, "source")),
-          native/set_statement("remaining", native/binary_expression(:Subtract, "length", "position")),
-          native/let_call("decoded", [:Record, "Utf8Decode"], "utf8_decode", ["text", "remaining"]),
-          native/unless_statement(native/field_expression("decoded", "ok"), [native/return_value("false")]),
-          native/set_statement("width", native/field_expression("decoded", "width")),
-          native/set_statement("position", native/binary_expression(:Add, "position", "width")),
-          native/set_statement("count", native/binary_expression(:Add, "count", "one"))
-        ])
+        native/let_offset("source", [:Pointer, :U8, :Mutable], "data", "position"),
+        native/let_load("byte", :U8, "source"),
+        native/let_statement("first", :U32, native/unary_expression(:Convert, "byte")),
+        @native_value/utf8_width("first", "width"),
+        native/set_statement("position", native/binary_expression(:Add, "position", "width")),
+        native/set_statement("count", native/binary_expression(:Add, "count", "one"))
       ]),
       native/return_value("false")
     ]
@@ -248,7 +251,6 @@ verb native_value/string_access(input: map) -> map
     native/let_field("index", [:Pointer, :U64, :Mutable], "storage", "index"),
     native/let_field("byte_start", :U64, "header", "byte_start"),
     native/let_field("scalar_start", :U64, "header", "scalar_start"),
-    native/let_statement("end", :U64, native/binary_expression(:Add, "byte_start", "length")),
     native/let_statement("target", :U64, native/binary_expression(:Add, "scalar_start", "position")),
     native/let_statement("offset", :U64, "byte_start"),
     native/let_statement("count", :U64, "scalar_start"),
@@ -261,11 +263,9 @@ verb native_value/string_access(input: map) -> map
     native/note_statement(:Invariant, "Sample offsets are relative to the immutable backing, including for slices."),
     native/while_statement(native/binary_expression(:Less, "count", "target"), [
       native/let_offset("source", [:Pointer, :U8, :Mutable], "data", "offset"),
-      native/let_statement("text", [:Pointer, :U8, :Const], native/unary_expression(:Freeze, "source")),
-      native/let_statement("remaining", :U64, native/binary_expression(:Subtract, "end", "offset")),
-      native/let_call("decoded", [:Record, "Utf8Decode"], "utf8_decode", ["text", "remaining"]),
-      native/unless_statement(native/field_expression("decoded", "ok"), [native/return_zero()]),
-      native/let_field("width", :U64, "decoded", "width"),
+      native/let_load("byte", :U8, "source"),
+      native/let_statement("first", :U32, native/unary_expression(:Convert, "byte")),
+      @native_value/utf8_width("first", "width"),
       native/set_statement("offset", native/binary_expression(:Add, "offset", "width")),
       native/set_statement("count", native/binary_expression(:Add, "count", "one"))
     ]),

@@ -18,7 +18,7 @@ verb native_value/utf8(input: map) -> map
   for number in [0, 1, 2, 3, 4, 6, 7, 15, 31, 63, 128, 192, 194, 224, 240, 245, 2048, 55296, 57344, 65536, 1114112]
     constants = [@constants, [string_concat("utf32_", to_literal(number)), :U32, native_value/hex(number)]]
   end
-  for number in [2, 3, 4, 8]
+  for number in [2, 3, 4, 8, 16]
     constants = [@constants, [string_concat("utf64_", to_literal(number)), :U64, native_value/hex(number)]]
   end
   constants = [@constants, ["utf8_high_bits", :U64, "8080808080808080"]]
@@ -40,19 +40,35 @@ verb native_value/utf8(input: map) -> map
     "apps/native/value/utf8.mica: native_value/utf8"
   )
   context[:state] = native/annotate(context[:state], context[:functions][name], :Invariant, "A successful Rune is at most U+10FFFF and excludes U+D800 through U+DFFF.")
-  let failure: list = [native/return_zero()]
   context = native/define_function(context, name, [
-    native/unless_statement(native/binary_expression(:Less, "number", "utf32_1114112"), failure),
-    native/unless_statement(
-      native/binary_expression(:Less, "number", "utf32_55296"),
-      [native/when_statement(native/binary_expression(:Less, "number", "utf32_57344"), failure)]
-    ),
+    @native_value/unicode_scalar_guard("number"),
     native/return_record(["true", native/typed_expression(rune, native/unary_expression(:Wrap, "number"))])
   ])
   context = native_value/utf8_decode(context)
   context = native_value/utf8_encode(context)
   context = native_value/utf8_scan(context)
   return context
+end
+
+verb native_value/unicode_scalar_guard(number: string) -> list
+  let failure: list = [native/return_zero()]
+  return [
+    native/unless_statement(native/binary_expression(:Less, number, "utf32_1114112"), failure),
+    native/unless_statement(native/binary_expression(:Less, number, "utf32_55296"), [
+      native/when_statement(native/binary_expression(:Less, number, "utf32_57344"), failure)])]
+end
+
+// Emit a width calculation for a leading byte of already validated UTF-8.
+// This does not validate input or decode a scalar value.
+verb native_value/utf8_width(first: string, width: string) -> list
+  return [
+    native/let_statement(width, :U64, "one"),
+    native/unless_statement(native/binary_expression(:Less, first, "utf32_128"), [
+      native/set_statement(width, "utf64_2"),
+      native/unless_statement(native/binary_expression(:Less, first, "utf32_224"), [
+        native/set_statement(width, "utf64_3"),
+        native/unless_statement(native/binary_expression(:Less, first, "utf32_240"), [
+          native/set_statement(width, "utf64_4")])])])]
 end
 
 verb native_value/utf8_decode(input: map) -> map
@@ -109,9 +125,8 @@ verb native_value/utf8_decode(input: map) -> map
       ]),
       native/when_statement(native/binary_expression(:Less, "number", "minimum"), [native/return_zero()])
     ]),
-    native/let_call("scalar", [:Record, "RuneResult"], "unicode_scalar", ["number"]),
-    native/unless_statement(native/field_expression("scalar", "ok"), [native/return_zero()]),
-    native/let_field("rune", [:Scalar, "Rune", :U32], "scalar", "rune"),
+    @native_value/unicode_scalar_guard("number"),
+    native/let_statement("rune", [:Scalar, "Rune", :U32], native/unary_expression(:Wrap, "number")),
     native/let_statement("result", result, native/record_expression(["true", "rune", "width"])),
     native/return_value("result")
   ])
@@ -185,7 +200,7 @@ verb native_value/utf8_scan(input: map) -> map
     :Source,
     "apps/native/value/utf8.mica: native_value/utf8_scan"
   )
-  context[:state] = native/annotate(context[:state], context[:functions][name], :Purpose, "Validate UTF-8 and count Unicode scalars, with an eight-byte ASCII fast path.")
+  context[:state] = native/annotate(context[:state], context[:functions][name], :Purpose, "Validate UTF-8 and count Unicode scalars, with a sixteen-byte ASCII fast path.")
   let failure: list = [native/return_zero()]
   context = native/define_function(context, name, [
     native/when_statement(
@@ -203,10 +218,25 @@ verb native_value/utf8_scan(input: map) -> map
       [:Pointer, :U8, :Mutable],
       native/unary_expression(:PointerCast, "chunk_address")
     ),
+    native/let_statement("next_chunk", :U64, native/zero_expression()),
+    native/let_statement("next_address", [:Pointer, :U64, :Mutable], native/unary_expression(:Address, "next_chunk")),
+    native/let_statement("next_bytes", [:Pointer, :U8, :Mutable], native/unary_expression(:PointerCast, "next_address")),
     native/while_statement(native/binary_expression(:Less, "offset", "length"), [
       native/note_statement(:Invariant, "offset is a scalar boundary within the supplied byte extent."),
       native/let_statement("remaining", :U64, native/binary_expression(:Subtract, "length", "offset")),
       native/let_offset("slot", pointer, "source", "offset"),
+      native/unless_statement(native/binary_expression(:Less, "remaining", "utf64_16"), [
+        native/copy_bytes_statement("chunk_bytes", "slot", "utf64_8"),
+        native/let_offset("next_slot", pointer, "slot", "utf64_8"),
+        native/copy_bytes_statement("next_bytes", "next_slot", "utf64_8"),
+        native/set_statement("chunk", native/load_expression("chunk_address")),
+        native/set_statement("next_chunk", native/load_expression("next_address")),
+        native/let_statement("pair", :U64, native/binary_expression(:BitOr, "chunk", "next_chunk")),
+        native/let_statement("pair_high", :U64, native/binary_expression(:BitAnd, "pair", "utf8_high_bits")),
+        native/when_statement(native/binary_expression(:Equal, "pair_high", "zero"), [
+          native/set_statement("offset", native/binary_expression(:Add, "offset", "utf64_16")),
+          native/set_statement("scalars", native/binary_expression(:Add, "scalars", "utf64_16")),
+          native/continue_statement()])]),
       native/unless_statement(native/binary_expression(:Less, "remaining", "utf64_8"), [
         native/note_statement(
           :Purpose,

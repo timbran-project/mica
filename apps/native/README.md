@@ -507,7 +507,8 @@ Strings contain valid UTF-8. Byte values can contain arbitrary bytes. Neither ty
 `mica_utf8_decode` returns one scalar and its byte width. Malformed or incomplete input returns `ok = false` and width zero.
 `mica_utf8_encode` returns up to four bytes. `mica_utf8_scan` validates the entire input and returns its scalar count and ASCII flag.
 Validation accepts Unicode noncharacters and embedded zero bytes. It rejects overlong encodings, surrogates, isolated continuation bytes, and out-of-range scalars.
-The scanner checks ASCII in bounded eight-byte groups. Unaligned input is valid, and no read extends beyond its supplied length.
+The scanner checks ASCII in bounded sixteen-byte groups, with eight-byte and scalar handling for shorter tails.
+Unaligned input is valid, and no read extends beyond its supplied length.
 
 String positions count Unicode scalars, not grapheme clusters. The APIs use these conventions:
 
@@ -524,20 +525,24 @@ String positions count Unicode scalars, not grapheme clusters. The APIs use thes
 Invalid types, reversed ranges, and out-of-range positions return `ok = false`.
 Search also returns `ok = false` for an absent match. An empty needle matches any valid position, including the end.
 Search uses byte comparisons, with a stack skip table for needles of at least four bytes.
-The worst-case search cost is O(haystack bytes × needle bytes). Converting a non-ASCII match to a scalar position scans its prefix.
+The worst-case search cost is O(haystack bytes × needle bytes).
+Converting a non-ASCII match to a scalar position counts boundaries between the requested start and the match.
 
 Each string view stores its byte length, scalar count, and ASCII flag.
 Backings with at least 128 bytes of capacity reserve one byte-offset sample per 32 scalar positions.
 Samples use eight bytes each. Capacity reserves enough samples for an eventual ASCII suffix.
-ASCII indexing uses direct offsets. Non-ASCII indexing starts at a sample and decodes at most 31 preceding scalars.
+ASCII indexing uses direct offsets. Non-ASCII indexing starts at a sample and steps past at most 31 preceding scalars.
+Index construction and navigation use leading-byte widths in validated text. Raw byte inputs still receive full UTF-8 validation.
 Slices share the backing bytes and samples. Small backings without samples use a bounded scan.
 
 Append allocates a separate view header. Only a view at the current tail of worker-private storage can reuse spare capacity.
 Other appends allocate another backing with geometric growth. Earlier views retain their bytes and lengths.
 Overlapping suffix bytes are valid. Invalid UTF-8 leaves the input unchanged.
+Concatenation uses the existing suffix string's scalar count and ASCII flag without validating its bytes again.
 The owning worker controls private storage mutation. Other workers receive collected values through shared roots.
 The collector preserves backing storage while a live view retains it. Allocation errors can leave temporary storage for collection.
-The allocation and index-building helpers are internal construction steps; callers must not publish incomplete headers.
+The allocation, index-building, and validated-append helpers are internal construction steps; callers must not publish incomplete headers.
+`value_string_append_validated` requires valid UTF-8 and exact suffix metadata.
 
 Finite relations contain a symbol heading and a canonical set of tuples.
 `value_relation(worker, heading, arity, rows, length)` copies the heading, tuple descriptors, and cell arrays into managed storage.
