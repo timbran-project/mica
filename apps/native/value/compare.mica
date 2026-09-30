@@ -118,15 +118,12 @@ verb native_value/comparison(input: map) -> map
     end
     rows = [
       @rows,
-      native/let_statement(index, :U64, "zero"),
-      native/while_statement(native/binary_expression(:Less, index, string_concat(left, "_length")), [
+      @native/for_range(index, "zero", string_concat(left, "_length"), [
         native/unless_statement(
           native/binary_expression(:Less, index, string_concat(right, "_length")),
           [native/break_statement()]
         ),
-        @elements,
-        native/set_statement(index, native/binary_expression(:Add, index, "one"))
-      ]),
+        @elements]),
       @native_value/scalar_order(string_concat(left, "_length"), string_concat(right, "_length"))
     ]
     statements = [
@@ -297,8 +294,7 @@ verb native_value/language_comparison(input: map) -> map
   for spec in [["value_equal", "value_compare"], ["value_language_equal", "value_language_compare"]]
     context = native/declare_function(context, spec[0], [:Record, "BoolResult"], [["left", word, :Gc], ["right", word, :Gc]], [], [:ReadMemory], :Value, "")
     context = native/define_function(context, spec[0], [
-      native/let_call("comparison", result, spec[1], ["left", "right"]),
-      native/unless_statement(native/field_expression("comparison", "ok"), [native/return_zero()]),
+      @native/try_call("comparison", result, spec[1], ["left", "right"], [native/return_zero()]),
       native/return_record(
         [
           "true",

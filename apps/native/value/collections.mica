@@ -43,19 +43,8 @@ verb native_value/list_allocation(input: map) -> map
       native/let_statement("storage_size", :U64, native/unary_expression(:SizeOf, storage)),
       native/let_statement("prefix", :U64, native/binary_expression(:Add, "header_size", "storage_size")),
       native/let_statement("element_size", :U64, native/unary_expression(:SizeOf, word)),
-      native/let_statement("limit", :U64, native/binary_expression(:Subtract, "allocation_limit", "prefix")),
-      native/set_statement("limit", native/binary_expression(:Divide, "limit", "element_size")),
-      native/when_statement(
-        native/binary_expression(:Less, "limit", "capacity"),
-        [native/return_value("null_list_header")]
-      ),
-      native/let_statement("bytes", :U64, native/binary_expression(:Multiply, "capacity", "element_size")),
-      native/let_statement("total", :U64, native/binary_expression(:Add, "prefix", "bytes")),
-      native/let_call("raw", [:Pointer, :U8, :Mutable], "memory_allocate", ["worker", "total", "layout_list"]),
-      native/when_statement(
-        native/binary_expression(:Equal, "raw", "null_bytes"),
-        [native/return_value("null_list_header")]
-      ),
+      @native_memory/allocate_with_tail("raw", "prefix", "element_size", "capacity",
+        "layout_list", [native/return_value("null_list_header")]),
       native/let_statement("target", pointer, native/unary_expression(:PointerCast, "raw")),
       native/let_offset("storage_raw", [:Pointer, :U8, :Mutable], "raw", "header_size"),
       native/let_statement(
@@ -83,13 +72,7 @@ verb native_value/list_allocation(input: map) -> map
     native/when_statement(native/binary_expression(:Equal, "target", "null_list_header"), [native/return_zero()]),
     native/let_load("header", header, "target"),
     native/let_field("data", values, "header", "data"),
-    native/let_statement("i", :U64, "zero"),
-    native/while_statement(native/binary_expression(:Less, "i", "length"), [
-      native/let_offset("src", [:Pointer, word, :Const], "source", "i"),
-      native/let_offset("dst", values, "data", "i"),
-      native/store_statement("dst", native/typed_load(word, "src")),
-      native/set_statement("i", native/binary_expression(:Add, "i", "one"))
-    ]),
+    @native/copy_elements(word, "data", "source", "length"),
     native/return_record(
       ["true", native/typed_expression(word, native/binary_expression(:PackPointer, "target", "tag_list"))]
     )
@@ -112,34 +95,19 @@ verb native_value/list_operations(input: map) -> map
     let name: string = string_concat("value_", kind, "_length")
     context = native/declare_function(context, name, [:Record, "IdResult"], [["value", word, :Gc]], [], [:ReadMemory], :Value, "")
     context = native/define_function(context, name, [
-      native/unless_statement(
-        native/binary_expression(
-          :Equal,
-          native/typed_expression(:U8, native/unary_expression(:Tag, "value")),
-          string_concat("tag_", kind)
-        ),
-        [native/return_zero()]
-      ),
-      native/let_statement("pointer", [:Pointer, record, :Const], native/unary_expression(:UnpackPointer, "value")),
-      native/let_load("header", record, "pointer"),
+      @native_value/open_heap("value", kind, record, "pointer", "header", [native/return_zero()]),
       native/return_record(["true", native/typed_field(:U64, "header", "length")])
     ])
   end
   let read: list = [
-    native/unless_statement(
-      native/binary_expression(:Equal, native/typed_expression(:U8, native/unary_expression(:Tag, "value")), "tag_list"),
-      [native/return_zero()]
-    ),
-    native/let_statement("pointer", [:Pointer, header, :Const], native/unary_expression(:UnpackPointer, "value")),
-    native/let_load("header", header, "pointer"),
+    @native_value/open_heap("value", "list", header, "pointer", "header", [native/return_zero()]),
     native/let_field("data", values, "header", "data"),
     native/let_field("length", :U64, "header", "length")
   ]
   context = native/declare_function(context, "value_list_get", result, [["value", word, :Gc], ["index", :U64, :Value]], [], [:ReadMemory], :Gc, "")
   context = native/define_function(context, "value_list_get", [
     @read,
-    native/unless_statement(native/binary_expression(:Less, "index", "length"), [native/return_zero()]),
-    native/let_offset("slot", values, "data", "index"),
+    @native/checked_element("slot", word, "data", "length", "index", [native/return_zero()]),
     native/return_record(["true", native/typed_load(word, "slot")])
   ])
   context = native/declare_function(context, "value_list_slice", result, [worker, ["value", word, :Gc],
@@ -148,10 +116,7 @@ verb native_value/list_operations(input: map) -> map
     @read,
     native/when_statement(native/binary_expression(:Less, "end", "start"), [native/return_zero()]),
     native/when_statement(native/binary_expression(:Less, "length", "end"), [native/return_zero()]),
-    native/let_statement("size", :U64, native/unary_expression(:SizeOf, header)),
-    native/let_call("raw", [:Pointer, :U8, :Mutable], "memory_allocate", ["worker", "size", "layout_list_view"]),
-    native/when_statement(native/binary_expression(:Equal, "raw", "null_bytes"), [native/return_zero()]),
-    native/let_statement("target", [:Pointer, header, :Mutable], native/unary_expression(:PointerCast, "raw")),
+    @native_memory/allocate_record("target", header, "layout_list_view", [native/return_zero()]),
     native/set_statement("data", native/offset_expression("data", "start")),
     native/set_statement("length", native/binary_expression(:Subtract, "end", "start")),
     native/let_field("storage", [:Pointer, [:Record, "ListStorage"], :Mutable], "header", "storage"),
@@ -166,8 +131,7 @@ verb native_value/list_operations(input: map) -> map
     @read,
     native/unless_statement(native/binary_expression(:Less, "index", "length"), [native/return_zero()]),
     native/let_statement("source", [:Pointer, word, :Const], native/unary_expression(:Freeze, "data")),
-    native/let_call("copied", result, "value_list", ["worker", "source", "length"]),
-    native/unless_statement(native/field_expression("copied", "ok"), [native/return_zero()]),
+    @native/try_call("copied", result, "value_list", ["worker", "source", "length"], [native/return_zero()]),
     native/let_field("updated", word, "copied", "value"),
     native/let_statement("target", [:Pointer, header, :Mutable], native/unary_expression(:UnpackPointer, "updated")),
     native/set_statement("header", native/load_expression("target")),
@@ -197,10 +161,7 @@ verb native_value/list_operations(input: map) -> map
       native/typed_expression([:Pointer, :U8, :Mutable], native/unary_expression(:PointerCast, "storage")),
       native/typed_expression(:U64, native/unary_expression(:SizeOf, header))]), [native/set_statement("reuse", "false")]),
     native/if_statement("reuse", [
-      native/let_statement("size", :U64, native/unary_expression(:SizeOf, header)),
-      native/let_call("raw", [:Pointer, :U8, :Mutable], "memory_allocate", ["worker", "size", "layout_list_view"]),
-      native/when_statement(native/binary_expression(:Equal, "raw", "null_bytes"), [native/return_zero()]),
-      native/let_statement("target", [:Pointer, header, :Mutable], native/unary_expression(:PointerCast, "raw")),
+      @native_memory/allocate_record("target", header, "layout_list_view", [native/return_zero()]),
       native/store_statement("tail", "element"),
       native/let_statement("used_slot", [:Pointer, :U64, :Mutable], native/field_pointer_expression("storage", "used")),
       native/store_statement("used_slot", native/typed_expression(:U64, native/binary_expression(:Add, "used", "one")))
@@ -213,13 +174,7 @@ verb native_value/list_operations(input: map) -> map
       ]),
       native/let_load("new_header", header, "target"),
       native/let_field("destination", values, "new_header", "data"),
-      native/let_statement("i", :U64, "zero"),
-      native/while_statement(native/binary_expression(:Less, "i", "length"), [
-        native/let_offset("src", values, "data", "i"),
-        native/let_offset("dst", values, "destination", "i"),
-        native/store_statement("dst", native/typed_load(word, "src")),
-        native/set_statement("i", native/binary_expression(:Add, "i", "one"))
-      ]),
+      @native/copy_elements(word, "destination", "data", "length", :Mutable),
       native/set_statement("tail", native/offset_expression("destination", "length")),
       native/store_statement("tail", "element"),
       native/set_statement("data", "destination"),
@@ -248,12 +203,7 @@ verb native_value/map_update(input: map) -> map
     ["value", word, :Gc], ["key", word, :Gc],
     ["element", word, :Gc]], [], [:Allocate, :ReadMemory, :WriteMemory], :Gc, "")
   context = native/define_function(context, "value_map_set", [
-    native/unless_statement(
-      native/binary_expression(:Equal, native/typed_expression(:U8, native/unary_expression(:Tag, "value")), "tag_map"),
-      [native/return_zero()]
-    ),
-    native/let_statement("pointer", [:Pointer, header, :Const], native/unary_expression(:UnpackPointer, "value")),
-    native/let_load("header", header, "pointer"),
+    @native_value/open_heap("value", "map", header, "pointer", "header", [native/return_zero()]),
     native/let_field("data", entries, "header", "data"),
     native/let_field("length", :U64, "header", "length"),
     native/let_statement("low", :U64, "zero"),
@@ -265,13 +215,7 @@ verb native_value/map_update(input: map) -> map
       native/let_statement("middle", :U64, native/binary_expression(:Add, "low", "distance")),
       native/let_offset("slot", entries, "data", "middle"),
       native/let_load("candidate", entry, "slot"),
-      native/let_call(
-        "comparison",
-        [:Record, "IntResult"],
-        "value_compare",
-        [native/typed_field(word, "candidate", "key"), "key"]
-      ),
-      native/unless_statement(native/field_expression("comparison", "ok"), [native/return_zero()]),
+      @native/try_call("comparison", [:Record, "IntResult"], "value_compare", [native/typed_field(word, "candidate", "key"), "key"], [native/return_zero()]),
       native/let_field("order", :I64, "comparison", "number"),
       native/when_statement(native/binary_expression(:Equal, "order", "int_zero"), [
         native/set_statement("low", "middle"),
@@ -288,13 +232,7 @@ verb native_value/map_update(input: map) -> map
     native/unless_statement("replace", [native/set_statement("count", native/binary_expression(:Add, "count", "one"))]),
     native/let_statement("header_size", :U64, native/unary_expression(:SizeOf, header)),
     native/let_statement("entry_size", :U64, native/unary_expression(:SizeOf, entry)),
-    native/let_statement("limit", :U64, native/binary_expression(:Subtract, "allocation_limit", "header_size")),
-    native/set_statement("limit", native/binary_expression(:Divide, "limit", "entry_size")),
-    native/when_statement(native/binary_expression(:Less, "limit", "count"), [native/return_zero()]),
-    native/let_statement("bytes", :U64, native/binary_expression(:Multiply, "count", "entry_size")),
-    native/let_statement("total", :U64, native/binary_expression(:Add, "header_size", "bytes")),
-    native/let_call("raw", [:Pointer, :U8, :Mutable], "memory_allocate", ["worker", "total", "layout_map"]),
-    native/when_statement(native/binary_expression(:Equal, "raw", "null_bytes"), [native/return_zero()]),
+    @native_memory/allocate_with_tail("raw", "header_size", "entry_size", "count", "layout_map", [native/return_zero()]),
     native/let_statement("target", [:Pointer, header, :Mutable], native/unary_expression(:PointerCast, "raw")),
     native/let_offset("raw_data", [:Pointer, :U8, :Mutable], "raw", "header_size"),
     native/let_statement("destination", entries, native/unary_expression(:PointerCast, "raw_data")),

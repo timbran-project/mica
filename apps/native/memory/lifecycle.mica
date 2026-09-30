@@ -39,12 +39,12 @@ verb native_memory/lifecycle(input: map) -> map
     ["memory_unpublish", :Bool, [["worker", worker, :Borrow], ["shared", root, :Borrow]], [:ReadMemory, :WriteMemory], :Value]]
     context = native_memory/declare(context, spec[0], spec[1], spec[2], spec[3], spec[4], "")
   end
-  let sync: list = [native_memory/bind("sync", bytes, native_memory/field(bytes, "heap", "mutex")),
+  let sync: list = [native/let_statement("sync", bytes, native_memory/field(bytes, "heap", "mutex")),
     native_memory/call("memory_lock", ["sync"])]
-  let worker_heap: list = [native_memory/bind("heap", heap, native_memory/field(heap, "worker", "heap"))]
+  let worker_heap: list = [native/let_statement("heap", heap, native_memory/field(heap, "worker", "heap"))]
   let unlock: list = [native_memory/call("memory_unlock", ["sync"])]
   let wait: list = [native/while_statement("memory_true", [
-    native_memory/bind("collecting", :Bool, native_memory/field(:Bool, "heap", "collecting")),
+    native/let_statement("collecting", :Bool, native_memory/field(:Bool, "heap", "collecting")),
     native/unless_statement("collecting", [native/break_statement()]),
     native_memory/call("memory_wait", ["sync"])])]
   let failed: list = [@unlock, native/return_value("memory_false")]
@@ -54,8 +54,8 @@ verb native_memory/lifecycle(input: map) -> map
     native/let_call("sync", bytes, "memory_sync_create", []),
     native/when_statement(native/binary_expression(:Equal, "sync", "memory_null_bytes"), [native/return_value("memory_false")]),
     native/store_statement("heap", native/typed_expression([:Record, "MemoryHeap"], [:Zero])),
-    native_memory/bind("slot", native_memory/pointer(bytes), native/field_pointer_expression("heap", "mutex")),
-    native_memory/bind("adopted", bytes, native/binary_expression(:Adopt, "slot", "sync")),
+    native/let_statement("slot", native_memory/pointer(bytes), native/field_pointer_expression("heap", "mutex")),
+    native/let_statement("adopted", bytes, native/binary_expression(:Adopt, "slot", "sync")),
     native_memory/store(trace, "heap", "trace", "trace"),
     native_memory/store(:Bool, "heap", "collection_ok", "memory_true"),
     native/return_value("memory_true")])
@@ -76,9 +76,9 @@ verb native_memory/lifecycle(input: map) -> map
       native/when_statement(native/binary_expression(:Equal, "nursery", "memory_null_bytes"), [native/return_value("memory_false")])]),
     @sync, @wait,
     native/store_statement("worker", native/typed_expression([:Record, "MemoryWorker"], [:Zero])),
-    native_memory/bind("slot", native_memory/pointer(bytes), native/field_pointer_expression("worker", "nursery")),
+    native/let_statement("slot", native_memory/pointer(bytes), native/field_pointer_expression("worker", "nursery")),
     native/unless_statement(native/binary_expression(:Equal, "nursery", "memory_null_bytes"), [
-      native_memory/bind("adopted", bytes, native/binary_expression(:Adopt, "slot", "nursery"))]),
+      native/let_statement("adopted", bytes, native/binary_expression(:Adopt, "slot", "nursery"))]),
     native_memory/store(:U64, "worker", "capacity", "capacity"),
     native_memory/store_root(heap, "worker", "heap", native/typed_expression(heap, native/manage_expression("heap"))),
     native_memory/store_root(worker, "worker", "next", native_memory/root(worker, "heap", "workers")),
@@ -88,29 +88,29 @@ verb native_memory/lifecycle(input: map) -> map
     @worker_heap,
     native/when_statement(native/binary_expression(:Equal, "heap", "memory_null_heap"), [native/return_value("memory_false")]),
     @sync,
-    native_memory/when(native_memory/field(:Bool, "worker", "active"), failed),
+    native/when_statement(native_memory/field(:Bool, "worker", "active"), failed),
     @wait,
     native/unless_statement(native/binary_expression(:Equal, native_memory/field(root, "worker", "roots"), "memory_null_root"), failed),
-    native_memory/bind("link", native_memory/pointer(worker), native/field_pointer_expression("heap", "workers")),
+    native/let_statement("link", native_memory/pointer(worker), native/field_pointer_expression("heap", "workers")),
     native/while_statement("memory_true", [
-      native_memory/bind("candidate", worker, native/root_load_expression("link")),
+      native/let_statement("candidate", worker, native/root_load_expression("link")),
       native/when_statement(native/binary_expression(:Equal, "candidate", "memory_null_worker"), failed),
       native/when_statement(native/binary_expression(:Equal, "candidate", "worker"), [native/break_statement()]),
       native/set_statement("link", native/field_pointer_expression("candidate", "next"))]),
     native/root_store_statement("link", native_memory/root(worker, "worker", "next")),
-    native_memory/bind("nursery", bytes, native_memory/root(bytes, "worker", "nursery")),
+    native/let_statement("nursery", bytes, native_memory/root(bytes, "worker", "nursery")),
     native_memory/call("memory_platform_release", ["nursery"]),
     native/store_statement("worker", native/typed_expression([:Record, "MemoryWorker"], [:Zero])), @success])
   for operation in ["enter", "leave"]
     let body: list = [@worker_heap, @sync]
     if operation == "enter"
       body = [@body,
-        native_memory/when(native_memory/field(:Bool, "worker", "active"), failed),
+        native/when_statement(native_memory/field(:Bool, "worker", "active"), failed),
         @wait,
         native_memory/store(:Bool, "worker", "active", "memory_true")]
     else
       body = [@body,
-        native_memory/bind("active", :Bool, native_memory/field(:Bool, "worker", "active")),
+        native/let_statement("active", :Bool, native_memory/field(:Bool, "worker", "active")),
         native/unless_statement("active", failed),
         native_memory/store(:Bool, "worker", "active", "memory_false"),
         native_memory/call("memory_wake", ["sync"])]
@@ -119,24 +119,24 @@ verb native_memory/lifecycle(input: map) -> map
   end
   context = native/define_function(context, "memory_safepoint", [
     @worker_heap, @sync,
-    native_memory/bind("active", :Bool, native_memory/field(:Bool, "worker", "active")),
+    native/let_statement("active", :Bool, native_memory/field(:Bool, "worker", "active")),
     native/unless_statement("active", failed),
     native_memory/store(:Bool, "worker", "active", "memory_false"),
     native_memory/call("memory_wake", ["sync"]),
-    native_memory/bind("requested", :Bool, native_memory/field(:Bool, "heap", "collecting")),
+    native/let_statement("requested", :Bool, native_memory/field(:Bool, "heap", "collecting")),
     native/if_statement("requested", wait, [
-      native_memory/bind("pressure", :Bool, native_memory/field(:Bool, "worker", "pressure")),
-      native_memory/bind("should_collect", :Bool, "collect"),
+      native/let_statement("pressure", :Bool, native_memory/field(:Bool, "worker", "pressure")),
+      native/let_statement("should_collect", :Bool, "collect"),
       native/when_statement("pressure", [native/set_statement("should_collect", "memory_true")]),
       native/when_statement("should_collect", [
         native_memory/store(:Bool, "heap", "collecting", "memory_true"),
         native/while_statement("memory_true", [
-          native_memory/bind("busy", :Bool, "memory_false"),
-          native_memory/bind("other", worker, native_memory/root(worker, "heap", "workers")),
+          native/let_statement("busy", :Bool, "memory_false"),
+          native/let_statement("other", worker, native_memory/root(worker, "heap", "workers")),
           native/while_statement("memory_true", [
             native/when_statement(native/binary_expression(:Equal, "other", "memory_null_worker"), [native/break_statement()]),
-            native_memory/when(native_memory/field(:Bool, "other", "active"), [native/set_statement("busy", "memory_true"), native/break_statement()]),
-            native_memory/set("other", native_memory/root(worker, "other", "next"))]),
+            native/when_statement(native_memory/field(:Bool, "other", "active"), [native/set_statement("busy", "memory_true"), native/break_statement()]),
+            native/set_statement("other", native_memory/root(worker, "other", "next"))]),
           native/unless_statement("busy", [native/break_statement()]),
           native_memory/call("memory_wait", ["sync"])]),
         native/let_call("ok", :Bool, "memory_collect_stopped", ["heap"]),
@@ -146,10 +146,10 @@ verb native_memory/lifecycle(input: map) -> map
           native/binary_expression(:Add, native_memory/field(:U64, "heap", "epoch"), "memory_n1"))),
         native_memory/call("memory_wake", ["sync"])])]),
     native_memory/store(:Bool, "worker", "active", "memory_true"),
-    native_memory/bind("result", :Bool, native_memory/field(:Bool, "heap", "collection_ok")),
+    native/let_statement("result", :Bool, native_memory/field(:Bool, "heap", "collection_ok")),
     @unlock, native/return_value("result")])
   context = native/define_function(context, "memory_allocate", [
-    native_memory/bind("active", :Bool, native_memory/field(:Bool, "worker", "active")),
+    native/let_statement("active", :Bool, native_memory/field(:Bool, "worker", "active")),
     native/unless_statement("active", [native/return_value("memory_null_bytes")]),
     native/let_call("allocation", bytes, "memory_nursery_allocate", ["worker", "size", "layout"]),
     native/unless_statement(native/binary_expression(:Equal, "allocation", "memory_null_bytes"), [native/return_value("allocation")]),
@@ -163,24 +163,24 @@ verb native_memory/lifecycle(input: map) -> map
     native_memory/store(:U64, "object", "state", "memory_object_private"),
     native/return_value(native/call_expression("memory_payload", ["object"]))])
   context = native/define_function(context, "memory_root_push", [
-    native_memory/bind("active", :Bool, native_memory/field(:Bool, "worker", "active")),
+    native/let_statement("active", :Bool, native_memory/field(:Bool, "worker", "active")),
     native/unless_statement("active", [native/return_value("memory_false")]),
     native/unless_statement(native/binary_expression(:Equal, native_memory/field(:U64, "root", "registration"), "memory_n0"), [native/return_value("memory_false")]),
     native_memory/store_root(root, "root", "next", native_memory/root(root, "worker", "roots")),
     native_memory/store_root(root, "worker", "roots", native/typed_expression(root, native/manage_expression("root"))),
     native_memory/store(:U64, "root", "registration", "memory_n1"), native/return_value("memory_true")])
   context = native/define_function(context, "memory_root_pop", [
-    native_memory/bind("active", :Bool, native_memory/field(:Bool, "worker", "active")),
+    native/let_statement("active", :Bool, native_memory/field(:Bool, "worker", "active")),
     native/unless_statement("active", [native/return_value("memory_false")]),
     native/unless_statement(native/binary_expression(:Equal, native_memory/root(root, "worker", "roots"), "root"), [native/return_value("memory_false")]),
     native_memory/store_root(root, "worker", "roots", native_memory/root(root, "root", "next")),
     native/store_statement("root", native/typed_expression([:Record, "MemoryRoot"], [:Zero])), native/return_value("memory_true")])
   context = native/define_function(context, "memory_publish", [
-    native_memory/bind("candidate", root, native_memory/field(root, "worker", "roots")),
+    native/let_statement("candidate", root, native_memory/field(root, "worker", "roots")),
     native/while_statement("memory_true", [
       native/when_statement(native/binary_expression(:Equal, "candidate", "memory_null_root"), [native/return_value("memory_false")]),
       native/when_statement(native/binary_expression(:Equal, "candidate", "source"), [native/break_statement()]),
-      native_memory/set("candidate", native_memory/field(root, "candidate", "next"))]),
+      native/set_statement("candidate", native_memory/field(root, "candidate", "next"))]),
     native/unless_statement(native/call_expression("memory_safepoint", ["worker", "memory_true"]), [native/return_value("memory_false")]),
     @worker_heap, @sync,
     native/unless_statement(native/binary_expression(:Equal, native_memory/field(:U64, "shared", "registration"), "memory_n0"), failed),
@@ -190,13 +190,13 @@ verb native_memory/lifecycle(input: map) -> map
     native_memory/store_root(root, "heap", "roots", native/typed_expression(root, native/manage_expression("shared"))),
     native_memory/store(:U64, "shared", "registration", "memory_n2"), @success])
   let find_shared: list = [
-    native_memory/bind("link", native_memory/pointer(root), native/field_pointer_expression("heap", "roots")),
+    native/let_statement("link", native_memory/pointer(root), native/field_pointer_expression("heap", "roots")),
     native/while_statement("memory_true", [
-      native_memory/bind("candidate", root, native/root_load_expression("link")),
+      native/let_statement("candidate", root, native/root_load_expression("link")),
       native/when_statement(native/binary_expression(:Equal, "candidate", "memory_null_root"), failed),
       native/when_statement(native/binary_expression(:Equal, "candidate", "shared"), [native/break_statement()]),
       native/set_statement("link", native/field_pointer_expression("candidate", "next"))])]
-  let active: list = [native_memory/bind("active", :Bool, native_memory/field(:Bool, "worker", "active")),
+  let active: list = [native/let_statement("active", :Bool, native_memory/field(:Bool, "worker", "active")),
     native/unless_statement("active", [native/return_value("memory_false")])]
   context = native/define_function(context, "memory_acquire", [
     @active, @worker_heap, @sync, @find_shared,

@@ -142,8 +142,7 @@ verb native_value/utf8_encode(input: map) -> map
     [], [:WriteMemory], :Value, "")
   context = native/define_function(context, name, [
     native/let_statement("number", :U32, native/unary_expression(:Unwrap, "rune")),
-    native/let_call("scalar", [:Record, "RuneResult"], "unicode_scalar", ["number"]),
-    native/unless_statement(native/field_expression("scalar", "ok"), [native/return_zero()]),
+    @native/try_call("scalar", [:Record, "RuneResult"], "unicode_scalar", ["number"], [native/return_zero()]),
     native/if_statement(native/binary_expression(:Less, "number", "utf32_128"), [
       native/let_statement("width", :U64, "one"),
       native/let_statement("prefix", :U32, "utf32_0")
@@ -258,8 +257,7 @@ verb native_value/utf8_scan(input: map) -> map
         native/set_statement("scalars", native/binary_expression(:Add, "scalars", "one")),
         native/continue_statement()
       ]),
-      native/let_call("decoded", [:Record, "Utf8Decode"], "utf8_decode", ["slot", "remaining"]),
-      native/unless_statement(native/field_expression("decoded", "ok"), failure),
+      @native/try_call("decoded", [:Record, "Utf8Decode"], "utf8_decode", ["slot", "remaining"], failure),
       native/let_field("width", :U64, "decoded", "width"),
       native/set_statement("ascii", "false"),
       native/set_statement("offset", native/binary_expression(:Add, "offset", "width")),

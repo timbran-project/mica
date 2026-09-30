@@ -23,27 +23,49 @@ verb native_kernel/schemas() -> list
       ["status", :U64], ["conflict_relation", :U64], ["conflict_tuple", word], ["done", :Bool]]]]
 end
 
-verb native_kernel/field_type(record: string, field: string)
+verb native_kernel/schema(record: string) -> list
   for spec in native_kernel/schemas()
     if spec[0] == record
-      for member in spec[1]
-        if member[0] == field
-          return member[1]
-        end
-      end
+      return [string_concat("Kernel", record), spec[1]]
     end
   end
-  native/ensure(false, "unknown kernel field")
+  native/ensure(false, string_concat("unknown kernel record ", record))
+  return []
 end
 
 verb native_kernel/read(record: string, object, field: string) -> list
-  let output: list = native_memory/field(native_kernel/field_type(record, field), object, field)
+  let output: list = native/member(native_kernel/schema(record), object, field)
   return output
 end
 
 verb native_kernel/write(record: string, object, field: string, value) -> list
-  let output: list = native_memory/store(native_kernel/field_type(record, field), object, field, value)
+  let output: list = native/set_member(native_kernel/schema(record), object, field, value)
   return output
+end
+
+// Named construction and path copying use the same schema as layout and GC.
+verb native_kernel/construct(record: string, fields: map) -> list
+  let arguments: list = native/record_arguments(native_kernel/schema(record), fields)
+  let output: list = native_kernel/call(native_kernel/pointer(record), string_concat("new_", record), ["worker", @arguments])
+  return output
+end
+
+verb native_kernel/copy_record(record: string, source: string, changes: map) -> list
+  let arguments: list = native/record_copy_arguments(native_kernel/schema(record), source, changes)
+  let output: list = native_kernel/call(native_kernel/pointer(record), string_concat("new_", record), ["worker", @arguments])
+  return output
+end
+
+verb native_kernel/walk(record: string, cursor: string, first, body: list, exhausted: list) -> list
+  let result: list = native/walk_chain(cursor, native_kernel/pointer(record), first,
+    native_kernel/read(record, cursor, "next"), body, exhausted)
+  return result
+end
+
+verb native_kernel/require_tuple(row, relation, failure: list) -> list
+  return [native_value/require_kind(row, "list", failure),
+    native/unless_statement(native_kernel/binary(:Equal,
+      native_kernel/call(:U64, "width", [row]), native_kernel/read("Relation", relation, "arity")), failure)]
 end
 
 verb native_kernel/binary(op: symbol, left, right) -> list
@@ -89,34 +111,7 @@ verb native_kernel/declare(context: map, name: string, result, parameters: list,
 end
 
 verb native_kernel/define(context: map, name: string, body: list) -> map
-  let output: map = native/define_function(context, string_concat("kernel_", name), native_kernel/body(body))
-  return output
-end
-
-// Typed expressions are convenient when composing kernel builders. Strip the
-// outer annotation where the structured statement already supplies its type.
-verb native_kernel/body(statements: list) -> list
-  let output: list = []
-  for statement in statements
-    let item: list = statement
-    let positions: map = {:Let -> 3, :Set -> 2, :Do -> 1, :If -> 1, :While -> 1, :Switch -> 2, :Return -> 1}
-    if map_contains_key(positions, item[0]) && len(item) > positions[item[0]]
-      let p: int = positions[item[0]]
-      if is_kind(item[p], :list) && item[p][0] == :Expr
-        item[p] = item[p][2]
-      end
-    end
-    if item[0] == :If
-      item[2] = native_kernel/body(item[2])
-      item[3] = native_kernel/body(item[3])
-    elseif item[0] == :While
-      item[2] = native_kernel/body(item[2])
-    elseif item[0] == :Switch
-      item[3] = [[arm[0], native_kernel/body(arm[1])] for arm in item[3]]
-      item[4] = native_kernel/body(item[4])
-    end
-    output = [@output, item]
-  end
+  let output: map = native/define_function(context, string_concat("kernel_", name), body)
   return output
 end
 
@@ -158,25 +153,16 @@ verb native_kernel/types(input: map) -> map
   end
   context[:constants] = merged
   for spec in native_kernel/schemas()
-    let type_id: list = native_kernel/pointer(spec[0])
-    let parameters: list = [["worker", worker, :Borrow]]
+    let fields: list = []
     for field in spec[1]
       let mode: symbol = :Value
       if native/is_pointer(field[1]) || field[1] == word
         mode = :Gc
       end
-      parameters = [@parameters, [field[0], field[1], mode]]
+      fields = [@fields, [field[0], field[1], mode]]
     end
-    let name: string = string_concat("new_", spec[0])
-    context = native_kernel/declare(context, name, type_id, parameters)
-    context = native_kernel/define(context, name, [
-      native/let_call("raw", bytes, "memory_allocate", ["worker",
-        native/typed_expression(:U64, native/unary_expression(:SizeOf, [:Record, string_concat("Kernel", spec[0])])),
-        string_concat("kernel_layout_", spec[0])]),
-      native/when_statement(native_kernel/binary(:Equal, "raw", "null_bytes"), [native/return_value(native_kernel/null(spec[0]))]),
-      native/let_statement("object", type_id, native/unary_expression(:PointerCast, "raw")),
-      native/store_statement("object", native/typed_record([:Record, string_concat("Kernel", spec[0])], [field[0] for field in spec[1]])),
-      native/return_value("object")])
+    context = native_memory/record_constructor(context, string_concat("kernel_new_", spec[0]),
+      [string_concat("Kernel", spec[0]), fields], string_concat("kernel_layout_", spec[0]), "null_bytes")
   end
   return context
 end
@@ -189,7 +175,7 @@ verb native_kernel/tracing(input: map) -> map
   context = native_kernel/declare(context, "trace", :Void, [["collection", collection, :Borrow], ["object", object, :Gc]])
   let cases: list = []
   for spec in native_kernel/schemas()
-    let body: list = [native_memory/bind("header", native_kernel/pointer(spec[0]), native/unary_expression(:PointerCast, "payload"))]
+    let body: list = [native/let_statement("header", native_kernel/pointer(spec[0]), native/unary_expression(:PointerCast, "payload"))]
     for field in spec[1]
       if native/is_pointer(field[1])
         body = [@body, @native_value/trace_external("header", field[0], field[1])]
@@ -201,7 +187,7 @@ verb native_kernel/tracing(input: map) -> map
       [@native/rename_bindings(body, native_value/trace_bindings(body, spec[0])), native/return_void()])]
   end
   context = native_kernel/define(context, "trace", [
-    native_memory/bind("layout", :U64, native_memory/field(:U64, "object", "layout")),
+    native/let_statement("layout", :U64, native_memory/field(:U64, "object", "layout")),
     native/let_call("payload", bytes, "memory_payload", ["object"]),
     native/switch_statement(:U64, "layout", cases, [native_memory/call("value_trace", ["collection", "object"]), native/return_void()])])
   return context

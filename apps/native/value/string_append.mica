@@ -23,8 +23,7 @@ verb native_value/string_append(input: map) -> map
     [], [:Allocate, :ReadMemory, :WriteMemory], :Gc, "")
   context = native/define_function(context, name, [
     native/note_statement(:Invariant, "The original string and suffix are validated UTF-8; suffix metadata describes exactly suffix_length bytes."),
-    native/let_call("checked", [:Record, "HeapStringResult"], "value_as_string", ["value"]),
-    native/unless_statement(native/field_expression("checked", "ok"), [native/return_zero()]),
+    @native/try_call("checked", [:Record, "HeapStringResult"], "value_as_string", ["value"], [native/return_zero()]),
     native/let_field("original", [:Pointer, header, :Const], "checked", "header"),
     native/let_load("header", header, "original"),
     native/let_field("length", :U64, "header", "length"),
@@ -63,10 +62,7 @@ verb native_value/string_append(input: map) -> map
       native/typed_expression(bytes, native/unary_expression(:PointerCast, "backing")),
       native/typed_expression(:U64, native/unary_expression(:SizeOf, header))]), [native/set_statement("reuse_tail", "false")]),
     native/if_statement("reuse_tail", [
-      native/let_statement("header_size", :U64, native/unary_expression(:SizeOf, header)),
-      native/let_call("raw", bytes, "memory_allocate", ["worker", "header_size", "layout_string_view"]),
-      native/when_statement(native/binary_expression(:Equal, "raw", "null_bytes"), [native/return_zero()]),
-      native/let_statement("target", [:Pointer, header, :Mutable], native/unary_expression(:PointerCast, "raw")),
+      @native_memory/allocate_record("target", header, "layout_string_view", [native/return_zero()], "raw", "header_size"),
       native/let_offset("destination", bytes, "base", "old_end"),
       native/copy_bytes_statement("destination", "suffix", "suffix_length"),
       native/let_statement("new_end", :U64, native/binary_expression(:Add, "old_end", "suffix_length")),
@@ -82,13 +78,7 @@ verb native_value/string_append(input: map) -> map
         native/binary_expression(:Less, "capacity", "total_length"),
         [native/set_statement("capacity", "total_length")]
       ),
-      native/let_call(
-        "allocation",
-        [:Record, "StringAllocation"],
-        "value_string_allocate",
-        ["worker", "total_length", "capacity", "total_scalars", "ascii"]
-      ),
-      native/unless_statement(native/field_expression("allocation", "ok"), [
+      @native/try_call("allocation", [:Record, "StringAllocation"], "value_string_allocate", ["worker", "total_length", "capacity", "total_scalars", "ascii"], [
         native/set_statement(
           "allocation",
           native/call_expression(
@@ -133,16 +123,14 @@ verb native_value/string_append(input: map) -> map
       ["suffix_length", :U64, :Value]
     ], [], [:Allocate, :ReadMemory, :WriteMemory], :Gc, "")
   context = native/define_function(context, name, [
-    native/let_call("checked", [:Record, "HeapStringResult"], "value_as_string", ["value"]),
-    native/unless_statement(native/field_expression("checked", "ok"), [native/return_zero()]),
+    @native/try_call("checked", [:Record, "HeapStringResult"], "value_as_string", ["value"], [native/return_zero()]),
     native/let_field("original", [:Pointer, header, :Const], "checked", "header"),
     native/let_load("header", header, "original"),
     native/let_field("length", :U64, "header", "length"),
     native/let_statement("limit", :U64, native/binary_expression(:Subtract, "allocation_limit", "length")),
     native/when_statement(native/binary_expression(:Less, "limit", "suffix_length"), [native/return_zero()]),
     native/when_statement(native/binary_expression(:Equal, "suffix_length", "zero"), [native/return_record(["true", "value"])]),
-    native/let_call("scan", [:Record, "Utf8Scan"], "utf8_scan", ["suffix", "suffix_length"]),
-    native/unless_statement(native/field_expression("scan", "ok"), [native/return_zero()]),
+    @native/try_call("scan", [:Record, "Utf8Scan"], "utf8_scan", ["suffix", "suffix_length"], [native/return_zero()]),
     native/let_field("scalars", :U64, "scan", "scalars"),
     native/let_field("ascii", :Bool, "scan", "ascii"),
     native/return_value(native/call_expression("value_string_append_validated", ["worker", "value", "suffix", "suffix_length", "scalars", "ascii"]))
@@ -155,8 +143,7 @@ verb native_value/string_append(input: map) -> map
     ],
     [], [:Allocate, :ReadMemory, :WriteMemory], :Gc, "")
   context = native/define_function(context, name, [
-    native/let_call("checked", [:Record, "HeapStringResult"], "value_as_string", ["right"]),
-    native/unless_statement(native/field_expression("checked", "ok"), [native/return_zero()]),
+    @native/try_call("checked", [:Record, "HeapStringResult"], "value_as_string", ["right"], [native/return_zero()]),
     native/let_field("pointer", [:Pointer, header, :Const], "checked", "header"),
     native/let_load("header", header, "pointer"),
     native/let_field("data", bytes, "header", "data"),

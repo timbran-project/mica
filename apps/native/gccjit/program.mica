@@ -72,13 +72,13 @@ verb native_jit/text(offset) -> list
   return result
 end
 verb native_jit/prologue() -> list
-  return [native_jit/bind("capacity", :U64, native_jit/word("data", 5))]
+  return [native/let_statement("capacity", :U64, native_jit/word("data", 5))]
 end
 verb native_jit/scan(section: int, body: list) -> list
-  return [native_jit/bind("cursor", :U64, native_jit/word("data", 6 + section * 2)),
+  return [native/let_statement("cursor", :U64, native_jit/word("data", 6 + section * 2)),
     native/while_statement(native/binary_expression(:Less, "cursor", native_jit/word("data", 7 + section * 2)), [
       native/let_offset("row", native_jit/words(), "data", "cursor"), @body,
-      native_jit/set("cursor", native_jit/binary(:Add, "cursor", native_jit/word("row", 0)))])]
+      native/set_statement("cursor", native_jit/binary(:Add, "cursor", native_jit/word("row", 0)))])]
 end
 verb native_jit/declare(input: map, name: string, result, parameters: list) -> map
   let mode: symbol = :Value
@@ -94,6 +94,63 @@ end
 verb native_jit/define(input: map, name: string, statements: list) -> map
   let context: map = native/define_function(input, string_concat("jit_", name), [@native_jit/prologue(), @statements])
   return context
+end
+
+// Argument storage is shared within a compilation. Complete a call before
+// preparing another argument list; the libgccjit call consumes the handles.
+verb native_jit/argument_buffer() -> list
+  let result: list = native/typed_expression([:Pointer, native_jit/handle(), :Mutable],
+    native/offset_expression("cache", native_jit/slot(6, "n0")))
+  return result
+end
+
+verb native_jit/arguments(values: list) -> list
+  let body: list = []
+  let index: int = 0
+  for value in values
+    body = [@body, native_jit/save(6, native_jit/n(index), value)]
+    index = index + 1
+  end
+  return body
+end
+
+// Serialized operands are node IDs. Resolve each ID to its rvalue handle and
+// bind argument_count for the call or aggregate constructor that follows.
+verb native_jit/row_arguments(first: int) -> list
+  return [native/let_statement("argument", :U64, native_jit/n(first)),
+    native/let_statement("argument_count", :U64, "n0"),
+    native/while_statement(native/binary_expression(:Less, "argument", native_jit/word("row", 0)), [
+      native_jit/save(6, "argument_count", native_jit/cached(1, native_jit/at("row", "argument", :U64))),
+      native/set_statement("argument", native_jit/binary(:Add, "argument", "n1")),
+      native/set_statement("argument_count", native_jit/binary(:Add, "argument_count", "n1"))])]
+end
+
+verb native_jit/builtin_call(destination: string, literal: string, arguments: list) -> list
+  return [@native_jit/arguments(arguments),
+    native/set_statement(destination, native_jit/j("call", ["ctx",
+      native_jit/j("builtin", ["ctx", native_jit/literal(literal)]),
+      native_jit/n(len(arguments)), native_jit/argument_buffer()]))]
+end
+
+verb native_jit/evaluate_builtin(block, literal: string, arguments: list) -> list
+  return [@native_jit/arguments(arguments),
+    native/do_statement(native/call_expression("j_eval", [block,
+      native_jit/j("call", ["ctx", native_jit/j("builtin", ["ctx", native_jit/literal(literal)]),
+        native_jit/n(len(arguments)), native_jit/argument_buffer()])]))]
+end
+
+verb native_jit/indirect_call(callee: string, first: int, ?tail: bool = false) -> list
+  let body: list = [
+    native_jit/trap_unless(native_jit/j("ne", ["ctx", callee,
+      native_jit/j("null", ["ctx", native_jit/j("value_type", [callee])])])),
+    @native_jit/row_arguments(first)]
+  let call: list = native_jit/j("call_indirect", ["ctx", callee, "argument_count", native_jit/argument_buffer()])
+  if tail
+    return [@body, native/let_statement("call", native_jit/handle(), call),
+      native/do_statement(native/call_expression("j_require_tail", ["call"])),
+      native/do_statement(native/call_expression("j_return", ["block", "call"]))]
+  end
+  return [@body, native/set_statement("value", call)]
 end
 
 // Cache planes: 0 declarations/blocks, 1 rvalues, 2 lvalues, 3 types,
@@ -137,42 +194,17 @@ verb native_jit/program() -> map
   context = native_jit/define_declarations(context)
   context = native_jit/define_instructions(context)
   context = native_jit/define(context, "build", [
-    native_jit/unless(native_jit/invoke("types", [], :Bool), [native_jit/ret("n128")]),
+    native/unless_statement(native_jit/invoke("types", [], :Bool), [native/return_value("n128")]),
     native/do_statement(native_jit/invoke("functions", [], :Void)),
     native/do_statement(native_jit/invoke("locals", [], :Void)),
     native/do_statement(native_jit/invoke("blocks", [], :Void)),
     native/do_statement(native_jit/invoke("constants", [], :Void)),
     native/do_statement(native_jit/invoke("globals", [], :Void)),
-    native_jit/bind("status", :U64, native_jit/invoke("instructions", [], :U64)),
-    native_jit/unless(native/binary_expression(:Equal, "status", "n0"), [native_jit/ret("status")]),
-    native/do_statement(native_jit/invoke("terminators", [], :Void)), native_jit/ret("n0")])
+    native/let_statement("status", :U64, native_jit/invoke("instructions", [], :U64)),
+    native/unless_statement(native/binary_expression(:Equal, "status", "n0"), [native/return_value("status")]),
+    native/do_statement(native_jit/invoke("terminators", [], :Void)), native/return_value("n0")])
   let program: map = context[:state]
   return program
-end
-
-// Backend expression helpers retain types on nested operands. Statement roots
-// already receive their expected type from the shared native syntax builder.
-verb native_jit/expression(expression)
-  if is_kind(expression, :list) && expression[0] == :Expr
-    return expression[2]
-  end
-  return expression
-end
-verb native_jit/bind(name: string, type_id, expression) -> list
-  let result: list = native/let_statement(name, type_id, native_jit/expression(expression))
-  return result
-end
-verb native_jit/set(name: string, expression) -> list
-  let result: list = native/set_statement(name, native_jit/expression(expression))
-  return result
-end
-verb native_jit/ret(expression) -> list
-  let result: list = native/return_value(native_jit/expression(expression))
-  return result
-end
-verb native_jit/unless(expression, body: list) -> list
-  let result: list = native/unless_statement(native_jit/expression(expression), body)
-  return result
 end
 
 verb native_jit/literals() -> list
@@ -203,6 +235,6 @@ verb native_jit/integer(number, type_id) -> list
   return result
 end
 verb native_jit/trap_unless(valid) -> list
-  let result: list = native_jit/set("block", native_jit/invoke("guard", ["block_id", valid], native_jit/handle()))
+  let result: list = native/set_statement("block", native_jit/invoke("guard", ["block_id", valid], native_jit/handle()))
   return result
 end

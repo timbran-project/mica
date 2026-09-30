@@ -1790,6 +1790,8 @@ int main(void) {{
         assert(mica_irreducible(limit, false) == (limit ? limit : 1));
         assert(mica_cycle_a(limit) == (limit % 2 ? 2 : 1));
         assert(mica_cycle_b(limit) == (limit % 2 ? 1 : 2));
+        assert(mica_semantic_range(limit) == (limit == 0 ? 0 : limit < 3 ? 1 : 4));
+        assert(mica_semantic_first(limit) == (limit == 0 ? 10 : 0));
     }}
     assert(mica_structured_choice(true) == 1);
     assert(mica_structured_choice(false) == 2);
@@ -1818,6 +1820,22 @@ int main(void) {{
     assert(mica_structured_guard_effects(false) == 1 && calls == 1);
     calls = 0;
     assert(mica_structured_guard_effects(true) == 0 && calls == 3);
+    struct mica_BuilderNode tail = {{ .f_next = NULL, .f_value = 2 }};
+    struct mica_BuilderNode head = {{ .f_next = &tail, .f_value = 1 }};
+    assert(mica_semantic_walk(NULL) == 0);
+    assert(mica_semantic_walk(&head) == 2);
+    struct mica_BuilderPair pair = mica_semantic_pair();
+    assert(pair.f_left == 1 && pair.f_right == 2);
+    uint64_t source[] = {{ 4, 5, 6 }}, destination[] = {{ 0, 0, 0 }};
+    assert(mica_semantic_elements(NULL, NULL, 0, 0) == 10);
+    assert(mica_semantic_elements(destination, source, 3, 2) == 6);
+    assert(destination[0] == 4 && destination[1] == 5 && destination[2] == 6);
+    assert(mica_semantic_elements(destination, source, 3, 3) == 10);
+    assert(mica_semantic_elements(source, source, 3, 0) == 4);
+    calls = 0;
+    struct mica_BuilderPair copy = mica_semantic_copy(&pair);
+    assert(copy.f_left == 1 && copy.f_right == 1 && calls == 1);
+    assert(pair.f_left == 1 && pair.f_right == 2);
     return 0;
 }}
 "#
@@ -1899,6 +1917,46 @@ fn graph_traversal_uses_work_stacks_for_long_chains() {
 #[test]
 fn structured_builders_reject_invalid_flow_and_annotations() {
     let mut runner = runner(true);
+    for (expression, expected) in [
+        (
+            r#"native/copy_elements(:U64, "dst", "src", "length", :Owned)"#,
+            "element copy requires const or mutable source access",
+        ),
+        (
+            r#"native/checked_element("slot", :U64, "data", "length", "index", [], :Owned)"#,
+            "element access requires const or mutable access",
+        ),
+        (
+            r#"native/record_arguments(["Pair", [["x", :U64], ["y", :U64]]], {"x" -> "one"})"#,
+            "field count for Pair",
+        ),
+        (
+            r#"native/record_arguments(["Pair", [["x", :U64], ["y", :U64]]], {"x" -> "one", "z" -> "one"})"#,
+            "missing field Pair.y",
+        ),
+        (
+            r#"native/record_copy_arguments(["Pair", [["x", :U64]]], "pair", {"typo" -> "one"})"#,
+            "unknown field Pair.typo",
+        ),
+        (
+            r#"native/record_arguments(["Pair", [["x", :U64], ["x", :U64]]], {"x" -> "one", "y" -> "one"})"#,
+            "duplicate record field",
+        ),
+        (
+            r#"native/walk_chain("cursor", [:Pointer, :U64, :Mutable], "head", "next", [], [])"#,
+            "chain exhaustion must leave the traversal",
+        ),
+        (
+            r#"native/walk_chain("cursor", [:Pointer, :U64, :Mutable], "head", "next", [], [native/continue_statement()])"#,
+            "chain exhaustion must leave the traversal",
+        ),
+    ] {
+        let source = format!(
+            "try\n {expression}\n return \"accepted\"\ncatch E_INVARG as problem\n return native/error_message(problem)\nend"
+        );
+        let message = eval(&mut runner, &source).with_str(str::to_owned).unwrap();
+        assert!(message.contains(expected), "{expression}: {message}");
+    }
     let prefix = r#"
 let state = native/program()
 let [constants, with_constants] = native/constants(state, [["one", :U64, "0000000000000001"]])

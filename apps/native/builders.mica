@@ -38,8 +38,15 @@ end
 
 // Syntax constructors compose with list splices and generator loops. They
 // return the checked body's existing syntax, not a second lowering API.
+verb native/statement_expression(expression)
+  if is_kind(expression, :list) && len(expression) == 3 && expression[0] == :Expr
+    return expression[2]
+  end
+  return expression
+end
+
 verb native/let_statement(name: string, type_id, expression) -> list
-  return [:Let, name, type_id, expression]
+  return [:Let, name, type_id, native/statement_expression(expression)]
 end
 
 verb native/let_field(name: string, type_id, value, field: string) -> list
@@ -59,23 +66,23 @@ verb native/let_call(name: string, type_id, function: string, arguments: list) -
 end
 
 verb native/set_statement(name: string, expression) -> list
-  return [:Set, name, expression]
+  return [:Set, name, native/statement_expression(expression)]
 end
 
 verb native/if_statement(condition, yes: list, no: list) -> list
-  return [:If, condition, yes, no]
+  return [:If, native/statement_expression(condition), yes, no]
 end
 
 verb native/when_statement(condition, body: list) -> list
-  return [:If, condition, body, []]
+  return [:If, native/statement_expression(condition), body, []]
 end
 
 verb native/unless_statement(condition, body: list) -> list
-  return [:If, condition, [], body]
+  return [:If, native/statement_expression(condition), [], body]
 end
 
 verb native/do_statement(expression) -> list
-  return [:Do, expression]
+  return [:Do, native/statement_expression(expression)]
 end
 
 verb native/store_statement(pointer, value) -> list
@@ -99,11 +106,11 @@ verb native/note_statement(kind: symbol, text: string) -> list
 end
 
 verb native/while_statement(condition, body: list) -> list
-  return [:While, condition, body]
+  return [:While, native/statement_expression(condition), body]
 end
 
 verb native/switch_statement(type_id, value, cases: list, fallback: list) -> list
-  return [:Switch, type_id, value, cases, fallback]
+  return [:Switch, type_id, native/statement_expression(value), cases, fallback]
 end
 
 verb native/case_arm(value: string, body: list) -> list
@@ -111,7 +118,7 @@ verb native/case_arm(value: string, body: list) -> list
 end
 
 verb native/return_value(value) -> list
-  return [:Return, value]
+  return [:Return, native/statement_expression(value)]
 end
 
 verb native/return_void() -> list
@@ -197,6 +204,158 @@ end
 
 verb native/binary_expression(op: symbol, left, right) -> list
   return [op, left, right]
+end
+
+// A record schema is [name, [[field, type, ...], ...]]. Named construction
+// checks completeness and always evaluates fields in declaration order.
+verb native/record_arguments(schema: list, fields: map) -> list
+  native/ensure(len(fields) == len(schema[1]), string_concat("field count for ", schema[0]))
+  let arguments: list = []
+  let seen: list = []
+  for field in schema[1]
+    native/ensure(!native/contains(seen, field[0]), "duplicate record field")
+    native/ensure(map_contains_key(fields, field[0]), string_concat("missing field ", schema[0], ".", field[0]))
+    seen = [@seen, field[0]]
+    arguments = [@arguments, fields[field[0]]]
+  end
+  return arguments
+end
+
+verb native/member_type(schema: list, field: string)
+  for member in schema[1]
+    if member[0] == field
+      return member[1]
+    end
+  end
+  native/ensure(false, string_concat("unknown field ", schema[0], ".", field))
+end
+
+verb native/member(schema: list, pointer, field: string) -> list
+  let kind = native/member_type(schema, field)
+  return [:Expr, kind, [:Load, [:Expr, [:Pointer, kind, :Mutable], [:FieldPointer, pointer, field]]]]
+end
+
+verb native/set_member(schema: list, pointer, field: string, value) -> list
+  let kind = native/member_type(schema, field)
+  return [:Do, [:Store, [:Expr, [:Pointer, kind, :Mutable], [:FieldPointer, pointer, field]], value]]
+end
+
+verb native/record_copy_arguments(schema: list, source: string, changes: map) -> list
+  for field, value in changes
+    native/member_type(schema, field)
+  end
+  let fields: map = changes
+  for field in schema[1]
+    if !map_contains_key(fields, field[0])
+      fields[field[0]] = native/member(schema, source, field[0])
+    end
+  end
+  let arguments: list = native/record_arguments(schema, fields)
+  return arguments
+end
+
+verb native/initialize_record(schema: list, fields: map) -> list
+  let result: list = native/typed_record([:Record, schema[0]], native/record_arguments(schema, fields))
+  return result
+end
+
+// Fallible operations expose an ok field. The failure body decides whether
+// to return the original error, translate it, or perform local recovery.
+verb native/try_call(name: string, result, function: string, arguments: list, failure: list) -> list
+  return [native/let_call(name, result, function, arguments),
+    native/unless_statement(native/field_expression(name, "ok"), failure)]
+end
+
+// Iteration owns its advancement, including continue inside a branch or
+// switch. A nested loop owns its own continue statements.
+verb native/advance_on_continue(body: list, advance: list) -> list
+  let result: list = []
+  for statement in body
+    let item: list = statement
+    if item[0] == :Continue
+      result = [@result, @advance]
+    elseif item[0] == :If
+      item[2] = native/advance_on_continue(item[2], advance)
+      item[3] = native/advance_on_continue(item[3], advance)
+    elseif item[0] == :Switch
+      item[3] = [[arm[0], native/advance_on_continue(arm[1], advance)] for arm in item[3]]
+      item[4] = native/advance_on_continue(item[4], advance)
+    end
+    result = [@result, item]
+  end
+  return result
+end
+
+verb native/body_falls_through(body: list, ?transfers: list = [:Return, :TailCall, :Break, :Continue]) -> bool
+  if len(body) == 0
+    return true
+  end
+  let last: list = body[len(body) - 1]
+  if native/contains(transfers, last[0])
+    return false
+  end
+  if last[0] == :If
+    let yes: bool = native/body_falls_through(last[2], transfers)
+    let no: bool = native/body_falls_through(last[3], transfers)
+    return yes || no
+  end
+  if last[0] == :Switch
+    for arm in last[3]
+      if native/body_falls_through(arm[1], transfers)
+        return true
+      end
+    end
+    let fallback: bool = native/body_falls_through(last[4], transfers)
+    return fallback
+  end
+  return true
+end
+
+verb native/advancing_loop(condition, body: list, advance: list) -> list
+  let statements: list = native/advance_on_continue(body, advance)
+  if native/body_falls_through(body)
+    statements = [@statements, @advance]
+  end
+  let result: list = native/while_statement(condition, statements)
+  return result
+end
+
+// The index is an unsigned count in [start, limit). Step must not wrap it.
+// Names supplied by callers are the only bindings introduced by these loops.
+verb native/for_range(index: string, start, limit, body: list, ?step = "one") -> list
+  return [native/let_statement(index, :U64, start),
+    native/advancing_loop(native/binary_expression(:Less, index, limit), body,
+      [native/set_statement(index, native/binary_expression(:Add, index, step))])]
+end
+
+// Exhaustion can break, return a default, or report failure. The next-link
+// expression is evaluated after the body, while the current node is valid.
+verb native/walk_chain(cursor: string, type_id: list, first, next, body: list, exhausted: list) -> list
+  native/ensure(native/is_pointer(type_id), "chain cursor requires a pointer type")
+  native/ensure(!native/body_falls_through(exhausted, [:Return, :TailCall, :Break]), "chain exhaustion must leave the traversal")
+  return [native/let_statement(cursor, type_id, first),
+    native/advancing_loop("true", [
+      native/when_statement(native/binary_expression(:Equal, cursor, native/typed_zero(type_id)), exhausted),
+      @body], [native/set_statement(cursor, next)])]
+end
+
+// Copy typed elements in ascending order. The regions must be disjoint or have
+// identical bases; this is not an overlapping byte move. Empty spans touch neither
+// pointer. Local names and source mutability are explicit at the call site.
+verb native/copy_elements(element, destination: string, source: string, length: string, ?access: symbol = :Const,
+    ?index: string = "i", ?source_slot: string = "src", ?destination_slot: string = "dst") -> list
+  native/ensure(access == :Const || access == :Mutable, "element copy requires const or mutable source access")
+  let result: list = native/for_range(index, "zero", length, [
+    native/let_offset(source_slot, [:Pointer, element, access], source, index),
+    native/let_offset(destination_slot, [:Pointer, element, :Mutable], destination, index),
+    native/store_statement(destination_slot, native/typed_load(element, source_slot))])
+  return result
+end
+
+verb native/checked_element(name: string, element, base, length: string, index: string, failure: list, ?access: symbol = :Mutable) -> list
+  native/ensure(access == :Const || access == :Mutable, "element access requires const or mutable access")
+  return [native/unless_statement(native/binary_expression(:Less, index, length), failure),
+    native/let_offset(name, [:Pointer, element, access], base, index)]
 end
 
 // Rename bindings in composed syntax without changing record fields, type

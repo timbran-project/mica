@@ -73,8 +73,7 @@ verb native_value/string_allocate(input: map) -> map
     ),
     native/let_statement("total", :U64, native/binary_expression(:Add, "fixed_size", "sample_bytes")),
     native/set_statement("total", native/binary_expression(:Add, "total", "capacity")),
-    native/let_call("allocation", bytes, "memory_allocate", ["worker", "total", "layout_string"]),
-    native/when_statement(native/binary_expression(:Equal, "allocation", "null_bytes"), [native/return_zero()]),
+    @native_memory/allocate("allocation", "total", "layout_string", [native/return_zero()]),
     native/let_statement("pointer", [:Pointer, header, :Mutable], native/unary_expression(:PointerCast, "allocation")),
     native/let_offset("cursor", bytes, "allocation", "header_size"),
     native/let_statement("backing", [:Pointer, storage, :Mutable], native/unary_expression(:PointerCast, "cursor")),
@@ -181,17 +180,10 @@ verb native_value/string_constructor(input: map) -> map
     [], [:Allocate, :ReadMemory, :WriteMemory], :Gc, "")
   context = native/define_function(context, name, [
     native/when_statement(native/binary_expression(:Less, "allocation_limit", "length"), [native/return_zero()]),
-    native/let_call("scan", [:Record, "Utf8Scan"], "utf8_scan", ["source", "length"]),
-    native/unless_statement(native/field_expression("scan", "ok"), [native/return_zero()]),
+    @native/try_call("scan", [:Record, "Utf8Scan"], "utf8_scan", ["source", "length"], [native/return_zero()]),
     native/let_field("scalars", :U64, "scan", "scalars"),
     native/let_field("ascii", :Bool, "scan", "ascii"),
-    native/let_call(
-      "allocation",
-      [:Record, "StringAllocation"],
-      "value_string_allocate",
-      ["worker", "length", "length", "scalars", "ascii"]
-    ),
-    native/unless_statement(native/field_expression("allocation", "ok"), [native/return_zero()]),
+    @native/try_call("allocation", [:Record, "StringAllocation"], "value_string_allocate", ["worker", "length", "length", "scalars", "ascii"], [native/return_zero()]),
     native/let_field("pointer", [:Pointer, header, :Mutable], "allocation", "header"),
     native/let_load("header", header, "pointer"),
     native/let_field("data", [:Pointer, :U8, :Mutable], "header", "data"),
@@ -218,8 +210,7 @@ verb native_value/string_access(input: map) -> map
   context = native/declare_function(context, name, result, [["value", word, :Gc]],
     [], [:ReadMemory], :Value, "")
   context = native/define_function(context, name, [
-    native/let_call("checked", [:Record, "HeapStringResult"], "value_as_string", ["value"]),
-    native/unless_statement(native/field_expression("checked", "ok"), [native/return_zero()]),
+    @native/try_call("checked", [:Record, "HeapStringResult"], "value_as_string", ["value"], [native/return_zero()]),
     native/let_field("pointer", header_pointer, "checked", "header"),
     native/let_load("header", header, "pointer"),
     native/let_field("count", :U64, "header", "scalars"),
@@ -230,8 +221,7 @@ verb native_value/string_access(input: map) -> map
   context = native/declare_function(context, name, result, [["value", word, :Gc], ["position", :U64, :Value]],
     [], [:ReadMemory], :Value, "")
   context = native/define_function(context, name, [
-    native/let_call("checked", [:Record, "HeapStringResult"], "value_as_string", ["value"]),
-    native/unless_statement(native/field_expression("checked", "ok"), [native/return_zero()]),
+    @native/try_call("checked", [:Record, "HeapStringResult"], "value_as_string", ["value"], [native/return_zero()]),
     native/let_field("pointer", header_pointer, "checked", "header"),
     native/let_load("header", header, "pointer"),
     native/let_field("length", :U64, "header", "length"),
@@ -277,8 +267,7 @@ verb native_value/string_access(input: map) -> map
   context = native/declare_function(context, name, [:Record, "RuneResult"], [["value", word, :Gc], ["position", :U64, :Value]],
     [], [:ReadMemory], :Value, "")
   context = native/define_function(context, name, [
-    native/let_call("offset_result", result, "value_string_byte_offset", ["value", "position"]),
-    native/unless_statement(native/field_expression("offset_result", "ok"), [native/return_zero()]),
+    @native/try_call("offset_result", result, "value_string_byte_offset", ["value", "position"], [native/return_zero()]),
     native/let_field("offset", :U64, "offset_result", "number"),
     native/let_statement("pointer", header_pointer, native/unary_expression(:UnpackPointer, "value")),
     native/let_load("header", header, "pointer"),
@@ -287,8 +276,7 @@ verb native_value/string_access(input: map) -> map
     native/let_offset("source", [:Pointer, :U8, :Mutable], "data", "offset"),
     native/let_statement("text", [:Pointer, :U8, :Const], native/unary_expression(:Freeze, "source")),
     native/set_statement("length", native/binary_expression(:Subtract, "length", "offset")),
-    native/let_call("decoded", [:Record, "Utf8Decode"], "utf8_decode", ["text", "length"]),
-    native/unless_statement(native/field_expression("decoded", "ok"), [native/return_zero()]),
+    @native/try_call("decoded", [:Record, "Utf8Decode"], "utf8_decode", ["text", "length"], [native/return_zero()]),
     native/let_field("rune", [:Scalar, "Rune", :U32], "decoded", "rune"),
     native/let_statement("result", [:Record, "RuneResult"], native/record_expression(["true", "rune"])),
     native/return_value("result")
@@ -321,8 +309,7 @@ verb native_value/string_slice(input: map) -> map
     native/let_field("last", :U64, "offset", "number"),
     native/unless_statement("condition", [native/return_zero()]),
     native/let_statement("size", :U64, native/unary_expression(:SizeOf, header)),
-    native/let_call("allocation", [:Pointer, :U8, :Mutable], "memory_allocate", ["worker", "size", "layout_string_view"]),
-    native/when_statement(native/binary_expression(:Equal, "allocation", "null_bytes"), [native/return_zero()]),
+    @native_memory/allocate("allocation", "size", "layout_string_view", [native/return_zero()]),
     native/note_statement(
       :Invariant,
       "Slices retain their backing and sampled index; only the view header is allocated."

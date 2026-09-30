@@ -48,29 +48,29 @@ verb native_jit/checked_cases() -> list
     [:CheckedRemainder, native_jit/j("ne", ["ctx", "right", zero]), native_jit/j("rem", ["ctx", integer, "left", "right"])],
     [:CheckedNegate, native_jit/j("ne", ["ctx", "left", minimum]), native_jit/j("neg", ["ctx", integer, "left"])],
     [:CheckedFloatToInt, native_jit/both(native_jit/j("ge", ["ctx", "left", float_lower]), native_jit/j("lt", ["ctx", "left", float_upper])), native_jit/j("cast", ["ctx", "left", integer])]]
-  let scratch = native/typed_expression([:Pointer, h, :Mutable], native/offset_expression("cache", native_jit/slot(6, "n0")))
+  let scratch = native_jit/argument_buffer()
   let truth = native_jit/integer("n1", boolean)
   let cases: list = []
   for spec in specs
     let body: list = [
       native/do_statement(native/call_expression("j_assign", ["block", native_jit/cached(2, "destination"), native_jit/j("record", ["ctx", "type", "n0", scratch])])),
-      native_jit/bind("function", h, native_jit/cached(0, native_jit/meta(3, "block_id"))),
-      native_jit/bind("success", h, native_jit/j("block", ["function", native_jit/literal("s_ok")])),
-      native_jit/bind("join", h, native_jit/j("block", ["function", native_jit/literal("s_join")])),
+      native/let_statement("function", h, native_jit/cached(0, native_jit/meta(3, "block_id"))),
+      native/let_statement("success", h, native_jit/j("block", ["function", native_jit/literal("s_ok")])),
+      native/let_statement("join", h, native_jit/j("block", ["function", native_jit/literal("s_join")])),
       native/do_statement(native/call_expression("j_branch", ["block", spec[1], "success", "join"]))]
     if spec[0] == :CheckedRemainder
       body = [@body,
-        native_jit/bind("ordinary", h, native_jit/j("block", ["function", native_jit/literal("s_ok")])),
-        native_jit/bind("minus_one", h, native_jit/j("block", ["function", native_jit/literal("s_ok")])),
+        native/let_statement("ordinary", h, native_jit/j("block", ["function", native_jit/literal("s_ok")])),
+        native/let_statement("minus_one", h, native_jit/j("block", ["function", native_jit/literal("s_ok")])),
         native/do_statement(native/call_expression("j_branch", ["success", native_jit/j("eq", ["ctx", "right", minus_one]), "minus_one", "ordinary"])),
-        native_jit/save(6, "n0", truth), native_jit/save(6, "n1", zero),
+        @native_jit/arguments([truth, zero]),
         native/do_statement(native/call_expression("j_assign", ["minus_one", native_jit/cached(2, "destination"), native_jit/j("record", ["ctx", "type", "n2", scratch])])),
-        native/do_statement(native/call_expression("j_jump", ["minus_one", "join"])), native_jit/set("success", "ordinary")]
+        native/do_statement(native/call_expression("j_jump", ["minus_one", "join"])), native/set_statement("success", "ordinary")]
     end
     body = [@body,
-      native_jit/save(6, "n0", truth), native_jit/save(6, "n1", spec[2]),
+      @native_jit/arguments([truth, spec[2]]),
       native/do_statement(native/call_expression("j_assign", ["success", native_jit/cached(2, "destination"), native_jit/j("record", ["ctx", "type", "n2", scratch])])),
-      native/do_statement(native/call_expression("j_jump", ["success", "join"])), native_jit/save(7, "block_id", "join"), native_jit/ret("n0")]
+      native/do_statement(native/call_expression("j_jump", ["success", "join"])), native_jit/save(7, "block_id", "join"), native/return_value("n0")]
     cases = [@cases, native_jit/case(spec[0], body)]
   end
   return cases

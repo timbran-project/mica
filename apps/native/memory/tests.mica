@@ -20,21 +20,21 @@ verb native_memory/test_context() -> map
   let edges: list = []
   for name in ["left", "right"]
     edges = [@edges,
-      native_memory/bind(name, bytes, native_memory/field(bytes, "pair", name)),
+      native/let_statement(name, bytes, native_memory/field(bytes, "pair", name)),
       native/let_call(string_concat("visited_", name), bytes, "memory_visit", ["collection", name]),
       native_memory/store(bytes, "pair", name, string_concat("visited_", name))]
   end
   context = native/define_function(context, "memory_test_trace", [
-    native_memory/bind("layout", :U64, native_memory/field(:U64, "object", "layout")),
+    native/let_statement("layout", :U64, native_memory/field(:U64, "object", "layout")),
     native/when_statement(native/binary_expression(:Equal, "layout", "memory_n0"), [native/return_void()]),
     native/let_call("payload", bytes, "memory_payload", ["object"]),
     native/when_statement(native/binary_expression(:Equal, "layout", "memory_n1"), [
-      native_memory/bind("pair", native_memory/pointer(pair), native/unary_expression(:PointerCast, "payload")),
+      native/let_statement("pair", native_memory/pointer(pair), native/unary_expression(:PointerCast, "payload")),
       @edges, native/return_void()]),
     native/when_statement(native/binary_expression(:Equal, "layout", "memory_n2"), [
-      native_memory/bind("view", native_memory/pointer(view), native/unary_expression(:PointerCast, "payload")),
-      native_memory/bind("base", bytes, native_memory/field(bytes, "view", "base")),
-      native_memory/bind("offset", :U64, native_memory/field(:U64, "view", "offset")),
+      native/let_statement("view", native_memory/pointer(view), native/unary_expression(:PointerCast, "payload")),
+      native/let_statement("base", bytes, native_memory/field(bytes, "view", "base")),
+      native/let_statement("offset", :U64, native_memory/field(:U64, "view", "offset")),
       native/let_call("relocated", bytes, "memory_visit", ["collection", "base"]),
       native_memory/store(bytes, "view", "base", "relocated"),
       native_memory/store(bytes, "view", "data", native/typed_expression(bytes, native/offset_expression("relocated", "offset"))),

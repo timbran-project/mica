@@ -40,12 +40,10 @@ verb native_value/codec_decoder(input: map) -> map
   ])
   context = native/declare_function(context, "codec_word", [:Record, "IdResult"], [["reader", pointer, :Borrow]], [], [:ReadMemory, :WriteMemory], :Value, "")
   context = native/define_function(context, "codec_word", [
-    native/let_call("span", span, "codec_span", ["reader", "word_bytes"]),
-    native/unless_statement(native/field_expression("span", "ok"), [native/return_zero()]),
+    @native/try_call("span", span, "codec_span", ["reader", "word_bytes"], [native/return_zero()]),
     native/let_field("data", bytes, "span", "data"),
     native/let_statement("number", :U64, "zero"),
-    native/let_statement("i", :U64, "zero"),
-    native/while_statement(native/binary_expression(:Less, "i", "word_bytes"), [
+    @native/for_range("i", "zero", "word_bytes", [
       native/let_load("byte", :U8, native/typed_expression(bytes, native/offset_expression("data", "i"))),
       native/let_statement("shift", :U64, native/binary_expression(:Multiply, "i", "word_bytes")),
       native/let_statement(
@@ -57,9 +55,7 @@ verb native_value/codec_decoder(input: map) -> map
           "shift"
         )
       ),
-      native/set_statement("number", native/binary_expression(:BitOr, "number", "part")),
-      native/set_statement("i", native/binary_expression(:Add, "i", "one"))
-    ]),
+      native/set_statement("number", native/binary_expression(:BitOr, "number", "part"))]),
     native/return_record(["true", "number"])
   ])
   context = native/declare_function(context, "codec_count", :Bool, [["reader", pointer, :Borrow], ["count", :U64, :Value], ["width", :U64, :Value]], [], [:ReadMemory], :Value, "")
@@ -97,8 +93,7 @@ verb native_value/codec_decoder(input: map) -> map
     ),
     native/let_statement("cursor", reader, native/record_expression(["data", "length", "zero"])),
     native/let_statement("reader", pointer, native/unary_expression(:Address, "cursor")),
-    native/let_call("result", result, "codec_decode", ["worker", "table", "reader", "options"]),
-    native/unless_statement(native/field_expression("result", "ok"), [native/return_zero()]),
+    @native/try_call("result", result, "codec_decode", ["worker", "table", "reader", "options"], [native/return_zero()]),
     native/let_load(
       "position",
       :U64,
@@ -108,8 +103,7 @@ verb native_value/codec_decoder(input: map) -> map
   ])
   context = native/declare_function(context, "value_decode_exact", result, parameters, [], [:Allocate, :ReadMemory, :WriteMemory, :Block], :Gc, "")
   context = native/define_function(context, "value_decode_exact", [
-    native/let_call("result", decoded, "value_decode", ["worker", "table", "data", "length", "options"]),
-    native/unless_statement(native/field_expression("result", "ok"), [native/return_zero()]),
+    @native/try_call("result", decoded, "value_decode", ["worker", "table", "data", "length", "options"], [native/return_zero()]),
     native/unless_statement(
       native/binary_expression(:Equal, native/typed_field(:U64, "result", "consumed"), "length"),
       [native/return_zero()]
@@ -122,36 +116,8 @@ end
 verb native_value/decode_child(name: string) -> list
   let checked: string = string_concat(name, "_checked")
   return [
-    native/let_call(checked, [:Record, "ValueResult"], "codec_decode", ["worker", "table", "reader", "options"]),
-    native/unless_statement(native/field_expression(checked, "ok"), [native/return_zero()]),
+    @native/try_call(checked, [:Record, "ValueResult"], "codec_decode", ["worker", "table", "reader", "options"], [native/return_zero()]),
     native/let_field(name, native_value/word(), checked, "value")
-  ]
-end
-
-verb native_value/decode_allocation(name: string, element, count: string) -> list
-  let size: string = string_concat(name, "_size")
-  let raw: string = string_concat(name, "_raw")
-  return [
-    native/let_statement(size, :U64, native/unary_expression(:SizeOf, element)),
-    native/when_statement(
-      native/binary_expression(
-        :Less,
-        native/typed_expression(:U64, native/binary_expression(:Divide, "allocation_limit", size)),
-        count
-      ),
-      [native/return_zero()]
-    ),
-    native/let_call(
-      raw,
-      [:Pointer, :U8, :Mutable],
-      "memory_allocate",
-      ["worker", native/typed_expression(:U64, native/binary_expression(:Multiply, size, count)), "layout_opaque"]
-    ),
-    native/when_statement(
-      native/binary_expression(:Less, "zero", count),
-      [native/when_statement(native/binary_expression(:Equal, raw, "null_bytes"), [native/return_zero()])]
-    ),
-    native/let_statement(name, [:Pointer, element, :Mutable], native/unary_expression(:PointerCast, raw))
   ]
 end
 
@@ -160,8 +126,7 @@ verb native_value/decode_value(input: map) -> map
   let word: list = native_value/word()
   let bytes: list = [:Pointer, :U8, :Const]
   let rows: list = [
-    native/let_call("checked_word", [:Record, "IdResult"], "codec_word", ["reader"]),
-    native/unless_statement(native/field_expression("checked_word", "ok"), [native/return_zero()]),
+    @native/try_call("checked_word", [:Record, "IdResult"], "codec_word", ["reader"], [native/return_zero()]),
     native/let_field("number", :U64, "checked_word", "number"),
     native/let_statement(
       "tag",
@@ -269,20 +234,13 @@ verb native_value/decode_value(input: map) -> map
     end
     body = [
       @body,
-      native/let_call(span, [:Record, "CodecSpan"], "codec_span", ["reader", "aux"]),
-      native/unless_statement(native/field_expression(span, "ok"), [native/return_zero()])
+      @native/try_call(span, [:Record, "CodecSpan"], "codec_span", ["reader", "aux"], [native/return_zero()])
     ]
     if name == "symbol" || name == "error_code"
       let id: string = string_concat(name, "_id")
       body = [
         @body,
-        native/let_call(
-          id,
-          [:Record, "IdResult"],
-          "value_symbol_intern",
-          ["table", native/typed_field(bytes, span, "data"), "aux"]
-        ),
-        native/unless_statement(native/field_expression(id, "ok"), [native/return_zero()]),
+        @native/try_call(id, [:Record, "IdResult"], "value_symbol_intern", ["table", native/typed_field(bytes, span, "data"), "aux"], [native/return_zero()]),
         native/return_value(
           native/call_expression(
             string_concat("value_", name),
@@ -329,16 +287,13 @@ verb native_value/decode_value(input: map) -> map
             native/call_expression("codec_count", ["reader", "aux", width]),
             [native/return_zero()]
           ),
-          @native_value/decode_allocation(data, spec[1], "aux"),
-          native/let_statement(index, :U64, "zero"),
-          native/while_statement(native/binary_expression(:Less, index, "aux"), [
+          @native_memory/allocate_array(data, spec[1], "aux", "layout_opaque", [native/return_zero()]),
+          @native/for_range(index, "zero", "aux", [
             @children,
             native/store_statement(
               native/typed_expression([:Pointer, spec[1], :Mutable], native/offset_expression(data, index)),
               element
-            ),
-            native/set_statement(index, native/binary_expression(:Add, index, "one"))
-          ]),
+            )]),
           native/return_value(
             native/call_expression(
               string_concat("value_", name),
@@ -369,14 +324,7 @@ verb native_value/decode_value(input: map) -> map
     native/when_statement(native/binary_expression(:Equal, "kind", "tag_error"), [
       native/when_statement(native/binary_expression(:Less, "codec_error_flags", "aux"), [native/return_zero()]),
       @native_value/decode_child("error_code"),
-      native/unless_statement(
-        native/binary_expression(
-          :Equal,
-          native/typed_expression(:U8, native/unary_expression(:Tag, "error_code")),
-          "tag_error_code"
-        ),
-        [native/return_zero()]
-      ),
+      native_value/require_kind("error_code", "error_code", [native/return_zero()]),
       native/let_statement(
         "has_message",
         :Bool,
@@ -398,18 +346,10 @@ verb native_value/decode_value(input: map) -> map
       native/let_statement("message", word, native/zero_expression()),
       native/let_statement("error_value", word, native/zero_expression()),
       native/when_statement("has_message", [
-        native/let_call("message_length", [:Record, "IdResult"], "codec_word", ["reader"]),
-        native/unless_statement(native/field_expression("message_length", "ok"), [native/return_zero()]),
+        @native/try_call("message_length", [:Record, "IdResult"], "codec_word", ["reader"], [native/return_zero()]),
         native/let_field("length", :U64, "message_length", "number"),
-        native/let_call("message_span", [:Record, "CodecSpan"], "codec_span", ["reader", "length"]),
-        native/unless_statement(native/field_expression("message_span", "ok"), [native/return_zero()]),
-        native/let_call(
-          "checked_message",
-          [:Record, "ValueResult"],
-          "value_string",
-          ["worker", native/typed_field(bytes, "message_span", "data"), "length"]
-        ),
-        native/unless_statement(native/field_expression("checked_message", "ok"), [native/return_zero()]),
+        @native/try_call("message_span", [:Record, "CodecSpan"], "codec_span", ["reader", "length"], [native/return_zero()]),
+        @native/try_call("checked_message", [:Record, "ValueResult"], "value_string", ["worker", native/typed_field(bytes, "message_span", "data"), "length"], [native/return_zero()]),
         native/set_statement("message", native/field_expression("checked_message", "value"))
       ]),
       native/when_statement("has_value", [
@@ -439,14 +379,7 @@ verb native_value/decode_value(input: map) -> map
     native/when_statement(native/binary_expression(:Equal, "kind", "tag_frob"), [
       native/unless_statement(native/binary_expression(:Equal, "aux", "zero"), [native/return_zero()]),
       @native_value/decode_child("delegate"),
-      native/unless_statement(
-        native/binary_expression(
-          :Equal,
-          native/typed_expression(:U8, native/unary_expression(:Tag, "delegate")),
-          "tag_identity"
-        ),
-        [native/return_zero()]
-      ),
+      native_value/require_kind("delegate", "identity", [native/return_zero()]),
       @native_value/decode_child("frob_value"),
       native/return_value(
         native/call_expression(
@@ -481,18 +414,10 @@ verb native_value/decode_relation(input: map) -> map
       native/call_expression("codec_count", ["reader", "arity", "word_bytes"]),
       [native/return_zero()]
     ),
-    @native_value/decode_allocation("heading", :U32, "arity"),
-    native/let_statement("column", :U64, "zero"),
-    native/while_statement(native/binary_expression(:Less, "column", "arity"), [
+    @native_memory/allocate_array("heading", :U32, "arity", "layout_opaque", [native/return_zero()]),
+    @native/for_range("column", "zero", "arity", [
       @native_value/decode_child("heading_value"),
-      native/unless_statement(
-        native/binary_expression(
-          :Equal,
-          native/typed_expression(:U8, native/unary_expression(:Tag, "heading_value")),
-          "tag_symbol"
-        ),
-        [native/return_zero()]
-      ),
+      native_value/require_kind("heading_value", "symbol", [native/return_zero()]),
       native/store_statement(
         native/typed_expression([:Pointer, :U32, :Mutable], native/offset_expression("heading", "column")),
         native/typed_expression(
@@ -502,11 +427,8 @@ verb native_value/decode_relation(input: map) -> map
             native/typed_expression(:U64, native/unary_expression(:Payload, "heading_value"))
           )
         )
-      ),
-      native/set_statement("column", native/binary_expression(:Add, "column", "one"))
-    ]),
-    native/let_call("checked_length", [:Record, "IdResult"], "codec_word", ["reader"]),
-    native/unless_statement(native/field_expression("checked_length", "ok"), [native/return_zero()]),
+      )]),
+    @native/try_call("checked_length", [:Record, "IdResult"], "codec_word", ["reader"], [native/return_zero()]),
     native/let_field("length", :U64, "checked_length", "number"),
     native/if_statement(native/binary_expression(:Equal, "arity", "zero"), [
       native/when_statement(native/binary_expression(:Less, "one", "length"), [native/return_zero()])
@@ -517,10 +439,9 @@ verb native_value/decode_relation(input: map) -> map
         [native/return_zero()]
       )
     ]),
-    @native_value/decode_allocation("rows", tuple, "length"),
-    native/let_statement("row", :U64, "zero"),
-    native/while_statement(native/binary_expression(:Less, "row", "length"), [
-      @native_value/decode_allocation("cells", word, "arity"),
+    @native_memory/allocate_array("rows", tuple, "length", "layout_opaque", [native/return_zero()]),
+    @native/for_range("row", "zero", "length", [
+      @native_memory/allocate_array("cells", word, "arity", "layout_opaque", [native/return_zero()]),
       native/set_statement("column", "zero"),
       native/while_statement(native/binary_expression(:Less, "column", "arity"), [
         @native_value/decode_child("cell"),
@@ -533,9 +454,7 @@ verb native_value/decode_relation(input: map) -> map
       native/store_statement(
         native/typed_expression([:Pointer, tuple, :Mutable], native/offset_expression("rows", "row")),
         native/typed_record(tuple, ["cells", "arity"])
-      ),
-      native/set_statement("row", native/binary_expression(:Add, "row", "one"))
-    ]),
+      )]),
     native/return_value(
       native/call_expression(
         "value_relation",

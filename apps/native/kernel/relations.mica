@@ -27,69 +27,62 @@ verb native_kernel/relations(input: map) -> map
       name = "named"
     end
     context = native_kernel/define(context, name, [
-      native/let_statement("cursor", relation, "head"),
-      native/while_statement("true", [
-        native/when_statement(native_kernel/is_null("Relation", "cursor"), [native/return_value("cursor")]),
-        native/when_statement(native_kernel/binary(:Equal, native_kernel/read("Relation", "cursor", field), field), [native/return_value("cursor")]),
-        native_memory/set("cursor", native_kernel/read("Relation", "cursor", "next"))]), native/return_value(native_kernel/null("Relation"))])
+      @native_kernel/walk("Relation", "cursor", "head", [
+        native/when_statement(native_kernel/binary(:Equal, native_kernel/read("Relation", "cursor", field), field), [native/return_value("cursor")])],
+        [native/return_value("cursor")]), native/return_value(native_kernel/null("Relation"))])
   end
-  let fields: list = ["id", "name", "arity", "policy", "keys", "indexes"]
   context = native_kernel/define(context, "catalog_put", [
     native/let_statement("tail", relation, "head"),
     native/unless_statement(native_kernel/is_null("Relation", "head"), [
       native/when_statement(native_kernel/binary(:Less, native_kernel/read("Relation", "head", "id"), native_kernel/read("Relation", "entry", "id")), [
         native/let_call("suffix", relation, "kernel_catalog_put", ["worker", native_kernel/read("Relation", "head", "next"), "entry"]),
         native/when_statement(native_kernel/is_null("Relation", "suffix"), [native/return_value(native_kernel/null("Relation"))]),
-        native/return_value(native/call_expression("kernel_new_Relation", ["worker", "suffix", @[native_kernel/read("Relation", "head", f) for f in fields]]))]),
+        native/return_value(native_kernel/copy_record("Relation", "head", {"next" -> "suffix"}))]),
       native/when_statement(native_kernel/binary(:Equal, native_kernel/read("Relation", "head", "id"), native_kernel/read("Relation", "entry", "id")), [
-        native_memory/set("tail", native_kernel/read("Relation", "head", "next"))])]),
-    native/return_value(native/call_expression("kernel_new_Relation", ["worker", "tail", @[native_kernel/read("Relation", "entry", f) for f in fields]]))])
+        native/set_statement("tail", native_kernel/read("Relation", "head", "next"))])]),
+    native/return_value(native_kernel/copy_record("Relation", "entry", {"next" -> "tail"}))])
   context = native_kernel/define(context, "index", [
     native/when_statement(native_kernel/is_null("Relation", "relation"), [native/return_value(native_kernel/null("Node"))]),
-    native_memory/bind("cursor", index, native_kernel/read("Relation", "relation", "indexes")),
-    native/while_statement("true", [
-      native/when_statement(native_kernel/is_null("Index", "cursor"), [native/return_value(native_kernel/null("Node"))]),
-      native/when_statement(native_kernel/binary(:Equal, native_kernel/read("Index", "cursor", "mask"), "mask"), [native/return_value(native_kernel/read("Index", "cursor", "tree"))]),
-      native_memory/set("cursor", native_kernel/read("Index", "cursor", "next"))]), native/return_value(native_kernel/null("Node"))])
+    @native_kernel/walk("Index", "cursor", native_kernel/read("Relation", "relation", "indexes"), [
+      native/when_statement(native_kernel/binary(:Equal, native_kernel/read("Index", "cursor", "mask"), "mask"), [native/return_value(native_kernel/read("Index", "cursor", "tree"))])],
+      [native/return_value(native_kernel/null("Node"))]), native/return_value(native_kernel/null("Node"))])
   context = native_kernel/define(context, "index_update", [
     native/when_statement(native_kernel/is_null("Index", "index"), [native/return_value(native_kernel/null("Index"))]),
-    native_memory/bind("next", index, native_kernel/read("Index", "index", "next")),
+    native/let_statement("next", index, native_kernel/read("Index", "index", "next")),
     native/let_statement("tail", index, native_kernel/null("Index")),
     native/unless_statement(native_kernel/is_null("Index", "next"), [
       native/set_statement("tail", native/call_expression("kernel_index_update", ["worker", "next", "row", "asserted"])),
       native/when_statement(native_kernel/is_null("Index", "tail"), [native/return_value("tail")])]),
-    native/let_call("updated", [:Record, "KernelNodeResult"], "kernel_set", ["worker", native_kernel/read("Index", "index", "tree"),
-      "row", native_kernel/read("Index", "index", "mask"), native/typed_expression(:Bool, native_kernel/negate("asserted")), "true"]),
-    native/unless_statement(native/field_expression("updated", "ok"), [native/return_value(native_kernel/null("Index"))]),
-    native/return_value(native/call_expression("kernel_new_Index", ["worker", "tail", native_kernel/read("Index", "index", "mask"), native/typed_field(node, "updated", "node")]))])
+    @native/try_call("updated", [:Record, "KernelNodeResult"], "kernel_set", ["worker", native_kernel/read("Index", "index", "tree"),
+      "row", native_kernel/read("Index", "index", "mask"), native/typed_expression(:Bool, native_kernel/negate("asserted")), "true"], [native/return_value(native_kernel/null("Index"))]),
+    native/return_value(native_kernel/copy_record("Index", "index", {"next" -> "tail", "tree" -> native/typed_field(node, "updated", "node")}))])
   context = native_kernel/define(context, "apply", [
     native/let_call("existing", node, "kernel_find", [native_kernel/call(node, "index", ["relation", "zero"]), "row", "zero", "false"]),
     native/when_statement(native_kernel/binary(:Equal, native_kernel/is_null("Node", "existing"), native/typed_expression(:Bool, native_kernel/negate("asserted"))), [native/return_value("relation")]),
     native/let_call("indexes", index, "kernel_index_update", ["worker", native_kernel/read("Relation", "relation", "indexes"), "row", "asserted"]),
     native/when_statement(native_kernel/is_null("Index", "indexes"), [native/return_value(native_kernel/null("Relation"))]),
-    native/return_value(native/call_expression("kernel_new_Relation", ["worker", native_kernel/read("Relation", "relation", "next"),
-      @[native_kernel/read("Relation", "relation", f) for f in ["id", "name", "arity", "policy", "keys"]], "indexes"]))])
+    native/return_value(native_kernel/copy_record("Relation", "relation", {"indexes" -> "indexes"}))])
   // Prefix comparison prunes the chosen index. Remaining bindings are filters;
   // capacity bounds the result buffer and traversal stops at the next match.
   context = native_kernel/define(context, "scan_tree", [
     native/when_statement(native_kernel/is_null("Node", "node"), [native/return_void()]),
-    native_memory/when(native_memory/field(:Bool, "scan", "more"), [native/return_void()]),
+    native/when_statement(native_memory/field(:Bool, "scan", "more"), [native/return_void()]),
     native_memory/store(:U64, "scan", "visited", native_kernel/binary(:Add, native_memory/field(:U64, "scan", "visited"), "one")),
-    native_memory/bind("row", word, native_kernel/read("Node", "node", "row")),
+    native/let_statement("row", word, native_kernel/read("Node", "node", "row")),
     native/let_statement("past", :I64, "int_one"),
-    native_memory/bind("after", word, native_memory/root(word, "scan", "after")),
+    native/let_statement("after", word, native_memory/root(word, "scan", "after")),
     native/unless_statement(native_kernel/binary(:Equal, "after", native/typed_zero(word)), [
       native/set_statement("past", native/call_expression("kernel_compare", ["row", "after", native_memory/field(:U64, "scan", "order"), "false"]))]),
     native/let_call("order", :I64, "kernel_compare", ["row", native_memory/root(word, "scan", "pattern"), native_memory/field(:U64, "scan", "prefix"), "true"]),
     native/unless_statement(native_kernel/binary(:Less, "order", "int_zero"), [
       native/when_statement(native_kernel/binary(:Less, "int_zero", "past"), [native_memory/call("kernel_scan_tree", [native_kernel/read("Node", "node", "left"), "scan"])])]),
-    native_memory/when(native_memory/field(:Bool, "scan", "more"), [native/return_void()]),
+    native/when_statement(native_memory/field(:Bool, "scan", "more"), [native/return_void()]),
     native/when_statement(native_kernel/binary(:Equal, "order", "int_zero"), [
       native/let_call("match", :I64, "kernel_compare", ["row", native_memory/root(word, "scan", "pattern"), native_memory/field(:U64, "scan", "mask"), "true"]),
       native/let_statement("matches", :Bool, native/binary_expression(:Equal, "match", "int_zero")),
       native/unless_statement(native_kernel/binary(:Less, "int_zero", "past"), [native/set_statement("matches", "false")]),
       native/when_statement("matches", [
-        native_memory/bind("count", :U64, native_memory/field(:U64, "scan", "count")),
+        native/let_statement("count", :U64, native_memory/field(:U64, "scan", "count")),
         native/when_statement(native_kernel/binary(:Equal, "count", native_memory/field(:U64, "scan", "capacity")), [
           native_memory/store(:Bool, "scan", "more", "true"), native/return_void()]),
         native/let_statement("slot", native_memory/pointer(word), native/offset_expression(native_memory/field(native_memory/pointer(word), "scan", "output"), "count")),
@@ -99,11 +92,9 @@ verb native_kernel/relations(input: map) -> map
       native_memory/call("kernel_scan_tree", [native_kernel/read("Node", "node", "right"), "scan"])]), native/return_void()])
   context = native_kernel/define(context, "relation_scan", [
     native/when_statement(native_kernel/is_null("Relation", "relation"), [native/return_record(["kernel_unknown", "zero", "zero", "false"])]),
-    native/unless_statement(native_kernel/binary(:Equal, native/typed_expression(:U8, native/unary_expression(:Tag, "pattern")), "tag_list"), [native/return_record(["kernel_arity", "zero", "zero", "false"])]),
-    native/unless_statement(native_kernel/binary(:Equal, native_kernel/call(:U64, "width", ["pattern"]), native_kernel/read("Relation", "relation", "arity")), [native/return_record(["kernel_arity", "zero", "zero", "false"])]),
+    @native_kernel/require_tuple("pattern", "relation", [native/return_record(["kernel_arity", "zero", "zero", "false"])]),
     native/unless_statement(native_kernel/binary(:Equal, "after", native/typed_zero(word)), [
-      native/unless_statement(native_kernel/binary(:Equal, native/typed_expression(:U8, native/unary_expression(:Tag, "after")), "tag_list"), [native/return_record(["kernel_arity", "zero", "zero", "false"])]),
-      native/unless_statement(native_kernel/binary(:Equal, native_kernel/call(:U64, "width", ["after"]), native_kernel/read("Relation", "relation", "arity")), [native/return_record(["kernel_arity", "zero", "zero", "false"])])]),
+      @native_kernel/require_tuple("after", "relation", [native/return_record(["kernel_arity", "zero", "zero", "false"])])]),
     native/when_statement(native_kernel/binary(:Less, native_kernel/read("Relation", "relation", "arity"), "kernel_64"), [
       native/unless_statement(native_kernel/binary(:Equal, native_kernel/binary(:ShiftRight, "mask", native_kernel/read("Relation", "relation", "arity")), "zero"), [native/return_record(["kernel_schema", "zero", "zero", "false"])])]),
     native/unless_statement(native_kernel/binary(:Equal, "capacity", "zero"), [
@@ -112,21 +103,17 @@ verb native_kernel/relations(input: map) -> map
     native/let_statement("ordering", :U64, "zero"),
     native/let_statement("prefix", :U64, "zero"),
     native/let_statement("bit", :U64, "one"),
-    native/let_statement("position", :U64, "zero"),
-    native/while_statement(native_kernel/binary(:Less, "position", native_kernel/read("Relation", "relation", "arity")), [
+    @native/for_range("position", "zero", native_kernel/read("Relation", "relation", "arity"), [
       native/when_statement(native_kernel/binary(:Equal, native_kernel/binary(:BitAnd, "mask", "bit"), "zero"), [native/break_statement()]),
       native/set_statement("prefix", native/binary_expression(:BitOr, "prefix", "bit")),
-      native/set_statement("bit", native/binary_expression(:ShiftLeft, "bit", "one")),
-      native/set_statement("position", native/binary_expression(:Add, "position", "one"))]),
+      native/set_statement("bit", native/binary_expression(:ShiftLeft, "bit", "one"))]),
     native/when_statement(native_kernel/binary(:Equal, "prefix", "zero"), [
-      native_memory/bind("index", index, native_kernel/read("Relation", "relation", "indexes")),
-      native/while_statement("true", [
-        native/when_statement(native_kernel/is_null("Index", "index"), [native/break_statement()]),
-        native_memory/bind("key", :U64, native_kernel/read("Index", "index", "mask")),
+      @native_kernel/walk("Index", "index", native_kernel/read("Relation", "relation", "indexes"), [
+        native/let_statement("key", :U64, native_kernel/read("Index", "index", "mask")),
         native/unless_statement(native_kernel/binary(:Equal, "key", "zero"), [
           native/when_statement(native_kernel/binary(:Equal, native_kernel/binary(:BitAnd, "key", "mask"), "key"), [
-            native/set_statement("prefix", "key"), native/set_statement("ordering", "key"), native_memory/set("tree", native_kernel/read("Index", "index", "tree")), native/break_statement()])]),
-        native_memory/set("index", native_kernel/read("Index", "index", "next"))])]),
+            native/set_statement("prefix", "key"), native/set_statement("ordering", "key"), native/set_statement("tree", native_kernel/read("Index", "index", "tree")), native/break_statement()])])],
+        [native/break_statement()])]),
     native/let_statement("state", [:Record, "KernelScan"], native/record_expression(["pattern", "after", "ordering", "mask", "prefix", "output", "capacity", "zero", "zero", "false"])),
     native/let_statement("scan", scan, native/unary_expression(:Address, "state")),
     native_memory/call("kernel_scan_tree", ["tree", "scan"]),

@@ -54,13 +54,7 @@ verb native_value/codec(input: map) -> map
     native/let_load("output", [:Record, "ValueBuffer"], "buffer"),
     native/let_field("data", [:Pointer, :U8, :Mutable], "output", "data"),
     native/let_field("length", :U64, "output", "length"),
-    native/let_call(
-      "raw",
-      [:Pointer, :U8, :Mutable],
-      "memory_allocate",
-      ["worker", native/typed_expression(:U64, native/unary_expression(:SizeOf, [:Record, "HeapBytes"])), "layout_bytes_view"]
-    ),
-    native/when_statement(native/binary_expression(:Equal, "raw", "null_bytes"), [native/return_zero()]),
+    @native_memory/allocate("raw", native/typed_expression(:U64, native/unary_expression(:SizeOf, [:Record, "HeapBytes"])), "layout_bytes_view", [native/return_zero()]),
     native/let_statement(
       "header",
       [:Pointer, [:Record, "HeapBytes"], :Mutable],
@@ -76,6 +70,22 @@ end
 
 verb native_value/encode_step(call: list) -> list
   return [native/unless_statement(call, [native/return_value("false")])]
+end
+
+// Wire operations stop on the first failed write. Expressions are consumed once.
+verb native_value/encode_word(value) -> list
+  let body: list = native_value/encode_step(native/call_expression("buffer_word", ["worker", "buffer", value]))
+  return body
+end
+
+verb native_value/encode_header(kind, auxiliary) -> list
+  let body: list = native_value/encode_step(native/call_expression("codec_header", ["worker", "buffer", kind, auxiliary]))
+  return body
+end
+
+verb native_value/encode_bytes(source, length) -> list
+  let body: list = native_value/encode_step(native/call_expression("buffer_append", ["worker", "buffer", source, length]))
+  return body
 end
 
 verb native_value/encode_child(value: string) -> list
@@ -149,20 +159,9 @@ verb native_value/codec_encode(input: map) -> map
           native/binary_expression(:Equal, "table", native/typed_zero([:Pointer, [:Record, "SymbolTable"], :Mutable])),
           [native/return_value("false")]
         ),
-        native/let_call(
-          string_concat(name, "_text"),
-          [:Record, "SymbolText"],
-          "value_symbol_text",
-          ["table", native/typed_expression(:U32, native/unary_expression(:Convert, "payload"))]
-        ),
-        native/unless_statement(
-          native/field_expression(string_concat(name, "_text"), "ok"),
-          [native/return_value("false")]
-        ),
+        @native/try_call(string_concat(name, "_text"), [:Record, "SymbolText"], "value_symbol_text", ["table", native/typed_expression(:U32, native/unary_expression(:Convert, "payload"))], [native/return_value("false")]),
         native/let_field(string_concat(name, "_length"), :U64, string_concat(name, "_text"), "length"),
-        @native_value/encode_step(
-          native/call_expression("codec_header", ["worker", "buffer", "tag", string_concat(name, "_length")])
-        ),
+        @native_value/encode_header("tag", string_concat(name, "_length")),
         native/return_value(
           native/call_expression(
             "buffer_append",
@@ -192,7 +191,7 @@ verb native_value/codec_encode(input: map) -> map
       native/let_load(header, [:Record, spec[1]], pointer),
       native/let_field(data, [:Pointer, spec[2], :Mutable], header, "data"),
       native/let_field(length, :U64, header, "length"),
-      @native_value/encode_step(native/call_expression("codec_header", ["worker", "buffer", "tag", length]))
+      @native_value/encode_header("tag", length)
     ]
     if spec[2] == :U8
       body = [
@@ -227,16 +226,13 @@ verb native_value/codec_encode(input: map) -> map
       end
       body = [
         @body,
-        native/let_statement(index, :U64, "zero"),
-        native/while_statement(native/binary_expression(:Less, index, length), [
+        @native/for_range(index, "zero", length, [
           native/let_load(
             element,
             spec[2],
             native/typed_expression([:Pointer, spec[2], :Mutable], native/offset_expression(data, index))
           ),
-          @children,
-          native/set_statement(index, native/binary_expression(:Add, index, "one"))
-        ]),
+          @children]),
         native/return_value("true")
       ]
     end
@@ -259,7 +255,7 @@ verb native_value/codec_encode(input: map) -> map
       native/let_field("has_end", :Bool, "range", "has_end"),
       native/let_statement("range_flags", :U64, "zero"),
       native/when_statement("has_end", [native/set_statement("range_flags", "one")]),
-      @native_value/encode_step(native/call_expression("codec_header", ["worker", "buffer", "tag", "range_flags"])),
+      @native_value/encode_header("tag", "range_flags"),
       native/let_field("start", word, "range", "start"),
       @native_value/encode_child("start"),
       native/when_statement("has_end", [
@@ -285,7 +281,7 @@ verb native_value/codec_encode(input: map) -> map
         "has_value",
         [native/set_statement("error_flags", native/binary_expression(:Add, "error_flags", "two"))]
       ),
-      @native_value/encode_step(native/call_expression("codec_header", ["worker", "buffer", "tag", "error_flags"])),
+      @native_value/encode_header("tag", "error_flags"),
       native/let_statement(
         "code",
         word,
@@ -307,21 +303,11 @@ verb native_value/codec_encode(input: map) -> map
           )
         ),
         native/let_field("message_length", :U64, "message_header", "length"),
-        @native_value/encode_step(native/call_expression("buffer_word", ["worker", "buffer", "message_length"])),
-        @native_value/encode_step(
-          native/call_expression(
-            "buffer_append",
-            [
-              "worker",
-              "buffer",
-              native/typed_expression(
+        @native_value/encode_word("message_length"),
+        @native_value/encode_bytes(native/typed_expression(
                 [:Pointer, :U8, :Const],
                 native/unary_expression(:Freeze, native/typed_field(bytes, "message_header", "data"))
-              ),
-              "message_length"
-            ]
-          )
-        )
+              ), "message_length")
       ]),
       native/when_statement("has_value", [
         native/let_field("error_value", word, "error", "value"),
@@ -338,7 +324,7 @@ verb native_value/codec_encode(input: map) -> map
           native/unary_expression(:UnpackPointer, "value")
         )
       ),
-      @native_value/encode_step(native/call_expression("codec_header", ["worker", "buffer", "tag", "zero"])),
+      @native_value/encode_header("tag", "zero"),
       native/let_statement(
         "delegate",
         word,
@@ -360,9 +346,8 @@ verb native_value/codec_encode(input: map) -> map
       ),
       native/let_field("arity", :U64, "relation", "arity"),
       native/let_field("heading", [:Pointer, :U32, :Mutable], "relation", "heading"),
-      @native_value/encode_step(native/call_expression("codec_header", ["worker", "buffer", "tag", "arity"])),
-      native/let_statement("column", :U64, "zero"),
-      native/while_statement(native/binary_expression(:Less, "column", "arity"), [
+      @native_value/encode_header("tag", "arity"),
+      @native/for_range("column", "zero", "arity", [
         native/let_load(
           "column_id",
           :U32,
@@ -377,14 +362,11 @@ verb native_value/codec_encode(input: map) -> map
             "tag_symbol"
           )
         ),
-        @native_value/encode_child("column_value"),
-        native/set_statement("column", native/binary_expression(:Add, "column", "one"))
-      ]),
+        @native_value/encode_child("column_value")]),
       native/let_field("length", :U64, "relation", "length"),
-      @native_value/encode_step(native/call_expression("buffer_word", ["worker", "buffer", "length"])),
+      @native_value/encode_word("length"),
       native/let_field("tuples", [:Pointer, [:Record, "ValueTuple"], :Mutable], "relation", "rows"),
-      native/let_statement("row", :U64, "zero"),
-      native/while_statement(native/binary_expression(:Less, "row", "length"), [
+      @native/for_range("row", "zero", "length", [
         native/let_load(
           "tuple",
           [:Record, "ValueTuple"],
@@ -403,9 +385,7 @@ verb native_value/codec_encode(input: map) -> map
           ),
           @native_value/encode_child("cell"),
           native/set_statement("column", native/binary_expression(:Add, "column", "one"))
-        ]),
-        native/set_statement("row", native/binary_expression(:Add, "row", "one"))
-      ]),
+        ])]),
       native/return_value("true")
     ]),
     native/return_value("false")

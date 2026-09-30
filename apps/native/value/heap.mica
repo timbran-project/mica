@@ -1,6 +1,39 @@
 // Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
+// Check the tag before interpreting a payload as a heap pointer.
+verb native_value/require_kind(value, kind: string, failure: list) -> list
+  let result: list = native/unless_statement(native/binary_expression(:Equal,
+    native/typed_expression(:U8, native/unary_expression(:Tag, value)), string_concat("tag_", kind)), failure)
+  return result
+end
+
+verb native_value/open_heap(value, kind: string, header: list, pointer_name: string, view_name: string, failure: list) -> list
+  return [native_value/require_kind(value, kind, failure),
+    native/let_statement(pointer_name, [:Pointer, header, :Const], native/unary_expression(:UnpackPointer, value)),
+    native/let_load(view_name, header, pointer_name)]
+end
+
+verb native_value/scalar_field(name: string, type_id) -> list
+  return [name, type_id, :Value, ""]
+end
+
+verb native_value/value_field(name: string, ?present: string = "") -> list
+  return [name, native_value/word(), :Gc, present]
+end
+
+// One description owns each fixed record's field order, parameter ownership,
+// and conditional GC edges. Presence fields are stored booleans.
+verb native_value/fixed_records() -> list
+  return [
+    ["range", "HeapRange", [native_value/value_field("start"),
+      native_value/scalar_field("has_end", :Bool), native_value/value_field("end", "has_end")]],
+    ["frob", "HeapFrob", [native_value/scalar_field("delegate", :U64), native_value/value_field("value")]],
+    ["error", "HeapError", [native_value/scalar_field("code", :U32),
+      native_value/scalar_field("has_message", :Bool), native_value/value_field("message", "has_message"),
+      native_value/scalar_field("has_value", :Bool), native_value/value_field("value", "has_value")]]]
+end
+
 verb native_value/heap(input: map) -> map
   let context: map = input
   let word = native_value/word()
@@ -12,9 +45,7 @@ verb native_value/heap(input: map) -> map
   state = native/record_type(state, "ListStorage", [["data", values], ["used", :U64], ["capacity", :U64]])[1]
   for spec in [["HeapBytes", [["data", bytes], ["length", :U64]]],
                ["HeapList", [["data", values], ["length", :U64], ["storage", [:Pointer, [:Record, "ListStorage"], :Mutable]]]],
-               ["HeapRange", [["start", word], ["has_end", :Bool], ["end", word]]],
-               ["HeapFrob", [["delegate", :U64], ["value", word]]],
-               ["HeapError", [["code", :U32], ["has_message", :Bool], ["message", word], ["has_value", :Bool], ["value", word]]]]
+               @[[spec[1], [[f[0], f[1]] for f in spec[2]]] for spec in native_value/fixed_records()]]
     state = native/record_type(state, spec[0], spec[1])[1]
   end
   context[:state] = state
@@ -24,9 +55,7 @@ verb native_value/heap(input: map) -> map
     end
     context = native_value/heap_accessor(context, spec[0], [:Record, spec[1]])
   end
-  for spec in [["range", "HeapRange", [["start", word, :Gc], ["has_end", :Bool, :Value], ["end", word, :Gc]]],
-               ["frob", "HeapFrob", [["delegate", :U64, :Value], ["value", word, :Gc]]],
-               ["error", "HeapError", [["code", :U32, :Value], ["has_message", :Bool, :Value], ["message", word, :Gc], ["has_value", :Bool, :Value], ["value", word, :Gc]]]]
+  for spec in native_value/fixed_records()
     context = native_value/record_constructor(context, spec)
     context = native_value/heap_accessor(context, spec[0], [:Record, spec[1]])
   end
@@ -58,8 +87,7 @@ verb native_value/bytes_constructor(input: map) -> map
     native/let_statement("limit", :U64, native/binary_expression(:Subtract, "allocation_limit", "header_size")),
     native/when_statement(native/binary_expression(:Less, "limit", "length"), failure),
     native/let_statement("total", :U64, native/binary_expression(:Add, "header_size", "length")),
-    native/let_call("allocation", bytes, "memory_allocate", ["worker", "total", "layout_bytes"]),
-    native/when_statement(native/binary_expression(:Equal, "allocation", "null_bytes"), failure),
+    @native_memory/allocate("allocation", "total", "layout_bytes", failure),
     native/let_statement("pointer", [:Pointer, header, :Mutable], native/unary_expression(:PointerCast, "allocation")),
     native/let_offset("data", bytes, "allocation", "header_size"),
     native/copy_bytes_statement("data", "source", "length"),
@@ -82,7 +110,7 @@ verb native_value/record_constructor(input: map, spec: list) -> map
   let header: list = [:Record, spec[1]]
   let result: list = [:Record, "ValueResult"]
   context = native/declare_function(context, name, result,
-    [["worker", [:Pointer, [:Record, "MemoryWorker"], :Mutable], :Borrow], @spec[2]],
+    [["worker", [:Pointer, [:Record, "MemoryWorker"], :Mutable], :Borrow], @[[f[0], f[1], f[2]] for f in spec[2]]],
     [], [:Allocate, :ReadMemory, :WriteMemory], :Gc, "")
   let failure: list = [native/return_zero()]
   let statements: list = []
@@ -94,25 +122,19 @@ verb native_value/record_constructor(input: map, spec: list) -> map
       native/when_statement(
         "has_message",
         [
-          native/unless_statement(
-            native/binary_expression(
-              :Equal,
-              native/typed_expression(:U8, native/unary_expression(:Tag, "message")),
-              "tag_string"
-            ),
-            failure
-          )
+          native_value/require_kind("message", "string", failure)
         ]
       )
     ]
   end
+  let fields: map = {}
+  for field in spec[2]
+    fields[field[0]] = field[0]
+  end
   context = native/define_function(context, name, [
     @statements,
-    native/let_statement("size", :U64, native/unary_expression(:SizeOf, header)),
-    native/let_call("allocation", [:Pointer, :U8, :Mutable], "memory_allocate", ["worker", "size", string_concat("layout_", spec[0])]),
-    native/when_statement(native/binary_expression(:Equal, "allocation", "null_bytes"), failure),
-    native/let_statement("pointer", [:Pointer, header, :Mutable], native/unary_expression(:PointerCast, "allocation")),
-    native/let_statement("header", header, native/record_expression([@[field[0] for field in spec[2]]])),
+    @native_memory/allocate_record("pointer", header, string_concat("layout_", spec[0]), failure, "allocation", "size"),
+    native/let_statement("header", header, native/initialize_record([spec[1], spec[2]], fields)),
     native/store_statement("pointer", "header"),
     native/return_record(
       [
@@ -133,14 +155,7 @@ verb native_value/heap_accessor(input: map, kind: string, header: list) -> map
   let name: string = string_concat("value_as_", kind)
   context = native/declare_function(context, name, result, [["value", native_value/word(), :Gc]], [], [], :Gc, "")
   context = native/define_function(context, name, [
-    native/unless_statement(
-      native/binary_expression(
-        :Equal,
-        native/typed_expression(:U8, native/unary_expression(:Tag, "value")),
-        string_concat("tag_", kind)
-      ),
-      [native/return_zero()]
-    ),
+    native_value/require_kind("value", kind, [native/return_zero()]),
     native/return_record(["true", native/typed_expression(pointer, native/unary_expression(:UnpackPointer, "value"))])
   ])
   return context

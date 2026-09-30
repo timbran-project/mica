@@ -53,16 +53,13 @@ verb native_value/persistence(input: map) -> map
         ),
         native/let_field(data, [:Pointer, spec[2], :Mutable], header, "data"),
         native/let_field(length, :U64, header, "length"),
-        native/let_statement(index, :U64, "zero"),
-        native/while_statement(native/binary_expression(:Less, index, length), [
+        @native/for_range(index, "zero", length, [
           native/let_load(
             element,
             spec[2],
             native/typed_expression([:Pointer, spec[2], :Mutable], native/offset_expression(data, index))
           ),
-          @children,
-          native/set_statement(index, native/binary_expression(:Add, index, "one"))
-        ]),
+          @children]),
         native/return_value("true")
       ])
     ]
@@ -114,8 +111,7 @@ verb native_value/persistence(input: map) -> map
       native/let_field("arity", :U64, "relation", "arity"),
       native/let_field("length", :U64, "relation", "length"),
       native/let_field("tuples", [:Pointer, [:Record, "ValueTuple"], :Mutable], "relation", "rows"),
-      native/let_statement("row", :U64, "zero"),
-      native/while_statement(native/binary_expression(:Less, "row", "length"), [
+      @native/for_range("row", "zero", "length", [
         native/let_load(
           "tuple",
           [:Record, "ValueTuple"],
@@ -125,8 +121,7 @@ verb native_value/persistence(input: map) -> map
           )
         ),
         native/let_field("cells", [:Pointer, word, :Mutable], "tuple", "data"),
-        native/let_statement("column", :U64, "zero"),
-        native/while_statement(native/binary_expression(:Less, "column", "arity"), [
+        @native/for_range("column", "zero", "arity", [
           native/let_load(
             "cell",
             word,
@@ -135,11 +130,7 @@ verb native_value/persistence(input: map) -> map
           native/unless_statement(
             native/call_expression("value_is_persistable", ["cell"]),
             [native/return_value("false")]
-          ),
-          native/set_statement("column", native/binary_expression(:Add, "column", "one"))
-        ]),
-        native/set_statement("row", native/binary_expression(:Add, "row", "one"))
-      ]),
+          )])]),
       native/return_value("true")
     ])
   ]

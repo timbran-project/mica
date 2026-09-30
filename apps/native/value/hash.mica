@@ -24,8 +24,7 @@ verb native_value/hashing(input: map) -> map
     ["data", [:Pointer, :U8, :Const], :Borrow], ["length", :U64, :Value]], [], [:ReadMemory], :Value, "")
   context = native/define_function(context, "value_hash_bytes", [
     native/let_statement("result", :U64, "hash"),
-    native/let_statement("i", :U64, "zero"),
-    native/while_statement(native/binary_expression(:Less, "i", "length"), [
+    @native/for_range("i", "zero", "length", [
       native/let_offset("slot", [:Pointer, :U8, :Const], "data", "i"),
       native/let_load("byte", :U8, "slot"),
       native/set_statement(
@@ -34,9 +33,7 @@ verb native_value/hashing(input: map) -> map
           "value_hash_mix",
           ["result", native/typed_expression(:U64, native/unary_expression(:Convert, "byte"))]
         )
-      ),
-      native/set_statement("i", native/binary_expression(:Add, "i", "one"))
-    ]),
+      )]),
     native/return_value("result")
   ])
   context = native/declare_function(context, "value_hash", result, [["value", word, :Gc]], [["child_hash", result]], [:ReadMemory], :Value, "")
@@ -45,13 +42,10 @@ verb native_value/hashing(input: map) -> map
     native/let_field("arity", :U64, "tuple", "arity"),
     native/let_field("data", [:Pointer, word, :Mutable], "tuple", "data"),
     native/let_call("hash", :U64, "value_hash_mix", ["value_hash_basis", "arity"]),
-    native/let_statement("i", :U64, "zero"),
-    native/while_statement(native/binary_expression(:Less, "i", "arity"), [
+    @native/for_range("i", "zero", "arity", [
       native/let_offset("slot", [:Pointer, word, :Mutable], "data", "i"),
       native/let_load("child", word, "slot"),
-      @native_value/hash_child("child"),
-      native/set_statement("i", native/binary_expression(:Add, "i", "one"))
-    ]),
+      @native_value/hash_child("child")]),
     native/return_record(["true", "hash"])
   ])
   let rows: list = [
@@ -136,13 +130,10 @@ verb native_value/hashing(input: map) -> map
       body = [
         @body,
         native/set_statement("hash", native/call_expression("value_hash_mix", ["hash", length])),
-        native/let_statement(index, :U64, "zero"),
-        native/while_statement(native/binary_expression(:Less, index, length), [
+        @native/for_range(index, "zero", length, [
           native/let_offset(slot, [:Pointer, spec[2], :Mutable], data, index),
           native/let_load(element, spec[2], slot),
-          @children,
-          native/set_statement(index, native/binary_expression(:Add, index, "one"))
-        ]),
+          @children]),
         native/return_record(["true", "hash"])
       ]
     end
@@ -233,14 +224,12 @@ verb native_value/hashing(input: map) -> map
   rows = [
     @rows,
     native/when_statement(native/binary_expression(:Equal, "kind", "tag_relation"), [
-      native/let_call("relation_checked", [:Record, "RelationResult"], "value_relation_view", ["value"]),
-      native/unless_statement(native/field_expression("relation_checked", "ok"), [native/return_zero()]),
+      @native/try_call("relation_checked", [:Record, "RelationResult"], "value_relation_view", ["value"], [native/return_zero()]),
       native/let_field("relation", [:Record, "HeapRelation"], "relation_checked", "relation"),
       native/let_field("heading", [:Pointer, :U32, :Mutable], "relation", "heading"),
       native/let_field("arity", :U64, "relation", "arity"),
       native/set_statement("hash", native/call_expression("value_hash_mix", ["hash", "arity"])),
-      native/let_statement("column", :U64, "zero"),
-      native/while_statement(native/binary_expression(:Less, "column", "arity"), [
+      @native/for_range("column", "zero", "arity", [
         native/let_offset("column_slot", [:Pointer, :U32, :Mutable], "heading", "column"),
         native/let_load("symbol", :U32, "column_slot"),
         native/set_statement(
@@ -249,14 +238,11 @@ verb native_value/hashing(input: map) -> map
             "value_hash_mix",
             ["hash", native/typed_expression(:U64, native/unary_expression(:Convert, "symbol"))]
           )
-        ),
-        native/set_statement("column", native/binary_expression(:Add, "column", "one"))
-      ]),
+        )]),
       native/let_field("tuples", [:Pointer, [:Record, "ValueTuple"], :Mutable], "relation", "rows"),
       native/let_field("length", :U64, "relation", "length"),
       native/set_statement("hash", native/call_expression("value_hash_mix", ["hash", "length"])),
-      native/let_statement("row", :U64, "zero"),
-      native/while_statement(native/binary_expression(:Less, "row", "length"), [
+      @native/for_range("row", "zero", "length", [
         native/let_offset("row_slot", [:Pointer, [:Record, "ValueTuple"], :Mutable], "tuples", "row"),
         native/set_statement(
           "child_hash",
@@ -266,9 +252,7 @@ verb native_value/hashing(input: map) -> map
         native/set_statement(
           "hash",
           native/call_expression("value_hash_mix", ["hash", native/typed_field(:U64, "child_hash", "number")])
-        ),
-        native/set_statement("row", native/binary_expression(:Add, "row", "one"))
-      ]),
+        )]),
       native/return_record(["true", "hash"])
     ]),
     native/return_zero()

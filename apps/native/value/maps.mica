@@ -29,13 +29,7 @@ verb native_value/maps(input: map) -> map
     ),
     native/let_statement("header_size", :U64, native/unary_expression(:SizeOf, header)),
     native/let_statement("size", :U64, native/unary_expression(:SizeOf, entry)),
-    native/let_statement("limit", :U64, native/binary_expression(:Subtract, "allocation_limit", "header_size")),
-    native/set_statement("limit", native/binary_expression(:Divide, "limit", "size")),
-    native/when_statement(native/binary_expression(:Less, "limit", "length"), [native/return_zero()]),
-    native/let_statement("bytes", :U64, native/binary_expression(:Multiply, "length", "size")),
-    native/let_statement("total", :U64, native/binary_expression(:Add, "header_size", "bytes")),
-    native/let_call("allocation", [:Pointer, :U8, :Mutable], "memory_allocate", ["worker", "total", "layout_map"]),
-    native/when_statement(native/binary_expression(:Equal, "allocation", "null_bytes"), [native/return_zero()]),
+    @native_memory/allocate_with_tail("allocation", "header_size", "size", "length", "layout_map", [native/return_zero()]),
     native/let_statement("pointer", [:Pointer, header, :Mutable], native/unary_expression(:PointerCast, "allocation")),
     native/let_offset("raw_data", [:Pointer, :U8, :Mutable], "allocation", "header_size"),
     native/let_statement("src", entries, native/unary_expression(:PointerCast, "raw_data")),
@@ -74,8 +68,7 @@ verb native_value/maps(input: map) -> map
           ),
           native/let_statement("left", :U64, "base"),
           native/let_statement("right", :U64, "middle"),
-          native/let_statement("out", :U64, "base"),
-          native/while_statement(native/binary_expression(:Less, "out", "end"), [
+          @native/for_range("out", "base", "end", [
             native/let_statement("take_left", :Bool, "true"),
             native/when_statement(
               native/binary_expression(:Less, "right", "end"),
@@ -87,8 +80,7 @@ verb native_value/maps(input: map) -> map
                   native/set_statement("right_entry", native/load_expression("right_slot")),
                   native/let_field("left_key", word, "left_entry", "key"),
                   native/let_field("right_key", word, "right_entry", "key"),
-                  native/let_call("comparison", [:Record, "IntResult"], "value_compare", ["left_key", "right_key"]),
-                  native/unless_statement(native/field_expression("comparison", "ok"), [native/return_zero()]),
+                  @native/try_call("comparison", [:Record, "IntResult"], "value_compare", ["left_key", "right_key"], [native/return_zero()]),
                   native/let_field("order", :I64, "comparison", "number"),
                   native/when_statement(
                     native/binary_expression(:Less, "int_zero", "order"),
@@ -109,9 +101,7 @@ verb native_value/maps(input: map) -> map
               native/set_statement("out_slot", native/offset_expression("dst", "out")),
               native/store_statement("out_slot", "right_entry"),
               native/set_statement("right", native/binary_expression(:Add, "right", "one"))
-            ]),
-            native/set_statement("out", native/binary_expression(:Add, "out", "one"))
-          ]),
+            ])]),
           native/set_statement("base", "end")
         ]),
         native/let_statement("swap", entries, "src"),
@@ -190,8 +180,7 @@ verb native_value/map_lookup(input: map) -> map
       native/let_offset("slot", [:Pointer, entry, :Mutable], "data", "middle"),
       native/let_load("entry", entry, "slot"),
       native/let_field("candidate", word, "entry", "key"),
-      native/let_call("comparison", [:Record, "IntResult"], "value_compare", ["candidate", "key"]),
-      native/unless_statement(native/field_expression("comparison", "ok"), [native/return_zero()]),
+      @native/try_call("comparison", [:Record, "IntResult"], "value_compare", ["candidate", "key"], [native/return_zero()]),
       native/let_field("order", :I64, "comparison", "number"),
       native/when_statement(native/binary_expression(:Equal, "order", "int_zero"), [
         native/let_field("value", word, "entry", "value"),

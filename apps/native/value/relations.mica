@@ -61,16 +61,9 @@ verb native_value/tuple_operations(input: map) -> map
     native/let_statement("limit", :U64, native/binary_expression(:Divide, "allocation_limit", "size")),
     native/when_statement(native/binary_expression(:Less, "limit", "arity"), [native/return_zero()]),
     native/let_statement("bytes", :U64, native/binary_expression(:Multiply, "arity", "size")),
-    native/let_call("raw", [:Pointer, :U8, :Mutable], "memory_allocate", ["worker", "bytes", "layout_values"]),
-    native/when_statement(native/binary_expression(:Equal, "raw", "null_bytes"), [native/return_zero()]),
+    @native_memory/allocate("raw", "bytes", "layout_values", [native/return_zero()]),
     native/let_statement("data", values, native/unary_expression(:PointerCast, "raw")),
-    native/let_statement("i", :U64, "zero"),
-    native/while_statement(native/binary_expression(:Less, "i", "arity"), [
-      native/let_offset("src", [:Pointer, word, :Const], "source", "i"),
-      native/let_offset("dst", values, "data", "i"),
-      native/store_statement("dst", native/typed_load(word, "src")),
-      native/set_statement("i", native/binary_expression(:Add, "i", "one"))
-    ]),
+    @native/copy_elements(word, "data", "source", "arity"),
     native/return_record(["true", native/typed_record(tuple, ["data", "arity"])])
   ])
   context = native/declare_function(context, "value_tuple_get", [:Record, "ValueResult"],
@@ -87,24 +80,15 @@ verb native_value/tuple_operations(input: map) -> map
     native/let_field("right_data", values, "right", "data"),
     native/let_field("left_arity", :U64, "left", "arity"),
     native/let_field("right_arity", :U64, "right", "arity"),
-    native/let_statement("i", :U64, "zero"),
-    native/while_statement(native/binary_expression(:Less, "i", "left_arity"), [
+    @native/for_range("i", "zero", "left_arity", [
       native/unless_statement(native/binary_expression(:Less, "i", "right_arity"), [native/break_statement()]),
       native/let_offset("left_slot", values, "left_data", "i"),
       native/let_offset("right_slot", values, "right_data", "i"),
-      native/let_call(
-        "comparison",
-        [:Record, "IntResult"],
-        "value_compare",
-        [native/typed_load(word, "left_slot"), native/typed_load(word, "right_slot")]
-      ),
-      native/unless_statement(native/field_expression("comparison", "ok"), [native/return_value("comparison")]),
+      @native/try_call("comparison", [:Record, "IntResult"], "value_compare", [native/typed_load(word, "left_slot"), native/typed_load(word, "right_slot")], [native/return_value("comparison")]),
       native/unless_statement(
         native/binary_expression(:Equal, native/typed_field(:I64, "comparison", "number"), "int_zero"),
         [native/return_value("comparison")]
-      ),
-      native/set_statement("i", native/binary_expression(:Add, "i", "one"))
-    ]),
+      )]),
     @native_value/scalar_order("left_arity", "right_arity")
   ])
   return context
@@ -130,8 +114,7 @@ verb native_value/relation_accessors(input: map) -> map
     native/return_record(["true", native/typed_load(relation, "pointer")])
   ])
   let read: list = [
-    native/let_call("checked", result, "value_relation_view", ["value"]),
-    native/unless_statement(native/field_expression("checked", "ok"), [native/return_zero()]),
+    @native/try_call("checked", result, "value_relation_view", ["value"], [native/return_zero()]),
     native/let_field("relation", relation, "checked", "relation")
   ]
   for field in ["arity", "length"]
@@ -212,8 +195,7 @@ verb native_value/relation_order(input: map) -> map
   for side in ["left", "right"]
     rows = [
       @rows,
-      native/let_call(string_concat(side, "_checked"), [:Record, "RelationResult"], "value_relation_view", [side]),
-      native/unless_statement(native/field_expression(string_concat(side, "_checked"), "ok"), [native/return_zero()]),
+      @native/try_call(string_concat(side, "_checked"), [:Record, "RelationResult"], "value_relation_view", [side], [native/return_zero()]),
       native/let_field(string_concat(side, "_view"), relation, string_concat(side, "_checked"), "relation")
     ]
   end
@@ -251,8 +233,7 @@ verb native_value/relation_order(input: map) -> map
     else
       elements = [
         @elements,
-        native/let_call("comparison", [:Record, "IntResult"], "value_tuple_compare", [left, right]),
-        native/unless_statement(native/field_expression("comparison", "ok"), [native/return_value("comparison")]),
+        @native/try_call("comparison", [:Record, "IntResult"], "value_tuple_compare", [left, right], [native/return_value("comparison")]),
         native/unless_statement(
           native/binary_expression(:Equal, native/typed_field(:I64, "comparison", "number"), "int_zero"),
           [native/return_value("comparison")]
@@ -263,12 +244,9 @@ verb native_value/relation_order(input: map) -> map
     let right_count: string = string_concat("right_", spec[2])
     rows = [
       @rows,
-      native/let_statement(index, :U64, "zero"),
-      native/while_statement(native/binary_expression(:Less, index, left_count), [
+      @native/for_range(index, "zero", left_count, [
         native/unless_statement(native/binary_expression(:Less, index, right_count), [native/break_statement()]),
-        @elements,
-        native/set_statement(index, native/binary_expression(:Add, index, "one"))
-      ]),
+        @elements]),
       native/unless_statement(
         native/binary_expression(:Equal, left_count, right_count),
         native_value/scalar_order(left_count, right_count)
@@ -305,8 +283,7 @@ verb native_value/relation_sort(input: map, kind: string, element: list) -> map
     ]
   else
     comparison = [
-      native/let_call("comparison", [:Record, "IntResult"], "value_tuple_compare", ["left_element", "right_element"]),
-      native/unless_statement(native/field_expression("comparison", "ok"), [native/return_value("false")]),
+      @native/try_call("comparison", [:Record, "IntResult"], "value_tuple_compare", ["left_element", "right_element"], [native/return_value("false")]),
       native/when_statement(
         native/binary_expression(:Less, "int_zero", native/typed_field(:I64, "comparison", "number")),
         [native/set_statement("take_left", "false")]
@@ -327,8 +304,7 @@ verb native_value/relation_sort(input: map, kind: string, element: list) -> map
     ]
   else
     ordered_test = [
-      native/let_call("scan_comparison", [:Record, "IntResult"], "value_tuple_compare", ["scan_left", "scan_right"]),
-      native/unless_statement(native/field_expression("scan_comparison", "ok"), [native/return_value("false")]),
+      @native/try_call("scan_comparison", [:Record, "IntResult"], "value_tuple_compare", ["scan_left", "scan_right"], [native/return_value("false")]),
       native/when_statement(native/binary_expression(
         :Less,
         "int_zero",
@@ -345,24 +321,19 @@ verb native_value/relation_sort(input: map, kind: string, element: list) -> map
     native/let_statement("limit", :U64, native/binary_expression(:Divide, "allocation_limit", "size")),
     native/when_statement(native/binary_expression(:Less, "limit", "length"), [native/return_value("false")]),
     native/let_statement("ordered", :Bool, "true"),
-    native/let_statement("scan", :U64, "one"),
-    native/while_statement(native/binary_expression(:Less, "scan", "length"), [
+    @native/for_range("scan", "one", "length", [
       native/let_statement("previous", :U64, native/binary_expression(:Subtract, "scan", "one")),
       native/let_offset("scan_left_slot", pointer, "data", "previous"),
       native/let_offset("scan_right_slot", pointer, "data", "scan"),
       native/let_load("scan_left", element, "scan_left_slot"),
       native/let_load("scan_right", element, "scan_right_slot"),
-      @ordered_test,
-      native/set_statement("scan", native/binary_expression(:Add, "scan", "one"))
-    ]),
+      @ordered_test]),
     native/when_statement("ordered", [native/return_value("true")]),
     native/let_statement("bytes", :U64, native/binary_expression(:Multiply, "length", "size")),
-    native/let_call("raw", [:Pointer, :U8, :Mutable], "memory_allocate", ["worker", "bytes", "layout_opaque"]),
-    native/when_statement(native/binary_expression(:Equal, "raw", "null_bytes"), [native/return_value("false")]),
+    @native_memory/allocate("raw", "bytes", "layout_opaque", [native/return_value("false")]),
     native/let_statement("src", pointer, "data"),
     native/let_statement("dst", pointer, native/unary_expression(:PointerCast, "raw")),
-    native/let_statement("width", :U64, "one"),
-    native/while_statement(native/binary_expression(:Less, "width", "length"), [
+    @native/for_range("width", "one", "length", [
       native/let_statement("base", :U64, "zero"),
       native/while_statement(
         native/binary_expression(:Less, "base", "length"),
@@ -379,8 +350,7 @@ verb native_value/relation_sort(input: map, kind: string, element: list) -> map
           ),
           native/let_statement("left", :U64, "base"),
           native/let_statement("right", :U64, "middle"),
-          native/let_statement("out", :U64, "base"),
-          native/while_statement(native/binary_expression(:Less, "out", "end"), [
+          @native/for_range("out", "base", "end", [
             native/let_statement("take_left", :Bool, "true"),
             native/when_statement(
               native/binary_expression(:Less, "right", "end"),
@@ -401,25 +371,18 @@ verb native_value/relation_sort(input: map, kind: string, element: list) -> map
             ], [native/set_statement("right", native/binary_expression(:Add, "right", "one"))]),
             native/let_offset("source_slot", pointer, "src", "chosen"),
             native/let_offset("destination_slot", pointer, "dst", "out"),
-            native/store_statement("destination_slot", native/typed_load(element, "source_slot")),
-            native/set_statement("out", native/binary_expression(:Add, "out", "one"))
-          ]),
+            native/store_statement("destination_slot", native/typed_load(element, "source_slot"))]),
           native/set_statement("base", "end")
         ]
       ),
       native/let_statement("swap", pointer, "src"),
       native/set_statement("src", "dst"),
-      native/set_statement("dst", "swap"),
-      native/set_statement("width", native/binary_expression(:Add, "width", "width"))
-    ]),
+      native/set_statement("dst", "swap")], "width"),
     native/unless_statement(native/binary_expression(:Equal, "src", "data"), [
-      native/let_statement("i", :U64, "zero"),
-      native/while_statement(native/binary_expression(:Less, "i", "length"), [
+      @native/for_range("i", "zero", "length", [
         native/set_statement("source_slot", native/offset_expression("src", "i")),
         native/set_statement("destination_slot", native/offset_expression("data", "i")),
-        native/store_statement("destination_slot", native/typed_load(element, "source_slot")),
-        native/set_statement("i", native/binary_expression(:Add, "i", "one"))
-      ])
+        native/store_statement("destination_slot", native/typed_load(element, "source_slot"))])
     ]),
     native/return_value("true")
   ])
@@ -465,10 +428,7 @@ verb native_value/relation_constructor(input: map) -> map
     native/let_statement("limit", :U64, native/binary_expression(:Subtract, "allocation_limit", "prefix")),
     native/set_statement("limit", native/binary_expression(:Divide, "limit", "row_size")),
     native/when_statement(native/binary_expression(:Less, "limit", "length"), fail),
-    native/let_statement("i", :U64, "zero"),
-    native/while_statement(
-      native/binary_expression(:Less, "i", "length"),
-      [
+    @native/for_range("i", "zero", "length", [
         native/let_offset("source_slot", [:Pointer, tuple, :Const], "source", "i"),
         native/let_load("row", tuple, "source_slot"),
         native/unless_statement(
@@ -479,10 +439,7 @@ verb native_value/relation_constructor(input: map) -> map
           native/let_field("row_data", values, "row", "data"),
           native/let_statement("borrowed", [:Pointer, word, :Const], native/unary_expression(:Freeze, "row_data")),
           native/when_statement(native/binary_expression(:Equal, "borrowed", "null_values"), fail)
-        ]),
-        native/set_statement("i", native/binary_expression(:Add, "i", "one"))
-      ]
-    ),
+        ])]),
     native/let_statement("count", :U64, "length"),
     native/when_statement(native/binary_expression(:Equal, "arity", "zero"), [
       native/when_statement(
@@ -495,8 +452,7 @@ verb native_value/relation_constructor(input: map) -> map
     native/unless_statement(native/binary_expression(:Equal, "arity", "zero"), [
       native/let_statement("column_size", :U64, native/unary_expression(:SizeOf, column)),
       native/let_statement("order_bytes", :U64, native/binary_expression(:Multiply, "arity", "column_size")),
-      native/let_call("raw_order", bytes, "memory_allocate", ["worker", "order_bytes", "layout_opaque"]),
-      native/when_statement(native/binary_expression(:Equal, "raw_order", "null_bytes"), fail),
+      @native_memory/allocate("raw_order", "order_bytes", "layout_opaque", fail),
       native/set_statement("order", native/unary_expression(:PointerCast, "raw_order")),
       native/set_statement("i", "zero"),
       native/while_statement(native/binary_expression(:Less, "i", "arity"), [
@@ -527,8 +483,7 @@ verb native_value/relation_constructor(input: map) -> map
     ]),
     native/let_statement("rows_size", :U64, native/binary_expression(:Multiply, "count", "row_size")),
     native/let_statement("total", :U64, native/binary_expression(:Add, "prefix", "rows_size")),
-    native/let_call("raw", bytes, "memory_allocate", ["worker", "total", "layout_relation"]),
-    native/when_statement(native/binary_expression(:Equal, "raw", "null_bytes"), fail),
+    @native_memory/allocate("raw", "total", "layout_relation", fail),
     native/let_statement("target", [:Pointer, relation, :Mutable], native/unary_expression(:PointerCast, "raw")),
     native/let_offset("raw_heading", bytes, "raw", "header_size"),
     native/let_statement(
@@ -554,16 +509,13 @@ verb native_value/relation_constructor(input: map) -> map
       native/set_statement("source_slot", native/offset_expression("source", "i")),
       native/set_statement("row", native/load_expression("source_slot")),
       native/set_statement("row_data", native/field_expression("row", "data")),
-      native/let_statement("j", :U64, "zero"),
-      native/while_statement(native/binary_expression(:Less, "j", "arity"), [
+      @native/for_range("j", "zero", "arity", [
         native/set_statement("column_slot", native/offset_expression("order", "j")),
         native/set_statement("current_column", native/load_expression("column_slot")),
         native/let_field("position", :U64, "current_column", "source"),
         native/let_offset("input_cell", values, "row_data", "position"),
         native/let_offset("output_cell", values, "cells", "j"),
-        native/store_statement("output_cell", native/typed_load(word, "input_cell")),
-        native/set_statement("j", native/binary_expression(:Add, "j", "one"))
-      ]),
+        native/store_statement("output_cell", native/typed_load(word, "input_cell"))]),
       native/let_offset("output_row", tuples, "rows", "i"),
       native/store_statement("output_row", native/typed_record(tuple, ["cells", "arity"])),
       native/set_statement("cells", native/offset_expression("cells", "arity")),
@@ -580,8 +532,7 @@ verb native_value/relation_constructor(input: map) -> map
         native/set_statement("previous", native/binary_expression(:Subtract, "write", "one")),
         native/set_statement("output_row", native/offset_expression("rows", "previous")),
         native/let_load("previous_row", tuple, "output_row"),
-        native/let_call("comparison", [:Record, "IntResult"], "value_tuple_compare", ["previous_row", "row"]),
-        native/unless_statement(native/field_expression("comparison", "ok"), fail),
+        @native/try_call("comparison", [:Record, "IntResult"], "value_tuple_compare", ["previous_row", "row"], fail),
         native/when_statement(
           native/binary_expression(:Equal, native/typed_field(:I64, "comparison", "number"), "int_zero"),
           [native/set_statement("keep", "false")]

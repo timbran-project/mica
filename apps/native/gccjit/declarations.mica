@@ -14,58 +14,58 @@ verb native_jit/define_types(input: map) -> map
     i = i + 1
   end
   let attempts: list = [
-    native_jit/bind("id", :U64, native_jit/word("row", 1)),
+    native/let_statement("id", :U64, native_jit/word("row", 1)),
     native/when_statement(native/binary_expression(:Equal, native_jit/meta(2, "id"), "n0"), [
-      native_jit/bind("kind", :U64, native_jit/word("row", 2)),
-      native_jit/bind("element", :U64, native_jit/word("row", 4)),
-      native_jit/bind("type", h, native_jit/cached(3, "element")),
-      native_jit/bind("result", h, "null"),
+      native/let_statement("kind", :U64, native_jit/word("row", 2)),
+      native/let_statement("element", :U64, native_jit/word("row", 4)),
+      native/let_statement("type", h, native_jit/cached(3, "element")),
+      native/let_statement("result", h, "null"),
       native/when_statement(native/binary_expression(:Equal, "kind", "n8"), [
-        native_jit/unless(native/binary_expression(:Equal, "type", "null"), [
-          native/when_statement(native/binary_expression(:Equal, native_jit/word("row", 5), "n1"), [native_jit/set("type", native_jit/j("const_type", ["type"]))]),
-          native_jit/set("result", native_jit/j("pointer", ["type"]))])]),
-      native/when_statement(native/binary_expression(:Equal, "kind", "n11"), [native_jit/set("result", "type")]),
-      native/when_statement(native/binary_expression(:Equal, "kind", "n12"), [native_jit/set("result", native_jit/cached(3, "n4"))]),
+        native/unless_statement(native/binary_expression(:Equal, "type", "null"), [
+          native/when_statement(native/binary_expression(:Equal, native_jit/word("row", 5), "n1"), [native/set_statement("type", native_jit/j("const_type", ["type"]))]),
+          native/set_statement("result", native_jit/j("pointer", ["type"]))])]),
+      native/when_statement(native/binary_expression(:Equal, "kind", "n11"), [native/set_statement("result", "type")]),
+      native/when_statement(native/binary_expression(:Equal, "kind", "n12"), [native/set_statement("result", native_jit/cached(3, "n4"))]),
       native/when_statement(native/binary_expression(:Equal, "kind", "n9"), [
         native/when_statement(native/binary_expression(:Equal, native_jit/meta(2, "element"), "n1"), [
-          native_jit/bind("array", h, native_jit/j("array", ["ctx", "type", native_jit/word("row", 5)])),
+          native/let_statement("array", h, native_jit/j("array", ["ctx", "type", native_jit/word("row", 5)])),
           native_jit/save(9, "id", "array"),
-          native_jit/bind("array_field", h, native_jit/j("field", ["ctx", "array", native_jit/text(native_jit/word("row", 7))])),
+          native/let_statement("array_field", h, native_jit/j("field", ["ctx", "array", native_jit/text(native_jit/word("row", 7))])),
           native_jit/save(5, native_jit/word("row", 6), "array_field"), native_jit/save(6, "n0", "array_field"),
           native/do_statement(native/call_expression("j_fields", [native_jit/cached(4, "id"), "n1", scratch])),
-          native_jit/set("result", native_jit/cached(3, "id"))])]),
+          native/set_statement("result", native_jit/cached(3, "id"))])]),
       native/when_statement(native/binary_expression(:Equal, "kind", "n10"), [
-        native_jit/bind("ready", :Bool, "true"), native_jit/bind("member", :U64, "n6"), native_jit/bind("count", :U64, "n0"),
+        native/let_statement("ready", :Bool, "true"), native/let_statement("member", :U64, "n6"), native/let_statement("count", :U64, "n0"),
         native/while_statement(native/binary_expression(:Less, "member", native_jit/word("row", 0)), [
-          native_jit/bind("field_type", h, native_jit/cached(3, native_jit/at("row", "member", :U64))),
-          native/if_statement(native/binary_expression(:Equal, native_jit/meta(2, native_jit/at("row", "member", :U64)), "n0"), [native_jit/set("ready", "false")], [
-            native_jit/bind("field", h, native_jit/j("field", ["ctx", "field_type", native_jit/text(native_jit/at("row", native_jit/binary(:Add, "member", "n1"), :U64))])),
+          native/let_statement("field_type", h, native_jit/cached(3, native_jit/at("row", "member", :U64))),
+          native/if_statement(native/binary_expression(:Equal, native_jit/meta(2, native_jit/at("row", "member", :U64)), "n0"), [native/set_statement("ready", "false")], [
+            native/let_statement("field", h, native_jit/j("field", ["ctx", "field_type", native_jit/text(native_jit/at("row", native_jit/binary(:Add, "member", "n1"), :U64))])),
             native_jit/save(6, "count", "field"), native_jit/save(5, native_jit/at("row", native_jit/binary(:Add, "member", "n2"), :U64), "field")]),
-          native_jit/set("member", native_jit/binary(:Add, "member", "n3")), native_jit/set("count", native_jit/binary(:Add, "count", "n1"))]),
-        native/when_statement("ready", [native/do_statement(native/call_expression("j_fields", [native_jit/cached(4, "id"), "count", scratch])), native_jit/set("result", native_jit/cached(3, "id"))])]),
+          native/set_statement("member", native_jit/binary(:Add, "member", "n3")), native/set_statement("count", native_jit/binary(:Add, "count", "n1"))]),
+        native/when_statement("ready", [native/do_statement(native/call_expression("j_fields", [native_jit/cached(4, "id"), "count", scratch])), native/set_statement("result", native_jit/cached(3, "id"))])]),
       native/when_statement(native/binary_expression(:Equal, "kind", "n13"), [
-        native_jit/bind("call_ready", :Bool, native/binary_expression(:Equal, "type", "null")),
-        native_jit/set("call_ready", native/binary_expression(:Equal, "call_ready", "false")),
-        native_jit/bind("argument", :U64, "n6"),
+        native/let_statement("call_ready", :Bool, native/binary_expression(:Equal, "type", "null")),
+        native/set_statement("call_ready", native/binary_expression(:Equal, "call_ready", "false")),
+        native/let_statement("argument", :U64, "n6"),
         native/while_statement(native/binary_expression(:Less, "argument", native_jit/word("row", 0)), [
-          native_jit/bind("argument_type", h, native_jit/cached(3, native_jit/at("row", "argument", :U64))),
-          native/when_statement(native/binary_expression(:Equal, "argument_type", "null"), [native_jit/set("call_ready", "false")]),
-          native_jit/save(6, native_jit/binary(:Subtract, "argument", "n6"), "argument_type"), native_jit/set("argument", native_jit/binary(:Add, "argument", "n1"))]),
-        native/when_statement("call_ready", [native_jit/set("result", native_jit/j("function_type", ["ctx", "type", native_jit/binary(:Subtract, native_jit/word("row", 0), "n6"), scratch]))])]),
-      native_jit/unless(native/binary_expression(:Equal, "result", "null"), [native_jit/save(3, "id", "result"), native_jit/save_meta(2, "id", "n1"), native_jit/set("progress", "true")])])]
+          native/let_statement("argument_type", h, native_jit/cached(3, native_jit/at("row", "argument", :U64))),
+          native/when_statement(native/binary_expression(:Equal, "argument_type", "null"), [native/set_statement("call_ready", "false")]),
+          native_jit/save(6, native_jit/binary(:Subtract, "argument", "n6"), "argument_type"), native/set_statement("argument", native_jit/binary(:Add, "argument", "n1"))]),
+        native/when_statement("call_ready", [native/set_statement("result", native_jit/j("function_type", ["ctx", "type", native_jit/binary(:Subtract, native_jit/word("row", 0), "n6"), scratch]))])]),
+      native/unless_statement(native/binary_expression(:Equal, "result", "null"), [native_jit/save(3, "id", "result"), native_jit/save_meta(2, "id", "n1"), native/set_statement("progress", "true")])])]
   context = native_jit/define(context, "types", [@primitives,
-    @native_jit/scan(0, [native_jit/bind("id", :U64, native_jit/word("row", 1)), native_jit/save_meta(1, "id", "cursor"),
-      native_jit/bind("kind", :U64, native_jit/word("row", 2)),
+    @native_jit/scan(0, [native/let_statement("id", :U64, native_jit/word("row", 1)), native_jit/save_meta(1, "id", "cursor"),
+      native/let_statement("kind", :U64, native_jit/word("row", 2)),
       native/when_statement(native/binary_expression(:Less, "n8", "kind"), [
         native/when_statement(native/binary_expression(:Less, "kind", "n11"), [
-          native_jit/bind("structure", h, native_jit/j("struct", ["ctx", native_jit/text(native_jit/word("row", 3))])),
+          native/let_statement("structure", h, native_jit/j("struct", ["ctx", native_jit/text(native_jit/word("row", 3))])),
           native_jit/save(4, "id", "structure"), native_jit/save(3, "id", native_jit/j("struct_type", ["structure"]))])])]),
-    native_jit/bind("progress", :Bool, "true"),
-    native/while_statement("progress", [native_jit/set("progress", "false"), @native_jit/renamed_scan(0, attempts, "resolve")]),
-    native_jit/bind("check", :U64, "n0"),
+    native/let_statement("progress", :Bool, "true"),
+    native/while_statement("progress", [native/set_statement("progress", "false"), @native_jit/renamed_scan(0, attempts, "resolve")]),
+    native/let_statement("check", :U64, "n0"),
     native/while_statement(native/binary_expression(:Less, "check", native_jit/word("data", 3)), [
-      native/when_statement(native/binary_expression(:Equal, native_jit/meta(2, "check"), "n0"), [native_jit/ret("false")]),
-      native_jit/set("check", native_jit/binary(:Add, "check", "n1"))]), native_jit/ret("true")])
+      native/when_statement(native/binary_expression(:Equal, native_jit/meta(2, "check"), "n0"), [native/return_value("false")]),
+      native/set_statement("check", native_jit/binary(:Add, "check", "n1"))]), native/return_value("true")])
   return context
 end
 
@@ -92,19 +92,19 @@ end
 verb native_jit/define_declarations(input: map) -> map
   let context: map = input
   let h: list = native_jit/handle()
-  let scratch = native/typed_expression([:Pointer, h, :Mutable], native/offset_expression("cache", native_jit/slot(6, "n0")))
+  let scratch = native_jit/argument_buffer()
   context = native_jit/define(context, "functions", [@native_jit/scan(1, [
-    native_jit/bind("position", :U64, "n5"), native_jit/bind("count", :U64, "n0"),
+    native/let_statement("position", :U64, "n5"), native/let_statement("count", :U64, "n0"),
     native/while_statement(native/binary_expression(:Less, "position", native_jit/word("row", 0)), [
-      native_jit/bind("parameter_id", :U64, native_jit/at("row", "position", :U64)),
-      native_jit/bind("parameter_type", :U64, native_jit/at("row", native_jit/binary(:Add, "position", "n1"), :U64)),
-      native_jit/bind("parameter", h, native_jit/j("parameter", ["ctx", native_jit/cached(3, "parameter_type"), native_jit/text(native_jit/at("row", native_jit/binary(:Add, "position", "n2"), :U64))])),
+      native/let_statement("parameter_id", :U64, native_jit/at("row", "position", :U64)),
+      native/let_statement("parameter_type", :U64, native_jit/at("row", native_jit/binary(:Add, "position", "n1"), :U64)),
+      native/let_statement("parameter", h, native_jit/j("parameter", ["ctx", native_jit/cached(3, "parameter_type"), native_jit/text(native_jit/at("row", native_jit/binary(:Add, "position", "n2"), :U64))])),
       native_jit/save(6, "count", "parameter"), native_jit/save(1, "parameter_id", native_jit/j("parameter_value", ["parameter"])), native_jit/save_meta(0, "parameter_id", "parameter_type"),
-      native_jit/set("position", native_jit/binary(:Add, "position", "n3")), native_jit/set("count", native_jit/binary(:Add, "count", "n1"))]),
+      native/set_statement("position", native_jit/binary(:Add, "position", "n3")), native/set_statement("count", native_jit/binary(:Add, "count", "n1"))]),
     native_jit/save(0, native_jit/word("row", 1), native_jit/j("function", ["ctx", native_jit/cached(3, native_jit/word("row", 3)), native_jit/text(native_jit/word("row", 2)), native/typed_expression(:Bool, native/binary_expression(:Equal, native_jit/word("row", 4), "n1")), "count", scratch]))]), native/return_void()])
   context = native_jit/define(context, "locals", [@native_jit/scan(2, [
-    native_jit/bind("id", :U64, native_jit/word("row", 1)), native_jit/bind("type_id", :U64, native_jit/word("row", 4)),
-    native_jit/bind("local", h, native_jit/j("local", [native_jit/cached(0, native_jit/word("row", 2)), native_jit/cached(3, "type_id"), native_jit/text(native_jit/word("row", 3))])),
+    native/let_statement("id", :U64, native_jit/word("row", 1)), native/let_statement("type_id", :U64, native_jit/word("row", 4)),
+    native/let_statement("local", h, native_jit/j("local", [native_jit/cached(0, native_jit/word("row", 2)), native_jit/cached(3, "type_id"), native_jit/text(native_jit/word("row", 3))])),
     native_jit/save(2, "id", "local"), native_jit/save(1, "id", native_jit/j("value", ["local"])), native_jit/save_meta(0, "id", "type_id")]), native/return_void()])
   // GCC chooses the first block as entry. The input table need not be ordered.
   let block_body: list = [
@@ -112,44 +112,44 @@ verb native_jit/define_declarations(input: map) -> map
       native_jit/save(0, native_jit/word("row", 1), native_jit/j("block", [native_jit/cached(0, native_jit/word("row", 2)), native_jit/text(native_jit/word("row", 3))])),
       native_jit/save(7, native_jit/word("row", 1), native_jit/cached(0, native_jit/word("row", 1))),
       native_jit/save_meta(3, native_jit/word("row", 1), native_jit/word("row", 2))])]
-  context = native_jit/define(context, "blocks", [native_jit/bind("entry", :U64, "n1"), @native_jit/scan(3, block_body), native_jit/set("entry", "n0"), @native_jit/renamed_scan(3, block_body, "remaining"), native/return_void()])
+  context = native_jit/define(context, "blocks", [native/let_statement("entry", :U64, "n1"), @native_jit/scan(3, block_body), native/set_statement("entry", "n0"), @native_jit/renamed_scan(3, block_body, "remaining"), native/return_void()])
   context = native_jit/define(context, "constants", [@native_jit/scan(4, [
-    native_jit/bind("id", :U64, native_jit/word("row", 1)), native_jit/bind("type_id", :U64, native_jit/word("row", 2)),
-    native_jit/bind("type_row", native_jit/words(), native/offset_expression("data", native_jit/meta(1, "type_id"))),
-    native_jit/bind("kind", :U64, native_jit/word("type_row", 2)),
-    native_jit/bind("type", h, native_jit/cached(3, "type_id")),
-    native_jit/bind("value", h, "null"),
+    native/let_statement("id", :U64, native_jit/word("row", 1)), native/let_statement("type_id", :U64, native_jit/word("row", 2)),
+    native/let_statement("type_row", native_jit/words(), native/offset_expression("data", native_jit/meta(1, "type_id"))),
+    native/let_statement("kind", :U64, native_jit/word("type_row", 2)),
+    native/let_statement("type", h, native_jit/cached(3, "type_id")),
+    native/let_statement("value", h, "null"),
     native/if_statement(native/binary_expression(:Less, "kind", "n8"), [
-      native_jit/bind("bits", :U64, native_jit/binary(:BitOr, native_jit/word("row", 3), native_jit/binary(:ShiftLeft, native_jit/word("row", 4), "n32"))),
-      native/when_statement(native/binary_expression(:Equal, native_jit/word("row", 5), "n1"), [native_jit/set("bits", native_jit/binary(:Subtract, "n0", "bits"))]),
-      native_jit/bind("signed", :I64, native/unary_expression(:Bitcast, "bits")),
-      native/if_statement(native/binary_expression(:Equal, "kind", "n6"), [native_jit/set("value", native_jit/j("bitcast", ["ctx", native_jit/j("integer", ["ctx", native_jit/cached(3, "n3"), "signed"]), "type"]))], [native_jit/set("value", native_jit/j("integer", ["ctx", "type", "signed"]))])
-    ], [native_jit/set("value", native_jit/j("null", ["ctx", "type"]))]),
+      native/let_statement("bits", :U64, native_jit/binary(:BitOr, native_jit/word("row", 3), native_jit/binary(:ShiftLeft, native_jit/word("row", 4), "n32"))),
+      native/when_statement(native/binary_expression(:Equal, native_jit/word("row", 5), "n1"), [native/set_statement("bits", native_jit/binary(:Subtract, "n0", "bits"))]),
+      native/let_statement("signed", :I64, native/unary_expression(:Bitcast, "bits")),
+      native/if_statement(native/binary_expression(:Equal, "kind", "n6"), [native/set_statement("value", native_jit/j("bitcast", ["ctx", native_jit/j("integer", ["ctx", native_jit/cached(3, "n3"), "signed"]), "type"]))], [native/set_statement("value", native_jit/j("integer", ["ctx", "type", "signed"]))])
+    ], [native/set_statement("value", native_jit/j("null", ["ctx", "type"]))]),
     native_jit/save(1, "id", "value"), native_jit/save_meta(0, "id", "type_id")]), native/return_void()])
   context = native_jit/define(context, "zero", [
-    native_jit/bind("type_row", native_jit/words(), native/offset_expression("data", native_jit/meta(1, "type_id"))),
-    native_jit/bind("kind", :U64, native_jit/word("type_row", 2)), native_jit/bind("type", h, native_jit/cached(3, "type_id")),
-    native/when_statement(native/binary_expression(:Equal, "kind", "n8"), [native_jit/ret(native_jit/j("null", ["ctx", "type"]))]),
-    native/when_statement(native/binary_expression(:Equal, "kind", "n13"), [native_jit/ret(native_jit/j("null", ["ctx", "type"]))]),
-    native/when_statement(native/binary_expression(:Equal, "kind", "n9"), [native_jit/ret(native_jit/j("record", ["ctx", "type", "n0", scratch]))]),
-    native/when_statement(native/binary_expression(:Equal, "kind", "n10"), [native_jit/ret(native_jit/j("record", ["ctx", "type", "n0", scratch]))]),
-    native_jit/ret(native_jit/j("zero", ["ctx", "type"]))])
+    native/let_statement("type_row", native_jit/words(), native/offset_expression("data", native_jit/meta(1, "type_id"))),
+    native/let_statement("kind", :U64, native_jit/word("type_row", 2)), native/let_statement("type", h, native_jit/cached(3, "type_id")),
+    native/when_statement(native/binary_expression(:Equal, "kind", "n8"), [native/return_value(native_jit/j("null", ["ctx", "type"]))]),
+    native/when_statement(native/binary_expression(:Equal, "kind", "n13"), [native/return_value(native_jit/j("null", ["ctx", "type"]))]),
+    native/when_statement(native/binary_expression(:Equal, "kind", "n9"), [native/return_value(native_jit/j("record", ["ctx", "type", "n0", scratch]))]),
+    native/when_statement(native/binary_expression(:Equal, "kind", "n10"), [native/return_value(native_jit/j("record", ["ctx", "type", "n0", scratch]))]),
+    native/return_value(native_jit/j("zero", ["ctx", "type"]))])
   context = native_jit/define(context, "globals", [@native_jit/scan(5, [
-    native_jit/bind("id", :U64, native_jit/word("row", 1)), native_jit/bind("type_id", :U64, native_jit/word("row", 3)),
-    native_jit/bind("type", h, native_jit/cached(3, "type_id")), native_jit/bind("declared_type", h, "type"),
-    native/when_statement(native/binary_expression(:Equal, native_jit/word("row", 4), "n1"), [native_jit/set("declared_type", native_jit/j("const_type", ["type"]))]),
-    native_jit/bind("global", h, native_jit/j("global", ["ctx", "declared_type", native_jit/text(native_jit/word("row", 2))])),
+    native/let_statement("id", :U64, native_jit/word("row", 1)), native/let_statement("type_id", :U64, native_jit/word("row", 3)),
+    native/let_statement("type", h, native_jit/cached(3, "type_id")), native/let_statement("declared_type", h, "type"),
+    native/when_statement(native/binary_expression(:Equal, native_jit/word("row", 4), "n1"), [native/set_statement("declared_type", native_jit/j("const_type", ["type"]))]),
+    native/let_statement("global", h, native_jit/j("global", ["ctx", "declared_type", native_jit/text(native_jit/word("row", 2))])),
     native/when_statement(native/binary_expression(:Equal, native_jit/word("row", 4), "n2"), [native/do_statement(native/call_expression("j_tls", ["global"]))]),
-    native_jit/bind("value", h, native_jit/invoke("zero", ["type_id"], h)),
-    native/when_statement(native/binary_expression(:Equal, native_jit/word("row", 5), "n1"), [native_jit/set("value", native_jit/cached(1, native_jit/word("row", 6)))]),
+    native/let_statement("value", h, native_jit/invoke("zero", ["type_id"], h)),
+    native/when_statement(native/binary_expression(:Equal, native_jit/word("row", 5), "n1"), [native/set_statement("value", native_jit/cached(1, native_jit/word("row", 6)))]),
     native/when_statement(native/binary_expression(:Equal, native_jit/word("row", 5), "n2"), [
-      native_jit/bind("position", :U64, "n6"),
+      native/let_statement("position", :U64, "n6"),
       native/while_statement(native/binary_expression(:Less, "position", native_jit/word("row", 0)), [
         native_jit/save(6, native_jit/binary(:Subtract, "position", "n6"), native_jit/integer(native_jit/at("row", "position", :U64), native_jit/cached(3, "n1"))),
-        native_jit/set("position", native_jit/binary(:Add, "position", "n1"))]),
-      native_jit/bind("bytes", h, native_jit/j("array_value", ["ctx", native_jit/cached(9, "type_id"), native_jit/binary(:Subtract, "position", "n6"), scratch])),
-      native_jit/save(6, "n0", "bytes"), native_jit/set("value", native_jit/j("record", ["ctx", "type", "n1", scratch]))]),
-    native_jit/bind("initialized", h, native_jit/j("global_init", ["global", "value"])),
+        native/set_statement("position", native_jit/binary(:Add, "position", "n1"))]),
+      native/let_statement("bytes", h, native_jit/j("array_value", ["ctx", native_jit/cached(9, "type_id"), native_jit/binary(:Subtract, "position", "n6"), scratch])),
+      native_jit/save(6, "n0", "bytes"), native/set_statement("value", native_jit/j("record", ["ctx", "type", "n1", scratch]))]),
+    native/let_statement("initialized", h, native_jit/j("global_init", ["global", "value"])),
     native_jit/save(2, "id", "initialized"), native_jit/save(1, "id", native_jit/j("value", ["initialized"])), native_jit/save_meta(0, "id", "type_id")]), native/return_void()])
   return context
 end

@@ -101,17 +101,8 @@ verb native_value/copying(input: map) -> map
         @body,
         native/let_statement("map_header_size", :U64, native/unary_expression(:SizeOf, header_type)),
         native/let_statement("map_entry_size", :U64, native/unary_expression(:SizeOf, spec[2])),
-        native/let_statement(
-          "map_limit",
-          :U64,
-          native/binary_expression(:Subtract, "allocation_limit", "map_header_size")
-        ),
-        native/set_statement("map_limit", native/binary_expression(:Divide, "map_limit", "map_entry_size")),
-        native/when_statement(native/binary_expression(:Less, "map_limit", length), [native/return_zero()]),
-        native/let_statement("map_bytes", :U64, native/binary_expression(:Multiply, length, "map_entry_size")),
-        native/let_statement("map_total", :U64, native/binary_expression(:Add, "map_header_size", "map_bytes")),
-        native/let_call("map_raw", [:Pointer, :U8, :Mutable], "memory_allocate", ["worker", "map_total", "layout_map"]),
-        native/when_statement(native/binary_expression(:Equal, "map_raw", "null_bytes"), [native/return_zero()]),
+        @native_memory/allocate_with_tail("map_raw", "map_header_size", "map_entry_size", length,
+          "layout_map", [native/return_zero()], "map_limit", "map_bytes", "map_total"),
         native/let_statement(
           target,
           [:Pointer, header_type, :Mutable],
@@ -146,15 +137,12 @@ verb native_value/copying(input: map) -> map
     end
     body = [
       @body,
-      native/let_statement(index, :U64, "zero"),
-      native/while_statement(native/binary_expression(:Less, index, length), [
+      @native/for_range(index, "zero", length, [
         native/let_offset(slot, elements, source, index),
         native/let_load(element, spec[2], slot),
         @children,
         native/let_offset(output_slot, elements, destination, index),
-        native/store_statement(output_slot, output),
-        native/set_statement(index, native/binary_expression(:Add, index, "one"))
-      ])
+        native/store_statement(output_slot, output)])
     ]
     if prefix == "map"
       body = [
@@ -205,11 +193,7 @@ verb native_value/copying(input: map) -> map
             @body,
             native/let_statement(copied, word, native/zero_expression()),
             native/when_statement(string_concat(spec[0], "_", field[2]), [
-              native/let_call(string_concat(copied, "_checked"), result, "value_copy", ["worker", local]),
-              native/unless_statement(
-                native/field_expression(string_concat(copied, "_checked"), "ok"),
-                [native/return_zero()]
-              ),
+              @native/try_call(string_concat(copied, "_checked"), result, "value_copy", ["worker", local], [native/return_zero()]),
               native/set_statement(copied, native/field_expression(string_concat(copied, "_checked"), "value"))
             ])
           ]
@@ -242,8 +226,7 @@ end
 verb native_value/copy_child(source: string, destination: string) -> list
   let checked: string = string_concat(destination, "_checked")
   return [
-    native/let_call(checked, [:Record, "ValueResult"], "value_copy", ["worker", source]),
-    native/unless_statement(native/field_expression(checked, "ok"), [native/return_zero()]),
+    @native/try_call(checked, [:Record, "ValueResult"], "value_copy", ["worker", source], [native/return_zero()]),
     native/let_field(destination, native_value/word(), checked, "value")
   ]
 end
@@ -264,18 +247,14 @@ verb native_value/copy_tuple(input: map) -> map
     native/let_statement("limit", :U64, native/binary_expression(:Divide, "allocation_limit", "size")),
     native/when_statement(native/binary_expression(:Less, "limit", "arity"), [native/return_zero()]),
     native/let_statement("bytes", :U64, native/binary_expression(:Multiply, "arity", "size")),
-    native/let_call("raw", [:Pointer, :U8, :Mutable], "memory_allocate", ["worker", "bytes", "layout_values"]),
-    native/when_statement(native/binary_expression(:Equal, "raw", "null_bytes"), [native/return_zero()]),
+    @native_memory/allocate("raw", "bytes", "layout_values", [native/return_zero()]),
     native/let_statement("data", values, native/unary_expression(:PointerCast, "raw")),
-    native/let_statement("i", :U64, "zero"),
-    native/while_statement(native/binary_expression(:Less, "i", "arity"), [
+    @native/for_range("i", "zero", "arity", [
       native/let_offset("input_slot", values, "source", "i"),
       native/let_load("child", word, "input_slot"),
       @native_value/copy_child("child", "copied"),
       native/let_offset("output_slot", values, "data", "i"),
-      native/store_statement("output_slot", "copied"),
-      native/set_statement("i", native/binary_expression(:Add, "i", "one"))
-    ]),
+      native/store_statement("output_slot", "copied")]),
     native/return_record(["true", native/typed_record(tuple, ["data", "arity"])])
   ])
   return context
@@ -292,8 +271,7 @@ verb native_value/copy_relation(input: map) -> map
     ["worker", [:Pointer, [:Record, "MemoryWorker"], :Mutable], :Borrow], ["value", word, :Gc]], [],
     [:Allocate, :ReadMemory, :WriteMemory], :Gc, "")
   context = native/define_function(context, "value_relation_copy", [
-    native/let_call("checked", [:Record, "RelationResult"], "value_relation_view", ["value"]),
-    native/unless_statement(native/field_expression("checked", "ok"), [native/return_zero()]),
+    @native/try_call("checked", [:Record, "RelationResult"], "value_relation_view", ["value"], [native/return_zero()]),
     native/let_field("original", relation, "checked", "relation"),
     native/let_field("arity", :U64, "original", "arity"),
     native/let_field("length", :U64, "original", "length"),
@@ -313,37 +291,20 @@ verb native_value/copy_relation(input: map) -> map
     native/set_statement("heading_size", native/binary_expression(:BitAnd, "heading_size", "alignment_mask")),
     native/let_statement("prefix", :U64, native/binary_expression(:Add, "header_size", "heading_size")),
     native/let_statement("tuple_size", :U64, native/unary_expression(:SizeOf, tuple)),
-    native/let_statement("limit", :U64, native/binary_expression(:Subtract, "allocation_limit", "prefix")),
-    native/set_statement("limit", native/binary_expression(:Divide, "limit", "tuple_size")),
-    native/when_statement(native/binary_expression(:Less, "limit", "length"), [native/return_zero()]),
-    native/let_statement("rows_size", :U64, native/binary_expression(:Multiply, "length", "tuple_size")),
-    native/let_statement("total", :U64, native/binary_expression(:Add, "prefix", "rows_size")),
-    native/let_call("raw", bytes, "memory_allocate", ["worker", "total", "layout_relation_copy"]),
-    native/when_statement(native/binary_expression(:Equal, "raw", "null_bytes"), [native/return_zero()]),
+    @native_memory/allocate_with_tail("raw", "prefix", "tuple_size", "length",
+      "layout_relation_copy", [native/return_zero()], "limit", "rows_size", "total"),
     native/let_statement("target", [:Pointer, relation, :Mutable], native/unary_expression(:PointerCast, "raw")),
     native/let_offset("raw_heading", bytes, "raw", "header_size"),
     native/let_statement("heading", [:Pointer, :U32, :Mutable], native/unary_expression(:PointerCast, "raw_heading")),
     native/let_field("source_heading", [:Pointer, :U32, :Mutable], "original", "heading"),
-    native/let_statement("i", :U64, "zero"),
-    native/while_statement(native/binary_expression(:Less, "i", "arity"), [
-      native/let_offset("source_column", [:Pointer, :U32, :Mutable], "source_heading", "i"),
-      native/let_offset("target_column", [:Pointer, :U32, :Mutable], "heading", "i"),
-      native/store_statement("target_column", native/typed_load(:U32, "source_column")),
-      native/set_statement("i", native/binary_expression(:Add, "i", "one"))
-    ]),
+    @native/copy_elements(:U32, "heading", "source_heading", "arity", :Mutable, "i", "source_column", "target_column"),
     native/let_offset("raw_rows", bytes, "raw", "prefix"),
     native/let_statement("rows", tuples, native/unary_expression(:PointerCast, "raw_rows")),
     native/let_field("source_rows", tuples, "original", "rows"),
     native/set_statement("i", "zero"),
     native/while_statement(native/binary_expression(:Less, "i", "length"), [
       native/let_offset("source_row", tuples, "source_rows", "i"),
-      native/let_call(
-        "copied",
-        [:Record, "TupleResult"],
-        "value_tuple_copy",
-        ["worker", native/typed_load(tuple, "source_row")]
-      ),
-      native/unless_statement(native/field_expression("copied", "ok"), [native/return_zero()]),
+      @native/try_call("copied", [:Record, "TupleResult"], "value_tuple_copy", ["worker", native/typed_load(tuple, "source_row")], [native/return_zero()]),
       native/let_offset("target_row", tuples, "rows", "i"),
       native/store_statement("target_row", native/typed_field(tuple, "copied", "tuple")),
       native/set_statement("i", native/binary_expression(:Add, "i", "one"))

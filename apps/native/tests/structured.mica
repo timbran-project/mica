@@ -137,6 +137,62 @@ verb native/control_examples(state: map, constants: map, tick: int) -> map
   end
   result = native/terminate(result, names["done"], :Return, [names["i"]])
   result = native/scope_examples(result, constants, tick)
+  result = native/semantic_examples(result, constants, tick)
+  return result
+end
+
+verb native/semantic_examples(input: map, constants: map, tick: int) -> map
+  let state: map = input
+  let pair: list = ["BuilderPair", [["left", :U64], ["right", :U64]]]
+  let node_pointer: list = [:Pointer, [:Record, "BuilderNode"], :Mutable]
+  let node: list = ["BuilderNode", [["next", node_pointer], ["value", :U64]]]
+  for schema in [pair, node]
+    state = native/record_type(state, schema[0], schema[1])[1]
+  end
+  let [extra, declared] = native/constants(state, [["true", :Bool, "true"]])
+  let bindings: map = constants
+  bindings["true"] = extra["true"]
+  let context: map = native/module_context(declared, bindings)
+  context[:functions] = {"tick" -> tick}
+  for name in ["semantic_range", "semantic_first"]
+    context = native/declare_function(context, name, :U64, [["limit", :U64, :Value]], [], [], :Value, "")
+  end
+  context = native/define_function(context, "semantic_range", [
+    native/let_statement("sum", :U64, "zero"),
+    @native/for_range("i", "zero", "limit", [
+      native/switch_statement(:U64, "i", [
+        native/case_arm("one", [native/continue_statement()]),
+        native/case_arm("three", [native/break_statement()])], []),
+      @native/for_range("j", "zero", "two", [
+        native/when_statement(native/binary_expression(:Equal, "j", "zero"), [native/continue_statement()]),
+        native/set_statement("sum", native/binary_expression(:Add, "sum", "one"))]),
+      native/set_statement("sum", native/binary_expression(:Add, "sum", "i"))]),
+    native/return_value("sum")])
+  context = native/define_function(context, "semantic_first", [
+    @native/for_range("i", "zero", "limit", [native/return_value("i")]),
+    native/return_value("ten")])
+  context = native/declare_function(context, "semantic_walk", :U64, [["head", node_pointer, :Borrow]], [], [:ReadMemory], :Value, "")
+  context = native/define_function(context, "semantic_walk", [
+    native/let_statement("sum", :U64, "zero"),
+    @native/walk_chain("node", node_pointer, "head", native/member(node, "node", "next"), [
+      native/when_statement(native/binary_expression(:Equal, native/member(node, "node", "value"), "one"), [native/continue_statement()]),
+      native/set_statement("sum", native/binary_expression(:Add, "sum", native/member(node, "node", "value")))], [native/break_statement()]),
+    native/return_value("sum")])
+  context = native/declare_function(context, "semantic_pair", [:Record, "BuilderPair"], [], [], [], :Value, "")
+  context = native/define_function(context, "semantic_pair", [
+    native/return_value(native/initialize_record(pair, {"right" -> "two", "left" -> "one"}))])
+  context = native/declare_function(context, "semantic_copy", [:Record, "BuilderPair"],
+    [["source", [:Pointer, [:Record, "BuilderPair"], :Mutable], :Borrow]], [], [:ReadMemory, :WriteMemory], :Value, "")
+  context = native/define_function(context, "semantic_copy", [
+    native/return_record(native/record_copy_arguments(pair, "source", {"right" -> native/typed_call(:U64, "tick", [])}))])
+  context = native/declare_function(context, "semantic_elements", :U64,
+    [["destination", [:Pointer, :U64, :Mutable], :Borrow], ["source", [:Pointer, :U64, :Const], :Borrow],
+      ["length", :U64, :Value], ["index", :U64, :Value]], [], [:ReadMemory, :WriteMemory], :Value, "")
+  context = native/define_function(context, "semantic_elements", [
+    @native/copy_elements(:U64, "destination", "source", "length"),
+    @native/checked_element("selected", :U64, "destination", "length", "index", [native/return_value("ten")]),
+    native/return_value(native/typed_load(:U64, "selected"))])
+  let result: map = context[:state]
   return result
 end
 

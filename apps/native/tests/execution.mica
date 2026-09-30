@@ -17,10 +17,10 @@ verb native/execution_example() -> map
   context = native/declare_function(context, "execution_step", :U64, parameters, [], effects, :Value, "")
   context = native/execution_function(context, "execution_step", :Tail)
   context = native/define_function(context, "execution_step", [
-    native_memory/bind("raw", bytes, native_memory/root(bytes, "root", "pointer")),
+    native/let_statement("raw", bytes, native_memory/root(bytes, "root", "pointer")),
     native/let_statement("saved", pointer, native/unary_expression(:PointerCast, "raw")),
-    native_memory/bind("remaining", :U64, native_memory/field(:U64, "saved", "remaining")),
-    native_memory/bind("sum", :U64, native_memory/field(:U64, "saved", "sum")),
+    native/let_statement("remaining", :U64, native_memory/field(:U64, "saved", "remaining")),
+    native/let_statement("sum", :U64, native_memory/field(:U64, "saved", "sum")),
     native/when_statement(native/binary_expression(:Equal, "remaining", "memory_n0"), [native/return_value("sum")]),
     native/when_statement(native/binary_expression(:Equal, "budget", "memory_n0"), [native/return_value("sum")]),
     native/let_statement("size", :U64, native/unary_expression(:SizeOf, state)),

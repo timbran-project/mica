@@ -24,8 +24,7 @@ verb native_value/string_search(input: map) -> map
     native/let_field("candidate", :U64, "offset_result", "number"),
     native/unless_statement("condition", [native/return_zero()]),
     native/let_statement("search_start", :U64, "candidate"),
-    native/let_call("checked", [:Record, "HeapStringResult"], "value_as_string", ["needle"]),
-    native/unless_statement(native/field_expression("checked", "ok"), [native/return_zero()]),
+    @native/try_call("checked", [:Record, "HeapStringResult"], "value_as_string", ["needle"], [native/return_zero()]),
     native/let_field("needle_pointer", [:Pointer, header, :Const], "checked", "header"),
     native/let_load("pattern", header, "needle_pointer"),
     native/let_statement("hay_pointer", [:Pointer, header, :Const], native/unary_expression(:UnpackPointer, "value")),
@@ -48,16 +47,13 @@ verb native_value/string_search(input: map) -> map
     native/let_statement("table_address", [:Pointer, table, :Mutable], native/unary_expression(:Address, "table")),
     native/unless_statement("condition", [
       native/set_statement("skip", "true"),
-      native/let_statement("index", :U64, "zero"),
-      native/while_statement(native/binary_expression(:Less, "index", "byte_domain"), [
+      @native/for_range("index", "zero", "byte_domain", [
         native/let_statement(
           "table_slot",
           [:Pointer, :U64, :Mutable],
           native/binary_expression(:ElementPointer, "table_address", "index")
         ),
-        native/store_statement("table_slot", "needle_length"),
-        native/set_statement("index", native/binary_expression(:Add, "index", "one"))
-      ]),
+        native/store_statement("table_slot", "needle_length")]),
       native/set_statement("index", "zero"),
       native/while_statement(native/binary_expression(:Less, "index", "last"), [
         native/let_offset("needle_slot", [:Pointer, :U8, :Mutable], "needle_data", "index"),

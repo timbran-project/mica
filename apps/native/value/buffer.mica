@@ -20,13 +20,7 @@ verb native_value/buffers(input: map) -> map
   let worker: list = ["worker", [:Pointer, [:Record, "MemoryWorker"], :Mutable], :Borrow]
   context = native/declare_function(context, "value_buffer", pointer, [worker], [], [:Allocate, :ReadMemory, :WriteMemory], :Gc, "")
   context = native/define_function(context, "value_buffer", [
-    native/let_call(
-      "raw",
-      bytes,
-      "memory_allocate",
-      ["worker", native/typed_expression(:U64, native/unary_expression(:SizeOf, buffer)), "layout_buffer"]
-    ),
-    native/when_statement(native/binary_expression(:Equal, "raw", "null_bytes"), [native/return_value("null_buffer")]),
+    @native_memory/allocate("raw", native/typed_expression(:U64, native/unary_expression(:SizeOf, buffer)), "layout_buffer", [native/return_value("null_buffer")]),
     native/let_statement("buffer", pointer, native/unary_expression(:PointerCast, "raw")),
     native/store_statement("buffer", native/typed_zero(buffer)),
     native/return_value("buffer")
@@ -61,11 +55,7 @@ verb native_value/buffers(input: map) -> map
         native/binary_expression(:Less, "grown", "needed"),
         [native/set_statement("grown", "needed")]
       ),
-      native/let_call("allocation", bytes, "memory_allocate", ["worker", "grown", "layout_opaque"]),
-      native/when_statement(
-        native/binary_expression(:Equal, "allocation", "null_bytes"),
-        [native/return_value("false")]
-      ),
+      @native_memory/allocate("allocation", "grown", "layout_opaque", [native/return_value("false")]),
       native/copy_bytes_statement(
         "allocation",
         native/typed_expression([:Pointer, :U8, :Const], native/unary_expression(:Freeze, "data")),
@@ -87,13 +77,10 @@ verb native_value/buffers(input: map) -> map
     native/let_statement("storage", [:Array, :U8, 8], native/zero_expression()),
     native/let_statement("array", [:Pointer, [:Array, :U8, 8], :Mutable], native/unary_expression(:Address, "storage")),
     native/let_statement("remaining", :U64, "number"),
-    native/let_statement("i", :U64, "zero"),
-    native/while_statement(native/binary_expression(:Less, "i", "word_bytes"), [
+    @native/for_range("i", "zero", "word_bytes", [
       native/let_statement("slot", bytes, native/binary_expression(:ElementPointer, "array", "i")),
       native/store_statement("slot", native/typed_expression(:U8, native/unary_expression(:Convert, "remaining"))),
-      native/set_statement("remaining", native/binary_expression(:ShiftRight, "remaining", "word_bytes")),
-      native/set_statement("i", native/binary_expression(:Add, "i", "one"))
-    ]),
+      native/set_statement("remaining", native/binary_expression(:ShiftRight, "remaining", "word_bytes"))]),
     native/let_statement("first", bytes, native/binary_expression(:ElementPointer, "array", "zero")),
     native/return_value(
       native/call_expression(

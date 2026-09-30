@@ -38,33 +38,6 @@ verb native_memory/number(value: int) -> string
   return string_concat("memory_n", to_literal(value))
 end
 
-verb native_memory/bind(name: string, type_id, expression) -> list
-  let body = expression
-  if is_kind(body, :list) && body[0] == :Expr
-    body = body[2]
-  end
-  let result: list = native/let_statement(name, type_id, body)
-  return result
-end
-
-verb native_memory/set(name: string, expression) -> list
-  let body = expression
-  if is_kind(body, :list) && body[0] == :Expr
-    body = body[2]
-  end
-  let result: list = native/set_statement(name, body)
-  return result
-end
-
-verb native_memory/when(condition, body: list) -> list
-  let test = condition
-  if is_kind(test, :list) && test[0] == :Expr
-    test = test[2]
-  end
-  let result: list = native/when_statement(test, body)
-  return result
-end
-
 verb native_memory/call(name: string, arguments: list) -> list
   let result: list = native/do_statement(native/call_expression(name, arguments))
   return result
@@ -74,6 +47,74 @@ verb native_memory/declare(context: map, name: string, result, parameters: list,
   let declared: map = native/declare_function(context, name, result, parameters, [], effects, mode, owner)
   let with_contract: map = native/execution_function(declared, name, :Collector)
   return with_contract
+end
+
+// These builders allocate without collecting. Failure must leave the operation
+// before a caller initializes or publishes the returned storage.
+verb native_memory/allocate(name: string, size, layout: string, failure: list, ?worker: string = "worker", ?null: string = "null_bytes") -> list
+  return [
+    native/let_call(name, native_memory/pointer(:U8), "memory_allocate", [worker, size, layout]),
+    native/when_statement(native/binary_expression(:Equal, name, null), failure)]
+end
+
+verb native_memory/allocate_record(name: string, record: list, layout: string, failure: list, ?raw: string = "raw", ?size: string = "size") -> list
+  return [
+    native/let_statement(size, :U64, native/unary_expression(:SizeOf, record)),
+    @native_memory/allocate(raw, size, layout, failure),
+    native/let_statement(name, native_memory/pointer(record), native/unary_expression(:PointerCast, raw))]
+end
+
+// Divide before multiplying, so the element count cannot overflow the byte size.
+// An empty array may have a null address and must not be dereferenced.
+verb native_memory/allocate_array(name: string, element, count: string, layout: string, failure: list) -> list
+  let size: string = string_concat(name, "_size")
+  let raw: string = string_concat(name, "_raw")
+  return [
+    native/let_statement(size, :U64, native/unary_expression(:SizeOf, element)),
+    native/when_statement(native/binary_expression(:Less,
+      native/typed_expression(:U64, native/binary_expression(:Divide, "allocation_limit", size)), count), failure),
+    native/let_call(raw, native_memory/pointer(:U8), "memory_allocate", ["worker",
+      native/typed_expression(:U64, native/binary_expression(:Multiply, size, count)), layout]),
+    native/when_statement(native/binary_expression(:Less, "zero", count),
+      [native/when_statement(native/binary_expression(:Equal, raw, "null_bytes"), failure)]),
+    native/let_statement(name, native_memory/pointer(element), native/unary_expression(:PointerCast, raw))]
+end
+
+// Allocate an object prefix followed by count fixed-width elements. The caller
+// establishes prefix <= allocation_limit and a nonzero element width first.
+// All extent operands are bindings, so checking cannot repeat an expression.
+verb native_memory/allocate_with_tail(raw: string, prefix: string, width: string, count: string, layout: string, failure: list,
+    ?limit: string = "limit", ?bytes: string = "bytes", ?total: string = "total") -> list
+  return [
+    native/let_statement(limit, :U64, native/binary_expression(:Subtract, "allocation_limit", prefix)),
+    native/set_statement(limit, native/binary_expression(:Divide, limit, width)),
+    native/when_statement(native/binary_expression(:Less, limit, count), failure),
+    native/let_statement(bytes, :U64, native/binary_expression(:Multiply, count, width)),
+    native/let_statement(total, :U64, native/binary_expression(:Add, prefix, bytes)),
+    @native_memory/allocate(raw, total, layout, failure)]
+end
+
+// Fields include their ownership mode. Construction initializes the complete
+// record before returning it; allocation does not introduce a safepoint.
+verb native_memory/record_constructor(input: map, name: string, schema: list, layout: string, allocation_null: string) -> map
+  let context: map = input
+  let pointer: list = native_memory/record_pointer(schema[0])
+  let fields: map = {}
+  for field in schema[1]
+    native/ensure(len(field) == 3, "managed record fields require ownership modes")
+    fields[field[0]] = field[0]
+  end
+  context = native_memory/declare(context, name, pointer,
+    [["worker", native_memory/record_pointer("MemoryWorker"), :Borrow], @schema[1]],
+    [:ReadMemory, :WriteMemory, :Allocate, :Release], :Gc, "")
+  context = native/define_function(context, name, [
+    @native_memory/allocate("raw",
+      native/typed_expression(:U64, native/unary_expression(:SizeOf, [:Record, schema[0]])), layout,
+      [native/return_value(native/typed_zero(pointer))], "worker", allocation_null),
+    native/let_statement("object", pointer, native/unary_expression(:PointerCast, "raw")),
+    native/store_statement("object", native/initialize_record(schema, fields)),
+    native/return_value("object")])
+  return context
 end
 
 // Allocation never relocates. Only explicit safepoints can rewrite roots.

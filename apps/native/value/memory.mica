@@ -41,7 +41,7 @@ verb native_value/memory(input: map) -> map
     native/let_statement("offset", :I64, native/unary_expression(:Bitcast, native/typed_expression(:U64, native/binary_expression(:Subtract, "zero", "header_size")))),
     native/let_offset("base", bytes, "storage", "offset"),
     native/let_call("object", object, "memory_object", ["base"]),
-    native_memory/bind("state", :U64, native_memory/field(:U64, "object", "state")),
+    native/let_statement("state", :U64, native_memory/field(:U64, "object", "state")),
     native/when_statement(native/binary_expression(:Equal, "state", "memory_object_nursery"), [native/return_value("true")]),
     native/return_value(native/binary_expression(:Equal, "state", "memory_object_private"))])
   context = native_memory/declare(context, "value_root_set", :Void,
@@ -67,10 +67,10 @@ verb native_value/memory(input: map) -> map
     native_memory/store(:U64, "root", "bits", native/typed_expression(:U64, native/binary_expression(:BitOr, "tag_bits", "payload"))),
     native/return_void()])
   context = native/define_function(context, "value_root_get", [
-    native_memory/bind("bits", :U64, native_memory/field(:U64, "root", "bits")),
+    native/let_statement("bits", :U64, native_memory/field(:U64, "root", "bits")),
     native/let_statement("tag", :U8, native/unary_expression(:Convert,
       native/typed_expression(:U64, native/binary_expression(:ShiftRight, "bits", "value_tag_shift")))),
-    native_memory/bind("pointer", bytes, native_memory/root(bytes, "root", "pointer")),
+    native/let_statement("pointer", bytes, native_memory/root(bytes, "root", "pointer")),
     native/when_statement(native/binary_expression(:Equal, "pointer", "null_bytes"), [
       native/return_value(native/binary_expression(:PackImmediate,
         native/typed_expression(:U64, native/binary_expression(:BitAnd, "bits", "payload_mask")), "tag"))]),

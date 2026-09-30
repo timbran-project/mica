@@ -213,10 +213,8 @@ names["zero"] = constants["zero"]
 names["one"] = constants["one"]
 state = native/function_body(declared, function, names, [
   native/let_statement("total", :U64, "zero"),
-  native/let_statement("i", :U64, "zero"),
-  native/while_statement(native/binary_expression(:Less, "i", "limit"), [
-    native/set_statement("total", native/binary_expression(:Add, "total", "i")),
-    native/set_statement("i", native/binary_expression(:Add, "i", "one"))
+  @native/for_range("i", "zero", "limit", [
+    native/set_statement("total", native/binary_expression(:Add, "total", "i"))
   ]),
   native/return_value("total")
 ])
@@ -226,6 +224,92 @@ Here, `constants` supplies U64 zero and one from `native/constants`.
 The [value generators](value/) use these builders throughout, including UTF-8 decoding, string search, recursive comparison, and map sorting.
 They declare control flow with branches, loops, and early returns; the shared builder creates the blocks and branch targets.
 Mica kind annotations check generator interfaces, while explicit IR types describe the generated values.
+
+### Semantic builders
+
+These Mica functions expand operations into the checked structured body.
+They introduce no runtime helper calls or allocations beyond the operations they describe.
+
+| Builder | Behaviour |
+| --- | --- |
+| `native/for_range(index, start, limit, body, ?step)` | Iterate an unsigned index and advance it on normal completion or `continue` |
+| `native/walk_chain(cursor, type, first, next, body, exhausted)` | Traverse a pointer chain with an explicit exhaustion exit |
+| `native/try_call(name, result, function, arguments, failure)` | Bind a result once and run the failure body when its `ok` field is false |
+| `native/initialize_record(schema, fields)` | Construct a typed record from named fields in declaration order |
+| `native/record_copy_arguments(schema, source, changes)` | Read unchanged fields and substitute named changes for a record copy |
+| `native/member`, `native/set_member` | Derive a field type from the schema for pointer access |
+| `native/copy_elements`, `native/checked_element` | Copy typed spans or form a slot after checking its index |
+| `native_memory/allocate`, `native_memory/allocate_record` | Allocate managed storage and handle failure before initialization |
+| `native_memory/allocate_array`, `native_memory/allocate_with_tail` | Check array extents before allocating standalone or trailing storage |
+| `native_memory/record_constructor` | Define a complete managed allocation and initialization function with explicit field ownership |
+| `native_value/open_heap` | Validate a value tag, unpack its pointer, and load its header |
+| `native_value/scalar_field`, `native_value/value_field` | Describe fixed heap fields, including ownership and optional presence flags |
+| `native_value/encode_word`, `native_value/encode_header`, `native_value/encode_bytes`, `native_value/encode_child` | Write wire values and stop on failure |
+| `native_jit/row_arguments`, `native_jit/builtin_call`, `native_jit/indirect_call` | Resolve serialized operands, assemble calls, and enforce indirect-call checks or required tail calls |
+| `native_kernel/require_transaction`, `native_kernel/require_tuple` | Check transaction state and tuple shape with caller-selected failure returns |
+| `native_kernel/construct`, `native_kernel/copy_record` | Allocate a kernel record from named fields or copy it with named changes |
+
+A schema contains a record name and its field declarations.
+Named construction rejects missing, extra, and duplicate fields. Record copies reject unknown field names.
+Record copies take a named source pointer, so field access cannot repeat a source expression with side effects.
+Kernel layouts, constructors, field access, and tracing share these declarations.
+For example, a catalogue update copies a relation and replaces its successor:
+
+```mica
+native/return_value(native_kernel/copy_record("Relation", "head", {"next" -> "suffix"}))
+```
+
+The value generators use the same approach for storage, sequences, and codecs.
+For example, list construction copies its elements with:
+
+```mica
+@native/copy_elements(word, "data", "source", "length")
+```
+
+A list allocation checks the complete trailing-array extent before allocating:
+
+```mica
+@native_memory/allocate_with_tail("raw", "prefix", "element_size", "capacity",
+  "layout_list", [native/return_value("null_list_header")])
+```
+
+`prefix`, `element_size`, and `capacity` are named U64 bindings.
+The caller establishes that the prefix fits `allocation_limit` and the element width is nonzero.
+The builder checks the count before multiplying, then handles allocation failure.
+These operations do not collect or introduce safepoints.
+
+`copy_elements` copies in ascending order. Regions must be disjoint or share the same base.
+Empty spans touch neither pointer. `checked_element` rejects an index equal to the length before forming its pointer.
+These builders take named lengths and indexes, so repeated checks cannot repeat an expression with side effects.
+Allocation failure bodies must exit before initialization. The enclosing value functions supply `worker`, `allocation_limit`, `null_bytes`, `zero`, and `one`.
+Builders expose their local names as arguments; `allocate_array` derives temporary names from its destination name.
+
+Fixed heap records share one declaration across C layout, constructor ownership, initialization, and GC tracing.
+For example, the range descriptor contains:
+
+```mica
+[native_value/value_field("start"),
+ native_value/scalar_field("has_end", :Bool),
+ native_value/value_field("end", "has_end")]
+```
+
+The collector traces `end` only when `has_end` is true.
+Codec writers express wire operations directly, such as `native_value/encode_header("tag", "range_flags")` followed by `native_value/encode_child("start")`.
+The GCC JIT generator uses `native_jit/indirect_call("callee", 4, true)` to check the callee, resolve arguments, and emit a required tail call.
+JIT argument scratch storage must be consumed by its call before another argument list is assembled.
+
+`for_range` supplies the increment, including when a branch or switch executes `continue`.
+Nested loops retain their own advancement. `break` and `return` do not advance the index.
+The default step is the `one` binding. The caller must supply a positive step that does not wrap the index.
+`walk_chain` checks for null before the body. Its exhaustion body must leave the traversal through `break`, `return`, or tail transfer.
+The enclosing function supplies the `true` binding for traversal.
+The current node must remain valid until the next-link expression completes.
+
+The range and chain builders introduce only the local names supplied by their callers.
+Expression arguments retain their types when nested. Statement constructors remove the outer type wrapper where the statement supplies the expected type.
+The kernel and value generators use these constructs for indexes, codecs, hashing, comparisons, collections, and tracing.
+
+### Statement and expression constructors
 
 | Statement | Behaviour |
 | --- | --- |
