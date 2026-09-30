@@ -94,6 +94,52 @@ verb native_memory/allocate_with_tail(raw: string, prefix: string, width: string
     @native_memory/allocate(raw, total, layout, failure)]
 end
 
+// Typed allocation builders preserve the no-safepoint allocation contract.
+// Extents are bound before checking, then reused for pointer partitioning.
+verb native_memory/extent(builder: map, prefix: map, element, count: map, failure) -> list
+  let [base: map, current: map] = native_gen/bind(builder, "prefix_size", prefix)
+  let [width: map, with_width: map] = native_gen/bind(current, "element_size", native_gen/sizeof(element))
+  current = with_width
+  let [length: map, with_length: map] = native_gen/bind(current, "element_count", count)
+  current = with_length
+  let limit: map = native_gen/ref(current, "allocation_limit")
+  current = native_gen/when(current, native_gen/less(limit, base), failure)
+  let available: map = native_gen/divide(native_gen/subtract(limit, base), width)
+  current = native_gen/when(current, native_gen/less(available, length), failure)
+  let [bytes: map, with_bytes: map] = native_gen/bind(current, "allocation_size", native_gen/add(base, native_gen/multiply(width, length)))
+  current = with_bytes
+  return [base, bytes, current]
+end
+
+verb native_memory/reserve(builder: map, worker: map, size: map, layout: string, failure) -> list
+  let [raw: map, current: map] = native_gen/bind(builder, "allocation", native_gen/call(builder, "memory_allocate", [worker, size, native_gen/ref(builder, layout)]))
+  current = native_gen/when(current, native_gen/equal(raw, native_gen/ref(current, "null_bytes")), failure)
+  return [raw, current]
+end
+
+verb native_memory/tail_storage(builder: map, worker: map, header, element, count: map, layout: string, failure) -> list
+  let [prefix: map, size: map, current: map] = native_memory/extent(builder, native_gen/sizeof(header), element, count, failure)
+  let [raw: map, with_raw: map] = native_memory/reserve(current, worker, size, layout, failure)
+  current = with_raw
+  let [object: map, with_object: map] = native_gen/bind(current, "object", native_gen/cast(native_memory/pointer(header), raw))
+  current = with_object
+  let [data: map, with_data: map] = native_gen/bind(current, "data", native_gen/cast(native_memory/pointer(element), native_gen/offset(raw, prefix)))
+  current = with_data
+  return [object, data, current]
+end
+
+// Empty arrays are represented by a null pointer without reserving storage.
+verb native_memory/array_storage(builder: map, worker: map, element, count: map, layout: string, failure) -> list
+  let [prefix: map, size: map, current: map] = native_memory/extent(builder, native_gen/zero(:U64), element, count, failure)
+  let pointer: list = native_memory/pointer(element)
+  let [data: map, initialized: map] = native_gen/bind(current, "data", native_gen/zero(pointer))
+  current = native_gen/unless(initialized, native_gen/equal(size, native_gen/zero(:U64)), fn(nonempty)
+    let [raw: map, allocated: map] = native_memory/reserve(nonempty, worker, size, layout, failure)
+    return native_gen/assign(allocated, data, native_gen/cast(pointer, raw))
+  end)
+  return [data, current]
+end
+
 // Fields include their ownership mode. Construction initializes the complete
 // record before returning it; allocation does not introduce a safepoint.
 verb native_memory/record_constructor(input: map, name: string, schema: list, layout: string, allocation_null: string) -> map

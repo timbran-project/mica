@@ -289,11 +289,14 @@ impl Native {
             .with_interpreter_only(true)
             .with_task_limits(TaskLimits {
                 instruction_budget: 500_000_000,
+                max_call_depth: 256,
                 ..TaskLimits::default()
             });
         for source in [
             "ir",
             "builders",
+            "generation",
+            "sequences",
             "types",
             "numeric",
             "layout",

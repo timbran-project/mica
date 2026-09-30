@@ -3,6 +3,62 @@
 
 // The binary input contains the checked IR tables, with names and structural
 // types interned. It contains no libgccjit API commands or host addresses.
+// Fixed fields exclude the row-length word. One description drives both the
+// serializer and generated field reads; variable tails remain domain-specific.
+verb native_jit/format() -> list
+  return [
+    [:Type, [:Id, :Kind, :Name, :Element, :Detail]],
+    [:Function, [:Id, :Name, :Result, :Foreign]],
+    [:Local, [:Id, :Function, :Name, :Type]],
+    [:Block, [:Id, :Function, :Name, :Entry]],
+    [:Constant, [:Id, :Type, :Low, :High, :Negative]],
+    [:Global, [:Id, :Name, :Type, :Storage, :Initializer]],
+    [:Instruction, [:Id, :Block, :Opcode, :Destination]],
+    [:Terminator, [:Block, :Opcode]]]
+end
+
+verb native_jit/row_schema(kind: symbol) -> list
+  for schema in native_jit/format()
+    if schema[0] == kind
+      let fields: list = schema[1]
+      return fields
+    end
+  end
+  raise E_INVARG, string_concat("unknown JIT row kind: ", to_literal(kind))
+end
+
+verb native_jit/encode_row(kind: symbol, fields: map, tail: list) -> list
+  let schema: list = native_jit/row_schema(kind)
+  native/ensure(len(fields) == len(schema), "JIT row field count mismatch")
+  let words: list = []
+  for field in schema
+    native/ensure(map_contains_key(fields, field), "missing JIT row field")
+    words = [@words, fields[field]]
+  end
+  return [@words, @tail]
+end
+
+verb native_jit/row_field(kind: symbol, row, field: symbol) -> list
+  let position: int = native_jit/position(native_jit/row_schema(kind), field) + 1
+  let result: list = native_jit/word(row, position)
+  return result
+end
+
+verb native_jit/tail_start(kind: symbol) -> int
+  let schema: list = native_jit/row_schema(kind)
+  return len(schema) + 1
+end
+
+verb native_jit/row_tail(kind: symbol, row, ordinal: int) -> list
+  let result: list = native_jit/word(row, native_jit/tail_start(kind) + ordinal)
+  return result
+end
+
+verb native_jit/section(kind: symbol) -> int
+  let result: int = native_jit/position([schema[0] for schema in native_jit/format()], kind)
+  return result
+end
+
 verb native_jit/opcodes() -> list
   return [:Copy, :Zero, :Add, :Subtract, :Multiply, :Divide, :Remainder,
     :BitAnd, :BitOr, :BitXor, :ShiftLeft, :ShiftRight, :Equal, :Less,
@@ -155,7 +211,7 @@ verb native_jit/data(state: map) -> map
     end
     let [name_offset, next] = native_jit/intern(pool, name)
     pool = next
-    rows = [@rows, [type_ids[type_id], native_jit/position(native_jit/type_kinds(), kind), name_offset, element, detail, @members]]
+    rows = [@rows, native_jit/encode_row(:Type, {:Id -> type_ids[type_id], :Kind -> native_jit/position(native_jit/type_kinds(), kind), :Name -> name_offset, :Element -> element, :Detail -> detail}, members)]
   end
   sections = [@sections, rows]
   // Functions retain ordered parameter triples in their declaration row.
@@ -173,7 +229,7 @@ verb native_jit/data(state: map) -> map
       pool = with_name
       parameters = [@parameters, parameter[0], type_ids[parameter[4]], spelling]
     end
-    rows = [@rows, [row[0], name, type_ids[row[2]], foreign, @parameters]]
+    rows = [@rows, native_jit/encode_row(:Function, {:Id -> row[0], :Name -> name, :Result -> type_ids[row[2]], :Foreign -> foreign}, parameters)]
   end
   sections = [@sections, rows]
   for table in [:locals, :blocks, :constants, :globals, :instructions, :terminators]
@@ -195,7 +251,13 @@ verb native_jit/data(state: map) -> map
             detail = 1
           end
         end
-        encoded = [row[0], row[1], name, detail]
+        let kind: symbol = :Local
+        let detail_field: symbol = :Type
+        if table == :blocks
+          kind = :Block
+          detail_field = :Entry
+        end
+        encoded = native_jit/encode_row(kind, {:Id -> row[0], :Function -> row[1], :Name -> name, detail_field -> detail}, [])
       end
       if table == :constants
         let digits: string = row[2]
@@ -216,7 +278,7 @@ verb native_jit/data(state: map) -> map
         if digits == "true"
           low = 1
         end
-        encoded = [row[0], type_ids[row[1]], low, high, negative]
+        encoded = native_jit/encode_row(:Constant, {:Id -> row[0], :Type -> type_ids[row[1]], :Low -> low, :High -> high, :Negative -> negative}, [])
       end
       if table == :globals
         let [name, next] = native_jit/intern(pool, string_concat("mica_global_", row[1]))
@@ -229,7 +291,13 @@ verb native_jit/data(state: map) -> map
             initializer = [1, row[4]]
           end
         end
-        encoded = [row[0], name, type_ids[row[2]], native_jit/position([:Mutable, :Constant, :ThreadLocal], row[3]), @initializer]
+        let tail: list = []
+        let position: int = 1
+        while position < len(initializer)
+          tail = [@tail, initializer[position]]
+          position = position + 1
+        end
+        encoded = native_jit/encode_row(:Global, {:Id -> row[0], :Name -> name, :Type -> type_ids[row[2]], :Storage -> native_jit/position([:Mutable, :Constant, :ThreadLocal], row[3]), :Initializer -> initializer[0]}, tail)
       end
       if table == :instructions
         let arguments: list = row[5]
@@ -248,10 +316,10 @@ verb native_jit/data(state: map) -> map
         if row[4] != :Discard
           destination = row[4]
         end
-        encoded = [row[0], row[1], native_jit/position(native_jit/opcodes(), row[3]), destination, @arguments]
+        encoded = native_jit/encode_row(:Instruction, {:Id -> row[0], :Block -> row[1], :Opcode -> native_jit/position(native_jit/opcodes(), row[3]), :Destination -> destination}, arguments)
       end
       if table == :terminators
-        encoded = [row[0], native_jit/position([:Return, :Jump, :Branch, :TailCall], row[1]), @row[2]]
+        encoded = native_jit/encode_row(:Terminator, {:Block -> row[0], :Opcode -> native_jit/position([:Return, :Jump, :Branch, :TailCall], row[1])}, row[2])
       end
       rows = [@rows, encoded]
     end

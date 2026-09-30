@@ -4,7 +4,6 @@
 verb native_jit/define_instructions(input: map) -> map
   let context: map = input
   let h: list = native_jit/handle()
-  let scratch = native_jit/argument_buffer()
   let cases: list = [@native_jit/extended_cases(), @native_jit/checked_cases()]
   let expressions: map = {
     :Manage -> "left",
@@ -17,33 +16,35 @@ verb native_jit/define_instructions(input: map) -> map
     :Wrap -> native_jit/j("cast", ["ctx", "left", "type"]),
     :Unwrap -> native_jit/j("cast", ["ctx", "left", "type"]),
     :Negate -> native_jit/j("neg", ["ctx", "type", "left"]),
-    :Field -> native_jit/j("field_value", ["left", native_jit/cached(5, "b")]),
-    :FieldPointer -> native_jit/j("address", [native_jit/j("field_local", ["left", native_jit/cached(5, "b")])]),
-    :Address -> native_jit/j("address", [native_jit/cached(2, "a")]),
+    :Field -> native_jit/j("field_value", ["left", native_jit/cache(:Field, "b")]),
+    :FieldPointer -> native_jit/j("address", [native_jit/j("field_local", ["left", native_jit/cache(:Field, "b")])]),
+    :Address -> native_jit/j("address", [native_jit/cache(:Lvalue, "a")]),
     :Load -> native_jit/j("value", [native_jit/j("dereference", ["left"])]),
     :Offset -> native_jit/j("address", [native_jit/j("element", ["ctx", "left", "right"])]),
     :Freeze -> native_jit/j("cast", ["ctx", "left", "type"]),
-    :SizeOf -> native_jit/j("cast", ["ctx", native_jit/j("sizeof", ["ctx", native_jit/cached(3, "a")]), "type"]),
-    :GlobalAddress -> native_jit/j("address", [native_jit/cached(2, "a")]),
-    :FunctionAddress -> native_jit/j("function_address", [native_jit/cached(0, "a")])}
+    :SizeOf -> native_jit/j("cast", ["ctx", native_jit/j("sizeof", ["ctx", native_jit/cache(:Type, "a")]), "type"]),
+    :GlobalAddress -> native_jit/j("address", [native_jit/cache(:Lvalue, "a")]),
+    :FunctionAddress -> native_jit/j("function_address", [native_jit/cache(:Declaration, "a")])}
   for op, expression in expressions
     cases = [@cases, native/case_arm(native_jit/n(native_jit/position(native_jit/opcodes(), op)), [native/set_statement("value", expression)])]
   end
   for spec in [[:Add, "add"], [:Subtract, "sub"], [:Multiply, "mul"], [:BitAnd, "and"], [:BitOr, "or"], [:BitXor, "xor"]]
-    let unsigned_type = native_jit/cached(3, "n4")
+    let unsigned_type = native_jit/cache(:Type, "n4")
     let widened = native_jit/j(spec[1], ["ctx", unsigned_type, native_jit/j("cast", ["ctx", "left", unsigned_type]), native_jit/j("cast", ["ctx", "right", unsigned_type])])
     cases = [@cases, native/case_arm(native_jit/n(native_jit/position(native_jit/opcodes(), spec[0])), [
       native/if_statement(native/binary_expression(:Equal, "kind", "n6"), [native/set_statement("value", native_jit/j(spec[1], ["ctx", "type", "left", "right"]))], [native/set_statement("value", native_jit/j("cast", ["ctx", widened, "type"]))])])]
   end
   for opcode in [:Call, :Record]
-    let first: int = 5
-    let expression = native_jit/j("record", ["ctx", "type", "argument_count", scratch])
+    let first: int = native_jit/tail_start(:Instruction)
+    let api: string = "record"
+    let prefix: list = ["ctx", "type"]
     if opcode == :Call
-      first = 6
-      expression = native_jit/j("call", ["ctx", native_jit/cached(0, "a"), "argument_count", scratch])
+      first = native_jit/tail_start(:Instruction) + 1
+      api = "call"
+      prefix = ["ctx", native_jit/cache(:Declaration, "a")]
     end
     // Each switch arm receives distinct native local names.
-    let body: list = [@native_jit/row_arguments(first), native/set_statement("value", expression)]
+    let body: list = native_jit/consume_operands(first, api, prefix, [:Set, "value"])
     let names: map = {"argument" -> string_concat("argument", to_literal(first)), "argument_count" -> string_concat("argument_count", to_literal(first))}
     cases = [@cases, native/case_arm(native_jit/n(native_jit/position(native_jit/opcodes(), opcode)), native_jit/rename(body, names))]
   end
@@ -52,28 +53,28 @@ verb native_jit/define_instructions(input: map) -> map
       native/do_statement(native/call_expression("j_assign", ["block", native_jit/j("dereference", ["left"]), "right"])), native/return_value("n0")])]
   end
   context = native_jit/define(context, "instruction", [
-    native/let_statement("block_id", :U64, native_jit/word("row", 2)), native/let_statement("block", h, native_jit/cached(7, "block_id")),
-    native/let_statement("op", :U64, native_jit/word("row", 3)), native/let_statement("destination", :U64, native_jit/word("row", 4)),
-    native/let_statement("type_id", :U64, native_jit/meta(0, "destination")), native/let_statement("type", h, native_jit/cached(3, "type_id")),
-    native/let_statement("type_row", native_jit/words(), native/offset_expression("data", native_jit/meta(1, "type_id"))), native/let_statement("kind", :U64, native_jit/word("type_row", 2)),
+    native/let_statement("block_id", :U64, native_jit/row_field(:Instruction, "row", :Block)), native/let_statement("block", h, native_jit/cache(:BlockTail, "block_id")),
+    native/let_statement("op", :U64, native_jit/row_field(:Instruction, "row", :Opcode)), native/let_statement("destination", :U64, native_jit/row_field(:Instruction, "row", :Destination)),
+    native/let_statement("type_id", :U64, native_jit/metadata(:NodeType, "destination")), native/let_statement("type", h, native_jit/cache(:Type, "type_id")),
+    native/let_statement("type_row", native_jit/words(), native/offset_expression("data", native_jit/metadata(:TypeRow, "type_id"))), native/let_statement("kind", :U64, native_jit/row_field(:Type, "type_row", :Kind)),
     native/let_statement("a", :U64, "n0"), native/let_statement("b", :U64, "n0"),
-    native/when_statement(native/binary_expression(:Less, "n5", native_jit/word("row", 0)), [native/set_statement("a", native_jit/word("row", 5))]),
-    native/when_statement(native/binary_expression(:Less, "n6", native_jit/word("row", 0)), [native/set_statement("b", native_jit/word("row", 6))]),
-    native/let_statement("left", h, native_jit/cached(1, "a")), native/let_statement("right", h, native_jit/cached(1, "b")), native/let_statement("value", h, "null"),
+    native/when_statement(native/binary_expression(:Less, native_jit/n(native_jit/tail_start(:Instruction)), native_jit/word("row", 0)), [native/set_statement("a", native_jit/row_tail(:Instruction, "row", 0))]),
+    native/when_statement(native/binary_expression(:Less, native_jit/n(native_jit/tail_start(:Instruction) + 1), native_jit/word("row", 0)), [native/set_statement("b", native_jit/row_tail(:Instruction, "row", 1))]),
+    native/let_statement("left", h, native_jit/cache(:Rvalue, "a")), native/let_statement("right", h, native_jit/cache(:Rvalue, "b")), native/let_statement("value", h, "null"),
     native/switch_statement(:U64, "op", cases, [native/return_value(native_jit/binary(:Add, "op", "n1"))]),
     native/if_statement(native/binary_expression(:Equal, "destination", native_jit/binary(:Subtract, native_jit/word("data", 2), "n1")), [
-      native/do_statement(native/call_expression("j_eval", ["block", "value"]))], [native/do_statement(native/call_expression("j_assign", ["block", native_jit/cached(2, "destination"), "value"]))]), native/return_value("n0")])
-  context = native_jit/define(context, "instructions", [@native_jit/scan(6, [native/let_statement("status", :U64, native_jit/invoke("instruction", ["row"], :U64)), native/unless_statement(native/binary_expression(:Equal, "status", "n0"), [native/return_value("status")])]), native/return_value("n0")])
-  context = native_jit/define(context, "terminators", [@native_jit/scan(7, [
-    native/let_statement("block_id", :U64, native_jit/word("row", 1)),
-    native/let_statement("block", h, native_jit/cached(7, "block_id")), native/let_statement("op", :U64, native_jit/word("row", 2)),
+      native/do_statement(native/call_expression("j_eval", ["block", "value"]))], [native/do_statement(native/call_expression("j_assign", ["block", native_jit/cache(:Lvalue, "destination"), "value"]))]), native/return_value("n0")])
+  context = native_jit/define(context, "instructions", [@native_jit/scan(native_jit/section(:Instruction), [native/let_statement("status", :U64, native_jit/invoke("instruction", ["row"], :U64)), native/unless_statement(native/binary_expression(:Equal, "status", "n0"), [native/return_value("status")])]), native/return_value("n0")])
+  context = native_jit/define(context, "terminators", [@native_jit/scan(native_jit/section(:Terminator), [
+    native/let_statement("block_id", :U64, native_jit/row_field(:Terminator, "row", :Block)),
+    native/let_statement("block", h, native_jit/cache(:BlockTail, "block_id")), native/let_statement("op", :U64, native_jit/row_field(:Terminator, "row", :Opcode)),
     native/switch_statement(:U64, "op", [
-      native/case_arm("n0", [native/if_statement(native/binary_expression(:Equal, native_jit/word("row", 0), "n3"), [
+      native/case_arm("n0", [native/if_statement(native/binary_expression(:Equal, native_jit/word("row", 0), native_jit/n(native_jit/tail_start(:Terminator))), [
         native/do_statement(native/call_expression("j_return_void", ["block"]))], [
-        native/do_statement(native/call_expression("j_return", ["block", native_jit/cached(1, native_jit/word("row", 3))]))])]),
-      native/case_arm("n1", [native/do_statement(native/call_expression("j_jump", ["block", native_jit/cached(0, native_jit/word("row", 3))]))]),
-      native/case_arm("n2", [native/do_statement(native/call_expression("j_branch", ["block", native_jit/cached(1, native_jit/word("row", 3)), native_jit/cached(0, native_jit/word("row", 4)), native_jit/cached(0, native_jit/word("row", 5))]))])], [
-      native/let_statement("callee", h, native_jit/cached(1, native_jit/word("row", 3))),
-      @native_jit/indirect_call("callee", 4, true)])]), native/return_void()])
+        native/do_statement(native/call_expression("j_return", ["block", native_jit/cache(:Rvalue, native_jit/row_tail(:Terminator, "row", 0))]))])]),
+      native/case_arm("n1", [native/do_statement(native/call_expression("j_jump", ["block", native_jit/cache(:Declaration, native_jit/row_tail(:Terminator, "row", 0))]))]),
+      native/case_arm("n2", [native/do_statement(native/call_expression("j_branch", ["block", native_jit/cache(:Rvalue, native_jit/row_tail(:Terminator, "row", 0)), native_jit/cache(:Declaration, native_jit/row_tail(:Terminator, "row", 1)), native_jit/cache(:Declaration, native_jit/row_tail(:Terminator, "row", 2))]))])], [
+      native/let_statement("callee", h, native_jit/cache(:Rvalue, native_jit/row_tail(:Terminator, "row", 0))),
+      @native_jit/indirect_call("callee", native_jit/tail_start(:Terminator) + 1, true)])]), native/return_void()])
   return context
 end

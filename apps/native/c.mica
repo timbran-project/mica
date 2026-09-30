@@ -295,28 +295,40 @@ verb native/c_signed_constant(encoding)
   return string_concat("INT64_C(0x", encoding, ")")
 end
 
-verb native/c_statement(index, row)
+// Emission shape is recorded where statements are selected. Declaration
+// placement never infers it from generated spelling or assignment prefixes.
+verb native/c_emission(text: string, leading_assignment: bool) -> map
+  return {:text -> text, :leading_assignment -> leading_assignment}
+end
+
+verb native/c_statement(index, row) -> string
+  let emission: map = native/c_statement_emission(index, row)
+  let text: string = emission[:text]
+  return text
+end
+
+verb native/c_statement_emission(index, row)
   let args = row[5]
   if row[4] != :Discard
-    let layout = native/c_layout_statement(index, row)
-    if layout != ""
+    let layout = native/c_layout_emission(index, row)
+    if layout[:text] != ""
       return layout
     end
-    let numeric = native/c_numeric_statement(index, row)
-    if numeric != ""
+    let numeric = native/c_numeric_emission(index, row)
+    if numeric[:text] != ""
       return numeric
     end
   end
   if row[3] == :Adopt
     let allocation = native/c_value(index, args[1])
-    return string_concat("if (", allocation, " == NULL) { abort(); } *(", native/c_value(index, args[0]), ") = ", allocation, "; ", native/c_value(index, row[4]), " = ", allocation, ";")
+    return native/c_emission(string_concat("if (", allocation, " == NULL) { abort(); } *(", native/c_value(index, args[0]), ") = ", allocation, "; ", native/c_value(index, row[4]), " = ", allocation, ";"), false)
   end
   if row[3] == :Store || row[3] == :RootStore
-    return string_concat("*(", native/c_value(index, args[0]), ") = ", native/c_value(index, args[1]), ";")
+    return native/c_emission(string_concat("*(", native/c_value(index, args[0]), ") = ", native/c_value(index, args[1]), ";"), false)
   end
   if row[3] == :CopyBytes
     let count = native/c_value(index, args[2])
-    return string_concat("if (", count, " != 0) memmove(", native/c_value(index, args[0]), ", ", native/c_value(index, args[1]), ", (size_t)", count, ");")
+    return native/c_emission(string_concat("if (", count, " != 0) memmove(", native/c_value(index, args[0]), ", ", native/c_value(index, args[1]), ", (size_t)", count, ");"), false)
   end
   let prefix = ""
   if row[4] != :Discard
@@ -325,7 +337,7 @@ verb native/c_statement(index, row)
   if row[3] == :CallIndirect
     prefix = string_concat("if (", native/c_value(index, args[0]), " == NULL) { abort(); } ", prefix)
   end
-  return string_concat(prefix, native/c_expression(index, row), ";")
+  return native/c_emission(string_concat(prefix, native/c_expression(index, row), ";"), row[4] != :Discard && row[3] != :CallIndirect)
 end
 
 verb native/emit_c(state)

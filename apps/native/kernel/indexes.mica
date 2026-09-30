@@ -3,6 +3,185 @@
 
 // Each index is a persistent AVL tree. Rows are immutable Mica lists; rotations
 // allocate path nodes and retain unchanged subtrees through managed pointers.
+
+// An index orders selected columns first, then the remaining columns. A
+// projection compares only selected columns, for keys and scan bounds.
+verb native_kernel/tuple_order(mask) -> map
+  return {:mask -> mask, :mode -> :Total}
+end
+
+verb native_kernel/tuple_projection(mask) -> map
+  return {:mask -> mask, :mode -> :Projection}
+end
+
+verb native_kernel/compare_rows(builder: map, left: map, right: map, order: map) -> map
+  let projection = native_gen/ref(builder, "false")
+  if order[:mode] == :Projection
+    projection = native_gen/ref(builder, "true")
+  end
+  let result: map = native_gen/call(builder, "kernel_compare", [left, right, order[:mask], projection])
+  return result
+end
+
+verb native_kernel/find_row(builder: map, relation: map, row: map, order: map) -> map
+  let tree = native_gen/call(builder, "kernel_index", [relation, order[:mask]])
+  let projection = native_gen/ref(builder, "false")
+  if order[:mode] == :Projection
+    projection = native_gen/ref(builder, "true")
+  end
+  let result: map = native_gen/call(builder, "kernel_find", [tree, row, order[:mask], projection])
+  return result
+end
+
+// The position and its mask bit advance together, including unselected columns.
+verb native_kernel/columns(builder: map, width: map, body) -> map
+  let [extent, bounded] = native_gen/bind(builder, "columns", width)
+  let [position, started] = native_gen/bind(bounded, "position", native_gen/ref(bounded, "zero"))
+  let [bit, ready] = native_gen/bind(started, "bit", native_gen/ref(started, "one"))
+  let result: map = native_gen/while_loop(ready, native_gen/less(position, extent),
+    fn(iteration) => native_kernel/column_step(iteration, position, bit, body))
+  return result
+end
+
+verb native_kernel/column_step(builder: map, position: map, bit: map, body) -> map
+  let result: map = body(builder, position, bit)
+  if result[:closed]
+    return result
+  end
+  result = native_gen/assign(result, position, native_gen/add(position, native_gen/ref(result, "one")))
+  let completed: map = native_gen/assign(result, bit, native_gen/shift_left(bit, native_gen/ref(result, "one")))
+  return completed
+end
+
+verb native_kernel/column_is_bound(mask: map, bit: map) -> map
+  let result: map = native_gen/not_equal(native_gen/bit_and(mask, bit), native_gen/zero(:U64))
+  return result
+end
+
+verb native_kernel/covers_columns(bound: map, required: map) -> map
+  let result: map = native_gen/equal(native_gen/bit_and(required, bound), required)
+  return result
+end
+
+verb native_kernel/compare_column(builder: map, left: map, right: map, position: map) -> map
+  let compared = native_gen/call(builder, "value_compare", [
+    native_gen/call(builder, "kernel_cell", [left, position]),
+    native_gen/call(builder, "kernel_cell", [right, position])])
+  let [result, ready] = native_gen/bind(builder, "comparison", compared)
+  let number = native_gen/field(ready, result, "number")
+  let completed: map = native_gen/unless(ready, native_gen/equal(number, native_gen/ref(ready, "int_zero")),
+    fn(arm) => native_gen/return_value(arm, number))
+  return completed
+end
+
+verb native_kernel/compare_columns(builder: map, left: map, right: map, width: map, mask: map, selected: bool) -> map
+  let result: map = native_kernel/columns(builder, width, fn(iteration, position, bit) => native_kernel/compare_selected_column(iteration, left, right, position, mask, bit, selected))
+  return result
+end
+
+verb native_kernel/compare_selected_column(builder: map, left: map, right: map, position: map, mask: map, bit: map, selected: bool) -> map
+  let included = native_kernel/column_is_bound(mask, bit)
+  if !selected
+    included = native_gen/negate(included)
+  end
+  let result: map = native_gen/when(builder, included, fn(arm) => native_kernel/compare_column(arm, left, right, position))
+  return result
+end
+
+verb native_kernel/compare_body(module: map) -> map
+  let builder = native_gen/context(module, "kernel_compare")
+  let left = native_gen/ref(builder, "left")
+  let right = native_gen/ref(builder, "right")
+  let mask = native_gen/ref(builder, "mask")
+  let [width, ready] = native_gen/bind(builder, "width", native_gen/call(builder, "kernel_width", [left]))
+  builder = native_kernel/compare_columns(ready, left, right, width, mask, true)
+  builder = native_gen/when(builder, native_gen/ref(builder, "prefix"),
+    fn(arm) => native_gen/return_value(arm, native_gen/ref(arm, "int_zero")))
+  builder = native_kernel/compare_columns(builder, left, right, width, mask, false)
+  builder = native_gen/return_value(builder, native_gen/ref(builder, "int_zero"))
+  let result: map = native_gen/finish(module, builder)
+  return result
+end
+
+// A mirrored rotation changes only the meaning of heavy/light children.
+verb native_kernel/orientation(heavy: string) -> map
+  let light = "right"
+  if heavy == "right"
+    light = "left"
+  end
+  return {:heavy -> heavy, :light -> light}
+end
+
+verb native_kernel/rebuild_tree(builder: map, children: map, row: map, present: map) -> map
+  let result: map = native_gen/call(builder, "kernel_make", [native_gen/ref(builder, "worker"), children["left"], children["right"], row, present])
+  return result
+end
+
+verb native_kernel/oriented_children(direction: map, heavy: map, light: map) -> map
+  return {direction[:heavy] -> heavy, direction[:light] -> light}
+end
+
+verb native_kernel/require_node(builder: map, node: map) -> map
+  let result: map = native_gen/when(builder, native_gen/equal(node, native_gen/zero(native_gen/type(node))),
+    fn(arm) => native_gen/return_value(arm, native_gen/zero(native_kernel/pointer("Node"))))
+  return result
+end
+
+verb native_kernel/double_rotation(builder: map, direction: map, pivot: map) -> map
+  let heavy = direction[:heavy]
+  let light = direction[:light]
+  let [middle, ready] = native_gen/bind(builder, "middle", native_kernel/load_field(builder, pivot, light))
+  let outer = native_kernel/oriented_children(direction,
+    native_kernel/load_field(ready, pivot, heavy), native_kernel/load_field(ready, middle, heavy))
+  let [a, with_a] = native_gen/bind(ready, "outer_child", native_kernel/rebuild_tree(ready, outer,
+    native_kernel/load_field(ready, pivot, "row"), native_kernel/load_field(ready, pivot, "present")))
+  let checked = native_kernel/require_node(with_a, a)
+  let inner = native_kernel/oriented_children(direction, native_kernel/load_field(checked, middle, light), native_gen/ref(checked, light))
+  let [b, with_b] = native_gen/bind(checked, "inner_child", native_kernel/rebuild_tree(checked, inner,
+    native_gen/ref(checked, "row"), native_gen/ref(checked, "present")))
+  checked = native_kernel/require_node(with_b, b)
+  let result: map = native_gen/return_value(checked, native_kernel/rebuild_tree(checked, native_kernel/oriented_children(direction, a, b),
+    native_kernel/load_field(checked, middle, "row"), native_kernel/load_field(checked, middle, "present")))
+  return result
+end
+
+verb native_kernel/single_rotation(builder: map, direction: map, pivot: map) -> map
+  let inner = native_kernel/oriented_children(direction,
+    native_kernel/load_field(builder, pivot, direction[:light]), native_gen/ref(builder, direction[:light]))
+  let [child, ready] = native_gen/bind(builder, "child", native_kernel/rebuild_tree(builder, inner,
+    native_gen/ref(builder, "row"), native_gen/ref(builder, "present")))
+  ready = native_kernel/require_node(ready, child)
+  let outer = native_kernel/oriented_children(direction, native_kernel/load_field(ready, pivot, direction[:heavy]), child)
+  let result: map = native_gen/return_value(ready, native_kernel/rebuild_tree(ready, outer,
+    native_kernel/load_field(ready, pivot, "row"), native_kernel/load_field(ready, pivot, "present")))
+  return result
+end
+
+verb native_kernel/rotate(builder: map, direction: map) -> map
+  let [pivot, ready] = native_gen/bind(builder, "pivot", native_gen/ref(builder, direction[:heavy]))
+  let outer_height = native_gen/call(ready, "kernel_height", [native_kernel/load_field(ready, pivot, direction[:heavy])])
+  let inner_height = native_gen/call(ready, "kernel_height", [native_kernel/load_field(ready, pivot, direction[:light])])
+  let result: map = native_gen/branch(ready, native_gen/less(outer_height, inner_height),
+    fn(arm) => native_kernel/double_rotation(arm, direction, pivot),
+    fn(arm) => native_kernel/single_rotation(arm, direction, pivot))
+  return result
+end
+
+verb native_kernel/balance_body(module: map) -> map
+  let builder = native_gen/context(module, "kernel_balance")
+  for side in ["left", "right"]
+    let direction = native_kernel/orientation(side)
+    let heavy_height = native_gen/call(builder, "kernel_height", [native_gen/ref(builder, direction[:heavy])])
+    let light_height = native_gen/call(builder, "kernel_height", [native_gen/ref(builder, direction[:light])])
+    let imbalanced = native_gen/less(native_gen/add(light_height, native_gen/ref(builder, "one")), heavy_height)
+    builder = native_gen/when(builder, imbalanced, fn(arm) => native_kernel/rotate(arm, direction))
+  end
+  let children = {"left" -> native_gen/ref(builder, "left"), "right" -> native_gen/ref(builder, "right")}
+  builder = native_gen/return_value(builder, native_kernel/rebuild_tree(builder, children, native_gen/ref(builder, "row"), native_gen/ref(builder, "present")))
+  let result: map = native_gen/finish(module, builder)
+  return result
+end
+
 verb native_kernel/indexes(input: map) -> map
   let context: map = input
   let node: list = native_kernel/pointer("Node")
@@ -30,22 +209,7 @@ verb native_kernel/indexes(input: map) -> map
     native/let_load("view", [:Record, "HeapList"], "header"),
     native/let_field("data", native_memory/pointer(word), "view", "data"),
     native/return_value(native/typed_load(word, native/typed_expression(native_memory/pointer(word), native/offset_expression("data", "position"))))])
-  context = native_kernel/define(context, "compare", [
-    native/let_call("width", :U64, "kernel_width", ["left"]),
-    @native/for_range("pass", "zero", "two", [
-      native/let_statement("i", :U64, "zero"), native/let_statement("bit", :U64, "one"),
-      native/while_statement(native_kernel/binary(:Less, "i", "width"), [
-        native/let_statement("selected", :Bool, native/binary_expression(:Equal,
-          native_kernel/binary(:BitAnd, "mask", "bit"), "zero")),
-        native/when_statement(native_kernel/binary(:Equal, "selected", native_kernel/binary(:Equal, "pass", "one")), [
-          native/let_call("order", [:Record, "IntResult"], "value_compare", [
-            native_kernel/call(word, "cell", ["left", "i"]), native_kernel/call(word, "cell", ["right", "i"])]),
-          native/let_field("number", :I64, "order", "number"),
-          native/unless_statement(native_kernel/binary(:Equal, "number", "int_zero"), [native/return_value("number")])]),
-        native/set_statement("i", native/binary_expression(:Add, "i", "one")),
-        native/set_statement("bit", native/binary_expression(:ShiftLeft, "bit", "one"))]),
-      native/when_statement("prefix", [native/return_value("int_zero")])]),
-    native/return_value("int_zero")])
+  context = native_kernel/compare_body(context)
   context = native_kernel/define(context, "height", [
     native/when_statement(native_kernel/is_null("Node", "node"), [native/return_value("zero")]),
     native/return_value(native_kernel/read("Node", "node", "height"))])
@@ -54,43 +218,7 @@ verb native_kernel/indexes(input: map) -> map
     native/let_call("other", :U64, "kernel_height", ["right"]),
     native/when_statement(native_kernel/binary(:Less, "height", "other"), [native/set_statement("height", "other")]),
     native/return_value(native_kernel/construct("Node", {"left" -> "left", "right" -> "right", "row" -> "row", "height" -> native_kernel/binary(:Add, "height", "one"), "present" -> "present"}))])
-  let rotations: list = []
-  for side in ["left", "right"]
-    let other: string = "right"
-    if side == "right"
-      other = "left"
-    end
-    let child_args: list = [native_kernel/read("Node", "pivot", other), other]
-    let root_args: list = [native_kernel/read("Node", "pivot", side), "child"]
-    let a_args: list = [native_kernel/read("Node", "pivot", side), native_kernel/read("Node", "middle", side)]
-    let b_args: list = [native_kernel/read("Node", "middle", other), other]
-    let double_args: list = ["a", "b"]
-    if side == "right"
-      child_args = [child_args[1], child_args[0]]
-      root_args = [root_args[1], root_args[0]]
-      a_args = [a_args[1], a_args[0]]
-      b_args = [b_args[1], b_args[0]]
-      double_args = ["b", "a"]
-    end
-    let body: list = [native/let_statement("pivot", node, side),
-      native/when_statement(native_kernel/binary(:Less,
-        native_kernel/call(:U64, "height", [native_kernel/read("Node", "pivot", side)]),
-        native_kernel/call(:U64, "height", [native_kernel/read("Node", "pivot", other)])), [
-        native/let_statement("middle", node, native_kernel/read("Node", "pivot", other)),
-        native/let_call("a", node, "kernel_make", ["worker", @a_args, native_kernel/read("Node", "pivot", "row"), native_kernel/read("Node", "pivot", "present")]),
-        native/when_statement(native_kernel/is_null("Node", "a"), [native/return_value(native_kernel/null("Node"))]),
-        native/let_call("b", node, "kernel_make", ["worker", @b_args, "row", "present"]),
-        native/when_statement(native_kernel/is_null("Node", "b"), [native/return_value(native_kernel/null("Node"))]),
-        native/return_value(native/call_expression("kernel_make", ["worker", @double_args, native_kernel/read("Node", "middle", "row"), native_kernel/read("Node", "middle", "present")]))]),
-      native/let_call("child", node, "kernel_make", ["worker", @child_args, "row", "present"]),
-      native/when_statement(native_kernel/is_null("Node", "child"), [native/return_value(native_kernel/null("Node"))]),
-      native/return_value(native/call_expression("kernel_make", ["worker", @root_args, native_kernel/read("Node", "pivot", "row"), native_kernel/read("Node", "pivot", "present")]))]
-    rotations = [@rotations, native/when_statement(native_kernel/binary(:Less,
-      native_kernel/binary(:Add, native_kernel/call(:U64, "height", [other]), "one"),
-      native_kernel/call(:U64, "height", [side])), native/rename_bindings(body, native_value/trace_bindings(body, side)))]
-  end
-  context = native_kernel/define(context, "balance", [@rotations,
-    native/return_value(native/call_expression("kernel_make", ["worker", "left", "right", "row", "present"]))])
+  context = native_kernel/balance_body(context)
   context = native_kernel/define(context, "find", [
     native/let_statement("cursor", node, "node"),
     native/while_statement("true", [

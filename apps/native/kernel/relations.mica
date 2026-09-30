@@ -1,6 +1,199 @@
 // Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
+// Prefer a bound prefix of natural tuple order. Only when that prefix is
+// empty, use the first secondary index whose complete key is bound.
+verb native_kernel/scan_plan(builder: map, relation: map, bound: map) -> list
+  let [tree, with_tree] = native_gen/bind(builder, "tree", native_gen/call(builder, "kernel_index", [relation, native_gen/ref(builder, "zero")]))
+  let [ordering, with_order] = native_gen/bind(with_tree, "ordering", native_gen/ref(with_tree, "zero"))
+  let [prefix, ready] = native_gen/bind(with_order, "prefix", native_gen/ref(with_order, "zero"))
+  ready = native_kernel/columns(ready, native_kernel/load_field(ready, relation, "arity"),
+    fn(iteration, position, bit) => native_kernel/extend_prefix(iteration, prefix, bound, bit))
+  ready = native_gen/when(ready, native_kernel/absent(prefix),
+    fn(arm) => native_kernel/choose_covered_index(arm, relation, bound, tree, ordering, prefix))
+  return [tree, ordering, prefix, ready]
+end
+
+verb native_kernel/extend_prefix(builder: map, prefix: map, bound: map, bit: map) -> map
+  let ready = native_gen/unless(builder, native_kernel/column_is_bound(bound, bit), fn(arm) => native_gen/break_loop(arm))
+  let result: map = native_gen/assign(ready, prefix, native_gen/bit_or(prefix, bit))
+  return result
+end
+
+verb native_kernel/choose_covered_index(builder: map, relation: map, bound: map, tree: map, ordering: map, prefix: map) -> map
+  let [index, ready] = native_gen/bind(builder, "index", native_kernel/load_field(builder, relation, "indexes"))
+  let result: map = native_gen/while_loop(ready, native_gen/ref(ready, "true"),
+    fn(iteration) => native_kernel/consider_index(iteration, index, bound, tree, ordering, prefix))
+  return result
+end
+
+verb native_kernel/consider_index(builder: map, index: map, bound: map, tree: map, ordering: map, prefix: map) -> map
+  let ready = native_gen/when(builder, native_kernel/absent(index), fn(arm) => native_gen/break_loop(arm))
+  let [key, with_key] = native_gen/bind(ready, "key", native_kernel/load_field(ready, index, "mask"))
+  ready = native_gen/unless(with_key, native_kernel/absent(key),
+    fn(arm) => native_gen/when(arm, native_kernel/covers_columns(bound, key),
+      fn(selected) => native_kernel/select_index(selected, index, key, tree, ordering, prefix)))
+  let result: map = native_gen/assign(ready, index, native_kernel/load_field(ready, index, "next"))
+  return result
+end
+
+verb native_kernel/select_index(builder: map, index: map, key: map, tree: map, ordering: map, prefix: map) -> map
+  let ready = native_gen/assign(builder, prefix, key)
+  ready = native_gen/assign(ready, ordering, key)
+  ready = native_gen/assign(ready, tree, native_kernel/load_field(ready, index, "tree"))
+  let result: map = native_gen/break_loop(ready)
+  return result
+end
+
+// Capacity exhaustion means there is another matching row. Merely filling
+// the buffer does not establish that, including when capacity is zero.
+verb native_kernel/scan_full(builder: map, scan: map) -> map
+  let ready = native_kernel/store_field(builder, scan, "more", native_gen/ref(builder, "true"))
+  let result: map = native_gen/return_void(ready)
+  return result
+end
+
+verb native_kernel/scan_offer(builder: map, scan: map, row: map) -> map
+  let [count, ready] = native_gen/bind(builder, "count", native_kernel/load_field(builder, scan, "count"))
+  ready = native_gen/when(ready, native_gen/equal(count, native_kernel/load_field(ready, scan, "capacity")),
+    fn(arm) => native_kernel/scan_full(arm, scan))
+  let output = native_kernel/load_field(ready, scan, "output")
+  let [slot, with_slot] = native_gen/bind(ready, "slot", native_gen/offset(output, count))
+  ready = native_gen/root_write(with_slot, native_gen/location(slot), row)
+  let result: map = native_kernel/store_field(ready, scan, "count", native_gen/add(count, native_gen/ref(ready, "one")))
+  return result
+end
+
+verb native_kernel/scan_compare(builder: map, row: map, scan: map, mask_field: string, projection: bool, target: string) -> map
+  let mask = native_kernel/load_field(builder, scan, mask_field)
+  let order = native_kernel/tuple_order(mask)
+  if projection
+    order = native_kernel/tuple_projection(mask)
+  end
+  let result: map = native_kernel/compare_rows(builder, row, native_gen/root_read(native_gen/field(builder, scan, target)), order)
+  return result
+end
+
+verb native_kernel/update_index(builder: map, index: map, tail: map) -> map
+  let call = native_gen/call(builder, "kernel_set", [native_gen/ref(builder, "worker"),
+    native_kernel/load_field(builder, index, "tree"), native_gen/ref(builder, "row"),
+    native_kernel/load_field(builder, index, "mask"), native_gen/negate(native_gen/ref(builder, "asserted")), native_gen/ref(builder, "true")])
+  let [updated, ready] = native_gen/bind(builder, "updated", call)
+  ready = native_gen/unless(ready, native_gen/field(ready, updated, "ok"),
+    fn(arm) => native_gen/return_value(arm, native_gen/zero(native_kernel/pointer("Index"))))
+  let result: map = native_gen/return_value(ready, native_kernel/replace_record(ready, native_gen/ref(ready, "worker"), "Index", index,
+    {"next" -> tail, "tree" -> native_gen/field(ready, updated, "node")}))
+  return result
+end
+
+verb native_kernel/index_update_body(module: map) -> map
+  let builder = native_gen/context(module, "kernel_index_update")
+  builder = native_kernel/copy_chain(builder, "Index", native_gen/ref(builder, "index"), "index_update",
+    [native_gen/ref(builder, "row"), native_gen/ref(builder, "asserted")],
+    fn(ready, index, tail) => native_kernel/update_index(ready, index, tail))
+  let result: map = native_gen/finish(module, builder)
+  return result
+end
+
+verb native_kernel/apply_body(module: map) -> map
+  let builder = native_gen/context(module, "kernel_apply")
+  let relation = native_gen/ref(builder, "relation")
+  let row = native_gen/ref(builder, "row")
+  let asserted = native_gen/ref(builder, "asserted")
+  let [existing, ready] = native_gen/bind(builder, "existing", native_kernel/find_row(builder, relation, row,
+    native_kernel/tuple_order(native_gen/ref(builder, "zero"))))
+  builder = native_gen/when(ready, native_gen/equal(native_kernel/absent(existing), native_gen/negate(asserted)),
+    fn(arm) => native_gen/return_value(arm, relation))
+  let [indexes, with_indexes] = native_gen/bind(builder, "indexes", native_gen/call(builder, "kernel_index_update",
+    [native_gen/ref(builder, "worker"), native_kernel/load_field(builder, relation, "indexes"), row, asserted]))
+  builder = native_gen/when(with_indexes, native_kernel/absent(indexes),
+    fn(arm) => native_gen/return_value(arm, native_gen/zero(native_kernel/pointer("Relation"))))
+  builder = native_gen/return_value(builder, native_kernel/replace_record(builder, native_gen/ref(builder, "worker"), "Relation", relation, {"indexes" -> indexes}))
+  let result: map = native_gen/finish(module, builder)
+  return result
+end
+
+verb native_kernel/offer_matching_row(builder: map, scan: map, row: map, past: map) -> map
+  let [matched, ready] = native_gen/bind(builder, "match", native_kernel/scan_compare(builder, row, scan, "mask", true, "pattern"))
+  let [matches, with_matches] = native_gen/bind(ready, "matches", native_kernel/absent(matched))
+  ready = native_gen/unless(with_matches, native_gen/less(native_gen/ref(with_matches, "int_zero"), past),
+    fn(arm) => native_gen/assign(arm, matches, native_gen/ref(arm, "false")))
+  let completed: map = native_gen/when(ready, matches, fn(arm) => native_kernel/scan_offer(arm, scan, row))
+  return completed
+end
+
+// Prefix comparison prunes the chosen index. Remaining bindings are filters;
+// capacity bounds the result buffer and traversal stops at the next match.
+verb native_kernel/scan_tree_body(module: map) -> map
+  let builder = native_gen/context(module, "kernel_scan_tree")
+  let node = native_gen/ref(builder, "node")
+  let scan = native_gen/ref(builder, "scan")
+  builder = native_gen/when(builder, native_kernel/absent(node), fn(arm) => native_gen/return_void(arm))
+  builder = native_gen/when(builder, native_kernel/load_field(builder, scan, "more"), fn(arm) => native_gen/return_void(arm))
+  builder = native_kernel/store_field(builder, scan, "visited", native_gen/add(native_kernel/load_field(builder, scan, "visited"), native_gen/ref(builder, "one")))
+  let [row, with_row] = native_gen/bind(builder, "row", native_kernel/load_field(builder, node, "row"))
+  let [past, with_past] = native_gen/bind(with_row, "past", native_gen/ref(with_row, "int_one"))
+  let [updated, ready] = native_gen/bind(with_past, "after", native_gen/root_read(native_gen/field(with_past, scan, "after")))
+  builder = native_gen/unless(ready, native_kernel/absent(updated),
+    fn(arm) => native_gen/assign(arm, past, native_kernel/compare_rows(arm, row, updated,
+      native_kernel/tuple_order(native_kernel/load_field(arm, scan, "order")))))
+  let [order, with_order] = native_gen/bind(builder, "order", native_kernel/scan_compare(builder, row, scan, "prefix", true, "pattern"))
+  builder = native_gen/unless(with_order, native_gen/less(order, native_gen/ref(with_order, "int_zero")),
+    fn(arm) => native_gen/when(arm, native_gen/less(native_gen/ref(arm, "int_zero"), past),
+      fn(before) => native_gen/do_call(before, "kernel_scan_tree", [native_kernel/load_field(before, node, "left"), scan])))
+  builder = native_gen/when(builder, native_kernel/load_field(builder, scan, "more"), fn(arm) => native_gen/return_void(arm))
+  builder = native_gen/when(builder, native_kernel/absent(order), fn(arm) => native_kernel/offer_matching_row(arm, scan, row, past))
+  builder = native_gen/unless(builder, native_gen/less(native_gen/ref(builder, "int_zero"), order),
+    fn(arm) => native_gen/do_call(arm, "kernel_scan_tree", [native_kernel/load_field(arm, node, "right"), scan]))
+  builder = native_gen/return_void(builder)
+  let result: map = native_gen/finish(module, builder)
+  return result
+end
+
+verb native_kernel/scan_error(builder: map, status: string) -> map
+  let result: map = native_gen/return_value(builder, native_gen/record(builder, [:Record, "KernelScanResult"],
+    {"status" -> native_gen/ref(builder, status), "count" -> native_gen/ref(builder, "zero"),
+      "visited" -> native_gen/ref(builder, "zero"), "more" -> native_gen/ref(builder, "false")}))
+  return result
+end
+
+verb native_kernel/check_scan_mask(builder: map, relation: map, mask: map) -> map
+  let arity = native_kernel/load_field(builder, relation, "arity")
+  let result: map = native_gen/when(builder, native_gen/less(arity, native_gen/ref(builder, "kernel_64")),
+    fn(arm) => native_gen/unless(arm, native_kernel/absent(native_gen/shift_right(mask, arity)),
+      fn(failed) => native_kernel/scan_error(failed, "kernel_schema")))
+  return result
+end
+
+verb native_kernel/relation_scan_body(module: map) -> map
+  let builder = native_gen/context(module, "kernel_relation_scan")
+  let relation = native_gen/ref(builder, "relation")
+  let pattern = native_gen/ref(builder, "pattern")
+  let updated = native_gen/ref(builder, "after")
+  let mask = native_gen/ref(builder, "mask")
+  let output = native_gen/ref(builder, "output")
+  let capacity = native_gen/ref(builder, "capacity")
+  builder = native_gen/when(builder, native_kernel/absent(relation), fn(arm) => native_kernel/scan_error(arm, "kernel_unknown"))
+  builder = native_kernel/check_tuple(builder, pattern, relation, fn(arm) => native_kernel/scan_error(arm, "kernel_arity"))
+  builder = native_gen/unless(builder, native_kernel/absent(updated),
+    fn(arm) => native_kernel/check_tuple(arm, updated, relation, fn(failed) => native_kernel/scan_error(failed, "kernel_arity")))
+  builder = native_kernel/check_scan_mask(builder, relation, mask)
+  builder = native_gen/unless(builder, native_kernel/absent(capacity),
+    fn(arm) => native_gen/when(arm, native_kernel/absent(output), fn(failed) => native_kernel/scan_error(failed, "kernel_schema")))
+  let [tree, ordering, prefix, ready] = native_kernel/scan_plan(builder, relation, mask)
+  let [state, with_state] = native_gen/bind(ready, "state", native_gen/record(ready, [:Record, "KernelScan"],
+    {"pattern" -> pattern, "after" -> updated, "order" -> ordering, "mask" -> mask, "prefix" -> prefix,
+      "output" -> output, "capacity" -> capacity, "count" -> native_gen/ref(ready, "zero"),
+      "visited" -> native_gen/ref(ready, "zero"), "more" -> native_gen/ref(ready, "false")}))
+  let [scan, with_scan] = native_gen/bind(with_state, "scan", native_gen/address(state))
+  builder = native_gen/do_call(with_scan, "kernel_scan_tree", [tree, scan])
+  builder = native_gen/return_value(builder, native_gen/record(builder, [:Record, "KernelScanResult"],
+    {"status" -> native_gen/ref(builder, "kernel_ok"), "count" -> native_gen/field(builder, state, "count"),
+      "visited" -> native_gen/field(builder, state, "visited"), "more" -> native_gen/field(builder, state, "more")}))
+  let result: map = native_gen/finish(module, builder)
+  return result
+end
+
 verb native_kernel/relations(input: map) -> map
   let context: map = input
   let relation: list = native_kernel/pointer("Relation")
@@ -46,77 +239,9 @@ verb native_kernel/relations(input: map) -> map
     @native_kernel/walk("Index", "cursor", native_kernel/read("Relation", "relation", "indexes"), [
       native/when_statement(native_kernel/binary(:Equal, native_kernel/read("Index", "cursor", "mask"), "mask"), [native/return_value(native_kernel/read("Index", "cursor", "tree"))])],
       [native/return_value(native_kernel/null("Node"))]), native/return_value(native_kernel/null("Node"))])
-  context = native_kernel/define(context, "index_update", [
-    native/when_statement(native_kernel/is_null("Index", "index"), [native/return_value(native_kernel/null("Index"))]),
-    native/let_statement("next", index, native_kernel/read("Index", "index", "next")),
-    native/let_statement("tail", index, native_kernel/null("Index")),
-    native/unless_statement(native_kernel/is_null("Index", "next"), [
-      native/set_statement("tail", native/call_expression("kernel_index_update", ["worker", "next", "row", "asserted"])),
-      native/when_statement(native_kernel/is_null("Index", "tail"), [native/return_value("tail")])]),
-    @native/try_call("updated", [:Record, "KernelNodeResult"], "kernel_set", ["worker", native_kernel/read("Index", "index", "tree"),
-      "row", native_kernel/read("Index", "index", "mask"), native/typed_expression(:Bool, native_kernel/negate("asserted")), "true"], [native/return_value(native_kernel/null("Index"))]),
-    native/return_value(native_kernel/copy_record("Index", "index", {"next" -> "tail", "tree" -> native/typed_field(node, "updated", "node")}))])
-  context = native_kernel/define(context, "apply", [
-    native/let_call("existing", node, "kernel_find", [native_kernel/call(node, "index", ["relation", "zero"]), "row", "zero", "false"]),
-    native/when_statement(native_kernel/binary(:Equal, native_kernel/is_null("Node", "existing"), native/typed_expression(:Bool, native_kernel/negate("asserted"))), [native/return_value("relation")]),
-    native/let_call("indexes", index, "kernel_index_update", ["worker", native_kernel/read("Relation", "relation", "indexes"), "row", "asserted"]),
-    native/when_statement(native_kernel/is_null("Index", "indexes"), [native/return_value(native_kernel/null("Relation"))]),
-    native/return_value(native_kernel/copy_record("Relation", "relation", {"indexes" -> "indexes"}))])
-  // Prefix comparison prunes the chosen index. Remaining bindings are filters;
-  // capacity bounds the result buffer and traversal stops at the next match.
-  context = native_kernel/define(context, "scan_tree", [
-    native/when_statement(native_kernel/is_null("Node", "node"), [native/return_void()]),
-    native/when_statement(native_memory/field(:Bool, "scan", "more"), [native/return_void()]),
-    native_memory/store(:U64, "scan", "visited", native_kernel/binary(:Add, native_memory/field(:U64, "scan", "visited"), "one")),
-    native/let_statement("row", word, native_kernel/read("Node", "node", "row")),
-    native/let_statement("past", :I64, "int_one"),
-    native/let_statement("after", word, native_memory/root(word, "scan", "after")),
-    native/unless_statement(native_kernel/binary(:Equal, "after", native/typed_zero(word)), [
-      native/set_statement("past", native/call_expression("kernel_compare", ["row", "after", native_memory/field(:U64, "scan", "order"), "false"]))]),
-    native/let_call("order", :I64, "kernel_compare", ["row", native_memory/root(word, "scan", "pattern"), native_memory/field(:U64, "scan", "prefix"), "true"]),
-    native/unless_statement(native_kernel/binary(:Less, "order", "int_zero"), [
-      native/when_statement(native_kernel/binary(:Less, "int_zero", "past"), [native_memory/call("kernel_scan_tree", [native_kernel/read("Node", "node", "left"), "scan"])])]),
-    native/when_statement(native_memory/field(:Bool, "scan", "more"), [native/return_void()]),
-    native/when_statement(native_kernel/binary(:Equal, "order", "int_zero"), [
-      native/let_call("match", :I64, "kernel_compare", ["row", native_memory/root(word, "scan", "pattern"), native_memory/field(:U64, "scan", "mask"), "true"]),
-      native/let_statement("matches", :Bool, native/binary_expression(:Equal, "match", "int_zero")),
-      native/unless_statement(native_kernel/binary(:Less, "int_zero", "past"), [native/set_statement("matches", "false")]),
-      native/when_statement("matches", [
-        native/let_statement("count", :U64, native_memory/field(:U64, "scan", "count")),
-        native/when_statement(native_kernel/binary(:Equal, "count", native_memory/field(:U64, "scan", "capacity")), [
-          native_memory/store(:Bool, "scan", "more", "true"), native/return_void()]),
-        native/let_statement("slot", native_memory/pointer(word), native/offset_expression(native_memory/field(native_memory/pointer(word), "scan", "output"), "count")),
-        native/root_store_statement("slot", "row"),
-        native_memory/store(:U64, "scan", "count", native_kernel/binary(:Add, "count", "one"))])]),
-    native/unless_statement(native_kernel/binary(:Less, "int_zero", "order"), [
-      native_memory/call("kernel_scan_tree", [native_kernel/read("Node", "node", "right"), "scan"])]), native/return_void()])
-  context = native_kernel/define(context, "relation_scan", [
-    native/when_statement(native_kernel/is_null("Relation", "relation"), [native/return_record(["kernel_unknown", "zero", "zero", "false"])]),
-    @native_kernel/require_tuple("pattern", "relation", [native/return_record(["kernel_arity", "zero", "zero", "false"])]),
-    native/unless_statement(native_kernel/binary(:Equal, "after", native/typed_zero(word)), [
-      @native_kernel/require_tuple("after", "relation", [native/return_record(["kernel_arity", "zero", "zero", "false"])])]),
-    native/when_statement(native_kernel/binary(:Less, native_kernel/read("Relation", "relation", "arity"), "kernel_64"), [
-      native/unless_statement(native_kernel/binary(:Equal, native_kernel/binary(:ShiftRight, "mask", native_kernel/read("Relation", "relation", "arity")), "zero"), [native/return_record(["kernel_schema", "zero", "zero", "false"])])]),
-    native/unless_statement(native_kernel/binary(:Equal, "capacity", "zero"), [
-      native/when_statement(native_kernel/binary(:Equal, "output", native/typed_zero(native_memory/pointer(word))), [native/return_record(["kernel_schema", "zero", "zero", "false"])])]),
-    native/let_call("tree", node, "kernel_index", ["relation", "zero"]),
-    native/let_statement("ordering", :U64, "zero"),
-    native/let_statement("prefix", :U64, "zero"),
-    native/let_statement("bit", :U64, "one"),
-    @native/for_range("position", "zero", native_kernel/read("Relation", "relation", "arity"), [
-      native/when_statement(native_kernel/binary(:Equal, native_kernel/binary(:BitAnd, "mask", "bit"), "zero"), [native/break_statement()]),
-      native/set_statement("prefix", native/binary_expression(:BitOr, "prefix", "bit")),
-      native/set_statement("bit", native/binary_expression(:ShiftLeft, "bit", "one"))]),
-    native/when_statement(native_kernel/binary(:Equal, "prefix", "zero"), [
-      @native_kernel/walk("Index", "index", native_kernel/read("Relation", "relation", "indexes"), [
-        native/let_statement("key", :U64, native_kernel/read("Index", "index", "mask")),
-        native/unless_statement(native_kernel/binary(:Equal, "key", "zero"), [
-          native/when_statement(native_kernel/binary(:Equal, native_kernel/binary(:BitAnd, "key", "mask"), "key"), [
-            native/set_statement("prefix", "key"), native/set_statement("ordering", "key"), native/set_statement("tree", native_kernel/read("Index", "index", "tree")), native/break_statement()])])],
-        [native/break_statement()])]),
-    native/let_statement("state", [:Record, "KernelScan"], native/record_expression(["pattern", "after", "ordering", "mask", "prefix", "output", "capacity", "zero", "zero", "false"])),
-    native/let_statement("scan", scan, native/unary_expression(:Address, "state")),
-    native_memory/call("kernel_scan_tree", ["tree", "scan"]),
-    native/return_record(["kernel_ok", native/typed_field(:U64, "state", "count"), native/typed_field(:U64, "state", "visited"), native/typed_field(:Bool, "state", "more")])])
+  context = native_kernel/index_update_body(context)
+  context = native_kernel/apply_body(context)
+  context = native_kernel/scan_tree_body(context)
+  context = native_kernel/relation_scan_body(context)
   return context
 end

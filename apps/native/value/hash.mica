@@ -142,9 +142,7 @@ verb native_value/hashing(input: map) -> map
       native/when_statement(native/binary_expression(:Equal, "kind", string_concat("tag_", prefix)), body)
     ]
   end
-  for spec in [["range", "HeapRange", [["start", word, ""], ["has_end", :Bool, ""], ["end", word, "has_end"]]],
-    ["error", "HeapError", [["code", :U32, ""], ["has_message", :Bool, ""], ["message", word, "has_message"], ["has_value", :Bool, ""], ["value", word, "has_value"]]],
-    ["frob", "HeapFrob", [["delegate", :U64, ""], ["value", word, ""]]]]
+  for spec in native_value/record_plan(:Hash)
     let pointer: string = string_concat(spec[0], "_pointer")
     let header: string = string_concat(spec[0], "_header")
     let body: list = [
@@ -164,7 +162,7 @@ verb native_value/hashing(input: map) -> map
       let step: list = []
       if field[1] == word
         step = native_value/hash_child(local)
-        if field[0] == "message"
+        if field[3] == :StringBytes
           step = [
             native/let_statement(
               "message_pointer",

@@ -1,41 +1,77 @@
 // Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
+// Target fragments always end their outgoing arms and publish the continuation
+// used by subsequent checked-IR instructions and terminators.
+verb native_jit/target_blocks(names: list) -> list
+  let body: list = [native/let_statement("function", native_jit/handle(),
+    native_jit/cache(:Declaration, native_jit/metadata(:BlockOwner, "block_id")))]
+  for spec in names
+    body = [@body, native/let_statement(spec[0], native_jit/handle(),
+      native_jit/j("block", ["function", native_jit/literal(spec[1])]))]
+  end
+  return body
+end
+
+verb native_jit/target_branch(block, valid, yes, no) -> list
+  let result: list = native/do_statement(native/call_expression("j_branch", [block, valid, yes, no]))
+  return result
+end
+
+verb native_jit/target_jump(block, destination) -> list
+  let result: list = native/do_statement(native/call_expression("j_jump", [block, destination]))
+  return result
+end
+
+verb native_jit/target_continue(block) -> list
+  let result: list = native_jit/publish(:BlockTail, "block_id", block)
+  return result
+end
+
+verb native_jit/checked_result(valid, value, special: list) -> list
+  let boolean = native_jit/cache(:Type, "n7")
+  return [
+    @native_jit/consume_arguments([], "record", ["ctx", "type"], [:Assign, "block", native_jit/cache(:Lvalue, "destination")]),
+    @native_jit/target_blocks([["success", "s_ok"], ["join", "s_join"]]),
+    native_jit/target_branch("block", valid, "success", "join"),
+    @special,
+    @native_jit/consume_arguments([native_jit/integer("n1", boolean), value], "record", ["ctx", "type"],
+      [:Assign, "success", native_jit/cache(:Lvalue, "destination")]),
+    native_jit/target_jump("success", "join"), native_jit/target_continue("join"), native/return_value("n0")]
+end
+
 verb native_jit/define_helpers(input: map) -> map
   let context: map = input
   let h: list = native_jit/handle()
-  let scratch = native_jit/argument_buffer()
   context = native_jit/define(context, "guard", [
-    native/let_statement("function", h, native_jit/cached(0, native_jit/meta(3, "block_id"))),
-    native/let_statement("success", h, native_jit/j("block", ["function", native_jit/literal("s_ok")])),
-    native/let_statement("failure", h, native_jit/j("block", ["function", native_jit/literal("s_fail")])),
-    native/do_statement(native/call_expression("j_branch", [native_jit/cached(7, "block_id"), "valid", "success", "failure"])),
+    @native_jit/target_blocks([["success", "s_ok"], ["failure", "s_fail"]]),
+    native_jit/target_branch(native_jit/cache(:BlockTail, "block_id"), "valid", "success", "failure"),
     native/let_statement("abort", h, native_jit/j("builtin", ["ctx", native_jit/literal("s_abort")])),
-    native/do_statement(native/call_expression("j_eval", ["failure", native_jit/j("call", ["ctx", "abort", "n0", scratch])])),
-    native/do_statement(native/call_expression("j_jump", ["failure", "success"])),
-    native_jit/save(7, "block_id", "success"), native/return_value("success")])
+    @native_jit/consume_arguments([], "call", ["ctx", "abort"], [:Eval, "failure"]),
+    native_jit/target_jump("failure", "success"),
+    native_jit/target_continue("success"), native/return_value("success")])
   // For the native IR's ordinary C types, sizeof({U8 pad; T item;}) -
   // sizeof(T) is alignof(T). This uses GCC layout, including aggregate padding.
   // GCC 14 has new_sizeof but does not expose new_alignof.
   context = native_jit/define(context, "align", [
-    native/let_statement("cached", h, native_jit/cached(8, "type_id")),
+    native/let_statement("cached", h, native_jit/cache(:Alignment, "type_id")),
     native/unless_statement(native/binary_expression(:Equal, "cached", "null"), [native/return_value("cached")]),
-    native/let_statement("type", h, native_jit/cached(3, "type_id")),
+    native/let_statement("type", h, native_jit/cache(:Type, "type_id")),
     native/let_statement("probe", h, native_jit/j("struct", ["ctx", native_jit/literal("s_align")])),
-    native_jit/save(6, "n0", native_jit/j("field", ["ctx", native_jit/cached(3, "n1"), native_jit/literal("s_pad")])),
-    native_jit/save(6, "n1", native_jit/j("field", ["ctx", "type", native_jit/literal("s_item")])),
-    native/do_statement(native/call_expression("j_fields", ["probe", "n2", scratch])),
-    native/let_statement("size", h, native_jit/j("cast", ["ctx", native_jit/j("sizeof", ["ctx", native_jit/j("struct_type", ["probe"])]), native_jit/cached(3, "n4")])),
-    native/let_statement("item_size", h, native_jit/j("cast", ["ctx", native_jit/j("sizeof", ["ctx", "type"]), native_jit/cached(3, "n4")])),
-    native/let_statement("alignment", h, native_jit/j("sub", ["ctx", native_jit/cached(3, "n4"), "size", "item_size"])),
-    native_jit/save(8, "type_id", "alignment"), native/return_value("alignment")])
+    @native_jit/consume_arguments([
+      native_jit/j("field", ["ctx", native_jit/cache(:Type, "n1"), native_jit/literal("s_pad")]),
+      native_jit/j("field", ["ctx", "type", native_jit/literal("s_item")])], "fields", ["probe"], [:Do]),
+    native/let_statement("size", h, native_jit/j("cast", ["ctx", native_jit/j("sizeof", ["ctx", native_jit/j("struct_type", ["probe"])]), native_jit/cache(:Type, "n4")])),
+    native/let_statement("item_size", h, native_jit/j("cast", ["ctx", native_jit/j("sizeof", ["ctx", "type"]), native_jit/cache(:Type, "n4")])),
+    native/let_statement("alignment", h, native_jit/j("sub", ["ctx", native_jit/cache(:Type, "n4"), "size", "item_size"])),
+    native_jit/publish(:Alignment, "type_id", "alignment"), native/return_value("alignment")])
   context = native_jit/define(context, "heap_test", [
-    native/let_statement("row", native_jit/words(), native/offset_expression("data", native_jit/meta(1, "type_id"))),
-    native/let_statement("position", :U64, "n6"), native/let_statement("test", h, native_jit/j("zero", ["ctx", native_jit/cached(3, "n7")])),
-    native/let_statement("wide", h, native_jit/j("cast", ["ctx", "tag", native_jit/cached(3, "n4")])),
+    native/let_statement("row", native_jit/words(), native/offset_expression("data", native_jit/metadata(:TypeRow, "type_id"))),
+    native/let_statement("position", :U64, native_jit/n(native_jit/tail_start(:Type))), native/let_statement("test", h, native_jit/j("zero", ["ctx", native_jit/cache(:Type, "n7")])),
+    native/let_statement("wide", h, native_jit/j("cast", ["ctx", "tag", native_jit/cache(:Type, "n4")])),
     native/while_statement(native/binary_expression(:Less, "position", native_jit/word("row", 0)), [
-      native/let_statement("expected", h, native_jit/integer(native_jit/at("row", "position", :U64), native_jit/cached(3, "n4"))),
-      native/set_statement("test", native_jit/j("logical_or", ["ctx", native_jit/cached(3, "n7"), "test", native_jit/j("eq", ["ctx", "wide", "expected"])])),
+      native/let_statement("expected", h, native_jit/integer(native_jit/at("row", "position", :U64), native_jit/cache(:Type, "n4"))),
+      native/set_statement("test", native_jit/j("logical_or", ["ctx", native_jit/cache(:Type, "n7"), "test", native_jit/j("eq", ["ctx", "wide", "expected"])])),
       native/set_statement("position", native_jit/binary(:Add, "position", "n1"))]), native/return_value("test")])
   return context
 end

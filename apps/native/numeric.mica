@@ -108,15 +108,15 @@ verb native/c_checked(index, row)
     string_concat(dst, ".f_number = ", dst, ".f_ok ? (", expressions[op], ") : 0; }")], " ")
 end
 
-verb native/c_numeric_statement(index, row)
+verb native/c_numeric_emission(index, row)
   let op = row[3]
   let args = row[5]
   if native/contains([:CheckedAdd, :CheckedSubtract, :CheckedMultiply, :CheckedDivide, :CheckedRemainder, :CheckedNegate, :CheckedFloatToInt], op)
-    return native/c_checked(index, row)
+    return native/c_emission(native/c_checked(index, row), false)
   end
   if op == :Bitcast
     let source_type = native/value_type(index, index[:blocks][row[1]][1], args[0])
-    return string_concat("memcpy(&", native/c_value(index, row[4]), ", &(", native/c_type(source_type), "){", native/c_value(index, args[0]), "}, sizeof(", native/c_type(source_type), "));")
+    return native/c_emission(string_concat("memcpy(&", native/c_value(index, row[4]), ", &(", native/c_type(source_type), "){", native/c_value(index, args[0]), "}, sizeof(", native/c_type(source_type), "));"), false)
   end
   let dst = native/c_value(index, row[4])
   let type_id = index[:variables][row[4]][2]
@@ -125,18 +125,18 @@ verb native/c_numeric_statement(index, row)
     let expressions = {:Convert -> string_concat("(", native/c_type(type_id), ")(", arg, ")"),
                        :Negate -> string_concat("-(", arg, ")"), :Truncate -> string_concat("truncf(", arg, ")"),
                        :IsFinite -> string_concat("isfinite(", arg, ")")}
-    return string_concat(dst, " = ", expressions[op], ";")
+    return native/c_emission(string_concat(dst, " = ", expressions[op], ";"), true)
   end
   let operators = {:Add -> " + ", :Subtract -> " - ", :Multiply -> " * ", :Divide -> " / ", :Remainder -> " % ",
                    :BitAnd -> " & ", :BitOr -> " | ", :BitXor -> " ^ ", :ShiftLeft -> " << ", :ShiftRight -> " >> ",
                    :Equal -> " == ", :Less -> " < "}
   if !map_contains_key(operators, op)
-    return ""
+    return native/c_emission("", false)
   end
   let left = native/c_value(index, args[0])
   let right = native/c_value(index, args[1])
   if op == :Remainder && type_id == :F32
-    return string_concat(dst, " = fmodf(", left, ", ", right, ");")
+    return native/c_emission(string_concat(dst, " = fmodf(", left, ", ", right, ");"), true)
   end
   let guard = ""
   if native/is_unsigned(type_id)
@@ -151,5 +151,5 @@ verb native/c_numeric_statement(index, row)
       guard = string_concat("if (", right, " >= ", width, ") { abort(); } ")
     end
   end
-  return string_concat(guard, dst, " = (", native/c_type(type_id), ")(", left, operators[op], right, ");")
+  return native/c_emission(string_concat(guard, dst, " = (", native/c_type(type_id), ")(", left, operators[op], right, ");"), guard == "")
 end

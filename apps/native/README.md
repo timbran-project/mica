@@ -24,6 +24,8 @@ From the repository root, run:
 cargo run --bin mica -- eval \
   --filein apps/native/ir.mica \
   --filein apps/native/builders.mica \
+  --filein apps/native/generation.mica \
+  --filein apps/native/sequences.mica \
   --filein apps/native/types.mica \
   --filein apps/native/numeric.mica \
   --filein apps/native/layout.mica \
@@ -197,6 +199,40 @@ Builders batch rows without changing the world.
 `native/function_scope`, `native/block_body`, `native/record_type`, and `native/constants` batch common construction sequences.
 The examples show their argument shapes. These helpers produce the same rows as the individual builders.
 
+### Typed authoring
+
+Load [generation.mica](generation.mica) and [sequences.mica](sequences.mica) after `builders.mica`.
+The `native_gen` API constructs typed expressions and locations, then lowers them into the checked structured body.
+A binding has a generated identity and a lexical scope. Its label is a readable hint, not a lookup key.
+Use `ref` for declared parameters and constants; retain the handle returned by `bind` for generated locals.
+
+```mica
+let builder: map = native_gen/context(context, "sum")
+let [total: map, initialized: map] = native_gen/bind(builder, "total", native_gen/zero(:U64))
+builder = native_gen/for_range(initialized, "index", native_gen/zero(:U64),
+  native_gen/ref(initialized, "limit"), fn(body, index)
+    return native_gen/assign(body, total, native_gen/add(total, index))
+  end)
+builder = native_gen/return_value(builder, total)
+context = native_gen/finish(context, builder)
+```
+
+The module must declare `sum` and a U64 `one` constant before constructing this body.
+Callbacks run during generation. Each returns updated builder state; it becomes ordinary target control flow, without runtime closures.
+Range operands evaluate once, in order. `continue` advances the index, including inside branches; nested loops keep their own continuation.
+
+`field` derives the member type from the record schema. For pointer bases, it returns a location with the pointer's access mode.
+`read` and `write` distinguish loading from storing. Writes through const locations and references escaping their scope fail during generation.
+`bind` evaluates an expression once; reusing an unbound expression evaluates it at each use.
+The existing IR checker still validates effects, ownership, safepoints, and tail transfers.
+The bootstrap tools give generation a 256-frame host call budget for composed callbacks, alongside their instruction budgets.
+
+`native_sequence` supplies spans, copying, ordered scans, stable merging, and binary search.
+Comparators specialize into the generated function and can propagate failure explicitly.
+Map construction and relation sorting share the merge implementation. Map lookup and update share binary search.
+Typed allocation helpers in `memory/program.mica` check extents before reserving storage and introduce no safepoints.
+String indexing and scalar lookup share a cursor for validated UTF-8 backing storage; untrusted input still uses the decoder.
+
 ### Structured bodies
 
 Load [builders.mica](builders.mica) after `ir.mica` to construct bodies without naming blocks or branch targets.
@@ -221,13 +257,13 @@ state = native/function_body(declared, function, names, [
 ```
 
 Here, `constants` supplies U64 zero and one from `native/constants`.
-The [value generators](value/) use these builders throughout, including UTF-8 decoding, string search, recursive comparison, and map sorting.
+The [value generators](value/) also use structured bodies directly for operations such as UTF-8 decoding, string search, and recursive comparison.
 They declare control flow with branches, loops, and early returns; the shared builder creates the blocks and branch targets.
 Mica kind annotations check generator interfaces, while explicit IR types describe the generated values.
 
 ### Semantic builders
 
-These Mica functions expand operations into the checked structured body.
+These Mica functions construct the structured representation used by the authoring and lowering layers.
 They introduce no runtime helper calls or allocations beyond the operations they describe.
 
 | Builder | Behaviour |
@@ -246,8 +282,12 @@ They introduce no runtime helper calls or allocations beyond the operations they
 | `native_value/scalar_field`, `native_value/value_field` | Describe fixed heap fields, including ownership and optional presence flags |
 | `native_value/encode_word`, `native_value/encode_header`, `native_value/encode_bytes`, `native_value/encode_child` | Write wire values and stop on failure |
 | `native_jit/row_arguments`, `native_jit/builtin_call`, `native_jit/indirect_call` | Resolve serialized operands, assemble calls, and enforce indirect-call checks or required tail calls |
-| `native_kernel/require_transaction`, `native_kernel/require_tuple` | Check transaction state and tuple shape with caller-selected failure returns |
+| `native_kernel/require_transaction`, `native_kernel/check_tuple` | Check transaction state and tuple shape with caller-selected failure returns |
 | `native_kernel/construct`, `native_kernel/copy_record` | Allocate a kernel record from named fields or copy it with named changes |
+| `native_kernel/columns`, `native_kernel/scan_plan`, `native_kernel/scan_offer` | Traverse tuple columns, choose the scan order, and admit rows into bounded output |
+| `native_kernel/copy_chain`, `native_kernel/apply_write_phases` | Rebuild persistent chains and order transaction write phases |
+| `native_jit/row_field`, `native_jit/row_tail` | Read serialized rows using the encoder's schema |
+| `native_jit/consume_arguments`, `native_jit/consume_operands` | Prepare the argument buffer and consume it before another call can overwrite it |
 
 A schema contains a record name and its field declarations.
 Named construction rejects missing, extra, and duplicate fields. Record copies reject unknown field names.

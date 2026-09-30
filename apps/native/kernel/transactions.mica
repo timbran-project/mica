@@ -12,6 +12,286 @@ verb native_kernel/require_transaction(failure: list) -> list
     native/when_statement(native_kernel/read("Work", "work", "done"), failure)]
 end
 
+// A functional key must have the same occupancy and complete tuple as the
+// base snapshot. Set assertions instead detect a concurrent removal.
+verb native_kernel/validate_key_state(builder: map, base: map, current: map, conflict) -> map
+  let base_absent = native_kernel/absent(base)
+  let current_absent = native_kernel/absent(current)
+  let ready = native_gen/unless(builder, native_gen/equal(base_absent, current_absent), conflict)
+  let same_row = native_gen/equal(native_kernel/compare_rows(ready,
+    native_kernel/load_field(ready, base, "row"), native_kernel/load_field(ready, current, "row"),
+    native_kernel/tuple_order(native_gen/ref(ready, "zero"))), native_gen/ref(ready, "int_zero"))
+  let result: map = native_gen/unless(ready, base_absent, fn(arm) => native_gen/unless(arm, same_row, conflict))
+  return result
+end
+
+verb native_kernel/validate_set_assertion(builder: map, writes: map, base: map, current: map, conflict) -> map
+  let result: map = native_gen/when(builder, native_kernel/load_field(builder, writes, "present"),
+    fn(arm) => native_gen/unless(arm, native_kernel/absent(base),
+      fn(present) => native_gen/when(present, native_kernel/absent(current), conflict)))
+  return result
+end
+
+// Removing a row absent from the base must not remove a concurrent assertion.
+verb native_kernel/effective_write(builder: map, before: map, row: map, asserted: map) -> list
+  let [effective, ready] = native_gen/bind(builder, "effective", asserted)
+  ready = native_gen/unless(ready, asserted, fn(arm) => native_kernel/check_retraction(arm, before, row, effective))
+  return [effective, ready]
+end
+
+verb native_kernel/check_retraction(builder: map, before: map, row: map, effective: map) -> map
+  let [was, ready] = native_gen/bind(builder, "was", native_kernel/find_row(builder, before, row,
+    native_kernel/tuple_order(native_gen/ref(builder, "zero"))))
+  let result: map = native_gen/assign(ready, effective, native_gen/negate(native_kernel/absent(was)))
+  return result
+end
+
+verb native_kernel/record_delta(builder: map, work: map, before: map, updated: map, row: map, asserted: map) -> map
+  let result: map = native_gen/unless(builder, native_gen/equal(before, updated),
+    fn(arm) => native_kernel/append_delta(arm, work, updated, row, asserted))
+  return result
+end
+
+verb native_kernel/append_delta(builder: map, work: map, updated: map, row: map, asserted: map) -> map
+  let [delta, ready] = native_gen/bind(builder, "delta", native_kernel/allocate_record(builder, native_gen/ref(builder, "worker"), "Delta",
+    {"next" -> native_kernel/load_field(builder, work, "deltas"),
+      "relation" -> native_kernel/load_field(builder, updated, "id"), "row" -> row, "asserted" -> asserted}))
+  ready = native_gen/when(ready, native_kernel/absent(delta),
+    fn(arm) => native_gen/return_value(arm, native_gen/zero(native_kernel/pointer("Relation"))))
+  let result: map = native_kernel/store_field(ready, work, "deltas", delta)
+  return result
+end
+
+// Retractions precede assertions so replacement preserves functional keys.
+// These are generation-time phases, not callbacks in the generated module.
+verb native_kernel/write_phases() -> list
+  return [[:Retract, "false"], [:Assert, "true"]]
+end
+
+verb native_kernel/apply_write_phases(builder: map, worker: map, work: map, entry: map, writes: map, before: map, failure) -> map
+  let ready: map = builder
+  for phase in native_kernel/write_phases()
+    ready = native_gen/assign(ready, entry, native_gen/call(ready, "kernel_apply_writes", [worker, work, writes, before, entry, native_gen/ref(ready, phase[1])]))
+    ready = native_gen/when(ready, native_kernel/absent(entry), failure)
+  end
+  return ready
+end
+
+verb native_kernel/open_transaction(builder: map, failure) -> list
+  let [work, ready] = native_gen/bind(builder, "work", native_gen/call(builder, "kernel_work", [native_gen/ref(builder, "transaction")]))
+  ready = native_gen/when(ready, native_kernel/absent(work), failure)
+  ready = native_gen/when(ready, native_kernel/load_field(ready, work, "done"), failure)
+  return [work, ready]
+end
+
+verb native_kernel/status(builder: map, status: string) -> map
+  let result: map = native_gen/return_value(builder, native_gen/ref(builder, status))
+  return result
+end
+
+verb native_kernel/add_index(builder: map, worker: map, head: map, mask: map) -> map
+  let ready = native_gen/assign(builder, head, native_kernel/allocate_record(builder, worker, "Index",
+    {"next" -> head, "mask" -> mask, "tree" -> native_gen/zero(native_kernel/pointer("Node"))}))
+  let result: map = native_gen/when(ready, native_kernel/absent(head), fn(arm) => native_kernel/status(arm, "kernel_oom"))
+  return result
+end
+
+verb native_kernel/add_secondary_index(builder: map, worker: map, head: map, indexes: map, keys: map, bit: map) -> map
+  let result: map = native_gen/when(builder, native_kernel/column_is_bound(indexes, bit),
+    fn(arm) => native_gen/unless(arm, native_gen/equal(bit, keys), fn(distinct) => native_kernel/add_index(distinct, worker, head, bit)))
+  return result
+end
+
+verb native_kernel/check_declaration_name(builder: map, cursor: map, name: map) -> map
+  let ready = native_gen/when(builder, native_kernel/absent(cursor), fn(arm) => native_gen/break_loop(arm))
+  let updated = native_kernel/load_field(ready, cursor, "after")
+  ready = native_gen/when(ready, native_gen/equal(native_kernel/load_field(ready, updated, "name"), name),
+    fn(arm) => native_kernel/status(arm, "kernel_name"))
+  let result: map = native_gen/assign(ready, cursor, native_kernel/load_field(ready, cursor, "next"))
+  return result
+end
+
+verb native_kernel/check_declaration_mask(builder: map, arity: map, keys: map, indexes: map) -> map
+  let result: map = native_gen/when(builder, native_gen/less(arity, native_gen/ref(builder, "kernel_64")),
+    fn(arm) => native_gen/unless(arm, native_kernel/absent(native_gen/shift_right(native_gen/bit_or(keys, indexes), arity)),
+      fn(failed) => native_kernel/status(failed, "kernel_schema")))
+  return result
+end
+
+verb native_kernel/declare_body(module: map) -> map
+  let builder = native_gen/context(module, "kernel_declare")
+  let transaction = native_gen/ref(builder, "transaction")
+  let id = native_gen/ref(builder, "id")
+  let name = native_gen/ref(builder, "name")
+  let arity = native_gen/ref(builder, "arity")
+  let policy = native_gen/ref(builder, "policy")
+  let keys = native_gen/ref(builder, "keys")
+  let indexes = native_gen/ref(builder, "indexes")
+  let [work, opened] = native_kernel/open_transaction(builder, fn(arm) => native_kernel/status(arm, "kernel_closed"))
+  let [worker, ready] = native_gen/bind(opened, "worker", native_kernel/load_field(opened, transaction, "worker"))
+  builder = native_gen/when(ready, native_kernel/absent(id), fn(arm) => native_kernel/status(arm, "kernel_schema"))
+  builder = native_gen/when(builder, native_gen/less(native_gen/ref(builder, "kernel_64"), arity), fn(arm) => native_kernel/status(arm, "kernel_schema"))
+  builder = native_gen/when(builder, native_gen/less(native_gen/ref(builder, "kernel_policy_event"), policy), fn(arm) => native_kernel/status(arm, "kernel_schema"))
+  builder = native_kernel/check_declaration_mask(builder, arity, keys, indexes)
+  builder = native_gen/unless(builder, native_gen/equal(policy, native_gen/ref(builder, "kernel_policy_functional")),
+    fn(arm) => native_gen/unless(arm, native_kernel/absent(keys), fn(failed) => native_kernel/status(failed, "kernel_schema")))
+  builder = native_gen/unless(builder, native_kernel/absent(native_gen/call(builder, "kernel_view", [transaction, id])),
+    fn(arm) => native_kernel/status(arm, "kernel_schema"))
+  let [base, with_base] = native_gen/bind(builder, "base", native_kernel/load_field(builder, work, "base"))
+  builder = native_gen/unless(with_base, native_kernel/absent(native_gen/call(with_base, "kernel_named",
+    [native_kernel/load_field(with_base, base, "relations"), name])), fn(arm) => native_kernel/status(arm, "kernel_name"))
+  let [cursor, with_cursor] = native_gen/bind(builder, "cursor", native_kernel/load_field(builder, work, "changes"))
+  builder = native_gen/while_loop(with_cursor, native_gen/ref(with_cursor, "true"),
+    fn(iteration) => native_kernel/check_declaration_name(iteration, cursor, name))
+  let [head, with_head] = native_gen/bind(builder, "head", native_kernel/allocate_record(builder, worker, "Index",
+    {"next" -> native_gen/zero(native_kernel/pointer("Index")), "mask" -> native_gen/ref(builder, "zero"), "tree" -> native_gen/zero(native_kernel/pointer("Node"))}))
+  builder = native_gen/when(with_head, native_kernel/absent(head), fn(arm) => native_kernel/status(arm, "kernel_oom"))
+  builder = native_gen/when(builder, native_gen/equal(policy, native_gen/ref(builder, "kernel_policy_functional")),
+    fn(arm) => native_gen/unless(arm, native_kernel/absent(keys), fn(keyed) => native_kernel/add_index(keyed, worker, head, keys)))
+  builder = native_kernel/columns(builder, arity, fn(iteration, position, bit) => native_kernel/add_secondary_index(iteration, worker, head, indexes, keys, bit))
+  let [relation, with_relation] = native_gen/bind(builder, "relation", native_kernel/allocate_record(builder, worker, "Relation",
+    {"next" -> native_gen/zero(native_kernel/pointer("Relation")), "id" -> id, "name" -> name, "arity" -> arity,
+      "policy" -> policy, "keys" -> keys, "indexes" -> head}))
+  builder = native_gen/when(with_relation, native_kernel/absent(relation), fn(arm) => native_kernel/status(arm, "kernel_oom"))
+  let [created, with_created] = native_gen/bind(builder, "created", native_kernel/allocate_record(builder, worker, "Change",
+    {"next" -> native_kernel/load_field(builder, work, "changes"), "before" -> native_gen/zero(native_kernel/pointer("Relation")),
+      "after" -> relation, "writes" -> native_gen/zero(native_kernel/pointer("Node"))}))
+  builder = native_gen/when(with_created, native_kernel/absent(created), fn(arm) => native_kernel/status(arm, "kernel_oom"))
+  builder = native_kernel/store_field(builder, work, "changes", created)
+  builder = native_kernel/status(builder, "kernel_ok")
+  let result: map = native_gen/finish(module, builder)
+  return result
+end
+
+verb native_kernel/check_functional_key(builder: map, relation: map, row: map) -> map
+  let [keys, ready] = native_gen/bind(builder, "keys", native_kernel/load_field(builder, relation, "keys"))
+  let [found, with_found] = native_gen/bind(ready, "found", native_kernel/find_row(ready, relation, row, native_kernel/tuple_projection(keys)))
+  let identical = native_gen/equal(native_kernel/compare_rows(with_found, row, native_kernel/load_field(with_found, found, "row"),
+    native_kernel/tuple_order(native_gen/ref(with_found, "zero"))), native_gen/ref(with_found, "int_zero"))
+  let result: map = native_gen/unless(with_found, native_kernel/absent(found),
+    fn(arm) => native_gen/unless(arm, identical, fn(failed) => native_kernel/status(failed, "kernel_key")))
+  return result
+end
+
+verb native_kernel/create_change(builder: map, worker: map, change: map, work: map, relation: map) -> map
+  let ready = native_gen/assign(builder, change, native_kernel/allocate_record(builder, worker, "Change",
+    {"next" -> native_kernel/load_field(builder, work, "changes"), "before" -> relation, "after" -> relation,
+      "writes" -> native_gen/zero(native_kernel/pointer("Node"))}))
+  ready = native_gen/when(ready, native_kernel/absent(change), fn(arm) => native_kernel/status(arm, "kernel_oom"))
+  let result: map = native_kernel/store_field(ready, work, "changes", change)
+  return result
+end
+
+verb native_kernel/write_body(module: map) -> map
+  let builder = native_gen/context(module, "kernel_write")
+  let transaction = native_gen/ref(builder, "transaction")
+  let row = native_gen/ref(builder, "row")
+  let asserted = native_gen/ref(builder, "asserted")
+  let [work, opened] = native_kernel/open_transaction(builder, fn(arm) => native_kernel/status(arm, "kernel_closed"))
+  let [worker, ready] = native_gen/bind(opened, "worker", native_kernel/load_field(opened, transaction, "worker"))
+  let [relation, with_relation] = native_gen/bind(ready, "relation", native_gen/call(ready, "kernel_view", [transaction, native_gen/ref(ready, "id")]))
+  builder = native_gen/when(with_relation, native_kernel/absent(relation), fn(arm) => native_kernel/status(arm, "kernel_unknown"))
+  builder = native_kernel/check_tuple(builder, row, relation, fn(arm) => native_kernel/status(arm, "kernel_arity"))
+  builder = native_gen/unless(builder, native_gen/call(builder, "value_is_persistable", [row]), fn(arm) => native_kernel/status(arm, "kernel_nonpersistent"))
+  builder = native_gen/when(builder, asserted, fn(arm) => native_gen/when(arm,
+    native_gen/equal(native_kernel/load_field(arm, relation, "policy"), native_gen/ref(arm, "kernel_policy_functional")),
+    fn(functional) => native_kernel/check_functional_key(functional, relation, row)))
+  let [change, with_change] = native_gen/bind(builder, "change", native_gen/call(builder, "kernel_change", [work, native_gen/ref(builder, "id")]))
+  builder = native_gen/when(with_change, native_kernel/absent(change), fn(arm) => native_kernel/create_change(arm, worker, change, work, relation))
+  let [updated, with_after] = native_gen/bind(builder, "after", native_gen/call(builder, "kernel_apply", [worker, relation, row, asserted]))
+  builder = native_gen/when(with_after, native_kernel/absent(updated), fn(arm) => native_kernel/status(arm, "kernel_oom"))
+  let [written, with_written] = native_gen/bind(builder, "written", native_gen/call(builder, "kernel_set",
+    [worker, native_kernel/load_field(builder, change, "writes"), row, native_gen/ref(builder, "zero"), native_gen/ref(builder, "false"), asserted]))
+  builder = native_gen/unless(with_written, native_gen/field(with_written, written, "ok"), fn(arm) => native_kernel/status(arm, "kernel_oom"))
+  builder = native_kernel/store_field(builder, change, "after", updated)
+  builder = native_kernel/store_field(builder, change, "writes", native_gen/field(builder, written, "node"))
+  builder = native_kernel/status(builder, "kernel_ok")
+  let result: map = native_gen/finish(module, builder)
+  return result
+end
+
+verb native_kernel/row_conflict(builder: map, work: map, before: map, row: map) -> map
+  let ready = native_kernel/store_field(builder, work, "status", native_gen/ref(builder, "kernel_conflict"))
+  ready = native_kernel/store_field(ready, work, "conflict_relation", native_kernel/load_field(ready, before, "id"))
+  ready = native_kernel/store_field(ready, work, "conflict_tuple", row)
+  let result: map = native_gen/return_value(ready, native_gen/ref(ready, "false"))
+  return result
+end
+
+verb native_kernel/validate_body(module: map) -> map
+  let builder = native_gen/context(module, "kernel_validate")
+  let work = native_gen/ref(builder, "work")
+  let writes = native_gen/ref(builder, "writes")
+  let before = native_gen/ref(builder, "before")
+  let current = native_gen/ref(builder, "current")
+  builder = native_gen/when(builder, native_kernel/absent(writes), fn(arm) => native_gen/return_value(arm, native_gen/ref(arm, "true")))
+  builder = native_gen/when(builder, native_kernel/absent(before), fn(arm) => native_gen/return_value(arm, native_gen/ref(arm, "true")))
+  builder = native_gen/when(builder, native_gen/equal(before, current), fn(arm) => native_gen/return_value(arm, native_gen/ref(arm, "true")))
+  let [row, with_row] = native_gen/bind(builder, "row", native_kernel/load_field(builder, writes, "row"))
+  builder = native_gen/when(with_row, native_kernel/absent(current), fn(arm) => native_kernel/row_conflict(arm, work, before, row))
+  let [policy, with_policy] = native_gen/bind(builder, "policy", native_kernel/load_field(builder, before, "policy"))
+  builder = native_gen/when(with_policy, native_gen/equal(policy, native_gen/ref(with_policy, "kernel_policy_event")),
+    fn(arm) => native_gen/return_value(arm, native_gen/ref(arm, "true")))
+  let [keys, with_keys] = native_gen/bind(builder, "keys", native_gen/ref(builder, "zero"))
+  let [prefix, ready] = native_gen/bind(with_keys, "prefix", native_gen/ref(with_keys, "false"))
+  builder = native_gen/when(ready, native_gen/equal(policy, native_gen/ref(ready, "kernel_policy_functional")),
+    fn(arm) => native_kernel/functional_validation(arm, before, keys, prefix))
+  let [base_row, with_base] = native_gen/bind(builder, "base_row", native_gen/call(builder, "kernel_find",
+    [native_gen/call(builder, "kernel_index", [before, keys]), row, keys, prefix]))
+  let [now_row, with_now] = native_gen/bind(with_base, "now_row", native_gen/call(with_base, "kernel_find",
+    [native_gen/call(with_base, "kernel_index", [current, keys]), row, keys, prefix]))
+  builder = native_gen/branch(with_now, prefix,
+    fn(arm) => native_kernel/validate_key_state(arm, base_row, now_row, fn(failed) => native_kernel/row_conflict(failed, work, before, row)),
+    fn(arm) => native_kernel/validate_set_assertion(arm, writes, base_row, now_row, fn(failed) => native_kernel/row_conflict(failed, work, before, row)))
+  builder = native_gen/unless(builder, native_gen/call(builder, "kernel_validate", [work, native_kernel/load_field(builder, writes, "left"), before, current]),
+    fn(arm) => native_gen/return_value(arm, native_gen/ref(arm, "false")))
+  builder = native_gen/return_value(builder, native_gen/call(builder, "kernel_validate", [work, native_kernel/load_field(builder, writes, "right"), before, current]))
+  let result: map = native_gen/finish(module, builder)
+  return result
+end
+
+verb native_kernel/functional_validation(builder: map, before: map, keys: map, prefix: map) -> map
+  let ready = native_gen/assign(builder, keys, native_kernel/load_field(builder, before, "keys"))
+  let result: map = native_gen/assign(ready, prefix, native_gen/ref(ready, "true"))
+  return result
+end
+
+verb native_kernel/apply_effective_write(builder: map, work: map, before: map, result: map, row: map, asserted: map) -> map
+  let [effective, ready] = native_kernel/effective_write(builder, before, row, asserted)
+  let completed: map = native_gen/when(ready, effective, fn(arm) => native_kernel/apply_delta(arm, work, result, row, asserted))
+  return completed
+end
+
+verb native_kernel/apply_delta(builder: map, work: map, result: map, row: map, asserted: map) -> map
+  let [updated, ready] = native_gen/bind(builder, "updated", native_gen/call(builder, "kernel_apply",
+    [native_gen/ref(builder, "worker"), result, row, asserted]))
+  ready = native_gen/when(ready, native_kernel/absent(updated), fn(arm) => native_gen/return_value(arm, updated))
+  ready = native_kernel/record_delta(ready, work, result, updated, row, asserted)
+  let completed: map = native_gen/assign(ready, result, updated)
+  return completed
+end
+
+verb native_kernel/apply_writes_body(module: map) -> map
+  let builder = native_gen/context(module, "kernel_apply_writes")
+  let worker = native_gen/ref(builder, "worker")
+  let work = native_gen/ref(builder, "work")
+  let writes = native_gen/ref(builder, "writes")
+  let before = native_gen/ref(builder, "before")
+  let current = native_gen/ref(builder, "current")
+  let asserted = native_gen/ref(builder, "asserted")
+  builder = native_gen/when(builder, native_kernel/absent(writes), fn(arm) => native_gen/return_value(arm, current))
+  let [result, with_result] = native_gen/bind(builder, "result", native_gen/call(builder, "kernel_apply_writes",
+    [worker, work, native_kernel/load_field(builder, writes, "left"), before, current, asserted]))
+  builder = native_gen/when(with_result, native_kernel/absent(result), fn(arm) => native_gen/return_value(arm, result))
+  let [row, with_row] = native_gen/bind(builder, "row", native_kernel/load_field(builder, writes, "row"))
+  builder = native_gen/when(with_row, native_gen/equal(native_kernel/load_field(with_row, writes, "present"), asserted),
+    fn(arm) => native_kernel/apply_effective_write(arm, work, before, result, row, asserted))
+  builder = native_gen/return_value(builder, native_gen/call(builder, "kernel_apply_writes",
+    [worker, work, native_kernel/load_field(builder, writes, "right"), before, result, asserted]))
+  let completed: map = native_gen/finish(module, builder)
+  return completed
+end
+
 verb native_kernel/transactions(input: map) -> map
   let context: map = input
   let transaction: list = native_kernel/pointer("Transaction")
@@ -45,68 +325,13 @@ verb native_kernel/transactions(input: map) -> map
       native/when_statement(native_kernel/binary(:Equal, native_kernel/read("Relation", native_kernel/read("Change", "cursor", "after"), "id"), "id"), [native/return_value("cursor")])],
       [native/return_value("cursor")]), native/return_value(native_kernel/null("Change"))])
   let load_work: list = [native/let_call("work", work, "kernel_work", ["transaction"])]
-  let open: list = [@native_kernel/require_transaction([native/return_value("kernel_closed")]),
-    native/let_statement("worker", worker[1], native_memory/field(worker[1], "transaction", "worker"))]
   context = native_kernel/define(context, "view", [@load_work,
     native/when_statement(native_kernel/is_null("Work", "work"), [native/return_value(native_kernel/null("Relation"))]),
     native/let_call("change", change, "kernel_change", ["work", "id"]),
     native/unless_statement(native_kernel/is_null("Change", "change"), [native/return_value(native_kernel/read("Change", "change", "after"))]),
     native/return_value(native/call_expression("kernel_relation", [native_kernel/read("Snapshot", native_kernel/read("Work", "work", "base"), "relations"), "id"]))])
-  context = native_kernel/define(context, "declare", [@open,
-    native/when_statement(native_kernel/binary(:Equal, "id", "zero"), [native/return_value("kernel_schema")]),
-    native/when_statement(native_kernel/binary(:Less, "kernel_64", "arity"), [native/return_value("kernel_schema")]),
-    native/when_statement(native_kernel/binary(:Less, "kernel_policy_event", "policy"), [native/return_value("kernel_schema")]),
-    native/when_statement(native_kernel/binary(:Less, "arity", "kernel_64"), [
-      native/unless_statement(native_kernel/binary(:Equal, native_kernel/binary(:ShiftRight, native_kernel/binary(:BitOr, "keys", "indexes"), "arity"), "zero"), [native/return_value("kernel_schema")])]),
-    native/unless_statement(native_kernel/binary(:Equal, "policy", "kernel_policy_functional"), [
-      native/unless_statement(native_kernel/binary(:Equal, "keys", "zero"), [native/return_value("kernel_schema")])]),
-    native/unless_statement(native_kernel/is_null("Relation", native_kernel/call(relation, "view", ["transaction", "id"])), [native/return_value("kernel_schema")]),
-    native/let_statement("base", snapshot, native_kernel/read("Work", "work", "base")),
-    native/unless_statement(native_kernel/is_null("Relation", native_kernel/call(relation, "named", [native_kernel/read("Snapshot", "base", "relations"), "name"])), [native/return_value("kernel_name")]),
-    @native_kernel/walk("Change", "cursor", native_kernel/read("Work", "work", "changes"), [
-      native/when_statement(native_kernel/binary(:Equal, native_kernel/read("Relation", native_kernel/read("Change", "cursor", "after"), "name"), "name"), [native/return_value("kernel_name")])],
-      [native/break_statement()]),
-    native/let_statement("head", index, native_kernel/construct("Index", {"next" -> native_kernel/null("Index"), "mask" -> "zero", "tree" -> native_kernel/null("Node")})),
-    native/when_statement(native_kernel/is_null("Index", "head"), [native/return_value("kernel_oom")]),
-    native/when_statement(native_kernel/binary(:Equal, "policy", "kernel_policy_functional"), [
-      native/unless_statement(native_kernel/binary(:Equal, "keys", "zero"), [
-        native/set_statement("head", native_kernel/construct("Index", {"next" -> "head", "mask" -> "keys", "tree" -> native_kernel/null("Node")})),
-        native/when_statement(native_kernel/is_null("Index", "head"), [native/return_value("kernel_oom")])])]),
-    native/let_statement("i", :U64, "zero"), native/let_statement("bit", :U64, "one"),
-    native/while_statement(native_kernel/binary(:Less, "i", "arity"), [
-      native/unless_statement(native_kernel/binary(:Equal, native_kernel/binary(:BitAnd, "indexes", "bit"), "zero"), [
-        native/unless_statement(native_kernel/binary(:Equal, "bit", "keys"), [
-          native/set_statement("head", native_kernel/construct("Index", {"next" -> "head", "mask" -> "bit", "tree" -> native_kernel/null("Node")})),
-          native/when_statement(native_kernel/is_null("Index", "head"), [native/return_value("kernel_oom")])])]),
-      native/set_statement("i", native/binary_expression(:Add, "i", "one")),
-      native/set_statement("bit", native/binary_expression(:ShiftLeft, "bit", "one"))]),
-    native/let_statement("relation", relation, native_kernel/construct("Relation", {"next" -> native_kernel/null("Relation"), "id" -> "id", "name" -> "name", "arity" -> "arity", "policy" -> "policy", "keys" -> "keys", "indexes" -> "head"})),
-    native/when_statement(native_kernel/is_null("Relation", "relation"), [native/return_value("kernel_oom")]),
-    native/let_statement("created", change, native_kernel/construct("Change", {"next" -> native_kernel/read("Work", "work", "changes"), "before" -> native_kernel/null("Relation"), "after" -> "relation", "writes" -> native_kernel/null("Node")})),
-    native/when_statement(native_kernel/is_null("Change", "created"), [native/return_value("kernel_oom")]),
-    native_kernel/write("Work", "work", "changes", "created"), native/return_value("kernel_ok")])
-  context = native_kernel/define(context, "write", [@open,
-    native/let_call("relation", relation, "kernel_view", ["transaction", "id"]),
-    native/when_statement(native_kernel/is_null("Relation", "relation"), [native/return_value("kernel_unknown")]),
-    @native_kernel/require_tuple("row", "relation", [native/return_value("kernel_arity")]),
-    native/unless_statement(native/call_expression("value_is_persistable", ["row"]), [native/return_value("kernel_nonpersistent")]),
-    native/when_statement("asserted", [
-      native/when_statement(native_kernel/binary(:Equal, native_kernel/read("Relation", "relation", "policy"), "kernel_policy_functional"), [
-        native/let_statement("keys", :U64, native_kernel/read("Relation", "relation", "keys")),
-        native/let_call("found", node, "kernel_find", [native_kernel/call(node, "index", ["relation", "keys"]), "row", "keys", "true"]),
-        native/unless_statement(native_kernel/is_null("Node", "found"), [
-          native/unless_statement(native_kernel/binary(:Equal, native_kernel/call(:I64, "compare", ["row", native_kernel/read("Node", "found", "row"), "zero", "false"]), "int_zero"), [native/return_value("kernel_key")])])])]),
-    native/let_call("change", change, "kernel_change", ["work", "id"]),
-    native/when_statement(native_kernel/is_null("Change", "change"), [
-      native/set_statement("change", native_kernel/construct("Change", {"next" -> native_kernel/read("Work", "work", "changes"), "before" -> "relation", "after" -> "relation", "writes" -> native_kernel/null("Node")})),
-      native/when_statement(native_kernel/is_null("Change", "change"), [native/return_value("kernel_oom")]),
-      native_kernel/write("Work", "work", "changes", "change")]),
-    native/let_call("after", relation, "kernel_apply", ["worker", "relation", "row", "asserted"]),
-    native/when_statement(native_kernel/is_null("Relation", "after"), [native/return_value("kernel_oom")]),
-    @native/try_call("written", [:Record, "KernelNodeResult"], "kernel_set", ["worker", native_kernel/read("Change", "change", "writes"), "row", "zero", "false", "asserted"], [native/return_value("kernel_oom")]),
-    native_kernel/write("Change", "change", "after", "after"),
-    native_kernel/write("Change", "change", "writes", native/typed_field(node, "written", "node")),
-    native/return_value("kernel_ok")])
+  context = native_kernel/declare_body(context)
+  context = native_kernel/write_body(context)
   context = native_kernel/define(context, "scan", [
     @native_kernel/require_transaction([native/return_record(["kernel_closed", "zero", "zero", "false"])]),
     native/return_value(native/call_expression("kernel_relation_scan", [native_kernel/call(relation, "view", ["transaction", "id"]), "pattern", "mask", "after", "output", "capacity"]))])
@@ -119,48 +344,7 @@ verb native_kernel/transactions(input: map) -> map
     native/when_statement(native_kernel/is_null("Work", "work"), [native/return_value(native_kernel/null("Delta"))]),
     native/unless_statement(native_kernel/read("Work", "work", "done"), [native/return_value(native_kernel/null("Delta"))]),
     native/return_value(native_kernel/read("Work", "work", "deltas"))])
-  let conflict: list = [native_kernel/write("Work", "work", "status", "kernel_conflict"),
-    native_kernel/write("Work", "work", "conflict_relation", native_kernel/read("Relation", "before", "id")),
-    native_kernel/write("Work", "work", "conflict_tuple", "row"), native/return_value("false")]
-  context = native_kernel/define(context, "validate", [
-    native/when_statement(native_kernel/is_null("Node", "writes"), [native/return_value("true")]),
-    native/when_statement(native_kernel/is_null("Relation", "before"), [native/return_value("true")]),
-    native/when_statement(native_kernel/binary(:Equal, "before", "current"), [native/return_value("true")]),
-    native/let_statement("row", word, native_kernel/read("Node", "writes", "row")),
-    native/when_statement(native_kernel/is_null("Relation", "current"), conflict),
-    native/let_statement("policy", :U64, native_kernel/read("Relation", "before", "policy")),
-    native/when_statement(native_kernel/binary(:Equal, "policy", "kernel_policy_event"), [native/return_value("true")]),
-    native/let_statement("keys", :U64, "zero"), native/let_statement("prefix", :Bool, "false"),
-    native/when_statement(native_kernel/binary(:Equal, "policy", "kernel_policy_functional"), [
-      native/set_statement("keys", native_kernel/read("Relation", "before", "keys")), native/set_statement("prefix", "true")]),
-    native/let_call("base_row", node, "kernel_find", [native_kernel/call(node, "index", ["before", "keys"]), "row", "keys", "prefix"]),
-    native/let_call("now_row", node, "kernel_find", [native_kernel/call(node, "index", ["current", "keys"]), "row", "keys", "prefix"]),
-    native/if_statement("prefix", [
-      native/unless_statement(native_kernel/binary(:Equal, native_kernel/is_null("Node", "base_row"), native_kernel/is_null("Node", "now_row")), conflict),
-      native/unless_statement(native_kernel/is_null("Node", "base_row"), [
-        native/unless_statement(native_kernel/binary(:Equal, native_kernel/call(:I64, "compare", [native_kernel/read("Node", "base_row", "row"), native_kernel/read("Node", "now_row", "row"), "zero", "false"]), "int_zero"), conflict)])], [
-      native/when_statement(native_kernel/read("Node", "writes", "present"), [
-        native/unless_statement(native_kernel/is_null("Node", "base_row"), [native/when_statement(native_kernel/is_null("Node", "now_row"), conflict)])])]),
-    native/unless_statement(native/call_expression("kernel_validate", ["work", native_kernel/read("Node", "writes", "left"), "before", "current"]), [native/return_value("false")]),
-    native/return_value(native/call_expression("kernel_validate", ["work", native_kernel/read("Node", "writes", "right"), "before", "current"]))])
-  context = native_kernel/define(context, "apply_writes", [
-    native/when_statement(native_kernel/is_null("Node", "writes"), [native/return_value("current")]),
-    native/let_call("result", relation, "kernel_apply_writes", ["worker", "work", native_kernel/read("Node", "writes", "left"), "before", "current", "asserted"]),
-    native/when_statement(native_kernel/is_null("Relation", "result"), [native/return_value("result")]),
-    native/let_statement("row", word, native_kernel/read("Node", "writes", "row")),
-    native/when_statement(native_kernel/binary(:Equal, native_kernel/read("Node", "writes", "present"), "asserted"), [
-      native/let_statement("effective", :Bool, "asserted"),
-      native/unless_statement("asserted", [
-        native/let_call("was", node, "kernel_find", [native_kernel/call(node, "index", ["before", "zero"]), "row", "zero", "false"]),
-        native/set_statement("effective", native_kernel/negate(native_kernel/is_null("Node", "was")))]),
-      native/when_statement("effective", [
-        native/let_call("updated", relation, "kernel_apply", ["worker", "result", "row", "asserted"]),
-        native/when_statement(native_kernel/is_null("Relation", "updated"), [native/return_value("updated")]),
-        native/unless_statement(native_kernel/binary(:Equal, "result", "updated"), [
-          native/let_statement("delta", delta, native_kernel/construct("Delta", {"next" -> native_kernel/read("Work", "work", "deltas"), "relation" -> native_kernel/read("Relation", "updated", "id"), "row" -> "row", "asserted" -> "asserted"})),
-          native/when_statement(native_kernel/is_null("Delta", "delta"), [native/return_value(native_kernel/null("Relation"))]),
-          native_kernel/write("Work", "work", "deltas", "delta")]),
-        native/set_statement("result", "updated")])]),
-    native/return_value(native/call_expression("kernel_apply_writes", ["worker", "work", native_kernel/read("Node", "writes", "right"), "before", "result", "asserted"]))])
+  context = native_kernel/validate_body(context)
+  context = native_kernel/apply_writes_body(context)
   return context
 end

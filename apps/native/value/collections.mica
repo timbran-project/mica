@@ -202,59 +202,40 @@ verb native_value/map_update(input: map) -> map
     ["worker", [:Pointer, [:Record, "MemoryWorker"], :Mutable], :Borrow],
     ["value", word, :Gc], ["key", word, :Gc],
     ["element", word, :Gc]], [], [:Allocate, :ReadMemory, :WriteMemory], :Gc, "")
-  context = native/define_function(context, "value_map_set", [
-    @native_value/open_heap("value", "map", header, "pointer", "header", [native/return_zero()]),
-    native/let_field("data", entries, "header", "data"),
-    native/let_field("length", :U64, "header", "length"),
-    native/let_statement("low", :U64, "zero"),
-    native/let_statement("high", :U64, "length"),
-    native/let_statement("replace", :Bool, "false"),
-    native/while_statement(native/binary_expression(:Less, "low", "high"), [
-      native/let_statement("distance", :U64, native/binary_expression(:Subtract, "high", "low")),
-      native/set_statement("distance", native/binary_expression(:Divide, "distance", "two")),
-      native/let_statement("middle", :U64, native/binary_expression(:Add, "low", "distance")),
-      native/let_offset("slot", entries, "data", "middle"),
-      native/let_load("candidate", entry, "slot"),
-      @native/try_call("comparison", [:Record, "IntResult"], "value_compare", [native/typed_field(word, "candidate", "key"), "key"], [native/return_zero()]),
-      native/let_field("order", :I64, "comparison", "number"),
-      native/when_statement(native/binary_expression(:Equal, "order", "int_zero"), [
-        native/set_statement("low", "middle"),
-        native/set_statement("replace", "true"),
-        native/break_statement()
-      ]),
-      native/if_statement(
-        native/binary_expression(:Less, "order", "int_zero"),
-        [native/set_statement("low", native/binary_expression(:Add, "middle", "one"))],
-        [native/set_statement("high", "middle")]
-      )
-    ]),
-    native/let_statement("count", :U64, "length"),
-    native/unless_statement("replace", [native/set_statement("count", native/binary_expression(:Add, "count", "one"))]),
-    native/let_statement("header_size", :U64, native/unary_expression(:SizeOf, header)),
-    native/let_statement("entry_size", :U64, native/unary_expression(:SizeOf, entry)),
-    @native_memory/allocate_with_tail("raw", "header_size", "entry_size", "count", "layout_map", [native/return_zero()]),
-    native/let_statement("target", [:Pointer, header, :Mutable], native/unary_expression(:PointerCast, "raw")),
-    native/let_offset("raw_data", [:Pointer, :U8, :Mutable], "raw", "header_size"),
-    native/let_statement("destination", entries, native/unary_expression(:PointerCast, "raw_data")),
-    native/let_statement("i", :U64, "zero"),
-    native/let_statement("read", :U64, "zero"),
-    native/while_statement(native/binary_expression(:Less, "i", "count"), [
-      native/let_statement("output", entry, native/record_expression(["key", "element"])),
-      native/if_statement(native/binary_expression(:Equal, "i", "low"), [
-        native/when_statement("replace", [native/set_statement("read", native/binary_expression(:Add, "read", "one"))])
-      ], [
-        native/set_statement("slot", native/offset_expression("data", "read")),
-        native/set_statement("output", native/load_expression("slot")),
-        native/set_statement("read", native/binary_expression(:Add, "read", "one"))
-      ]),
-      native/let_offset("dst", entries, "destination", "i"),
-      native/store_statement("dst", "output"),
-      native/set_statement("i", native/binary_expression(:Add, "i", "one"))
-    ]),
-    native/store_statement("target", native/typed_record(header, ["destination", "count"])),
-    native/return_record(
-      ["true", native/typed_expression(word, native/binary_expression(:PackPointer, "target", "tag_map"))]
-    )
-  ])
+  let builder: map = native_gen/context(context, "value_map_set")
+  let failure = fn(failed) => native_gen/return_zero(failed)
+  let [view: map, with_view: map] = native_value/open_value(builder, native_gen/ref(builder, "value"), "map", "HeapMap", failure)
+  builder = with_view
+  let key: map = native_gen/ref(builder, "key")
+  let [position: map, replace: map, with_position: map] = native_value/map_search(builder, view, key)
+  builder = with_position
+  let [count: map, with_count: map] = native_gen/bind(builder, "count", native_gen/field(builder, view, "length"))
+  builder = with_count
+  builder = native_gen/unless(builder, replace, fn(insert)
+    return native_gen/assign(insert, count, native_gen/add(count, native_gen/ref(insert, "one")))
+  end)
+  let [object: map, destination: map, with_object: map] = native_memory/tail_storage(builder, native_gen/ref(builder, "worker"), header, entry, count, "layout_map", failure)
+  builder = with_object
+  let [read: map, with_read: map] = native_gen/bind(builder, "read", native_gen/zero(:U64))
+  builder = with_read
+  let source: map = native_gen/field(builder, view, "data")
+  builder = native_gen/for_range(builder, "write", native_gen/zero(:U64), count, fn(input_body, index)
+    let body: map = input_body
+    let [output: map, with_output: map] = native_gen/bind(body, "output", native_gen/record(body, entry, {"key" -> key, "value" -> native_gen/ref(body, "element")}))
+    body = with_output
+    body = native_gen/branch(body, native_gen/equal(index, position), fn(insert)
+      return native_gen/when(insert, replace, fn(skip)
+        return native_gen/assign(skip, read, native_gen/add(read, native_gen/ref(skip, "one")))
+      end)
+    end, fn(input_copy)
+      let copy: map = input_copy
+      copy = native_gen/assign(copy, output, native_gen/load(native_gen/offset(source, read)))
+      return native_gen/assign(copy, read, native_gen/add(read, native_gen/ref(copy, "one")))
+    end)
+    return native_gen/store(body, native_gen/offset(destination, index), output)
+  end)
+  builder = native_gen/store(builder, object, native_gen/record(builder, header, {"data" -> destination, "length" -> count}))
+  builder = native_gen/return_value(builder, native_value/packed_result(builder, object, "map"))
+  context = native_gen/finish(context, builder)
   return context
 end

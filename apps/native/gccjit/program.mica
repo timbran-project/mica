@@ -31,26 +31,43 @@ verb native_jit/binary(op: symbol, left, right) -> list
   let result: list = native/typed_expression(:U64, native/binary_expression(op, left, right))
   return result
 end
-verb native_jit/slot(table: int, id) -> list
+// The ID domain and handle category are separate: declarations and blocks
+// share a plane because checked IR IDs are globally unique. Scratch has ordinal
+// indices, while types and fields use their own serialized identity domains.
+verb native_jit/cache_planes() -> list
+  return [:Declaration, :Rvalue, :Lvalue, :Type, :Structure, :Field,
+    :Arguments, :BlockTail, :Alignment, :ArrayRepresentation]
+end
+
+verb native_jit/metadata_planes() -> list
+  return [:NodeType, :TypeRow, :TypeComplete, :BlockOwner]
+end
+
+verb native_jit/slot(planes: list, kind: symbol, id) -> list
+  let table: int = native_jit/position(planes, kind)
   let result: list = native_jit/binary(:Add, native_jit/binary(:Multiply, "capacity", native_jit/n(table)), id)
   return result
 end
-verb native_jit/cached(table: int, id) -> list
+
+verb native_jit/cache(kind: symbol, id) -> list
   let h: list = native_jit/handle()
-  let result: list = native/typed_load(h, native/typed_expression([:Pointer, h, :Mutable], native/offset_expression("cache", native_jit/slot(table, id))))
+  let result: list = native/typed_load(h, native/typed_expression([:Pointer, h, :Mutable], native/offset_expression("cache", native_jit/slot(native_jit/cache_planes(), kind, id))))
   return result
 end
-verb native_jit/save(table: int, id, expression) -> list
+
+verb native_jit/publish(kind: symbol, id, value) -> list
   let h: list = native_jit/handle()
-  let result: list = native/store_statement(native/typed_expression([:Pointer, h, :Mutable], native/offset_expression("cache", native_jit/slot(table, id))), expression)
+  let result: list = native/store_statement(native/typed_expression([:Pointer, h, :Mutable], native/offset_expression("cache", native_jit/slot(native_jit/cache_planes(), kind, id))), value)
   return result
 end
-verb native_jit/meta(table: int, id) -> list
-  let result: list = native/typed_load(:U64, native/typed_expression([:Pointer, :U64, :Mutable], native/offset_expression("meta", native_jit/slot(table, id))))
+
+verb native_jit/metadata(kind: symbol, id) -> list
+  let result: list = native/typed_load(:U64, native/typed_expression([:Pointer, :U64, :Mutable], native/offset_expression("meta", native_jit/slot(native_jit/metadata_planes(), kind, id))))
   return result
 end
-verb native_jit/save_meta(table: int, id, value) -> list
-  let result: list = native/store_statement(native/typed_expression([:Pointer, :U64, :Mutable], native/offset_expression("meta", native_jit/slot(table, id))), value)
+
+verb native_jit/publish_metadata(kind: symbol, id, value) -> list
+  let result: list = native/store_statement(native/typed_expression([:Pointer, :U64, :Mutable], native/offset_expression("meta", native_jit/slot(native_jit/metadata_planes(), kind, id))), value)
   return result
 end
 verb native_jit/j(name: string, args: list) -> list
@@ -100,7 +117,7 @@ end
 // preparing another argument list; the libgccjit call consumes the handles.
 verb native_jit/argument_buffer() -> list
   let result: list = native/typed_expression([:Pointer, native_jit/handle(), :Mutable],
-    native/offset_expression("cache", native_jit/slot(6, "n0")))
+    native/offset_expression("cache", native_jit/slot(native_jit/cache_planes(), :Arguments, "n0")))
   return result
 end
 
@@ -108,7 +125,7 @@ verb native_jit/arguments(values: list) -> list
   let body: list = []
   let index: int = 0
   for value in values
-    body = [@body, native_jit/save(6, native_jit/n(index), value)]
+    body = [@body, native_jit/publish(:Arguments, native_jit/n(index), value)]
     index = index + 1
   end
   return body
@@ -120,37 +137,127 @@ verb native_jit/row_arguments(first: int) -> list
   return [native/let_statement("argument", :U64, native_jit/n(first)),
     native/let_statement("argument_count", :U64, "n0"),
     native/while_statement(native/binary_expression(:Less, "argument", native_jit/word("row", 0)), [
-      native_jit/save(6, "argument_count", native_jit/cached(1, native_jit/at("row", "argument", :U64))),
+      native_jit/publish(:Arguments, "argument_count", native_jit/cache(:Rvalue, native_jit/at("row", "argument", :U64))),
       native/set_statement("argument", native_jit/binary(:Add, "argument", "n1")),
       native/set_statement("argument_count", native_jit/binary(:Add, "argument_count", "n1"))])]
 end
 
+// A consumer identifies how a completed GCC call enters the target program.
+// Preparing scratch and consuming it are one operation. Prefix expressions
+// cannot contain another scratch-backed constructor.
+verb native_jit/argument_buffer_use(tree, buffer: list, calls_only: bool) -> bool
+  if !calls_only && tree == buffer
+    return true
+  end
+  if !is_kind(tree, :list) || len(tree) == 0
+    return false
+  end
+  if calls_only && tree[0] == :Call
+    let uses_buffer: bool = native_jit/argument_buffer_use(tree, buffer, false)
+    return uses_buffer
+  end
+  for child in tree
+    if native_jit/argument_buffer_use(child, buffer, calls_only)
+      return true
+    end
+  end
+  return false
+end
+
+verb native_jit/uses_argument_buffer(tree) -> bool
+  let result: bool = native_jit/argument_buffer_use(tree, native_jit/argument_buffer(), false)
+  return result
+end
+
+// Preparing slot zero takes the buffer's address too. Only a call that reads
+// the shared array can consume another preparation's unfinished arguments.
+verb native_jit/nested_argument_call(tree) -> bool
+  let result: bool = native_jit/argument_buffer_use(tree, native_jit/argument_buffer(), true)
+  return result
+end
+
+verb native_jit/argument_call(api: string, prefix: list, count) -> list
+  native/ensure(!native_jit/uses_argument_buffer(prefix), "nested JIT argument scratch consumer")
+  let name: string = string_concat("j_", api)
+  let declarations: list = [declaration for declaration in native_jit/api() if declaration[0] == name]
+  native/ensure(len(declarations) == 1, "unknown JIT argument consumer")
+  let declaration: list = declarations[0]
+  let parameters: list = declaration[2]
+  native/ensure(len(parameters) == len(prefix) + 2 && parameters[len(prefix)][1] == :U64 && parameters[len(prefix) + 1][1] == [:Pointer, native_jit/handle(), :Mutable], "JIT argument consumer signature mismatch")
+  let arguments: list = [@prefix, count, native_jit/argument_buffer()]
+  if declaration[1] == :Void
+    let result: list = native/call_expression(name, arguments)
+    return result
+  end
+  let result: list = native/typed_call(declaration[1], name, arguments)
+  return result
+end
+
+verb native_jit/finish_call(call, consumer: list) -> list
+  if consumer[0] == :Do
+    return [native/do_statement(call)]
+  end
+  if consumer[0] == :Let
+    return [native/let_statement(consumer[1], native_jit/handle(), call)]
+  end
+  if consumer[0] == :Return
+    return [native/return_value(call)]
+  end
+  if consumer[0] == :Publish
+    return [native_jit/publish(consumer[1], consumer[2], call)]
+  end
+  if consumer[0] == :Set
+    return [native/set_statement(consumer[1], call)]
+  end
+  if consumer[0] == :Assign
+    return [native/do_statement(native/call_expression("j_assign", [consumer[1], consumer[2], call]))]
+  end
+  if consumer[0] == :Eval
+    return [native/do_statement(native/call_expression("j_eval", [consumer[1], call]))]
+  end
+  native/ensure(consumer[0] == :Tail, "unknown JIT call consumer")
+  return [native/let_statement("call", native_jit/handle(), call),
+    native/do_statement(native/call_expression("j_require_tail", ["call"])),
+    native/do_statement(native/call_expression("j_return", [consumer[1], "call"]))]
+end
+
+verb native_jit/consume_prepared_arguments(preparation: list, api: string, prefix: list, count, consumer: list) -> list
+  native/ensure(!native_jit/nested_argument_call(preparation), "nested JIT argument scratch preparation")
+  native/ensure(!native_jit/uses_argument_buffer(count) && !native_jit/uses_argument_buffer(consumer), "nested JIT argument scratch consumer")
+  return [@preparation, @native_jit/finish_call(native_jit/argument_call(api, prefix, count), consumer)]
+end
+
+verb native_jit/consume_arguments(values: list, api: string, prefix: list, consumer: list) -> list
+  native/ensure(!native_jit/uses_argument_buffer(values), "nested JIT argument scratch preparation")
+  let result: list = native_jit/consume_prepared_arguments(native_jit/arguments(values), api, prefix, native_jit/n(len(values)), consumer)
+  return result
+end
+
+verb native_jit/consume_operands(first: int, api: string, prefix: list, consumer: list) -> list
+  let result: list = native_jit/consume_prepared_arguments(native_jit/row_arguments(first), api, prefix, "argument_count", consumer)
+  return result
+end
+
 verb native_jit/builtin_call(destination: string, literal: string, arguments: list) -> list
-  return [@native_jit/arguments(arguments),
-    native/set_statement(destination, native_jit/j("call", ["ctx",
-      native_jit/j("builtin", ["ctx", native_jit/literal(literal)]),
-      native_jit/n(len(arguments)), native_jit/argument_buffer()]))]
+  let body: list = native_jit/consume_arguments(arguments, "call",
+    ["ctx", native_jit/j("builtin", ["ctx", native_jit/literal(literal)])], [:Set, destination])
+  return body
 end
 
 verb native_jit/evaluate_builtin(block, literal: string, arguments: list) -> list
-  return [@native_jit/arguments(arguments),
-    native/do_statement(native/call_expression("j_eval", [block,
-      native_jit/j("call", ["ctx", native_jit/j("builtin", ["ctx", native_jit/literal(literal)]),
-        native_jit/n(len(arguments)), native_jit/argument_buffer()])]))]
+  let body: list = native_jit/consume_arguments(arguments, "call",
+    ["ctx", native_jit/j("builtin", ["ctx", native_jit/literal(literal)])], [:Eval, block])
+  return body
 end
 
 verb native_jit/indirect_call(callee: string, first: int, ?tail: bool = false) -> list
-  let body: list = [
-    native_jit/trap_unless(native_jit/j("ne", ["ctx", callee,
-      native_jit/j("null", ["ctx", native_jit/j("value_type", [callee])])])),
-    @native_jit/row_arguments(first)]
-  let call: list = native_jit/j("call_indirect", ["ctx", callee, "argument_count", native_jit/argument_buffer()])
+  let consumer: list = [:Set, "value"]
   if tail
-    return [@body, native/let_statement("call", native_jit/handle(), call),
-      native/do_statement(native/call_expression("j_require_tail", ["call"])),
-      native/do_statement(native/call_expression("j_return", ["block", "call"]))]
+    consumer = [:Tail, "block"]
   end
-  return [@body, native/set_statement("value", call)]
+  return [native_jit/trap_unless(native_jit/j("ne", ["ctx", callee,
+      native_jit/j("null", ["ctx", native_jit/j("value_type", [callee])])])),
+    @native_jit/consume_operands(first, "call_indirect", ["ctx", callee], consumer)]
 end
 
 // Cache planes: 0 declarations/blocks, 1 rvalues, 2 lvalues, 3 types,

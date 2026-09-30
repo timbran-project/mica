@@ -104,9 +104,8 @@ verb native/c_place_declarations(index: map, nodes: list, declarations: map) -> 
         let destination: int = row[4]
         // Some operations expand into guards and multiple C statements.
         // Fuse only a leading assignment, leaving those expansions intact.
-        let prefix: string = string_concat(native/c_value(index, destination), " = ")
-        let statement: string = native/c_statement(index, row)
-        if native/contains([local[0] for local in locals], destination) && !native/contains(native/reads(row), destination) && string_len(statement) >= string_len(prefix) && string_slice(statement, 0, string_len(prefix)) == prefix
+        let emission: map = native/c_statement_emission(index, row)
+        if native/contains([local[0] for local in locals], destination) && !native/contains(native/reads(row), destination) && emission[:leading_assignment]
           node[:initialize] = true
           locals = [local for local in locals if local[0] != destination]
         end

@@ -6,6 +6,130 @@ verb native_kernel/shared_root() -> list
   return result
 end
 
+verb native_kernel/empty_indexes_body(module: map) -> map
+  let builder = native_gen/context(module, "kernel_empty_indexes")
+  builder = native_kernel/copy_chain(builder, "Index", native_gen/ref(builder, "index"), "empty_indexes", [],
+    fn(ready, index, tail) => native_gen/return_value(ready, native_kernel/replace_record(ready,
+      native_gen/ref(ready, "worker"), "Index", index, {"next" -> tail, "tree" -> native_gen/zero(native_kernel/pointer("Node"))})))
+  let result: map = native_gen/finish(module, builder)
+  return result
+end
+
+verb native_kernel/shared_root_pointer(builder: map, kernel: map) -> map
+  let location = native_gen/field(builder, kernel, "current")
+  let result: map = location[:pointer]
+  return result
+end
+
+verb native_kernel/unlock_kernel(builder: map, kernel: map) -> map
+  let result: map = native_gen/do_call(builder, "memory_unlock", [native_kernel/load_field(builder, kernel, "mutex")])
+  return result
+end
+
+verb native_kernel/commit_oom(builder: map, kernel: map, work: map) -> map
+  let ready = native_kernel/store_field(builder, work, "candidate", native_gen/zero(native_kernel/pointer("Snapshot")))
+  ready = native_kernel/store_field(ready, work, "deltas", native_gen/zero(native_kernel/pointer("Delta")))
+  ready = native_kernel/store_field(ready, work, "status", native_gen/ref(ready, "kernel_oom"))
+  ready = native_kernel/unlock_kernel(ready, kernel)
+  let result: map = native_kernel/status(ready, "kernel_oom")
+  return result
+end
+
+verb native_kernel/commit_collision(builder: map, kernel: map, work: map, id: map) -> map
+  let ready = native_kernel/store_field(builder, work, "status", native_gen/ref(builder, "kernel_conflict"))
+  ready = native_kernel/store_field(ready, work, "conflict_relation", id)
+  ready = native_kernel/unlock_kernel(ready, kernel)
+  let result: map = native_kernel/status(ready, "kernel_conflict")
+  return result
+end
+
+verb native_kernel/commit_unchanged(builder: map, kernel: map, work: map, current: map) -> map
+  let ready = native_kernel/store_field(builder, work, "candidate", current)
+  ready = native_kernel/store_field(ready, work, "done", native_gen/ref(ready, "true"))
+  ready = native_kernel/unlock_kernel(ready, kernel)
+  let result: map = native_kernel/status(ready, "kernel_ok")
+  return result
+end
+
+verb native_kernel/commit_new_relation(builder: map, worker: map, kernel: map, work: map, catalog: map, updated: map, id: map, entry: map) -> map
+  let ready = native_gen/unless(builder, native_kernel/absent(entry), fn(arm) => native_kernel/commit_collision(arm, kernel, work, id))
+  ready = native_gen/unless(ready, native_kernel/absent(native_gen/call(ready, "kernel_named",
+    [catalog, native_kernel/load_field(ready, updated, "name")])), fn(arm) => native_kernel/commit_collision(arm, kernel, work, id))
+  let [empty, with_empty] = native_gen/bind(ready, "empty", native_gen/call(ready, "kernel_empty_indexes",
+    [worker, native_kernel/load_field(ready, updated, "indexes")]))
+  ready = native_gen/when(with_empty, native_kernel/absent(empty), fn(arm) => native_kernel/commit_oom(arm, kernel, work))
+  ready = native_gen/assign(ready, entry, native_kernel/replace_record(ready, worker, "Relation", updated,
+    {"next" -> native_gen/zero(native_kernel/pointer("Relation")), "id" -> id, "indexes" -> empty}))
+  let result: map = native_gen/when(ready, native_kernel/absent(entry), fn(arm) => native_kernel/commit_oom(arm, kernel, work))
+  return result
+end
+
+verb native_kernel/commit_validation_failed(builder: map, kernel: map) -> map
+  let ready = native_kernel/unlock_kernel(builder, kernel)
+  let result: map = native_kernel/status(ready, "kernel_conflict")
+  return result
+end
+
+verb native_kernel/commit_change(builder: map, worker: map, kernel: map, work: map, catalog: map, change: map) -> map
+  let ready = native_gen/when(builder, native_kernel/absent(change), fn(arm) => native_gen/break_loop(arm))
+  let [before, with_before] = native_gen/bind(ready, "before", native_kernel/load_field(ready, change, "before"))
+  let [updated, with_after] = native_gen/bind(with_before, "after", native_kernel/load_field(with_before, change, "after"))
+  let [id, with_id] = native_gen/bind(with_after, "id", native_kernel/load_field(with_after, updated, "id"))
+  let [entry, with_entry] = native_gen/bind(with_id, "entry", native_gen/call(with_id, "kernel_relation", [catalog, id]))
+  ready = native_gen/branch(with_entry, native_kernel/absent(before),
+    fn(arm) => native_kernel/commit_new_relation(arm, worker, kernel, work, catalog, updated, id, entry),
+    fn(arm) => native_gen/unless(arm, native_gen/call(arm, "kernel_validate",
+      [work, native_kernel/load_field(arm, change, "writes"), before, entry]),
+      fn(failed) => native_kernel/commit_validation_failed(failed, kernel)))
+  ready = native_kernel/apply_write_phases(ready, worker, work, entry, native_kernel/load_field(ready, change, "writes"), before,
+    fn(failed) => native_kernel/commit_oom(failed, kernel, work))
+  ready = native_gen/assign(ready, catalog, native_gen/call(ready, "kernel_catalog_put", [worker, catalog, entry]))
+  ready = native_gen/when(ready, native_kernel/absent(catalog), fn(arm) => native_kernel/commit_oom(arm, kernel, work))
+  let result: map = native_gen/assign(ready, change, native_kernel/load_field(ready, change, "next"))
+  return result
+end
+
+verb native_kernel/commit_body(module: map) -> map
+  let builder = native_gen/context(module, "kernel_commit")
+  let transaction = native_gen/ref(builder, "transaction")
+  let [work, opened] = native_kernel/open_transaction(builder, fn(arm) => native_kernel/status(arm, "kernel_closed"))
+  let [worker, with_worker] = native_gen/bind(opened, "worker", native_kernel/load_field(opened, transaction, "worker"))
+  let [kernel, with_kernel] = native_gen/bind(with_worker, "kernel", native_kernel/load_field(with_worker, transaction, "kernel"))
+  builder = native_gen/unless(with_kernel, native_gen/call(with_kernel, "kernel_lock", [kernel, worker]), fn(arm) => native_kernel/status(arm, "kernel_closed"))
+  // kernel_lock parks this worker. Reload every managed pointer afterwards.
+  builder = native_gen/assign(builder, work, native_gen/call(builder, "kernel_work", [transaction]))
+  builder = native_kernel/store_field(builder, work, "status", native_gen/ref(builder, "kernel_ok"))
+  builder = native_kernel/store_field(builder, work, "conflict_relation", native_gen/ref(builder, "zero"))
+  builder = native_kernel/store_field(builder, work, "conflict_tuple", native_gen/zero(native_value/word()))
+  builder = native_kernel/store_field(builder, work, "deltas", native_gen/zero(native_kernel/pointer("Delta")))
+  let [raw, with_raw] = native_gen/bind(builder, "raw", native_gen/root_read(native_gen/field(builder,
+    native_kernel/shared_root_pointer(builder, kernel), "pointer")))
+  let [current, with_current] = native_gen/bind(with_raw, "current", native_gen/cast(native_kernel/pointer("Snapshot"), raw))
+  let [change, with_change] = native_gen/bind(with_current, "change", native_kernel/load_field(with_current, work, "changes"))
+  builder = native_gen/when(with_change, native_kernel/absent(change), fn(arm) => native_kernel/commit_unchanged(arm, kernel, work, current))
+  let [catalog, with_catalog] = native_gen/bind(builder, "catalog", native_kernel/load_field(builder, current, "relations"))
+  builder = native_gen/while_loop(with_catalog, native_gen/ref(with_catalog, "true"),
+    fn(iteration) => native_kernel/commit_change(iteration, worker, kernel, work, catalog, change))
+  let [candidate, with_candidate] = native_gen/bind(builder, "candidate", native_kernel/allocate_record(builder, worker, "Snapshot",
+    {"version" -> native_gen/add(native_kernel/load_field(builder, current, "version"), native_gen/ref(builder, "one")), "relations" -> catalog}))
+  builder = native_gen/when(with_candidate, native_kernel/absent(candidate), fn(arm) => native_kernel/commit_oom(arm, kernel, work))
+  builder = native_kernel/store_field(builder, work, "candidate", candidate)
+  let [promoted, with_promoted] = native_gen/bind(builder, "promoted", native_gen/call(builder, "memory_safepoint", [worker, native_gen/ref(builder, "true")]))
+  builder = native_gen/assign(with_promoted, work, native_gen/call(with_promoted, "kernel_work", [transaction]))
+  builder = native_gen/unless(builder, promoted, fn(arm) => native_kernel/commit_oom(arm, kernel, work))
+  let [heap, with_heap] = native_gen/bind(builder, "heap", native_kernel/load_field(builder, kernel, "heap"))
+  let [heap_mutex, with_mutex] = native_gen/bind(with_heap, "heap_mutex", native_kernel/load_field(with_heap, heap, "mutex"))
+  builder = native_gen/do_call(with_mutex, "memory_lock", [heap_mutex])
+  builder = native_gen/root_write(builder, native_gen/field(builder, native_kernel/shared_root_pointer(builder, kernel), "pointer"),
+    native_gen/cast(native_memory/pointer(:U8), native_kernel/load_field(builder, work, "candidate")))
+  builder = native_gen/do_call(builder, "memory_unlock", [heap_mutex])
+  builder = native_kernel/store_field(builder, work, "done", native_gen/ref(builder, "true"))
+  builder = native_kernel/unlock_kernel(builder, kernel)
+  builder = native_kernel/status(builder, "kernel_ok")
+  let result: map = native_gen/finish(module, builder)
+  return result
+end
+
 verb native_kernel/lifecycle(input: map) -> map
   let context: map = input
   let kernel: list = native_memory/record_pointer("Kernel")
@@ -79,71 +203,7 @@ verb native_kernel/lifecycle(input: map) -> map
     native/when_statement(native_kernel/binary(:Equal, "worker", "memory_null_worker"), [native/return_value("false")]),
     native/unless_statement(native/call_expression("memory_root_pop", ["worker", native_kernel/transaction_root()]), [native/return_value("false")]),
     native/store_statement("transaction", native/typed_zero([:Record, "KernelTransaction"])), native/return_value("true")])
-  context = native_kernel/define(context, "empty_indexes", [
-    native/when_statement(native_kernel/is_null("Index", "index"), [native/return_value(native_kernel/null("Index"))]),
-    native/let_statement("next", index, native_kernel/read("Index", "index", "next")),
-    native/let_statement("tail", index, native_kernel/null("Index")),
-    native/unless_statement(native_kernel/is_null("Index", "next"), [
-      native/set_statement("tail", native/call_expression("kernel_empty_indexes", ["worker", "next"])),
-      native/when_statement(native_kernel/is_null("Index", "tail"), [native/return_value("tail")])]),
-    native/return_value(native_kernel/copy_record("Index", "index", {"next" -> "tail", "tree" -> native_kernel/null("Node")}))])
-  let oom: list = [native_kernel/write("Work", "work", "candidate", native_kernel/null("Snapshot")),
-    native_kernel/write("Work", "work", "deltas", native_kernel/null("Delta")),
-    native_kernel/write("Work", "work", "status", "kernel_oom"), @unlock, native/return_value("kernel_oom")]
-  let collision: list = [native_kernel/write("Work", "work", "status", "kernel_conflict"),
-    native_kernel/write("Work", "work", "conflict_relation", "id"), @unlock, native/return_value("kernel_conflict")]
-  context = native_kernel/define(context, "commit", [
-    @native_kernel/require_transaction([native/return_value("kernel_closed")]),
-    native/let_statement("worker", worker, native_memory/field(worker, "transaction", "worker")),
-    native/let_statement("kernel", kernel, native_memory/field(kernel, "transaction", "kernel")),
-    native/unless_statement(native/call_expression("kernel_lock", ["kernel", "worker"]), [native/return_value("kernel_closed")]),
-    // kernel_lock parks this worker. Reload every managed pointer afterwards.
-    native/set_statement("work", native/call_expression("kernel_work", ["transaction"])),
-    native_kernel/write("Work", "work", "status", "kernel_ok"),
-    native_kernel/write("Work", "work", "conflict_relation", "zero"),
-    native_kernel/write("Work", "work", "conflict_tuple", native/typed_zero(word)),
-    native_kernel/write("Work", "work", "deltas", native_kernel/null("Delta")),
-    native/let_statement("raw", bytes, native_memory/root(bytes, native_kernel/shared_root(), "pointer")),
-    native/let_statement("current", snapshot, native/unary_expression(:PointerCast, "raw")),
-    native/let_statement("change", change, native_kernel/read("Work", "work", "changes")),
-    native/when_statement(native_kernel/is_null("Change", "change"), [
-      native_kernel/write("Work", "work", "candidate", "current"), native_kernel/write("Work", "work", "done", "true"),
-      @unlock, native/return_value("kernel_ok")]),
-    native/let_statement("catalog", relation, native_kernel/read("Snapshot", "current", "relations")),
-    native/while_statement("true", [
-      native/when_statement(native_kernel/is_null("Change", "change"), [native/break_statement()]),
-      native/let_statement("before", relation, native_kernel/read("Change", "change", "before")),
-      native/let_statement("after", relation, native_kernel/read("Change", "change", "after")),
-      native/let_statement("id", :U64, native_kernel/read("Relation", "after", "id")),
-      native/let_call("entry", relation, "kernel_relation", ["catalog", "id"]),
-      native/if_statement(native_kernel/is_null("Relation", "before"), [
-        native/unless_statement(native_kernel/is_null("Relation", "entry"), collision),
-        native/unless_statement(native_kernel/is_null("Relation", native_kernel/call(relation, "named", ["catalog", native_kernel/read("Relation", "after", "name")])), collision),
-        native/let_call("empty", index, "kernel_empty_indexes", ["worker", native_kernel/read("Relation", "after", "indexes")]),
-        native/when_statement(native_kernel/is_null("Index", "empty"), oom),
-        native/set_statement("entry", native_kernel/copy_record("Relation", "after", {"next" -> native_kernel/null("Relation"), "id" -> "id", "indexes" -> "empty"})),
-        native/when_statement(native_kernel/is_null("Relation", "entry"), oom)], [
-        native/unless_statement(native/call_expression("kernel_validate", ["work", native_kernel/read("Change", "change", "writes"), "before", "entry"]), [@unlock, native/return_value("kernel_conflict")])]),
-      // Apply removals before additions so functional replacements remain valid.
-      native/set_statement("entry", native/call_expression("kernel_apply_writes", ["worker", "work", native_kernel/read("Change", "change", "writes"), "before", "entry", "false"])),
-      native/when_statement(native_kernel/is_null("Relation", "entry"), oom),
-      native/set_statement("entry", native/call_expression("kernel_apply_writes", ["worker", "work", native_kernel/read("Change", "change", "writes"), "before", "entry", "true"])),
-      native/when_statement(native_kernel/is_null("Relation", "entry"), oom),
-      native/set_statement("catalog", native/call_expression("kernel_catalog_put", ["worker", "catalog", "entry"])),
-      native/when_statement(native_kernel/is_null("Relation", "catalog"), oom),
-      native/set_statement("change", native_kernel/read("Change", "change", "next"))]),
-    native/let_statement("candidate", snapshot, native_kernel/construct("Snapshot", {"version" -> native_kernel/binary(:Add, native_kernel/read("Snapshot", "current", "version"), "one"), "relations" -> "catalog"})),
-    native/when_statement(native_kernel/is_null("Snapshot", "candidate"), oom),
-    native_kernel/write("Work", "work", "candidate", "candidate"),
-    native/let_call("promoted", :Bool, "memory_safepoint", ["worker", "true"]),
-    native/set_statement("work", native/call_expression("kernel_work", ["transaction"])),
-    native/unless_statement("promoted", oom),
-    native/let_statement("heap", heap, native_memory/field(heap, "kernel", "heap")),
-    native/let_statement("heap_mutex", bytes, native_memory/field(bytes, "heap", "mutex")),
-    native_memory/call("memory_lock", ["heap_mutex"]),
-    native_memory/store_root(bytes, native_kernel/shared_root(), "pointer", native/typed_expression(bytes,
-      native/unary_expression(:PointerCast, native_kernel/read("Work", "work", "candidate")))),
-    native_memory/call("memory_unlock", ["heap_mutex"]),
-    native_kernel/write("Work", "work", "done", "true"), @unlock, native/return_value("kernel_ok")])
+  context = native_kernel/empty_indexes_body(context)
+  context = native_kernel/commit_body(context)
   return context
 end

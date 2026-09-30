@@ -1,0 +1,455 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+// Generation executes in Mica. Expressions describe target operations; only
+// bind and statement builders change construction state, and return that state.
+verb native_gen/context(module: map, name: string) -> map
+  native/ensure(map_contains_key(module[:functions], name), "unknown generated function")
+  let function: int = module[:functions][name]
+  let records: map = native/check_records(module[:state])
+  let bindings: map = module[:constants]
+  for spelling, id in module[:bindings][name]
+    native/ensure(!map_contains_key(bindings, spelling), "duplicate generated binding")
+    bindings[spelling] = id
+  end
+  let writable: map = {}
+  let types: map = {}
+  for row in module[:state][:constants]
+    types[row[0]] = row[1]
+  end
+  for row in module[:state][:parameters]
+    if row[1] == function
+      types[row[0]] = row[4]
+    end
+  end
+  for row in module[:state][:locals]
+    if row[1] == function
+      types[row[0]] = row[3]
+      writable[row[0]] = true
+    end
+  end
+  let declaration: list = native/owned(module[:state][:functions], 0, function)[0]
+  return {:function -> function, :result -> declaration[2], :name -> name, :module -> module, :bindings -> bindings,
+    :types -> types, :writable -> writable, :records -> records, :serial -> 0, :scope -> [], :statements -> [],
+    :closed -> false, :loops -> 0, :references -> {}, :owner -> [function, name, records, module[:state][:constants], module[:state][:parameters]]}
+end
+
+verb native_gen/ref(builder: map, name: string) -> map
+  native/ensure(map_contains_key(builder[:bindings], name), string_concat("unknown generated value ", name))
+  let id: int = builder[:bindings][name]
+  native/ensure(map_contains_key(builder[:types], id), "generated reference requires a value")
+  return {:kind -> :Reference, :function -> builder[:function], :owner -> builder[:owner], :scope -> [],
+    :name -> name, :type -> builder[:types][id], :writable -> map_contains_key(builder[:writable], id)}
+end
+
+verb native_gen/expression(type_id, op: symbol, operands: list) -> map
+  return {:kind -> :Expression, :type -> type_id, :op -> op, :operands -> operands}
+end
+
+verb native_gen/check_reference(builder: map, reference: map)
+  native/ensure(reference[:function] == builder[:function], "generated reference belongs to another function")
+  native/ensure(reference[:owner] == builder[:owner], "generated reference belongs to another context")
+  let scope: list = reference[:scope]
+  native/ensure(len(scope) <= len(builder[:scope]), "generated reference escaped its scope")
+  let i: int = 0
+  while i < len(scope)
+    native/ensure(scope[i] == builder[:scope][i], "generated reference belongs to another scope")
+    i = i + 1
+  end
+  let name: string = reference[:name]
+  if map_contains_key(builder[:references], name)
+    native/ensure(builder[:references][name] == reference, "generated reference does not match its binding")
+  else
+    native/ensure(map_contains_key(builder[:bindings], name), "generated reference requires its updated builder")
+    native/ensure(reference == native_gen/ref(builder, name), "generated reference does not match its declaration")
+  end
+end
+
+// Every nested value is typed. Lowering visits operands in declaration order,
+// so target calls and loads are sequenced before their enclosing operation.
+verb native_gen/syntax(builder: map, value: map)
+  if value[:kind] == :Reference
+    native_gen/check_reference(builder, value)
+    return value[:name]
+  end
+  native/ensure(value[:kind] == :Expression, "expected generated value expression")
+  if map_contains_key(value, :owner)
+    native/ensure(value[:owner] == builder[:owner], "generated expression belongs to another context")
+  end
+  let operands: list = []
+  for operand in value[:operands]
+    if is_kind(operand, :map)
+      operands = [@operands, native/typed_expression(operand[:type], native_gen/syntax(builder, operand))]
+    else
+      operands = [@operands, operand]
+    end
+  end
+  return [value[:op], @operands]
+end
+
+verb native_gen/emit(input: map, statement: list) -> map
+  let builder: map = input
+  native/ensure(!builder[:closed], "generated statement after control flow terminates")
+  builder[:statements] = [@builder[:statements], statement]
+  return builder
+end
+
+// Binding gives a value stable identity and evaluates its initializer once.
+verb native_gen/bind(input: map, label: string, value: map) -> list
+  let builder: map = input
+  native/identifier(label)
+  let name: string = string_concat("gen_", to_literal(builder[:serial]), "_", label)
+  builder[:serial] = builder[:serial] + 1
+  while map_contains_key(builder[:bindings], name) || map_contains_key(builder[:references], name)
+    name = string_concat("gen_", to_literal(builder[:serial]), "_", label)
+    builder[:serial] = builder[:serial] + 1
+  end
+  let initializer = native_gen/syntax(builder, value)
+  let reference: map = {:kind -> :Reference, :function -> builder[:function], :owner -> builder[:owner], :scope -> builder[:scope],
+    :name -> name, :type -> value[:type], :writable -> true, :definition -> initializer}
+  builder = native_gen/emit(builder, native/let_statement(name, value[:type], initializer))
+  let references: map = builder[:references]
+  references[name] = reference
+  builder[:references] = references
+  return [reference, builder]
+end
+
+verb native_gen/assign(builder: map, reference: map, value: map) -> map
+  native_gen/check_reference(builder, reference)
+  native/ensure(reference[:writable] && reference[:type] == value[:type], "generated assignment requires a writable local of the same type")
+  let generated_result: map = native_gen/emit(builder, native/set_statement(reference[:name], native_gen/syntax(builder, value)))
+  return generated_result
+end
+
+verb native_gen/location(pointer: map) -> map
+  native/ensure(native/is_pointer(pointer[:type]), "generated location requires a pointer")
+  return {:kind -> :Location, :pointer -> pointer, :type -> pointer[:type][1], :access -> pointer[:type][2]}
+end
+
+verb native_gen/read(location: map) -> map
+  native/ensure(location[:kind] == :Location, "generated read requires a location")
+  let generated_result: map = native_gen/expression(location[:type], :Load, [location[:pointer]])
+  return generated_result
+end
+
+verb native_gen/write(builder: map, location: map, value: map) -> map
+  native/ensure(location[:kind] == :Location && location[:access] == :Mutable, "generated write requires a mutable location")
+  native/ensure(location[:type] == value[:type], "generated store type mismatch")
+  let generated_result: map = native_gen/emit(builder, native/store_statement(native/typed_expression(location[:pointer][:type], native_gen/syntax(builder, location[:pointer])),
+    native/typed_expression(value[:type], native_gen/syntax(builder, value))))
+  return generated_result
+end
+
+verb native_gen/field(builder: map, base: map, name: string) -> map
+  let type_id = base[:type]
+  let index: map = {:records -> builder[:records]}
+  if native/is_pointer(type_id)
+    let member = native/field_type(index, type_id[1], name)
+    let pointer: map = native_gen/expression([:Pointer, member, type_id[2]], :FieldPointer, [base, name])
+    pointer[:owner] = builder[:owner]
+    let location: map = native_gen/location(pointer)
+    return location
+  end
+  let value: map = native_gen/expression(native/field_type(index, type_id, name), :Field, [base, name])
+  value[:owner] = builder[:owner]
+  return value
+end
+
+verb native_gen/binary(op: symbol, left: map, right: map) -> map
+  native/ensure(left[:type] == right[:type], "generated binary operand type mismatch")
+  let result = left[:type]
+  if op == :Equal || op == :Less
+    result = :Bool
+  end
+  let generated_result: map = native_gen/expression(result, op, [left, right])
+  return generated_result
+end
+
+verb native_gen/add(left: map, right: map) -> map
+  let generated_result: map = native_gen/binary(:Add, left, right)
+  return generated_result
+end
+verb native_gen/subtract(left: map, right: map) -> map
+  let generated_result: map = native_gen/binary(:Subtract, left, right)
+  return generated_result
+end
+verb native_gen/multiply(left: map, right: map) -> map
+  let generated_result: map = native_gen/binary(:Multiply, left, right)
+  return generated_result
+end
+verb native_gen/divide(left: map, right: map) -> map
+  let generated_result: map = native_gen/binary(:Divide, left, right)
+  return generated_result
+end
+verb native_gen/remainder(left: map, right: map) -> map
+  let generated_result: map = native_gen/binary(:Remainder, left, right)
+  return generated_result
+end
+verb native_gen/bit_and(left: map, right: map) -> map
+  let generated_result: map = native_gen/binary(:BitAnd, left, right)
+  return generated_result
+end
+verb native_gen/bit_or(left: map, right: map) -> map
+  let generated_result: map = native_gen/binary(:BitOr, left, right)
+  return generated_result
+end
+verb native_gen/equal(left: map, right: map) -> map
+  let generated_result: map = native_gen/binary(:Equal, left, right)
+  return generated_result
+end
+verb native_gen/less(left: map, right: map) -> map
+  let generated_result: map = native_gen/binary(:Less, left, right)
+  return generated_result
+end
+
+verb native_gen/zero(type_id) -> map
+  let generated_result: map = native_gen/expression(type_id, :Zero, [])
+  return generated_result
+end
+verb native_gen/sizeof(type_id) -> map
+  let generated_result: map = native_gen/expression(:U64, :SizeOf, [type_id])
+  return generated_result
+end
+verb native_gen/convert(type_id, value: map) -> map
+  let generated_result: map = native_gen/expression(type_id, :Convert, [value])
+  return generated_result
+end
+verb native_gen/cast(type_id, pointer: map) -> map
+  native/ensure(native/is_pointer(type_id) && native/is_pointer(pointer[:type]), "generated cast requires pointers")
+  native/ensure(pointer[:type][2] == :Mutable || type_id[2] == :Const, "generated cast cannot remove const")
+  let generated_result: map = native_gen/expression(type_id, :PointerCast, [pointer])
+  return generated_result
+end
+verb native_gen/freeze(pointer: map) -> map
+  native/ensure(native/is_pointer(pointer[:type]), "generated freeze requires a pointer")
+  let generated_result: map = native_gen/expression([:Pointer, pointer[:type][1], :Const], :Freeze, [pointer])
+  return generated_result
+end
+verb native_gen/offset(pointer: map, index: map) -> map
+  native/ensure(native/is_pointer(pointer[:type]), "generated offset requires a pointer")
+  let generated_result: map = native_gen/expression(pointer[:type], :Offset, [pointer, index])
+  return generated_result
+end
+verb native_gen/address(reference: map) -> map
+  native/ensure(reference[:kind] == :Reference, "generated address requires a reference")
+  let access: symbol = :Const
+  if reference[:writable]
+    access = :Mutable
+  end
+  let generated_result: map = native_gen/expression([:Pointer, reference[:type], access], :Address, [reference])
+  return generated_result
+end
+
+verb native_gen/call(builder: map, name: string, arguments: list) -> map
+  let module: map = builder[:module]
+  native/ensure(map_contains_key(module[:functions], name), "unknown generated callee")
+  let id: int = module[:functions][name]
+  let function: list = native/owned(module[:state][:functions], 0, id)[0]
+  let parameters: list = native/ordered(native/owned(module[:state][:parameters], 1, id), 2)
+  native/ensure(len(parameters) == len(arguments), "generated call arity mismatch")
+  let i: int = 0
+  for parameter in parameters
+    native/ensure(parameter[4] == arguments[i][:type], "generated call argument type mismatch")
+    i = i + 1
+  end
+  let generated_result: map = native_gen/expression(function[2], :Call, [name, @arguments])
+  generated_result[:owner] = builder[:owner]
+  return generated_result
+end
+
+verb native_gen/record(builder: map, type_id, fields: map) -> map
+  let schema: list = native/record_fields({:records -> builder[:records]}, type_id)
+  native/ensure(len(schema) == len(fields), "generated record field count mismatch")
+  let operands: list = []
+  for field in schema
+    native/ensure(map_contains_key(fields, field[2]), "missing generated record field")
+    native/ensure(fields[field[2]][:type] == field[3], "generated record field type mismatch")
+    operands = [@operands, fields[field[2]]]
+  end
+  let generated_result: map = native_gen/expression(type_id, :Record, operands)
+  generated_result[:owner] = builder[:owner]
+  return generated_result
+end
+
+verb native_gen/do_call(builder: map, name: string, arguments: list) -> map
+  let expression: map = native_gen/call(builder, name, arguments)
+  native/ensure(expression[:type] == :Void, "generated discarded call requires Void result")
+  let generated_result: map = native_gen/emit(builder, native/do_statement(native_gen/syntax(builder, expression)))
+  return generated_result
+end
+
+verb native_gen/return_value(input: map, value: map) -> map
+  native/ensure(input[:result] == value[:type], "generated return type mismatch")
+  let builder: map = native_gen/emit(input, native/return_value(native_gen/syntax(input, value)))
+  builder[:closed] = true
+  return builder
+end
+verb native_gen/return_zero(input: map) -> map
+  let builder: map = native_gen/emit(input, native/return_zero())
+  builder[:closed] = true
+  return builder
+end
+verb native_gen/return_void(input: map) -> map
+  native/ensure(input[:result] == :Void, "generated void return requires Void function")
+  let builder: map = native_gen/emit(input, native/return_void())
+  builder[:closed] = true
+  return builder
+end
+
+// A callback gets a fresh lexical scope. Its updated counter returns to the
+// parent, while its references remain confined to that arm or loop body.
+verb native_gen/body(input: map, callback) -> list
+  let child: map = input
+  child[:scope] = [@input[:scope], input[:serial]]
+  child[:serial] = input[:serial] + 1
+  child[:statements] = []
+  child[:closed] = false
+  let completed: map = callback(child)
+  native/ensure(completed[:function] == input[:function] && completed[:scope] == child[:scope], "generated callback returned another body")
+  let parent: map = input
+  parent[:serial] = completed[:serial]
+  return [completed[:statements], completed[:closed], parent]
+end
+
+verb native_gen/branch(input: map, condition: map, yes, no) -> map
+  native/ensure(condition[:type] == :Bool, "generated branch requires Bool")
+  let test = native_gen/syntax(input, condition)
+  let [yes_body, yes_closed, after_yes] = native_gen/body(input, yes)
+  let [no_body, no_closed, after_no] = native_gen/body(after_yes, no)
+  let builder: map = native_gen/emit(after_no, native/if_statement(test, yes_body, no_body))
+  builder[:closed] = yes_closed && no_closed
+  return builder
+end
+
+verb native_gen/while_loop(input: map, condition: map, callback) -> map
+  native/ensure(condition[:type] == :Bool, "generated loop requires Bool")
+  let loop: map = input
+  loop[:loops] = input[:loops] + 1
+  let [body, closed, following] = native_gen/body(loop, callback)
+  following[:loops] = input[:loops]
+  let generated_result: map = native_gen/emit(following, native/while_statement(native_gen/syntax(input, condition), body))
+  return generated_result
+end
+verb native_gen/break_loop(input: map) -> map
+  native/ensure(input[:loops] > 0, "generated break outside a loop")
+  let builder: map = native_gen/emit(input, native/break_statement())
+  builder[:closed] = true
+  return builder
+end
+verb native_gen/continue_loop(input: map) -> map
+  native/ensure(input[:loops] > 0, "generated continue outside a loop")
+  let builder: map = native_gen/emit(input, native/continue_statement())
+  builder[:closed] = true
+  return builder
+end
+verb native_gen/tail_call(input: map, name: string, arguments: list) -> map
+  let names: list = []
+  for argument in arguments
+    native/ensure(argument[:kind] == :Reference, "generated transfer arguments must be bound")
+    names = [@names, native_gen/syntax(input, argument)]
+  end
+  let builder: map = native_gen/emit(input, [:TailCall, name, names])
+  builder[:closed] = true
+  return builder
+end
+verb native_gen/note(builder: map, kind: symbol, text: string) -> map
+  let generated_result: map = native_gen/emit(builder, native/note_statement(kind, text))
+  return generated_result
+end
+verb native_gen/finish(module: map, builder: map) -> map
+  native/ensure(builder[:closed] && len(builder[:scope]) == 0, "generated function can fall through or ends in a nested scope")
+  native/ensure(module[:functions][builder[:name]] == builder[:function], "generated function belongs to another module")
+  let generated_result: map = native/define_function(module, builder[:name], builder[:statements])
+  return generated_result
+end
+
+verb native_gen/type(value: map)
+  return value[:type]
+end
+verb native_gen/load(pointer: map) -> map
+  let generated_result: map = native_gen/read(native_gen/location(pointer))
+  return generated_result
+end
+verb native_gen/store(builder: map, pointer: map, value: map) -> map
+  let generated_result: map = native_gen/write(builder, native_gen/location(pointer), value)
+  return generated_result
+end
+verb native_gen/bit_xor(left: map, right: map) -> map
+  let generated_result: map = native_gen/binary(:BitXor, left, right)
+  return generated_result
+end
+verb native_gen/shift_left(left: map, right: map) -> map
+  let generated_result: map = native_gen/binary(:ShiftLeft, left, right)
+  return generated_result
+end
+verb native_gen/shift_right(left: map, right: map) -> map
+  let generated_result: map = native_gen/binary(:ShiftRight, left, right)
+  return generated_result
+end
+// Bool equality supplies negation without introducing a target opcode.
+verb native_gen/negate(value: map) -> map
+  native/ensure(value[:type] == :Bool, "generated predicate negation requires Bool")
+  let generated_result: map = native_gen/equal(value, native_gen/zero(:Bool))
+  return generated_result
+end
+verb native_gen/not_equal(left: map, right: map) -> map
+  let generated_result: map = native_gen/negate(native_gen/equal(left, right))
+  return generated_result
+end
+verb native_gen/unchanged(builder: map) -> map
+  return builder
+end
+verb native_gen/when(builder: map, condition: map, callback) -> map
+  let generated_result: map = native_gen/branch(builder, condition, callback, fn(arm) => arm)
+  return generated_result
+end
+verb native_gen/unless(builder: map, condition: map, callback) -> map
+  let generated_result: map = native_gen/branch(builder, condition, fn(arm) => arm, callback)
+  return generated_result
+end
+
+verb native_gen/root_read(location: map) -> map
+  native/ensure(location[:kind] == :Location, "generated root read requires a location")
+  let result: map = native_gen/expression(location[:type], :RootLoad, [location[:pointer]])
+  return result
+end
+verb native_gen/root_write(builder: map, location: map, value: map) -> map
+  native/ensure(location[:kind] == :Location && location[:access] == :Mutable, "generated root write requires a mutable location")
+  native/ensure(location[:type] == value[:type], "generated root store type mismatch")
+  let result: map = native_gen/emit(builder, native/root_store_statement(
+    native/typed_expression(location[:pointer][:type], native_gen/syntax(builder, location[:pointer])),
+    native/typed_expression(value[:type], native_gen/syntax(builder, value))))
+  return result
+end
+
+// Range operands are evaluated once. Advancement belongs to this range,
+// including Continue in nested branches; a nested loop owns its own Continue.
+// Steps must be positive and must not wrap the U64 index.
+verb native_gen/for_range(input: map, label: string, start: map, limit: map, callback, ?step = :Default) -> map
+  let stride = step
+  if stride == :Default
+    stride = native_gen/ref(input, "one")
+  end
+  native/ensure(start[:type] == :U64 && limit[:type] == :U64 && stride[:type] == :U64, "generated range requires U64 extents")
+  let [statements, closed, following] = native_gen/body(input,
+    fn(child) => native_gen/range_body(child, label, start, limit, stride, callback))
+  let builder: map = following
+  for statement in statements
+    builder = native_gen/emit(builder, statement)
+  end
+  return builder
+end
+
+verb native_gen/range_body(input: map, label: string, start: map, limit: map, step: map, callback) -> map
+  let [index: map, with_index: map] = native_gen/bind(input, label, start)
+  let [bound: map, with_end: map] = native_gen/bind(with_index, "range_limit", limit)
+  let [stride: map, with_stride: map] = native_gen/bind(with_end, "range_step", step)
+  let loop: map = with_stride
+  loop[:loops] = input[:loops] + 1
+  let [body, closed, following] = native_gen/body(loop, fn(child) => callback(child, index))
+  following[:loops] = input[:loops]
+  let advance: list = [native/set_statement(index[:name], native_gen/syntax(following, native_gen/add(index, stride)))]
+  let statement: list = native/advancing_loop(native_gen/syntax(following, native_gen/less(index, bound)), body, advance)
+  let result: map = native_gen/emit(following, statement)
+  return result
+end

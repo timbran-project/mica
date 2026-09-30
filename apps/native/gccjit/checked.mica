@@ -1,76 +1,111 @@
 // Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-verb native_jit/both(left, right) -> list
-  let result: list = native_jit/j("logical_and", ["ctx", native_jit/cached(3, "n7"), left, right])
-  return result
+// Bounds are expressions in the target program, not Mica calculations. And/Or
+// retain libgccjit's short-circuit operators, protecting division predicates.
+verb native_jit/signed_expression(term)
+  let integer = native_jit/cache(:Type, "n5")
+  let boolean = native_jit/cache(:Type, "n7")
+  let float_type = native_jit/cache(:Type, "n6")
+  if is_kind(term, :symbol)
+    let atoms: map = {:Left -> "left", :Right -> "right",
+      :Zero -> native_jit/j("zero", ["ctx", integer]),
+      :Min -> native_jit/j("integer", ["ctx", integer, "signed_min"]),
+      :Max -> native_jit/j("integer", ["ctx", integer, "signed_max"]),
+      :MinusOne -> native_jit/j("integer", ["ctx", integer, "signed_minus_one"])}
+    native/ensure(map_contains_key(atoms, term), "unknown signed arithmetic atom")
+    return atoms[term]
+  end
+  let left = native_jit/signed_expression(term[1])
+  if term[0] == :Float
+    return native_jit/j("cast", ["ctx", left, float_type])
+  end
+  if term[0] == :NegateFloat
+    return native_jit/j("neg", ["ctx", float_type, left])
+  end
+  if term[0] == :Int
+    return native_jit/j("cast", ["ctx", left, integer])
+  end
+  if term[0] == :Negate
+    return native_jit/j("neg", ["ctx", integer, left])
+  end
+  if term[0] == :Not
+    return native_jit/j("not", ["ctx", boolean, left])
+  end
+  let right = native_jit/signed_expression(term[2])
+  let comparisons: map = {:Equal -> "eq", :NotEqual -> "ne", :Less -> "lt", :AtMost -> "le", :Greater -> "gt", :AtLeast -> "ge"}
+  if map_contains_key(comparisons, term[0])
+    return native_jit/j(comparisons[term[0]], ["ctx", left, right])
+  end
+  let operators: map = {:Add -> "add", :Subtract -> "sub", :Multiply -> "mul", :Divide -> "div", :Remainder -> "rem", :And -> "logical_and", :Or -> "logical_or"}
+  native/ensure(map_contains_key(operators, term[0]), "unknown signed arithmetic operation")
+  let type_id = integer
+  if term[0] == :And || term[0] == :Or
+    type_id = boolean
+  end
+  return native_jit/j(operators[term[0]], ["ctx", type_id, left, right])
 end
-verb native_jit/either(left, right) -> list
-  let result: list = native_jit/j("logical_or", ["ctx", native_jit/cached(3, "n7"), left, right])
-  return result
+
+verb native_jit/signed_add_valid() -> list
+  return [:Not, [:Or,
+    [:And, [:Greater, :Right, :Zero], [:Greater, :Left, [:Subtract, :Max, :Right]]],
+    [:And, [:Less, :Right, :Zero], [:Less, :Left, [:Subtract, :Min, :Right]]]]]
 end
+
+verb native_jit/signed_subtract_valid() -> list
+  return [:Not, [:Or,
+    [:And, [:Less, :Right, :Zero], [:Greater, :Left, [:Add, :Max, :Right]]],
+    [:And, [:Greater, :Right, :Zero], [:Less, :Left, [:Add, :Min, :Right]]]]]
+end
+
+verb native_jit/signed_multiply_valid() -> list
+  let positive_left = [:Greater, :Left, :Zero]
+  let negative_left = [:Less, :Left, :Zero]
+  let positive_right = [:Greater, :Right, :Zero]
+  let negative_right = [:Less, :Right, :Zero]
+  let zero_product = [:Or, [:Equal, :Left, :Zero], [:Equal, :Right, :Zero]]
+  let positive_product = [:And, positive_left, [:Or,
+    [:And, positive_right, [:AtMost, :Left, [:Divide, :Max, :Right]]],
+    [:And, negative_right, [:AtLeast, :Right, [:Divide, :Min, :Left]]]]]
+  let negative_product = [:And, negative_left, [:Or,
+    [:And, positive_right, [:AtLeast, :Left, [:Divide, :Min, :Right]]],
+    [:And, negative_right, [:AtLeast, :Left, [:Divide, :Max, :Right]]]]]
+  return [:Or, zero_product, [:Or, positive_product, negative_product]]
+end
+
+verb native_jit/checked_specs() -> list
+  let singular_division = [:And, [:Equal, :Left, :Min], [:Equal, :Right, :MinusOne]]
+  let float_lower = [:Float, :Min]
+  let float_upper = [:NegateFloat, float_lower]
+  return [
+    [:CheckedAdd, native_jit/signed_add_valid(), [:Add, :Left, :Right]],
+    [:CheckedSubtract, native_jit/signed_subtract_valid(), [:Subtract, :Left, :Right]],
+    [:CheckedMultiply, native_jit/signed_multiply_valid(), [:Multiply, :Left, :Right]],
+    [:CheckedDivide, [:And, [:NotEqual, :Right, :Zero], [:Not, singular_division]], [:Divide, :Left, :Right]],
+    [:CheckedRemainder, [:NotEqual, :Right, :Zero], [:Remainder, :Left, :Right]],
+    [:CheckedNegate, [:NotEqual, :Left, :Min], [:Negate, :Left]],
+    [:CheckedFloatToInt, [:And, [:AtLeast, :Left, float_lower], [:Less, :Left, float_upper]], [:Int, :Left]]]
+end
+
 verb native_jit/checked_cases() -> list
   let h: list = native_jit/handle()
-  let integer = native_jit/cached(3, "n5")
-  let boolean = native_jit/cached(3, "n7")
-  let float_type = native_jit/cached(3, "n6")
+  let integer = native_jit/cache(:Type, "n5")
+  let boolean = native_jit/cache(:Type, "n7")
   let zero = native_jit/j("zero", ["ctx", integer])
-  let minimum = native_jit/j("integer", ["ctx", integer, "signed_min"])
-  let maximum = native_jit/j("integer", ["ctx", integer, "signed_max"])
   let minus_one = native_jit/j("integer", ["ctx", integer, "signed_minus_one"])
-  let positive_b = native_jit/j("gt", ["ctx", "right", zero])
-  let negative_b = native_jit/j("lt", ["ctx", "right", zero])
-  let positive_a = native_jit/j("gt", ["ctx", "left", zero])
-  let negative_a = native_jit/j("lt", ["ctx", "left", zero])
-  let add_bad = native_jit/either(
-    native_jit/both(positive_b, native_jit/j("gt", ["ctx", "left", native_jit/j("sub", ["ctx", integer, maximum, "right"])])),
-    native_jit/both(negative_b, native_jit/j("lt", ["ctx", "left", native_jit/j("sub", ["ctx", integer, minimum, "right"])])))
-  let sub_bad = native_jit/either(
-    native_jit/both(negative_b, native_jit/j("gt", ["ctx", "left", native_jit/j("add", ["ctx", integer, maximum, "right"])])),
-    native_jit/both(positive_b, native_jit/j("lt", ["ctx", "left", native_jit/j("add", ["ctx", integer, minimum, "right"])])))
-  let multiply = native_jit/either(
-    native_jit/either(native_jit/j("eq", ["ctx", "left", zero]), native_jit/j("eq", ["ctx", "right", zero])),
-    native_jit/either(
-      native_jit/both(positive_a, native_jit/either(
-        native_jit/both(positive_b, native_jit/j("le", ["ctx", "left", native_jit/j("div", ["ctx", integer, maximum, "right"])])),
-        native_jit/both(negative_b, native_jit/j("ge", ["ctx", "right", native_jit/j("div", ["ctx", integer, minimum, "left"])])))),
-      native_jit/both(negative_a, native_jit/either(
-        native_jit/both(positive_b, native_jit/j("ge", ["ctx", "left", native_jit/j("div", ["ctx", integer, minimum, "right"])])),
-        native_jit/both(negative_b, native_jit/j("ge", ["ctx", "left", native_jit/j("div", ["ctx", integer, maximum, "right"])]))))))
-  let divide_bad = native_jit/both(native_jit/j("eq", ["ctx", "left", minimum]), native_jit/j("eq", ["ctx", "right", minus_one]))
-  let float_lower = native_jit/j("cast", ["ctx", minimum, float_type])
-  let float_upper = native_jit/j("neg", ["ctx", float_type, float_lower])
-  let specs: list = [
-    [:CheckedAdd, native_jit/j("not", ["ctx", boolean, add_bad]), native_jit/j("add", ["ctx", integer, "left", "right"])],
-    [:CheckedSubtract, native_jit/j("not", ["ctx", boolean, sub_bad]), native_jit/j("sub", ["ctx", integer, "left", "right"])],
-    [:CheckedMultiply, multiply, native_jit/j("mul", ["ctx", integer, "left", "right"])],
-    [:CheckedDivide, native_jit/both(native_jit/j("ne", ["ctx", "right", zero]), native_jit/j("not", ["ctx", boolean, divide_bad])), native_jit/j("div", ["ctx", integer, "left", "right"])],
-    [:CheckedRemainder, native_jit/j("ne", ["ctx", "right", zero]), native_jit/j("rem", ["ctx", integer, "left", "right"])],
-    [:CheckedNegate, native_jit/j("ne", ["ctx", "left", minimum]), native_jit/j("neg", ["ctx", integer, "left"])],
-    [:CheckedFloatToInt, native_jit/both(native_jit/j("ge", ["ctx", "left", float_lower]), native_jit/j("lt", ["ctx", "left", float_upper])), native_jit/j("cast", ["ctx", "left", integer])]]
-  let scratch = native_jit/argument_buffer()
   let truth = native_jit/integer("n1", boolean)
   let cases: list = []
-  for spec in specs
-    let body: list = [
-      native/do_statement(native/call_expression("j_assign", ["block", native_jit/cached(2, "destination"), native_jit/j("record", ["ctx", "type", "n0", scratch])])),
-      native/let_statement("function", h, native_jit/cached(0, native_jit/meta(3, "block_id"))),
-      native/let_statement("success", h, native_jit/j("block", ["function", native_jit/literal("s_ok")])),
-      native/let_statement("join", h, native_jit/j("block", ["function", native_jit/literal("s_join")])),
-      native/do_statement(native/call_expression("j_branch", ["block", spec[1], "success", "join"]))]
+  for spec in native_jit/checked_specs()
+    let special: list = []
     if spec[0] == :CheckedRemainder
-      body = [@body,
+      special = [
         native/let_statement("ordinary", h, native_jit/j("block", ["function", native_jit/literal("s_ok")])),
         native/let_statement("minus_one", h, native_jit/j("block", ["function", native_jit/literal("s_ok")])),
-        native/do_statement(native/call_expression("j_branch", ["success", native_jit/j("eq", ["ctx", "right", minus_one]), "minus_one", "ordinary"])),
-        @native_jit/arguments([truth, zero]),
-        native/do_statement(native/call_expression("j_assign", ["minus_one", native_jit/cached(2, "destination"), native_jit/j("record", ["ctx", "type", "n2", scratch])])),
-        native/do_statement(native/call_expression("j_jump", ["minus_one", "join"])), native/set_statement("success", "ordinary")]
+        native_jit/target_branch("success", native_jit/j("eq", ["ctx", "right", minus_one]), "minus_one", "ordinary"),
+        @native_jit/consume_arguments([truth, zero], "record", ["ctx", "type"], [:Assign, "minus_one", native_jit/cache(:Lvalue, "destination")]),
+        native_jit/target_jump("minus_one", "join"), native/set_statement("success", "ordinary")]
     end
-    body = [@body,
-      @native_jit/arguments([truth, spec[2]]),
-      native/do_statement(native/call_expression("j_assign", ["success", native_jit/cached(2, "destination"), native_jit/j("record", ["ctx", "type", "n2", scratch])])),
-      native/do_statement(native/call_expression("j_jump", ["success", "join"])), native_jit/save(7, "block_id", "join"), native/return_value("n0")]
+    let body: list = native_jit/checked_result(native_jit/signed_expression(spec[1]), native_jit/signed_expression(spec[2]), special)
     cases = [@cases, native_jit/case(spec[0], body)]
   end
   return cases

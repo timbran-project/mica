@@ -1,199 +1,117 @@
 // Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-// Bottom-up stable merge sort followed by compaction. Equal keys retain the
-// last input value. Both buffers belong to the worker; the input is never changed.
+verb native_value/map_order(builder: map, left: map, right: map) -> list
+  let [comparison: map, current: map] = native_value/checked_result(builder, "value_compare", [
+    native_gen/field(builder, left, "key"), native_gen/field(builder, right, "key")], fn(failed) => native_gen/return_zero(failed))
+  return [native_gen/field(current, comparison, "number"), current]
+end
+
+// Sorted runs preserve input order. Compaction replaces the preceding entry
+// on equality, so the last input value wins without changing the source array.
+verb native_value/compact_map(builder: map, span: map) -> list
+  let [written: map, current: map] = native_gen/bind(builder, "written", native_gen/zero(:U64))
+  current = native_gen/for_range(current, "read", native_gen/zero(:U64), span[:length], fn(input_body, index)
+    let body: map = input_body
+    let [entry: map, with_entry: map] = native_gen/bind(body, "entry", native_gen/read(native_sequence/at(span, index)))
+    body = with_entry
+    let [duplicate: map, with_duplicate: map] = native_gen/bind(body, "duplicate", native_gen/zero(:Bool))
+    body = with_duplicate
+    body = native_gen/unless(body, native_gen/equal(written, native_gen/zero(:U64)), fn(input_previous)
+      let previous: map = input_previous
+      let preceding: map = native_sequence/at(span, native_gen/subtract(written, native_gen/ref(previous, "one")))
+      let [order: map, with_order: map] = native_value/map_order(previous, native_gen/read(preceding), entry)
+      previous = with_order
+      previous = native_gen/assign(previous, duplicate, native_gen/equal(order, native_gen/zero(:I64)))
+      return native_gen/when(previous, duplicate, fn(replace) => native_gen/write(replace, preceding, entry))
+    end)
+    return native_gen/unless(body, duplicate, fn(input_append)
+      let append: map = input_append
+      append = native_gen/write(append, native_sequence/at(span, written), entry)
+      return native_gen/assign(append, written, native_gen/add(written, native_gen/ref(append, "one")))
+    end)
+  end)
+  return [written, current]
+end
+
 verb native_value/maps(input: map) -> map
   let context: map = input
-  let word: list = native_value/word()
   let entry: list = [:Record, "ValueMapEntry"]
-  let entries: list = [:Pointer, entry, :Mutable]
   let header: list = [:Record, "HeapMap"]
-  let result: list = [:Record, "ValueResult"]
-  let name: string = "value_map"
-  let [null, ns] = native/add_constant(context[:state], [:Pointer, entry, :Const], "null")
-  context[:state] = ns
+  let source_type: list = [:Pointer, entry, :Const]
+  let [null, state] = native/add_constant(context[:state], source_type, "null")
+  context[:state] = state
   let constants: map = context[:constants]
   constants["null_map_entries"] = null
   context[:constants] = constants
-  context = native/declare_function(context, name, result, [
-      ["worker", [:Pointer, [:Record, "MemoryWorker"], :Mutable], :Borrow],
-      ["source", [:Pointer, entry, :Const], :Gc],
-      ["length", :U64, :Value]
-    ],
-    [], [:Allocate, :ReadMemory, :WriteMemory], :Gc, "")
-  context = native/define_function(context, name, [
-    native/unless_statement(
-      native/binary_expression(:Equal, "length", "zero"),
-      [native/when_statement(native/binary_expression(:Equal, "source", "null_map_entries"), [native/return_zero()])]
-    ),
-    native/let_statement("header_size", :U64, native/unary_expression(:SizeOf, header)),
-    native/let_statement("size", :U64, native/unary_expression(:SizeOf, entry)),
-    @native_memory/allocate_with_tail("allocation", "header_size", "size", "length", "layout_map", [native/return_zero()]),
-    native/let_statement("pointer", [:Pointer, header, :Mutable], native/unary_expression(:PointerCast, "allocation")),
-    native/let_offset("raw_data", [:Pointer, :U8, :Mutable], "allocation", "header_size"),
-    native/let_statement("src", entries, native/unary_expression(:PointerCast, "raw_data")),
-    native/let_statement("read", :U64, "zero"),
-    native/let_statement("write", :U64, "length"),
-    native/while_statement(native/binary_expression(:Less, "read", "length"), [
-      native/let_offset("input_slot", [:Pointer, entry, :Const], "source", "read"),
-      native/let_load("right_entry", entry, "input_slot"),
-      native/let_offset("out_slot", entries, "src", "read"),
-      native/store_statement("out_slot", "right_entry"),
-      native/set_statement("read", native/binary_expression(:Add, "read", "one"))
-    ]),
-    native/when_statement(native/binary_expression(:Less, "one", "length"), [
-      native/set_statement("size", native/unary_expression(:SizeOf, entry)),
-      native/set_statement("bytes", native/binary_expression(:Multiply, "length", "size")),
-      native/set_statement("allocation", native/call_expression("memory_allocate", ["worker", "bytes", "layout_opaque"])),
-      native/when_statement(native/binary_expression(:Equal, "allocation", "null_bytes"), [native/return_zero()]),
-      native/let_statement("dst", entries, native/unary_expression(:PointerCast, "allocation")),
-      native/let_statement("width", :U64, "one"),
-      native/note_statement(
-        :Invariant,
-        "Choose the left run on equality to preserve input order before keeping the last duplicate."
-      ),
-      native/while_statement(native/binary_expression(:Less, "width", "length"), [
-        native/let_statement("base", :U64, "zero"),
-        native/while_statement(native/binary_expression(:Less, "base", "length"), [
-          native/let_statement("middle", :U64, native/binary_expression(:Add, "base", "width")),
-          native/when_statement(
-            native/binary_expression(:Less, "length", "middle"),
-            [native/set_statement("middle", "length")]
-          ),
-          native/let_statement("end", :U64, native/binary_expression(:Add, "middle", "width")),
-          native/when_statement(
-            native/binary_expression(:Less, "length", "end"),
-            [native/set_statement("end", "length")]
-          ),
-          native/let_statement("left", :U64, "base"),
-          native/let_statement("right", :U64, "middle"),
-          @native/for_range("out", "base", "end", [
-            native/let_statement("take_left", :Bool, "true"),
-            native/when_statement(
-              native/binary_expression(:Less, "right", "end"),
-              [
-                native/if_statement(native/binary_expression(:Less, "left", "middle"), [
-                  native/let_offset("left_slot", entries, "src", "left"),
-                  native/let_load("left_entry", entry, "left_slot"),
-                  native/let_offset("right_slot", entries, "src", "right"),
-                  native/set_statement("right_entry", native/load_expression("right_slot")),
-                  native/let_field("left_key", word, "left_entry", "key"),
-                  native/let_field("right_key", word, "right_entry", "key"),
-                  @native/try_call("comparison", [:Record, "IntResult"], "value_compare", ["left_key", "right_key"], [native/return_zero()]),
-                  native/let_field("order", :I64, "comparison", "number"),
-                  native/when_statement(
-                    native/binary_expression(:Less, "int_zero", "order"),
-                    [native/set_statement("take_left", "false")]
-                  )
-                ], [native/set_statement("take_left", "false")])
-              ]
-            ),
-            native/if_statement("take_left", [
-              native/set_statement("left_slot", native/offset_expression("src", "left")),
-              native/set_statement("left_entry", native/load_expression("left_slot")),
-              native/set_statement("out_slot", native/offset_expression("dst", "out")),
-              native/store_statement("out_slot", "left_entry"),
-              native/set_statement("left", native/binary_expression(:Add, "left", "one"))
-            ], [
-              native/set_statement("right_slot", native/offset_expression("src", "right")),
-              native/set_statement("right_entry", native/load_expression("right_slot")),
-              native/set_statement("out_slot", native/offset_expression("dst", "out")),
-              native/store_statement("out_slot", "right_entry"),
-              native/set_statement("right", native/binary_expression(:Add, "right", "one"))
-            ])]),
-          native/set_statement("base", "end")
-        ]),
-        native/let_statement("swap", entries, "src"),
-        native/set_statement("src", "dst"),
-        native/set_statement("dst", "swap"),
-        native/set_statement("width", native/binary_expression(:Add, "width", "width"))
-      ]),
-      native/set_statement("read", "zero"),
-      native/set_statement("write", "zero"),
-      native/while_statement(native/binary_expression(:Less, "read", "length"), [
-        native/set_statement("right_slot", native/offset_expression("src", "read")),
-        native/set_statement("right_entry", native/load_expression("right_slot")),
-        native/if_statement(native/binary_expression(:Equal, "write", "zero"), [
-          native/set_statement("out_slot", native/offset_expression("src", "write")),
-          native/store_statement("out_slot", "right_entry"),
-          native/set_statement("write", native/binary_expression(:Add, "write", "one"))
-        ], [
-          native/let_statement("previous", :U64, native/binary_expression(:Subtract, "write", "one")),
-          native/set_statement("left_slot", native/offset_expression("src", "previous")),
-          native/set_statement("left_entry", native/load_expression("left_slot")),
-          native/set_statement("left_key", native/field_expression("left_entry", "key")),
-          native/set_statement("right_key", native/field_expression("right_entry", "key")),
-          native/set_statement("comparison", native/call_expression("value_compare", ["left_key", "right_key"])),
-          native/unless_statement(native/field_expression("comparison", "ok"), [native/return_zero()]),
-          native/set_statement("order", native/field_expression("comparison", "number")),
-          native/if_statement(native/binary_expression(:Equal, "order", "int_zero"), [
-            native/store_statement("left_slot", "right_entry")
-          ], [
-            native/set_statement("out_slot", native/offset_expression("src", "write")),
-            native/store_statement("out_slot", "right_entry"),
-            native/set_statement("write", native/binary_expression(:Add, "write", "one"))
-          ])
-        ]),
-        native/set_statement("read", native/binary_expression(:Add, "read", "one"))
-      ])
-    ]),
-    native/let_statement("header", header, native/record_expression(["src", "write"])),
-    native/store_statement("pointer", "header"),
-    native/let_statement("value", word, native/binary_expression(:PackPointer, "pointer", "tag_map")),
-    native/let_statement("result", result, native/record_expression(["true", "value"])),
-    native/return_value("result")
-  ])
+  context = native/declare_function(context, "value_map", [:Record, "ValueResult"], [
+    ["worker", native_memory/record_pointer("MemoryWorker"), :Borrow],
+    ["source", source_type, :Gc], ["length", :U64, :Value]], [],
+    [:Allocate, :ReadMemory, :WriteMemory], :Gc, "")
+  let builder: map = native_gen/context(context, "value_map")
+  let worker: map = native_gen/ref(builder, "worker")
+  let source: map = native_gen/ref(builder, "source")
+  let length: map = native_gen/ref(builder, "length")
+  let failure = fn(failed) => native_gen/return_zero(failed)
+  builder = native_gen/unless(builder, native_gen/equal(length, native_gen/zero(:U64)), fn(nonempty)
+    return native_gen/when(nonempty, native_gen/equal(source, native_gen/ref(nonempty, "null_map_entries")), failure)
+  end)
+  let [object: map, data: map, with_object: map] = native_memory/tail_storage(builder, worker, header, entry, length, "layout_map", failure)
+  builder = with_object
+  builder = native_sequence/copy(builder, native_sequence/span(data, length), native_sequence/span(source, length))
+  let [sorted: map, with_sorted: map] = native_gen/bind(builder, "sorted", data)
+  builder = with_sorted
+  let [count: map, with_count: map] = native_gen/bind(builder, "count", length)
+  builder = with_count
+  builder = native_gen/when(builder, native_gen/less(native_gen/ref(builder, "one"), length), fn(input_sort)
+    let sort: map = input_sort
+    let [scratch: map, with_scratch: map] = native_memory/array_storage(sort, worker, entry, length, "layout_opaque", failure)
+    sort = with_scratch
+    let ordered = fn(body, left, right)
+      let [order: map, compared: map] = native_value/map_order(body, left, right)
+      return [native_gen/negate(native_gen/less(native_gen/zero(:I64), order)), compared]
+    end
+    let [result: map, with_result: map] = native_sequence/stable_merge(sort, native_sequence/span(data, length), scratch, ordered)
+    sort = with_result
+    sort = native_gen/assign(sort, sorted, result)
+    let [written: map, with_written: map] = native_value/compact_map(sort, native_sequence/span(sorted, length))
+    sort = with_written
+    return native_gen/assign(sort, count, written)
+  end)
+  builder = native_gen/store(builder, object, native_gen/record(builder, header, {"data" -> sorted, "length" -> count}))
+  builder = native_gen/return_value(builder, native_value/packed_result(builder, object, "map"))
+  context = native_gen/finish(context, builder)
   context = native_value/map_lookup(context)
   return context
+end
+
+verb native_value/map_search(builder: map, header: map, key: map) -> list
+  let span: map = native_sequence/span(native_gen/field(builder, header, "data"), native_gen/field(builder, header, "length"))
+  let result: list = native_sequence/search(builder, span, fn(body, candidate)
+    let [comparison: map, current: map] = native_value/checked_result(body, "value_compare", [native_gen/field(body, candidate, "key"), key], fn(failed) => native_gen/return_zero(failed))
+    return [native_gen/field(current, comparison, "number"), current]
+  end)
+  return result
 end
 
 verb native_value/map_lookup(input: map) -> map
   let context: map = input
   let word: list = native_value/word()
-  let entry: list = [:Record, "ValueMapEntry"]
   let result: list = [:Record, "ValueResult"]
-  let name: string = "value_map_get"
-  let [two, s] = native/add_constant(context[:state], :U64, "0000000000000002")
-  context[:state] = s
+  let [two, state] = native/add_constant(context[:state], :U64, "0000000000000002")
+  context[:state] = state
   let constants: map = context[:constants]
   constants["two"] = two
   context[:constants] = constants
-  context = native/declare_function(context, name, result, [["map", word, :Gc], ["key", word, :Gc]],
-    [], [:ReadMemory], :Gc, "")
-  context = native/define_function(context, name, [
-    native/let_statement("tag", :U8, native/unary_expression(:Tag, "map")),
-    native/unless_statement(native/binary_expression(:Equal, "tag", "tag_map"), [native/return_zero()]),
-    native/let_statement(
-      "pointer",
-      [:Pointer, [:Record, "HeapMap"], :Const],
-      native/unary_expression(:UnpackPointer, "map")
-    ),
-    native/let_load("header", [:Record, "HeapMap"], "pointer"),
-    native/let_field("data", [:Pointer, entry, :Mutable], "header", "data"),
-    native/let_field("high", :U64, "header", "length"),
-    native/let_statement("low", :U64, "zero"),
-    native/while_statement(native/binary_expression(:Less, "low", "high"), [
-      native/let_statement("distance", :U64, native/binary_expression(:Subtract, "high", "low")),
-      native/set_statement("distance", native/binary_expression(:Divide, "distance", "two")),
-      native/let_statement("middle", :U64, native/binary_expression(:Add, "low", "distance")),
-      native/let_offset("slot", [:Pointer, entry, :Mutable], "data", "middle"),
-      native/let_load("entry", entry, "slot"),
-      native/let_field("candidate", word, "entry", "key"),
-      @native/try_call("comparison", [:Record, "IntResult"], "value_compare", ["candidate", "key"], [native/return_zero()]),
-      native/let_field("order", :I64, "comparison", "number"),
-      native/when_statement(native/binary_expression(:Equal, "order", "int_zero"), [
-        native/let_field("value", word, "entry", "value"),
-        native/let_statement("result", result, native/record_expression(["true", "value"])),
-        native/return_value("result")
-      ]),
-      native/if_statement(
-        native/binary_expression(:Less, "order", "int_zero"),
-        [native/set_statement("low", native/binary_expression(:Add, "middle", "one"))],
-        [native/set_statement("high", "middle")]
-      )
-    ]),
-    native/return_zero()
-  ])
+  context = native/declare_function(context, "value_map_get", result, [["map", word, :Gc], ["key", word, :Gc]], [], [:ReadMemory], :Gc, "")
+  let builder: map = native_gen/context(context, "value_map_get")
+  let [header: map, with_header: map] = native_value/open_value(builder, native_gen/ref(builder, "map"), "map", "HeapMap", fn(failed) => native_gen/return_zero(failed))
+  builder = with_header
+  let [index: map, found: map, with_index: map] = native_value/map_search(builder, header, native_gen/ref(builder, "key"))
+  builder = with_index
+  builder = native_gen/unless(builder, found, fn(missing) => native_gen/return_zero(missing))
+  let entry: map = native_gen/load(native_gen/offset(native_gen/field(builder, header, "data"), index))
+  builder = native_gen/return_value(builder, native_gen/record(builder, result, {"ok" -> native_gen/ref(builder, "true"), "value" -> native_gen/field(builder, entry, "value")}))
+  context = native_gen/finish(context, builder)
   return context
 end

@@ -116,54 +116,45 @@ verb native_value/string_index(input: map) -> map
       ["ascii", :Bool, :Value]
     ],
     [], [:ReadMemory, :WriteMemory], :Value, "")
-  context = native/define_function(
-    context,
-    name,
-    [
-      native/let_load("backing", storage, "storage"),
-      native/let_field("data", [:Pointer, :U8, :Mutable], "backing", "data"),
-      native/let_field("index", [:Pointer, :U64, :Mutable], "backing", "index"),
-      native/when_statement(
-        native/binary_expression(:Equal, "index", "string_null_index"),
-        [native/return_value("true")]
-      ),
-      native/when_statement(native/binary_expression(:Less, "length", "offset"), [native/return_value("false")]),
-      native/when_statement("ascii", [
-        native/let_statement("rounding", :U64, native/binary_expression(:Subtract, "string_stride", "one")),
-        native/let_statement("rounded", :U64, native/binary_expression(:Add, "scalar", "rounding")),
-        native/let_statement("sample_number", :U64, native/binary_expression(:Divide, "rounded", "string_stride")),
-        native/let_statement("remaining", :U64, native/binary_expression(:Subtract, "length", "offset")),
-        native/let_statement("last_scalar", :U64, native/binary_expression(:Add, "scalar", "remaining")),
-        native/let_statement("last_sample", :U64, native/binary_expression(:Divide, "last_scalar", "string_stride")),
-        native/while_statement("true", [
-          native/when_statement(native/binary_expression(:Less, "last_sample", "sample_number"), [native/return_value("true")]),
-          native/let_statement("sample_scalar", :U64, native/binary_expression(:Multiply, "sample_number", "string_stride")),
-          native/let_statement("relative", :U64, native/binary_expression(:Subtract, "sample_scalar", "scalar")),
-          native/let_statement("sample_offset", :U64, native/binary_expression(:Add, "offset", "relative")),
-          native/let_offset("sample", [:Pointer, :U64, :Mutable], "index", "sample_number"),
-          native/store_statement("sample", "sample_offset"),
-          native/set_statement("sample_number", native/binary_expression(:Add, "sample_number", "one"))])]),
-      native/let_statement("position", :U64, "offset"),
-      native/let_statement("count", :U64, "scalar"),
-      native/while_statement("true", [
-        native/when_statement(native/binary_expression(:Less, "length", "position"), [native/return_value("false")]),
-        native/let_statement("remainder", :U64, native/binary_expression(:Remainder, "count", "string_stride")),
-        native/when_statement(native/binary_expression(:Equal, "remainder", "zero"), [
-          native/set_statement("sample_number", native/binary_expression(:Divide, "count", "string_stride")),
-          native/set_statement("sample", native/offset_expression("index", "sample_number")),
-          native/store_statement("sample", "position")
-        ]),
-        native/when_statement(native/binary_expression(:Equal, "position", "length"), [native/return_value("true")]),
-        native/let_offset("source", [:Pointer, :U8, :Mutable], "data", "position"),
-        native/let_load("byte", :U8, "source"),
-        native/let_statement("first", :U32, native/unary_expression(:Convert, "byte")),
-        @native_value/utf8_width("first", "width"),
-        native/set_statement("position", native/binary_expression(:Add, "position", "width")),
-        native/set_statement("count", native/binary_expression(:Add, "count", "one"))
-      ]),
-      native/return_value("false")
-    ]
-  )
+  let builder: map = native_gen/context(context, name)
+  let [backing: map, with_backing: map] = native_gen/bind(builder, "backing", native_gen/load(native_gen/ref(builder, "storage")))
+  builder = with_backing
+  let data: map = native_gen/field(builder, backing, "data")
+  let index: map = native_gen/field(builder, backing, "index")
+  let offset: map = native_gen/ref(builder, "offset")
+  let scalar: map = native_gen/ref(builder, "scalar")
+  let length: map = native_gen/ref(builder, "length")
+  let stride: map = native_gen/ref(builder, "string_stride")
+  let one: map = native_gen/ref(builder, "one")
+  let success = fn(done) => native_gen/return_value(done, native_gen/ref(done, "true"))
+  let failure = fn(failed) => native_gen/return_zero(failed)
+  builder = native_gen/when(builder, native_gen/equal(index, native_gen/ref(builder, "string_null_index")), success)
+  builder = native_gen/when(builder, native_gen/less(length, offset), failure)
+  builder = native_gen/when(builder, native_gen/ref(builder, "ascii"), fn(input_ascii)
+    let ascii: map = input_ascii
+    let first: map = native_gen/divide(native_gen/add(scalar, native_gen/subtract(stride, one)), stride)
+    let last: map = native_gen/divide(native_gen/add(scalar, native_gen/subtract(length, offset)), stride)
+    ascii = native_gen/for_range(ascii, "sample", first, native_gen/add(last, one), fn(sample, number)
+      let position: map = native_gen/add(offset, native_gen/subtract(native_gen/multiply(number, stride), scalar))
+      return native_gen/store(sample, native_gen/offset(index, number), position)
+    end)
+    return success(ascii)
+  end)
+  let [position: map, with_position: map] = native_gen/bind(builder, "position", offset)
+  builder = with_position
+  let [count: map, with_count: map] = native_gen/bind(builder, "scalar", scalar)
+  builder = with_count
+  builder = native_gen/while_loop(builder, native_gen/ref(builder, "true"), fn(input_scan)
+    let scan: map = input_scan
+    scan = native_gen/when(scan, native_gen/less(length, position), failure)
+    scan = native_gen/when(scan, native_gen/equal(native_gen/remainder(count, stride), native_gen/zero(:U64)), fn(sample)
+      return native_gen/store(sample, native_gen/offset(index, native_gen/divide(count, stride)), position)
+    end)
+    scan = native_gen/when(scan, native_gen/equal(position, length), success)
+    return native_value/advance_utf8(scan, data, position, count)
+  end)
+  builder = native_gen/return_zero(builder)
+  context = native_gen/finish(context, builder)
   return context
 end
 
@@ -220,49 +211,8 @@ verb native_value/string_access(input: map) -> map
   name = "value_string_byte_offset"
   context = native/declare_function(context, name, result, [["value", word, :Gc], ["position", :U64, :Value]],
     [], [:ReadMemory], :Value, "")
-  context = native/define_function(context, name, [
-    @native/try_call("checked", [:Record, "HeapStringResult"], "value_as_string", ["value"], [native/return_zero()]),
-    native/let_field("pointer", header_pointer, "checked", "header"),
-    native/let_load("header", header, "pointer"),
-    native/let_field("length", :U64, "header", "length"),
-    native/let_field("scalars", :U64, "header", "scalars"),
-    native/when_statement(native/binary_expression(:Less, "scalars", "position"), [native/return_zero()]),
-    native/when_statement(native/binary_expression(:Equal, "position", "scalars"), [
-      native/let_statement("result", result, native/record_expression(["true", "length"])),
-      native/return_value("result")
-    ]),
-    native/when_statement(native/field_expression("header", "ascii"), [
-      native/set_statement("result", native/record_expression(["true", "position"])),
-      native/return_value("result")
-    ]),
-    native/let_field("backing", [:Pointer, [:Record, "StringStorage"], :Mutable], "header", "storage"),
-    native/let_load("storage", [:Record, "StringStorage"], "backing"),
-    native/let_field("data", [:Pointer, :U8, :Mutable], "storage", "data"),
-    native/let_field("index", [:Pointer, :U64, :Mutable], "storage", "index"),
-    native/let_field("byte_start", :U64, "header", "byte_start"),
-    native/let_field("scalar_start", :U64, "header", "scalar_start"),
-    native/let_statement("target", :U64, native/binary_expression(:Add, "scalar_start", "position")),
-    native/let_statement("offset", :U64, "byte_start"),
-    native/let_statement("count", :U64, "scalar_start"),
-    native/unless_statement(native/binary_expression(:Equal, "index", "string_null_index"), [
-      native/let_statement("sample_number", :U64, native/binary_expression(:Divide, "target", "string_stride")),
-      native/let_offset("sample", [:Pointer, :U64, :Mutable], "index", "sample_number"),
-      native/set_statement("offset", native/load_expression("sample")),
-      native/set_statement("count", native/binary_expression(:Multiply, "sample_number", "string_stride"))
-    ]),
-    native/note_statement(:Invariant, "Sample offsets are relative to the immutable backing, including for slices."),
-    native/while_statement(native/binary_expression(:Less, "count", "target"), [
-      native/let_offset("source", [:Pointer, :U8, :Mutable], "data", "offset"),
-      native/let_load("byte", :U8, "source"),
-      native/let_statement("first", :U32, native/unary_expression(:Convert, "byte")),
-      @native_value/utf8_width("first", "width"),
-      native/set_statement("offset", native/binary_expression(:Add, "offset", "width")),
-      native/set_statement("count", native/binary_expression(:Add, "count", "one"))
-    ]),
-    native/set_statement("offset", native/binary_expression(:Subtract, "offset", "byte_start")),
-    native/set_statement("result", native/record_expression(["true", "offset"])),
-    native/return_value("result")
-  ])
+  context = native_value/string_offset(context)
+
   name = "value_string_scalar_at"
   context = native/declare_function(context, name, [:Record, "RuneResult"], [["value", word, :Gc], ["position", :U64, :Value]],
     [], [:ReadMemory], :Value, "")
@@ -337,5 +287,50 @@ verb native_value/string_slice(input: map) -> map
     native/let_statement("result", result, native/record_expression(["true", "packed"])),
     native/return_value("result")
   ])
+  return context
+end
+
+// Views store their origins in the backing's coordinate system. The index
+// selects a backing sample; only the returned byte position is view-relative.
+verb native_value/string_offset(input: map) -> map
+  let context: map = input
+  let builder: map = native_gen/context(context, "value_string_byte_offset")
+  let failure = fn(failed) => native_gen/return_zero(failed)
+  let [checked: map, with_checked: map] = native_value/checked_result(builder, "value_as_string", [native_gen/ref(builder, "value")], failure)
+  builder = with_checked
+  let [header: map, with_header: map] = native_gen/bind(builder, "header", native_gen/load(native_gen/field(builder, checked, "header")))
+  builder = with_header
+  let position: map = native_gen/ref(builder, "position")
+  let length: map = native_gen/field(builder, header, "length")
+  let scalars: map = native_gen/field(builder, header, "scalars")
+  let result = fn(body, number) => native_gen/return_value(body, native_gen/record(body, [:Record, "IdResult"], {"ok" -> native_gen/ref(body, "true"), "number" -> number}))
+  builder = native_gen/when(builder, native_gen/less(scalars, position), failure)
+  builder = native_gen/when(builder, native_gen/equal(position, scalars), fn(done) => result(done, length))
+  builder = native_gen/when(builder, native_gen/field(builder, header, "ascii"), fn(ascii) => result(ascii, position))
+  let [storage: map, with_storage: map] = native_gen/bind(builder, "storage", native_gen/load(native_gen/field(builder, header, "storage")))
+  builder = with_storage
+  let data: map = native_gen/field(builder, storage, "data")
+  let index: map = native_gen/field(builder, storage, "index")
+  let origin: map = native_gen/field(builder, header, "byte_start")
+  let scalar_origin: map = native_gen/field(builder, header, "scalar_start")
+  let [target: map, with_target: map] = native_gen/bind(builder, "target", native_gen/add(scalar_origin, position))
+  builder = with_target
+  let [offset: map, with_offset: map] = native_gen/bind(builder, "offset", origin)
+  builder = with_offset
+  let [count: map, with_count: map] = native_gen/bind(builder, "scalar", scalar_origin)
+  builder = with_count
+  builder = native_gen/unless(builder, native_gen/equal(index, native_gen/ref(builder, "string_null_index")), fn(input_sample)
+    let sample: map = input_sample
+    let stride: map = native_gen/ref(sample, "string_stride")
+    let [number: map, with_number: map] = native_gen/bind(sample, "sample", native_gen/divide(target, stride))
+    sample = with_number
+    sample = native_gen/assign(sample, offset, native_gen/load(native_gen/offset(index, number)))
+    return native_gen/assign(sample, count, native_gen/multiply(number, stride))
+  end)
+  builder = native_gen/while_loop(builder, native_gen/less(count, target), fn(scan)
+    return native_value/advance_utf8(scan, data, offset, count)
+  end)
+  builder = result(builder, native_gen/subtract(offset, origin))
+  context = native_gen/finish(context, builder)
   return context
 end

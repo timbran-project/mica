@@ -62,10 +62,44 @@ verb native_kernel/walk(record: string, cursor: string, first, body: list, exhau
   return result
 end
 
-verb native_kernel/require_tuple(row, relation, failure: list) -> list
-  return [native_value/require_kind(row, "list", failure),
-    native/unless_statement(native_kernel/binary(:Equal,
-      native_kernel/call(:U64, "width", [row]), native_kernel/read("Relation", relation, "arity")), failure)]
+// Rebuild the suffix before transforming this element. A null input is empty;
+// a null result for a nonempty suffix means allocation failed.
+verb native_kernel/copy_chain(builder: map, record: string, cursor: map, recurse: string, arguments: list, transform) -> map
+  let absent = native_gen/zero(native_kernel/pointer(record))
+  let ready = native_gen/when(builder, native_gen/equal(cursor, absent),
+    fn(arm) => native_gen/return_value(arm, absent))
+  let [next, with_next] = native_gen/bind(ready, "next", native_kernel/load_field(ready, cursor, "next"))
+  let [tail, with_tail] = native_gen/bind(with_next, "tail", absent)
+  ready = native_gen/unless(with_tail, native_gen/equal(next, absent),
+    fn(arm) => native_kernel/copy_suffix(arm, record, recurse, next, tail, arguments))
+  let result: map = transform(ready, cursor, tail)
+  return result
+end
+
+verb native_kernel/copy_suffix(builder: map, record: string, recurse: string, next: map, tail: map, arguments: list) -> map
+  let ready = native_gen/assign(builder, tail, native_gen/call(builder, string_concat("kernel_", recurse),
+    [native_gen/ref(builder, "worker"), next, @arguments]))
+  let result: map = native_gen/when(ready, native_gen/equal(tail, native_gen/zero(native_kernel/pointer(record))),
+    fn(arm) => native_gen/return_value(arm, tail))
+  return result
+end
+
+verb native_kernel/check_tuple(builder: map, row: map, relation: map, failure) -> map
+  let list_kind = native_gen/equal(native_gen/expression(:U8, :Tag, [row]), native_gen/ref(builder, "tag_list"))
+  let ready = native_gen/unless(builder, list_kind, failure)
+  let result: map = native_gen/unless(ready, native_gen/equal(native_gen/call(ready, "kernel_width", [row]),
+    native_kernel/load_field(ready, relation, "arity")), failure)
+  return result
+end
+
+verb native_kernel/absent(value: map) -> map
+  let result: map = native_gen/equal(value, native_gen/zero(native_gen/type(value)))
+  return result
+end
+
+verb native_kernel/store_field(builder: map, object: map, field: string, value: map) -> map
+  let result: map = native_gen/write(builder, native_gen/field(builder, object, field), value)
+  return result
 end
 
 verb native_kernel/binary(op: symbol, left, right) -> list
@@ -113,6 +147,28 @@ end
 verb native_kernel/define(context: map, name: string, body: list) -> map
   let output: map = native/define_function(context, string_concat("kernel_", name), body)
   return output
+end
+
+verb native_kernel/load_field(builder: map, object: map, field: string) -> map
+  let result: map = native_gen/read(native_gen/field(builder, object, field))
+  return result
+end
+
+verb native_kernel/allocate_record(builder: map, worker: map, record: string, fields: map) -> map
+  let arguments = native/record_arguments(native_kernel/schema(record), fields)
+  let result: map = native_gen/call(builder, string_concat("kernel_new_", record), [worker, @arguments])
+  return result
+end
+
+verb native_kernel/replace_record(builder: map, worker: map, record: string, source: map, changes: map) -> map
+  let fields = changes
+  for field in native_kernel/schema(record)[1]
+    if !map_contains_key(fields, field[0])
+      fields[field[0]] = native_kernel/load_field(builder, source, field[0])
+    end
+  end
+  let result: map = native_kernel/allocate_record(builder, worker, record, fields)
+  return result
 end
 
 verb native_kernel/types(input: map) -> map

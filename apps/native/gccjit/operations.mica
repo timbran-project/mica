@@ -27,8 +27,8 @@ end
 verb native_jit/extended_cases() -> list
   let cases: list = []
   let h: list = native_jit/handle()
-  let u64 = native_jit/cached(3, "n4")
-  let bool_type = native_jit/cached(3, "n7")
+  let u64 = native_jit/cache(:Type, "n4")
+  let bool_type = native_jit/cache(:Type, "n7")
   let zero = native_jit/j("zero", ["ctx", u64])
   cases = [@cases, native_jit/case(:PointerDistance, [
     native/set_statement("value", native_jit/j("bitcast", ["ctx",
@@ -56,36 +56,34 @@ verb native_jit/extended_cases() -> list
     cases = [@cases, native_jit/case(spec[0], body)]
   end
   cases = [@cases, native_jit/case(:Truncate, native_jit/builtin_call("value", "s_trunc", ["left"]))]
-  let u32 = native_jit/cached(3, "n3")
+  let u32 = native_jit/cache(:Type, "n3")
   let exponent = native_jit/integer("float_exponent", u32)
   cases = [@cases, native_jit/case(:IsFinite, [native/set_statement("value", native_jit/j("ne", ["ctx", native_jit/j("and", ["ctx", u32, native_jit/j("bitcast", ["ctx", "left", u32]), exponent]), exponent]))])]
   cases = [@cases, native_jit/case(:AlignOf, [native/set_statement("value", native_jit/invoke("align", ["a"], h))])]
   cases = [@cases, native_jit/case(:PointerCast, [
-    native/let_statement("alignment", h, native_jit/invoke("align", [native_jit/word("type_row", 4)], h)),
+    native/let_statement("alignment", h, native_jit/invoke("align", [native_jit/row_field(:Type, "type_row", :Element)], h)),
     native/let_statement("bits", h, native_jit/j("bitcast", ["ctx", "left", u64])),
     native_jit/trap_unless(native_jit/j("eq", ["ctx", native_jit/j("rem", ["ctx", u64, "bits", "alignment"]), zero])),
     native/set_statement("value", native_jit/j("bitcast", ["ctx", "left", "type"]))])]
   cases = [@cases, native_jit/case(:ElementPointer, [
-    native/let_statement("pointer_row", native_jit/words(), native/offset_expression("data", native_jit/meta(1, native_jit/meta(0, "a")))),
-    native/let_statement("array_row", native_jit/words(), native/offset_expression("data", native_jit/meta(1, native_jit/word("pointer_row", 4)))),
-    native_jit/trap_unless(native_jit/j("lt", ["ctx", "right", native_jit/integer(native_jit/word("array_row", 5), u64)])),
-    native/let_statement("array", h, native_jit/j("value", [native_jit/j("field_local", ["left", native_jit/cached(5, native_jit/word("array_row", 6))])])),
+    native/let_statement("pointer_row", native_jit/words(), native/offset_expression("data", native_jit/metadata(:TypeRow, native_jit/metadata(:NodeType, "a")))),
+    native/let_statement("array_row", native_jit/words(), native/offset_expression("data", native_jit/metadata(:TypeRow, native_jit/row_field(:Type, "pointer_row", :Element)))),
+    native_jit/trap_unless(native_jit/j("lt", ["ctx", "right", native_jit/integer(native_jit/row_field(:Type, "array_row", :Detail), u64)])),
+    native/let_statement("array", h, native_jit/j("value", [native_jit/j("field_local", ["left", native_jit/cache(:Field, native_jit/row_tail(:Type, "array_row", 0))])])),
     native/set_statement("value", native_jit/j("address", [native_jit/j("element", ["ctx", "array", "right"])]))])]
   cases = [@cases, native_jit/case(:Adopt, [
     native_jit/trap_unless(native_jit/j("ne", ["ctx", "right", native_jit/j("null", ["ctx", native_jit/j("value_type", ["right"])])])),
     native/do_statement(native/call_expression("j_assign", ["block", native_jit/j("dereference", ["left"]), "right"])), native/set_statement("value", "right")])]
-  cases = [@cases, native_jit/case(:CallIndirect, native_jit/indirect_call("left", 6))]
+  cases = [@cases, native_jit/case(:CallIndirect, native_jit/indirect_call("left", native_jit/tail_start(:Instruction) + 1))]
   cases = [@cases, native_jit/case(:CopyBytes, [
-    native/let_statement("length", h, native_jit/cached(1, native_jit/word("row", 7))),
-    native/let_statement("function", h, native_jit/cached(0, native_jit/meta(3, "block_id"))),
-    native/let_statement("copy", h, native_jit/j("block", ["function", native_jit/literal("s_ok")])),
-    native/let_statement("join", h, native_jit/j("block", ["function", native_jit/literal("s_join")])),
-    native/do_statement(native/call_expression("j_branch", ["block", native_jit/j("eq", ["ctx", "length", zero]), "join", "copy"])),
+    native/let_statement("length", h, native_jit/cache(:Rvalue, native_jit/row_tail(:Instruction, "row", 2))),
+    @native_jit/target_blocks([["copy", "s_ok"], ["join", "s_join"]]),
+    native_jit/target_branch("block", native_jit/j("eq", ["ctx", "length", zero]), "join", "copy"),
     @native_jit/evaluate_builtin("copy", "s_memmove", [
       native_jit/j("bitcast", ["ctx", "left", native_jit/j("type_voidptr", ["ctx"])]),
-      native_jit/j("bitcast", ["ctx", "right", native_jit/j("pointer", [native_jit/j("const_type", [native_jit/cached(3, "n0")])])]),
+      native_jit/j("bitcast", ["ctx", "right", native_jit/j("pointer", [native_jit/j("const_type", [native_jit/cache(:Type, "n0")])])]),
       "length"]),
-    native/do_statement(native/call_expression("j_jump", ["copy", "join"])), native_jit/save(7, "block_id", "join"), native/return_value("n0")])]
+    native_jit/target_jump("copy", "join"), native_jit/target_continue("join"), native/return_value("n0")])]
   let mask = native_jit/integer("mask56", u64)
   let shift = native_jit/integer("n56", u64)
   for op in [:PackPointer, :PackImmediate]
@@ -108,12 +106,12 @@ verb native_jit/extended_cases() -> list
     if op == :Tag
       body = [@body, native/set_statement("value", native_jit/j("cast", ["ctx", "tag", "type"]))]
     else
-      body = [@body, native/let_statement("heap", h, native_jit/invoke("heap_test", [native_jit/meta(0, "a"), "tag"], h)), native/let_statement("payload", h, native_jit/j("and", ["ctx", u64, "left", mask]))]
+      body = [@body, native/let_statement("heap", h, native_jit/invoke("heap_test", [native_jit/metadata(:NodeType, "a"), "tag"], h)), native/let_statement("payload", h, native_jit/j("and", ["ctx", u64, "left", mask]))]
       if op == :Payload
         body = [@body, native_jit/trap_unless(native_jit/j("not", ["ctx", bool_type, "heap"])), native/set_statement("value", "payload")]
       else
         body = [@body, native_jit/trap_unless("heap"), native_jit/trap_unless(native_jit/j("ne", ["ctx", "payload", zero])),
-          native/let_statement("alignment", h, native_jit/invoke("align", [native_jit/word("type_row", 4)], h)),
+          native/let_statement("alignment", h, native_jit/invoke("align", [native_jit/row_field(:Type, "type_row", :Element)], h)),
           native_jit/trap_unless(native_jit/j("eq", ["ctx", native_jit/j("rem", ["ctx", u64, "payload", "alignment"]), zero])),
           native/set_statement("value", native_jit/j("bitcast", ["ctx", "payload", "type"]))]
       end

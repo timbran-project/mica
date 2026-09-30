@@ -14,6 +14,8 @@ use mica_var::Value;
 const SOURCES: &[&str] = &[
     include_str!("../../../apps/native/ir.mica"),
     include_str!("../../../apps/native/builders.mica"),
+    include_str!("../../../apps/native/generation.mica"),
+    include_str!("../../../apps/native/sequences.mica"),
     include_str!("../../../apps/native/types.mica"),
     include_str!("../../../apps/native/numeric.mica"),
     include_str!("../../../apps/native/layout.mica"),
@@ -35,6 +37,7 @@ fn runner(interpreter_only: bool) -> SourceRunner {
         .with_interpreter_only(interpreter_only)
         .with_task_limits(TaskLimits {
             instruction_budget: 100_000_000,
+            max_call_depth: 256,
             ..TaskLimits::default()
         });
     for source in SOURCES {
@@ -1503,6 +1506,7 @@ fn native_value_layer_executes_on_both_mica_tiers() {
         // Match the comparison harness budget for the complete value module.
         let mut runner = runner(interpreter_only).with_task_limits(TaskLimits {
             instruction_budget: 500_000_000,
+            max_call_depth: 256,
             ..TaskLimits::default()
         });
         load_native_values(&mut runner);
@@ -1535,7 +1539,7 @@ return native/emit_c(state)
             .unwrap()
             .1;
         assert!(sort_columns.starts_with(
-            "  if (!(UINT64_C(0x0000000000000001) < v_length)) {\n    return true;\n  }\n  uint64_t v_size = "
+            "  if (!(UINT64_C(0x0000000000000001) < v_length)) {\n    return true;\n  }\n"
         ));
         if let Some(previous) = &previous {
             assert_eq!(&generated, previous);
@@ -2026,6 +2030,7 @@ fn native_relation_kernel_executes_on_both_mica_tiers() {
     for interpreter_only in [true, false] {
         let mut runner = runner(interpreter_only).with_task_limits(TaskLimits {
             instruction_budget: 1_000_000_000,
+            max_call_depth: 256,
             ..TaskLimits::default()
         });
         load_native_values(&mut runner);
@@ -2101,5 +2106,257 @@ fn native_relation_kernel_executes_on_both_mica_tiers() {
             .unwrap();
         assert!(executed.status.success(), "{executed:?}");
         assert!(executed.stderr.is_empty(), "{executed:?}");
+    }
+}
+
+#[test]
+fn typed_generation_preserves_evaluation_scopes_and_schema() {
+    let fixtures = [
+        (
+            "generated_example",
+            r#"
+static uint64_t calls;
+uint64_t mica_foreign_generated_tick(void) { return ++calls; }
+int main(void) {
+    for (uint64_t limit = 0; limit < 100; ++limit) {
+        uint64_t expected = 0;
+        for (uint64_t i = 1; i <= limit && i < 10; ++i) if (i != 3) expected += i;
+        assert(mica_generated_sum(limit) == expected);
+    }
+    assert(mica_generated_sum(12) == 42);
+    assert(mica_generated_order() == UINT64_MAX && calls == 2);
+    calls = 0;
+    assert(mica_generated_once() == 2 && calls == 1);
+    return 0;
+}
+"#,
+        ),
+        (
+            "generated_range_example",
+            r#"
+int main(void) {
+    for (uint64_t limit = 0; limit < 20; ++limit) {
+        uint64_t expected = 0;
+        for (uint64_t i = 0; i < limit; ++i) if (i != 3) expected += i;
+        assert(mica_generated_range(limit) == expected);
+        assert(mica_generated_nested_range(limit) == limit * expected + limit - (limit > 3));
+    }
+    return 0;
+}
+"#,
+        ),
+        (
+            "generated_range_once_example",
+            r#"
+static uint64_t calls;
+uint64_t mica_foreign_generated_tick(void) { return ++calls; }
+int main(void) {
+    assert(mica_generated_range_once() == 1 && calls == 3);
+    return 0;
+}
+"#,
+        ),
+        (
+            "generated_fields_example",
+            r#"
+int main(void) {
+    struct mica_GeneratedPair pair = { .f_left = 7, .f_right = 11 };
+    assert(mica_generated_field_value(pair) == 11);
+    assert(mica_generated_field_pointer(&pair) == 7);
+    mica_generated_field_write(&pair, 19);
+    assert(pair.f_left == 7 && pair.f_right == 19);
+    return 0;
+}
+"#,
+        ),
+        (
+            "generated_hygiene_example",
+            r#"
+int main(void) {
+    assert(mica_generated_hygiene(0) == 8);
+    assert(mica_generated_hygiene(11) == 19);
+    return 0;
+}
+"#,
+        ),
+    ];
+    let failures = [
+        ("generated_scope_failure", "reference escaped its scope"),
+        (
+            "generated_const_failure",
+            "write requires a mutable location",
+        ),
+        (
+            "generated_owner_failure",
+            "reference belongs to another function",
+        ),
+        (
+            "generated_binding_failure",
+            "reference requires its updated builder",
+        ),
+        (
+            "generated_context_failure",
+            "reference belongs to another context",
+        ),
+        (
+            "generated_call_context_failure",
+            "expression belongs to another context",
+        ),
+        (
+            "generated_fork_failure",
+            "reference does not match its binding",
+        ),
+        (
+            "generated_field_const_failure",
+            "write requires a mutable location",
+        ),
+    ];
+    let mut previous = Vec::new();
+    for interpreter_only in [true, false] {
+        let mut runner = runner(interpreter_only);
+        runner
+            .run_filein(include_str!("../../../apps/native/tests/structured.mica"))
+            .unwrap();
+        for (ordinal, (fixture, oracle)) in fixtures.iter().enumerate() {
+            let generated = eval(
+                &mut runner,
+                &format!("return native/emit_c(native/{fixture}(0))"),
+            )
+            .with_str(str::to_owned)
+            .unwrap();
+            let renumbered = eval(
+                &mut runner,
+                &format!("return native/emit_c(native/{fixture}(1000))"),
+            )
+            .with_str(str::to_owned)
+            .unwrap();
+            assert_eq!(generated, renumbered, "{fixture}");
+            if interpreter_only {
+                previous.push(generated.clone());
+            } else {
+                assert_eq!(generated, previous[ordinal], "{fixture}");
+            }
+            let scratch = Scratch::new();
+            let source = scratch.0.join("generated.c");
+            let binary = scratch.0.join("generated");
+            fs::write(
+                &source,
+                format!("{generated}\n#include <assert.h>\n{oracle}"),
+            )
+            .unwrap();
+            let compiled = Command::new(std::env::var_os("CC").unwrap_or_else(|| "cc".into()))
+                .args([
+                    "-std=c11",
+                    "-O2",
+                    "-Wall",
+                    "-Wextra",
+                    "-Werror",
+                    "-pedantic",
+                    "-fsanitize=address,undefined",
+                    "-fno-sanitize-recover=all",
+                ])
+                .arg(&source)
+                .arg("-o")
+                .arg(&binary)
+                .arg("-lm")
+                .output()
+                .unwrap();
+            assert!(
+                compiled.status.success(),
+                "{fixture}: {}",
+                String::from_utf8_lossy(&compiled.stderr)
+            );
+            let executed = Command::new(&binary).output().unwrap();
+            assert!(executed.status.success(), "{fixture}: {executed:?}");
+            assert!(executed.stderr.is_empty(), "{fixture}: {executed:?}");
+        }
+        for (fixture, message) in failures {
+            let report = runner
+                .run_source(&format!("return native/{fixture}()"))
+                .unwrap();
+            assert!(
+                matches!(report.outcome, TaskOutcome::Aborted { .. }),
+                "{fixture}: {}",
+                report.render()
+            );
+            assert!(report.render().contains(message), "{}", report.render());
+        }
+    }
+}
+
+#[test]
+fn gccjit_argument_scratch_rejects_nested_consumers() {
+    let nested = r#"native_jit/j("record", ["ctx", "type", "n1", native_jit/argument_buffer()])"#;
+    let failures = [
+        (
+            format!(
+                r#"return native_jit/consume_arguments([{nested}], "record", ["ctx", "type"], [:Set, "value"])"#
+            ),
+            "nested JIT argument scratch preparation",
+        ),
+        (
+            format!(
+                r#"return native_jit/consume_arguments(["left"], "record", ["ctx", {nested}], [:Set, "value"])"#
+            ),
+            "nested JIT argument scratch consumer",
+        ),
+        (
+            format!(
+                r#"return native_jit/consume_prepared_arguments([native/do_statement({nested})], "record", ["ctx", "type"], "n1", [:Set, "value"])"#
+            ),
+            "nested JIT argument scratch preparation",
+        ),
+        (
+            r#"return native_jit/consume_prepared_arguments([], "record", ["ctx", "type"], native_jit/argument_buffer(), [:Set, "value"])"#.to_owned(),
+            "nested JIT argument scratch consumer",
+        ),
+        (
+            r#"return native_jit/consume_arguments(["left"], "record", ["ctx", "type"], [:Set, native_jit/argument_buffer()])"#.to_owned(),
+            "nested JIT argument scratch consumer",
+        ),
+        (
+            r#"return native_jit/consume_arguments(["left"], "zero", ["ctx", "type"], [:Set, "value"])"#.to_owned(),
+            "JIT argument consumer signature mismatch",
+        ),
+    ];
+    for interpreter_only in [true, false] {
+        let mut runner = runner(interpreter_only);
+        for source in [
+            include_str!("../../../apps/native/gccjit/data.mica"),
+            include_str!("../../../apps/native/gccjit/bindings.mica"),
+            include_str!("../../../apps/native/gccjit/program.mica"),
+        ] {
+            for report in runner.run_filein(source).unwrap() {
+                assert!(
+                    matches!(report.outcome, TaskOutcome::Complete { .. }),
+                    "{}",
+                    report.render()
+                );
+            }
+        }
+        // A slot-zero store uses the same address as the call argument buffer.
+        // Preparation must accept this address without accepting nested calls.
+        assert_eq!(
+            eval(
+                &mut runner,
+                r#"
+native_jit/consume_arguments(["left"], "record", ["ctx", "type"], [:Set, "value"])
+native_jit/consume_arguments([], "record", ["ctx", "type"], [:Return])
+native_jit/consume_arguments(["first", "second"], "fields", ["structure"], [:Do])
+native_jit/consume_prepared_arguments([native_jit/publish(:Arguments, "n0", "left")], "record", ["ctx", "type"], "n1", [:Set, "value"])
+return true
+"#,
+            ),
+            Value::bool(true)
+        );
+        for (source, message) in &failures {
+            let report = runner.run_source(source).unwrap();
+            assert!(
+                matches!(report.outcome, TaskOutcome::Aborted { .. }),
+                "{}",
+                report.render()
+            );
+            assert!(report.render().contains(message), "{}", report.render());
+        }
     }
 }

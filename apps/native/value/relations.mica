@@ -260,132 +260,47 @@ verb native_value/relation_order(input: map) -> map
   return context
 end
 
-// Sort descriptors, not their cell arrays. Each merge pass is linear and stable.
+// Ordering policy is separate from the shared traversal and stable merge.
+verb native_value/relation_ordered(builder: map, kind: string, left: map, right: map) -> list
+  if kind == "columns"
+    return [native_gen/negate(native_gen/less(native_gen/field(builder, right, "symbol"), native_gen/field(builder, left, "symbol"))), builder]
+  end
+  let [comparison: map, current: map] = native_value/checked_result(builder, "value_tuple_compare", [left, right], fn(failed) => native_gen/return_zero(failed))
+  return [native_gen/negate(native_gen/less(native_gen/zero(:I64), native_gen/field(current, comparison, "number"))), current]
+end
+
+// Sort descriptors, not their cell arrays. Already ordered input allocates
+// nothing; merging uses one scratch buffer and copies back only when needed.
 verb native_value/relation_sort(input: map, kind: string, element: list) -> map
   let context: map = input
   let pointer: list = [:Pointer, element, :Mutable]
   let name: string = string_concat("relation_sort_", kind)
   context = native/declare_function(context, name, :Bool, [
-    ["worker", [:Pointer, [:Record, "MemoryWorker"], :Mutable], :Borrow],
+    ["worker", native_memory/record_pointer("MemoryWorker"), :Borrow],
     ["data", pointer, :Gc], ["length", :U64, :Value]], [],
     [:Allocate, :ReadMemory, :WriteMemory], :Value, "")
-  let comparison: list = []
-  if kind == "columns"
-    comparison = [
-      native/let_field("left_symbol", :U32, "left_element", "symbol"),
-      native/let_field("right_symbol", :U32, "right_element", "symbol"),
-      native/set_statement("take_left", native/binary_expression(:Less, "right_symbol", "left_symbol")),
-      native/if_statement(
-        "take_left",
-        [native/set_statement("take_left", "false")],
-        [native/set_statement("take_left", "true")]
-      )
-    ]
-  else
-    comparison = [
-      @native/try_call("comparison", [:Record, "IntResult"], "value_tuple_compare", ["left_element", "right_element"], [native/return_value("false")]),
-      native/when_statement(
-        native/binary_expression(:Less, "int_zero", native/typed_field(:I64, "comparison", "number")),
-        [native/set_statement("take_left", "false")]
-      )
-    ]
-  end
-  let ordered_test: list = []
-  if kind == "columns"
-    ordered_test = [
-      native/when_statement(native/binary_expression(
-        :Less,
-        native/typed_field(:U32, "scan_right", "symbol"),
-        native/typed_field(:U32, "scan_left", "symbol")
-      ), [
-        native/set_statement("ordered", "false"),
-        native/break_statement()
-      ])
-    ]
-  else
-    ordered_test = [
-      @native/try_call("scan_comparison", [:Record, "IntResult"], "value_tuple_compare", ["scan_left", "scan_right"], [native/return_value("false")]),
-      native/when_statement(native/binary_expression(
-        :Less,
-        "int_zero",
-        native/typed_field(:I64, "scan_comparison", "number")
-      ), [
-        native/set_statement("ordered", "false"),
-        native/break_statement()
-      ])
-    ]
-  end
-  context = native/define_function(context, name, [
-    native/unless_statement(native/binary_expression(:Less, "one", "length"), [native/return_value("true")]),
-    native/let_statement("size", :U64, native/unary_expression(:SizeOf, element)),
-    native/let_statement("limit", :U64, native/binary_expression(:Divide, "allocation_limit", "size")),
-    native/when_statement(native/binary_expression(:Less, "limit", "length"), [native/return_value("false")]),
-    native/let_statement("ordered", :Bool, "true"),
-    @native/for_range("scan", "one", "length", [
-      native/let_statement("previous", :U64, native/binary_expression(:Subtract, "scan", "one")),
-      native/let_offset("scan_left_slot", pointer, "data", "previous"),
-      native/let_offset("scan_right_slot", pointer, "data", "scan"),
-      native/let_load("scan_left", element, "scan_left_slot"),
-      native/let_load("scan_right", element, "scan_right_slot"),
-      @ordered_test]),
-    native/when_statement("ordered", [native/return_value("true")]),
-    native/let_statement("bytes", :U64, native/binary_expression(:Multiply, "length", "size")),
-    @native_memory/allocate("raw", "bytes", "layout_opaque", [native/return_value("false")]),
-    native/let_statement("src", pointer, "data"),
-    native/let_statement("dst", pointer, native/unary_expression(:PointerCast, "raw")),
-    @native/for_range("width", "one", "length", [
-      native/let_statement("base", :U64, "zero"),
-      native/while_statement(
-        native/binary_expression(:Less, "base", "length"),
-        [
-          native/let_statement("middle", :U64, native/binary_expression(:Add, "base", "width")),
-          native/when_statement(
-            native/binary_expression(:Less, "length", "middle"),
-            [native/set_statement("middle", "length")]
-          ),
-          native/let_statement("end", :U64, native/binary_expression(:Add, "middle", "width")),
-          native/when_statement(
-            native/binary_expression(:Less, "length", "end"),
-            [native/set_statement("end", "length")]
-          ),
-          native/let_statement("left", :U64, "base"),
-          native/let_statement("right", :U64, "middle"),
-          @native/for_range("out", "base", "end", [
-            native/let_statement("take_left", :Bool, "true"),
-            native/when_statement(
-              native/binary_expression(:Less, "right", "end"),
-              [
-                native/if_statement(native/binary_expression(:Less, "left", "middle"), [
-                  native/let_offset("left_slot", pointer, "src", "left"),
-                  native/let_offset("right_slot", pointer, "src", "right"),
-                  native/let_load("left_element", element, "left_slot"),
-                  native/let_load("right_element", element, "right_slot"),
-                  @comparison
-                ], [native/set_statement("take_left", "false")])
-              ]
-            ),
-            native/let_statement("chosen", :U64, "right"),
-            native/if_statement("take_left", [
-              native/set_statement("chosen", "left"),
-              native/set_statement("left", native/binary_expression(:Add, "left", "one"))
-            ], [native/set_statement("right", native/binary_expression(:Add, "right", "one"))]),
-            native/let_offset("source_slot", pointer, "src", "chosen"),
-            native/let_offset("destination_slot", pointer, "dst", "out"),
-            native/store_statement("destination_slot", native/typed_load(element, "source_slot"))]),
-          native/set_statement("base", "end")
-        ]
-      ),
-      native/let_statement("swap", pointer, "src"),
-      native/set_statement("src", "dst"),
-      native/set_statement("dst", "swap")], "width"),
-    native/unless_statement(native/binary_expression(:Equal, "src", "data"), [
-      @native/for_range("i", "zero", "length", [
-        native/set_statement("source_slot", native/offset_expression("src", "i")),
-        native/set_statement("destination_slot", native/offset_expression("data", "i")),
-        native/store_statement("destination_slot", native/typed_load(element, "source_slot"))])
-    ]),
-    native/return_value("true")
-  ])
+  let builder: map = native_gen/context(context, name)
+  let length: map = native_gen/ref(builder, "length")
+  let data: map = native_gen/ref(builder, "data")
+  let span: map = native_sequence/span(data, length)
+  let success = fn(done) => native_gen/return_value(done, native_gen/ref(done, "true"))
+  let failure = fn(failed) => native_gen/return_zero(failed)
+  builder = native_gen/unless(builder, native_gen/less(native_gen/ref(builder, "one"), length), success)
+  let capacity: map = native_gen/divide(native_gen/ref(builder, "allocation_limit"), native_gen/sizeof(element))
+  builder = native_gen/when(builder, native_gen/less(capacity, length), failure)
+  let compare = fn(body, left, right) => native_value/relation_ordered(body, kind, left, right)
+  let [ordered: map, with_ordered: map] = native_sequence/is_ordered(builder, span, compare)
+  builder = with_ordered
+  builder = native_gen/when(builder, ordered, success)
+  let [scratch: map, with_scratch: map] = native_memory/array_storage(builder, native_gen/ref(builder, "worker"), element, length, "layout_opaque", failure)
+  builder = with_scratch
+  let [sorted: map, with_sorted: map] = native_sequence/stable_merge(builder, span, scratch, compare)
+  builder = with_sorted
+  builder = native_gen/unless(builder, native_gen/equal(sorted, data), fn(copy)
+    return native_sequence/copy(copy, span, native_sequence/span(sorted, length))
+  end)
+  builder = success(builder)
+  context = native_gen/finish(context, builder)
   return context
 end
 

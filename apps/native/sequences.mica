@@ -1,0 +1,148 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+// Spans exist only while generating code. Traversals specialize callbacks into
+// the target function; they allocate no iterator or callback at runtime.
+verb native_sequence/span(data: map, length: map) -> map
+  native/ensure(native/is_pointer(native_gen/type(data)), "span requires an element pointer")
+  native/ensure(native_gen/type(length) == :U64, "span length must be U64")
+  return {:data -> data, :length -> length}
+end
+
+verb native_sequence/at(span: map, index: map) -> map
+  let result: map = native_gen/location(native_gen/offset(span[:data], index))
+  return result
+end
+
+verb native_sequence/copy(builder: map, destination: map, source: map) -> map
+  let result: map = native_gen/for_range(builder, "copy", native_gen/zero(:U64), source[:length], fn(initial_body, index)
+    let body: map = initial_body
+    return native_gen/write(body, native_sequence/at(destination, index), native_gen/read(native_sequence/at(source, index)))
+  end)
+  return result
+end
+
+// The comparator returns [ordered predicate, updated builder]. It may emit a
+// checked comparison and leave the generated function on failure.
+verb native_sequence/is_ordered(builder: map, span: map, compare) -> list
+  let [ordered: map, current: map] = native_gen/bind(builder, "ordered", native_gen/ref(builder, "true"))
+  current = native_gen/for_range(current, "scan", native_gen/ref(current, "one"), span[:length], fn(initial_body, index)
+    let body: map = initial_body
+    let left: map = native_gen/read(native_sequence/at(span, native_gen/subtract(index, native_gen/ref(body, "one"))))
+    let right: map = native_gen/read(native_sequence/at(span, index))
+    let [in_order, compared] = compare(body, left, right)
+    return native_gen/unless(compared, in_order, fn(initial_unordered)
+      let unordered: map = initial_unordered
+      unordered = native_gen/assign(unordered, ordered, native_gen/zero(:Bool))
+      return native_gen/break_loop(unordered)
+    end)
+  end)
+  return [ordered, current]
+end
+
+// Stable bottom-up merging. Storage and failure policy belong to the caller.
+// The returned pointer can be either input buffer; equality takes the left run.
+// Length must fit the allocation limit and be below 2^63, so doubling cannot wrap.
+verb native_sequence/stable_merge(builder: map, span: map, scratch: map, compare) -> list
+  let [source: map, current: map] = native_gen/bind(builder, "source", span[:data])
+  let [target: map, with_target: map] = native_gen/bind(current, "target", scratch)
+  current = with_target
+  let [width: map, with_width: map] = native_gen/bind(current, "width", native_gen/ref(current, "one"))
+  current = with_width
+  current = native_gen/while_loop(current, native_gen/less(width, span[:length]),
+    fn(pass) => native_sequence/merge_pass(pass, source, target, width, span[:length], compare))
+  return [source, current]
+end
+
+// Each pass merges adjacent runs, swaps buffers, and doubles the run width.
+verb native_sequence/merge_pass(builder: map, source: map, target: map, width: map, length: map, compare) -> map
+  let [base: map, current: map] = native_gen/bind(builder, "base", native_gen/zero(:U64))
+  current = native_gen/while_loop(current, native_gen/less(base, length),
+    fn(run) => native_sequence/merge_run(run, source, target, width, base, length, compare))
+  let [swap: map, with_swap: map] = native_gen/bind(current, "swap", source)
+  current = with_swap
+  current = native_gen/assign(current, source, target)
+  current = native_gen/assign(current, target, swap)
+  let result: map = native_gen/assign(current, width, native_gen/add(width, width))
+  return result
+end
+
+// Clamp the two run boundaries, then fill their shared output interval.
+verb native_sequence/merge_run(builder: map, source: map, target: map, width: map, base: map, length: map, compare) -> map
+  let [middle: map, current: map] = native_gen/bind(builder, "middle", native_gen/add(base, width))
+  current = native_gen/when(current, native_gen/less(length, middle),
+    fn(clamp) => native_gen/assign(clamp, middle, length))
+  let [limit: map, with_limit: map] = native_gen/bind(current, "limit", native_gen/add(middle, width))
+  current = with_limit
+  current = native_gen/when(current, native_gen/less(length, limit),
+    fn(clamp) => native_gen/assign(clamp, limit, length))
+  let [left: map, with_left: map] = native_gen/bind(current, "left", base)
+  current = with_left
+  let [right: map, with_right: map] = native_gen/bind(current, "right", middle)
+  current = with_right
+  current = native_gen/for_range(current, "output", base, limit, fn(output, index)
+    let [chosen: map, selected: map] = native_sequence/merge_choice(output, source, left, right, middle, limit, compare)
+    return native_gen/store(selected, native_gen/offset(target, index), native_gen/load(native_gen/offset(source, chosen)))
+  end)
+  let result: map = native_gen/assign(current, base, limit)
+  return result
+end
+
+// Read both candidates only while both runs have elements. Equality chooses
+// the left run; advancement changes only the cursor of the selected run.
+verb native_sequence/merge_choice(builder: map, source: map, left: map, right: map, middle: map, limit: map, compare) -> list
+  let [take_left: map, current: map] = native_gen/bind(builder, "take_left", native_gen/ref(builder, "true"))
+  current = native_gen/when(current, native_gen/less(right, limit), fn(available)
+    return native_gen/branch(available, native_gen/less(left, middle), fn(initial_both)
+      let both: map = initial_both
+      let [a: map, with_a: map] = native_gen/bind(both, "left_element", native_gen/load(native_gen/offset(source, left)))
+      both = with_a
+      let [b: map, with_b: map] = native_gen/bind(both, "right_element", native_gen/load(native_gen/offset(source, right)))
+      both = with_b
+      let [in_order: map, with_in_order: map] = compare(both, a, b)
+      return native_gen/assign(with_in_order, take_left, in_order)
+    end, fn(right_only) => native_gen/assign(right_only, take_left, native_gen/zero(:Bool)))
+  end)
+  let [chosen: map, with_chosen: map] = native_gen/bind(current, "chosen", right)
+  current = with_chosen
+  let one: map = native_gen/ref(current, "one")
+  current = native_gen/branch(current, take_left, fn(initial_from_left)
+    let from_left: map = native_gen/assign(initial_from_left, chosen, left)
+    return native_gen/assign(from_left, left, native_gen/add(left, one))
+  end, fn(from_right) => native_gen/assign(from_right, right, native_gen/add(right, one)))
+  return [chosen, current]
+end
+
+// Search a sorted unique span. The comparator returns signed order relative
+// to the sought key. A miss returns its insertion position.
+verb native_sequence/search(builder: map, span: map, compare) -> list
+  let [low: map, current: map] = native_gen/bind(builder, "low", native_gen/zero(:U64))
+  let [high: map, with_high: map] = native_gen/bind(current, "high", span[:length])
+  current = with_high
+  let [found: map, with_found: map] = native_gen/bind(current, "found", native_gen/zero(:Bool))
+  current = with_found
+  current = native_gen/while_loop(current, native_gen/less(low, high), fn(initial_body)
+    let body: map = initial_body
+    let distance: map = native_gen/subtract(high, low)
+    let [middle: map, with_middle: map] = native_gen/bind(body, "middle", native_gen/add(low, native_gen/divide(distance, native_gen/ref(body, "two"))))
+    body = with_middle
+    let [element: map, with_element: map] = native_gen/bind(body, "candidate", native_gen/read(native_sequence/at(span, middle)))
+    body = with_element
+    let [order: map, with_order: map] = compare(body, element)
+    body = with_order
+    body = native_gen/when(body, native_gen/equal(order, native_gen/zero(:I64)), fn(initial_equal)
+      let equal: map = initial_equal
+      equal = native_gen/assign(equal, low, middle)
+      equal = native_gen/assign(equal, found, native_gen/ref(equal, "true"))
+      return native_gen/break_loop(equal)
+    end)
+    return native_gen/branch(body, native_gen/less(order, native_gen/zero(:I64)), fn(initial_later)
+      let later: map = initial_later
+      return native_gen/assign(later, low, native_gen/add(middle, native_gen/ref(later, "one")))
+    end, fn(initial_earlier)
+      let earlier: map = initial_earlier
+      return native_gen/assign(earlier, high, middle)
+    end)
+  end)
+  return [low, found, current]
+end

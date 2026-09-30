@@ -235,3 +235,231 @@ verb native/scope_examples(state: map, constants: map, tick: int) -> map
   let result: map = context[:state]
   return result
 end
+
+// Typed authoring keeps state updates explicit and callbacks at generation time.
+verb native/generated_example(first_id: int) -> map
+  let state: map = native/program()
+  state[:next] = first_id
+  let [constants, declared] = native/constants(state, [
+    ["zero", :U64, "0000000000000000"], ["one", :U64, "0000000000000001"],
+    ["three", :U64, "0000000000000003"], ["ten", :U64, "000000000000000a"]])
+  let module: map = native/module_context(declared, constants)
+  module = native/declare_function(module, "generated_sum", :U64, [["limit", :U64, :Value]], [], [], :Value, "")
+  let b: map = native_gen/context(module, "generated_sum")
+  let zero: map = native_gen/ref(b, "zero")
+  let [sum: map, with_sum: map] = native_gen/bind(b, "sum", zero)
+  let [i: map, with_i: map] = native_gen/bind(with_sum, "i", zero)
+  b = native_gen/while_loop(with_i, native_gen/less(i, native_gen/ref(with_i, "limit")),
+    fn(loop) => native/generated_sum_step(loop, sum, i))
+  b = native_gen/return_value(b, sum)
+  module = native_gen/finish(module, b)
+  module = native/declare_function(module, "generated_tick", :U64, [], [], [:WriteMemory], :Value, "")
+  module[:state] = native/foreign(module[:state], module[:functions]["generated_tick"])
+  module = native/declare_function(module, "generated_order", :U64, [], [], [:WriteMemory], :Value, "")
+  b = native_gen/context(module, "generated_order")
+  b = native_gen/return_value(b, native_gen/subtract(native_gen/call(b, "generated_tick", []), native_gen/call(b, "generated_tick", [])))
+  module = native_gen/finish(module, b)
+  module = native/declare_function(module, "generated_once", :U64, [], [], [:WriteMemory], :Value, "")
+  b = native_gen/context(module, "generated_once")
+  let [tick: map, with_tick: map] = native_gen/bind(b, "tick", native_gen/call(b, "generated_tick", []))
+  b = native_gen/return_value(with_tick, native_gen/add(tick, tick))
+  module = native_gen/finish(module, b)
+  let result: map = module[:state]
+  return result
+end
+
+verb native/generated_sum_step(input: map, sum: map, index: map) -> map
+  let b: map = native_gen/assign(input, index, native_gen/add(index, native_gen/ref(input, "one")))
+  b = native_gen/when(b, native_gen/equal(index, native_gen/ref(b, "three")), fn(arm) => native_gen/continue_loop(arm))
+  b = native_gen/when(b, native_gen/equal(index, native_gen/ref(b, "ten")), fn(arm) => native_gen/break_loop(arm))
+  b = native_gen/assign(b, sum, native_gen/add(sum, index))
+  return b
+end
+
+verb native/generated_scope_failure() -> map
+  let module: map = native/module_context(native/program(), {})
+  module = native/declare_function(module, "generated_scope", :U64, [], [], [], :Value, "")
+  let parent: map = native_gen/context(module, "generated_scope")
+  let child: map = parent
+  child[:scope] = [1]
+  let [private: map, declared: map] = native_gen/bind(child, "private", native_gen/zero(:U64))
+  let result: map = native_gen/return_value(parent, private)
+  return result
+end
+
+verb native/generated_const_failure() -> map
+  let pointer: list = [:Pointer, :U64, :Const]
+  let module: map = native/module_context(native/program(), {})
+  module = native/declare_function(module, "generated_const", :Void, [["pointer", pointer, :Borrow]], [], [:WriteMemory], :Value, "")
+  let b: map = native_gen/context(module, "generated_const")
+  let result: map = native_gen/store(b, native_gen/ref(b, "pointer"), native_gen/zero(:U64))
+  return result
+end
+
+verb native/generated_range_example(first_id: int) -> map
+  let state: map = native/program()
+  state[:next] = first_id
+  let [constants, declared] = native/constants(state, [
+    ["zero", :U64, "0000000000000000"], ["one", :U64, "0000000000000001"],
+    ["three", :U64, "0000000000000003"]])
+  let module: map = native/module_context(declared, constants)
+  module = native/declare_function(module, "generated_range", :U64, [["limit", :U64, :Value]], [], [], :Value, "")
+  let b: map = native_gen/context(module, "generated_range")
+  let [sum: map, initialized: map] = native_gen/bind(b, "sum", native_gen/ref(b, "zero"))
+  b = native_gen/for_range(initialized, "index", native_gen/ref(initialized, "zero"), native_gen/ref(initialized, "limit"),
+    fn(loop, index) => native/generated_range_step(loop, index, sum))
+  b = native_gen/return_value(b, sum)
+  module = native_gen/finish(module, b)
+  module = native/declare_function(module, "generated_nested_range", :U64, [["limit", :U64, :Value]], [], [], :Value, "")
+  b = native_gen/context(module, "generated_nested_range")
+  let [nested_sum: map, with_nested_sum: map] = native_gen/bind(b, "sum", native_gen/ref(b, "zero"))
+  b = native_gen/for_range(with_nested_sum, "outer", native_gen/ref(with_nested_sum, "zero"), native_gen/ref(with_nested_sum, "limit"),
+    fn(loop, index) => native/generated_nested_range_step(loop, index, nested_sum))
+  b = native_gen/return_value(b, nested_sum)
+  module = native_gen/finish(module, b)
+  let result: map = module[:state]
+  return result
+end
+
+verb native/generated_range_step(input: map, index: map, sum: map) -> map
+  let b: map = native_gen/when(input, native_gen/equal(index, native_gen/ref(input, "three")), fn(arm) => native_gen/continue_loop(arm))
+  b = native_gen/assign(b, sum, native_gen/add(sum, index))
+  return b
+end
+
+verb native/generated_owner_failure() -> map
+  let module: map = native/module_context(native/program(), {})
+  module = native/declare_function(module, "generated_first", :U64, [], [], [], :Value, "")
+  module = native/declare_function(module, "generated_second", :U64, [], [], [], :Value, "")
+  let first: map = native_gen/context(module, "generated_first")
+  let [reference: map, initialized: map] = native_gen/bind(first, "value", native_gen/zero(:U64))
+  let second: map = native_gen/context(module, "generated_second")
+  let result: map = native_gen/return_value(second, reference)
+  return result
+end
+
+verb native/generated_binding_failure() -> map
+  let module: map = native/module_context(native/program(), {})
+  module = native/declare_function(module, "generated_binding", :U64, [], [], [], :Value, "")
+  let parent: map = native_gen/context(module, "generated_binding")
+  let [reference: map, initialized: map] = native_gen/bind(parent, "value", native_gen/zero(:U64))
+  let result: map = native_gen/return_value(parent, reference)
+  return result
+end
+
+verb native/generated_context_failure() -> map
+  let first_module: map = native/module_context(native/program(), {})
+  first_module = native/declare_function(first_module, "generated_context", :U64, [["value", :U64, :Value]], [], [], :Value, "")
+  let second_module: map = native/module_context(native/program(), {})
+  second_module = native/declare_function(second_module, "generated_context", :U64, [["other", :U64, :Value]], [], [], :Value, "")
+  let first: map = native_gen/context(first_module, "generated_context")
+  let second: map = native_gen/context(second_module, "generated_context")
+  let result: map = native_gen/return_value(second, native_gen/ref(first, "value"))
+  return result
+end
+
+// Tick returns one, two, then three. Range initialization must call it in that
+// order exactly once, leaving the single visited index equal to one.
+verb native/generated_range_once_example(first_id: int) -> map
+  let state: map = native/program()
+  state[:next] = first_id
+  let module: map = native/module_context(state, {})
+  module = native/declare_function(module, "generated_tick", :U64, [], [], [:WriteMemory], :Value, "")
+  module[:state] = native/foreign(module[:state], module[:functions]["generated_tick"])
+  module = native/declare_function(module, "generated_range_once", :U64, [], [], [:WriteMemory], :Value, "")
+  let b: map = native_gen/context(module, "generated_range_once")
+  let [sum: map, initialized: map] = native_gen/bind(b, "sum", native_gen/zero(:U64))
+  b = native_gen/for_range(initialized, "index", native_gen/call(initialized, "generated_tick", []),
+    native_gen/call(initialized, "generated_tick", []),
+    fn(loop, index) => native_gen/assign(loop, sum, native_gen/add(sum, index)),
+    native_gen/call(initialized, "generated_tick", []))
+  b = native_gen/return_value(b, sum)
+  module = native_gen/finish(module, b)
+  let result: map = module[:state]
+  return result
+end
+
+verb native/generated_fields_example(first_id: int) -> map
+  let state: map = native/program()
+  state[:next] = first_id
+  let [record, declared] = native/record_type(state, "GeneratedPair", [["left", :U64], ["right", :U64]])
+  let module: map = native/module_context(declared, {})
+  module = native/declare_function(module, "generated_field_value", :U64, [["pair", record, :Value]], [], [], :Value, "")
+  let b: map = native_gen/context(module, "generated_field_value")
+  b = native_gen/return_value(b, native_gen/field(b, native_gen/ref(b, "pair"), "right"))
+  module = native_gen/finish(module, b)
+  module = native/declare_function(module, "generated_field_pointer", :U64, [["pair", [:Pointer, record, :Const], :Borrow]], [], [:ReadMemory], :Value, "")
+  b = native_gen/context(module, "generated_field_pointer")
+  b = native_gen/return_value(b, native_gen/read(native_gen/field(b, native_gen/ref(b, "pair"), "left")))
+  module = native_gen/finish(module, b)
+  module = native/declare_function(module, "generated_field_write", :Void,
+    [["pair", [:Pointer, record, :Mutable], :Borrow], ["value", :U64, :Value]], [], [:WriteMemory], :Value, "")
+  b = native_gen/context(module, "generated_field_write")
+  b = native_gen/write(b, native_gen/field(b, native_gen/ref(b, "pair"), "right"), native_gen/ref(b, "value"))
+  b = native_gen/return_void(b)
+  module = native_gen/finish(module, b)
+  let result: map = module[:state]
+  return result
+end
+
+verb native/generated_field_const_failure() -> map
+  let [record, declared] = native/record_type(native/program(), "GeneratedConstPair", [["value", :U64]])
+  let module: map = native/module_context(declared, {})
+  module = native/declare_function(module, "generated_field_const", :Void,
+    [["pair", [:Pointer, record, :Const], :Borrow]], [], [:WriteMemory], :Value, "")
+  let b: map = native_gen/context(module, "generated_field_const")
+  let result: map = native_gen/write(b, native_gen/field(b, native_gen/ref(b, "pair"), "value"), native_gen/zero(:U64))
+  return result
+end
+
+verb native/generated_fork_failure() -> map
+  let module: map = native/module_context(native/program(), {})
+  module = native/declare_function(module, "generated_fork", :U64, [], [], [], :Value, "")
+  let parent: map = native_gen/context(module, "generated_fork")
+  let [first: map, with_first: map] = native_gen/bind(parent, "value", native_gen/zero(:U64))
+  let [second: map, with_second: map] = native_gen/bind(parent, "value", native_gen/sizeof(:U64))
+  let result: map = native_gen/return_value(with_second, first)
+  return result
+end
+
+verb native/generated_nested_range_step(input: map, index: map, sum: map) -> map
+  let b: map = native_gen/for_range(input, "inner", native_gen/ref(input, "zero"), native_gen/ref(input, "limit"),
+    fn(loop, inner) => native/generated_range_step(loop, inner, sum))
+  b = native_gen/when(b, native_gen/equal(index, native_gen/ref(b, "three")), fn(arm) => native_gen/continue_loop(arm))
+  b = native_gen/assign(b, sum, native_gen/add(sum, native_gen/ref(b, "one")))
+  return b
+end
+
+verb native/generated_call_context_failure() -> map
+  let module: map = native/module_context(native/program(), {})
+  module = native/declare_function(module, "generated_callee", :U64, [], [], [], :Value, "")
+  module = native/declare_function(module, "generated_caller", :U64, [], [], [], :Value, "")
+  let callee: map = native_gen/context(module, "generated_callee")
+  let caller: map = native_gen/context(module, "generated_caller")
+  let result: map = native_gen/return_value(caller, native_gen/call(callee, "generated_callee", []))
+  return result
+end
+
+// Generated names skip declared parameters and locals. Repeated labels in
+// sibling branches remain separate bindings while updating the shared result.
+verb native/generated_hygiene_example(first_id: int) -> map
+  let state: map = native/program()
+  state[:next] = first_id
+  let module: map = native/module_context(state, {})
+  module = native/declare_function(module, "generated_hygiene", :U64,
+    [["gen_0_value", :U64, :Value]], [["gen_1_value", :U64]], [], :Value, "")
+  let b: map = native_gen/context(module, "generated_hygiene")
+  b = native_gen/assign(b, native_gen/ref(b, "gen_1_value"), native_gen/ref(b, "gen_0_value"))
+  let [value: map, initialized: map] = native_gen/bind(b, "value", native_gen/ref(b, "gen_1_value"))
+  b = native_gen/branch(initialized, native_gen/less(native_gen/zero(:U64), value), fn(arm)
+    let [private: map, with_private: map] = native_gen/bind(arm, "value", native_gen/add(value, native_gen/sizeof(:U64)))
+    return native_gen/assign(with_private, value, private)
+  end, fn(arm)
+    let [private: map, with_private: map] = native_gen/bind(arm, "value", native_gen/sizeof(:U64))
+    return native_gen/assign(with_private, value, private)
+  end)
+  b = native_gen/return_value(b, value)
+  module = native_gen/finish(module, b)
+  let result: map = module[:state]
+  return result
+end

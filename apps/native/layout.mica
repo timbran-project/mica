@@ -186,41 +186,41 @@ verb native/check_layout_instruction(index, fn_id, row, result_type)
   return false
 end
 
-verb native/c_layout_statement(index, row)
+verb native/c_layout_emission(index, row)
   let op = row[3]
   let args = row[5]
   let dst = native/c_value(index, row[4])
   let type_id = index[:variables][row[4]][2]
   if op == :GlobalAddress
-    return string_concat(dst, " = &mica_global_", index[:globals][args[0]][1], ";")
+    return native/c_emission(string_concat(dst, " = &mica_global_", index[:globals][args[0]][1], ";"), true)
   end
   if op == :Zero
-    return string_concat(dst, " = (", native/c_type(type_id), "){0};")
+    return native/c_emission(string_concat(dst, " = (", native/c_type(type_id), "){0};"), true)
   end
   if op == :SizeOf || op == :AlignOf
     let operator = "sizeof"
     if op == :AlignOf
       operator = "_Alignof"
     end
-    return string_concat(dst, " = ", operator, "(", native/c_type(args[0]), ");")
+    return native/c_emission(string_concat(dst, " = ", operator, "(", native/c_type(args[0]), ");"), true)
   end
   if !native/contains([:Address, :ElementPointer, :PointerCast, :Wrap, :Unwrap, :PackPointer, :PackImmediate, :UnpackPointer, :Tag, :Payload], op)
-    return ""
+    return native/c_emission("", false)
   end
   let arg = native/c_value(index, args[0])
   if op == :Address
-    return string_concat(dst, " = &", arg, ";")
+    return native/c_emission(string_concat(dst, " = &", arg, ";"), true)
   end
   if op == :ElementPointer
     let source = native/value_type(index, index[:blocks][row[1]][1], args[0])
     let offset = native/c_value(index, args[1])
-    return string_concat("if (", offset, " >= ", to_literal(source[1][2]), ") { abort(); } ", dst, " = &", arg, "->elements[", offset, "];")
+    return native/c_emission(string_concat("if (", offset, " >= ", to_literal(source[1][2]), ") { abort(); } ", dst, " = &", arg, "->elements[", offset, "];"), false)
   end
   if op == :PointerCast
-    return string_concat("if ((uintptr_t)", arg, " % _Alignof(", native/c_type(type_id[1]), ") != 0) { abort(); } ", dst, " = (", native/c_type(type_id), ")", arg, ";")
+    return native/c_emission(string_concat("if ((uintptr_t)", arg, " % _Alignof(", native/c_type(type_id[1]), ") != 0) { abort(); } ", dst, " = (", native/c_type(type_id), ")", arg, ";"), false)
   end
   if op == :Wrap || op == :Unwrap
-    return string_concat(dst, " = (", native/c_type(type_id), ")", arg, ";")
+    return native/c_emission(string_concat(dst, " = (", native/c_type(type_id), ")", arg, ";"), true)
   end
   if op == :PackPointer || op == :PackImmediate
     let expression = arg
@@ -231,20 +231,20 @@ verb native/c_layout_statement(index, row)
       expression = string_concat("(uint64_t)(uintptr_t)", arg)
       guard = string_concat("!(", heap, ") || p == 0 || ")
     end
-    return string_concat("{ uint64_t p = ", expression, "; if (", guard, "p > MICA_INTERNAL_WORD_PAYLOAD_MASK) { abort(); } ", dst,
-      " = p | ((uint64_t)", native/c_value(index, args[1]), " << 56); }")
+    return native/c_emission(string_concat("{ uint64_t p = ", expression, "; if (", guard, "p > MICA_INTERNAL_WORD_PAYLOAD_MASK) { abort(); } ", dst,
+      " = p | ((uint64_t)", native/c_value(index, args[1]), " << 56); }"), false)
   end
   if op == :UnpackPointer
     let tagged = native/value_type(index, index[:blocks][row[1]][1], args[0])
     let heap = native/c_heap_tag(tagged, string_concat("mica_internal_word_tag(", arg, ")"))
-    return string_concat("{ uintptr_t p = (uintptr_t)mica_internal_word_payload(", arg, "); if (!(", heap, ") || p == 0 || p % _Alignof(", native/c_type(type_id[1]), ") != 0) { abort(); } ", dst, " = (", native/c_type(type_id), ")p; }")
+    return native/c_emission(string_concat("{ uintptr_t p = (uintptr_t)mica_internal_word_payload(", arg, "); if (!(", heap, ") || p == 0 || p % _Alignof(", native/c_type(type_id[1]), ") != 0) { abort(); } ", dst, " = (", native/c_type(type_id), ")p; }"), false)
   end
   if op == :Tag
-    return string_concat(dst, " = mica_internal_word_tag(", arg, ");")
+    return native/c_emission(string_concat(dst, " = mica_internal_word_tag(", arg, ");"), true)
   end
   let tagged = native/value_type(index, index[:blocks][row[1]][1], args[0])
   let heap = native/c_heap_tag(tagged, string_concat("mica_internal_word_tag(", arg, ")"))
-  return string_concat("if (", heap, ") { abort(); } ", dst, " = mica_internal_word_payload(", arg, ");")
+  return native/c_emission(string_concat("if (", heap, ") { abort(); } ", dst, " = mica_internal_word_payload(", arg, ");"), false)
 end
 
 // Emit only helpers used by this module. Each guard also permits headers

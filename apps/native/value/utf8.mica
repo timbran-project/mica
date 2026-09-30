@@ -71,6 +71,26 @@ verb native_value/utf8_width(first: string, width: string) -> list
           native/set_statement(width, "utf64_4")])])])]
 end
 
+// Advance from one known scalar boundary to the next. This cursor is for
+// validated backing storage; untrusted input still goes through utf8_decode.
+verb native_value/advance_utf8(builder: map, data: map, position: map, count: map) -> map
+  let [first: map, current: map] = native_gen/bind(builder, "lead", native_gen/convert(:U32, native_gen/load(native_gen/offset(data, position))))
+  let [width: map, with_width: map] = native_gen/bind(current, "width", native_gen/ref(current, "one"))
+  current = with_width
+  current = native_gen/unless(current, native_gen/less(first, native_gen/ref(current, "utf32_128")), fn(input_two)
+    let two: map = native_gen/assign(input_two, width, native_gen/ref(input_two, "utf64_2"))
+    return native_gen/unless(two, native_gen/less(first, native_gen/ref(two, "utf32_224")), fn(input_three)
+      let three: map = native_gen/assign(input_three, width, native_gen/ref(input_three, "utf64_3"))
+      return native_gen/unless(three, native_gen/less(first, native_gen/ref(three, "utf32_240")), fn(four)
+        return native_gen/assign(four, width, native_gen/ref(four, "utf64_4"))
+      end)
+    end)
+  end)
+  current = native_gen/assign(current, position, native_gen/add(position, width))
+  current = native_gen/assign(current, count, native_gen/add(count, native_gen/ref(current, "one")))
+  return current
+end
+
 verb native_value/utf8_decode(input: map) -> map
   let context: map = input
   let name: string = "utf8_decode"

@@ -34,6 +34,62 @@ verb native_value/fixed_records() -> list
       native_value/scalar_field("has_value", :Bool), native_value/value_field("value", "has_value")]]]
 end
 
+// Each traversal selects its own policy from the same physical schema.
+// Persistence deliberately ignores error message text; hashing includes its
+// bytes without hashing a nested string tag.
+verb native_value/record_plan(operation: symbol) -> list
+  native/ensure(operation == :Compare || operation == :Copy || operation == :Hash || operation == :Persist, "unknown fixed record operation")
+  let by_kind: map = {}
+  for spec in native_value/fixed_records()
+    by_kind[spec[0]] = spec
+  end
+  let plan: list = []
+  for kind in ["range", "error", "frob"]
+    let spec: list = by_kind[kind]
+    let fields: list = []
+    for field in spec[2]
+      if operation == :Persist
+        if field[2] == :Gc && !(kind == "error" && field[0] == "message")
+          fields = [@fields, [field[0], field[3]]]
+        end
+      else
+        let policy: symbol = :Scalar
+        if field[2] == :Gc
+          policy = :Child
+        end
+        if operation == :Hash && kind == "error" && field[0] == "message"
+          policy = :StringBytes
+        end
+        fields = [@fields, [field[0], field[1], field[3], policy]]
+      end
+    end
+    plan = [@plan, [spec[0], spec[1], fields]]
+  end
+  return plan
+end
+
+// Typed value operations keep tag checks and comparison failure explicit.
+verb native_value/checked_result(builder: map, name: string, arguments: list, failure) -> list
+  let [result: map, current: map] = native_gen/bind(builder, "result", native_gen/call(builder, name, arguments))
+  current = native_gen/unless(current, native_gen/field(current, result, "ok"), failure)
+  return [result, current]
+end
+
+verb native_value/open_value(builder: map, value: map, kind: string, record: string, failure) -> list
+  let tag: map = native_gen/expression(:U8, :Tag, [value])
+  let current: map = native_gen/unless(builder, native_gen/equal(tag, native_gen/ref(builder, string_concat("tag_", kind))), failure)
+  let pointer: map = native_gen/expression([:Pointer, [:Record, record], :Const], :UnpackPointer, [value])
+  let [header: map, with_header: map] = native_gen/bind(current, "header", native_gen/load(pointer))
+  current = with_header
+  return [header, current]
+end
+
+verb native_value/packed_result(builder: map, pointer: map, kind: string) -> map
+  let value: map = native_gen/expression(native_value/word(), :PackPointer, [pointer, native_gen/ref(builder, string_concat("tag_", kind))])
+  let result: map = native_gen/record(builder, [:Record, "ValueResult"], {"ok" -> native_gen/ref(builder, "true"), "value" -> value})
+  return result
+end
+
 verb native_value/heap(input: map) -> map
   let context: map = input
   let word = native_value/word()
