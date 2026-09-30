@@ -3,7 +3,8 @@
 This Mica library constructs typed programs for C11 and libgccjit. Rust Mica supplies the bootstrap host.
 The core IR has no dependency on the Mica compiler app or a runtime value layout.
 The [managed heap](memory/program.mica) and [value library](value/program.mica) use that IR to define their implementations.
-Task scheduling, transactions, and general native source execution remain separate runtime work.
+The [relation kernel](kernel/program.mica) adds snapshots, transactional tuple storage, and concurrent commits.
+Task scheduling, rules, dispatch, and general native source execution remain separate runtime work.
 
 The [value examples](examples/values.mica) implement three operations:
 
@@ -56,6 +57,119 @@ They compile a generated module separately from its C consumer. Compiler overflo
 Separate tests reject invalid types, control flow, effects, and ownership contracts.
 Fresh processes vary symbol creation order. Other tests reverse relation rows and change node IDs.
 Generated source, binaries, and measurement output stay outside source control.
+
+## Transactional relation kernel
+
+`native_kernel/program()` generates the value library, managed heap, and in-memory relation store as one module.
+All storage, indexing, conflict checks, publication, and tracing algorithms come from Mica source.
+The platform bindings supply allocation and pthread primitives.
+
+Each relation has persistent AVL indexes over immutable tuples.
+An update copies the search paths and shares unchanged subtrees.
+The catalogue is a sorted linked list. Catalogue updates copy the prefix before the changed entry.
+Snapshots retain catalogue roots. They have no parent links that retain obsolete versions.
+
+Transactions read a fixed snapshot and their own staged writes.
+Declarations and fact changes publish atomically.
+Set, functional-key, and event-append policies use the existing kernel conflict rules.
+A functional replacement requires an explicit retraction before the assertion.
+A retraction of a tuple absent from the base snapshot does not erase a concurrent insertion.
+Failed commits leave the published snapshot unchanged and retain the transaction for inspection.
+After an allocation failure, the caller can retry the same transaction.
+After a conflict, the caller must begin a fresh transaction and repeat its work.
+
+One mutex serializes commit validation and publication.
+Workers leave the active heap set before they wait for this mutex.
+A commit roots its candidate, completes collection, then replaces the shared snapshot root.
+Every managed pointer used after collection comes from the registered transaction root.
+Allocation failure leaves the previous shared root intact.
+
+The current collector scans the full live heap at publication.
+This cost affects small commits over large relations, even though index updates copy only search paths.
+Parallel commit preparation and incremental collection remain performance work.
+
+### Kernel interface
+
+The generated C names have the `mica_` prefix. Controls must start as zero-initialized structs.
+A `Kernel` and its `MemoryHeap` must outlive all associated workers and transactions.
+The heap uses `kernel_heap_init`, which installs both kernel and value descriptors.
+
+| Function | Contract |
+| --- | --- |
+| `kernel_init(kernel, worker)` | Create the empty published snapshot on an active worker |
+| `kernel_begin(kernel, worker, transaction)` | Retain the current snapshot and register transaction roots |
+| `kernel_declare(transaction, id, name, arity, policy, keys, indexes)` | Stage a relation declaration with caller-assigned identity and symbol IDs |
+| `kernel_write(transaction, id, tuple, asserted)` | Stage an assertion or retraction of a list-valued tuple |
+| `kernel_scan(transaction, id, pattern, mask, after, output, capacity)` | Read a bounded batch into a caller-owned array of value words |
+| `kernel_commit(transaction)` | Validate, publish, and retain net fact deltas on success |
+| `kernel_version(transaction)` | Read the base version, or the published version after commit |
+| `kernel_deltas(transaction)` | Read committed additions and removals until the transaction ends |
+| `kernel_end(transaction)` | Release transaction roots and discard any uncommitted changes |
+| `kernel_release(kernel, worker)` | Remove the shared snapshot root under exclusive ownership of the kernel control |
+
+The policy codes are 0 for set, 1 for functional keys, and 2 for event append.
+Arity ranges from 0 through 64. Masks use one bit per column.
+`keys` selects the functional key columns in column order.
+`indexes` selects additional single-column indexes. The natural tuple index and functional key index exist automatically.
+
+A scan pattern is a list with the declared arity. Only columns selected by `mask` constrain the scan.
+The result contains `status`, `count`, `visited`, and `more`.
+The first batch uses a zero value word for `after`.
+Subsequent batches use the final tuple from the previous batch, with the same pattern and mask.
+Index choice determines result order. The continuation follows that order.
+Tuples, continuations, and delta pointers remain valid until the next safepoint unless the caller registers roots for them.
+
+Operations require an active worker. A transaction belongs to one worker and has no concurrent mutation support.
+Nested transactions on one worker end in reverse creation order, as required by the root stack.
+Other workers can read and commit concurrently. Callers park workers before external blocking operations.
+
+| Status | Meaning |
+| --- | --- |
+| 0 | Success |
+| 1 | Unknown relation |
+| 2 | Tuple or pattern arity mismatch |
+| 3 | Non-persistable tuple |
+| 4 | Functional key violation |
+| 5 | Commit conflict |
+| 6 | Duplicate relation name |
+| 7 | Invalid schema, identity, mask, or output buffer |
+| 8 | Allocation or collection failure |
+| 9 | Closed transaction or invalid lifecycle operation |
+
+`kernel_work(transaction)` exposes the last commit status and its conflicting relation and tuple.
+The current layer supports relation creation. Relation removal, transactional buffers, durable storage, rules, computed relations, authority, and dispatch remain separate work.
+
+### Kernel checks and measurements
+
+Run the sanitizer fixture through C, libgccjit object code, and libgccjit shared code:
+
+```sh
+cargo run --release -p mica-value-comparison --bin native-backend -- \
+  --output target/native-gccjit --check-fixtures --fixture kernel --sanitize
+cargo run --release -p mica-value-comparison --bin mica-kernel-comparison -- \
+  --native-executable target/native-gccjit/kernel/check --seed 19 --cases 256
+cargo test -p mica-runtime --test native_codegen native_relation_kernel_executes_on_both_mica_tiers
+```
+
+The fixture covers snapshots, catalogue atomicity, allocation failure, heap-valued tuples, AVL rotations, bounded scans, and concurrent commits.
+The Rust comparison checks complete query results and net commit deltas for reproducible transaction sequences.
+It includes aborted transactions, collection between operations, and competing functional writes.
+The integration test requires identical generated C from both bootstrap execution tiers.
+
+Rebuild the fixture without sanitizers before measuring:
+
+```sh
+cargo run --release -p mica-value-comparison --bin native-backend -- \
+  --reuse-backend --output target/native-gccjit --check-fixtures --fixture kernel
+cargo run --release -p mica-value-comparison --bin mica-kernel-comparison -- \
+  --native-executable target/native-gccjit/kernel/check --bench --samples 5 --rounds 128
+```
+
+The benchmark measures indexed reads, small updates, disjoint writes, and contended functional writes against Rust.
+It includes native collection and thread creation for parallel workloads. Initial store construction stays outside the measured interval.
+Samples alternate implementation order and report elapsed time, operation count, and conflicts.
+Write workloads verify the final stored tuples outside the measured interval.
+Generated modules, executables, and measurement output belong under ignored `target/` paths.
 
 ## Construction API
 

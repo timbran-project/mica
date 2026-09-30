@@ -1768,9 +1768,16 @@ It does not establish Mica task, transaction, authority, or delivery semantics.
 The Rust-service task experiment is removed. It provided no accepted evidence for an independent generated runtime.
 No replacement task-boundary experiment is a prerequisite for further work.
 
-The remaining work builds real runtime components over these values and memory APIs:
+The generated kernel in `apps/native/kernel/` now supplies in-memory relation storage and transactions.
+Persistent AVL indexes share unchanged subtrees between snapshots.
+Transactions stage declarations and tuple writes, validate conflicts, and publish through a shared managed root.
+A commit completes full collection before publication. Waiting writers park their workers before they acquire the publication mutex.
+The kernel fixture covers concurrent commits, retained snapshots, and allocation failure.
+The comparison harness checks query results and net commit deltas against Rust.
 
-1. Relation storage and transactions, including snapshots, overlays, conflict checks, and publication.
+The remaining work builds on these components:
+
+1. Remaining relation services: rules, queries beyond indexed scans, computed relations, authority, dispatch, transactional buffers, and durable storage.
 2. Task state, immutable retry images, fresh resume authority, staged effects, and mailbox delivery.
 3. Native worker scheduling, wait registration, cancellation claims, and independent task progress.
 4. Execution and compiler lowering against the runtime operations required by each supported language form.

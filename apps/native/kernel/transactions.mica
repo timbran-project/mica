@@ -1,0 +1,169 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+verb native_kernel/transaction_root() -> list
+  let result: list = native/typed_expression(native_memory/record_pointer("MemoryRoot"), native/field_pointer_expression("transaction", "root"))
+  return result
+end
+
+verb native_kernel/transactions(input: map) -> map
+  let context: map = input
+  let transaction: list = native_kernel/pointer("Transaction")
+  let work: list = native_kernel/pointer("Work")
+  let change: list = native_kernel/pointer("Change")
+  let relation: list = native_kernel/pointer("Relation")
+  let node: list = native_kernel/pointer("Node")
+  let index: list = native_kernel/pointer("Index")
+  let snapshot: list = native_kernel/pointer("Snapshot")
+  let delta: list = native_kernel/pointer("Delta")
+  let word: list = native_value/word()
+  let worker: list = ["worker", native_memory/record_pointer("MemoryWorker"), :Borrow]
+  let tx: list = ["transaction", transaction, :Borrow]
+  for spec in [
+    ["work", work, [tx]],
+    ["change", change, [["work", work, :Gc], ["id", :U64, :Value]]],
+    ["view", relation, [tx, ["id", :U64, :Value]]],
+    ["declare", :U64, [tx, ["id", :U64, :Value], ["name", :U64, :Value], ["arity", :U64, :Value], ["policy", :U64, :Value], ["keys", :U64, :Value], ["indexes", :U64, :Value]]],
+    ["write", :U64, [tx, ["id", :U64, :Value], ["row", word, :Gc], ["asserted", :Bool, :Value]]],
+    ["scan", [:Record, "KernelScanResult"], [tx, ["id", :U64, :Value], ["pattern", word, :Gc], ["mask", :U64, :Value], ["after", word, :Gc], ["output", native_memory/pointer(word), :Borrow], ["capacity", :U64, :Value]]],
+    ["validate", :Bool, [["work", work, :Gc], ["writes", node, :Gc], ["before", relation, :Gc], ["current", relation, :Gc]]],
+    ["apply_writes", relation, [worker, ["work", work, :Gc], ["writes", node, :Gc], ["before", relation, :Gc], ["current", relation, :Gc], ["asserted", :Bool, :Value]]],
+    ["version", :U64, [tx]], ["deltas", delta, [tx]]]
+    context = native_kernel/declare(context, spec[0], spec[1], spec[2])
+  end
+  context = native_kernel/define(context, "work", [
+    native_memory/bind("pointer", native_memory/pointer(:U8), native_memory/root(native_memory/pointer(:U8), native_kernel/transaction_root(), "pointer")),
+    native/return_value(native/unary_expression(:PointerCast, "pointer"))])
+  context = native_kernel/define(context, "change", [
+    native_memory/bind("cursor", change, native_kernel/read("Work", "work", "changes")),
+    native/while_statement("true", [
+      native/when_statement(native_kernel/is_null("Change", "cursor"), [native/return_value("cursor")]),
+      native/when_statement(native_kernel/binary(:Equal, native_kernel/read("Relation", native_kernel/read("Change", "cursor", "after"), "id"), "id"), [native/return_value("cursor")]),
+      native_memory/set("cursor", native_kernel/read("Change", "cursor", "next"))]), native/return_value(native_kernel/null("Change"))])
+  let load_work: list = [native/let_call("work", work, "kernel_work", ["transaction"])]
+  let open: list = [@load_work,
+    native/when_statement(native_kernel/is_null("Work", "work"), [native/return_value("kernel_closed")]),
+    native_memory/when(native_kernel/read("Work", "work", "done"), [native/return_value("kernel_closed")]),
+    native_memory/bind("worker", worker[1], native_memory/field(worker[1], "transaction", "worker"))]
+  context = native_kernel/define(context, "view", [@load_work,
+    native/when_statement(native_kernel/is_null("Work", "work"), [native/return_value(native_kernel/null("Relation"))]),
+    native/let_call("change", change, "kernel_change", ["work", "id"]),
+    native/unless_statement(native_kernel/is_null("Change", "change"), [native/return_value(native_kernel/read("Change", "change", "after"))]),
+    native/return_value(native/call_expression("kernel_relation", [native_kernel/read("Snapshot", native_kernel/read("Work", "work", "base"), "relations"), "id"]))])
+  context = native_kernel/define(context, "declare", [@open,
+    native/when_statement(native_kernel/binary(:Equal, "id", "zero"), [native/return_value("kernel_schema")]),
+    native/when_statement(native_kernel/binary(:Less, "kernel_64", "arity"), [native/return_value("kernel_schema")]),
+    native/when_statement(native_kernel/binary(:Less, "kernel_policy_event", "policy"), [native/return_value("kernel_schema")]),
+    native/when_statement(native_kernel/binary(:Less, "arity", "kernel_64"), [
+      native/unless_statement(native_kernel/binary(:Equal, native_kernel/binary(:ShiftRight, native_kernel/binary(:BitOr, "keys", "indexes"), "arity"), "zero"), [native/return_value("kernel_schema")])]),
+    native/unless_statement(native_kernel/binary(:Equal, "policy", "kernel_policy_functional"), [
+      native/unless_statement(native_kernel/binary(:Equal, "keys", "zero"), [native/return_value("kernel_schema")])]),
+    native/unless_statement(native_kernel/is_null("Relation", native_kernel/call(relation, "view", ["transaction", "id"])), [native/return_value("kernel_schema")]),
+    native_memory/bind("base", snapshot, native_kernel/read("Work", "work", "base")),
+    native/unless_statement(native_kernel/is_null("Relation", native_kernel/call(relation, "named", [native_kernel/read("Snapshot", "base", "relations"), "name"])), [native/return_value("kernel_name")]),
+    native_memory/bind("cursor", change, native_kernel/read("Work", "work", "changes")),
+    native/while_statement("true", [
+      native/when_statement(native_kernel/is_null("Change", "cursor"), [native/break_statement()]),
+      native/when_statement(native_kernel/binary(:Equal, native_kernel/read("Relation", native_kernel/read("Change", "cursor", "after"), "name"), "name"), [native/return_value("kernel_name")]),
+      native_memory/set("cursor", native_kernel/read("Change", "cursor", "next"))]),
+    native/let_call("head", index, "kernel_new_Index", ["worker", native_kernel/null("Index"), "zero", native_kernel/null("Node")]),
+    native/when_statement(native_kernel/is_null("Index", "head"), [native/return_value("kernel_oom")]),
+    native/when_statement(native_kernel/binary(:Equal, "policy", "kernel_policy_functional"), [
+      native/unless_statement(native_kernel/binary(:Equal, "keys", "zero"), [
+        native/set_statement("head", native/call_expression("kernel_new_Index", ["worker", "head", "keys", native_kernel/null("Node")])),
+        native/when_statement(native_kernel/is_null("Index", "head"), [native/return_value("kernel_oom")])])]),
+    native/let_statement("i", :U64, "zero"), native/let_statement("bit", :U64, "one"),
+    native/while_statement(native_kernel/binary(:Less, "i", "arity"), [
+      native/unless_statement(native_kernel/binary(:Equal, native_kernel/binary(:BitAnd, "indexes", "bit"), "zero"), [
+        native/unless_statement(native_kernel/binary(:Equal, "bit", "keys"), [
+          native/set_statement("head", native/call_expression("kernel_new_Index", ["worker", "head", "bit", native_kernel/null("Node")])),
+          native/when_statement(native_kernel/is_null("Index", "head"), [native/return_value("kernel_oom")])])]),
+      native/set_statement("i", native/binary_expression(:Add, "i", "one")),
+      native/set_statement("bit", native/binary_expression(:ShiftLeft, "bit", "one"))]),
+    native/let_call("relation", relation, "kernel_new_Relation", ["worker", native_kernel/null("Relation"), "id", "name", "arity", "policy", "keys", "head"]),
+    native/when_statement(native_kernel/is_null("Relation", "relation"), [native/return_value("kernel_oom")]),
+    native/let_call("created", change, "kernel_new_Change", ["worker", native_kernel/read("Work", "work", "changes"), native_kernel/null("Relation"), "relation", native_kernel/null("Node")]),
+    native/when_statement(native_kernel/is_null("Change", "created"), [native/return_value("kernel_oom")]),
+    native_kernel/write("Work", "work", "changes", "created"), native/return_value("kernel_ok")])
+  context = native_kernel/define(context, "write", [@open,
+    native/let_call("relation", relation, "kernel_view", ["transaction", "id"]),
+    native/when_statement(native_kernel/is_null("Relation", "relation"), [native/return_value("kernel_unknown")]),
+    native/unless_statement(native_kernel/binary(:Equal, native/typed_expression(:U8, native/unary_expression(:Tag, "row")), "tag_list"), [native/return_value("kernel_arity")]),
+    native/unless_statement(native_kernel/binary(:Equal, native_kernel/call(:U64, "width", ["row"]), native_kernel/read("Relation", "relation", "arity")), [native/return_value("kernel_arity")]),
+    native/unless_statement(native/call_expression("value_is_persistable", ["row"]), [native/return_value("kernel_nonpersistent")]),
+    native/when_statement("asserted", [
+      native/when_statement(native_kernel/binary(:Equal, native_kernel/read("Relation", "relation", "policy"), "kernel_policy_functional"), [
+        native_memory/bind("keys", :U64, native_kernel/read("Relation", "relation", "keys")),
+        native/let_call("found", node, "kernel_find", [native_kernel/call(node, "index", ["relation", "keys"]), "row", "keys", "true"]),
+        native/unless_statement(native_kernel/is_null("Node", "found"), [
+          native/unless_statement(native_kernel/binary(:Equal, native_kernel/call(:I64, "compare", ["row", native_kernel/read("Node", "found", "row"), "zero", "false"]), "int_zero"), [native/return_value("kernel_key")])])])]),
+    native/let_call("change", change, "kernel_change", ["work", "id"]),
+    native/when_statement(native_kernel/is_null("Change", "change"), [
+      native/set_statement("change", native/call_expression("kernel_new_Change", ["worker", native_kernel/read("Work", "work", "changes"), "relation", "relation", native_kernel/null("Node")])),
+      native/when_statement(native_kernel/is_null("Change", "change"), [native/return_value("kernel_oom")]),
+      native_kernel/write("Work", "work", "changes", "change")]),
+    native/let_call("after", relation, "kernel_apply", ["worker", "relation", "row", "asserted"]),
+    native/when_statement(native_kernel/is_null("Relation", "after"), [native/return_value("kernel_oom")]),
+    native/let_call("written", [:Record, "KernelNodeResult"], "kernel_set", ["worker", native_kernel/read("Change", "change", "writes"), "row", "zero", "false", "asserted"]),
+    native/unless_statement(native/field_expression("written", "ok"), [native/return_value("kernel_oom")]),
+    native_kernel/write("Change", "change", "after", "after"),
+    native_kernel/write("Change", "change", "writes", native/typed_field(node, "written", "node")),
+    native/return_value("kernel_ok")])
+  context = native_kernel/define(context, "scan", [@load_work,
+    native/when_statement(native_kernel/is_null("Work", "work"), [native/return_record(["kernel_closed", "zero", "zero", "false"])]),
+    native_memory/when(native_kernel/read("Work", "work", "done"), [native/return_record(["kernel_closed", "zero", "zero", "false"])]),
+    native/return_value(native/call_expression("kernel_relation_scan", [native_kernel/call(relation, "view", ["transaction", "id"]), "pattern", "mask", "after", "output", "capacity"]))])
+  context = native_kernel/define(context, "version", [@load_work,
+    native/when_statement(native_kernel/is_null("Work", "work"), [native/return_value("zero")]),
+    native_memory/bind("snapshot", snapshot, native_kernel/read("Work", "work", "candidate")),
+    native/when_statement(native_kernel/is_null("Snapshot", "snapshot"), [native_memory/set("snapshot", native_kernel/read("Work", "work", "base"))]),
+    native/return_value(native_kernel/read("Snapshot", "snapshot", "version"))])
+  context = native_kernel/define(context, "deltas", [@load_work,
+    native/when_statement(native_kernel/is_null("Work", "work"), [native/return_value(native_kernel/null("Delta"))]),
+    native/unless_statement(native_kernel/read("Work", "work", "done"), [native/return_value(native_kernel/null("Delta"))]),
+    native/return_value(native_kernel/read("Work", "work", "deltas"))])
+  let conflict: list = [native_kernel/write("Work", "work", "status", "kernel_conflict"),
+    native_kernel/write("Work", "work", "conflict_relation", native_kernel/read("Relation", "before", "id")),
+    native_kernel/write("Work", "work", "conflict_tuple", "row"), native/return_value("false")]
+  context = native_kernel/define(context, "validate", [
+    native/when_statement(native_kernel/is_null("Node", "writes"), [native/return_value("true")]),
+    native/when_statement(native_kernel/is_null("Relation", "before"), [native/return_value("true")]),
+    native/when_statement(native_kernel/binary(:Equal, "before", "current"), [native/return_value("true")]),
+    native_memory/bind("row", word, native_kernel/read("Node", "writes", "row")),
+    native/when_statement(native_kernel/is_null("Relation", "current"), conflict),
+    native_memory/bind("policy", :U64, native_kernel/read("Relation", "before", "policy")),
+    native/when_statement(native_kernel/binary(:Equal, "policy", "kernel_policy_event"), [native/return_value("true")]),
+    native/let_statement("keys", :U64, "zero"), native/let_statement("prefix", :Bool, "false"),
+    native/when_statement(native_kernel/binary(:Equal, "policy", "kernel_policy_functional"), [
+      native_memory/set("keys", native_kernel/read("Relation", "before", "keys")), native/set_statement("prefix", "true")]),
+    native/let_call("base_row", node, "kernel_find", [native_kernel/call(node, "index", ["before", "keys"]), "row", "keys", "prefix"]),
+    native/let_call("now_row", node, "kernel_find", [native_kernel/call(node, "index", ["current", "keys"]), "row", "keys", "prefix"]),
+    native/if_statement("prefix", [
+      native/unless_statement(native_kernel/binary(:Equal, native_kernel/is_null("Node", "base_row"), native_kernel/is_null("Node", "now_row")), conflict),
+      native/unless_statement(native_kernel/is_null("Node", "base_row"), [
+        native/unless_statement(native_kernel/binary(:Equal, native_kernel/call(:I64, "compare", [native_kernel/read("Node", "base_row", "row"), native_kernel/read("Node", "now_row", "row"), "zero", "false"]), "int_zero"), conflict)])], [
+      native_memory/when(native_kernel/read("Node", "writes", "present"), [
+        native/unless_statement(native_kernel/is_null("Node", "base_row"), [native/when_statement(native_kernel/is_null("Node", "now_row"), conflict)])])]),
+    native/unless_statement(native/call_expression("kernel_validate", ["work", native_kernel/read("Node", "writes", "left"), "before", "current"]), [native/return_value("false")]),
+    native/return_value(native/call_expression("kernel_validate", ["work", native_kernel/read("Node", "writes", "right"), "before", "current"]))])
+  context = native_kernel/define(context, "apply_writes", [
+    native/when_statement(native_kernel/is_null("Node", "writes"), [native/return_value("current")]),
+    native/let_call("result", relation, "kernel_apply_writes", ["worker", "work", native_kernel/read("Node", "writes", "left"), "before", "current", "asserted"]),
+    native/when_statement(native_kernel/is_null("Relation", "result"), [native/return_value("result")]),
+    native_memory/bind("row", word, native_kernel/read("Node", "writes", "row")),
+    native/when_statement(native_kernel/binary(:Equal, native_kernel/read("Node", "writes", "present"), "asserted"), [
+      native/let_statement("effective", :Bool, "asserted"),
+      native/unless_statement("asserted", [
+        native/let_call("was", node, "kernel_find", [native_kernel/call(node, "index", ["before", "zero"]), "row", "zero", "false"]),
+        native/set_statement("effective", native_kernel/negate(native_kernel/is_null("Node", "was")))]),
+      native/when_statement("effective", [
+        native/let_call("updated", relation, "kernel_apply", ["worker", "result", "row", "asserted"]),
+        native/when_statement(native_kernel/is_null("Relation", "updated"), [native/return_value("updated")]),
+        native/unless_statement(native_kernel/binary(:Equal, "result", "updated"), [
+          native/let_call("delta", delta, "kernel_new_Delta", ["worker", native_kernel/read("Work", "work", "deltas"), native_kernel/read("Relation", "updated", "id"), "row", "asserted"]),
+          native/when_statement(native_kernel/is_null("Delta", "delta"), [native/return_value(native_kernel/null("Relation"))]),
+          native_kernel/write("Work", "work", "deltas", "delta")]),
+        native/set_statement("result", "updated")])]),
+    native/return_value(native/call_expression("kernel_apply_writes", ["worker", "work", native_kernel/read("Node", "writes", "right"), "before", "result", "asserted"]))])
+  return context
+end

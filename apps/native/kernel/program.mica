@@ -1,0 +1,220 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+verb native_kernel/pointer(name: string) -> list
+  let output: list = native_memory/record_pointer(string_concat("Kernel", name))
+  return output
+end
+
+verb native_kernel/schemas() -> list
+  let node: list = native_kernel/pointer("Node")
+  let relation: list = native_kernel/pointer("Relation")
+  let word: list = native_value/word()
+  return [
+    ["Node", [["left", node], ["right", node], ["row", word], ["height", :U64], ["present", :Bool]]],
+    ["Index", [["next", native_kernel/pointer("Index")], ["mask", :U64], ["tree", node]]],
+    ["Relation", [["next", relation], ["id", :U64], ["name", :U64], ["arity", :U64],
+      ["policy", :U64], ["keys", :U64], ["indexes", native_kernel/pointer("Index")]]],
+    ["Snapshot", [["version", :U64], ["relations", relation]]],
+    ["Change", [["next", native_kernel/pointer("Change")], ["before", relation], ["after", relation], ["writes", node]]],
+    ["Delta", [["next", native_kernel/pointer("Delta")], ["relation", :U64], ["row", word], ["asserted", :Bool]]],
+    ["Work", [["base", native_kernel/pointer("Snapshot")], ["changes", native_kernel/pointer("Change")],
+      ["candidate", native_kernel/pointer("Snapshot")], ["deltas", native_kernel/pointer("Delta")],
+      ["status", :U64], ["conflict_relation", :U64], ["conflict_tuple", word], ["done", :Bool]]]]
+end
+
+verb native_kernel/field_type(record: string, field: string)
+  for spec in native_kernel/schemas()
+    if spec[0] == record
+      for member in spec[1]
+        if member[0] == field
+          return member[1]
+        end
+      end
+    end
+  end
+  native/ensure(false, "unknown kernel field")
+end
+
+verb native_kernel/read(record: string, object, field: string) -> list
+  let output: list = native_memory/field(native_kernel/field_type(record, field), object, field)
+  return output
+end
+
+verb native_kernel/write(record: string, object, field: string, value) -> list
+  let output: list = native_memory/store(native_kernel/field_type(record, field), object, field, value)
+  return output
+end
+
+verb native_kernel/binary(op: symbol, left, right) -> list
+  let kind: symbol = :U64
+  if native/contains([:Equal, :Less, :LessEqual, :NotEqual], op)
+    kind = :Bool
+  end
+  let output: list = native/typed_expression(kind, native/binary_expression(op, left, right))
+  return output
+end
+
+verb native_kernel/negate(value) -> list
+  let output: list = native/binary_expression(:Equal, value, "false")
+  return output
+end
+
+verb native_kernel/null(name: string) -> list
+  let output: list = native/typed_zero(native_kernel/pointer(name))
+  return output
+end
+
+verb native_kernel/is_null(name: string, value) -> list
+  let output: list = native_kernel/binary(:Equal, value, native_kernel/null(name))
+  return output
+end
+
+verb native_kernel/call(type_id, name: string, args: list) -> list
+  let output: list = native/typed_call(type_id, string_concat("kernel_", name), args)
+  return output
+end
+
+verb native_kernel/declare(context: map, name: string, result, parameters: list, ?relocates: bool = false) -> map
+  let effects: list = [:ReadMemory, :WriteMemory, :Allocate, :Release]
+  if relocates
+    effects = [@effects, :Relocate]
+  end
+  let mode: symbol = :Value
+  if native/is_pointer(result) || result == native_value/word() || result == [:Record, "KernelNodeResult"]
+    mode = :Gc
+  end
+  let output: map = native_memory/declare(context, string_concat("kernel_", name), result, parameters, effects, mode, "")
+  return output
+end
+
+verb native_kernel/define(context: map, name: string, body: list) -> map
+  let output: map = native/define_function(context, string_concat("kernel_", name), native_kernel/body(body))
+  return output
+end
+
+// Typed expressions are convenient when composing kernel builders. Strip the
+// outer annotation where the structured statement already supplies its type.
+verb native_kernel/body(statements: list) -> list
+  let output: list = []
+  for statement in statements
+    let item: list = statement
+    let positions: map = {:Let -> 3, :Set -> 2, :Do -> 1, :If -> 1, :While -> 1, :Switch -> 2, :Return -> 1}
+    if map_contains_key(positions, item[0]) && len(item) > positions[item[0]]
+      let p: int = positions[item[0]]
+      if is_kind(item[p], :list) && item[p][0] == :Expr
+        item[p] = item[p][2]
+      end
+    end
+    if item[0] == :If
+      item[2] = native_kernel/body(item[2])
+      item[3] = native_kernel/body(item[3])
+    elseif item[0] == :While
+      item[2] = native_kernel/body(item[2])
+    elseif item[0] == :Switch
+      item[3] = [[arm[0], native_kernel/body(arm[1])] for arm in item[3]]
+      item[4] = native_kernel/body(item[4])
+    end
+    output = [@output, item]
+  end
+  return output
+end
+
+verb native_kernel/types(input: map) -> map
+  let context: map = input
+  let word: list = native_value/word()
+  let root: list = [:Record, "MemoryRoot"]
+  let worker: list = native_memory/record_pointer("MemoryWorker")
+  let bytes: list = native_memory/pointer(:U8)
+  let state: map = context[:state]
+  let constants: list = [
+    ["kernel_ok", :U64, native_value/hex(0)], ["kernel_unknown", :U64, native_value/hex(1)],
+    ["kernel_arity", :U64, native_value/hex(2)], ["kernel_nonpersistent", :U64, native_value/hex(3)],
+    ["kernel_key", :U64, native_value/hex(4)], ["kernel_conflict", :U64, native_value/hex(5)],
+    ["kernel_name", :U64, native_value/hex(6)], ["kernel_schema", :U64, native_value/hex(7)],
+    ["kernel_oom", :U64, native_value/hex(8)], ["kernel_closed", :U64, native_value/hex(9)],
+    ["kernel_policy_set", :U64, native_value/hex(0)], ["kernel_policy_functional", :U64, native_value/hex(1)],
+    ["kernel_policy_event", :U64, native_value/hex(2)], ["kernel_64", :U64, native_value/hex(64)]]
+  let layout: int = 100
+  for spec in native_kernel/schemas()
+    state = native/record_type(state, string_concat("Kernel", spec[0]), spec[1])[1]
+    constants = [@constants, [string_concat("kernel_layout_", spec[0]), :U64, native_value/hex(layout)]]
+    layout = layout + 1
+  end
+  for spec in [
+    ["Kernel", [["heap", native_memory/record_pointer("MemoryHeap")], ["mutex", bytes], ["current", root]]],
+    ["KernelTransaction", [["kernel", native_memory/record_pointer("Kernel")], ["worker", worker], ["root", root]]],
+    ["KernelNodeResult", [["ok", :Bool], ["node", native_kernel/pointer("Node")]]],
+    ["KernelScan", [["pattern", word], ["after", word], ["order", :U64], ["mask", :U64], ["prefix", :U64],
+      ["output", native_memory/pointer(word)], ["capacity", :U64], ["count", :U64], ["visited", :U64], ["more", :Bool]]],
+    ["KernelScanResult", [["status", :U64], ["count", :U64], ["visited", :U64], ["more", :Bool]]]]
+    state = native/record_type(state, spec[0], spec[1])[1]
+  end
+  let [bindings, declared] = native/constants(state, constants)
+  context[:state] = declared
+  let merged: map = context[:constants]
+  for name, id in bindings
+    merged[name] = id
+  end
+  context[:constants] = merged
+  for spec in native_kernel/schemas()
+    let type_id: list = native_kernel/pointer(spec[0])
+    let parameters: list = [["worker", worker, :Borrow]]
+    for field in spec[1]
+      let mode: symbol = :Value
+      if native/is_pointer(field[1]) || field[1] == word
+        mode = :Gc
+      end
+      parameters = [@parameters, [field[0], field[1], mode]]
+    end
+    let name: string = string_concat("new_", spec[0])
+    context = native_kernel/declare(context, name, type_id, parameters)
+    context = native_kernel/define(context, name, [
+      native/let_call("raw", bytes, "memory_allocate", ["worker",
+        native/typed_expression(:U64, native/unary_expression(:SizeOf, [:Record, string_concat("Kernel", spec[0])])),
+        string_concat("kernel_layout_", spec[0])]),
+      native/when_statement(native_kernel/binary(:Equal, "raw", "null_bytes"), [native/return_value(native_kernel/null(spec[0]))]),
+      native/let_statement("object", type_id, native/unary_expression(:PointerCast, "raw")),
+      native/store_statement("object", native/typed_record([:Record, string_concat("Kernel", spec[0])], [field[0] for field in spec[1]])),
+      native/return_value("object")])
+  end
+  return context
+end
+
+verb native_kernel/tracing(input: map) -> map
+  let context: map = input
+  let collection: list = native_memory/record_pointer("MemoryCollection")
+  let object: list = native_memory/record_pointer("MemoryObject")
+  let bytes: list = native_memory/pointer(:U8)
+  context = native_kernel/declare(context, "trace", :Void, [["collection", collection, :Borrow], ["object", object, :Gc]])
+  let cases: list = []
+  for spec in native_kernel/schemas()
+    let body: list = [native_memory/bind("header", native_kernel/pointer(spec[0]), native/unary_expression(:PointerCast, "payload"))]
+    for field in spec[1]
+      if native/is_pointer(field[1])
+        body = [@body, @native_value/trace_external("header", field[0], field[1])]
+      elseif field[1] == native_value/word()
+        body = [@body, @native_value/trace_word_field("header", field[0])]
+      end
+    end
+    cases = [@cases, native/case_arm(string_concat("kernel_layout_", spec[0]),
+      [@native/rename_bindings(body, native_value/trace_bindings(body, spec[0])), native/return_void()])]
+  end
+  context = native_kernel/define(context, "trace", [
+    native_memory/bind("layout", :U64, native_memory/field(:U64, "object", "layout")),
+    native/let_call("payload", bytes, "memory_payload", ["object"]),
+    native/switch_statement(:U64, "layout", cases, [native_memory/call("value_trace", ["collection", "object"]), native/return_void()])])
+  return context
+end
+
+verb native_kernel/program() -> map
+  let context: map = native_value/definitions()
+  context = native_kernel/types(context)
+  context = native_kernel/tracing(context)
+  context = native_kernel/indexes(context)
+  context = native_kernel/relations(context)
+  context = native_kernel/transactions(context)
+  context = native_kernel/lifecycle(context)
+  let state: map = context[:state]
+  return state
+end

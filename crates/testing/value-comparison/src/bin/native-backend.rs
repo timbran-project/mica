@@ -29,6 +29,9 @@ struct Options {
     /// Check the backends, managed heap, values, and tail-call execution.
     #[arg(long, conflicts_with_all = ["module", "load_symbol"])]
     check_fixtures: bool,
+    /// Run one named fixture instead of the complete fixture suite.
+    #[arg(long, requires = "check_fixtures")]
+    fixture: Option<String>,
     /// Rebuild B1/B2, qualify both, and measure repeated compiler lifecycles.
     #[arg(long, conflicts_with_all = ["module", "load_symbol", "check_fixtures", "reuse_backend"])]
     self_rebuild: bool,
@@ -125,6 +128,11 @@ fn run() -> Result<()> {
         "value/codec",
         "value/codec_decode",
         "value/persistence",
+        "kernel/program",
+        "kernel/indexes",
+        "kernel/relations",
+        "kernel/transactions",
+        "kernel/lifecycle",
         "gccjit/data",
         "gccjit/bindings",
         "gccjit/program",
@@ -387,6 +395,7 @@ fn check_fixtures(
     root: &Path,
     backend: &Path,
 ) -> Result<()> {
+    let mut checked = false;
     for (name, expression, symbol, traps) in [
         ("scalar", "native/scalar_example()", "mica_sum", ""),
         (
@@ -420,7 +429,21 @@ fn check_fixtures(
             "mica_value_root_get",
             "",
         ),
+        (
+            "kernel",
+            "native_kernel/program()",
+            "mica_kernel_commit",
+            "",
+        ),
     ] {
+        if options
+            .fixture
+            .as_deref()
+            .is_some_and(|fixture| fixture != name)
+        {
+            continue;
+        }
+        checked = true;
         let directory = options.output.join(name);
         fs::create_dir_all(&directory)?;
         generate_module(runner, expression, &directory, "module")?;
@@ -460,6 +483,13 @@ fn check_fixtures(
                 fs::read_to_string(root.join("native/platform/allocation.c"))?,
                 fs::read_to_string(root.join("native/platform/mutex.c"))?,
                 fs::read_to_string(root.join("apps/native/value/gc_tests.c"))?,
+            ),
+            "kernel" => format!(
+                "#define MICA_MEMORY_TEST_ALLOCATOR\n{}\n{}\n{}\n{}",
+                text(&eval(runner, "return native_memory/platform()")?)?,
+                fs::read_to_string(root.join("native/platform/allocation.c"))?,
+                fs::read_to_string(root.join("native/platform/mutex.c"))?,
+                fs::read_to_string(root.join("apps/native/kernel/tests.c"))?,
             ),
             _ => unreachable!(),
         };
@@ -530,6 +560,9 @@ fn check_fixtures(
             serde_json::json!({"fixture":name,"correctness":"passed","backends":["c", "gccjit-object", "gccjit-shared"],"sanitized":options.sanitize})
         );
     }
+    if !checked {
+        return Err(format!("unknown fixture: {:?}", options.fixture).into());
+    }
     Ok(())
 }
 
@@ -573,6 +606,7 @@ fn self_rebuild(runner: &mut SourceRunner, options: &Options, root: &Path) -> Re
             reuse_backend: true,
             module: "native_value/program()".into(),
             check_fixtures: false,
+            fixture: None,
             self_rebuild: false,
             lifecycle_rounds: options.lifecycle_rounds,
             load_symbol: None,

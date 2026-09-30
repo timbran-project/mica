@@ -3789,6 +3789,7 @@ name = "mica-value-comparison"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "mica-relation-kernel",
  "mica-runtime",
  "mica-var",
  "proptest",

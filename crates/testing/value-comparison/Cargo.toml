@@ -10,6 +10,7 @@ description = "Correctness and performance comparison of Rust and Mica-generated
 [dependencies]
 clap.workspace = true
 mica-runtime.workspace = true
+mica-relation-kernel.workspace = true
 mica-var.workspace = true
 proptest.workspace = true
 serde.workspace = true

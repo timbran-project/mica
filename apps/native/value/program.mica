@@ -53,7 +53,7 @@ verb native_value/context() -> map
   return context
 end
 
-verb native_value/program() -> map
+verb native_value/definitions() -> map
   let context: map = native_value/context()
   context = native_value/immediates(context)
   context = native_value/numbers(context)
@@ -76,6 +76,11 @@ verb native_value/program() -> map
   context = native_value/codec_decoder(context)
   context = native_value/persistence(context)
   context = native_value/tracing(context)
+  return context
+end
+
+verb native_value/program() -> map
+  let context: map = native_value/definitions()
   let state: map = context[:state]
   return state
 end

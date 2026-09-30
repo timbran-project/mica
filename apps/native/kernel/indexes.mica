@@ -1,0 +1,142 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+// Each index is a persistent AVL tree. Rows are immutable Mica lists; rotations
+// allocate path nodes and retain unchanged subtrees through managed pointers.
+verb native_kernel/indexes(input: map) -> map
+  let context: map = input
+  let node: list = native_kernel/pointer("Node")
+  let word: list = native_value/word()
+  let worker: list = ["worker", native_memory/record_pointer("MemoryWorker"), :Borrow]
+  let result: list = [:Record, "KernelNodeResult"]
+  for spec in [
+    ["cell", word, [["row", word, :Gc], ["position", :U64, :Value]]],
+    ["width", :U64, [["row", word, :Gc]]],
+    ["compare", :I64, [["left", word, :Gc], ["right", word, :Gc], ["mask", :U64, :Value], ["prefix", :Bool, :Value]]],
+    ["height", :U64, [["node", node, :Gc]]],
+    ["make", node, [worker, ["left", node, :Gc], ["right", node, :Gc], ["row", word, :Gc], ["present", :Bool, :Value]]],
+    ["balance", node, [worker, ["left", node, :Gc], ["right", node, :Gc], ["row", word, :Gc], ["present", :Bool, :Value]]],
+    ["set", result, [worker, ["node", node, :Gc], ["row", word, :Gc], ["mask", :U64, :Value], ["remove", :Bool, :Value], ["present", :Bool, :Value]]],
+    ["find", node, [["node", node, :Gc], ["row", word, :Gc], ["mask", :U64, :Value], ["prefix", :Bool, :Value]]]]
+    context = native_kernel/declare(context, spec[0], spec[1], spec[2])
+  end
+  let header: list = [:Pointer, [:Record, "HeapList"], :Const]
+  context = native_kernel/define(context, "width", [
+    native/let_statement("header", header, native/unary_expression(:UnpackPointer, "row")),
+    native/let_load("view", [:Record, "HeapList"], "header"),
+    native/return_value(native/typed_field(:U64, "view", "length"))])
+  context = native_kernel/define(context, "cell", [
+    native/let_statement("header", header, native/unary_expression(:UnpackPointer, "row")),
+    native/let_load("view", [:Record, "HeapList"], "header"),
+    native/let_field("data", native_memory/pointer(word), "view", "data"),
+    native/return_value(native/typed_load(word, native/typed_expression(native_memory/pointer(word), native/offset_expression("data", "position"))))])
+  context = native_kernel/define(context, "compare", [
+    native/let_call("width", :U64, "kernel_width", ["left"]),
+    native/let_statement("pass", :U64, "zero"),
+    native/while_statement(native_kernel/binary(:Less, "pass", "two"), [
+      native/let_statement("i", :U64, "zero"), native/let_statement("bit", :U64, "one"),
+      native/while_statement(native_kernel/binary(:Less, "i", "width"), [
+        native/let_statement("selected", :Bool, native/binary_expression(:Equal,
+          native_kernel/binary(:BitAnd, "mask", "bit"), "zero")),
+        native/when_statement(native_kernel/binary(:Equal, "selected", native_kernel/binary(:Equal, "pass", "one")), [
+          native/let_call("order", [:Record, "IntResult"], "value_compare", [
+            native_kernel/call(word, "cell", ["left", "i"]), native_kernel/call(word, "cell", ["right", "i"])]),
+          native/let_field("number", :I64, "order", "number"),
+          native/unless_statement(native_kernel/binary(:Equal, "number", "int_zero"), [native/return_value("number")])]),
+        native/set_statement("i", native/binary_expression(:Add, "i", "one")),
+        native/set_statement("bit", native/binary_expression(:ShiftLeft, "bit", "one"))]),
+      native/when_statement("prefix", [native/return_value("int_zero")]),
+      native/set_statement("pass", native/binary_expression(:Add, "pass", "one"))]),
+    native/return_value("int_zero")])
+  context = native_kernel/define(context, "height", [
+    native/when_statement(native_kernel/is_null("Node", "node"), [native/return_value("zero")]),
+    native/return_value(native_kernel/read("Node", "node", "height"))])
+  context = native_kernel/define(context, "make", [
+    native/let_call("height", :U64, "kernel_height", ["left"]),
+    native/let_call("other", :U64, "kernel_height", ["right"]),
+    native/when_statement(native_kernel/binary(:Less, "height", "other"), [native/set_statement("height", "other")]),
+    native/return_value(native/call_expression("kernel_new_Node", ["worker", "left", "right", "row",
+      native_kernel/binary(:Add, "height", "one"), "present"]))])
+  let rotations: list = []
+  for side in ["left", "right"]
+    let other: string = "right"
+    if side == "right"
+      other = "left"
+    end
+    let child_args: list = [native_kernel/read("Node", "pivot", other), other]
+    let root_args: list = [native_kernel/read("Node", "pivot", side), "child"]
+    let a_args: list = [native_kernel/read("Node", "pivot", side), native_kernel/read("Node", "middle", side)]
+    let b_args: list = [native_kernel/read("Node", "middle", other), other]
+    let double_args: list = ["a", "b"]
+    if side == "right"
+      child_args = [child_args[1], child_args[0]]
+      root_args = [root_args[1], root_args[0]]
+      a_args = [a_args[1], a_args[0]]
+      b_args = [b_args[1], b_args[0]]
+      double_args = ["b", "a"]
+    end
+    let body: list = [native/let_statement("pivot", node, side),
+      native/when_statement(native_kernel/binary(:Less,
+        native_kernel/call(:U64, "height", [native_kernel/read("Node", "pivot", side)]),
+        native_kernel/call(:U64, "height", [native_kernel/read("Node", "pivot", other)])), [
+        native_memory/bind("middle", node, native_kernel/read("Node", "pivot", other)),
+        native/let_call("a", node, "kernel_make", ["worker", @a_args, native_kernel/read("Node", "pivot", "row"), native_kernel/read("Node", "pivot", "present")]),
+        native/when_statement(native_kernel/is_null("Node", "a"), [native/return_value(native_kernel/null("Node"))]),
+        native/let_call("b", node, "kernel_make", ["worker", @b_args, "row", "present"]),
+        native/when_statement(native_kernel/is_null("Node", "b"), [native/return_value(native_kernel/null("Node"))]),
+        native/return_value(native/call_expression("kernel_make", ["worker", @double_args, native_kernel/read("Node", "middle", "row"), native_kernel/read("Node", "middle", "present")]))]),
+      native/let_call("child", node, "kernel_make", ["worker", @child_args, "row", "present"]),
+      native/when_statement(native_kernel/is_null("Node", "child"), [native/return_value(native_kernel/null("Node"))]),
+      native/return_value(native/call_expression("kernel_make", ["worker", @root_args, native_kernel/read("Node", "pivot", "row"), native_kernel/read("Node", "pivot", "present")]))]
+    rotations = [@rotations, native/when_statement(native_kernel/binary(:Less,
+      native_kernel/binary(:Add, native_kernel/call(:U64, "height", [other]), "one"),
+      native_kernel/call(:U64, "height", [side])), native/rename_bindings(body, native_value/trace_bindings(body, side)))]
+  end
+  context = native_kernel/define(context, "balance", [@rotations,
+    native/return_value(native/call_expression("kernel_make", ["worker", "left", "right", "row", "present"]))])
+  context = native_kernel/define(context, "find", [
+    native/let_statement("cursor", node, "node"),
+    native/while_statement("true", [
+      native/when_statement(native_kernel/is_null("Node", "cursor"), [native/return_value("cursor")]),
+      native/let_call("order", :I64, "kernel_compare", ["row", native_kernel/read("Node", "cursor", "row"), "mask", "prefix"]),
+      native/when_statement(native_kernel/binary(:Equal, "order", "int_zero"), [native/return_value("cursor")]),
+      native/if_statement(native_kernel/binary(:Less, "order", "int_zero"),
+        [native_memory/set("cursor", native_kernel/read("Node", "cursor", "left"))],
+        [native_memory/set("cursor", native_kernel/read("Node", "cursor", "right"))])]), native/return_value(native_kernel/null("Node"))])
+  let failed: list = [native/return_zero()]
+  context = native_kernel/define(context, "set", [
+    native/when_statement(native_kernel/is_null("Node", "node"), [
+      native/when_statement("remove", [native/return_record(["true", native_kernel/null("Node")])]),
+      native/let_call("leaf", node, "kernel_make", ["worker", native_kernel/null("Node"), native_kernel/null("Node"), "row", "present"]),
+      native/return_record([native/typed_expression(:Bool, native_kernel/negate(native_kernel/is_null("Node", "leaf"))), "leaf"])]),
+    native_memory/bind("left", node, native_kernel/read("Node", "node", "left")),
+    native_memory/bind("right", node, native_kernel/read("Node", "node", "right")),
+    native_memory/bind("item", word, native_kernel/read("Node", "node", "row")),
+    native_memory/bind("flag", :Bool, native_kernel/read("Node", "node", "present")),
+    native/let_call("order", :I64, "kernel_compare", ["row", "item", "mask", "false"]),
+    native/if_statement(native_kernel/binary(:Equal, "order", "int_zero"), [
+      native/if_statement("remove", [
+        native/when_statement(native_kernel/is_null("Node", "left"), [native/return_record(["true", "right"])]),
+        native/when_statement(native_kernel/is_null("Node", "right"), [native/return_record(["true", "left"])]),
+        native/let_statement("successor", node, "right"),
+        native/while_statement("true", [
+          native_memory/bind("next", node, native_kernel/read("Node", "successor", "left")),
+          native/when_statement(native_kernel/is_null("Node", "next"), [native/break_statement()]),
+          native/set_statement("successor", "next")]),
+        native_memory/set("item", native_kernel/read("Node", "successor", "row")),
+        native_memory/set("flag", native_kernel/read("Node", "successor", "present")),
+        native/let_call("deleted", result, "kernel_set", ["worker", "right", "item", "mask", "true", "false"]),
+        native/unless_statement(native/field_expression("deleted", "ok"), failed),
+        native/set_statement("right", native/field_expression("deleted", "node"))],
+        [native/set_statement("item", "row"), native/set_statement("flag", "present")])], [
+      native/if_statement(native_kernel/binary(:Less, "order", "int_zero"), [
+        native/let_call("changed_left", result, "kernel_set", ["worker", "left", "row", "mask", "remove", "present"]),
+        native/unless_statement(native/field_expression("changed_left", "ok"), failed),
+        native/set_statement("left", native/field_expression("changed_left", "node"))], [
+        native/let_call("changed_right", result, "kernel_set", ["worker", "right", "row", "mask", "remove", "present"]),
+        native/unless_statement(native/field_expression("changed_right", "ok"), failed),
+        native/set_statement("right", native/field_expression("changed_right", "node"))])]),
+    native/let_call("balanced", node, "kernel_balance", ["worker", "left", "right", "item", "flag"]),
+    native/return_record([native/typed_expression(:Bool, native_kernel/negate(native_kernel/is_null("Node", "balanced"))), "balanced"])])
+  return context
+end

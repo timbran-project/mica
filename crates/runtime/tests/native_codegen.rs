@@ -1455,6 +1455,42 @@ state = native/block_body(state, v["entry"], [[:PackPointer, v["word"], [v["inpu
     }
 }
 
+fn load_native_values(runner: &mut SourceRunner) {
+    for source in [
+        include_str!("../../../apps/native/value/program.mica"),
+        include_str!("../../../apps/native/value/immediates.mica"),
+        include_str!("../../../apps/native/value/numbers.mica"),
+        include_str!("../../../apps/native/value/symbol_storage.mica"),
+        include_str!("../../../apps/native/memory/program.mica"),
+        include_str!("../../../apps/native/memory/allocation.mica"),
+        include_str!("../../../apps/native/memory/collection.mica"),
+        include_str!("../../../apps/native/memory/lifecycle.mica"),
+        include_str!("../../../apps/native/memory/platform.mica"),
+        include_str!("../../../apps/native/value/memory.mica"),
+        include_str!("../../../apps/native/value/tracing.mica"),
+        include_str!("../../../apps/native/value/heap.mica"),
+        include_str!("../../../apps/native/value/utf8.mica"),
+        include_str!("../../../apps/native/value/strings.mica"),
+        include_str!("../../../apps/native/value/symbols.mica"),
+        include_str!("../../../apps/native/value/string_append.mica"),
+        include_str!("../../../apps/native/value/string_search.mica"),
+        include_str!("../../../apps/native/value/compare.mica"),
+        include_str!("../../../apps/native/value/maps.mica"),
+        include_str!("../../../apps/native/value/collections.mica"),
+        include_str!("../../../apps/native/value/relations.mica"),
+        include_str!("../../../apps/native/value/hash.mica"),
+        include_str!("../../../apps/native/value/copy.mica"),
+        include_str!("../../../apps/native/value/buffer.mica"),
+        include_str!("../../../apps/native/value/codec.mica"),
+        include_str!("../../../apps/native/value/codec_decode.mica"),
+        include_str!("../../../apps/native/value/persistence.mica"),
+    ] {
+        runner.run_filein(source).unwrap_or_else(|error| {
+            panic!("{}", runner.render_source_task_error(&error));
+        });
+    }
+}
+
 #[test]
 fn native_value_layer_executes_on_both_mica_tiers() {
     let sanitizer = if std::env::var_os("MICA_NATIVE_THREAD_SANITIZER").is_some() {
@@ -1469,39 +1505,7 @@ fn native_value_layer_executes_on_both_mica_tiers() {
             instruction_budget: 500_000_000,
             ..TaskLimits::default()
         });
-        for source in [
-            include_str!("../../../apps/native/value/program.mica"),
-            include_str!("../../../apps/native/value/immediates.mica"),
-            include_str!("../../../apps/native/value/numbers.mica"),
-            include_str!("../../../apps/native/value/symbol_storage.mica"),
-            include_str!("../../../apps/native/memory/program.mica"),
-            include_str!("../../../apps/native/memory/allocation.mica"),
-            include_str!("../../../apps/native/memory/collection.mica"),
-            include_str!("../../../apps/native/memory/lifecycle.mica"),
-            include_str!("../../../apps/native/memory/platform.mica"),
-            include_str!("../../../apps/native/value/memory.mica"),
-            include_str!("../../../apps/native/value/tracing.mica"),
-            include_str!("../../../apps/native/value/heap.mica"),
-            include_str!("../../../apps/native/value/utf8.mica"),
-            include_str!("../../../apps/native/value/strings.mica"),
-            include_str!("../../../apps/native/value/symbols.mica"),
-            include_str!("../../../apps/native/value/string_append.mica"),
-            include_str!("../../../apps/native/value/string_search.mica"),
-            include_str!("../../../apps/native/value/compare.mica"),
-            include_str!("../../../apps/native/value/maps.mica"),
-            include_str!("../../../apps/native/value/collections.mica"),
-            include_str!("../../../apps/native/value/relations.mica"),
-            include_str!("../../../apps/native/value/hash.mica"),
-            include_str!("../../../apps/native/value/copy.mica"),
-            include_str!("../../../apps/native/value/buffer.mica"),
-            include_str!("../../../apps/native/value/codec.mica"),
-            include_str!("../../../apps/native/value/codec_decode.mica"),
-            include_str!("../../../apps/native/value/persistence.mica"),
-        ] {
-            runner.run_filein(source).unwrap_or_else(|error| {
-                panic!("{}", runner.render_source_task_error(&error));
-            });
-        }
+        load_native_values(&mut runner);
         let generated = eval(&mut runner, r#"
 let state = native_value/program()
 let functions = {}
@@ -1955,5 +1959,89 @@ state = declared
         );
         let message = eval(&mut runner, &source).with_str(str::to_owned).unwrap();
         assert!(message.contains(expected), "{message}");
+    }
+}
+
+#[test]
+fn native_relation_kernel_executes_on_both_mica_tiers() {
+    let mut previous = None;
+    for interpreter_only in [true, false] {
+        let mut runner = runner(interpreter_only).with_task_limits(TaskLimits {
+            instruction_budget: 1_000_000_000,
+            ..TaskLimits::default()
+        });
+        load_native_values(&mut runner);
+        for source in [
+            include_str!("../../../apps/native/kernel/program.mica"),
+            include_str!("../../../apps/native/kernel/indexes.mica"),
+            include_str!("../../../apps/native/kernel/relations.mica"),
+            include_str!("../../../apps/native/kernel/transactions.mica"),
+            include_str!("../../../apps/native/kernel/lifecycle.mica"),
+        ] {
+            runner.run_filein(source).unwrap_or_else(|error| {
+                panic!("{}", runner.render_source_task_error(&error));
+            });
+        }
+        let generated = eval(&mut runner, "return native/emit_c(native_kernel/program())")
+            .with_str(str::to_owned)
+            .unwrap();
+        if let Some(previous) = &previous {
+            assert_eq!(&generated, previous);
+        }
+        previous = Some(generated.clone());
+        let platform = eval(&mut runner, "return native_memory/platform()")
+            .with_str(str::to_owned)
+            .unwrap();
+        let scratch = Scratch::new();
+        let source = scratch.0.join("kernel.c");
+        let binary = scratch.0.join("kernel");
+        fs::write(
+            &source,
+            format!(
+                "{generated}\n#define MICA_MEMORY_TEST_ALLOCATOR\n{platform}\n{}\n{}\n{}",
+                include_str!("../../../native/platform/allocation.c"),
+                include_str!("../../../native/platform/mutex.c"),
+                include_str!("../../../apps/native/kernel/tests.c")
+            ),
+        )
+        .unwrap();
+        let sanitizer = if std::env::var_os("MICA_NATIVE_THREAD_SANITIZER").is_some() {
+            "-fsanitize=thread"
+        } else {
+            "-fsanitize=address,undefined,float-cast-overflow"
+        };
+        let compiled = Command::new(std::env::var_os("CC").unwrap_or_else(|| "cc".into()))
+            .args([
+                "-std=c11",
+                "-pthread",
+                "-O2",
+                "-g",
+                "-Wall",
+                "-Wextra",
+                "-Werror",
+                "-pedantic",
+                "-ffp-contract=off",
+                "-fno-fast-math",
+                sanitizer,
+                "-fno-sanitize-recover=all",
+                "-fno-omit-frame-pointer",
+            ])
+            .arg(&source)
+            .args(["-lm", "-o"])
+            .arg(&binary)
+            .output()
+            .unwrap();
+        assert!(
+            compiled.status.success(),
+            "{}",
+            String::from_utf8_lossy(&compiled.stderr)
+        );
+        let executed = Command::new(binary)
+            .env("ASAN_OPTIONS", "detect_leaks=1:halt_on_error=1")
+            .env("TSAN_OPTIONS", "halt_on_error=1")
+            .output()
+            .unwrap();
+        assert!(executed.status.success(), "{executed:?}");
+        assert!(executed.stderr.is_empty(), "{executed:?}");
     }
 }
