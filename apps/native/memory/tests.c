@@ -167,6 +167,41 @@ static void failed_collection_preserves_private_allocations(void) {
     assert(mica_memory_heap_release(&heap));
 }
 
+static void sweep_unlinks_empty_pages_from_free_lists(void) {
+    struct mica_MemoryHeap heap = {0};
+    struct mica_MemoryRoot roots[2] = {{0}, {0}};
+    struct mica_MemoryWorker worker = {.f_heap = &heap, .f_roots = roots};
+    heap.f_workers = &worker;
+    roots[0].f_next = &roots[1];
+    struct mica_MemoryObject *first = mica_memory_mature_allocate(&heap, 4096, 0);
+    assert(first);
+    uint64_t capacity = first->f_page->f_capacity;
+    roots[0].f_pointer = mica_memory_payload(first);
+    for (uint64_t i = 1; i < 3 * capacity; ++i) {
+        struct mica_MemoryObject *object = mica_memory_mature_allocate(&heap, 4096, 0);
+        assert(object);
+        if (i == 2 * capacity) roots[1].f_pointer = mica_memory_payload(object);
+    }
+    // Retain the first and last pages, with an empty page between them.
+    assert(mica_memory_collect_stopped(&heap));
+    assert(heap.f_retained == 8192);
+    assert(heap.f_pages && heap.f_pages->f_next && !heap.f_pages->f_next->f_next);
+    size_t before = allocations;
+    for (uint64_t i = 0; i < 2 * capacity - 2; ++i) {
+        struct mica_MemoryObject *object = mica_memory_mature_allocate(&heap, 4096, 0);
+        assert(object);
+        assert(object->f_page == heap.f_pages || object->f_page == heap.f_pages->f_next);
+        memset(mica_memory_payload(object), 0x81, 4096);
+    }
+    assert(allocations == before);
+    assert(mica_memory_mature_allocate(&heap, 4096, 0));
+    assert(allocations == before + 1);
+    worker.f_roots = NULL;
+    assert(mica_memory_collect_stopped(&heap));
+    assert(heap.f_retained == 0 && heap.f_allocated == 0);
+    for (unsigned i = 0; i < 10; ++i) assert(heap.f_free.elements[i] == NULL);
+}
+
 struct worker_test {
     struct mica_MemoryHeap *heap;
     unsigned rounds;
@@ -235,6 +270,7 @@ int main(void) {
     failed_promotion_preserves_roots();
     page_reuse_and_large_objects();
     failed_collection_preserves_private_allocations();
+    sweep_unlinks_empty_pages_from_free_lists();
     worker_lifecycle();
     assert(allocations == releases);
     return 0;

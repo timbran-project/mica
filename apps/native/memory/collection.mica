@@ -179,7 +179,7 @@ verb native_memory/free_slot_at(builder: map, heap: map, bucket: map) -> map
   return slot
 end
 
-verb native_memory/sweep_live_cell(builder: map, item: map, heap: map, reclaim: map, live: map) -> map
+verb native_memory/sweep_live_cell(builder: map, item: map, reclaim: map, live: map, retained_bytes: map) -> map
   let body: map = native_gen/when(builder, reclaim, fn(reclaiming)
     return native_gen/when(reclaiming,
       native_gen/equal(native_gen/read(native_gen/field(reclaiming, item, "mark")), native_gen/ref(reclaiming, "memory_n0")),
@@ -192,20 +192,18 @@ verb native_memory/sweep_live_cell(builder: map, item: map, heap: map, reclaim: 
     native_gen/equal(native_gen/read(native_gen/field(body, item, "state")), native_gen/ref(body, "memory_object_free")),
     fn(retained)
       let current: map = native_gen/assign(retained, live, native_gen/add(live, native_gen/ref(retained, "memory_n1")))
-      return native_gen/write(current, native_gen/field(current, heap, "retained"),
-        native_gen/add(native_gen/read(native_gen/field(current, heap, "retained")),
-          native_gen/read(native_gen/field(current, item, "size"))))
+      return native_gen/assign(current, retained_bytes,
+        native_gen/add(retained_bytes, native_gen/read(native_gen/field(current, item, "size"))))
     end)
   return result
 end
 
-verb native_memory/sweep_free_cell(builder: map, item: map, heap: map, bucket: map) -> map
+verb native_memory/sweep_free_cell(builder: map, item: map, free_head: map) -> map
   let result: map = native_gen/when(builder,
     native_gen/equal(native_gen/read(native_gen/field(builder, item, "state")), native_gen/ref(builder, "memory_object_free")),
     fn(freeing)
-      let slot: map = native_memory/free_slot_at(freeing, heap, bucket)
-      let current: map = native_gen/write(freeing, native_gen/field(freeing, item, "next"), native_gen/root_read(slot))
-      return native_gen/root_write(current, native_memory/free_slot_at(current, heap, bucket), item)
+      let current: map = native_gen/write(freeing, native_gen/field(freeing, item, "next"), free_head)
+      return native_gen/assign(current, free_head, item)
     end)
   return result
 end
@@ -221,17 +219,26 @@ verb native_memory/sweep_body(module: map) -> map
         native_gen/ref(initial_body, "memory_null_object"))
       return native_gen/assign(body, bucket, native_gen/add(bucket, native_gen/ref(body, "memory_n1")))
     end)
-  builder = native_gen/write(builder, native_gen/field(builder, heap, "retained"), native_gen/ref(builder, "memory_n0"))
-  let [link: map, with_link: map] = native_gen/bind(builder, "link", native_gen/field(builder, heap, "pages")[:pointer])
+  let [retained_bytes: map, with_retained: map] = native_gen/bind(builder, "retained_bytes", native_gen/ref(builder, "memory_n0"))
+  let [link: map, with_link: map] = native_gen/bind(with_retained, "link", native_gen/field(with_retained, heap, "pages")[:pointer])
   builder = native_gen/while_loop(with_link, native_gen/ref(with_link, "memory_true"), fn(initial_body)
     let [page: map, with_page: map] = native_gen/bind(initial_body, "page", native_gen/load(link))
     let body: map = native_gen/when(with_page,
       native_gen/equal(page, native_gen/ref(with_page, "memory_null_page")),
       fn(done) => native_gen/break_loop(done))
     let [next: map, with_next: map] = native_gen/bind(body, "next", native_gen/read(native_gen/field(body, page, "next")))
-    let [live: map, with_live: map] = native_gen/bind(with_next, "live", native_gen/ref(with_next, "memory_n0"))
-    let [span: map, with_cells: map] = native_memory/visit_page_cells(with_live, page,
-      fn(cell_body, item) => native_memory/sweep_live_cell(cell_body, item, heap, reclaim, live))
+    body = native_gen/assign(with_next, bucket, native_gen/read(native_gen/field(with_next, page, "bucket")))
+    let pooled = native_gen/less(bucket, native_gen/ref(body, "memory_n10"))
+    let [free_head: map, with_head: map] = native_gen/bind(body, "free_head", native_gen/ref(body, "memory_null_object"))
+    body = native_gen/when(with_head, pooled, fn(small) => native_gen/assign(small, free_head,
+      native_gen/root_read(native_memory/free_slot_at(small, heap, bucket))))
+    let [live: map, with_live: map] = native_gen/bind(body, "live", native_gen/ref(body, "memory_n0"))
+    // Build the free chain locally in the same pass. Publish it only if the
+    // page survives, so no free-list link can retain a released page.
+    let [span: map, with_cells: map] = native_memory/visit_page_cells(with_live, page, fn(cell_body, item)
+      let swept = native_memory/sweep_live_cell(cell_body, item, reclaim, live, retained_bytes)
+      return native_memory/sweep_free_cell(swept, item, free_head)
+    end)
     return native_gen/branch(with_cells, native_gen/equal(live, native_gen/ref(with_cells, "memory_n0")),
       fn(empty)
         let released: map = native_gen/store(empty, link, next)
@@ -243,24 +250,13 @@ verb native_memory/sweep_body(module: map) -> map
         return native_gen/do_call(current, "memory_platform_release", [span[:managed_bytes]])
       end,
       fn(retained)
-        let current: map = native_gen/write(retained, native_gen/field(retained, page, "live"), live)
+        let published = native_gen/when(retained, pooled, fn(small) => native_gen/root_write(small,
+          native_memory/free_slot_at(small, heap, bucket), free_head))
+        let current: map = native_gen/write(published, native_gen/field(published, page, "live"), live)
         return native_gen/assign(current, link, native_gen/field(current, page, "next")[:pointer])
       end)
   end)
-  let [page: map, with_page: map] = native_gen/bind(builder, "page", native_gen/read(native_gen/field(builder, heap, "pages")))
-  builder = native_gen/while_loop(with_page, native_gen/ref(with_page, "memory_true"), fn(initial_body)
-    let body: map = native_gen/when(initial_body,
-      native_gen/equal(page, native_gen/ref(initial_body, "memory_null_page")),
-      fn(done) => native_gen/break_loop(done))
-    body = native_gen/assign(body, bucket, native_gen/read(native_gen/field(body, page, "bucket")))
-    body = native_gen/when(body, native_gen/less(bucket, native_gen/ref(body, "memory_n10")), fn(small)
-      let [span: map, visited: map] = native_memory/visit_page_cells(small, page,
-        fn(cell_body, item) => native_memory/sweep_free_cell(cell_body, item, heap, bucket))
-      return visited
-    end)
-    let [next: map, with_next: map] = native_gen/bind(body, "next", native_gen/read(native_gen/field(body, page, "next")))
-    return native_gen/assign(with_next, page, next)
-  end)
+  builder = native_gen/write(builder, native_gen/field(builder, heap, "retained"), retained_bytes)
   builder = native_gen/return_void(builder)
   let result: map = native_gen/finish(module, builder)
   return result
