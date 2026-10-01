@@ -1,0 +1,112 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+// Schema indexes belong to snapshots and contain no fact rows. A draft or
+// publication candidate overlays its new declarations onto the shared index.
+// Existing schemas are immutable in the current kernel.
+verb native_rules/schemas_body(module: map) -> map
+  let builder: map = native_rules/context(module, "rule_schemas")
+  let work: map = native_rules/ref(builder, "work")
+  let [base: map, with_base: map] = native_roots/retain(builder, "base", native_rules/read(builder, work, "checked"))
+  builder = native_gen/when(with_base, native_rules/ref(with_base, "draft"), fn(draft) => native_roots/store(draft, base, native_rules/read(draft, work, "base")))
+  let [index: map, ready: map] = native_roots/retain(builder, "schemas", native_rules/read(builder, base, "schemas"))
+  builder = native_rules/each(ready, "change", native_rules/read(ready, work, "changes"), fn(step, change)
+    return native_gen/when(step, native_kernel/absent(native_rules/read(step, change, "before")), fn(declared)
+      let relation: map = native_rules/read(declared, change, "after")
+      let [revision: map, with_revision: map] = native_gen/bind(declared, "revision", native_rules/ref(declared, "zero"))
+      let ready: map = native_gen/unless(with_revision, native_rules/ref(with_revision, "draft"), fn(committing) => native_gen/assign(committing, revision,
+        native_gen/add(native_rules/read(committing, base, "version"), native_rules/ref(committing, "one"))))
+      let [schema: map, allocated: map] = native_rules/allocate(ready, "RuleSchema", {
+        "id" -> native_rules/read(ready, relation, "id"), "arity" -> native_rules/read(ready, relation, "arity"), "schema_revision" -> revision})
+      let [updated: map, indexed: map] = native_rules/index_put(allocated, "rule_schema_index", index, schema)
+      return native_roots/store(indexed, index, updated)
+    end)
+  end)
+  builder = native_rules/result(builder, native_rules/ref(builder, "kernel_ok"), {"schemas" -> index})
+  let result: map = native_gen/finish(module, builder)
+  return result
+end
+verb native_rules/schema_lookup(builder: map, id: map) -> map
+  let result: map = native_gen/call(builder, "kernel_rule_schema_index_lookup", [native_rules/ref(builder, "schemas"), id])
+  return result
+end
+verb native_rules/validate_term(builder: map, term: map, bound: map) -> map
+  let kind: map = native_rules/read(builder, term, "kind")
+  let result: map = native_gen/switch(builder, kind, [
+    [native_rules/ref(builder, "rule_variable"), fn(variable)
+      return native_gen/branch(variable, native_rules/ref(variable, "collect"), fn(collect)
+        let [index: map, ready: map] = native_rules/index_put(collect, "rule_variable_index", bound, term)
+        return native_roots/store(ready, bound, index)
+      end, fn(bound_check)
+        let found: map = native_gen/call(bound_check, "kernel_rule_variable_index_lookup", [bound, native_rules/read(bound_check, term, "id")])
+        return native_rules/check(bound_check, native_gen/negate(native_kernel/absent(found)), "schema")
+      end)
+    end],
+    [native_rules/ref(builder, "rule_constant"), fn(constant) => native_rules/check(constant,
+      native_gen/call(constant, "value_is_persistable", [native_rules/read(constant, term, "value")]), "nonpersistent")],
+    [native_rules/ref(builder, "rule_hole"), fn(hole) => native_rules/check(hole, native_rules/ref(hole, "holes"), "schema")]],
+    fn(invalid) => native_rules/error(invalid, "schema"))
+  return result
+end
+verb native_rules/terms_body(module: map) -> map
+  let builder: map = native_rules/context(module, "rule_terms_validate")
+  let bound: map = native_roots/root_value(builder, native_rules/ref(builder, "bound"), native_kernel/pointer("RuleVariableIndex"))
+  let [count: map, ready: map] = native_gen/bind(builder, "count", native_rules/ref(builder, "zero"))
+  builder = native_rules/each(ready, "term", native_rules/ref(ready, "terms"), fn(step, term)
+    let checked: map = native_rules/check(step, native_gen/less(count, native_rules/ref(step, "arity")), "schema")
+    checked = native_rules/validate_term(checked, term, bound)
+    return native_gen/assign(checked, count, native_gen/add(count, native_rules/ref(checked, "one")))
+  end)
+  builder = native_rules/check(builder, native_gen/equal(count, native_rules/ref(builder, "arity")), "schema")
+  builder = native_kernel/status(builder, "kernel_ok")
+  let result: map = native_gen/finish(module, builder)
+  return result
+end
+verb native_rules/validate_terms(builder: map, terms: map, bound: map, arity: map, collect: map, holes: map) -> map
+  let result: map = native_rules/status_call(builder, "rule_terms_validate", [native_roots/worker(builder), terms, bound[:scope_root], arity, collect, holes, native_rules/ref(builder, "budget")])
+  return result
+end
+verb native_rules/definition_body(module: map) -> map
+  let builder: map = native_rules/context(module, "rule_def_validate")
+  let definition: map = native_rules/ref(builder, "definition")
+  builder = native_rules/check(builder, native_gen/negate(native_kernel/absent(definition)), "schema")
+  builder = native_rules/check(builder, native_gen/equal(native_gen/expression(:U8, :Tag, [native_rules/read(builder, definition, "source")]), native_rules/ref(builder, "tag_string")), "schema")
+  builder = native_rules/check(builder, native_gen/call(builder, "value_is_persistable", [native_rules/read(builder, definition, "tenant")]), "nonpersistent")
+  let [bound: map, ready: map] = native_roots/retain(builder, "bound", native_gen/zero(native_kernel/pointer("RuleVariableIndex")))
+  // Collect positive bindings before checking heads, negation, or guards.
+  // Atom order does not affect range restriction.
+  for collect in [true, false]
+    builder = native_rules/each(ready, "atom", native_rules/read(ready, definition, "atoms"), fn(step, atom)
+      let negative: map = native_rules/read(step, atom, "negative")
+      let [relation: map, checked: map] = native_gen/bind(step, "relation", native_rules/schema_lookup(step, native_rules/read(step, atom, "relation")))
+      checked = native_rules/check(checked, native_gen/negate(native_kernel/absent(relation)), "unknown")
+      checked = native_rules/observe_schema(checked, relation)
+      let arity: map = native_rules/read(checked, relation, "arity")
+      if collect
+        return native_gen/unless(checked, negative, fn(positive) => native_rules/validate_terms(positive, native_rules/read(positive, atom, "terms"), bound, arity, native_rules/ref(positive, "true"), native_rules/ref(positive, "true")))
+      end
+      return native_rules/validate_terms(checked, native_rules/read(checked, atom, "terms"), bound, arity, native_rules/ref(checked, "false"), native_gen/negate(negative))
+    end)
+    ready = builder
+  end
+  let [head: map, with_head: map] = native_gen/bind(builder, "head", native_rules/schema_lookup(builder, native_rules/read(builder, definition, "head")))
+  builder = native_rules/check(with_head, native_gen/negate(native_kernel/absent(head)), "unknown")
+  builder = native_rules/observe_schema(builder, head)
+  builder = native_rules/validate_terms(builder, native_rules/read(builder, definition, "terms"), bound, native_rules/read(builder, head, "arity"), native_rules/ref(builder, "false"), native_rules/ref(builder, "false"))
+  builder = native_rules/each(builder, "guard", native_rules/read(builder, definition, "guards"), fn(step, guard)
+    let checked: map = native_rules/check(step, native_gen/less(native_rules/read(step, guard, "operation"), native_rules/ref(step, "rule_guard_count")), "schema")
+    for side in ["left", "right"]
+      checked = native_rules/validate_terms(checked, native_rules/read(checked, guard, side), bound, native_rules/ref(checked, "one"), native_rules/ref(checked, "false"), native_rules/ref(checked, "false"))
+    end
+    return checked
+  end)
+  builder = native_kernel/status(builder, "kernel_ok")
+  let result: map = native_gen/finish(module, builder)
+  return result
+end
+
+verb native_rules/observe_schema(builder: map, schema: map) -> map
+  let result: map = native_gen/when(builder, native_rules/ref(builder, "draft"),
+    fn(draft) => native_rules/status_call(draft, "rule_head_observe", [native_roots/worker(draft), native_rules/ref(draft, "work"), native_rules/read(draft, schema, "id"), native_rules/read(draft, schema, "schema_revision"), native_rules/ref(draft, "false")]))
+  return result
+end

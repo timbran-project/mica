@@ -1,0 +1,121 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+verb native_rules/head_observe_body(module: map) -> map
+  let builder: map = native_rules/context(module, "rule_head_observe")
+  let work: map = native_rules/ref(builder, "work")
+  let id: map = native_rules/ref(builder, "id")
+  let [existing: map, found_existing: map] = native_gen/bind(builder, "existing", native_gen/call(builder, "kernel_rule_dependency_index_lookup", [native_rules/read(builder, work, "rule_dependency_index"), id]))
+  builder = native_gen/unless(found_existing, native_kernel/absent(existing), fn(observed)
+    let ready: map = native_gen/when(observed, native_rules/ref(observed, "head_read"), fn(head) => native_kernel/store_field(head, existing, "head_read", native_rules/ref(head, "true")))
+    return native_kernel/status(ready, "kernel_ok")
+  end)
+  let base: map = native_rules/read(builder, work, "base")
+  let revision: map = native_gen/call(builder, "kernel_rule_head_revision", [native_rules/read(builder, base, "rule_heads"), id])
+  let schema: map = native_rules/ref(builder, "schema")
+  let [dependency: map, allocated: map] = native_rules/allocate(builder, "RuleDependency", {"next" -> native_rules/read(builder, work, "rule_dependencies"), "id" -> id, "revision" -> revision, "schema" -> schema, "head_read" -> native_rules/ref(builder, "head_read")})
+  let [index: map, indexed: map] = native_rules/index_put(allocated, "rule_dependency_index", native_rules/read(allocated, work, "rule_dependency_index"), dependency)
+  builder = native_kernel/store_field(indexed, work, "rule_dependencies", dependency)
+  builder = native_kernel/store_field(builder, work, "rule_dependency_index", index)
+  builder = native_kernel/status(builder, "kernel_ok")
+  let result: map = native_gen/finish(module, builder)
+  return result
+end
+verb native_rules/dependencies_body(module: map) -> map
+  let builder: map = native_rules/context(module, "rule_dependencies_validate")
+  let work: map = native_rules/ref(builder, "work")
+  let current: map = native_rules/read(builder, work, "checked")
+  builder = native_gen/when(builder, native_kernel/absent(native_rules/read(builder, work, "rule_dependencies")), fn(empty) => native_kernel/status(empty, "kernel_ok"))
+  let schemas: map = native_rules/read(builder, current, "schemas")
+  builder = native_rules/each(builder, "dependency", native_rules/read(builder, work, "rule_dependencies"), fn(step, dependency)
+    let id: map = native_rules/read(step, dependency, "id")
+    let revision: map = native_gen/call(step, "kernel_rule_head_revision", [native_rules/read(step, current, "rule_heads"), id])
+    let checked: map = native_gen/when(step, native_rules/read(step, dependency, "head_read"), fn(head) => native_gen/unless(head, native_gen/equal(revision, native_rules/read(head, dependency, "revision")), fn(conflict)
+      let failed: map = native_kernel/store_field(conflict, work, "conflict_relation", id)
+      return native_rules/error(failed, "conflict")
+    end))
+    let [relation: map, found: map] = native_gen/bind(checked, "relation", native_gen/call(checked, "kernel_rule_schema_index_lookup", [schemas, id]))
+    let [schema: map, ready: map] = native_gen/bind(found, "schema", native_rules/ref(found, "zero"))
+    ready = native_gen/unless(ready, native_kernel/absent(relation), fn(present) => native_gen/assign(present, schema, native_rules/read(present, relation, "schema_revision")))
+    return native_gen/unless(ready, native_gen/equal(schema, native_rules/read(ready, dependency, "schema")), fn(conflict)
+      let failed: map = native_kernel/store_field(conflict, work, "conflict_relation", id)
+      return native_rules/error(failed, "conflict")
+    end)
+  end)
+  builder = native_kernel/status(builder, "kernel_ok")
+  let result: map = native_gen/finish(module, builder)
+  return result
+end
+// Record only the queried head's transitive dependencies. Unrelated catalogue
+// edits remain eligible for a candidate rebuild instead of forcing task retry.
+verb native_rules/depend_body(module: map) -> map
+  let [work: map, opened: map] = native_kernel/rule_transaction(module, "kernel_rule_depend")
+  let builder: map = opened
+  let id: map = native_rules/ref(builder, "id")
+  let [relation: map, found_relation: map] = native_gen/bind(builder, "relation", native_gen/call(builder, "kernel_rule_schema_index_lookup", [native_rules/read(builder, native_rules/read(builder, work, "base"), "schemas"), id]))
+  let [schema: map, with_schema: map] = native_gen/bind(found_relation, "schema", native_rules/ref(found_relation, "zero"))
+  builder = native_gen/unless(with_schema, native_kernel/absent(relation), fn(present) => native_gen/assign(present, schema, native_rules/read(present, relation, "schema_revision")))
+  builder = native_rules/status_call(builder, "rule_head_observe", [native_roots/worker(builder), work, id, schema, native_rules/ref(builder, "true")])
+  let plan: map = native_rules/read(builder, work, "rule_plan")
+  builder = native_gen/when(builder, native_kernel/absent(plan), fn(empty) => native_kernel/status(empty, "kernel_ok"))
+  let vertex: map = native_gen/call(builder, "kernel_rule_vertex_index_lookup", [native_rules/read(builder, plan, "index"), id])
+  let [stack: map, with_stack: map] = native_roots/retain(builder, "stack", native_gen/zero(native_kernel/pointer("RuleMember")))
+  let [visited: map, with_visited: map] = native_roots/retain(with_stack, "visited", native_gen/zero(native_kernel/pointer("RuleVertexIndex")))
+  builder = native_gen/unless(with_visited, native_kernel/absent(vertex), fn(found)
+    let [entry: map, ready: map] = native_rules/allocate(found, "RuleMember", {"vertex" -> vertex})
+    return native_roots/store(ready, stack, entry)
+  end)
+  let [remaining: map, with_budget: map] = native_gen/bind(builder, "remaining", native_rules/read(builder, work, "rule_limit"))
+  builder = with_budget
+  let bindings: map = builder[:scope_bindings]
+  bindings["budget"] = native_gen/address(remaining)
+  builder[:scope_bindings] = bindings
+  builder = native_gen/while_loop(builder, native_gen/negate(native_kernel/absent(stack)), fn(iteration)
+    let step: map = native_rules/tick(iteration)
+    // Keep the current member rooted until its entire adjacency list is walked.
+    let [current: map, with_current: map] = native_roots/retain(step, "current", native_rules/read(step, stack, "vertex"))
+    step = native_roots/store(with_current, stack, native_rules/read(with_current, stack, "next"))
+    let found: map = native_gen/call(step, "kernel_rule_vertex_index_lookup", [visited, native_rules/read(step, current, "id")])
+    step = native_gen/when(step, native_kernel/absent(found), fn(unseen)
+      let [index: map, indexed: map] = native_rules/index_put(unseen, "rule_vertex_index", visited, current)
+      let ready: map = native_roots/store(indexed, visited, index)
+      ready = native_rules/status_call(ready, "rule_head_observe", [native_roots/worker(ready), work, native_rules/read(ready, current, "id"), native_rules/read(ready, current, "schema"), native_rules/ref(ready, "true")])
+      return native_rules/each(ready, "edge", native_rules/read(ready, current, "edges"), fn(edge_step, edge)
+        let [entry: map, allocated: map] = native_rules/allocate(edge_step, "RuleMember", {"next" -> stack, "vertex" -> native_rules/read(edge_step, edge, "target")})
+        return native_roots/store(allocated, stack, entry)
+      end)
+    end)
+    return native_rules/release_root(step, current)
+  end)
+  builder = native_kernel/status(builder, "kernel_ok")
+  let result: map = native_gen/finish(module, builder)
+  return result
+end
+verb native_rules/catalogue(input: map) -> map
+  let module: map = input
+  let builder: map = native_gen/context(module, "kernel_rule_head_revision")
+  let [entry: map, ready: map] = native_gen/bind(builder, "entry", native_gen/call(builder, "kernel_rule_generation_index_lookup", [native_rules/ref(builder, "heads"), native_rules/ref(builder, "id")]))
+  builder = native_gen/when(ready, native_kernel/absent(entry), fn(absent) => native_gen/return_value(absent, native_rules/ref(absent, "zero")))
+  builder = native_gen/return_value(builder, native_rules/read(builder, entry, "revision"))
+  module = native_gen/finish(module, builder)
+  builder = native_rules/context(module, "rule_head_bump")
+  let heads: map = native_roots/root_value(builder, native_rules/ref(builder, "heads"), native_kernel/pointer("RuleGenerationIndex"))
+  let [generation: map, allocated: map] = native_rules/allocate(builder, "RuleGeneration", {"id" -> native_rules/ref(builder, "id"), "revision" -> native_rules/ref(builder, "revision")})
+  let [index: map, indexed: map] = native_rules/index_put(allocated, "rule_generation_index", heads, generation)
+  builder = native_roots/store(indexed, heads, index)
+  builder = native_kernel/status(builder, "kernel_ok")
+  module = native_gen/finish(module, builder)
+  module = native_rules/head_observe_body(module)
+  module = native_rules/dependencies_body(module)
+  module = native_rules/depend_body(module)
+  let [work: map, opened: map] = native_kernel/rule_transaction(module, "kernel_rule_plan")
+  builder = native_kernel/store_field(opened, work, "rules_read", native_rules/ref(opened, "true"))
+  builder = native_rules/result(builder, native_rules/ref(builder, "kernel_ok"), {"plan" -> native_rules/read(builder, work, "rule_plan")})
+  module = native_gen/finish(module, builder)
+  builder = native_gen/context(module, "kernel_rule_set_limit")
+  let [limit_work: map, limit_opened: map] = native_kernel/open_transaction(builder, fn(failed) => native_rules/error(failed, "closed"))
+  builder = native_kernel/store_field(limit_opened, limit_work, "rule_limit", native_rules/ref(limit_opened, "steps"))
+  builder = native_kernel/status(builder, "kernel_ok")
+  module = native_gen/finish(module, builder)
+  return module
+end

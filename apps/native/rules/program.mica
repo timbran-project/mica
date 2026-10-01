@@ -1,0 +1,94 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+verb native_rules/declarations(input: map) -> map
+  let module: map = input
+  let constants: list = [["rule_variable", :U64, native_value/hex(0)], ["rule_constant", :U64, native_value/hex(1)],
+    ["rule_hole", :U64, native_value/hex(2)], ["rule_guard_count", :U64, native_value/hex(6)]]
+  let [bindings: map, state: map] = native/constants(module[:state], constants)
+  module[:state] = state
+  let names: map = module[:constants]
+  for name, id in bindings
+    names[name] = id
+  end
+  module[:constants] = names
+  let worker: list = ["worker", native_memory/record_pointer("MemoryWorker"), :Borrow]
+  let work: list = ["work", native_kernel/pointer("Work"), :Gc]
+  let schemas: list = ["schemas", native_kernel/pointer("RuleSchemaIndex"), :Gc]
+  let draft: list = ["draft", :Bool, :Value]
+  let budget: list = ["budget", native_memory/pointer(:U64), :Borrow]
+  let plan: list = ["plan", native_kernel/pointer("RulePlan"), :Gc]
+  let vertex: list = ["vertex", native_kernel/pointer("RuleVertex"), :Gc]
+  let root: list = native_memory/record_pointer("MemoryRoot")
+  let id: list = ["id", :U64, :Value]
+  let term: list = native_kernel/pointer("RuleTerm")
+  let definition: list = ["definition", native_kernel/pointer("RuleDef"), :Gc]
+  let tx: list = ["transaction", native_kernel/pointer("Transaction"), :Borrow]
+  for spec in [
+    ["rule_schemas", [:Record, "KernelRuleSchemasResult"], [worker, work, draft, budget], true],
+    ["rule_terms_validate", :U64, [worker, ["terms", term, :Gc], ["bound", root, :Borrow], ["arity", :U64, :Value], ["collect", :Bool, :Value], ["holes", :Bool, :Value], budget], true],
+    ["rule_def_validate", :U64, [worker, work, schemas, draft, definition, budget], true],
+    ["rule_vertex", [:Record, "KernelRuleVertexResult"], [worker, plan, schemas, id], false],
+    ["rule_graph_add", :U64, [worker, plan, schemas, ["rule", native_kernel/pointer("Rule"), :Gc], budget], true],
+    ["rule_graph_load", :U64, [worker, work, ["tree", native_kernel/pointer("RuleIndex"), :Gc], schemas, draft, plan, budget], true],
+    ["rule_discover", :U64, [worker, vertex, ["frames", root, :Borrow], ["stack", root, :Borrow], ["counter", native_memory/pointer(:U64), :Borrow]], false],
+    ["rule_component", :U64, [worker, plan, vertex, ["stack", root, :Borrow], budget], true],
+    ["rule_stratify", :U64, [worker, plan, budget], true],
+    ["rules_compile", [:Record, "KernelRulePlanResult"], [worker, work, ["tree", native_kernel/pointer("RuleIndex"), :Gc], schemas, draft, budget], true],
+    ["rule_head_revision", :U64, [["heads", native_kernel/pointer("RuleGenerationIndex"), :Gc], id], false],
+    ["rule_head_bump", :U64, [worker, ["heads", root, :Borrow], id, ["revision", :U64, :Value]], false],
+    ["rule_head_observe", :U64, [worker, work, id, ["schema", :U64, :Value], ["head_read", :Bool, :Value]], false],
+    ["rule_dependencies_validate", :U64, [worker, work, budget], true],
+    ["rule_depend", :U64, [tx, id], true],
+    ["rule_plan", [:Record, "KernelRulePlanResult"], [tx], true],
+    ["rule_set_limit", :U64, [tx, ["steps", :U64, :Value]], false]]
+    module = native_kernel/declare(module, spec[0], spec[1], spec[2], spec[3])
+  end
+  for spec in native_rules/constructor_specs()
+    module = native_kernel/declare(module, spec[0], native_kernel/pointer(spec[1]), [worker, @spec[2]])
+  end
+  return module
+end
+verb native_rules/constructor_specs() -> list
+  let term: list = native_kernel/pointer("RuleTerm")
+  let next: list = ["next", term, :Gc]
+  return [
+    ["rule_variable", "RuleTerm", [["id", :U64, :Value], next]],
+    ["rule_constant", "RuleTerm", [["value", native_value/word(), :Gc], next]],
+    ["rule_hole", "RuleTerm", [next]],
+    ["rule_atom", "RuleAtom", [["relation", :U64, :Value], ["negative", :Bool, :Value], ["terms", term, :Gc], ["next", native_kernel/pointer("RuleAtom"), :Gc]]],
+    ["rule_guard", "RuleGuard", [["operation", :U64, :Value], ["left", term, :Gc], ["right", term, :Gc], ["next", native_kernel/pointer("RuleGuard"), :Gc]]],
+    ["rule_definition", "RuleDef", [["head", :U64, :Value], ["terms", term, :Gc], ["atoms", native_kernel/pointer("RuleAtom"), :Gc],
+      ["guards", native_kernel/pointer("RuleGuard"), :Gc], ["tenant", native_value/word(), :Gc], ["source", native_value/word(), :Gc]]]]
+end
+verb native_rules/constructors(input: map) -> map
+  let module: map = input
+  for spec in native_rules/constructor_specs()
+    let builder: map = native_gen/context(module, string_concat("kernel_", spec[0]))
+    let fields: map = {}
+    for parameter in spec[2]
+      fields[parameter[0]] = native_rules/ref(builder, parameter[0])
+    end
+    if spec[1] == "RuleTerm"
+      fields["kind"] = native_rules/ref(builder, spec[0])
+    end
+    builder = native_gen/return_value(builder, native_rules/create(builder, spec[1], fields))
+    module = native_gen/finish(module, builder)
+  end
+  return module
+end
+verb native_rules/program(input: map) -> map
+  let module: map = native_rules/constructors(input)
+  module = native_rules/schemas_body(module)
+  module = native_rules/terms_body(module)
+  module = native_rules/definition_body(module)
+  module = native_rules/vertex_body(module)
+  module = native_rules/graph_rule_body(module)
+  module = native_rules/graph_load_body(module)
+  module = native_rules/discover_body(module)
+  module = native_rules/component_body(module)
+  module = native_rules/stratify_body(module)
+  module = native_rules/compile_body(module)
+  module = native_rules/catalogue(module)
+  return module
+end

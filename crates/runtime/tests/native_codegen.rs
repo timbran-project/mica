@@ -2029,13 +2029,20 @@ fn native_relation_kernel_executes_on_both_mica_tiers() {
     let mut previous = None;
     for interpreter_only in [true, false] {
         let mut runner = runner(interpreter_only).with_task_limits(TaskLimits {
-            instruction_budget: 1_000_000_000,
+            // Includes definition validation and SCC/dependency-plan generation.
+            instruction_budget: 3_000_000_000,
             max_call_depth: 256,
             ..TaskLimits::default()
         });
         load_native_values(&mut runner);
         for source in [
             include_str!("../../../apps/native/memory/roots.mica"),
+            include_str!("../../../apps/native/rules/schema.mica"),
+            include_str!("../../../apps/native/rules/builders.mica"),
+            include_str!("../../../apps/native/rules/validate.mica"),
+            include_str!("../../../apps/native/rules/stratify.mica"),
+            include_str!("../../../apps/native/rules/catalog.mica"),
+            include_str!("../../../apps/native/rules/program.mica"),
             include_str!("../../../apps/native/kernel/program.mica"),
             include_str!("../../../apps/native/kernel/indexes.mica"),
             include_str!("../../../apps/native/kernel/relations.mica"),

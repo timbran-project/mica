@@ -146,45 +146,86 @@ Other workers can read and commit concurrently. Callers park workers before exte
 | 7 | Invalid schema, identity, mask, or output buffer |
 | 8 | Allocation or collection failure |
 | 9 | Closed transaction or invalid lifecycle operation |
+| 10 | Rule planning or dependency traversal work limit exceeded |
 
 `kernel_work(transaction)` exposes the last commit status, conflicting relation and tuple, and conflicting rule identity.
-The current layer supports relation creation and transactional rule metadata.
+The current layer supports relation creation, transactional rule definitions, and dependency planning.
 Relation removal, transactional buffers, durable storage, rule evaluation, computed relations, authority, and dispatch remain separate work.
 
-### Rule catalogue
+### Rule definitions and dependency plans
 
-`kernel/rules.mica` generates the transactional catalogue for rule metadata.
-Each entry contains an identity, head relation, arity, active flag, and committed revision.
-Rule bodies, safety checks, stratification, export authorization, and evaluation remain unimplemented.
-An active metadata entry does not derive facts.
+`rules/` generates rule definitions, structural validation, and dependency planning.
+`kernel/rules.mica` stages and publishes definitions with ordinary fact changes.
+Rule evaluation, source parsing, and authority checks remain separate work.
+Installing an active definition does not derive rows yet.
+
+Definitions contain a head relation, head terms, body atoms, comparison guards, defining tenant, and source text.
+The tenant field records identity; it does not grant authority.
+These are trusted kernel APIs. Tenant-facing installation still requires source-read and head-export authorization.
+
+| Constructor | Result |
+| --- | --- |
+| `kernel_rule_variable(worker, id, next)` | Variable term; IDs are local to the definition |
+| `kernel_rule_constant(worker, value, next)` | Constant term |
+| `kernel_rule_hole(worker, next)` | Independent wildcard term |
+| `kernel_rule_atom(worker, relation, negative, terms, next)` | Positive or negated predicate |
+| `kernel_rule_guard(worker, operation, left, right, next)` | Comparison guard with two single-term operands |
+| `kernel_rule_definition(worker, head, terms, atoms, guards, tenant, source)` | Complete immutable definition |
+
+Terms, atoms, and guards use immutable linked lists. Constructors return null on allocation failure.
+Guard codes `0` through `5` mean `==`, `!=`, `<`, `<=`, `>`, and `>=` respectively.
+Validation checks the operator code; numeric comparison execution belongs to the evaluator.
+Constants and tenant values must be persistable. Source text must be a string.
+Callers must root managed pointers across safepoints and treat definitions and plans as immutable.
 
 | Operation | Result |
 | --- | --- |
-| `kernel_rule_add(transaction, id, head, arity, active)` | Stage a definition for an absent identity |
-| `kernel_rule_update(transaction, id, head, arity, active)` | Replace the metadata of an existing identity |
+| `kernel_rule_add(transaction, id, definition, active)` | Stage a definition for an absent identity |
+| `kernel_rule_update(transaction, id, definition, active)` | Replace a definition or change its active flag |
 | `kernel_rule_remove(transaction, id)` | Stage removal of an existing identity |
-| `kernel_rule(transaction, id)` | Read one definition from the transaction view |
-| `kernel_rules(transaction)` | Read the complete catalogue from the transaction view |
+| `kernel_rule(transaction, id)` | Read one definition from the draft |
+| `kernel_rules(transaction)` | Enumerate the draft catalogue |
+| `kernel_rule_plan(transaction)` | Read the draft dependency plan and record a whole-catalogue dependency |
+| `kernel_rule_depend(transaction, relation)` | Record head-generation and schema dependencies through the draft plan |
+| `kernel_rule_set_limit(transaction, steps)` | Set the work allowance for planning and dependency traversal |
 
-Writes return kernel status codes. Reads return `KernelRuleResult` with `status` and `rule`.
-A successful catalogue read returns a linked list through `rule`. A null pointer means the catalogue is empty.
-Definitions and observations use persistent AVL indexes. Point operations copy logarithmic paths.
-Enumeration materializes and caches an ordered list in the draft. Edits invalidate that cache.
-Catalogue traversal and commit rebasing poll for collection with managed pointers rooted.
-A missing identity returns `kernel_unknown`. Reads and writes reject closed or committed transactions.
-Returned pointers follow the kernel root contract: callers must root retained pointers across safepoints and treat records as immutable.
+Writes return kernel status codes. Definition reads return `KernelRuleResult` with `status` and `rule`.
+Enumeration returns an ordered linked list; null means the catalogue is empty.
+Plan reads return `KernelRulePlanResult` with `status` and `plan`; null represents an initial empty plan.
+Missing identities return `kernel_unknown`. Reads and writes reject closed or committed transactions.
 
-Draft reads include repeated additions, updates, and removals within the same transaction.
-Staging checks head relation existence and arity, including staged relation declarations.
-Commit validates the candidate catalogue and publishes rule metadata and fact changes atomically.
-Rollback discards both. Allocation failure preserves the previous draft and publishes nothing.
+Staging checks relation existence and arity for heads and every body atom, including inactive definitions.
+Head, negation, and guard variables must occur in positive atoms. Guards do not bind variables.
+Only positive atoms permit holes. Atom order does not affect variable safety.
+Active definitions must have stratified negation. Positive recursion is permitted.
+Commit validates definitions and stratification against the publication candidate before atomic publication.
+Rollback discards definitions and plans with fact changes. Failed edits preserve the previous draft.
 
-Point reads record the original definition revision, including observations of missing identities.
-Commit reports a conflict when another transaction changes an observed definition.
-Catalogue enumeration records a whole-catalogue dependency, so a concurrent catalogue change also conflicts.
-Disjoint point updates can commit after preparation against the latest snapshot.
-Read-only catalogue validation does not advance the world version.
-`kernel_work(transaction).conflict_rule` identifies a conflicting point observation. Whole-catalogue conflicts use zero.
+Definitions and point observations use persistent AVL indexes.
+Enumeration materializes an ordered list in the draft; edits invalidate that cache.
+Snapshots share an immutable index of relation schema metadata, without retaining fact rows through that index.
+Draft planning overlays staged declarations; fact-only commits reuse the schema index.
+Planning builds signed head-to-source edges and uses iterative Tarjan traversal with managed frames.
+Components appear in dependency order. Positive recursion stays within a component; negative edges must cross components.
+Plans retain their definitions and participate in the ordinary collector root protocol.
+
+Point reads record original definition revisions, including missing identities.
+Head dependencies also detect newly installed rules that the reader never named.
+Dependency traversal follows both positive and negative edges and records relation schema revisions.
+Active replacement, removal, and activation changes advance affected head generations; inactive-only edits do not.
+Unrelated head changes can rebuild a publication candidate without invalidating the task's recorded dependencies.
+Whole-catalogue reads remain conservative: any catalogue change conflicts.
+`kernel_work(transaction).conflict_rule` identifies point conflicts; `conflict_relation` identifies head or schema conflicts.
+
+Each catalogue edit rebuilds and validates its candidate dependency plan.
+Unchanged catalogues reuse the committed plan during fact-only commits.
+This is dependency planning; incremental derived-row maintenance is not implemented yet.
+Planning and dependency walks poll for collection and consume a work allowance.
+The default allowance is 16,777,216 steps per operation; callers can change it before an operation.
+Commit shares one allowance across schema preparation, dependency validation, catalogue rebasing, and plan compilation.
+Publication retries consume the same allowance.
+Exhaustion returns `kernel_limit` (10), preserves the draft, and publishes nothing.
+It is a resource error, not a transaction conflict. Cancellation and resumable scheduling remain separate work.
 
 ### Query execution
 

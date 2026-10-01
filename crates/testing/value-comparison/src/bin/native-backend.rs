@@ -77,7 +77,7 @@ fn run() -> Result<()> {
     let mut runner = SourceRunner::new_empty()
         .with_interpreter_only(true)
         .with_task_limits(TaskLimits {
-            instruction_budget: 2_000_000_000,
+            instruction_budget: 3_000_000_000,
             max_call_depth: 256,
             ..TaskLimits::default()
         });
@@ -132,6 +132,12 @@ fn run() -> Result<()> {
         "value/codec_decode",
         "value/persistence",
         "memory/roots",
+        "rules/schema",
+        "rules/builders",
+        "rules/validate",
+        "rules/stratify",
+        "rules/catalog",
+        "rules/program",
         "kernel/program",
         "kernel/indexes",
         "kernel/relations",

@@ -1,0 +1,52 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+// Definitions are immutable managed graphs. Planner vertices and DFS frames
+// are private until the completed dependency plan is installed in a snapshot.
+verb native_rules/schemas() -> list
+  let term: list = native_kernel/pointer("RuleTerm")
+  let atom: list = native_kernel/pointer("RuleAtom")
+  let guard: list = native_kernel/pointer("RuleGuard")
+  let vertex: list = native_kernel/pointer("RuleVertex")
+  let edge: list = native_kernel/pointer("RuleEdge")
+  let member: list = native_kernel/pointer("RuleMember")
+  let component: list = native_kernel/pointer("RuleComponent")
+  let frame: list = native_kernel/pointer("RuleFrame")
+  let dependency: list = native_kernel/pointer("RuleDependency")
+  return [
+    ["RuleSchema", [["id", :U64], ["arity", :U64], ["schema_revision", :U64]]],
+    ["RuleTerm", [["next", term], ["kind", :U64], ["id", :U64], ["value", native_value/word()]]],
+    ["RuleAtom", [["next", atom], ["relation", :U64], ["negative", :Bool], ["terms", term]]],
+    ["RuleGuard", [["next", guard], ["operation", :U64], ["left", term], ["right", term]]],
+    ["RuleDef", [["head", :U64], ["terms", term], ["atoms", atom], ["guards", guard], ["tenant", native_value/word()], ["source", native_value/word()]]],
+    ["RuleVertex", [["next", vertex], ["id", :U64], ["schema", :U64], ["edges", edge], ["rules", native_kernel/pointer("RulePlanEntry")],
+      ["number", :U64], ["low", :U64], ["stacked", :Bool], ["component", :U64]]],
+    ["RuleEdge", [["next", edge], ["target", vertex], ["negative", :Bool]]],
+    ["RulePlanEntry", [["next", native_kernel/pointer("RulePlanEntry")], ["rule", native_kernel/pointer("Rule")]]],
+    ["RuleMember", [["next", member], ["vertex", vertex]]],
+    ["RuleFrame", [["next", frame], ["vertex", vertex], ["edge", edge]]],
+    ["RuleComponent", [["next", component], ["id", :U64], ["members", member], ["recursive", :Bool]]],
+    ["RulePlan", [["vertices", vertex], ["index", native_kernel/pointer("RuleVertexIndex")], ["components", component], ["tail", component], ["count", :U64]]],
+    ["RuleGeneration", [["id", :U64], ["revision", :U64]]],
+    ["RuleDependency", [["next", dependency], ["id", :U64], ["revision", :U64], ["schema", :U64], ["head_read", :Bool]]]]
+end
+
+verb native_rules/index_specs() -> list
+  return [["rule_schema_index", "RuleSchemaIndex", "RuleSchema"], ["rule_variable_index", "RuleVariableIndex", "RuleTerm"],
+    ["rule_vertex_index", "RuleVertexIndex", "RuleVertex"],
+    ["rule_generation_index", "RuleGenerationIndex", "RuleGeneration"],
+    ["rule_dependency_index", "RuleDependencyIndex", "RuleDependency"]]
+end
+
+verb native_rules/result_schemas() -> list
+  let results: list = [["KernelRuleSchemasResult", [["status", :U64], ["schemas", native_kernel/pointer("RuleSchemaIndex")]]], ["KernelRulePlanResult", [["status", :U64], ["plan", native_kernel/pointer("RulePlan")]]],
+    ["KernelRuleVertexResult", [["status", :U64], ["vertex", native_kernel/pointer("RuleVertex")]]]]
+  for spec in native_rules/index_specs()
+    results = [@results, [string_concat("Kernel", spec[1], "Result"), [["ok", :Bool], ["node", native_kernel/pointer(spec[1])]]]]
+  end
+  return results
+end
+verb native_rules/result_types() -> list
+  let result: list = [[:Record, spec[0]] for spec in native_rules/result_schemas()]
+  return result
+end

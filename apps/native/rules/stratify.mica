@@ -1,0 +1,174 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+verb native_rules/vertex_body(module: map) -> map
+  let builder: map = native_rules/context(module, "rule_vertex")
+  let plan: map = native_rules/ref(builder, "plan")
+  let [found: map, ready: map] = native_gen/bind(builder, "found", native_gen/call(builder, "kernel_rule_vertex_index_lookup",
+    [native_rules/read(builder, plan, "index"), native_rules/ref(builder, "id")]))
+  builder = native_gen/unless(ready, native_kernel/absent(found), fn(existing) => native_rules/result(existing, native_rules/ref(existing, "kernel_ok"), {"vertex" -> found}))
+  let schema: map = native_rules/schema_lookup(builder, native_rules/ref(builder, "id"))
+  builder = native_rules/check(builder, native_gen/negate(native_kernel/absent(schema)), "unknown")
+  let [vertex: map, created: map] = native_rules/allocate(builder, "RuleVertex", {"schema" -> native_rules/read(builder, schema, "schema_revision"), "id" -> native_rules/ref(builder, "id"), "next" -> native_rules/read(builder, plan, "vertices")})
+  let [index: map, indexed: map] = native_rules/index_put(created, "rule_vertex_index", native_rules/read(created, plan, "index"), vertex)
+  builder = native_kernel/store_field(indexed, plan, "index", index)
+  builder = native_kernel/store_field(builder, plan, "vertices", vertex)
+  builder = native_rules/result(builder, native_rules/ref(builder, "kernel_ok"), {"vertex" -> vertex})
+  let result: map = native_gen/finish(module, builder)
+  return result
+end
+verb native_rules/graph_rule_body(module: map) -> map
+  let builder: map = native_rules/context(module, "rule_graph_add")
+  let rule: map = native_rules/ref(builder, "rule")
+  let plan: map = native_rules/ref(builder, "plan")
+  let [vertex: map, located: map] = native_rules/checked_call(builder, "rule_vertex", [native_roots/worker(builder), plan, native_rules/ref(builder, "schemas"), native_rules/read(builder, rule, "head")], "vertex")
+  let [head: map, rooted: map] = native_roots/retain(located, "head", vertex)
+  let [entry: map, allocated: map] = native_rules/allocate(rooted, "RulePlanEntry", {"next" -> native_rules/read(rooted, head, "rules"), "rule" -> rule})
+  builder = native_kernel/store_field(allocated, head, "rules", entry)
+  let definition: map = native_rules/read(builder, rule, "definition")
+  builder = native_rules/each(builder, "atom", native_rules/read(builder, definition, "atoms"), fn(step, atom)
+    let [target: map, found: map] = native_rules/checked_call(step, "rule_vertex", [native_roots/worker(step), plan, native_rules/ref(step, "schemas"), native_rules/read(step, atom, "relation")], "vertex")
+    let [edge: map, made: map] = native_rules/allocate(found, "RuleEdge", {"next" -> native_rules/read(found, head, "edges"), "target" -> target, "negative" -> native_rules/read(found, atom, "negative")})
+    return native_kernel/store_field(made, head, "edges", edge)
+  end)
+  builder = native_kernel/status(builder, "kernel_ok")
+  let result: map = native_gen/finish(module, builder)
+  return result
+end
+verb native_rules/graph_load_body(module: map) -> map
+  let builder: map = native_rules/context(module, "rule_graph_load")
+  let tree: map = native_rules/ref(builder, "tree")
+  builder = native_gen/when(builder, native_kernel/absent(tree), fn(empty) => native_kernel/status(empty, "kernel_ok"))
+  builder = native_rules/tick(builder)
+  for side in ["left", "right"]
+    builder = native_rules/status_call(builder, "rule_graph_load", [native_roots/worker(builder), native_rules/ref(builder, "work"),
+      native_rules/read(builder, tree, side), native_rules/ref(builder, "schemas"), native_rules/ref(builder, "draft"), native_rules/ref(builder, "plan"), native_rules/ref(builder, "budget")])
+  end
+  let rule: map = native_rules/read(builder, tree, "entry")
+  builder = native_rules/status_call(builder, "rule_def_validate", [native_roots/worker(builder), native_rules/ref(builder, "work"),
+    native_rules/ref(builder, "schemas"), native_rules/ref(builder, "draft"), native_rules/read(builder, rule, "definition"), native_rules/ref(builder, "budget")])
+  builder = native_gen/when(builder, native_rules/read(builder, rule, "active"), fn(active) => native_rules/status_call(active, "rule_graph_add",
+    [native_roots/worker(active), native_rules/ref(active, "plan"), native_rules/ref(active, "schemas"), rule, native_rules/ref(active, "budget")]))
+  builder = native_kernel/status(builder, "kernel_ok")
+  let result: map = native_gen/finish(module, builder)
+  return result
+end
+
+// Discover and finish own Tarjan's stack operations. Explicit managed frames
+// keep native stack depth independent of rule graph depth.
+verb native_rules/discover_body(module: map) -> map
+  let builder: map = native_rules/context(module, "rule_discover")
+  let vertex: map = native_rules/ref(builder, "vertex")
+  let stack: map = native_roots/root_value(builder, native_rules/ref(builder, "stack"), native_kernel/pointer("RuleMember"))
+  let frames: map = native_roots/root_value(builder, native_rules/ref(builder, "frames"), native_kernel/pointer("RuleFrame"))
+  let counter: map = native_gen/location(native_rules/ref(builder, "counter"))
+  let [member: map, allocated: map] = native_rules/allocate(builder, "RuleMember", {"next" -> stack, "vertex" -> vertex})
+  builder = native_roots/store(allocated, stack, member)
+  let [frame: map, with_frame: map] = native_rules/allocate(builder, "RuleFrame", {"next" -> frames, "vertex" -> vertex, "edge" -> native_rules/read(builder, vertex, "edges")})
+  builder = native_roots/store(with_frame, frames, frame)
+  builder = native_gen/write(builder, counter, native_gen/add(native_gen/read(counter), native_rules/ref(builder, "one")))
+  builder = native_kernel/store_field(builder, vertex, "number", native_gen/read(counter))
+  builder = native_kernel/store_field(builder, vertex, "low", native_gen/read(counter))
+  builder = native_kernel/store_field(builder, vertex, "stacked", native_rules/ref(builder, "true"))
+  builder = native_kernel/status(builder, "kernel_ok")
+  let result: map = native_gen/finish(module, builder)
+  return result
+end
+verb native_rules/component_body(module: map) -> map
+  let builder: map = native_rules/context(module, "rule_component")
+  let plan: map = native_rules/ref(builder, "plan")
+  let stack: map = native_roots/root_value(builder, native_rules/ref(builder, "stack"), native_kernel/pointer("RuleMember"))
+  let id: map = native_gen/add(native_rules/read(builder, plan, "count"), native_rules/ref(builder, "one"))
+  let [allocated: map, with_component: map] = native_rules/allocate(builder, "RuleComponent", {"id" -> id})
+  let [component: map, ready: map] = native_roots/retain(with_component, "component", allocated)
+  builder = native_kernel/store_field(ready, plan, "count", id)
+  builder = native_gen/while_loop(builder, native_rules/ref(builder, "true"), fn(iteration)
+    let step: map = native_rules/tick(iteration)
+    let [member: map, with_member: map] = native_gen/bind(step, "member", stack)
+    let vertex: map = native_rules/read(with_member, member, "vertex")
+    step = native_roots/store(with_member, stack, native_rules/read(with_member, member, "next"))
+    step = native_kernel/store_field(step, vertex, "component", native_rules/read(step, component, "id"))
+    step = native_kernel/store_field(step, vertex, "stacked", native_rules/ref(step, "false"))
+    step = native_gen/unless(step, native_kernel/absent(native_rules/read(step, component, "members")),
+      fn(multiple) => native_kernel/store_field(multiple, component, "recursive", native_rules/ref(multiple, "true")))
+    step = native_kernel/store_field(step, member, "next", native_rules/read(step, component, "members"))
+    step = native_kernel/store_field(step, component, "members", member)
+    return native_gen/when(step, native_gen/equal(vertex, native_rules/ref(step, "vertex")), fn(done) => native_gen/break_loop(done))
+  end)
+  let tail: map = native_rules/read(builder, plan, "tail")
+  builder = native_gen/branch(builder, native_kernel/absent(tail),
+    fn(first) => native_kernel/store_field(first, plan, "components", component),
+    fn(append) => native_kernel/store_field(append, tail, "next", component))
+  builder = native_kernel/store_field(builder, plan, "tail", component)
+  builder = native_kernel/status(builder, "kernel_ok")
+  let result: map = native_gen/finish(module, builder)
+  return result
+end
+verb native_rules/lower_low(builder: map, vertex: map, candidate: map) -> map
+  let result: map = native_gen/when(builder, native_gen/less(candidate, native_rules/read(builder, vertex, "low")),
+    fn(lower) => native_kernel/store_field(lower, vertex, "low", candidate))
+  return result
+end
+verb native_rules/dfs_step(builder: map, plan: map, frames: map, stack: map, counter: map) -> map
+  let ready: map = native_rules/tick(builder)
+  let vertex: map = native_rules/read(ready, frames, "vertex")
+  let edge: map = native_rules/read(ready, frames, "edge")
+  ready = native_gen/unless(ready, native_kernel/absent(edge), fn(follow)
+    let [target: map, with_target: map] = native_gen/bind(follow, "target", native_rules/read(follow, edge, "target"))
+    let step: map = native_kernel/store_field(with_target, frames, "edge", native_rules/read(with_target, edge, "next"))
+    step = native_gen/branch(step, native_kernel/absent(native_rules/read(step, target, "number")),
+      fn(unseen) => native_rules/status_call(unseen, "rule_discover", [native_roots/worker(unseen), target, frames[:scope_root], stack[:scope_root], native_gen/address(counter)]),
+      fn(seen) => native_gen/when(seen, native_rules/read(seen, target, "stacked"),
+        fn(back) => native_rules/lower_low(back, vertex, native_rules/read(back, target, "number"))))
+    return native_gen/continue_loop(step)
+  end)
+  ready = native_gen/when(ready, native_gen/equal(native_rules/read(ready, vertex, "low"), native_rules/read(ready, vertex, "number")),
+    fn(finish) => native_rules/status_call(finish, "rule_component", [native_roots/worker(finish), plan, vertex, stack[:scope_root], native_rules/ref(finish, "budget")]))
+  let [low: map, with_low: map] = native_gen/bind(ready, "low", native_rules/read(ready, vertex, "low"))
+  ready = native_roots/store(with_low, frames, native_rules/read(with_low, frames, "next"))
+  let result: map = native_gen/unless(ready, native_kernel/absent(frames),
+    fn(parent) => native_rules/lower_low(parent, native_rules/read(parent, frames, "vertex"), low))
+  return result
+end
+verb native_rules/stratify_body(module: map) -> map
+  let builder: map = native_rules/context(module, "rule_stratify")
+  let plan: map = native_rules/ref(builder, "plan")
+  let [frames: map, with_frames: map] = native_roots/retain(builder, "frames", native_gen/zero(native_kernel/pointer("RuleFrame")))
+  let [stack: map, with_stack: map] = native_roots/retain(with_frames, "stack", native_gen/zero(native_kernel/pointer("RuleMember")))
+  let [counter: map, ready: map] = native_gen/bind(with_stack, "counter", native_rules/ref(with_stack, "zero"))
+  builder = native_rules/each(ready, "vertex", native_rules/read(ready, plan, "vertices"), fn(step, vertex)
+    return native_gen/when(step, native_kernel/absent(native_rules/read(step, vertex, "number")), fn(unseen)
+      let discovered: map = native_rules/status_call(unseen, "rule_discover", [native_roots/worker(unseen), vertex, frames[:scope_root], stack[:scope_root], native_gen/address(counter)])
+      return native_gen/while_loop(discovered, native_gen/negate(native_kernel/absent(frames)), fn(iteration) => native_rules/dfs_step(iteration, plan, frames, stack, counter))
+    end)
+  end)
+  builder = native_rules/each(builder, "component", native_rules/read(builder, plan, "components"), fn(step, component)
+    return native_rules/each(step, "member", native_rules/read(step, component, "members"), fn(member_step, member)
+      let vertex: map = native_rules/read(member_step, member, "vertex")
+      return native_rules/each(member_step, "edge", native_rules/read(member_step, vertex, "edges"), fn(edge_step, edge)
+        let target: map = native_rules/read(edge_step, edge, "target")
+        let internal: map = native_gen/equal(native_rules/read(edge_step, target, "component"), native_rules/read(edge_step, component, "id"))
+        return native_gen/when(edge_step, internal, fn(recursive)
+          let checked: map = native_rules/check(recursive, native_gen/negate(native_rules/read(recursive, edge, "negative")), "schema")
+          return native_kernel/store_field(checked, component, "recursive", native_rules/ref(checked, "true"))
+        end)
+      end)
+    end)
+  end)
+  builder = native_kernel/status(builder, "kernel_ok")
+  let result: map = native_gen/finish(module, builder)
+  return result
+end
+verb native_rules/compile_body(module: map) -> map
+  let builder: map = native_rules/context(module, "rules_compile")
+  let schemas: map = native_rules/ref(builder, "schemas")
+  let budget: map = native_rules/ref(builder, "budget")
+  let [created: map, allocated: map] = native_rules/allocate(builder, "RulePlan", {})
+  let [plan: map, ready: map] = native_roots/retain(allocated, "plan", created)
+  builder = native_rules/status_call(ready, "rule_graph_load", [native_roots/worker(ready), native_rules/ref(ready, "work"),
+    native_rules/ref(ready, "tree"), schemas, native_rules/ref(ready, "draft"), plan, budget])
+  builder = native_rules/status_call(builder, "rule_stratify", [native_roots/worker(builder), plan, budget])
+  builder = native_rules/result(builder, native_rules/ref(builder, "kernel_ok"), {"plan" -> plan})
+  let result: map = native_gen/finish(module, builder)
+  return result
+end

@@ -22,7 +22,7 @@ void mica_foreign_memory_platform_release(uint8_t *pointer) { free(pointer); }
 #endif
 
 // These values are the public status and conflict-policy codes.
-enum { OK, UNKNOWN, ARITY, NONPERSISTENT, KEY, CONFLICT, NAME, SCHEMA, OOM, CLOSED };
+enum { OK, UNKNOWN, ARITY, NONPERSISTENT, KEY, CONFLICT, NAME, SCHEMA, OOM, CLOSED, LIMIT };
 enum { SET, FUNCTIONAL, EVENT };
 
 struct fixture {
@@ -264,8 +264,9 @@ static void prepared_publication_rebases(void) {
     begin(&f, &a);
     assert(write_pair(&a, 1, 10, 20, true) == OK);
     // Preparation must work while the publication mutex is already held.
+    uint64_t budget = mica_kernel_work(&a)->f_rule_limit;
     mica_foreign_memory_lock(f.kernel.f_mutex);
-    assert(mica_kernel_prepare(&a) == OK);
+    assert(mica_kernel_prepare(&a, &budget) == OK);
     mica_foreign_memory_unlock(f.kernel.f_mutex);
     struct mica_KernelWork *work = mica_kernel_work(&a);
     work->f_candidate = (void *)mica_memory_share(&f.worker, (void *)work->f_candidate);
@@ -423,6 +424,35 @@ static void allocation_failures(void) {
 #endif
 }
 
+// Build complete, range-restricted self-recursive definitions for catalogue
+// fixtures. Constructor failure is part of the same allocation-failure test.
+static struct mica_KernelRuleDef *self_rule(struct mica_MemoryWorker *worker, uint64_t head, unsigned arity) {
+    struct mica_KernelRuleTerm *terms = NULL;
+    for (unsigned i = arity; i > 0; --i) {
+        terms = mica_kernel_rule_variable(worker, i - 1, terms);
+        if (!terms) return NULL;
+    }
+    struct mica_KernelRuleAtom *atom = mica_kernel_rule_atom(worker, head, false, terms, NULL);
+    if (!atom) return NULL;
+    struct mica_ValueResult source = mica_value_string(worker, (const uint8_t *)"", 0);
+    if (!source.f_ok) return NULL;
+    return mica_kernel_rule_definition(worker, head, terms, atom, NULL, integer(1), source.f_value);
+}
+static uint64_t stage_self_rule(struct mica_KernelTransaction *tx, uint64_t id, uint64_t head, unsigned arity, bool active, bool replace) {
+    struct mica_KernelRuleDef *definition = NULL;
+    if (tx->f_worker && mica_kernel_work(tx) && !mica_kernel_work(tx)->f_done) {
+        definition = self_rule(tx->f_worker, head, arity);
+        if (!definition) return OOM;
+    }
+    return replace ? mica_kernel_rule_update(tx, id, definition, active) : mica_kernel_rule_add(tx, id, definition, active);
+}
+static uint64_t add_rule(struct mica_KernelTransaction *tx, uint64_t id, uint64_t head, unsigned arity, bool active) {
+    return stage_self_rule(tx, id, head, arity, active, false);
+}
+static uint64_t update_rule(struct mica_KernelTransaction *tx, uint64_t id, uint64_t head, unsigned arity, bool active) {
+    return stage_self_rule(tx, id, head, arity, active, true);
+}
+
 static void expect_rule(struct mica_KernelTransaction *tx, uint64_t id, uint64_t head, bool active) {
     struct mica_KernelRuleResult result = mica_kernel_rule(tx, id);
     assert(result.f_status == OK && result.f_rule);
@@ -440,41 +470,247 @@ static uint64_t rule_count(struct mica_KernelTransaction *tx) {
     }
     return n;
 }
+static struct mica_KernelRuleTerm *rule_pair(struct mica_MemoryWorker *worker) {
+    struct mica_KernelRuleTerm *last = mica_kernel_rule_variable(worker, 1, NULL);
+    assert(last);
+    struct mica_KernelRuleTerm *first = mica_kernel_rule_variable(worker, 0, last);
+    assert(first);
+    return first;
+}
+static struct mica_KernelRuleAtom *rule_atom_pair(struct mica_MemoryWorker *worker, uint64_t relation, bool negative, struct mica_KernelRuleAtom *next) {
+    struct mica_KernelRuleAtom *atom = mica_kernel_rule_atom(worker, relation, negative, rule_pair(worker), next);
+    assert(atom);
+    return atom;
+}
+static struct mica_KernelRuleDef *fixture_rule(struct mica_MemoryWorker *worker, uint64_t head, struct mica_KernelRuleTerm *terms, struct mica_KernelRuleAtom *atoms, struct mica_KernelRuleGuard *guards) {
+    struct mica_ValueResult source = mica_value_string(worker, (const uint8_t *)"fixture", 7);
+    assert(source.f_ok);
+    struct mica_KernelRuleDef *definition = mica_kernel_rule_definition(worker, head, terms, atoms, guards, integer(7), source.f_value);
+    assert(definition);
+    return definition;
+}
+static uint64_t install_edge(struct mica_KernelTransaction *tx, uint64_t id, uint64_t head, uint64_t source, bool negative) {
+    struct mica_MemoryWorker *worker = tx->f_worker;
+    struct mica_KernelRuleAtom *atoms = rule_atom_pair(worker, source, negative, NULL);
+    if (negative) atoms = rule_atom_pair(worker, 2, false, atoms);
+    struct mica_KernelRuleDef *definition = fixture_rule(worker, head, rule_pair(worker), atoms, NULL);
+    return mica_kernel_rule_add(tx, id, definition, true);
+}
+static void rule_definition_validation(void) {
+    struct fixture f;
+    init(&f);
+    declare(&f, 1, SET);
+    declare(&f, 2, SET);
+    struct mica_KernelTransaction tx;
+    begin(&f, &tx);
+    struct mica_MemoryRoot *parent = f.worker.f_roots;
+    for (unsigned invalid = 0; invalid < 9; ++invalid) {
+        struct mica_KernelRuleTerm *head = rule_pair(&f.worker);
+        struct mica_KernelRuleTerm *body = rule_pair(&f.worker);
+        struct mica_KernelRuleGuard *guard = NULL;
+        bool negative = false;
+        uint64_t relation = 2;
+        if (invalid == 0) head = mica_kernel_rule_variable(&f.worker, 99, head->f_next);
+        if (invalid == 1) head = mica_kernel_rule_hole(&f.worker, head->f_next);
+        if (invalid == 2) { negative = true; body = mica_kernel_rule_hole(&f.worker, body->f_next); }
+        if (invalid == 3) { negative = true; }
+        if (invalid == 4) body = body->f_next;
+        if (invalid == 5) relation = 999;
+        if (invalid >= 6) {
+            struct mica_KernelRuleTerm *operand = mica_kernel_rule_variable(&f.worker, invalid == 6 ? 99 : 0, NULL);
+            if (invalid == 7) operand = mica_kernel_rule_hole(&f.worker, NULL);
+            guard = mica_kernel_rule_guard(&f.worker, invalid == 8 ? 6 : 0, operand, mica_kernel_rule_constant(&f.worker, integer(0), NULL), NULL);
+            assert(guard);
+        }
+        struct mica_KernelRuleAtom *atom = mica_kernel_rule_atom(&f.worker, relation, negative, body, NULL);
+        assert(atom);
+        struct mica_KernelRuleDef *definition = fixture_rule(&f.worker, 1, head, atom, guard);
+        assert(mica_kernel_rule_add(&tx, 1, definition, true) == (invalid == 5 ? UNKNOWN : SCHEMA));
+        assert(f.worker.f_roots == parent);
+        assert(mica_kernel_rule(&tx, 1).f_status == UNKNOWN);
+    }
+    // Negation may precede the positive binding; repeated variables and holes
+    // are valid in positive atoms. Guards filter bindings and never bind them.
+    struct mica_KernelRuleTerm *head = mica_kernel_rule_variable(&f.worker, 0, mica_kernel_rule_variable(&f.worker, 0, NULL));
+    struct mica_KernelRuleTerm *positive = mica_kernel_rule_variable(&f.worker, 0, mica_kernel_rule_hole(&f.worker, NULL));
+    struct mica_KernelRuleAtom *atoms = mica_kernel_rule_atom(&f.worker, 2, false, positive, NULL);
+    atoms = mica_kernel_rule_atom(&f.worker, 2, true, head, atoms);
+    struct mica_KernelRuleGuard *guards = NULL;
+    for (unsigned op = 0; op < 6; ++op) {
+        guards = mica_kernel_rule_guard(&f.worker, op, mica_kernel_rule_variable(&f.worker, 0, NULL), mica_kernel_rule_constant(&f.worker, integer(5), NULL), guards);
+        assert(guards);
+    }
+    struct mica_KernelRuleDef *definition = fixture_rule(&f.worker, 1, head, atoms, guards);
+    assert(mica_kernel_rule_add(&tx, 1, definition, true) == OK);
+    assert(mica_memory_safepoint(&f.worker, true));
+    struct mica_KernelRuleResult found = mica_kernel_rule(&tx, 1);
+    assert(found.f_status == OK && found.f_rule->f_definition->f_guards);
+    assert(mica_value_string_length(found.f_rule->f_definition->f_source).f_number == 7);
+    assert(mica_value_as_int(found.f_rule->f_definition->f_tenant).f_number == 7);
+    assert(mica_kernel_commit(&tx) == OK && mica_kernel_end(&tx));
+    begin(&f, &tx);
+    found = mica_kernel_rule(&tx, 1);
+    assert(found.f_status == OK && found.f_rule->f_definition->f_atoms->f_negative);
+    assert(mica_kernel_end(&tx));
+    destroy(&f);
+}
+static struct mica_KernelRuleVertex *planned_vertex(struct mica_KernelRulePlan *plan, uint64_t id) {
+    struct mica_KernelRuleVertex *vertex = mica_kernel_rule_vertex_index_lookup(plan->f_index, id);
+    assert(vertex && vertex->f_component);
+    return vertex;
+}
+static void rule_dependency_planning(void) {
+    struct fixture f;
+    init(&f);
+    for (unsigned id = 1; id <= 5; ++id) declare(&f, id, SET);
+    struct mica_KernelTransaction tx, a, b;
+    begin(&f, &tx);
+    assert(install_edge(&tx, 1, 1, 2, false) == OK);
+    assert(install_edge(&tx, 2, 2, 1, false) == OK);
+    assert(install_edge(&tx, 3, 3, 1, false) == OK);
+    assert(install_edge(&tx, 4, 3, 4, true) == OK);
+    struct mica_KernelRulePlanResult planned = mica_kernel_rule_plan(&tx);
+    assert(planned.f_status == OK && planned.f_plan);
+    uint64_t component = planned_vertex(planned.f_plan, 1)->f_component;
+    assert(component == planned_vertex(planned.f_plan, 2)->f_component);
+    assert(component < planned_vertex(planned.f_plan, 3)->f_component);
+    assert(planned_vertex(planned.f_plan, 4)->f_component < planned_vertex(planned.f_plan, 3)->f_component);
+    assert(install_edge(&tx, 5, 4, 3, true) == SCHEMA);
+    assert(mica_kernel_rule(&tx, 5).f_status == UNKNOWN);
+    assert(mica_kernel_commit(&tx) == OK && mica_kernel_end(&tx));
+    // Each concurrent edit is stratified alone; their union is not.
+    begin(&f, &a);
+    begin(&f, &b);
+    assert(install_edge(&a, 6, 4, 5, true) == OK);
+    assert(install_edge(&b, 7, 5, 3, false) == OK);
+    assert(mica_kernel_commit(&b) == OK && mica_kernel_end(&b));
+    assert(mica_kernel_commit(&a) == CONFLICT);
+    assert(mica_kernel_work(&a)->f_candidate == NULL);
+    assert(mica_kernel_end(&a));
+    // A new rule feeding an indirectly queried head invalidates the consumer.
+    begin(&f, &a);
+    begin(&f, &b);
+    assert(mica_kernel_rule_depend(&a, 3) == OK);
+    assert(install_edge(&b, 8, 4, 2, false) == OK);
+    assert(mica_kernel_commit(&b) == OK && mica_kernel_end(&b));
+    assert(mica_kernel_commit(&a) == CONFLICT);
+    assert(mica_kernel_work(&a)->f_conflict_relation == 4);
+    assert(mica_kernel_end(&a));
+    // Unrelated heads do not force task retry.
+    begin(&f, &a);
+    begin(&f, &b);
+    assert(mica_kernel_rule_depend(&a, 1) == OK);
+    assert(install_edge(&b, 9, 5, 2, false) == OK);
+    assert(mica_kernel_commit(&b) == OK && mica_kernel_end(&b));
+    assert(mica_kernel_commit(&a) == OK && mica_kernel_end(&a));
+    // Inactive rules participate in structural validation, but do not change
+    // the active head generation. Activation must check stratification again.
+    begin(&f, &a);
+    begin(&f, &b);
+    assert(mica_kernel_rule_depend(&a, 1) == OK);
+    struct mica_KernelRuleAtom *inactive_atoms = rule_atom_pair(&f.worker, 1, true, NULL);
+    inactive_atoms = rule_atom_pair(&f.worker, 2, false, inactive_atoms);
+    struct mica_KernelRuleDef *inactive = fixture_rule(&f.worker, 1, rule_pair(&f.worker), inactive_atoms, NULL);
+    assert(mica_kernel_rule_add(&b, 90, inactive, false) == OK);
+    assert(mica_kernel_commit(&b) == OK && mica_kernel_end(&b));
+    assert(mica_kernel_commit(&a) == OK && mica_kernel_end(&a));
+    begin(&f, &tx);
+    struct mica_KernelRuleResult inactive_read = mica_kernel_rule(&tx, 90);
+    assert(inactive_read.f_status == OK);
+    assert(mica_kernel_rule_update(&tx, 90, inactive_read.f_rule->f_definition, true) == SCHEMA);
+    assert(!mica_kernel_rule(&tx, 90).f_rule->f_active);
+    assert(mica_kernel_end(&tx));
+    begin(&f, &tx);
+    assert(mica_kernel_rule_set_limit(&tx, 0) == OK);
+    assert(install_edge(&tx, 10, 5, 2, false) == LIMIT);
+    assert(mica_kernel_rule(&tx, 10).f_status == UNKNOWN);
+    assert(mica_kernel_rule_set_limit(&tx, UINT64_MAX) == OK);
+    assert(install_edge(&tx, 10, 5, 2, false) == OK);
+    assert(mica_kernel_rule_set_limit(&tx, 0) == OK);
+    assert(mica_kernel_commit(&tx) == LIMIT);
+    assert(mica_kernel_work(&tx)->f_status == LIMIT && mica_kernel_work(&tx)->f_candidate == NULL);
+    assert(mica_kernel_rule_set_limit(&tx, UINT64_MAX) == OK);
+    assert(mica_kernel_commit(&tx) == OK && mica_kernel_end(&tx));
+    destroy(&f);
+}
+
+static void rule_work_limits(void) {
+    struct fixture f;
+    init(&f);
+    struct mica_KernelTransaction tx, observer;
+    begin(&f, &tx);
+    for (unsigned id = 1; id <= 4; ++id) assert(mica_kernel_rule(&tx, id).f_status == UNKNOWN);
+    struct mica_MemoryRoot *parent = f.worker.f_roots;
+    // Point reads need validation even when there are no writes or head reads.
+    for (unsigned limit = 0; limit < 4; ++limit) {
+        assert(mica_kernel_rule_set_limit(&tx, limit) == OK);
+        assert(mica_kernel_commit(&tx) == LIMIT);
+        assert(f.worker.f_roots == parent);
+        assert(mica_kernel_work(&tx)->f_status == LIMIT);
+        assert(!mica_kernel_work(&tx)->f_done && !mica_kernel_work(&tx)->f_candidate);
+    }
+    assert(mica_kernel_rule_set_limit(&tx, 4) == OK);
+    assert(mica_kernel_commit(&tx) == OK && mica_kernel_end(&tx));
+
+    begin(&f, &tx);
+    for (unsigned id = 100; id < 164; ++id) assert(mica_kernel_rule(&tx, id).f_status == UNKNOWN);
+    assert(mica_kernel_declare(&tx, 1, 1, 2, SET, 0, 0) == OK);
+    assert(add_rule(&tx, 1, 1, 2, false) == OK);
+    parent = f.worker.f_roots;
+    // Schema preparation, its dependency, and 65 catalogue observations leave
+    // four steps of this allowance. The definition cannot finish validation.
+    // Resetting the allowance at compilation incorrectly makes this succeed.
+    assert(mica_kernel_rule_set_limit(&tx, 71) == OK);
+    assert(mica_kernel_commit(&tx) == LIMIT);
+    assert(f.worker.f_roots == parent);
+    assert(mica_kernel_work(&tx)->f_status == LIMIT);
+    assert(!mica_kernel_work(&tx)->f_candidate && !mica_kernel_deltas(&tx));
+    assert(!mica_kernel_work(&tx)->f_done && mica_kernel_view(&tx, 1));
+    expect_rule(&tx, 1, 1, false);
+    begin(&f, &observer);
+    assert(!mica_kernel_view(&observer, 1));
+    assert(mica_kernel_rule(&observer, 1).f_status == UNKNOWN);
+    assert(mica_kernel_end(&observer));
+    assert(mica_kernel_rule_set_limit(&tx, UINT64_MAX) == OK);
+    assert(mica_kernel_commit(&tx) == OK && mica_kernel_end(&tx));
+    destroy(&f);
+}
+
 static void rule_catalogue(void) {
     struct fixture f;
     init(&f);
     struct mica_KernelTransaction closed = {0}, tx, old, observer;
     assert(mica_kernel_rule(&closed, 1).f_status == CLOSED);
     assert(mica_kernel_rules(&closed).f_status == CLOSED);
-    assert(mica_kernel_rule_add(&closed, 1, 1, 2, true) == CLOSED);
-    assert(mica_kernel_rule_update(&closed, 1, 1, 2, false) == CLOSED);
+    assert(add_rule(&closed, 1, 1, 2, true) == CLOSED);
+    assert(update_rule(&closed, 1, 1, 2, false) == CLOSED);
     assert(mica_kernel_rule_remove(&closed, 1) == CLOSED);
     begin(&f, &old);
     begin(&f, &tx);
-    assert(mica_kernel_rule_add(&tx, 10, 1, 2, true) == UNKNOWN);
+    assert(add_rule(&tx, 10, 1, 2, true) == UNKNOWN);
     assert(mica_kernel_declare(&tx, 1, 1, 2, SET, 0, 0) == OK);
     assert(mica_kernel_declare(&tx, 2, 2, 2, SET, 0, 0) == OK);
-    assert(mica_kernel_rule_add(&tx, 10, 1, 1, true) == SCHEMA);
-    assert(mica_kernel_rule_add(&tx, 10, 1, 2, true) == OK);
-    assert(mica_kernel_rule_add(&tx, 10, 1, 2, true) == SCHEMA);
+    assert(add_rule(&tx, 10, 1, 1, true) == SCHEMA);
+    assert(add_rule(&tx, 10, 1, 2, true) == OK);
+    assert(add_rule(&tx, 10, 1, 2, true) == SCHEMA);
     expect_rule(&tx, 10, 1, true);
-    assert(mica_kernel_rule_update(&tx, 10, 2, 2, false) == OK);
+    assert(update_rule(&tx, 10, 2, 2, false) == OK);
     expect_rule(&tx, 10, 2, false);
-    assert(mica_kernel_rule_update(&tx, 10, 999, 2, true) == UNKNOWN);
-    assert(mica_kernel_rule_update(&tx, 10, 1, 3, true) == SCHEMA);
+    assert(update_rule(&tx, 10, 999, 2, true) == UNKNOWN);
+    assert(update_rule(&tx, 10, 1, 3, true) == SCHEMA);
     expect_rule(&tx, 10, 2, false);
     assert(mica_kernel_rule_remove(&tx, 10) == OK);
     assert(mica_kernel_rule(&tx, 10).f_status == UNKNOWN && rule_count(&tx) == 0);
     assert(mica_kernel_rule_remove(&tx, 10) == UNKNOWN);
-    assert(mica_kernel_rule_update(&tx, 10, 1, 2, true) == UNKNOWN);
-    assert(mica_kernel_rule_add(&tx, 10, 1, 2, true) == OK);
-    assert(mica_kernel_rule_add(&tx, 20, 2, 2, false) == OK);
+    assert(update_rule(&tx, 10, 1, 2, true) == UNKNOWN);
+    assert(add_rule(&tx, 10, 1, 2, true) == OK);
+    assert(add_rule(&tx, 20, 2, 2, false) == OK);
     assert(write_pair(&tx, 1, 4, 5, true) == OK);
     assert(mica_memory_safepoint(&f.worker, true));
     expect_rule(&tx, 10, 1, true);
     assert(rule_count(&tx) == 2 && rule_count(&old) == 0);
     assert(mica_kernel_commit(&tx) == OK);
-    assert(mica_kernel_rule_add(&tx, 30, 1, 2, true) == CLOSED);
+    assert(add_rule(&tx, 30, 1, 2, true) == CLOSED);
     assert(mica_kernel_rule(&tx, 10).f_status == CLOSED);
     assert(mica_kernel_end(&tx));
     assert(rule_count(&old) == 0 && mica_kernel_view(&old, 1) == NULL);
@@ -484,7 +720,7 @@ static void rule_catalogue(void) {
     expect_rule(&observer, 20, 2, false);
     assert(count(&observer, 1) == 1);
     begin(&f, &tx);
-    assert(mica_kernel_rule_update(&tx, 10, 2, 2, false) == OK);
+    assert(update_rule(&tx, 10, 2, 2, false) == OK);
     assert(mica_kernel_rule_remove(&tx, 20) == OK);
     assert(write_pair(&tx, 1, 4, 5, false) == OK);
     assert(mica_kernel_end(&tx)); // Rollback discards catalogue and tuple changes.
@@ -510,13 +746,13 @@ static void rule_conflicts(void) {
     struct mica_KernelTransaction a, b, observer;
     // Disjoint additions rebase without discarding either catalogue change.
     begin(&f, &b); begin(&f, &a);
-    assert(mica_kernel_rule_add(&a, 10, 1, 2, true) == OK);
-    assert(mica_kernel_rule_add(&b, 20, 1, 2, true) == OK);
+    assert(add_rule(&a, 10, 1, 2, true) == OK);
+    assert(add_rule(&b, 20, 1, 2, true) == OK);
     assert(mica_kernel_commit(&a) == OK && mica_kernel_end(&a));
     assert(mica_kernel_commit(&b) == OK && mica_kernel_end(&b));
     begin(&f, &b); begin(&f, &a);
-    assert(mica_kernel_rule_update(&a, 10, 1, 2, false) == OK);
-    assert(mica_kernel_rule_update(&b, 10, 1, 2, false) == OK);
+    assert(update_rule(&a, 10, 1, 2, false) == OK);
+    assert(update_rule(&b, 10, 1, 2, false) == OK);
     assert(write_pair(&b, 1, 99, 99, true) == OK);
     assert(mica_kernel_commit(&a) == OK && mica_kernel_end(&a));
     assert(mica_kernel_commit(&b) == CONFLICT);
@@ -535,15 +771,15 @@ static void rule_conflicts(void) {
         if (kind == 0) expect_rule(&a, 10, 1, false);
         else if (kind == 1) assert(mica_kernel_rule(&a, id).f_status == UNKNOWN);
         else assert(rule_count(&a) == 3);
-        if (kind == 0) assert(mica_kernel_rule_update(&b, 10, 1, 2, true) == OK);
-        else assert(mica_kernel_rule_add(&b, id, 1, 2, true) == OK);
+        if (kind == 0) assert(update_rule(&b, 10, 1, 2, true) == OK);
+        else assert(add_rule(&b, id, 1, 2, true) == OK);
         assert(mica_kernel_commit(&b) == OK && mica_kernel_end(&b));
         assert(mica_kernel_commit(&a) == CONFLICT && mica_kernel_end(&a));
     }
     // An unchanged rule's revision survives prefix copying for another id.
     begin(&f, &a); begin(&f, &b);
     expect_rule(&a, 10, 1, true);
-    assert(mica_kernel_rule_update(&b, 20, 1, 2, false) == OK);
+    assert(update_rule(&b, 20, 1, 2, false) == OK);
     assert(mica_kernel_commit(&b) == OK && mica_kernel_end(&b));
     assert(mica_kernel_commit(&a) == OK && mica_kernel_end(&a));
     // Delete and recreate the same definition must not hide an intervening change.
@@ -552,13 +788,13 @@ static void rule_conflicts(void) {
     assert(mica_kernel_rule_remove(&b, 10) == OK);
     assert(mica_kernel_commit(&b) == OK && mica_kernel_end(&b));
     begin(&f, &b);
-    assert(mica_kernel_rule_add(&b, 10, 1, 2, true) == OK);
+    assert(add_rule(&b, 10, 1, 2, true) == OK);
     assert(mica_kernel_commit(&b) == OK && mica_kernel_end(&b));
     assert(mica_kernel_commit(&a) == CONFLICT && mica_kernel_end(&a));
     // Simultaneous definitions of a previously missing id conflict.
     begin(&f, &a); begin(&f, &b);
-    assert(mica_kernel_rule_add(&a, 100, 1, 2, true) == OK);
-    assert(mica_kernel_rule_add(&b, 100, 1, 2, false) == OK);
+    assert(add_rule(&a, 100, 1, 2, true) == OK);
+    assert(add_rule(&b, 100, 1, 2, false) == OK);
     assert(mica_kernel_commit(&b) == OK && mica_kernel_end(&b));
     assert(mica_kernel_commit(&a) == CONFLICT && mica_kernel_end(&a));
     destroy(&f);
@@ -573,11 +809,11 @@ static void rule_allocation_failures(void) {
     declare(&staging, 1, SET);
     struct mica_KernelTransaction draft;
     begin(&staging, &draft);
-    assert(mica_kernel_rule_add(&draft, 1, 1, 2, true) == OK);
+    assert(add_rule(&draft, 1, 1, 2, true) == OK);
     bool active = true, exhausted = false;
     atomic_store(&allocation_budget, 0);
     for (unsigned i = 0; i < 4096; ++i) {
-        uint64_t status = mica_kernel_rule_update(&draft, 1, 1, 2, !active);
+        uint64_t status = update_rule(&draft, 1, 1, 2, !active);
         assert(status == OK || status == OOM);
         if (status == OOM) { exhausted = true; break; }
         active = !active;
@@ -598,7 +834,7 @@ static void rule_allocation_failures(void) {
         declare(&f, 1, SET);
         struct mica_KernelTransaction tx, retained;
         begin(&f, &tx);
-        for (unsigned i = 0; i < 63; ++i) assert(mica_kernel_rule_add(&tx, i, 1, 2, true) == OK);
+        for (unsigned i = 0; i < 63; ++i) assert(add_rule(&tx, i, 1, 2, true) == OK);
         assert(mica_kernel_commit(&tx) == OK && mica_kernel_end(&tx));
         begin(&f, &retained);
         begin(&f, &tx);
@@ -607,7 +843,7 @@ static void rule_allocation_failures(void) {
         struct mica_MemoryRoot *parent = f.worker.f_roots;
         atomic_store(&allocation_budget, 0);
         for (unsigned i = 0; i < 4096; ++i) {
-            uint64_t status = mica_kernel_rule_update(&tx, id, 1, 2, !previous);
+            uint64_t status = update_rule(&tx, id, 1, 2, !previous);
             assert(f.worker.f_roots == parent);
             assert(status == OK || status == OOM);
             if (status == OOM) { failed = true; break; }
@@ -634,7 +870,7 @@ static void rule_allocation_failures(void) {
         declare(&f, 1, SET);
         struct mica_KernelTransaction tx, observer;
         begin(&f, &tx);
-        for (unsigned i = 0; i < 48; ++i) assert(mica_kernel_rule_add(&tx, i, 1, 2, true) == OK);
+        for (unsigned i = 0; i < 48; ++i) assert(add_rule(&tx, i, 1, 2, true) == OK);
         assert(write_pair(&tx, 1, 1, 2, true) == OK);
         atomic_store(&allocation_budget, budget);
         uint64_t status = mica_kernel_commit(&tx);
@@ -667,15 +903,16 @@ static void rule_prepared_publication(void) {
     declare(&f, 1, SET);
     struct mica_KernelTransaction a, b;
     begin(&f, &a);
-    assert(mica_kernel_rule_add(&a, 1, 1, 2, true) == OK);
+    assert(add_rule(&a, 1, 1, 2, true) == OK);
+    uint64_t budget = mica_kernel_work(&a)->f_rule_limit;
     mica_foreign_memory_lock(f.kernel.f_mutex);
-    assert(mica_kernel_prepare(&a) == OK); // No publication lock needed to prepare rules.
+    assert(mica_kernel_prepare(&a, &budget) == OK); // No publication lock needed to prepare rules.
     mica_foreign_memory_unlock(f.kernel.f_mutex);
     struct mica_KernelWork *work = mica_kernel_work(&a);
     work->f_candidate = (void *)mica_memory_share(&f.worker, (void *)work->f_candidate);
     assert(work->f_candidate);
     begin(&f, &b);
-    assert(mica_kernel_rule_add(&b, 2, 1, 2, false) == OK);
+    assert(add_rule(&b, 2, 1, 2, false) == OK);
     assert(mica_kernel_commit(&b) == OK && mica_kernel_end(&b));
     assert(!mica_kernel_try_publish(&a));
     assert(mica_memory_safepoint(&f.worker, true));
@@ -704,9 +941,9 @@ static void *rule_parallel_worker(void *opaque) {
             struct mica_KernelRuleResult current = mica_kernel_rule(&tx, 1);
             assert(current.f_status == OK);
             bool active = current.f_rule->f_active;
-            assert(mica_kernel_rule_update(&tx, 1, 1, 2, !active) == OK);
+            assert(update_rule(&tx, 1, 1, 2, !active) == OK);
             uint64_t id = 100 + job->id * 20 + round;
-            assert(mica_kernel_rule_add(&tx, id, 1, 2, true) == OK);
+            assert(add_rule(&tx, id, 1, 2, true) == OK);
             assert(write_pair(&tx, 1, job->id, round, true) == OK);
             uint64_t status = mica_kernel_commit(&tx);
             assert(status == OK || status == CONFLICT);
@@ -726,7 +963,7 @@ static void rule_concurrency(void) {
     declare(&f, 1, SET);
     struct mica_KernelTransaction tx;
     begin(&f, &tx);
-    assert(mica_kernel_rule_add(&tx, 1, 1, 2, false) == OK);
+    assert(add_rule(&tx, 1, 1, 2, false) == OK);
     assert(mica_kernel_commit(&tx) == OK && mica_kernel_end(&tx));
     enum { THREADS = 4 };
     pthread_t threads[THREADS];
@@ -1219,7 +1456,7 @@ static void rule_index_edits(void) {
     begin(&f, &tx);
     // Multiplication permutes the ids and exercises both double rotations.
     for (unsigned i = 0; i < 1024; ++i) {
-        assert(mica_kernel_rule_add(&tx, (i * 307) % 1024, 1, 2, true) == OK);
+        assert(add_rule(&tx, (i * 307) % 1024, 1, 2, true) == OK);
         assert(rule_tree_check(mica_kernel_work(&tx)->f_rule_index, 0, UINT64_MAX) <= 15);
     }
     assert(mica_kernel_commit(&tx) == OK && mica_kernel_end(&tx));
@@ -1239,7 +1476,7 @@ static void rule_collection(bool preparing) {
     declare(&f, 1, SET);
     struct mica_KernelTransaction tx;
     begin(&f, &tx);
-    for (unsigned i = 0; i < 1024; ++i) assert(mica_kernel_rule_add(&tx, i, 1, 2, true) == OK);
+    for (unsigned i = 0; i < 1024; ++i) assert(add_rule(&tx, i, 1, 2, true) == OK);
     struct mica_MemoryRoot *parent = f.worker.f_roots;
     uint64_t epoch = f.heap.f_epoch;
     struct collection_job job = {.heap = &f.heap};
@@ -1253,7 +1490,8 @@ static void rule_collection(bool preparing) {
         if (requested) break;
         sched_yield();
     }
-    if (preparing) assert(mica_kernel_prepare(&tx) == OK);
+    uint64_t budget = mica_kernel_work(&tx)->f_rule_limit;
+    if (preparing) assert(mica_kernel_prepare(&tx, &budget) == OK);
     else assert(rule_count(&tx) == 1024);
     assert(f.heap.f_epoch > epoch && f.worker.f_roots == parent);
     assert(mica_memory_leave(&f.worker));
@@ -1265,11 +1503,125 @@ static void rule_collection(bool preparing) {
     destroy(&f);
 }
 
+// Build the graph directly to isolate SCC stack depth from catalogue building.
+// Collection during DFS must retain both the active frames and Tarjan stack.
+static void rule_deep_planning(void) {
+    enum { VERTICES = 10000 };
+    struct fixture f;
+    init(&f);
+    struct mica_KernelRuleVertex *vertices = NULL;
+    for (unsigned i = 0; i < VERTICES; ++i) {
+        struct mica_KernelRuleEdge *edge = NULL;
+        if (vertices) {
+            edge = mica_kernel_new_RuleEdge(&f.worker, NULL, vertices, i % 2 != 0);
+            assert(edge);
+        }
+        vertices = mica_kernel_new_RuleVertex(&f.worker, vertices, i, 0, edge, NULL, 0, 0, false, 0);
+        assert(vertices);
+    }
+    struct mica_KernelRulePlan *plan = mica_kernel_new_RulePlan(&f.worker, vertices, NULL, NULL, NULL, 0);
+    assert(plan);
+    struct mica_MemoryRoot root = {.f_pointer = (uint8_t *)plan};
+    assert(mica_memory_root_push(&f.worker, &root));
+    uint64_t epoch = f.heap.f_epoch;
+    struct collection_job job = {.heap = &f.heap};
+    pthread_t collector;
+    assert(!pthread_create(&collector, NULL, collect_repeatedly, &job));
+    while (!atomic_load(&job.ready)) sched_yield();
+    for (;;) {
+        mica_foreign_memory_lock(f.heap.f_mutex);
+        bool requested = f.heap.f_collecting;
+        mica_foreign_memory_unlock(f.heap.f_mutex);
+        if (requested) break;
+        sched_yield();
+    }
+    uint64_t budget = VERTICES * 16;
+    assert(mica_kernel_rule_stratify(&f.worker, (struct mica_KernelRulePlan *)root.f_pointer, &budget) == OK);
+    assert(f.heap.f_epoch > epoch && f.worker.f_roots == &root);
+    plan = (struct mica_KernelRulePlan *)root.f_pointer;
+    assert(plan->f_count == VERTICES);
+    uint64_t id = 1;
+    for (struct mica_KernelRuleComponent *component = plan->f_components; component; component = component->f_next) {
+        assert(component->f_id == id++ && !component->f_recursive);
+        assert(component->f_members && !component->f_members->f_next);
+        assert(component->f_members->f_vertex->f_id == component->f_id - 1);
+    }
+    assert(id == VERTICES + 1);
+    assert(mica_memory_root_pop(&f.worker, &root));
+    assert(mica_memory_leave(&f.worker));
+    assert(!pthread_join(collector, NULL));
+    assert(mica_memory_enter(&f.worker));
+    destroy(&f);
+}
+
+// A small reachability oracle is independent of the generated DFS algorithm.
+static void rule_graph_oracle(void) {
+    enum { N = 8 };
+    struct fixture f;
+    init(&f);
+    uint64_t random = 19;
+    for (unsigned sample = 0; sample < 64; ++sample) {
+        bool edge[N][N] = {{false}}, negative[N][N] = {{false}}, reachable[N][N] = {{false}};
+        struct mica_KernelRuleVertex *vertices[N];
+        struct mica_KernelRuleVertex *head = NULL;
+        for (unsigned i = 0; i < N; ++i) {
+            vertices[i] = mica_kernel_new_RuleVertex(&f.worker, head, i, 0, NULL, NULL, 0, 0, false, 0);
+            assert(vertices[i]);
+            head = vertices[i];
+        }
+        for (unsigned i = 0; i < N; ++i) {
+            reachable[i][i] = true;
+            for (unsigned j = 0; j < N; ++j) {
+                random ^= random << 13; random ^= random >> 7; random ^= random << 17;
+                edge[i][j] = random % 7 == 0;
+                negative[i][j] = edge[i][j] && sample % 3 && (random >> 8) % 3 == 0;
+                if (!edge[i][j]) continue;
+                reachable[i][j] = true;
+                vertices[i]->f_edges = mica_kernel_new_RuleEdge(&f.worker, vertices[i]->f_edges, vertices[j], negative[i][j]);
+                assert(vertices[i]->f_edges);
+            }
+        }
+        for (unsigned k = 0; k < N; ++k)
+            for (unsigned i = 0; i < N; ++i)
+                for (unsigned j = 0; j < N; ++j)
+                    reachable[i][j] |= reachable[i][k] && reachable[k][j];
+        bool invalid = false;
+        for (unsigned i = 0; i < N; ++i)
+            for (unsigned j = 0; j < N; ++j)
+                invalid |= negative[i][j] && reachable[j][i];
+        struct mica_KernelRulePlan *plan = mica_kernel_new_RulePlan(&f.worker, head, NULL, NULL, NULL, 0);
+        assert(plan);
+        struct mica_MemoryRoot root = {.f_pointer = (uint8_t *)plan};
+        assert(mica_memory_root_push(&f.worker, &root));
+        uint64_t budget = 10000;
+        uint64_t status = mica_kernel_rule_stratify(&f.worker, plan, &budget);
+        assert(status == (invalid ? SCHEMA : OK));
+        if (!invalid) {
+            plan = (struct mica_KernelRulePlan *)root.f_pointer;
+            for (struct mica_KernelRuleVertex *v = plan->f_vertices; v; v = v->f_next) vertices[v->f_id] = v;
+            for (unsigned i = 0; i < N; ++i) {
+                for (unsigned j = 0; j < N; ++j) {
+                    bool same = vertices[i]->f_component == vertices[j]->f_component;
+                    assert(same == (reachable[i][j] && reachable[j][i]));
+                    if (edge[i][j] && !same) assert(vertices[j]->f_component < vertices[i]->f_component);
+                }
+            }
+        }
+        assert(f.worker.f_roots == &root);
+        assert(mica_memory_root_pop(&f.worker, &root));
+        assert(mica_memory_safepoint(&f.worker, true));
+    }
+    destroy(&f);
+}
+
 int main(int argc, char **argv) {
     if (argc == 2 && !strcmp(argv[1], "trace")) return trace();
     if (argc == 5 && !strcmp(argv[1], "bench")) return benchmark(argv[2], (unsigned)strtoul(argv[3], NULL, 10), (unsigned)strtoul(argv[4], NULL, 10));
     assert(argc == 1);
     rule_catalogue();
+    rule_definition_validation();
+    rule_dependency_planning();
+    rule_work_limits();
     rule_conflicts();
     rule_allocation_failures();
     rule_prepared_publication();
@@ -1277,6 +1629,8 @@ int main(int argc, char **argv) {
     rule_index_edits();
     rule_collection(false);
     rule_collection(true);
+    rule_deep_planning();
+    rule_graph_oracle();
     query_indexes();
     queries();
     query_collection(true);

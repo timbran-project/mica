@@ -1,0 +1,110 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+verb native_rules/ref(builder: map, name: string) -> map
+  let result: map = native_roots/ref(builder, name)
+  return result
+end
+verb native_rules/read(builder: map, object: map, name: string) -> map
+  let result: map = native_kernel/load_field(builder, object, name)
+  return result
+end
+verb native_rules/fail(builder: map, status: map) -> map
+  if builder[:result] == [:Record, "KernelRuleTreeResult"]
+    let result: map = native_kernel/rule_result(builder, status, native_gen/zero(native_kernel/pointer("RuleIndex")))
+    return result
+  end
+  if builder[:result] == :U64
+    let result: map = native_roots/return_value(builder, status)
+    return result
+  end
+  let result: map = native_rules/result(builder, status, {})
+  return result
+end
+verb native_rules/error(builder: map, name: string) -> map
+  let result: map = native_rules/fail(builder, native_rules/ref(builder, string_concat("kernel_", name)))
+  return result
+end
+verb native_rules/check(builder: map, condition: map, name: string) -> map
+  let result: map = native_gen/unless(builder, condition, fn(failed) => native_rules/error(failed, name))
+  return result
+end
+verb native_rules/context(module: map, name: string) -> map
+  let result: map = native_roots/context(module, string_concat("kernel_", name), fn(failed, reason) => native_rules/error(failed, reason))
+  return result
+end
+verb native_rules/status_call(builder: map, name: string, arguments: list) -> map
+  let [status: map, ready: map] = native_gen/bind(builder, "status", native_gen/call(builder, string_concat("kernel_", name), arguments))
+  let result: map = native_gen/unless(ready, native_kernel/absent(status), fn(failed) => native_rules/fail(failed, status))
+  return result
+end
+verb native_rules/create(builder: map, record: string, overrides: map) -> map
+  let fields: map = {}
+  for field in native_kernel/schema(record)[1]
+    fields[field[0]] = native_gen/zero(field[1])
+  end
+  for name, value in overrides
+    fields[name] = value
+  end
+  let result: map = native_kernel/allocate_record(builder, native_roots/worker(builder), record, fields)
+  return result
+end
+verb native_rules/allocate(builder: map, record: string, fields: map) -> list
+  let [created: map, ready: map] = native_gen/bind(builder, "created", native_rules/create(builder, record, fields))
+  ready = native_rules/check(ready, native_gen/negate(native_kernel/absent(created)), "oom")
+  return [created, ready]
+end
+verb native_rules/index_put(builder: map, name: string, tree: map, entry: map) -> list
+  let [updated: map, ready: map] = native_gen/checked_bind(builder, "updated", native_gen/call(builder, string_concat("kernel_", name, "_put"),
+    [native_roots/worker(builder), tree, native_rules/read(builder, entry, "id"), entry]), "ok", fn(failed) => native_rules/error(failed, "oom"))
+  return [native_gen/field(ready, updated, "node"), ready]
+end
+// Budget is shared by validation, graph construction, and SCC traversal. It
+// bounds malformed cyclic input as well as legitimate large definitions.
+verb native_rules/tick(builder: map) -> map
+  let budget: map = native_gen/location(native_rules/ref(builder, "budget"))
+  let remaining: map = native_gen/read(budget)
+  let ready: map = native_rules/check(builder, native_gen/negate(native_kernel/absent(remaining)), "limit")
+  ready = native_gen/write(ready, budget, native_gen/subtract(remaining, native_rules/ref(ready, "one")))
+  let result: map = native_roots/poll(ready)
+  return result
+end
+verb native_rules/each(builder: map, name: string, first: map, body) -> map
+  let [cursor: map, ready: map] = native_roots/retain(builder, name, first)
+  ready = native_gen/while_loop(ready, native_gen/negate(native_kernel/absent(cursor)), fn(iteration)
+    let step: map = native_rules/tick(iteration)
+    step = body(step, cursor)
+    return native_roots/store(step, cursor, native_rules/read(step, cursor, "next"))
+  end)
+  let result: map = native_rules/release_root(ready, cursor)
+  return result
+end
+
+verb native_rules/result(builder: map, status: map, overrides: map) -> map
+  let fields: map = {}
+  for spec in native_rules/result_schemas()
+    if builder[:result] == [:Record, spec[0]]
+      for field in spec[1]
+        fields[field[0]] = native_gen/zero(field[1])
+      end
+    end
+  end
+  fields["status"] = status
+  for name, value in overrides
+    fields[name] = value
+  end
+  let result: map = native_roots/return_value(builder, native_gen/record(builder, builder[:result], fields))
+  return result
+end
+verb native_rules/checked_call(builder: map, name: string, arguments: list, field: string) -> list
+  let [result: map, ready: map] = native_gen/bind(builder, "result", native_gen/call(builder, string_concat("kernel_", name), arguments))
+  ready = native_gen/unless(ready, native_kernel/absent(native_gen/field(ready, result, "status")),
+    fn(failed) => native_rules/fail(failed, native_gen/field(failed, result, "status")))
+  return [native_gen/field(ready, result, field), ready]
+end
+
+verb native_rules/release_root(builder: map, value: map) -> map
+  let [popped: map, ready: map] = native_gen/bind(builder, "root_released", native_gen/call(builder, "memory_root_pop", [native_roots/worker(builder), value[:scope_root]]))
+  let result: map = native_rules/check(ready, popped, "closed")
+  return result
+end

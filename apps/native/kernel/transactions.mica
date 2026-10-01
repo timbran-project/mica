@@ -154,7 +154,7 @@ verb native_kernel/declare_body(module: map) -> map
   builder = native_kernel/columns(builder, arity, fn(iteration, position, bit) => native_kernel/add_secondary_index(iteration, worker, head, indexes, keys, bit))
   let [relation, with_relation] = native_gen/bind(builder, "relation", native_kernel/allocate_record(builder, worker, "Relation",
     {"next" -> native_gen/zero(native_kernel/pointer("Relation")), "id" -> id, "name" -> name, "arity" -> arity,
-      "policy" -> policy, "keys" -> keys, "indexes" -> head}))
+      "policy" -> policy, "keys" -> keys, "schema_revision" -> native_gen/ref(builder, "zero"), "indexes" -> head}))
   builder = native_gen/when(with_relation, native_kernel/absent(relation), fn(arm) => native_kernel/status(arm, "kernel_oom"))
   let [created, with_created] = native_gen/bind(builder, "created", native_kernel/allocate_record(builder, worker, "Change",
     {"next" -> native_kernel/load_field(builder, work, "changes"), "before" -> native_gen/zero(native_kernel/pointer("Relation")),

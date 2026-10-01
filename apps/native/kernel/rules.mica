@@ -1,16 +1,28 @@
 // Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-// Transactional rule metadata. Bodies, dependency plans, and evaluation are
-// supplied by the rule runtime in a later stage. Persistent AVL indexes bound
-// individual edits; rooted catalogue traversals poll between those edits.
-verb native_kernel/rule_result(builder: map, status: map, rule: map) -> map
-  let generated_result: map = native_roots/return_value(builder, native_gen/record(builder, builder[:result],
-    {"status" -> status, "rule" -> rule}))
+// Transactional rule definitions and dependency plans. Evaluation is separate.
+// Persistent AVL indexes bound individual edits; rooted catalogue traversals
+// poll between those edits.
+verb native_kernel/rule_result(builder: map, status: map, rule: map, ?extra: map = {}) -> map
+  let fields: map = {"status" -> status, "rule" -> rule}
+  if builder[:result] == [:Record, "KernelRuleTreeResult"]
+    fields["schemas"] = native_gen/zero(native_kernel/pointer("RuleSchemaIndex"))
+    fields["heads"] = native_gen/zero(native_kernel/pointer("RuleGenerationIndex"))
+    fields["plan"] = native_gen/zero(native_kernel/pointer("RulePlan"))
+  end
+  for name, value in extra
+    fields[name] = value
+  end
+  let generated_result: map = native_roots/return_value(builder, native_gen/record(builder, builder[:result], fields))
   return generated_result
 end
 
 verb native_kernel/rule_error(builder: map, status: string) -> map
+  if builder[:result] == [:Record, "KernelRulePlanResult"]
+    let result: map = native_rules/fail(builder, native_gen/ref(builder, status))
+    return result
+  end
   if builder[:result] == :U64
     let generated_result: map = native_kernel/status(builder, status)
     return generated_result
@@ -121,19 +133,31 @@ verb native_kernel/rule_stage_body(module: map, operation: string) -> map
   let [entry, with_entry] = native_gen/bind(builder, "entry", native_gen/zero(native_kernel/pointer("Rule")))
   builder = with_entry
   if operation != "remove"
-    let head = native_gen/ref(builder, "head")
-    let arity = native_gen/ref(builder, "arity")
+    let definition: map = native_rules/ref(builder, "definition")
+    builder = native_gen/when(builder, native_kernel/absent(definition), fn(invalid) => native_kernel/status(invalid, "kernel_schema"))
+    let head: map = native_rules/read(builder, definition, "head")
     let [relation, with_relation] = native_gen/bind(builder, "relation", native_gen/call(builder, "kernel_view", [transaction, head]))
     builder = native_gen/when(with_relation, native_kernel/absent(relation), fn(missing) => native_kernel/status(missing, "kernel_unknown"))
-    builder = native_gen/unless(builder, native_gen/equal(arity, native_kernel/load_field(builder, relation, "arity")),
-      fn(invalid) => native_kernel/status(invalid, "kernel_schema"))
     builder = native_gen/assign(builder, entry, native_kernel/allocate_record(builder, worker, "Rule",
-      {"next" -> native_gen/zero(native_kernel/pointer("Rule")), "id" -> id, "head" -> head, "arity" -> arity,
+      {"next" -> native_gen/zero(native_kernel/pointer("Rule")), "id" -> id, "head" -> head,
+        "arity" -> native_rules/read(builder, relation, "arity"), "definition" -> definition,
         "active" -> native_gen/ref(builder, "active"), "revision" -> native_gen/ref(builder, "zero")}))
     builder = native_gen/when(builder, native_kernel/absent(entry), fn(failed) => native_kernel/status(failed, "kernel_oom"))
   end
   let [rules, staged] = native_kernel/rule_index_edit(builder, "kernel_rule_index_put", native_kernel/load_field(builder, work, "rule_index"), id, entry)
-  builder = native_kernel/store_field(staged, work, "rule_index", rules)
+  let [candidate: map, rooted: map] = native_roots/retain(staged, "candidate", rules)
+  let [remaining: map, with_budget: map] = native_gen/bind(rooted, "remaining", native_rules/read(rooted, work, "rule_limit"))
+  let budget: map = native_gen/address(remaining)
+  let [metadata: map, indexed: map] = native_rules/checked_call(with_budget, "rule_schemas", [worker, work, native_gen/ref(with_budget, "true"), budget], "schemas")
+  let [schemas: map, with_schemas: map] = native_roots/retain(indexed, "schemas", metadata)
+  let [plan: map, planned: map] = native_rules/checked_call(with_schemas, "rules_compile", [worker, work, candidate, schemas, native_gen/ref(with_schemas, "true"), budget], "plan")
+  // All allocation and validation completes before publishing the draft edit.
+  builder = native_kernel/store_field(planned, work, "rule_index", candidate)
+  builder = native_kernel/store_field(builder, work, "rule_plan", plan)
+  let [observation: map, reloaded: map] = native_gen/bind(builder, "observed", native_gen/call(builder, "kernel_observation_index_lookup", [native_kernel/load_field(builder, work, "rule_observations"), id]))
+  builder = reloaded
+  change = observation
+  entry = native_gen/call(builder, "kernel_rule_index_lookup", [candidate, id])
   builder = native_kernel/store_field(builder, work, "rules", native_gen/zero(native_kernel/pointer("Rule")))
   builder = native_kernel/store_field(builder, work, "rules_cached", native_gen/ref(builder, "false"))
   builder = native_kernel/store_field(builder, change, "after", entry)
@@ -180,6 +204,37 @@ verb native_kernel/rule_rebase_change(builder: map, work: map, change: map, rule
   return generated_result
 end
 
+// Advance both head generations for active replacements that change heads.
+verb native_kernel/rule_rebase_heads(builder: map, change: map, heads: map, revision: map) -> map
+  let updated: map = builder
+  for side in ["before", "after"]
+    let entry: map = native_kernel/load_field(updated, change, side)
+    updated = native_gen/unless(updated, native_kernel/absent(entry), fn(present)
+      return native_gen/when(present, native_kernel/load_field(present, entry, "active"), fn(active)
+        let [status: map, bumped: map] = native_gen/bind(active, "bumped", native_gen/call(active, "kernel_rule_head_bump", [native_roots/worker(active), heads[:scope_root], native_kernel/load_field(active, entry, "head"), revision]))
+        return native_gen/unless(bumped, native_kernel/absent(status), fn(failed) => native_kernel/rule_result(failed, status, native_gen/zero(native_kernel/pointer("RuleIndex"))))
+      end)
+    end)
+  end
+  return updated
+end
+
+verb native_kernel/rule_prepare_plan(input: map, work: map, rules: map, current: map, schemas: map, budget: map) -> list
+  let builder: map = input
+  let [plan: map, with_plan: map] = native_gen/bind(builder, "plan", native_kernel/load_field(builder, current, "rule_plan"))
+  builder = native_gen/unless(with_plan, native_gen/equal(rules, native_kernel/load_field(with_plan, current, "rules")), fn(changed)
+    let [result: map, planned: map] = native_gen/bind(changed, "planned", native_gen/call(changed, "kernel_rules_compile", [native_roots/worker(changed), work, rules, schemas, native_gen/ref(changed, "false"), budget]))
+    let status: map = native_gen/field(planned, result, "status")
+    let ready: map = native_gen/unless(planned, native_kernel/absent(status), fn(failed)
+      let transient: map = native_gen/branch(failed, native_gen/equal(status, native_gen/ref(failed, "kernel_oom")),
+        fn(oom) => native_kernel/rule_error(oom, "kernel_oom"), fn(other) => native_gen/when(other, native_gen/equal(status, native_gen/ref(other, "kernel_limit")), fn(limit) => native_kernel/rule_error(limit, "kernel_limit")))
+      return native_kernel/rule_error(transient, "kernel_conflict")
+    end)
+    return native_gen/assign(ready, plan, native_gen/field(ready, result, "plan"))
+  end)
+  return [plan, builder]
+end
+
 verb native_kernel/rules_rebase_body(module: map) -> map
   let builder = native_roots/context(module, "kernel_rules_rebase", fn(failed, reason) => native_kernel/rule_error(failed, string_concat("kernel_", reason)))
   let work = native_roots/ref(builder, "work")
@@ -191,19 +246,32 @@ verb native_kernel/rules_rebase_body(module: map) -> map
       fn(conflict) => native_kernel/rule_conflict(conflict, work, native_gen/ref(conflict, "zero")))
     return generated_result
   end)
+  let [heads: map, with_heads: map] = native_roots/retain(builder, "heads", native_kernel/load_field(builder, current, "rule_heads"))
+  let budget: map = native_rules/ref(with_heads, "budget")
+  let [metadata: map, with_metadata: map] = native_gen/bind(with_heads, "metadata", native_gen/call(with_heads, "kernel_rule_schemas", [native_roots/worker(with_heads), work, native_gen/ref(with_heads, "false"), budget]))
+  let schema_status: map = native_gen/field(with_metadata, metadata, "status")
+  let ready_schemas: map = native_gen/unless(with_metadata, native_kernel/absent(schema_status), fn(failed) => native_kernel/rule_result(failed, schema_status, native_gen/zero(native_kernel/pointer("RuleIndex"))))
+  let [schemas: map, with_schemas: map] = native_roots/retain(ready_schemas, "schemas", native_gen/field(ready_schemas, metadata, "schemas"))
+  let [checked: map, with_checked: map] = native_gen/bind(with_schemas, "checked", native_gen/call(with_schemas, "kernel_rule_dependencies_validate", [native_roots/worker(with_schemas), work, budget]))
+  builder = native_gen/unless(with_checked, native_kernel/absent(checked), fn(failed) => native_kernel/rule_result(failed, checked, native_gen/zero(native_kernel/pointer("RuleIndex"))))
   let revision = native_gen/add(native_kernel/load_field(builder, current, "version"), native_gen/ref(builder, "one"))
   let [change, ready] = native_roots/retain(builder, "change", native_kernel/load_field(builder, work, "rule_changes"))
   builder = native_gen/while_loop(ready, native_gen/negate(native_kernel/absent(change)), fn(iteration)
-    let polled = native_roots/poll(iteration)
+    let polled = native_rules/tick(iteration)
     let [found, with_found] = native_gen/bind(polled, "found", native_gen/call(polled, "kernel_rule_index_lookup",
       [native_kernel/load_field(iteration, current, "rules"), native_kernel/load_field(iteration, change, "id")]))
     let step = native_kernel/rule_validate_observation(with_found, work, change, found)
     step = native_gen/when(step, native_kernel/load_field(step, change, "written"),
-      fn(written) => native_kernel/rule_rebase_change(written, work, change, rules, revision))
+      fn(written)
+        let updated: map = native_kernel/rule_rebase_change(written, work, change, rules, revision)
+        return native_kernel/rule_rebase_heads(updated, change, heads, revision)
+      end)
     let generated_result: map = native_roots/store(step, change, native_kernel/load_field(step, change, "next"))
     return generated_result
   end)
-  builder = native_kernel/rule_result(builder, native_gen/ref(builder, "kernel_ok"), rules)
+  let [plan: map, planned: map] = native_kernel/rule_prepare_plan(builder, work, rules, current, schemas, budget)
+  builder = planned
+  builder = native_kernel/rule_result(builder, native_gen/ref(builder, "kernel_ok"), rules, {"heads" -> heads, "plan" -> plan, "schemas" -> schemas})
   let generated_result: map = native_gen/finish(module, builder)
   return generated_result
 end
@@ -241,13 +309,13 @@ verb native_kernel/rules(input: map) -> map
   let rule = native_kernel/pointer("Rule")
   let change = native_kernel/pointer("RuleChange")
   let result = [:Record, "KernelRuleResult"]
-  let definition = [id, ["head", :U64, :Value], ["arity", :U64, :Value], ["active", :Bool, :Value]]
+  let definition = [id, ["definition", native_kernel/pointer("RuleDef"), :Gc], ["active", :Bool, :Value]]
   for spec in [
     ["rules", result, [tx], true], ["rule", result, [tx, id], true],
     ["rule_add", :U64, [tx, @definition], true], ["rule_update", :U64, [tx, @definition], true], ["rule_remove", :U64, [tx, id], true],
     ["rule_observe", change, [worker, work, id], false],
     ["rules_collect", :U64, [worker, ["node", native_kernel/pointer("RuleIndex"), :Gc], ["output", native_memory/record_pointer("MemoryRoot"), :Borrow]], true],
-    ["rules_rebase", [:Record, "KernelRuleTreeResult"], [worker, work, ["catalog", native_kernel/pointer("Relation"), :Gc]], true]]
+    ["rules_rebase", [:Record, "KernelRuleTreeResult"], [worker, work, ["catalog", native_kernel/pointer("Relation"), :Gc], ["budget", native_memory/pointer(:U64), :Borrow]], true]]
     module = native_kernel/declare(module, spec[0], spec[1], spec[2], spec[3])
   end
   module = native_kernel/rule_observe_body(module)
