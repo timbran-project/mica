@@ -132,7 +132,6 @@ verb native_memory/reset_workers(builder: map, heap: map) -> map
       native_gen/equal(worker, native_gen/ref(initial_body, "memory_null_worker")),
       fn(done) => native_gen/break_loop(done))
     body = native_gen/write(body, native_gen/field(body, worker, "used"), native_gen/ref(body, "memory_n0"))
-    body = native_gen/write(body, native_gen/field(body, worker, "pressure"), native_gen/ref(body, "memory_false"))
     let [next: map, with_next: map] = native_gen/bind(body, "next_worker",
       native_gen/read(native_gen/field(body, worker, "next")))
     return native_gen/assign(with_next, worker, next)

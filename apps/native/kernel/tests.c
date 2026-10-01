@@ -3,6 +3,7 @@
 
 #include <assert.h>
 #include <pthread.h>
+#include <sched.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -126,6 +127,7 @@ static void basics(void) {
     assert(mica_memory_safepoint(&f.worker, true));
     assert(scan(&old, 1, 0, 0, 0, rows, 8).f_status == UNKNOWN);
     assert(mica_kernel_end(&old));
+    assert(mica_kernel_query_execute(&old, NULL).f_status == CLOSED);
     begin(&f, &tx);
     assert(count(&tx, 1) == 2);
     assert(write_pair(&tx, 1, 3, 9, true) == OK);
@@ -185,6 +187,7 @@ static void indexes_and_gc(void) {
     assert(mica_memory_safepoint(&f.worker, true));
     assert(count(&old, 1) == 1024);
     assert(mica_kernel_end(&old));
+    assert(mica_kernel_query_execute(&old, NULL).f_status == CLOSED);
     begin(&f, &tx);
     assert(count(&tx, 1) == 513);
     assert(mica_kernel_end(&tx));
@@ -445,7 +448,9 @@ static struct mica_KernelQuery *query_scan(struct fixture *f, uint64_t relation)
     return query;
 }
 static uint64_t query_count(struct mica_KernelTransaction *tx, struct mica_KernelQuery *query, uint64_t arity) {
+    struct mica_MemoryRoot *roots = tx->f_worker->f_roots;
     struct mica_KernelQueryResult result = mica_kernel_query_execute(tx, query);
+    assert(tx->f_worker->f_roots == roots);
     assert(result.f_status == OK && result.f_arity == arity);
     uint64_t length = mica_kernel_width(result.f_rows);
     for (uint64_t i = 0; i < length; ++i) {
@@ -679,69 +684,84 @@ static void queries(void) {
     declare(&f, 1, SET);
     declare(&f, 2, SET);
     struct mica_KernelTransaction old, tx;
+    struct mica_KernelTransaction closed = {0};
+    assert(mica_kernel_query_execute(&closed, NULL).f_status == CLOSED);
     begin(&f, &old);
     begin(&f, &tx);
+    enum {
+        Q_first, Q_second, Q_empty, Q_repeat, Q_invalid, Q_key_left, Q_key_right,
+        Q_left, Q_right, Q_join, Q_project, Q_one_column, Q_bound, Q_product, QUERY_ROOT_COUNT
+    };
+    struct mica_MemoryRoot held[QUERY_ROOT_COUNT] = {{0}};
+    for (unsigned i = 0; i < QUERY_ROOT_COUNT; ++i) assert(mica_memory_root_push(&f.worker, &held[i]));
+#define QUERY_VALUE(slot) mica_value_root_get(&held[slot])
+#define QUERY_PLAN(slot) ((struct mica_KernelQuery *)held[slot].f_pointer)
+
     assert(write_pair(&tx, 1, 1, 10, true) == OK);
     assert(write_pair(&tx, 1, 2, 20, true) == OK);
     assert(write_pair(&tx, 1, 3, 20, true) == OK);
     assert(write_pair(&tx, 2, 10, 100, true) == OK);
     assert(write_pair(&tx, 2, 20, 200, true) == OK);
     assert(write_pair(&tx, 2, 20, 201, true) == OK);
-    mica_type_Value first = query_columns(&f.worker, (int64_t[]){0}, 1);
-    mica_type_Value second = query_columns(&f.worker, (int64_t[]){1}, 1);
-    mica_type_Value empty = query_columns(&f.worker, NULL, 0);
-    struct mica_KernelQuery *left = query_scan(&f, 1), *right = query_scan(&f, 2);
-    struct mica_KernelQuery *join = mica_kernel_query_join(&f.worker, left, right, second, first);
-    assert(query_count(&tx, join, 4) == 5);
-    assert(query_count(&old, join, 4) == 0);
-    assert(query_count(&tx, mica_kernel_query_semi(&f.worker, left, right, second, first), 2) == 3);
-    assert(query_count(&tx, mica_kernel_query_anti(&f.worker, left, right, second, first), 2) == 0);
-    assert(query_count(&tx, mica_kernel_query_join(&f.worker, left, right, empty, empty), 4) == 9);
-    assert(query_count(&tx, mica_kernel_query_project(&f.worker, left, empty), 0) == 1);
-    assert(query_count(&old, mica_kernel_query_project(&f.worker, left, empty), 0) == 0);
-    assert(query_count(&tx, mica_kernel_query_project(&f.worker, left, second), 1) == 2);
-    assert(query_count(&tx, mica_kernel_query_union(&f.worker, left, left), 2) == 3);
-    assert(query_count(&tx, mica_kernel_query_difference(&f.worker, left, left), 2) == 0);
-    assert(query_count(&tx, mica_kernel_query_union(&f.worker, left, right), 2) == 6);
-    mica_type_Value repeat = query_columns(&f.worker, (int64_t[]){3, 0, 3}, 3);
-    struct mica_KernelQuery *project = mica_kernel_query_project(&f.worker, join, repeat);
-    struct mica_KernelQueryResult result = mica_kernel_query_execute(&tx, project);
+    mica_value_root_set(&held[Q_first], query_columns(&f.worker, (int64_t[]){0}, 1));
+    mica_value_root_set(&held[Q_second], query_columns(&f.worker, (int64_t[]){1}, 1));
+    mica_value_root_set(&held[Q_empty], query_columns(&f.worker, NULL, 0));
+    held[Q_left].f_pointer = (uint8_t *)(query_scan(&f, 1));
+    held[Q_right].f_pointer = (uint8_t *)(query_scan(&f, 2));
+    held[Q_join].f_pointer = (uint8_t *)(mica_kernel_query_join(&f.worker, QUERY_PLAN(Q_left), QUERY_PLAN(Q_right), QUERY_VALUE(Q_second), QUERY_VALUE(Q_first)));
+    assert(query_count(&tx, QUERY_PLAN(Q_join), 4) == 5);
+    assert(query_count(&old, QUERY_PLAN(Q_join), 4) == 0);
+    assert(query_count(&tx, mica_kernel_query_semi(&f.worker, QUERY_PLAN(Q_left), QUERY_PLAN(Q_right), QUERY_VALUE(Q_second), QUERY_VALUE(Q_first)), 2) == 3);
+    assert(query_count(&tx, mica_kernel_query_anti(&f.worker, QUERY_PLAN(Q_left), QUERY_PLAN(Q_right), QUERY_VALUE(Q_second), QUERY_VALUE(Q_first)), 2) == 0);
+    assert(query_count(&tx, mica_kernel_query_join(&f.worker, QUERY_PLAN(Q_left), QUERY_PLAN(Q_right), QUERY_VALUE(Q_empty), QUERY_VALUE(Q_empty)), 4) == 9);
+    assert(query_count(&tx, mica_kernel_query_project(&f.worker, QUERY_PLAN(Q_left), QUERY_VALUE(Q_empty)), 0) == 1);
+    assert(query_count(&old, mica_kernel_query_project(&f.worker, QUERY_PLAN(Q_left), QUERY_VALUE(Q_empty)), 0) == 0);
+    assert(query_count(&tx, mica_kernel_query_project(&f.worker, QUERY_PLAN(Q_left), QUERY_VALUE(Q_second)), 1) == 2);
+    assert(query_count(&tx, mica_kernel_query_union(&f.worker, QUERY_PLAN(Q_left), QUERY_PLAN(Q_left)), 2) == 3);
+    assert(query_count(&tx, mica_kernel_query_difference(&f.worker, QUERY_PLAN(Q_left), QUERY_PLAN(Q_left)), 2) == 0);
+    assert(query_count(&tx, mica_kernel_query_union(&f.worker, QUERY_PLAN(Q_left), QUERY_PLAN(Q_right)), 2) == 6);
+    mica_value_root_set(&held[Q_repeat], query_columns(&f.worker, (int64_t[]){3, 0, 3}, 3));
+    held[Q_project].f_pointer = (uint8_t *)(mica_kernel_query_project(&f.worker, QUERY_PLAN(Q_join), QUERY_VALUE(Q_repeat)));
+    struct mica_KernelQueryResult result = mica_kernel_query_execute(&tx, QUERY_PLAN(Q_project));
     assert(result.f_status == OK && result.f_arity == 3 && mica_kernel_width(result.f_rows) == 5);
     mica_type_Value row = mica_kernel_cell(result.f_rows, 0);
     assert(cell(row, 0) == 100 && cell(row, 1) == 1 && cell(row, 2) == 100);
     // Query plans and materialized results remain valid independently of a transaction.
-    struct mica_MemoryRoot plan_root = {.f_pointer = (uint8_t *)project}, result_root = {0};
+    struct mica_MemoryRoot plan_root = {.f_pointer = (uint8_t *)QUERY_PLAN(Q_project)}, result_root = {0};
     assert(mica_memory_root_push(&f.worker, &plan_root));
     assert(mica_memory_root_push(&f.worker, &result_root));
     mica_value_root_set(&result_root, result.f_rows);
     assert(mica_kernel_commit(&tx) == OK);
-    assert(mica_kernel_query_execute(&tx, project).f_status == CLOSED);
+    assert(mica_kernel_query_execute(&tx, QUERY_PLAN(Q_project)).f_status == CLOSED);
     assert(mica_memory_safepoint(&f.worker, true));
-    project = (struct mica_KernelQuery *)plan_root.f_pointer;
-    assert(query_count(&old, project, 3) == 0);
+    held[Q_project].f_pointer = (uint8_t *)((struct mica_KernelQuery *)plan_root.f_pointer);
+    assert(query_count(&old, QUERY_PLAN(Q_project), 3) == 0);
     assert(mica_kernel_width(mica_value_root_get(&result_root)) == 5);
     assert(mica_memory_root_pop(&f.worker, &result_root));
     assert(mica_memory_root_pop(&f.worker, &plan_root));
+    for (unsigned i = QUERY_ROOT_COUNT; i > 0; --i) assert(mica_memory_root_pop(&f.worker, &held[i-1]));
     assert(mica_kernel_end(&tx));
     assert(mica_kernel_end(&old));
+    assert(mica_kernel_query_execute(&old, NULL).f_status == CLOSED);
     begin(&f, &tx);
-    left = query_scan(&f, 1); right = query_scan(&f, 2);
-    first = query_columns(&f.worker, (int64_t[]){0}, 1);
-    second = query_columns(&f.worker, (int64_t[]){1}, 1);
+    for (unsigned i = 0; i < QUERY_ROOT_COUNT; ++i) assert(mica_memory_root_push(&f.worker, &held[i]));
+    held[Q_left].f_pointer = (uint8_t *)(query_scan(&f, 1)); held[Q_right].f_pointer = (uint8_t *)(query_scan(&f, 2));
+    mica_value_root_set(&held[Q_first], query_columns(&f.worker, (int64_t[]){0}, 1));
+    mica_value_root_set(&held[Q_second], query_columns(&f.worker, (int64_t[]){1}, 1));
     assert(write_pair(&tx, 1, 2, 20, false) == OK);
-    assert(query_count(&tx, mica_kernel_query_join(&f.worker, left, right, second, first), 4) == 3);
+    assert(query_count(&tx, mica_kernel_query_join(&f.worker, QUERY_PLAN(Q_left), QUERY_PLAN(Q_right), QUERY_VALUE(Q_second), QUERY_VALUE(Q_first)), 4) == 3);
     // Invalid plans fail even when inputs are empty; no unchecked column reads.
-    mica_type_Value invalid = query_columns(&f.worker, (int64_t[]){-1}, 1);
-    assert(mica_kernel_query_execute(&tx, mica_kernel_query_project(&f.worker, left, invalid)).f_status == SCHEMA);
-    invalid = query_columns(&f.worker, (int64_t[]){2}, 1);
-    assert(mica_kernel_query_execute(&tx, mica_kernel_query_project(&f.worker, left, invalid)).f_status == SCHEMA);
-    assert(mica_kernel_query_execute(&tx, mica_kernel_query_project(&f.worker, left, integer(0))).f_status == SCHEMA);
+    mica_value_root_set(&held[Q_invalid], query_columns(&f.worker, (int64_t[]){-1}, 1));
+    assert(mica_kernel_query_execute(&tx, mica_kernel_query_project(&f.worker, QUERY_PLAN(Q_left), QUERY_VALUE(Q_invalid))).f_status == SCHEMA);
+    mica_value_root_set(&held[Q_invalid], query_columns(&f.worker, (int64_t[]){2}, 1));
+    assert(mica_kernel_query_execute(&tx, mica_kernel_query_project(&f.worker, QUERY_PLAN(Q_left), QUERY_VALUE(Q_invalid))).f_status == SCHEMA);
+    assert(mica_kernel_query_execute(&tx, mica_kernel_query_project(&f.worker, QUERY_PLAN(Q_left), integer(0))).f_status == SCHEMA);
     assert(mica_kernel_query_execute(&tx, NULL).f_status == SCHEMA);
     assert(mica_kernel_query_execute(&tx, query_scan(&f, 999)).f_status == UNKNOWN);
-    struct mica_KernelQuery *one_column = mica_kernel_query_project(&f.worker, left, first);
-    assert(mica_kernel_query_execute(&tx, mica_kernel_query_union(&f.worker, left, one_column)).f_status == ARITY);
-    empty = query_columns(&f.worker, NULL, 0);
-    assert(mica_kernel_query_execute(&tx, mica_kernel_query_join(&f.worker, left, right, first, empty)).f_status == SCHEMA);
+    held[Q_one_column].f_pointer = (uint8_t *)(mica_kernel_query_project(&f.worker, QUERY_PLAN(Q_left), QUERY_VALUE(Q_first)));
+    assert(mica_kernel_query_execute(&tx, mica_kernel_query_union(&f.worker, QUERY_PLAN(Q_left), QUERY_PLAN(Q_one_column))).f_status == ARITY);
+    mica_value_root_set(&held[Q_empty], query_columns(&f.worker, NULL, 0));
+    assert(mica_kernel_query_execute(&tx, mica_kernel_query_join(&f.worker, QUERY_PLAN(Q_left), QUERY_PLAN(Q_right), QUERY_VALUE(Q_first), QUERY_VALUE(Q_empty))).f_status == SCHEMA);
     // Input headings are canonicalized by the relation value constructor.
     uint32_t heading[] = {2, 1};
     mica_type_Value cells[] = {integer(9), integer(7)};
@@ -756,36 +776,103 @@ static void queries(void) {
     cells[0] = mica_value_float(1.0f).f_value; cells[1] = integer(1);
     input = mica_value_relation(&f.worker, heading, 2, &input_row, 1);
     assert(input.f_ok);
-    assert(query_count(&tx, mica_kernel_query_semi(&f.worker, left,
-        mica_kernel_query_input(&f.worker, input.f_value), first, second), 2) == 0);
+    assert(query_count(&tx, mica_kernel_query_semi(&f.worker, QUERY_PLAN(Q_left),
+        mica_kernel_query_input(&f.worker, input.f_value), QUERY_VALUE(Q_first), QUERY_VALUE(Q_second)), 2) == 0);
     // More than one scan page, including a secondary-index scan.
     for (int64_t i = 4; i < 150; ++i) assert(write_pair(&tx, 1, i, 20, true) == OK);
-    struct mica_KernelQuery *bound = mica_kernel_query_scan(&f.worker, 1, tuple(&f.worker, 0, 20), 2);
-    assert(query_count(&tx, bound, 2) == 147);
+    held[Q_bound].f_pointer = (uint8_t *)(mica_kernel_query_scan(&f.worker, 1, tuple(&f.worker, 0, 20), 2));
+    assert(query_count(&tx, QUERY_PLAN(Q_bound), 2) == 147);
+    // Scan bindings and join bindings must agree. A contradictory probe is
+    // empty for join/semi, and retains the left row for anti.
+    assert(query_count(&tx, mica_kernel_query_semi(&f.worker, QUERY_PLAN(Q_left), QUERY_PLAN(Q_bound), QUERY_VALUE(Q_second), QUERY_VALUE(Q_second)), 2) == 147);
+    assert(query_count(&tx, mica_kernel_query_anti(&f.worker, QUERY_PLAN(Q_left), QUERY_PLAN(Q_bound), QUERY_VALUE(Q_second), QUERY_VALUE(Q_second)), 2) == 1);
+    assert(mica_kernel_query_execute(&tx, mica_kernel_query_scan(&f.worker, 1, tuple(&f.worker, 0, 0), 4)).f_status == SCHEMA);
     // Repeated key positions and key order are positional, not a column mask.
-    mica_type_Value key_left = query_columns(&f.worker, (int64_t[]){1, 0, 1}, 3);
-    mica_type_Value key_right = query_columns(&f.worker, (int64_t[]){1, 0, 1}, 3);
-    assert(query_count(&tx, mica_kernel_query_join(&f.worker, left, left, key_left, key_right), 4) == 148);
-    key_right = query_columns(&f.worker, (int64_t[]){0, 1, 0}, 3);
-    assert(query_count(&tx, mica_kernel_query_join(&f.worker, left, left, key_left, key_right), 4) == 1);
+    mica_value_root_set(&held[Q_key_left], query_columns(&f.worker, (int64_t[]){1, 0, 1}, 3));
+    mica_value_root_set(&held[Q_key_right], query_columns(&f.worker, (int64_t[]){1, 0, 1}, 3));
+    assert(query_count(&tx, mica_kernel_query_join(&f.worker, QUERY_PLAN(Q_left), QUERY_PLAN(Q_left), QUERY_VALUE(Q_key_left), QUERY_VALUE(Q_key_right)), 4) == 148);
+    mica_value_root_set(&held[Q_key_right], query_columns(&f.worker, (int64_t[]){0, 1, 0}, 3));
+    assert(query_count(&tx, mica_kernel_query_join(&f.worker, QUERY_PLAN(Q_left), QUERY_PLAN(Q_left), QUERY_VALUE(Q_key_left), QUERY_VALUE(Q_key_right)), 4) == 1);
     // Bounded plan depth also rejects cycles supplied by a malformed native caller.
-    one_column->f_left = one_column;
-    assert(mica_kernel_query_execute(&tx, one_column).f_status == SCHEMA);
+    QUERY_PLAN(Q_one_column)->f_left = QUERY_PLAN(Q_one_column);
+    assert(mica_kernel_query_execute(&tx, QUERY_PLAN(Q_one_column)).f_status == SCHEMA);
 #ifdef MICA_MEMORY_TEST_ALLOCATOR
     // Exhaust allocation partway through a large result. Failure publishes no
     // partial result, leaves staged writes intact, and does not poison a retry.
-    struct mica_KernelQuery *product = mica_kernel_query_join(&f.worker, left, left, empty, empty);
-    struct mica_MemoryRoot bound_root = {.f_pointer = (uint8_t *)bound};
+    held[Q_product].f_pointer = (uint8_t *)(mica_kernel_query_join(&f.worker, QUERY_PLAN(Q_left), QUERY_PLAN(Q_left), QUERY_VALUE(Q_empty), QUERY_VALUE(Q_empty)));
+    struct mica_MemoryRoot bound_root = {.f_pointer = (uint8_t *)QUERY_PLAN(Q_bound)};
     assert(mica_memory_root_push(&f.worker, &bound_root));
     atomic_store(&allocation_budget, 0);
-    result = mica_kernel_query_execute(&tx, product);
+    result = mica_kernel_query_execute(&tx, QUERY_PLAN(Q_product));
     atomic_store(&allocation_budget, -1);
     assert(result.f_status == OOM && result.f_rows == 0);
     assert(mica_memory_safepoint(&f.worker, true));
     assert(query_count(&tx, (struct mica_KernelQuery *)bound_root.f_pointer, 2) == 147);
     assert(mica_memory_root_pop(&f.worker, &bound_root));
 #endif
+    for (unsigned i = QUERY_ROOT_COUNT; i > 0; --i) assert(mica_memory_root_pop(&f.worker, &held[i-1]));
     assert(mica_kernel_end(&tx));
+    destroy(&f);
+#undef QUERY_VALUE
+#undef QUERY_PLAN
+}
+
+// A collector on another native thread must make progress during a large
+// query. Tiny nurseries also force relocation while joins retain live rows.
+struct query_collector {
+    struct mica_MemoryHeap *heap;
+    _Atomic bool ready;
+};
+static void *collect_during_query(void *opaque) {
+    struct query_collector *job = opaque;
+    struct mica_MemoryWorker worker = {0};
+    assert(mica_memory_worker_init(&worker, job->heap, 4096));
+    assert(mica_memory_enter(&worker));
+    atomic_store(&job->ready, true);
+    for (unsigned i = 0; i < 16; ++i) assert(mica_memory_safepoint(&worker, true));
+    assert(mica_memory_leave(&worker));
+    assert(mica_memory_worker_release(&worker));
+    return NULL;
+}
+static void query_collection(bool indexed) {
+    struct fixture f;
+    init(&f);
+    declare(&f, 1, SET);
+    struct mica_KernelTransaction tx;
+    begin(&f, &tx);
+    for (int64_t i = 0; i < 128; ++i) assert(write_pair(&tx, 1, i, i % 8, true) == OK);
+    struct mica_KernelQuery *scan_plan = query_scan(&f, 1);
+    mica_type_Value empty = query_columns(&f.worker, NULL, 0);
+    struct mica_KernelQuery *right = scan_plan;
+    if (!indexed) {
+        // Force the general join path through a materialized projection.
+        mica_type_Value identity = query_columns(&f.worker, (int64_t[]){0, 1}, 2);
+        right = mica_kernel_query_project(&f.worker, right, identity);
+    }
+    struct mica_MemoryRoot plan = {.f_pointer = (uint8_t *)mica_kernel_query_join(&f.worker, scan_plan, right, empty, empty)};
+    assert(mica_memory_root_push(&f.worker, &plan));
+    uint64_t epoch = f.heap.f_epoch;
+    struct query_collector job = {.heap = &f.heap};
+    pthread_t collector;
+    assert(!pthread_create(&collector, NULL, collect_during_query, &job));
+    while (!atomic_load(&job.ready)) sched_yield();
+    // Observe the request under the heap mutex before entering the query.
+    // The collector is waiting for this active worker to reach an internal poll.
+    for (;;) {
+        mica_foreign_memory_lock(f.heap.f_mutex);
+        bool requested = f.heap.f_collecting;
+        mica_foreign_memory_unlock(f.heap.f_mutex);
+        if (requested) break;
+        sched_yield();
+    }
+    assert(query_count(&tx, (struct mica_KernelQuery *)plan.f_pointer, 4) == 128 * 128);
+    assert(f.heap.f_epoch > epoch);
+    assert(f.worker.f_roots == &plan);
+    assert(mica_memory_root_pop(&f.worker, &plan));
+    assert(mica_kernel_end(&tx));
+    assert(mica_memory_leave(&f.worker));
+    assert(!pthread_join(collector, NULL));
+    assert(mica_memory_enter(&f.worker));
     destroy(&f);
 }
 
@@ -795,6 +882,8 @@ int main(int argc, char **argv) {
     assert(argc == 1);
     query_indexes();
     queries();
+    query_collection(true);
+    query_collection(false);
     basics();
     indexes_and_gc();
     conflicts();

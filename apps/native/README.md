@@ -93,8 +93,8 @@ Disjoint writes within one relation preserve both commits. Existing conflict pol
 After 64 lost publication attempts, the commit returns a conflict status.
 Every managed pointer used after a possible collection comes from the registered transaction root.
 
-Major collection runs at explicit requests or allocation pressure, independently of successful commits.
-Nursery exhaustion requests collection at the next safepoint.
+Major collection runs on explicit requests or when managed page allocation reaches the heap growth limit, independently of successful commits.
+Nursery overflow uses managed pages and does not independently request collection.
 Mature allocation requests collection after page storage reaches twice its size after the last collection, with a 1 MiB minimum.
 Major collection still stops active workers and scans the full live heap.
 Publication copying does not reclaim storage or reset nurseries.
@@ -178,22 +178,32 @@ Invalid columns, missing operands, and excessive plan depth return status 7.
 Incompatible arities return status 2. Plans permit at most 64 levels and results permit at most 64 columns.
 Query errors leave the transaction unchanged.
 
-Execution materializes intermediate results. Equality joins build an index on the right projected key.
-Unbound scans walk the existing ordered tree. Bound scans reuse 64-row pages from the indexed scan interface.
-Temporary query indexes use private mutable AVL nodes. They never mutate persistent relation indexes.
-Query execution does not collect or relocate objects inside the call.
-Large queries can therefore delay collection and exhaust allocation before returning.
-Streaming operators, internal GC polling, join planning, and shared-subplan caching remain future work.
+Projection over a stored relation consumes its scan directly.
+Joins, semi-joins, and anti-joins against a stored relation probe its existing indexes.
+Other equality joins build a temporary index on the right projected key.
+Remaining operator boundaries materialize intermediate results. Join reordering and shared-subplan caching remain future work.
 
+Scans and projections traverse the selected tree once, polling every 64 visited rows, including rows rejected by residual bindings.
+Join probes share a polling counter. Each probe seek is bounded by the AVL tree height.
+Other row loops and result assembly also poll at bounded row intervals.
+These are row-count bounds, not time bounds: comparing a large value can still take longer.
+Temporary indexes and result buffers belong exclusively to one execution.
+They never mutate persistent relation indexes or published list views.
+
+Query execution can collect and relocate objects inside the call.
+The executor roots its live inputs and accumulators, reloads them after polls, and restores the caller's root chain on return.
 Plans and results use the generated heap and tracing descriptors.
-Before a safepoint, register roots for every retained plan and result.
-After collection, reload them through those roots. A rooted result can outlive its transaction.
+Before query execution or another safepoint, register roots for every plan and value retained across that call.
+After the call, reload retained values through those roots. A rooted result can outlive its transaction.
 
 The authoring layer separates row mechanics from operator definitions:
 
-- `each_row` traverses materialized rows.
+- `each_row` traverses materialized rows and polls for collection.
+- `scan_rows` traverses an index without materializing its input.
+- `retain` and `root_value` express live managed values across polls.
 - `build_row` and `project_row` allocate and fill row storage.
-- `join_index` and `join_matches_body` build and probe projected keys.
+- `bind_probe` combines join keys with existing scan bindings.
+- `join_index` and `join_matches_body` handle joins with materialized right inputs.
 - `row_set`, `offer`, and `finish_rows` produce canonical results.
 - `checked_query` and `status_call` propagate errors without partial results.
 
@@ -751,7 +761,8 @@ Start each root control zeroed. A raw root pointer must identify an allocation b
 After a safepoint, reload them with `mica_value_root_get`.
 Direct value pointers remain valid between safepoints. Promotion can change their addresses.
 
-`mica_memory_safepoint(worker, false)` joins a pending collection or collects after allocation pressure.
+`mica_memory_safepoint(worker, false)` joins a pending collection or collects when managed page allocation reaches the heap growth limit.
+Nursery overflow uses managed pages and does not independently trigger a full collection.
 An explicit `true` requests collection. Collection waits for active workers to reach a safepoint or leave.
 Idle workers retain their registered roots but do not join this wait.
 Promotion reserves destinations before it rewrites references. Failed reservation preserves the original graph, roots, and nursery contents.

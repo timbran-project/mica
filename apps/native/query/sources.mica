@@ -1,61 +1,123 @@
 // Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-// Bounded scan pages reuse one scratch list. Scans select indexes and apply
-// bindings through the existing transaction view; results are canonicalized
-// independently of the index order used to find them.
-verb native_query/scan_page(builder: map, query: map, data: map, cursor: map, output: map) -> map
-  let [page: map, ready: map] = native_gen/bind(builder, "page", native_gen/call(builder, "kernel_scan", [
-    native_gen/ref(builder, "transaction"), native_kernel/load_field(builder, query, "relation"),
-    native_kernel/load_field(builder, query, "pattern"), native_kernel/load_field(builder, query, "mask"),
-    cursor, data, native_gen/ref(builder, "kernel_64")]))
-  ready = native_gen/unless(ready, native_kernel/absent(native_gen/field(ready, page, "status")),
-    fn(failed) => native_query/fail(failed, native_gen/field(failed, page, "status")))
-  ready = native_gen/for_range(ready, "matched", native_gen/zero(:U64), native_gen/field(ready, page, "count"), fn(iteration, position)
-    let [row: map, with_row: map] = native_gen/bind(iteration, "row", native_gen/load(native_gen/offset(data, position)))
-    let inserted: map = native_query/offer(with_row, output, row)
-    let generated_result: map = native_gen/assign(inserted, cursor, row)
-    return generated_result
+// Seek one candidate at a time. Each seek is bounded by AVL height; the
+// caller polls by visited rows, including rows rejected by residual bindings.
+verb native_query/seek_body(module: map) -> map
+  let builder: map = native_gen/context(module, "kernel_query_seek")
+  let [node: map, with_node: map] = native_gen/bind(builder, "node", native_gen/ref(builder, "node"))
+  builder = with_node
+  let pattern: map = native_gen/ref(builder, "pattern")
+  let cursor: map = native_gen/ref(builder, "cursor")
+  let [candidate: map, ready: map] = native_gen/bind(builder, "candidate", native_gen/zero(native_kernel/pointer("Node")))
+  builder = native_gen/while_loop(ready, native_gen/negate(native_kernel/absent(node)), fn(step)
+    let row: map = native_kernel/load_field(step, node, "row")
+    let [before: map, compared: map] = native_gen/bind(step, "prefix_order", native_kernel/compare_rows(step, row, pattern,
+      native_kernel/tuple_projection(native_gen/ref(step, "prefix"))))
+    let [passed: map, with_passed: map] = native_gen/bind(compared, "passed", native_gen/less(before, native_gen/ref(compared, "int_zero")))
+    compared = native_gen/unless(with_passed, native_kernel/absent(cursor), fn(resume)
+      let order: map = native_kernel/compare_rows(resume, row, cursor, native_kernel/tuple_order(native_gen/ref(resume, "ordering")))
+      return native_gen/unless(resume, native_gen/less(native_gen/ref(resume, "int_zero"), order), fn(behind) => native_gen/assign(behind, passed, native_gen/ref(behind, "true")))
+    end)
+    return native_gen/branch(compared, passed,
+      fn(right) => native_gen/assign(right, node, native_kernel/load_field(right, node, "right")),
+      fn(left)
+        let selected: map = native_gen/assign(left, candidate, node)
+        return native_gen/assign(selected, node, native_kernel/load_field(selected, node, "left"))
+      end)
   end)
-  let generated_result: map = native_gen/unless(ready, native_gen/field(ready, page, "more"), fn(done) => native_gen/break_loop(done))
-  return generated_result
+  builder = native_gen/unless(builder, native_kernel/absent(candidate), fn(found)
+    let order: map = native_kernel/compare_rows(found, native_kernel/load_field(found, candidate, "row"), pattern,
+      native_kernel/tuple_projection(native_gen/ref(found, "prefix")))
+    return native_gen/unless(found, native_kernel/absent(order), fn(done) => native_gen/return_value(done, native_gen/zero(native_kernel/pointer("Node"))))
+  end)
+  builder = native_gen/return_value(builder, candidate)
+  let result: map = native_gen/finish(module, builder)
+  return result
 end
-verb native_query/scan_body(module: map) -> map
-  let builder: map = native_gen/context(module, "kernel_query_scan_rows")
-  let query: map = native_gen/ref(builder, "query")
-  let [relation: map, with_relation: map] = native_gen/bind(builder, "relation", native_gen/call(builder, "kernel_view",
-    [native_gen/ref(builder, "transaction"), native_kernel/load_field(builder, query, "relation")]))
-  builder = native_query/check(with_relation, native_gen/negate(native_kernel/absent(relation)), "unknown")
-  builder = native_kernel/check_tuple(builder, native_kernel/load_field(builder, query, "pattern"), relation,
+
+verb native_query/scan_relation(builder: map, query: map) -> list
+  let [relation: map, ready: map] = native_gen/bind(builder, "relation", native_gen/call(builder, "kernel_view",
+    [native_query/ref(builder, "transaction"), native_kernel/load_field(builder, query, "relation")]))
+  ready = native_query/check(ready, native_gen/negate(native_kernel/absent(relation)), "unknown")
+  ready = native_kernel/check_tuple(ready, native_kernel/load_field(ready, query, "pattern"), relation,
     fn(failed) => native_query/error(failed, "arity"))
-  builder = native_gen/when(builder, native_kernel/absent(native_kernel/load_field(builder, query, "mask")), fn(unbound)
-    let tree: map = native_gen/call(unbound, "kernel_index", [relation, native_gen/zero(:U64)])
-    let result: map = native_query/finish_rows(unbound, tree, native_kernel/load_field(unbound, relation, "arity"))
-    return result
+  ready = native_kernel/check_column_mask(ready, native_kernel/load_field(ready, relation, "arity"), native_kernel/load_field(ready, query, "mask"), fn(failed) => native_query/error(failed, "schema"))
+  let result: list = native_query/retain(ready, "relation", relation)
+  return result
+end
+
+// The row callback runs between polls. It can allocate, but cannot relocate;
+// callers that need nested polling retain the row before entering a callee.
+verb native_query/scan_rows(builder: map, relation: map, pattern: map, mask: map, ticks: map, body) -> map
+  let [selected: map, ordering: map, prefix: map, planned: map] = native_kernel/scan_plan(builder, relation, mask)
+  let [tree: map, with_tree: map] = native_query/retain(planned, "scan_tree", selected)
+  let [cursor: map, with_cursor: map] = native_query/retain(with_tree, "scan_cursor", native_gen/zero(native_value/word()))
+  let ready: map = with_cursor
+  let result: map = native_gen/while_loop(ready, native_query/ref(ready, "true"), fn(step)
+    let polled: map = native_query/poll_interval(step, native_gen/load(ticks))
+    polled = native_gen/store(polled, ticks, native_gen/add(native_gen/load(ticks), native_query/ref(polled, "one")))
+    let [node: map, found: map] = native_gen/bind(polled, "candidate", native_gen/call(polled, "kernel_query_seek", [tree, pattern, cursor, ordering, prefix]))
+    found = native_gen/when(found, native_kernel/absent(node), fn(done) => native_gen/break_loop(done))
+    let [row: map, with_row: map] = native_gen/bind(found, "row", native_kernel/load_field(found, node, "row"))
+    found = native_query/store(with_row, cursor, row)
+    let matches: map = native_kernel/absent(native_kernel/compare_rows(found, row, pattern, native_kernel/tuple_projection(mask)))
+    return native_gen/when(found, matches, fn(matched) => body(matched, row))
   end)
-  let [scratch: map, with_scratch: map] = native_gen/bind(builder, "scratch", native_gen/call(builder, "list_allocate",
-    [native_gen/ref(builder, "worker"), native_gen/ref(builder, "kernel_64"), native_gen/ref(builder, "kernel_64")]))
-  builder = native_query/check(with_scratch, native_gen/negate(native_kernel/absent(scratch)), "oom")
-  let [data: map, with_data: map] = native_gen/bind(builder, "page_rows", native_kernel/load_field(builder, scratch, "data"))
-  let [cursor: map, with_after: map] = native_gen/bind(with_data, "cursor", native_gen/zero(native_value/word()))
-  let [output: map, ready: map] = native_query/row_set(with_after)
-  builder = native_gen/while_loop(ready, native_gen/ref(ready, "true"), fn(page) => native_query/scan_page(page, query, data, cursor, output))
-  builder = native_query/finish_rows(builder, output, native_kernel/load_field(builder, relation, "arity"))
-  let generated_result: map = native_gen/finish(module, builder)
-  return generated_result
+  return result
+end
+
+verb native_query/scan_body(module: map, project: bool) -> map
+  let name: string = "kernel_query_scan_rows"
+  if project
+    name = "kernel_query_project_scan"
+  end
+  let builder: map = native_query/context(module, name)
+  let query: map = native_query/ref(builder, "query")
+  let [relation: map, ready: map] = native_query/scan_relation(builder, query)
+  let [arity: map, with_arity: map] = native_gen/bind(ready, "arity", native_kernel/load_field(ready, relation, "arity"))
+  builder = with_arity
+  let output_arity: map = arity
+  if project
+    let positions: map = native_query/ref(builder, "positions")
+    builder = native_query/check_positions(builder, positions, arity)
+    output_arity = native_query/width(builder, positions)
+    builder = native_query/check(builder, native_gen/negate(native_gen/less(native_query/ref(builder, "kernel_64"), output_arity)), "arity")
+  else
+    builder = native_gen/when(builder, native_kernel/absent(native_kernel/load_field(builder, query, "mask")), fn(unbound)
+      let tree: map = native_gen/call(unbound, "kernel_index", [relation, native_gen/zero(:U64)])
+      return native_query/finish_rows(unbound, tree, arity)
+    end)
+  end
+  let [output: map, with_output: map] = native_query/row_set(builder)
+  let [tree: map, ordering: map, prefix: map, planned: map] = native_kernel/scan_plan(with_output, relation, native_kernel/load_field(with_output, query, "mask"))
+  let [ticks: map, with_ticks: map] = native_gen/bind(planned, "visited", native_gen/zero(:U64))
+  let positions: map = native_gen/zero(native_value/word())
+  if project
+    positions = native_query/ref(with_ticks, "positions")
+  end
+  builder = native_query/status_call(with_ticks, "kernel_query_select_tree", [native_query/ref(with_ticks, "worker"), tree,
+    native_kernel/load_field(with_ticks, query, "pattern"), native_kernel/load_field(with_ticks, query, "mask"), prefix, positions,
+    output[:query_root], native_gen/address(ticks)])
+  builder = native_query/finish_rows(builder, output, output_arity)
+  let result: map = native_gen/finish(module, builder)
+  return result
 end
 verb native_query/input_body(module: map) -> map
-  let builder: map = native_gen/context(module, "kernel_query_input_rows")
-  let [view: map, with_view: map] = native_gen/checked_bind(builder, "input", native_gen/call(builder, "value_relation_view", [native_gen/ref(builder, "input")]), "ok",
+  let builder: map = native_query/context(module, "kernel_query_input_rows")
+  let [view: map, with_view: map] = native_gen/checked_bind(builder, "input", native_gen/call(builder, "value_relation_view", [native_query/ref(builder, "input")]), "ok",
     fn(failed) => native_query/error(failed, "schema"))
   let relation: map = native_gen/field(with_view, view, "relation")
-  let arity: map = native_gen/field(with_view, relation, "arity")
-  builder = native_query/check(with_view, native_gen/negate(native_gen/less(native_gen/ref(with_view, "kernel_64"), arity)), "arity")
+  let [arity: map, with_arity: map] = native_gen/bind(with_view, "arity", native_gen/field(with_view, relation, "arity"))
+  builder = native_query/check(with_arity, native_gen/negate(native_gen/less(native_query/ref(with_view, "kernel_64"), arity)), "arity")
   let [output: map, ready: map] = native_query/row_set(builder)
   builder = native_gen/for_range(ready, "row_index", native_gen/zero(:U64), native_gen/field(ready, relation, "length"), fn(iteration, index)
-    let tuple: map = native_gen/load(native_gen/offset(native_gen/field(iteration, relation, "rows"), index))
+    let polled: map = native_query/poll_interval(iteration, index)
+    let [current_view: map, with_current: map] = native_gen/bind(polled, "view", native_gen/call(polled, "value_relation_view", [native_query/ref(polled, "input")]))
+    let current: map = native_gen/field(with_current, current_view, "relation")
+    let tuple: map = native_gen/load(native_gen/offset(native_gen/field(with_current, current, "rows"), index))
     let source: map = native_gen/freeze(native_gen/field(iteration, tuple, "data"))
-    let [row: map, with_row: map] = native_query/value(iteration, "value_list", [native_gen/ref(iteration, "worker"), source, arity])
+    let [row: map, with_row: map] = native_query/value(with_current, "value_list", [native_query/ref(with_current, "worker"), source, arity])
     let generated_result: map = native_query/offer(with_row, output, row)
     return generated_result
   end)
@@ -64,7 +126,51 @@ verb native_query/input_body(module: map) -> map
   return generated_result
 end
 verb native_query/sources(module: map) -> map
-  let context: map = native_query/scan_body(module)
+  let context: map = native_query/seek_body(module)
+  context = native_query/select_tree_body(context)
+  context = native_query/scan_body(context, false)
+  context = native_query/scan_body(context, true)
   let generated_result: map = native_query/input_body(context)
   return generated_result
+end
+
+// Walk an index once for scans and projections. The recursion follows AVL
+// height, with rooted frames and a shared visit counter for collection polls.
+verb native_query/select_tree_body(module: map) -> map
+  let builder: map = native_query/context(module, "kernel_query_select_tree")
+  let node: map = native_query/ref(builder, "node")
+  let pattern: map = native_query/ref(builder, "pattern")
+  let positions: map = native_query/ref(builder, "positions")
+  let ticks: map = native_query/ref(builder, "ticks")
+  let output: map = native_query/root_value(builder, native_query/ref(builder, "output"), native_kernel/pointer("Node"))
+  builder = native_gen/when(builder, native_kernel/absent(node), fn(empty) => native_query/return_value(empty, native_query/ref(empty, "kernel_ok")))
+  builder = native_query/poll_interval(builder, native_gen/load(ticks))
+  builder = native_gen/store(builder, ticks, native_gen/add(native_gen/load(ticks), native_query/ref(builder, "one")))
+  let row: map = native_kernel/load_field(builder, node, "row")
+  let [order: map, ready: map] = native_gen/bind(builder, "prefix_order", native_kernel/compare_rows(builder, row, pattern,
+    native_kernel/tuple_projection(native_query/ref(builder, "prefix"))))
+  builder = ready
+  for side in ["left", "right"]
+    let descend: map = native_gen/negate(native_gen/less(order, native_query/ref(builder, "int_zero")))
+    if side == "right"
+      descend = native_gen/negate(native_gen/less(native_query/ref(builder, "int_zero"), order))
+    end
+    builder = native_gen/when(builder, descend, fn(branch) => native_query/status_call(branch, "kernel_query_select_tree",
+      [native_query/ref(branch, "worker"), native_kernel/load_field(branch, node, side), pattern, native_query/ref(branch, "mask"),
+        native_query/ref(branch, "prefix"), positions, native_query/ref(branch, "output"), ticks]))
+    if side == "left"
+      let matches: map = native_kernel/absent(native_kernel/compare_rows(builder, row, pattern, native_kernel/tuple_projection(native_query/ref(builder, "mask"))))
+      builder = native_gen/when(builder, matches, fn(matched)
+        return native_gen/branch(matched, native_kernel/absent(positions),
+          fn(identity) => native_query/offer(identity, output, row),
+          fn(projection)
+            let [projected: map, with_row: map] = native_query/project_row(projection, row, positions)
+            return native_query/offer(with_row, output, projected)
+          end)
+      end)
+    end
+  end
+  builder = native_query/return_value(builder, native_query/ref(builder, "kernel_ok"))
+  let result: map = native_gen/finish(module, builder)
+  return result
 end

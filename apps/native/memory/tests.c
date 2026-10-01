@@ -285,6 +285,32 @@ static void failed_share_preserves_source(void) {
     assert(mica_memory_heap_release(&heap));
 }
 
+static void nursery_spill_uses_heap_budget(void) {
+    struct mica_MemoryHeap heap = {0};
+    struct mica_MemoryWorker worker = {0};
+    struct mica_MemoryRoot root = {0};
+    assert(mica_memory_heap_init(&heap, mica_memory_test_trace));
+    assert(mica_memory_worker_init(&worker, &heap, 256));
+    assert(mica_memory_enter(&worker));
+    assert(mica_memory_root_push(&worker, &root));
+    root.f_pointer = mica_memory_allocate(&worker, 32, 0);
+    assert(root.f_pointer);
+    memset(root.f_pointer, 0x52, 32);
+    for (unsigned i = 0; i < 16; ++i) assert(mica_memory_allocate(&worker, 4096, 0));
+    assert(heap.f_allocated > 0 && heap.f_allocated < heap.f_collection_limit);
+    assert(mica_memory_safepoint(&worker, false));
+    assert(heap.f_collections == 0 && root.f_pointer[31] == 0x52);
+    while (heap.f_allocated < heap.f_collection_limit) assert(mica_memory_allocate(&worker, 4096, 0));
+    assert(mica_memory_safepoint(&worker, false));
+    assert(heap.f_collections == 1 && root.f_pointer[31] == 0x52);
+    assert(mica_memory_root_pop(&worker, &root));
+    assert(mica_memory_safepoint(&worker, true));
+    assert(heap.f_retained == 0);
+    assert(mica_memory_leave(&worker));
+    assert(mica_memory_worker_release(&worker));
+    assert(mica_memory_heap_release(&heap));
+}
+
 static void heap_growth_requests_collection(void) {
     struct mica_MemoryHeap heap = {0};
     struct mica_MemoryWorker worker = {0};
@@ -297,7 +323,7 @@ static void heap_growth_requests_collection(void) {
     assert(root.f_pointer);
     memset(root.f_pointer, 0x82, 100000);
     for (unsigned i = 0; i < 20; ++i) assert(mica_memory_share(&worker, root.f_pointer));
-    assert(!worker.f_pressure && heap.f_allocated >= heap.f_collection_limit);
+    assert(worker.f_used < worker.f_capacity && heap.f_allocated >= heap.f_collection_limit);
     assert(heap.f_collections == 0);
     assert(mica_memory_safepoint(&worker, false));
     assert(heap.f_collections == 1 && heap.f_retained == 100000);
@@ -380,6 +406,7 @@ int main(void) {
     sweep_unlinks_empty_pages_from_free_lists();
     share_graph_without_collection();
     failed_share_preserves_source();
+    nursery_spill_uses_heap_budget();
     heap_growth_requests_collection();
     worker_lifecycle();
     assert(allocations == releases);

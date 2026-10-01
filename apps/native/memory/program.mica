@@ -220,7 +220,7 @@ verb native_memory/context(input: map) -> map
     ["next", root], ["pointer", bytes], ["bits", :U64], ["registration", :U64]])[1]
   state = native/record_type(state, "MemoryWorker", [
     ["next", worker], ["heap", heap], ["roots", root], ["nursery", bytes],
-    ["capacity", :U64], ["used", :U64], ["active", :Bool], ["pressure", :Bool]])[1]
+    ["capacity", :U64], ["used", :U64], ["active", :Bool]])[1]
   state = native/record_type(state, "MemoryHeap", [
     ["pages", page], ["free", [:Array, object, 10]], ["workers", worker], ["roots", root], ["trace", trace],
     ["mutex", bytes], ["collecting", :Bool], ["collection_ok", :Bool], ["epoch", :U64],

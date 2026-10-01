@@ -1,0 +1,111 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+// Rooted expressions reload their value each time they are used. Operators
+// retain inputs and accumulators once, then poll without naming stale pointers.
+verb native_query/worker(builder: map) -> map
+  if map_contains_key(builder, :query_worker)
+    let worker: map = builder[:query_worker]
+    return worker
+  end
+  let worker: map = native_gen/ref(builder, "worker")
+  return worker
+end
+verb native_query/ref(builder: map, name: string) -> map
+  if name == "worker" && map_contains_key(builder, :query_worker)
+    let worker: map = builder[:query_worker]
+    return worker
+  end
+  if map_contains_key(builder, :query_bindings) && map_contains_key(builder[:query_bindings], name)
+    let value: map = builder[:query_bindings][name]
+    return value
+  end
+  let value: map = native_gen/ref(builder, name)
+  return value
+end
+verb native_query/root_value(builder: map, root: map, kind) -> map
+  let value: map = native_gen/call(builder, "value_root_get", [root])
+  if kind != native_value/word()
+    value = native_gen/cast(kind, native_gen/root_read(native_gen/field(builder, root, "pointer")))
+  end
+  value[:query_root] = root
+  return value
+end
+verb native_query/store(builder: map, rooted: map, value: map) -> map
+  native/ensure(map_contains_key(rooted, :query_root), "query assignment requires a root")
+  let root: map = rooted[:query_root]
+  if native_gen/type(value) == native_value/word()
+    let result: map = native_gen/do_call(builder, "value_root_set", [root, value])
+    return result
+  end
+  let result: map = native_gen/root_write(builder, native_gen/field(builder, root, "pointer"),
+    native_gen/cast(native_memory/pointer(:U8), value))
+  return result
+end
+verb native_query/retain(builder: map, label: string, value: map) -> list
+  let [slot: map, with_slot: map] = native_gen/bind(builder, string_concat(label, "_root"), native_gen/zero([:Record, "MemoryRoot"]))
+  let root: map = native_gen/address(slot)
+  let rooted: map = native_query/root_value(with_slot, root, native_gen/type(value))
+  let ready: map = native_query/store(with_slot, rooted, value)
+  let [pushed: map, with_push: map] = native_gen/bind(ready, "root_registered", native_gen/call(ready, "memory_root_push", [native_query/worker(ready), root]))
+  with_push[:query_roots] = [@with_push[:query_roots], root]
+  ready = native_query/check(with_push, pushed, "closed")
+  return [rooted, ready]
+end
+verb native_query/context(module: map, name: string) -> map
+  let result: map = native_query/begin_roots(native_gen/context(module, name))
+  return result
+end
+verb native_query/begin_roots(input: map) -> map
+  let builder: map = input
+  let module: map = builder[:module]
+  let name: string = builder[:name]
+  builder[:query_roots] = []
+  builder[:query_bindings] = {}
+  let worker: map = native_gen/zero(native_memory/record_pointer("MemoryWorker"))
+  if map_contains_key(module[:bindings][name], "worker")
+    worker = native_gen/ref(builder, "worker")
+  else
+    worker = native_kernel/load_field(builder, native_gen/ref(builder, "transaction"), "worker")
+  end
+  let [bound_worker: map, ready: map] = native_gen/bind(builder, "worker", worker)
+  ready[:query_worker] = bound_worker
+  // Root records live in native frames. The chain head is a stable borrowed
+  // address, unlike the managed payload pointers held inside those records.
+  let [parent: map, with_parent: map] = native_gen/bind(ready, "parent_roots", native_gen/read(native_gen/field(ready, bound_worker, "roots")))
+  ready = with_parent
+  ready[:query_parent] = parent
+  let bindings: map = {}
+  let managed: list = [row[0] for row in module[:state][:parameter_contracts] if row[1] == :Gc]
+  for parameter in module[:state][:parameters]
+    if parameter[1] == builder[:function] && native/contains(managed, parameter[0])
+      let spelling: string = parameter[3]
+      let [rooted: map, with_root: map] = native_query/retain(ready, spelling, native_gen/ref(ready, spelling))
+      ready = with_root
+      bindings[spelling] = rooted
+    end
+  end
+  ready[:query_bindings] = bindings
+  return ready
+end
+verb native_query/return_value(builder: map, value: map) -> map
+  let [result: map, ready: map] = native_gen/bind(builder, "result", value)
+  // Every nested query restores its own scope before returning. Unlink this
+  // complete frame directly; its root records are stack storage about to expire.
+  if map_contains_key(ready, :query_roots) && len(ready[:query_roots]) > 0
+    let previous: map = native_gen/manage(ready[:query_parent])
+    ready = native_gen/root_write(ready, native_gen/field(ready, native_query/worker(ready), "roots"), previous)
+  end
+  let completed: map = native_gen/return_value(ready, result)
+  return completed
+end
+verb native_query/poll(builder: map) -> map
+  let [polled: map, ready: map] = native_gen/bind(builder, "polled", native_gen/call(builder, "memory_safepoint", [native_query/worker(builder), native_gen/ref(builder, "false")]))
+  let result: map = native_query/check(ready, polled, "oom")
+  return result
+end
+verb native_query/poll_interval(builder: map, progress: map) -> map
+  let boundary: map = native_kernel/absent(native_gen/bit_and(progress, native_gen/ref(builder, "query_poll_mask")))
+  let result: map = native_gen/when(builder, boundary, fn(poll) => native_query/poll(poll))
+  return result
+end

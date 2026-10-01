@@ -134,12 +134,12 @@ verb native_memory/lifecycle(input: map) -> map
     native_memory/call("memory_wake", ["sync"]),
     native/let_statement("requested", :Bool, native_memory/field(:Bool, "heap", "collecting")),
     native/if_statement("requested", wait, [
-      native/let_statement("pressure", :Bool, native_memory/field(:Bool, "worker", "pressure")),
+      // Nursery overflow uses managed pages. The heap growth limit decides
+      // when to collect; a small nursery must not trigger repeated full scans.
       native/let_statement("should_collect", :Bool, "collect"),
       native/unless_statement(native/binary_expression(:Less,
         native_memory/field(:U64, "heap", "allocated"), native_memory/field(:U64, "heap", "collection_limit")),
         [native/set_statement("should_collect", "memory_true")]),
-      native/when_statement("pressure", [native/set_statement("should_collect", "memory_true")]),
       native/when_statement("should_collect", [
         native_memory/store(:Bool, "heap", "collecting", "memory_true"),
         native/while_statement("memory_true", [
@@ -165,7 +165,6 @@ verb native_memory/lifecycle(input: map) -> map
     native/unless_statement("active", [native/return_value("memory_null_bytes")]),
     native/let_call("allocation", bytes, "memory_nursery_allocate", ["worker", "size", "layout"]),
     native/unless_statement(native/binary_expression(:Equal, "allocation", "memory_null_bytes"), [native/return_value("allocation")]),
-    native_memory/store(:Bool, "worker", "pressure", "memory_true"),
     @worker_heap, @sync,
     native/let_call("object", object, "memory_mature_allocate", ["heap", "size", "layout"]),
     @unlock,
