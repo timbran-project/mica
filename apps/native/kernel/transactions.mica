@@ -85,6 +85,10 @@ verb native_kernel/open_transaction(builder: map, failure) -> list
 end
 
 verb native_kernel/status(builder: map, status: string) -> map
+  if map_contains_key(builder, :scope_parent)
+    let result: map = native_roots/return_value(builder, native_gen/ref(builder, status))
+    return result
+  end
   let result: map = native_gen/return_value(builder, native_gen/ref(builder, status))
   return result
 end

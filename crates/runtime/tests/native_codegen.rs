@@ -2035,10 +2035,13 @@ fn native_relation_kernel_executes_on_both_mica_tiers() {
         });
         load_native_values(&mut runner);
         for source in [
+            include_str!("../../../apps/native/memory/roots.mica"),
             include_str!("../../../apps/native/kernel/program.mica"),
             include_str!("../../../apps/native/kernel/indexes.mica"),
             include_str!("../../../apps/native/kernel/relations.mica"),
             include_str!("../../../apps/native/kernel/transactions.mica"),
+            include_str!("../../../apps/native/kernel/rule_indexes.mica"),
+            include_str!("../../../apps/native/kernel/rules.mica"),
             include_str!("../../../apps/native/kernel/lifecycle.mica"),
             include_str!("../../../apps/native/query/builders.mica"),
             include_str!("../../../apps/native/query/roots.mica"),

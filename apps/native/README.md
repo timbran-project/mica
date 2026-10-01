@@ -4,7 +4,7 @@ This Mica library constructs typed programs for C11 and libgccjit. Rust Mica sup
 The core IR has no dependency on the Mica compiler app or a runtime value layout.
 The [managed heap](memory/program.mica) and [value library](value/program.mica) use that IR to define their implementations.
 The [relation kernel](kernel/program.mica) adds snapshots, transactional tuple storage, and concurrent commits.
-Task scheduling, rules, dispatch, and general native source execution remain separate runtime work.
+Task scheduling, rule evaluation, dispatch, and general native source execution remain separate runtime work.
 
 The [value examples](examples/values.mica) implement three operations:
 
@@ -137,7 +137,7 @@ Other workers can read and commit concurrently. Callers park workers before exte
 | Status | Meaning |
 | --- | --- |
 | 0 | Success |
-| 1 | Unknown relation |
+| 1 | Unknown relation or rule |
 | 2 | Tuple or pattern arity mismatch |
 | 3 | Non-persistable tuple |
 | 4 | Functional key violation |
@@ -147,8 +147,44 @@ Other workers can read and commit concurrently. Callers park workers before exte
 | 8 | Allocation or collection failure |
 | 9 | Closed transaction or invalid lifecycle operation |
 
-`kernel_work(transaction)` exposes the last commit status and its conflicting relation and tuple.
-The current layer supports relation creation. Relation removal, transactional buffers, durable storage, rules, computed relations, authority, and dispatch remain separate work.
+`kernel_work(transaction)` exposes the last commit status, conflicting relation and tuple, and conflicting rule identity.
+The current layer supports relation creation and transactional rule metadata.
+Relation removal, transactional buffers, durable storage, rule evaluation, computed relations, authority, and dispatch remain separate work.
+
+### Rule catalogue
+
+`kernel/rules.mica` generates the transactional catalogue for rule metadata.
+Each entry contains an identity, head relation, arity, active flag, and committed revision.
+Rule bodies, safety checks, stratification, export authorization, and evaluation remain unimplemented.
+An active metadata entry does not derive facts.
+
+| Operation | Result |
+| --- | --- |
+| `kernel_rule_add(transaction, id, head, arity, active)` | Stage a definition for an absent identity |
+| `kernel_rule_update(transaction, id, head, arity, active)` | Replace the metadata of an existing identity |
+| `kernel_rule_remove(transaction, id)` | Stage removal of an existing identity |
+| `kernel_rule(transaction, id)` | Read one definition from the transaction view |
+| `kernel_rules(transaction)` | Read the complete catalogue from the transaction view |
+
+Writes return kernel status codes. Reads return `KernelRuleResult` with `status` and `rule`.
+A successful catalogue read returns a linked list through `rule`. A null pointer means the catalogue is empty.
+Definitions and observations use persistent AVL indexes. Point operations copy logarithmic paths.
+Enumeration materializes and caches an ordered list in the draft. Edits invalidate that cache.
+Catalogue traversal and commit rebasing poll for collection with managed pointers rooted.
+A missing identity returns `kernel_unknown`. Reads and writes reject closed or committed transactions.
+Returned pointers follow the kernel root contract: callers must root retained pointers across safepoints and treat records as immutable.
+
+Draft reads include repeated additions, updates, and removals within the same transaction.
+Staging checks head relation existence and arity, including staged relation declarations.
+Commit validates the candidate catalogue and publishes rule metadata and fact changes atomically.
+Rollback discards both. Allocation failure preserves the previous draft and publishes nothing.
+
+Point reads record the original definition revision, including observations of missing identities.
+Commit reports a conflict when another transaction changes an observed definition.
+Catalogue enumeration records a whole-catalogue dependency, so a concurrent catalogue change also conflicts.
+Disjoint point updates can commit after preparation against the latest snapshot.
+Read-only catalogue validation does not advance the world version.
+`kernel_work(transaction).conflict_rule` identifies a conflicting point observation. Whole-catalogue conflicts use zero.
 
 ### Query execution
 

@@ -1,0 +1,161 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+// Specialize the same persistent AVL operations for definitions and draft
+// observations. An operation follows a bounded AVL path and does not collect;
+// callers poll between operations and root the returned tree before polling.
+verb native_kernel/id_index_specs() -> list
+  return [["rule_index", "RuleIndex", "Rule"], ["observation_index", "RuleObservationIndex", "RuleChange"]]
+end
+verb native_kernel/id_index_call(builder: map, operation: string, arguments: list) -> map
+  let spec: list = builder[:id_index]
+  let result: map = native_gen/call(builder, string_concat("kernel_", spec[0], "_", operation), arguments)
+  return result
+end
+verb native_kernel/id_index_context(module: map, spec: list, operation: string) -> map
+  let builder: map = native_gen/context(module, string_concat("kernel_", spec[0], "_", operation))
+  builder[:id_index] = spec
+  return builder
+end
+verb native_kernel/id_index_result(builder: map, ok: map, node: map) -> map
+  let spec: list = builder[:id_index]
+  let result: map = native_gen/return_value(builder, native_gen/record(builder, [:Record, string_concat("Kernel", spec[1], "Result")],
+    {"ok" -> ok, "node" -> node}))
+  return result
+end
+verb native_kernel/id_index_make(builder: map, children: map, entry: map) -> map
+  let result: map = native_kernel/id_index_call(builder, "make", [native_gen/ref(builder, "worker"), children["left"], children["right"], entry])
+  return result
+end
+verb native_kernel/id_index_require(builder: map, node: map) -> map
+  let result: map = native_gen/when(builder, native_kernel/absent(node), fn(failed) => native_gen/return_value(failed, node))
+  return result
+end
+verb native_kernel/id_index_rotation(builder: map, direction: map, pivot: map, double: bool) -> map
+  let heavy: string = direction[:heavy]
+  let light: string = direction[:light]
+  let ready: map = builder
+  if double
+    let [middle, with_middle] = native_gen/bind(ready, "middle", native_kernel/load_field(ready, pivot, light))
+    let outer = native_kernel/oriented_children(direction, native_kernel/load_field(with_middle, pivot, heavy), native_kernel/load_field(with_middle, middle, heavy))
+    let [a, with_a] = native_gen/bind(with_middle, "outer", native_kernel/id_index_make(with_middle, outer, native_kernel/load_field(with_middle, pivot, "entry")))
+    ready = native_kernel/id_index_require(with_a, a)
+    let inner = native_kernel/oriented_children(direction, native_kernel/load_field(ready, middle, light), native_gen/ref(ready, light))
+    let [b, with_b] = native_gen/bind(ready, "inner", native_kernel/id_index_make(ready, inner, native_gen/ref(ready, "entry")))
+    ready = native_kernel/id_index_require(with_b, b)
+    let result: map = native_gen/return_value(ready, native_kernel/id_index_make(ready, native_kernel/oriented_children(direction, a, b), native_kernel/load_field(ready, middle, "entry")))
+    return result
+  end
+  let inner = native_kernel/oriented_children(direction, native_kernel/load_field(ready, pivot, light), native_gen/ref(ready, light))
+  let [child, with_child] = native_gen/bind(ready, "child", native_kernel/id_index_make(ready, inner, native_gen/ref(ready, "entry")))
+  ready = native_kernel/id_index_require(with_child, child)
+  let outer = native_kernel/oriented_children(direction, native_kernel/load_field(ready, pivot, heavy), child)
+  let result: map = native_gen/return_value(ready, native_kernel/id_index_make(ready, outer, native_kernel/load_field(ready, pivot, "entry")))
+  return result
+end
+verb native_kernel/id_index_balance(module: map, spec: list) -> map
+  let builder: map = native_kernel/id_index_context(module, spec, "balance")
+  for side in ["left", "right"]
+    let direction: map = native_kernel/orientation(side)
+    let heavy = native_gen/ref(builder, direction[:heavy])
+    let light = native_gen/ref(builder, direction[:light])
+    let high = native_kernel/id_index_call(builder, "height", [heavy])
+    let low = native_kernel/id_index_call(builder, "height", [light])
+    builder = native_gen/when(builder, native_gen/less(native_gen/add(low, native_gen/ref(builder, "one")), high), fn(rotate)
+      let outside = native_kernel/id_index_call(rotate, "height", [native_kernel/load_field(rotate, heavy, direction[:heavy])])
+      let inside = native_kernel/id_index_call(rotate, "height", [native_kernel/load_field(rotate, heavy, direction[:light])])
+      return native_gen/branch(rotate, native_gen/less(outside, inside),
+        fn(double) => native_kernel/id_index_rotation(double, direction, heavy, true),
+        fn(single) => native_kernel/id_index_rotation(single, direction, heavy, false))
+    end)
+  end
+  builder = native_gen/return_value(builder, native_kernel/id_index_make(builder,
+    {"left" -> native_gen/ref(builder, "left"), "right" -> native_gen/ref(builder, "right")}, native_gen/ref(builder, "entry")))
+  let result: map = native_gen/finish(module, builder)
+  return result
+end
+verb native_kernel/id_index_child(builder: map, child: map, id: map, entry: map) -> map
+  let [changed, ready] = native_gen/checked_bind(builder, "changed", native_kernel/id_index_call(builder, "put",
+    [native_gen/ref(builder, "worker"), child, id, entry]), "ok", fn(failed) => native_gen/return_value(failed, native_gen/zero(failed[:result])))
+  let result: map = native_gen/assign(ready, child, native_gen/field(ready, changed, "node"))
+  return result
+end
+verb native_kernel/id_index_remove(builder: map, left: map, right: map, item: map) -> map
+  let ready: map = native_gen/when(builder, native_kernel/absent(left), fn(single) => native_kernel/id_index_result(single, native_gen/ref(single, "true"), right))
+  ready = native_gen/when(ready, native_kernel/absent(right), fn(single) => native_kernel/id_index_result(single, native_gen/ref(single, "true"), left))
+  let [successor, with_successor] = native_gen/bind(ready, "successor", right)
+  ready = native_gen/while_loop(with_successor, native_gen/negate(native_kernel/absent(native_kernel/load_field(with_successor, successor, "left"))),
+    fn(step) => native_gen/assign(step, successor, native_kernel/load_field(step, successor, "left")))
+  ready = native_gen/assign(ready, item, native_kernel/load_field(ready, successor, "entry"))
+  let result: map = native_kernel/id_index_child(ready, right, native_kernel/load_field(ready, item, "id"), native_gen/zero(native_gen/type(item)))
+  return result
+end
+verb native_kernel/id_index_put(module: map, spec: list) -> map
+  let builder: map = native_kernel/id_index_context(module, spec, "put")
+  let node = native_gen/ref(builder, "node")
+  let entry = native_gen/ref(builder, "entry")
+  let id = native_gen/ref(builder, "id")
+  builder = native_gen/when(builder, native_kernel/absent(node), fn(empty)
+    let ready = native_gen/when(empty, native_kernel/absent(entry), fn(absent) => native_kernel/id_index_result(absent, native_gen/ref(absent, "true"), node))
+    let [leaf, allocated] = native_gen/bind(ready, "leaf", native_kernel/id_index_make(ready, {"left" -> node, "right" -> node}, entry))
+    return native_kernel/id_index_result(allocated, native_gen/negate(native_kernel/absent(leaf)), leaf)
+  end)
+  let [left, with_left] = native_gen/bind(builder, "left", native_kernel/load_field(builder, node, "left"))
+  let [right, with_right] = native_gen/bind(with_left, "right", native_kernel/load_field(with_left, node, "right"))
+  let [item, ready] = native_gen/bind(with_right, "item", native_kernel/load_field(with_right, node, "entry"))
+  let key = native_kernel/load_field(ready, item, "id")
+  builder = native_gen/branch(ready, native_gen/equal(id, key),
+    fn(equal) => native_gen/branch(equal, native_kernel/absent(entry),
+      fn(remove) => native_kernel/id_index_remove(remove, left, right, item),
+      fn(replace) => native_gen/assign(replace, item, entry)),
+    fn(unequal) => native_gen/branch(unequal, native_gen/less(id, key),
+      fn(smaller) => native_kernel/id_index_child(smaller, left, id, entry),
+      fn(larger) => native_kernel/id_index_child(larger, right, id, entry)))
+  let [balanced, with_balanced] = native_gen/bind(builder, "balanced", native_kernel/id_index_call(builder, "balance", [native_gen/ref(builder, "worker"), left, right, item]))
+  builder = native_kernel/id_index_result(with_balanced, native_gen/negate(native_kernel/absent(balanced)), balanced)
+  let result: map = native_gen/finish(module, builder)
+  return result
+end
+verb native_kernel/id_indexes(input: map) -> map
+  let module: map = input
+  for spec in native_kernel/id_index_specs()
+    let node: list = native_kernel/pointer(spec[1])
+    let entry: list = native_kernel/pointer(spec[2])
+    let worker: list = ["worker", native_memory/record_pointer("MemoryWorker"), :Borrow]
+    let children: list = [["left", node, :Gc], ["right", node, :Gc], ["entry", entry, :Gc]]
+    for function in [
+      ["height", :U64, [["node", node, :Gc]]],
+      ["make", node, [worker, @children]], ["balance", node, [worker, @children]],
+      ["lookup", entry, [["node", node, :Gc], ["id", :U64, :Value]]],
+      ["put", [:Record, string_concat("Kernel", spec[1], "Result")], [worker, ["node", node, :Gc], ["id", :U64, :Value], ["entry", entry, :Gc]]]]
+      module = native_kernel/declare(module, string_concat(spec[0], "_", function[0]), function[1], function[2])
+    end
+    let builder: map = native_kernel/id_index_context(module, spec, "height")
+    let root = native_gen/ref(builder, "node")
+    builder = native_gen/when(builder, native_kernel/absent(root), fn(empty) => native_gen/return_value(empty, native_gen/ref(empty, "zero")))
+    builder = native_gen/return_value(builder, native_kernel/load_field(builder, root, "height"))
+    module = native_gen/finish(module, builder)
+    builder = native_kernel/id_index_context(module, spec, "make")
+    let [height, with_height] = native_gen/bind(builder, "height", native_kernel/id_index_call(builder, "height", [native_gen/ref(builder, "left")]))
+    let [other, with_other] = native_gen/bind(with_height, "other", native_kernel/id_index_call(with_height, "height", [native_gen/ref(with_height, "right")]))
+    builder = native_gen/when(with_other, native_gen/less(height, other), fn(taller) => native_gen/assign(taller, height, other))
+    builder = native_gen/return_value(builder, native_kernel/allocate_record(builder, native_gen/ref(builder, "worker"), spec[1],
+      {"left" -> native_gen/ref(builder, "left"), "right" -> native_gen/ref(builder, "right"), "entry" -> native_gen/ref(builder, "entry"), "height" -> native_gen/add(height, native_gen/ref(builder, "one"))}))
+    module = native_gen/finish(module, builder)
+    builder = native_kernel/id_index_context(module, spec, "lookup")
+    let [cursor, with_cursor] = native_gen/bind(builder, "cursor", native_gen/ref(builder, "node"))
+    builder = native_gen/while_loop(with_cursor, native_gen/negate(native_kernel/absent(cursor)), fn(step)
+      let item = native_kernel/load_field(step, cursor, "entry")
+      let key = native_kernel/load_field(step, item, "id")
+      let ready = native_gen/when(step, native_gen/equal(native_gen/ref(step, "id"), key), fn(found) => native_gen/return_value(found, item))
+      return native_gen/branch(ready, native_gen/less(native_gen/ref(ready, "id"), key),
+        fn(left) => native_gen/assign(left, cursor, native_kernel/load_field(left, cursor, "left")),
+        fn(right) => native_gen/assign(right, cursor, native_kernel/load_field(right, cursor, "right")))
+    end)
+    builder = native_gen/return_value(builder, native_gen/zero(entry))
+    module = native_gen/finish(module, builder)
+    module = native_kernel/id_index_balance(module, spec)
+    module = native_kernel/id_index_put(module, spec)
+  end
+  return module
+end

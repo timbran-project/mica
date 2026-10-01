@@ -16,20 +16,28 @@ verb native_kernel/schemas() -> list
   let node: list = native_kernel/pointer("Node")
   let relation: list = native_kernel/pointer("Relation")
   let word: list = native_value/word()
+  let rule: list = native_kernel/pointer("Rule")
+  let rule_change: list = native_kernel/pointer("RuleChange")
   return [
     ["Node", [["left", node], ["right", node], ["row", word], ["height", :U64], ["present", :Bool]]],
     ["Index", [["next", native_kernel/pointer("Index")], ["mask", :U64], ["tree", node]]],
     ["Relation", [["next", relation], ["id", :U64], ["name", :U64], ["arity", :U64],
       ["policy", :U64], ["keys", :U64], ["indexes", native_kernel/pointer("Index")]]],
-    ["Snapshot", [["version", :U64], ["relations", relation]]],
+    ["Snapshot", [["version", :U64], ["relations", relation], ["rules", native_kernel/pointer("RuleIndex")]]],
+    ["Rule", [["next", rule], ["id", :U64], ["head", :U64], ["arity", :U64], ["active", :Bool], ["revision", :U64]]],
+    ["RuleIndex", [["left", native_kernel/pointer("RuleIndex")], ["right", native_kernel/pointer("RuleIndex")], ["entry", rule], ["height", :U64]]],
+    ["RuleObservationIndex", [["left", native_kernel/pointer("RuleObservationIndex")], ["right", native_kernel/pointer("RuleObservationIndex")], ["entry", rule_change], ["height", :U64]]],
+    ["RuleChange", [["next", rule_change], ["id", :U64], ["before", rule], ["after", rule], ["written", :Bool]]],
     ["Change", [["next", native_kernel/pointer("Change")], ["before", relation], ["after", relation], ["writes", node]]],
     ["Delta", [["next", native_kernel/pointer("Delta")], ["relation", :U64], ["row", word], ["asserted", :Bool]]],
     ["Query", [["kind", :U64], ["relation", :U64], ["pattern", word], ["mask", :U64],
       ["left", native_kernel/pointer("Query")], ["right", native_kernel/pointer("Query")],
       ["positions", word], ["right_positions", word], ["input", word]]],
     ["Work", [["base", native_kernel/pointer("Snapshot")], ["changes", native_kernel/pointer("Change")],
+      ["rule_changes", rule_change], ["rule_observations", native_kernel/pointer("RuleObservationIndex")],
+      ["rule_index", native_kernel/pointer("RuleIndex")], ["rules", rule], ["rules_cached", :Bool], ["rules_read", :Bool],
       ["checked", native_kernel/pointer("Snapshot")], ["candidate", native_kernel/pointer("Snapshot")], ["deltas", native_kernel/pointer("Delta")],
-      ["status", :U64], ["conflict_relation", :U64], ["conflict_tuple", word], ["done", :Bool]]]]
+      ["status", :U64], ["conflict_rule", :U64], ["conflict_relation", :U64], ["conflict_tuple", word], ["done", :Bool]]]]
 end
 
 verb native_kernel/schema(record: string) -> list
@@ -146,7 +154,7 @@ verb native_kernel/declare(context: map, name: string, result, parameters: list,
     effects = [@effects, :Relocate]
   end
   let mode: symbol = :Value
-  if native/is_pointer(result) || result == native_value/word() || result == [:Record, "KernelNodeResult"] || result == [:Record, "KernelQueryResult"] || result == [:Record, "ValueResult"]
+  if native/is_pointer(result) || result == native_value/word() || native/contains([[:Record, "KernelRuleResult"], [:Record, "KernelRuleTreeResult"], [:Record, "KernelRuleIndexResult"], [:Record, "KernelRuleObservationIndexResult"]], result) || result == [:Record, "KernelNodeResult"] || result == [:Record, "KernelQueryResult"] || result == [:Record, "ValueResult"]
     mode = :Gc
   end
   let output: map = native_memory/declare(context, string_concat("kernel_", name), result, parameters, effects, mode, "")
@@ -205,6 +213,10 @@ verb native_kernel/types(input: map) -> map
     ["Kernel", [["heap", native_memory/record_pointer("MemoryHeap")], ["mutex", bytes], ["current", root]]],
     ["KernelTransaction", [["kernel", native_memory/record_pointer("Kernel")], ["worker", worker], ["root", root]]],
     ["KernelQueryResult", [["status", :U64], ["arity", :U64], ["rows", word]]],
+    ["KernelRuleIndexResult", [["ok", :Bool], ["node", native_kernel/pointer("RuleIndex")]]],
+    ["KernelRuleObservationIndexResult", [["ok", :Bool], ["node", native_kernel/pointer("RuleObservationIndex")]]],
+    ["KernelRuleTreeResult", [["status", :U64], ["rule", native_kernel/pointer("RuleIndex")]]],
+    ["KernelRuleResult", [["status", :U64], ["rule", native_kernel/pointer("Rule")]]],
     ["KernelNodeResult", [["ok", :Bool], ["node", native_kernel/pointer("Node")]]],
     ["KernelScan", [["pattern", word], ["after", word], ["order", :U64], ["mask", :U64], ["prefix", :U64],
       ["output", native_memory/pointer(word)], ["capacity", :U64], ["count", :U64], ["visited", :U64], ["more", :Bool]]],
@@ -276,6 +288,7 @@ verb native_kernel/program() -> map
   context = native_kernel/indexes(context)
   context = native_kernel/relations(context)
   context = native_kernel/transactions(context)
+  context = native_kernel/rules(context)
   context = native_kernel/lifecycle(context)
   context = native_query/program(context)
   let state: map = context[:state]

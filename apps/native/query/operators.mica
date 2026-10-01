@@ -3,10 +3,10 @@
 
 verb native_query/project_body(module: map) -> map
   let builder: map = native_query/context(module, "kernel_query_project_rows")
-  let rows: map = native_query/ref(builder, "rows")
-  let positions: map = native_query/ref(builder, "positions")
-  builder = native_query/check_positions(builder, positions, native_query/ref(builder, "arity"))
-  builder = native_query/check(builder, native_gen/negate(native_gen/less(native_query/ref(builder, "kernel_64"), native_query/width(builder, positions))), "arity")
+  let rows: map = native_roots/ref(builder, "rows")
+  let positions: map = native_roots/ref(builder, "positions")
+  builder = native_query/check_positions(builder, positions, native_roots/ref(builder, "arity"))
+  builder = native_query/check(builder, native_gen/negate(native_gen/less(native_roots/ref(builder, "kernel_64"), native_query/width(builder, positions))), "arity")
   let [output: map, ready: map] = native_query/row_set(builder)
   builder = native_query/each_row(ready, rows, fn(iteration, row)
     let [projected: map, with_row: map] = native_query/project_row(iteration, row, positions)
@@ -20,17 +20,17 @@ end
 
 verb native_query/join_body(module: map, kind: string) -> map
   let builder: map = native_query/context(module, string_concat("kernel_query_", kind, "_rows"))
-  let left: map = native_query/ref(builder, "left")
-  let right: map = native_query/ref(builder, "right")
-  let left_positions: map = native_query/ref(builder, "left_positions")
-  let right_positions: map = native_query/ref(builder, "right_positions")
-  builder = native_query/check_positions(builder, left_positions, native_query/ref(builder, "left_arity"))
-  builder = native_query/check_positions(builder, right_positions, native_query/ref(builder, "right_arity"))
+  let left: map = native_roots/ref(builder, "left")
+  let right: map = native_roots/ref(builder, "right")
+  let left_positions: map = native_roots/ref(builder, "left_positions")
+  let right_positions: map = native_roots/ref(builder, "right_positions")
+  builder = native_query/check_positions(builder, left_positions, native_roots/ref(builder, "left_arity"))
+  builder = native_query/check_positions(builder, right_positions, native_roots/ref(builder, "right_arity"))
   builder = native_query/check(builder, native_gen/equal(native_query/width(builder, left_positions), native_query/width(builder, right_positions)), "schema")
-  let arity: map = native_query/ref(builder, "left_arity")
+  let arity: map = native_roots/ref(builder, "left_arity")
   if kind == "join"
-    arity = native_gen/add(arity, native_query/ref(builder, "right_arity"))
-    builder = native_query/check(builder, native_gen/negate(native_gen/less(native_query/ref(builder, "kernel_64"), arity)), "arity")
+    arity = native_gen/add(arity, native_roots/ref(builder, "right_arity"))
+    builder = native_query/check(builder, native_gen/negate(native_gen/less(native_roots/ref(builder, "kernel_64"), arity)), "arity")
   end
   let [index: map, indexed: map] = native_query/join_index(builder, right, right_positions)
   let [output: map, with_output: map] = native_query/row_set(indexed)
@@ -39,12 +39,12 @@ verb native_query/join_body(module: map, kind: string) -> map
     let [key: map, projected: map] = native_query/project_row(iteration, row, left_positions)
     if kind == "join"
       let generated_result: map = native_query/status_call(projected, "kernel_query_join_matches",
-        [native_query/ref(projected, "worker"), index, key, row, output[:query_root], native_gen/address(ticks)])
+        [native_roots/ref(projected, "worker"), index, key, row, output[:scope_root], native_gen/address(ticks)])
       return generated_result
     end
     let [probe: map, with_probe: map] = native_query/index_entry(projected, key, row)
     let [found: map, with_found: map] = native_gen/bind(with_probe, "found", native_gen/call(with_probe, "kernel_find",
-      [index, probe, native_query/ref(with_probe, "one"), native_query/ref(with_probe, "true")]))
+      [index, probe, native_roots/ref(with_probe, "one"), native_roots/ref(with_probe, "true")]))
     let keep: map = native_kernel/absent(found)
     if kind == "semi"
       keep = native_gen/negate(keep)
@@ -58,23 +58,23 @@ verb native_query/join_body(module: map, kind: string) -> map
 end
 verb native_query/set_body(module: map, kind: string) -> map
   let builder: map = native_query/context(module, string_concat("kernel_query_", kind, "_rows"))
-  builder = native_query/check(builder, native_gen/equal(native_query/ref(builder, "left_arity"), native_query/ref(builder, "right_arity")), "arity")
+  builder = native_query/check(builder, native_gen/equal(native_roots/ref(builder, "left_arity"), native_roots/ref(builder, "right_arity")), "arity")
   let [right: map, indexed: map] = native_query/row_set(builder)
-  indexed = native_query/each_row(indexed, native_query/ref(indexed, "right"), fn(body, row) => native_query/offer(body, right, row))
+  indexed = native_query/each_row(indexed, native_roots/ref(indexed, "right"), fn(body, row) => native_query/offer(body, right, row))
   let [output: map, ready: map] = native_query/row_set(indexed)
   if kind == "union"
-    ready = native_query/store(ready, output, right)
+    ready = native_roots/store(ready, output, right)
   end
-  builder = native_query/each_row(ready, native_query/ref(ready, "left"), fn(body, row)
+  builder = native_query/each_row(ready, native_roots/ref(ready, "left"), fn(body, row)
     if kind == "union"
       let generated_result: map = native_query/offer(body, output, row)
       return generated_result
     end
-    let found: map = native_gen/call(body, "kernel_find", [right, row, native_gen/zero(:U64), native_query/ref(body, "false")])
+    let found: map = native_gen/call(body, "kernel_find", [right, row, native_gen/zero(:U64), native_roots/ref(body, "false")])
     let generated_result: map = native_gen/when(body, native_kernel/absent(found), fn(selected) => native_query/offer(selected, output, row))
     return generated_result
   end)
-  builder = native_query/finish_rows(builder, output, native_query/ref(builder, "left_arity"))
+  builder = native_query/finish_rows(builder, output, native_roots/ref(builder, "left_arity"))
   let generated_result: map = native_gen/finish(module, builder)
   return generated_result
 end

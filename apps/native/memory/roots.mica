@@ -1,0 +1,113 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+// Rooted expressions reload their value each time they are used. Operators
+// retain inputs and accumulators once, then poll without naming stale pointers.
+verb native_roots/worker(builder: map) -> map
+  if map_contains_key(builder, :scope_worker)
+    let worker: map = builder[:scope_worker]
+    return worker
+  end
+  let worker: map = native_gen/ref(builder, "worker")
+  return worker
+end
+verb native_roots/ref(builder: map, name: string) -> map
+  if name == "worker" && map_contains_key(builder, :scope_worker)
+    let worker: map = builder[:scope_worker]
+    return worker
+  end
+  if map_contains_key(builder, :scope_bindings) && map_contains_key(builder[:scope_bindings], name)
+    let value: map = builder[:scope_bindings][name]
+    return value
+  end
+  let value: map = native_gen/ref(builder, name)
+  return value
+end
+verb native_roots/root_value(builder: map, root: map, kind) -> map
+  let value: map = native_gen/call(builder, "value_root_get", [root])
+  if kind != native_value/word()
+    value = native_gen/cast(kind, native_gen/root_read(native_gen/field(builder, root, "pointer")))
+  end
+  value[:scope_root] = root
+  return value
+end
+verb native_roots/store(builder: map, rooted: map, value: map) -> map
+  native/ensure(map_contains_key(rooted, :scope_root), "managed assignment requires a root")
+  let root: map = rooted[:scope_root]
+  if native_gen/type(value) == native_value/word()
+    let result: map = native_gen/do_call(builder, "value_root_set", [root, value])
+    return result
+  end
+  let result: map = native_gen/root_write(builder, native_gen/field(builder, root, "pointer"),
+    native_gen/cast(native_memory/pointer(:U8), value))
+  return result
+end
+verb native_roots/retain(builder: map, label: string, value: map) -> list
+  let [slot: map, with_slot: map] = native_gen/bind(builder, string_concat(label, "_root"), native_gen/zero([:Record, "MemoryRoot"]))
+  let root: map = native_gen/address(slot)
+  let rooted: map = native_roots/root_value(with_slot, root, native_gen/type(value))
+  let ready: map = native_roots/store(with_slot, rooted, value)
+  let [pushed: map, with_push: map] = native_gen/bind(ready, "root_registered", native_gen/call(ready, "memory_root_push", [native_roots/worker(ready), root]))
+  with_push[:scope_roots] = [@with_push[:scope_roots], root]
+  ready = native_gen/unless(with_push, pushed, fn(failed) => native_roots/fail(failed, "closed"))
+  return [rooted, ready]
+end
+verb native_roots/open_scope(input: map, failure) -> map
+  let builder: map = input
+  builder[:scope_failure] = failure
+  let module: map = builder[:module]
+  let name: string = builder[:name]
+  builder[:scope_roots] = []
+  builder[:scope_bindings] = {}
+  let worker: map = native_gen/zero(native_memory/record_pointer("MemoryWorker"))
+  if map_contains_key(module[:bindings][name], "worker")
+    worker = native_gen/ref(builder, "worker")
+  else
+    worker = native_gen/read(native_gen/field(builder, native_gen/ref(builder, "transaction"), "worker"))
+  end
+  let [bound_worker: map, ready: map] = native_gen/bind(builder, "worker", worker)
+  ready[:scope_worker] = bound_worker
+  // Root records live in native frames. The chain head is a stable borrowed
+  // address, unlike the managed payload pointers held inside those records.
+  let [parent: map, with_parent: map] = native_gen/bind(ready, "parent_roots", native_gen/read(native_gen/field(ready, bound_worker, "roots")))
+  ready = with_parent
+  ready[:scope_parent] = parent
+  let bindings: map = {}
+  let managed: list = [row[0] for row in module[:state][:parameter_contracts] if row[1] == :Gc]
+  for parameter in module[:state][:parameters]
+    if parameter[1] == builder[:function] && native/contains(managed, parameter[0])
+      let spelling: string = parameter[3]
+      let [rooted: map, with_root: map] = native_roots/retain(ready, spelling, native_gen/ref(ready, spelling))
+      ready = with_root
+      bindings[spelling] = rooted
+    end
+  end
+  ready[:scope_bindings] = bindings
+  return ready
+end
+verb native_roots/return_value(builder: map, value: map) -> map
+  let [result: map, ready: map] = native_gen/bind(builder, "result", value)
+  // Every nested scope restores its own scope before returning. Unlink this
+  // complete frame directly; its root records are stack storage about to expire.
+  if map_contains_key(ready, :scope_roots) && len(ready[:scope_roots]) > 0
+    let previous: map = native_gen/manage(ready[:scope_parent])
+    ready = native_gen/root_write(ready, native_gen/field(ready, native_roots/worker(ready), "roots"), previous)
+  end
+  let completed: map = native_gen/return_value(ready, result)
+  return completed
+end
+verb native_roots/poll(builder: map) -> map
+  let [polled: map, ready: map] = native_gen/bind(builder, "polled", native_gen/call(builder, "memory_safepoint", [native_roots/worker(builder), native_gen/ref(builder, "false")]))
+  let result: map = native_gen/unless(ready, polled, fn(failed) => native_roots/fail(failed, "oom"))
+  return result
+end
+verb native_roots/context(module: map, name: string, failure) -> map
+  let result: map = native_roots/open_scope(native_gen/context(module, name), failure)
+  return result
+end
+
+verb native_roots/fail(builder: map, reason: string) -> map
+  let failure = builder[:scope_failure]
+  let result: map = failure(builder, reason)
+  return result
+end

@@ -5,15 +5,15 @@
 // every pointer needed while scanning is retained in this native frame.
 verb native_query/probe_matches_body(module: map, kind: string) -> map
   let builder: map = native_query/context(module, string_concat("kernel_query_probe_", kind))
-  let left: map = native_query/ref(builder, "left")
-  let output: map = native_query/root_value(builder, native_query/ref(builder, "output"), native_kernel/pointer("Node"))
-  let [found: map, ready: map] = native_gen/bind(builder, "found", native_query/ref(builder, "false"))
-  builder = native_query/scan_rows(ready, native_query/ref(ready, "relation"), native_query/ref(ready, "pattern"), native_query/ref(ready, "mask"), native_query/ref(ready, "ticks"), fn(matched, right)
+  let left: map = native_roots/ref(builder, "left")
+  let output: map = native_roots/root_value(builder, native_roots/ref(builder, "output"), native_kernel/pointer("Node"))
+  let [found: map, ready: map] = native_gen/bind(builder, "found", native_roots/ref(builder, "false"))
+  builder = native_query/scan_rows(ready, native_roots/ref(ready, "relation"), native_roots/ref(ready, "pattern"), native_roots/ref(ready, "mask"), native_roots/ref(ready, "ticks"), fn(matched, right)
     if kind == "join"
       let [row: map, joined: map] = native_query/concat_rows(matched, left, right)
       return native_query/offer(joined, output, row)
     end
-    let selected: map = native_gen/assign(matched, found, native_query/ref(matched, "true"))
+    let selected: map = native_gen/assign(matched, found, native_roots/ref(matched, "true"))
     return native_gen/break_loop(selected)
   end)
   if kind != "join"
@@ -23,7 +23,7 @@ verb native_query/probe_matches_body(module: map, kind: string) -> map
     end
     builder = native_gen/when(builder, keep, fn(selected) => native_query/offer(selected, output, left))
   end
-  builder = native_query/return_value(builder, native_query/ref(builder, "kernel_ok"))
+  builder = native_roots/return_value(builder, native_roots/ref(builder, "kernel_ok"))
   let result: map = native_gen/finish(module, builder)
   return result
 end
@@ -37,11 +37,11 @@ verb native_query/bind_probe(builder: map, pattern: map, mask: map, row: map, le
     let left_index: map = native_gen/expression(:U64, :Payload, [native_query/cell(column, left_positions, index)])
     let right_index: map = native_gen/expression(:U64, :Payload, [native_query/cell(column, right_positions, index)])
     let value: map = native_query/cell(column, row, left_index)
-    let bit: map = native_gen/shift_left(native_query/ref(column, "one"), right_index)
+    let bit: map = native_gen/shift_left(native_roots/ref(column, "one"), right_index)
     let ready: map = native_gen/when(column, native_kernel/column_is_bound(mask, bit), fn(bound)
       let [comparison: map, checked: map] = native_gen/checked_bind(bound, "comparison", native_gen/call(bound, "value_compare", [native_gen/load(native_gen/offset(data, right_index)), value]), "ok", fn(failed) => native_query/error(failed, "schema"))
       return native_gen/unless(checked, native_kernel/absent(native_gen/field(checked, comparison, "number")),
-        fn(conflict) => native_gen/assign(conflict, compatible, native_query/ref(conflict, "false")))
+        fn(conflict) => native_gen/assign(conflict, compatible, native_roots/ref(conflict, "false")))
     end)
     ready = native_gen/store(ready, native_gen/offset(data, right_index), value)
     return native_gen/assign(ready, mask, native_gen/bit_or(mask, bit))
@@ -51,24 +51,24 @@ end
 
 verb native_query/probe_body(module: map, kind: string) -> map
   let builder: map = native_query/context(module, string_concat("kernel_query_", kind, "_scan"))
-  let query: map = native_query/ref(builder, "query")
-  let left_positions: map = native_query/ref(builder, "left_positions")
-  let right_positions: map = native_query/ref(builder, "right_positions")
+  let query: map = native_roots/ref(builder, "query")
+  let left_positions: map = native_roots/ref(builder, "left_positions")
+  let right_positions: map = native_roots/ref(builder, "right_positions")
   let [relation: map, ready: map] = native_query/scan_relation(builder, query)
   let [right_arity: map, with_arity: map] = native_gen/bind(ready, "right_arity", native_kernel/load_field(ready, relation, "arity"))
-  builder = native_query/check_positions(with_arity, left_positions, native_query/ref(with_arity, "left_arity"))
+  builder = native_query/check_positions(with_arity, left_positions, native_roots/ref(with_arity, "left_arity"))
   builder = native_query/check_positions(builder, right_positions, right_arity)
   builder = native_query/check(builder, native_gen/equal(native_query/width(builder, left_positions), native_query/width(builder, right_positions)), "schema")
-  let arity: map = native_query/ref(builder, "left_arity")
+  let arity: map = native_roots/ref(builder, "left_arity")
   if kind == "join"
     arity = native_gen/add(arity, right_arity)
-    builder = native_query/check(builder, native_gen/negate(native_gen/less(native_query/ref(builder, "kernel_64"), arity)), "arity")
+    builder = native_query/check(builder, native_gen/negate(native_gen/less(native_roots/ref(builder, "kernel_64"), arity)), "arity")
   end
   let [blank: map, with_blank: map] = native_query/build_row(builder, right_arity, fn(row, index) => native_gen/zero(native_value/word()))
-  let [pattern: map, with_pattern: map] = native_query/retain(with_blank, "probe_pattern", blank)
+  let [pattern: map, with_pattern: map] = native_roots/retain(with_blank, "probe_pattern", blank)
   let [output: map, with_output: map] = native_query/row_set(with_pattern)
   let [ticks: map, with_ticks: map] = native_gen/bind(with_output, "visited", native_gen/zero(:U64))
-  builder = native_query/each_row(with_ticks, native_query/ref(with_ticks, "left"), fn(iteration, row)
+  builder = native_query/each_row(with_ticks, native_roots/ref(with_ticks, "left"), fn(iteration, row)
     let source: map = native_kernel/load_field(iteration, query, "pattern")
     let header: map = native_gen/expression(native_memory/record_pointer("HeapList"), :UnpackPointer, [pattern])
     let data: map = native_kernel/load_field(iteration, header, "data")
@@ -76,13 +76,13 @@ verb native_query/probe_body(module: map, kind: string) -> map
       return native_gen/store(binding, native_gen/offset(data, position), native_query/cell(binding, source, position))
     end)
     let [mask: map, with_mask: map] = native_gen/bind(copied, "bound_columns", native_kernel/load_field(copied, query, "mask"))
-    let [compatible: map, with_compatible: map] = native_gen/bind(with_mask, "compatible", native_query/ref(with_mask, "true"))
+    let [compatible: map, with_compatible: map] = native_gen/bind(with_mask, "compatible", native_roots/ref(with_mask, "true"))
     let bound: map = native_query/bind_probe(with_compatible, pattern, mask, row, left_positions, right_positions, compatible)
     if kind == "anti"
       bound = native_gen/unless(bound, compatible, fn(unmatched) => native_query/offer(unmatched, output, row))
     end
     bound = native_gen/when(bound, compatible, fn(probe) => native_query/status_call(probe, string_concat("kernel_query_probe_", kind),
-      [native_query/ref(probe, "worker"), relation, pattern, mask, row, output[:query_root], native_gen/address(ticks)]))
+      [native_roots/ref(probe, "worker"), relation, pattern, mask, row, output[:scope_root], native_gen/address(ticks)]))
     return bound
   end)
   builder = native_query/finish_rows(builder, output, arity)
