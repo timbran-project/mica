@@ -78,8 +78,7 @@ verb native_kernel/update_index(builder: map, index: map, tail: map) -> map
   let call = native_gen/call(builder, "kernel_set", [native_gen/ref(builder, "worker"),
     native_kernel/load_field(builder, index, "tree"), native_gen/ref(builder, "row"),
     native_kernel/load_field(builder, index, "mask"), native_gen/negate(native_gen/ref(builder, "asserted")), native_gen/ref(builder, "true")])
-  let [updated, ready] = native_gen/bind(builder, "updated", call)
-  ready = native_gen/unless(ready, native_gen/field(ready, updated, "ok"),
+  let [updated, ready] = native_gen/checked_bind(builder, "updated", call, "ok",
     fn(arm) => native_gen/return_value(arm, native_gen/zero(native_kernel/pointer("Index"))))
   let result: map = native_gen/return_value(ready, native_kernel/replace_record(ready, native_gen/ref(ready, "worker"), "Index", index,
     {"next" -> tail, "tree" -> native_gen/field(ready, updated, "node")}))
@@ -159,9 +158,8 @@ end
 
 verb native_kernel/check_scan_mask(builder: map, relation: map, mask: map) -> map
   let arity = native_kernel/load_field(builder, relation, "arity")
-  let result: map = native_gen/when(builder, native_gen/less(arity, native_gen/ref(builder, "kernel_64")),
-    fn(arm) => native_gen/unless(arm, native_kernel/absent(native_gen/shift_right(mask, arity)),
-      fn(failed) => native_kernel/scan_error(failed, "kernel_schema")))
+  let result: map = native_kernel/check_column_mask(builder, arity, mask,
+    fn(failed) => native_kernel/scan_error(failed, "kernel_schema"))
   return result
 end
 

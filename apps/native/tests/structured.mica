@@ -264,7 +264,38 @@ verb native/generated_example(first_id: int) -> map
   let [tick: map, with_tick: map] = native_gen/bind(b, "tick", native_gen/call(b, "generated_tick", []))
   b = native_gen/return_value(with_tick, native_gen/add(tick, tick))
   module = native_gen/finish(module, b)
+  module = native/declare_function(module, "generated_switch", :U64, [["choice", :U64, :Value]], [], [], :Value, "")
+  b = native_gen/context(module, "generated_switch")
+  b = native/generated_switch_body(b, native_gen/ref(b, "choice"))
+  module = native_gen/finish(module, b)
+  module = native/declare_function(module, "generated_switch_once", :U64, [], [], [:WriteMemory], :Value, "")
+  b = native_gen/context(module, "generated_switch_once")
+  b = native/generated_switch_body(b, native_gen/call(b, "generated_tick", []))
+  module = native_gen/finish(module, b)
   let result: map = module[:state]
+  return result
+end
+
+verb native/generated_switch_body(builder: map, selector: map) -> map
+  let result: map = native_gen/switch(builder, selector, [
+    [native_gen/ref(builder, "one"), fn(arm)
+      let [value: map, with_value: map] = native_gen/bind(arm, "result", native_gen/ref(arm, "ten"))
+      return native_gen/return_value(with_value, value)
+    end],
+    [native_gen/ref(builder, "three"), fn(arm)
+      let [value: map, with_value: map] = native_gen/bind(arm, "result", native_gen/ref(arm, "three"))
+      return native_gen/return_value(with_value, value)
+    end]], fn(otherwise) => native_gen/return_value(otherwise, native_gen/ref(otherwise, "zero")))
+  return result
+end
+
+verb native/generated_switch_label_failure() -> map
+  let module: map = native/module_context(native/program(), {})
+  module = native/declare_function(module, "generated_switch_label", :U64, [["choice", :U64, :Value]], [], [], :Value, "")
+  let builder: map = native_gen/context(module, "generated_switch_label")
+  let choice: map = native_gen/ref(builder, "choice")
+  let result: map = native_gen/switch(builder, choice,
+    [[choice, fn(arm) => native_gen/return_zero(arm)]], fn(otherwise) => native_gen/return_zero(otherwise))
   return result
 end
 
@@ -437,6 +468,28 @@ verb native/generated_call_context_failure() -> map
   let callee: map = native_gen/context(module, "generated_callee")
   let caller: map = native_gen/context(module, "generated_caller")
   let result: map = native_gen/return_value(caller, native_gen/call(callee, "generated_callee", []))
+  return result
+end
+
+verb native/generated_call_arity_failure() -> map
+  let module: map = native/module_context(native/program(), {})
+  module = native/declare_function(module, "generated_callee", :U64, [["value", :U64, :Value]], [], [], :Value, "")
+  module = native/declare_function(module, "generated_caller", :U64, [], [], [], :Value, "")
+  let caller: map = native_gen/context(module, "generated_caller")
+  let result: map = native_gen/call(caller, "generated_callee", [])
+  return result
+end
+
+verb native/generated_call_type_failure() -> map
+  let [callee: int, bindings: map, state: map] = native/function_scope(native/program(), "generated_callee", :U64,
+    [["value", :U64, :Value]], [], [])
+  let module: map = native/module_context(state, {})
+  let functions: map = module[:functions]
+  functions["generated_callee"] = callee
+  module[:functions] = functions
+  module = native/declare_function(module, "generated_caller", :U64, [], [], [], :Value, "")
+  let caller: map = native_gen/context(module, "generated_caller")
+  let result: map = native_gen/call(caller, "generated_callee", [native_gen/zero(:Bool)])
   return result
 end
 

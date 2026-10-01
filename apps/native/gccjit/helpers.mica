@@ -29,7 +29,7 @@ verb native_jit/target_continue(block) -> list
 end
 
 verb native_jit/checked_result(valid, value, special: list) -> list
-  let boolean = native_jit/cache(:Type, "n7")
+  let boolean = native_jit/primitive_type(:Bool)
   return [
     @native_jit/consume_arguments([], "record", ["ctx", "type"], [:Assign, "block", native_jit/cache(:Lvalue, "destination")]),
     @native_jit/target_blocks([["success", "s_ok"], ["join", "s_join"]]),
@@ -59,19 +59,19 @@ verb native_jit/define_helpers(input: map) -> map
     native/let_statement("type", h, native_jit/cache(:Type, "type_id")),
     native/let_statement("probe", h, native_jit/j("struct", ["ctx", native_jit/literal("s_align")])),
     @native_jit/consume_arguments([
-      native_jit/j("field", ["ctx", native_jit/cache(:Type, "n1"), native_jit/literal("s_pad")]),
+      native_jit/j("field", ["ctx", native_jit/primitive_type(:U8), native_jit/literal("s_pad")]),
       native_jit/j("field", ["ctx", "type", native_jit/literal("s_item")])], "fields", ["probe"], [:Do]),
-    native/let_statement("size", h, native_jit/j("cast", ["ctx", native_jit/j("sizeof", ["ctx", native_jit/j("struct_type", ["probe"])]), native_jit/cache(:Type, "n4")])),
-    native/let_statement("item_size", h, native_jit/j("cast", ["ctx", native_jit/j("sizeof", ["ctx", "type"]), native_jit/cache(:Type, "n4")])),
-    native/let_statement("alignment", h, native_jit/j("sub", ["ctx", native_jit/cache(:Type, "n4"), "size", "item_size"])),
+    native/let_statement("size", h, native_jit/j("cast", ["ctx", native_jit/j("sizeof", ["ctx", native_jit/j("struct_type", ["probe"])]), native_jit/primitive_type(:U64)])),
+    native/let_statement("item_size", h, native_jit/j("cast", ["ctx", native_jit/j("sizeof", ["ctx", "type"]), native_jit/primitive_type(:U64)])),
+    native/let_statement("alignment", h, native_jit/j("sub", ["ctx", native_jit/primitive_type(:U64), "size", "item_size"])),
     native_jit/publish(:Alignment, "type_id", "alignment"), native/return_value("alignment")])
   context = native_jit/define(context, "heap_test", [
     native/let_statement("row", native_jit/words(), native/offset_expression("data", native_jit/metadata(:TypeRow, "type_id"))),
-    native/let_statement("position", :U64, native_jit/n(native_jit/tail_start(:Type))), native/let_statement("test", h, native_jit/j("zero", ["ctx", native_jit/cache(:Type, "n7")])),
-    native/let_statement("wide", h, native_jit/j("cast", ["ctx", "tag", native_jit/cache(:Type, "n4")])),
+    native/let_statement("position", :U64, native_jit/n(native_jit/tail_start(:Type))), native/let_statement("test", h, native_jit/j("zero", ["ctx", native_jit/primitive_type(:Bool)])),
+    native/let_statement("wide", h, native_jit/j("cast", ["ctx", "tag", native_jit/primitive_type(:U64)])),
     native/while_statement(native/binary_expression(:Less, "position", native_jit/word("row", 0)), [
-      native/let_statement("expected", h, native_jit/integer(native_jit/at("row", "position", :U64), native_jit/cache(:Type, "n4"))),
-      native/set_statement("test", native_jit/j("logical_or", ["ctx", native_jit/cache(:Type, "n7"), "test", native_jit/j("eq", ["ctx", "wide", "expected"])])),
+      native/let_statement("expected", h, native_jit/integer(native_jit/at("row", "position", :U64), native_jit/primitive_type(:U64))),
+      native/set_statement("test", native_jit/j("logical_or", ["ctx", native_jit/primitive_type(:Bool), "test", native_jit/j("eq", ["ctx", "wide", "expected"])])),
       native/set_statement("position", native_jit/binary(:Add, "position", "n1"))]), native/return_value("test")])
   return context
 end

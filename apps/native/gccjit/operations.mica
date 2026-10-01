@@ -20,15 +20,15 @@ verb native_jit/case(op: symbol, body: list) -> list
   for name in native_jit/locals(body)
     names[name] = string_concat("op", to_literal(ordinal), "_", name)
   end
-  let result: list = native/case_arm(native_jit/n(ordinal), native_jit/rename(body, names))
+  let result: list = native/case_arm(native_jit/n(ordinal), native/rename_bindings(body, names))
   return result
 end
 
 verb native_jit/extended_cases() -> list
   let cases: list = []
   let h: list = native_jit/handle()
-  let u64 = native_jit/cache(:Type, "n4")
-  let bool_type = native_jit/cache(:Type, "n7")
+  let u64 = native_jit/primitive_type(:U64)
+  let bool_type = native_jit/primitive_type(:Bool)
   let zero = native_jit/j("zero", ["ctx", u64])
   cases = [@cases, native_jit/case(:PointerDistance, [
     native/set_statement("value", native_jit/j("bitcast", ["ctx",
@@ -51,12 +51,12 @@ verb native_jit/extended_cases() -> list
       if spec[0] == :Remainder
         floating = native_jit/builtin_call("value", "s_fmod", ["left", "right"])
       end
-      body = [native/if_statement(native/binary_expression(:Equal, "kind", "n6"), floating, body)]
+      body = [native/if_statement(native/binary_expression(:Equal, "kind", native_jit/type_kind(:F32)), floating, body)]
     end
     cases = [@cases, native_jit/case(spec[0], body)]
   end
   cases = [@cases, native_jit/case(:Truncate, native_jit/builtin_call("value", "s_trunc", ["left"]))]
-  let u32 = native_jit/cache(:Type, "n3")
+  let u32 = native_jit/primitive_type(:U32)
   let exponent = native_jit/integer("float_exponent", u32)
   cases = [@cases, native_jit/case(:IsFinite, [native/set_statement("value", native_jit/j("ne", ["ctx", native_jit/j("and", ["ctx", u32, native_jit/j("bitcast", ["ctx", "left", u32]), exponent]), exponent]))])]
   cases = [@cases, native_jit/case(:AlignOf, [native/set_statement("value", native_jit/invoke("align", ["a"], h))])]
@@ -81,7 +81,7 @@ verb native_jit/extended_cases() -> list
     native_jit/target_branch("block", native_jit/j("eq", ["ctx", "length", zero]), "join", "copy"),
     @native_jit/evaluate_builtin("copy", "s_memmove", [
       native_jit/j("bitcast", ["ctx", "left", native_jit/j("type_voidptr", ["ctx"])]),
-      native_jit/j("bitcast", ["ctx", "right", native_jit/j("pointer", [native_jit/j("const_type", [native_jit/cache(:Type, "n0")])])]),
+      native_jit/j("bitcast", ["ctx", "right", native_jit/j("pointer", [native_jit/j("const_type", [native_jit/primitive_type(:Void)])])]),
       "length"]),
     native_jit/target_jump("copy", "join"), native_jit/target_continue("join"), native/return_value("n0")])]
   let mask = native_jit/integer("mask56", u64)

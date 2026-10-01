@@ -28,8 +28,8 @@ verb native_gen/context(module: map, name: string) -> map
       writable[row[0]] = true
     end
   end
-  let declaration: list = native/owned(module[:state][:functions], 0, function)[0]
-  return {:function -> function, :result -> declaration[2], :name -> name, :module -> module, :bindings -> bindings,
+  let shape: list = module[:call_shapes][function]
+  return {:function -> function, :result -> shape[0], :name -> name, :module -> module, :bindings -> bindings,
     :types -> types, :writable -> writable, :records -> records, :serial -> 0, :scope -> [], :statements -> [],
     :closed -> false, :loops -> 0, :references -> {}, :owner -> [function, name, records, module[:state][:constants], module[:state][:parameters]]}
 end
@@ -112,6 +112,13 @@ verb native_gen/bind(input: map, label: string, value: map) -> list
   references[name] = reference
   builder[:references] = references
   return [reference, builder]
+end
+
+// Bind the call result once and leave its payload inaccessible on failure.
+verb native_gen/checked_bind(input: map, label: string, value: map, valid_field: string, failure) -> list
+  let [bound: map, ready: map] = native_gen/bind(input, label, value)
+  let checked: map = native_gen/unless(ready, native_gen/field(ready, bound, valid_field), failure)
+  return [bound, checked]
 end
 
 verb native_gen/assign(builder: map, reference: map, value: map) -> map
@@ -214,6 +221,17 @@ verb native_gen/convert(type_id, value: map) -> map
   let generated_result: map = native_gen/expression(type_id, :Convert, [value])
   return generated_result
 end
+verb native_gen/bitcast(type_id, value: map) -> map
+  let generated_result: map = native_gen/expression(type_id, :Bitcast, [value])
+  return generated_result
+end
+verb native_gen/pointer_distance(pointer: map, base: map) -> map
+  for value in [pointer, base]
+    native/ensure(native/is_pointer(value[:type]) && value[:type][1] == :U8, "generated pointer distance requires byte pointers")
+  end
+  let generated_result: map = native_gen/expression(:I64, :PointerDistance, [pointer, base])
+  return generated_result
+end
 verb native_gen/cast(type_id, pointer: map) -> map
   native/ensure(native/is_pointer(type_id) && native/is_pointer(pointer[:type]), "generated cast requires pointers")
   native/ensure(pointer[:type][2] == :Mutable || type_id[2] == :Const, "generated cast cannot remove const")
@@ -223,6 +241,11 @@ end
 verb native_gen/freeze(pointer: map) -> map
   native/ensure(native/is_pointer(pointer[:type]), "generated freeze requires a pointer")
   let generated_result: map = native_gen/expression([:Pointer, pointer[:type][1], :Const], :Freeze, [pointer])
+  return generated_result
+end
+verb native_gen/manage(pointer: map) -> map
+  native/ensure(native/is_pointer(pointer[:type]), "generated Manage requires a pointer")
+  let generated_result: map = native_gen/expression(pointer[:type], :Manage, [pointer])
   return generated_result
 end
 verb native_gen/offset(pointer: map, index: map) -> map
@@ -244,15 +267,32 @@ verb native_gen/call(builder: map, name: string, arguments: list) -> map
   let module: map = builder[:module]
   native/ensure(map_contains_key(module[:functions], name), "unknown generated callee")
   let id: int = module[:functions][name]
-  let function: list = native/owned(module[:state][:functions], 0, id)[0]
-  let parameters: list = native/ordered(native/owned(module[:state][:parameters], 1, id), 2)
+  native/ensure(map_contains_key(module[:call_shapes], id), "unknown generated callee")
+  let shape: list = module[:call_shapes][id]
+  let parameters: list = shape[1]
   native/ensure(len(parameters) == len(arguments), "generated call arity mismatch")
   let i: int = 0
-  for parameter in parameters
-    native/ensure(parameter[4] == arguments[i][:type], "generated call argument type mismatch")
+  for type_id in parameters
+    native/ensure(type_id == arguments[i][:type], "generated call argument type mismatch")
     i = i + 1
   end
-  let generated_result: map = native_gen/expression(function[2], :Call, [name, @arguments])
+  let generated_result: map = native_gen/expression(shape[0], :Call, [name, @arguments])
+  generated_result[:owner] = builder[:owner]
+  return generated_result
+end
+
+verb native_gen/call_indirect(builder: map, callee: map, arguments: list) -> map
+  native/ensure(native/is_function_pointer(callee[:type]), "generated indirect call requires a function pointer")
+  let signatures: list = [row for row in builder[:module][:state][:function_types] if row[0] == callee[:type][1]]
+  native/ensure(len(signatures) == 1, "unknown generated callable type")
+  let signature: list = signatures[0]
+  native/ensure(len(signature[2]) == len(arguments), "generated indirect call arity mismatch")
+  let position: int = 0
+  for parameter in signature[2]
+    native/ensure(parameter[1] == arguments[position][:type], "generated indirect call argument type mismatch")
+    position = position + 1
+  end
+  let generated_result: map = native_gen/expression(signature[1], :CallIndirect, [callee, @arguments])
   generated_result[:owner] = builder[:owner]
   return generated_result
 end
@@ -274,6 +314,13 @@ end
 verb native_gen/do_call(builder: map, name: string, arguments: list) -> map
   let expression: map = native_gen/call(builder, name, arguments)
   native/ensure(expression[:type] == :Void, "generated discarded call requires Void result")
+  let generated_result: map = native_gen/emit(builder, native/do_statement(native_gen/syntax(builder, expression)))
+  return generated_result
+end
+
+verb native_gen/do_indirect_call(builder: map, callee: map, arguments: list) -> map
+  let expression: map = native_gen/call_indirect(builder, callee, arguments)
+  native/ensure(expression[:type] == :Void, "generated discarded indirect call requires Void result")
   let generated_result: map = native_gen/emit(builder, native/do_statement(native_gen/syntax(builder, expression)))
   return generated_result
 end
@@ -319,6 +366,32 @@ verb native_gen/branch(input: map, condition: map, yes, no) -> map
   let builder: map = native_gen/emit(after_no, native/if_statement(test, yes_body, no_body))
   builder[:closed] = yes_closed && no_closed
   return builder
+end
+
+// Each switch arm owns its lexical bindings, just like a conditional branch.
+// Labels must refer to module constants of the selector's integer type.
+verb native_gen/switch(input: map, value: map, cases: list, fallback) -> map
+  native/ensure(native/is_unsigned(value[:type]) || value[:type] == :I64, "generated switch requires an integer selector")
+  let selector = native_gen/syntax(input, value)
+  let current: map = input
+  let arms: list = []
+  let closed: bool = true
+  for arm in cases
+    native/ensure(is_kind(arm, :list) && len(arm) == 2, "generated switch case requires a label and callback")
+    let label: map = arm[0]
+    native/ensure(label[:kind] == :Reference && label[:type] == value[:type], "generated switch label requires a constant of the selector type")
+    let constant: bool = map_contains_key(input[:module][:constants], label[:name])
+    native/ensure(constant, "generated switch label requires a constant of the selector type")
+    native_gen/check_reference(current, label)
+    let [body, arm_closed, following] = native_gen/body(current, arm[1])
+    current = following
+    closed = closed && arm_closed
+    arms = [@arms, native/case_arm(label[:name], body)]
+  end
+  let [otherwise, fallback_closed, with_fallback] = native_gen/body(current, fallback)
+  let result: map = native_gen/emit(with_fallback, native/switch_statement(value[:type], selector, arms, otherwise))
+  result[:closed] = closed && fallback_closed
+  return result
 end
 
 verb native_gen/while_loop(input: map, condition: map, callback) -> map

@@ -64,28 +64,10 @@ verb native/c_collect_scopes(index: map, nodes: list, path: list, input: map) ->
       end
     end
     context[:paths] = paths
-    let children: list = []
-    if node[:kind] == :If
-      children = [:yes, :no]
-    end
-    if node[:kind] == :Loop
-      children = [:body]
-    end
-    if node[:kind] == :Switch
-      let cases: list = []
-      for arm in node[:cases]
-        let [body: list, following: map] = native/c_collect_scopes(index, arm[:body], location, context)
-        context = following
-        cases = [@cases, native/c_case(arm[:value], body)]
-      end
-      node[:cases] = cases
-      children = [:fallback]
-    end
-    for child in children
-      let [body: list, following: map] = native/c_collect_scopes(index, node[child], location, context)
-      context = following
-      node[child] = body
-    end
+    let [scoped: map, following: map] = native/c_map_child_bodies(node, context,
+      fn(body, current) => native/c_collect_scopes(index, body, location, current))
+    node = scoped
+    context = following
     result = [@result, node]
     position = position + 1
   end
@@ -115,24 +97,9 @@ verb native/c_place_declarations(index: map, nodes: list, declarations: map) -> 
         result = [@result, @[native/c_text(note, false) for note in native/c_notes(index, node[:row][4], "")]]
       end
     end
-    let children: list = []
-    if node[:kind] == :If
-      children = [:yes, :no]
-    end
-    if node[:kind] == :Loop
-      children = [:body]
-    end
-    if node[:kind] == :Switch
-      let cases: list = []
-      for arm in node[:cases]
-        cases = [@cases, native/c_case(arm[:value], native/c_place_declarations(index, arm[:body], declarations))]
-      end
-      node[:cases] = cases
-      children = [:fallback]
-    end
-    for child in children
-      node[child] = native/c_place_declarations(index, node[child], declarations)
-    end
+    let [placed: map, unchanged: map] = native/c_map_child_bodies(node, declarations,
+      fn(body, current) => [native/c_place_declarations(index, body, current), current])
+    node = placed
     result = [@result, node]
   end
   return result

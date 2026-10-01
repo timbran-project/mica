@@ -4,8 +4,22 @@
 // Structured bodies lower to the same checked instructions and terminators.
 // Bindings map names to existing constants, functions, parameters, and locals.
 // A body's local names are function-wide; generated names reserve body_ prefix.
+verb native/call_shapes(state: map) -> map
+  let grouped: map = native/group_rows(state[:parameters], 1)
+  let shapes: map = {}
+  for function in state[:functions]
+    let parameters: list = []
+    if map_contains_key(grouped, function[0])
+      parameters = native/ordered(grouped[function[0]], 2)
+    end
+    shapes[function[0]] = [function[2], [row[4] for row in parameters]]
+  end
+  return shapes
+end
+
 verb native/module_context(state: map, constants: map) -> map
-  return {:state -> state, :constants -> constants, :functions -> {}, :bindings -> {}}
+  return {:state -> state, :constants -> constants, :functions -> {}, :bindings -> {},
+    :call_shapes -> native/call_shapes(state)}
 end
 
 // Separate declarations from bodies to support mutually recursive modules.
@@ -17,6 +31,9 @@ verb native/declare_function(input: map, name: string, result, parameters: list,
   let functions: map = context[:functions]
   functions[name] = id
   context[:functions] = functions
+  let shapes: map = context[:call_shapes]
+  shapes[id] = [result, [parameter[1] for parameter in parameters]]
+  context[:call_shapes] = shapes
   let scopes: map = context[:bindings]
   scopes[name] = bindings
   context[:bindings] = scopes

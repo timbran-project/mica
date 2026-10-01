@@ -70,6 +70,16 @@ verb native/check(state)
   end
   let index = {:records -> records, :functions -> functions, :variables -> variables, :constants -> constants,
                :blocks -> blocks, :terms -> terms}
+  index[:function_blocks] = native/group_rows(state[:blocks], 1)
+  let instructions: map = native/group_rows(state[:instructions], 1)
+  for row in state[:blocks]
+    let rows: list = []
+    if map_contains_key(instructions, row[0])
+      rows = instructions[row[0]]
+    end
+    instructions[row[0]] = native/ordered(rows, 2)
+  end
+  index[:block_instructions] = instructions
   index[:function_types] = native/index_function_types(state, records)
   index[:annotations] = native/check_annotations(state, ids)
   index[:globals] = native/check_globals(state, index)
@@ -78,19 +88,19 @@ verb native/check(state)
   index = native/check_contracts(state, index)
   index = native/check_execution_declarations(state, index)
   let signatures: map = {}
-  for row in state[:instructions]
-    if row[3] == :FunctionAddress && len(row[5]) == 1 && map_contains_key(functions, row[5][0]) && !map_contains_key(signatures, row[5][0])
-      signatures[row[5][0]] = native/function_signature(state, index, row[5][0])
-    end
+  for row in state[:functions]
+    signatures[row[0]] = native/function_signature(state, index, row[0])
   end
   index[:function_signatures] = signatures
+  let graphs: map = {}
   for fn_row in state[:functions]
     try
-      native/check_function(state, index, fn_row)
+      graphs[fn_row[0]] = native/check_function(state, index, fn_row)
     catch E_INVARG as problem
       raise E_INVARG, string_concat("native: function ", fn_row[1], ": ", native/error_message(problem))
     end
   end
+  index[:function_graphs] = graphs
   native/check_effects(state, index)
   let origins: map = native/check_ownership(state, index)
   native/check_relocation_liveness(state, index, origins)
@@ -197,10 +207,13 @@ verb native/check_function(state, index, fn_row)
     native/ensure(row[2] == position, "parameter positions must be contiguous from zero")
     position = position + 1
   end
-  let blocks = native/owned(state[:blocks], 1, fn_id)
+  let blocks: list = []
+  if map_contains_key(index[:function_blocks], fn_id)
+    blocks = index[:function_blocks][fn_id]
+  end
   if map_contains_key(index[:foreign], fn_id)
     native/ensure(len(blocks) == 0, "foreign function has a body")
-    return
+    return {:blocks -> [], :entry -> :None, :instructions -> {}, :predecessors -> {}}
   end
   let entries = [row[0] for row in blocks if row[3]]
   native/ensure(len(entries) == 1, "function requires exactly one entry block")
@@ -235,7 +248,7 @@ verb native/check_function(state, index, fn_row)
       native/ensure(index[:blocks][target][1] == fn_id, "branch crosses function boundary")
       predecessors[target] = [@predecessors[target], id]
     end
-    let ordered = native/ordered(native/owned(state[:instructions], 1, id), 2)
+    let ordered: list = index[:block_instructions][id]
     let ordinal = 0
     for row in ordered
       native/ensure(row[2] == ordinal, "instruction positions must be contiguous from zero")
@@ -272,8 +285,15 @@ verb native/check_function(state, index, fn_row)
   native/ensure(len(reachable) == len(blocks), "unreachable block")
   // Forward must-analysis. Start non-entry blocks at the universe, then
   // intersect predecessor outputs until the sets stop shrinking.
-  let initial = [row[0] for row in parameters]
-  let universe = sort([@initial, @[row[0] for row in native/owned(state[:locals], 1, fn_id)]])
+  let initial: map = {}
+  let universe: map = {}
+  for row in parameters
+    initial[row[0]] = true
+    universe[row[0]] = true
+  end
+  for row in native/owned(state[:locals], 1, fn_id)
+    universe[row[0]] = true
+  end
   let incoming = {}
   let outgoing = {}
   for block in blocks
@@ -287,19 +307,24 @@ verb native/check_function(state, index, fn_row)
       let id = block[0]
       let assigned = universe
       if id == entries[0]
-        assigned = sort(initial)
+        assigned = initial
       else
         for predecessor in predecessors[id]
-          assigned = [item for item in assigned if native/contains(outgoing[predecessor], item)]
+          let intersection: map = {}
+          for item, present in assigned
+            if map_contains_key(outgoing[predecessor], item)
+              intersection[item] = true
+            end
+          end
+          assigned = intersection
         end
       end
       incoming[id] = assigned
       for row in instructions[id]
-        if row[4] != :Discard && !native/contains(assigned, row[4])
-          assigned = [@assigned, row[4]]
+        if row[4] != :Discard
+          assigned[row[4]] = true
         end
       end
-      assigned = sort(assigned)
       if assigned != outgoing[id]
         outgoing[id] = assigned
         changed = true
@@ -313,7 +338,7 @@ verb native/check_function(state, index, fn_row)
         native/assigned(index, assigned, operand)
       end
       if row[4] != :Discard
-        assigned = [@assigned, row[4]]
+        assigned[row[4]] = true
       end
     end
     let term = index[:terms][block[0]]
@@ -321,8 +346,9 @@ verb native/check_function(state, index, fn_row)
       native/assigned(index, assigned, operand)
     end
   end
+  return {:blocks -> blocks, :entry -> entries[0], :instructions -> instructions, :predecessors -> predecessors}
 end
 
 verb native/assigned(index, assigned, id)
-  native/ensure(map_contains_key(index[:constants], id) || native/contains(assigned, id), "read before definite assignment")
+  native/ensure(map_contains_key(index[:constants], id) || map_contains_key(assigned, id), "read before definite assignment")
 end

@@ -55,6 +55,18 @@ verb native_jit/cache(kind: symbol, id) -> list
   return result
 end
 
+// Type kinds and the primitive type IDs share the initial serialized order.
+verb native_jit/type_kind(kind: symbol) -> string
+  let result: string = native_jit/n(native_jit/position(native_jit/type_kinds(), kind))
+  return result
+end
+
+verb native_jit/primitive_type(kind: symbol) -> list
+  native/ensure(native_jit/position(native_jit/type_kinds(), kind) < 8, "expected primitive JIT type")
+  let result: list = native_jit/cache(:Type, native_jit/type_kind(kind))
+  return result
+end
+
 verb native_jit/publish(kind: symbol, id, value) -> list
   let h: list = native_jit/handle()
   let result: list = native/store_statement(native/typed_expression([:Pointer, h, :Mutable], native/offset_expression("cache", native_jit/slot(native_jit/cache_planes(), kind, id))), value)

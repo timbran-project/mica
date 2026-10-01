@@ -1,36 +1,6 @@
 // Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-verb native/group_rows(rows: list, column: int) -> map
-  let groups: map = {}
-  for row in rows
-    let key = row[column]
-    let group: list = []
-    if map_contains_key(groups, key)
-      group = groups[key]
-    end
-    groups[key] = [@group, row]
-  end
-  return groups
-end
-
-// Index once for emission, rather than scanning every instruction for each
-// basic block. These indexes belong to this checked snapshot only.
-verb native/emission_index(state: map, checked: map) -> map
-  let index: map = checked
-  index[:function_blocks] = native/group_rows(state[:blocks], 1)
-  let instructions: map = native/group_rows(state[:instructions], 1)
-  for row in state[:blocks]
-    let rows: list = []
-    if map_contains_key(instructions, row[0])
-      rows = instructions[row[0]]
-    end
-    instructions[row[0]] = native/ordered(rows, 2)
-  end
-  index[:block_instructions] = instructions
-  return index
-end
-
 // Visit callees before callers. Only a back edge to another active function
 // needs a prototype; a function's own definition already declares recursion.
 verb native/function_order(state: map, index: map) -> map
@@ -158,29 +128,25 @@ verb native/flow_postorder(terms: map, entry: int) -> list
   return order
 end
 
-verb native/flow_analysis(state: map, index: map, fn_id: int) -> map
-  let blocks: list = index[:function_blocks][fn_id]
-  let entry: int = [row[0] for row in blocks if row[3]][0]
+verb native/flow_analysis(index: map, fn_id: int) -> map
+  let graph: map = index[:function_graphs][fn_id]
+  let entry: int = graph[:entry]
   let postorder: list = native/flow_postorder(index[:terms], entry)
   let order: list = []
   for id in postorder
     order = [id, @order]
   end
   let instructions: map = {}
-  let predecessors: map = {}
+  let predecessors: map = graph[:predecessors]
   let successors: map = {}
   let uses: map = {}
   for id in order
-    instructions[id] = index[:block_instructions][id]
-    predecessors[id] = []
+    instructions[id] = graph[:instructions][id]
   end
   let exits: list = []
   for id in order
     let term: list = index[:terms][id]
     let targets: list = native/targets(term)
-    for target in targets
-      predecessors[target] = [@predecessors[target], id]
-    end
     if term[1] == :Return || native/is_transfer(term)
       exits = [@exits, id]
       targets = [:Exit]

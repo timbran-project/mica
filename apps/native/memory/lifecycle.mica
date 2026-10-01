@@ -4,6 +4,19 @@
 // A worker owns its roots and nursery while active. It must enter before
 // accessing managed payloads, and leave before blocking outside the runtime.
 // The heap mutex guards membership, collection, and mature allocation only.
+// Return the writable registry link, with the heap lock still held. Publication
+// uses ordinary loads instead, because it only checks worker-root membership.
+verb native_memory/find_registered_link(record: string, first: string, sought: string, absent: string, failure: list) -> list
+  let entry: list = native_memory/record_pointer(record)
+  return [
+    native/let_statement("link", native_memory/pointer(entry), native/field_pointer_expression("heap", first)),
+    native/while_statement("memory_true", [
+      native/let_statement("candidate", entry, native/root_load_expression("link")),
+      native/when_statement(native/binary_expression(:Equal, "candidate", absent), failure),
+      native/when_statement(native/binary_expression(:Equal, "candidate", sought), [native/break_statement()]),
+      native/set_statement("link", native/field_pointer_expression("candidate", "next"))])]
+end
+
 verb native_memory/lifecycle(input: map) -> map
   let context: map = input
   let bytes: list = native_memory/pointer(:U8)
@@ -91,12 +104,7 @@ verb native_memory/lifecycle(input: map) -> map
     native/when_statement(native_memory/field(:Bool, "worker", "active"), failed),
     @wait,
     native/unless_statement(native/binary_expression(:Equal, native_memory/field(root, "worker", "roots"), "memory_null_root"), failed),
-    native/let_statement("link", native_memory/pointer(worker), native/field_pointer_expression("heap", "workers")),
-    native/while_statement("memory_true", [
-      native/let_statement("candidate", worker, native/root_load_expression("link")),
-      native/when_statement(native/binary_expression(:Equal, "candidate", "memory_null_worker"), failed),
-      native/when_statement(native/binary_expression(:Equal, "candidate", "worker"), [native/break_statement()]),
-      native/set_statement("link", native/field_pointer_expression("candidate", "next"))]),
+    @native_memory/find_registered_link("MemoryWorker", "workers", "worker", "memory_null_worker", failed),
     native/root_store_statement("link", native_memory/root(worker, "worker", "next")),
     native/let_statement("nursery", bytes, native_memory/root(bytes, "worker", "nursery")),
     native_memory/call("memory_platform_release", ["nursery"]),
@@ -189,13 +197,7 @@ verb native_memory/lifecycle(input: map) -> map
     native_memory/store_root(root, "shared", "next", native_memory/root(root, "heap", "roots")),
     native_memory/store_root(root, "heap", "roots", native/typed_expression(root, native/manage_expression("shared"))),
     native_memory/store(:U64, "shared", "registration", "memory_n2"), @success])
-  let find_shared: list = [
-    native/let_statement("link", native_memory/pointer(root), native/field_pointer_expression("heap", "roots")),
-    native/while_statement("memory_true", [
-      native/let_statement("candidate", root, native/root_load_expression("link")),
-      native/when_statement(native/binary_expression(:Equal, "candidate", "memory_null_root"), failed),
-      native/when_statement(native/binary_expression(:Equal, "candidate", "shared"), [native/break_statement()]),
-      native/set_statement("link", native/field_pointer_expression("candidate", "next"))])]
+  let find_shared: list = native_memory/find_registered_link("MemoryRoot", "roots", "shared", "memory_null_root", failed)
   let active: list = [native/let_statement("active", :Bool, native_memory/field(:Bool, "worker", "active")),
     native/unless_statement("active", [native/return_value("memory_false")])]
   context = native/define_function(context, "memory_acquire", [

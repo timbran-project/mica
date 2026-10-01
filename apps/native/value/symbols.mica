@@ -36,6 +36,20 @@ verb native_value/symbols(input: map) -> map
   return context
 end
 
+// Probe generation keeps collision advancement and wraparound identical for
+// lookup and rehash. The empty arm must exit the generated loop.
+verb native_value/probe_symbol_buckets(buckets: string, slot: string, mask: string,
+    occupied: string, empty: list, present: list) -> list
+  let bucket: list = native/typed_expression([:Pointer, :U64, :Mutable], native/offset_expression(buckets, slot))
+  let result: list = native/while_statement("true", [
+    native/let_load(occupied, :U64, bucket),
+    native/when_statement(native/binary_expression(:Equal, occupied, "zero"), empty),
+    @present,
+    native/set_statement(slot, native/binary_expression(:BitAnd,
+      native/typed_expression(:U64, native/binary_expression(:Add, slot, "one")), mask))])
+  return result
+end
+
 verb native_value/symbol_lookup(input: map) -> map
   let context: map = input
   let bytes: list = [:Pointer, :U8, :Const]
@@ -73,13 +87,7 @@ verb native_value/symbol_lookup(input: map) -> map
     ),
     native/set_statement("mask", native/binary_expression(:Subtract, "mask", "one")),
     native/let_statement("slot", :U64, native/binary_expression(:BitAnd, "hash", "mask")),
-    native/while_statement("true", [
-      native/let_load(
-        "id",
-        :U64,
-        native/typed_expression([:Pointer, :U64, :Mutable], native/offset_expression("buckets", "slot"))
-      ),
-      native/when_statement(native/binary_expression(:Equal, "id", "zero"), [native/return_value("slot")]),
+    native_value/probe_symbol_buckets("buckets", "slot", "mask", "id", [native/return_value("slot")], [
       native/let_load(
         "candidate",
         entry,
@@ -118,14 +126,6 @@ verb native_value/symbol_lookup(input: map) -> map
             native/when_statement(native/binary_expression(:Equal, "position", "length"), [native/return_value("slot")])
           ])
         ]
-      ),
-      native/set_statement(
-        "slot",
-        native/binary_expression(
-          :BitAnd,
-          native/typed_expression(:U64, native/binary_expression(:Add, "slot", "one")),
-          "mask"
-        )
       )
     ]),
     native/return_value("zero")
@@ -214,22 +214,7 @@ verb native_value/symbol_grow(input: map) -> map
         :U64,
         native/binary_expression(:BitAnd, native/typed_field(:U64, "item", "hash"), "mask")
       ),
-      native/while_statement("true", [
-        native/let_load(
-          "occupied",
-          :U64,
-          native/typed_expression(buckets, native/offset_expression("new_buckets", "slot"))
-        ),
-        native/when_statement(native/binary_expression(:Equal, "occupied", "zero"), [native/break_statement()]),
-        native/set_statement(
-          "slot",
-          native/binary_expression(
-            :BitAnd,
-            native/typed_expression(:U64, native/binary_expression(:Add, "slot", "one")),
-            "mask"
-          )
-        )
-      ]),
+      native_value/probe_symbol_buckets("new_buckets", "slot", "mask", "occupied", [native/break_statement()], []),
       native/store_statement(
         native/typed_expression(buckets, native/offset_expression("new_buckets", "slot")),
         native/typed_expression(:U64, native/binary_expression(:Add, "position", "one"))

@@ -151,15 +151,17 @@ verb native/check_execution_ownership(state: map, index: map, origins: map)
         native/ensure(origin[0] == :Gc, "RootStore requires managed references")
       end
     end
-    if row[3] == :Call
-      try
-        native/check_gc_arguments(native/function_signature(state, index, row[5][0]), row[5], origins)
-      catch E_INVARG as problem
-        raise E_INVARG, string_concat(native/instruction_location(index, row), ": ", native/error_message(problem))
+    if row[3] == :Call || row[3] == :CallIndirect
+      let signature: list = native/call_signature(index, function, row)
+      if row[3] == :Call
+        try
+          native/check_gc_arguments(signature, row[5], origins)
+        catch E_INVARG as problem
+          raise E_INVARG, string_concat(native/instruction_location(index, row), ": ", native/error_message(problem))
+        end
+      else
+        native/check_gc_arguments(signature, row[5], origins)
       end
-    end
-    if row[3] == :CallIndirect
-      native/check_gc_arguments(native/indirect_signature(index, function, row), row[5], origins)
     end
   end
   for term in state[:terminators]
@@ -210,7 +212,8 @@ verb native/check_relocation_liveness(state: map, index: map, origins: map)
     return
   end
   for function in state[:functions]
-    let blocks: list = native/owned(state[:blocks], 1, function[0])
+    let graph: map = index[:function_graphs][function[0]]
+    let blocks: list = graph[:blocks]
     if len(blocks) == 0
       continue
     end
@@ -219,17 +222,10 @@ verb native/check_relocation_liveness(state: map, index: map, origins: map)
       continue
     end
     let invalid: map = {}
-    let predecessors: map = {}
-    let instructions: map = {}
+    let predecessors: map = graph[:predecessors]
+    let instructions: map = graph[:instructions]
     for block in blocks
       invalid[block[0]] = []
-      predecessors[block[0]] = []
-      instructions[block[0]] = native/ordered(native/owned(state[:instructions], 1, block[0]), 2)
-    end
-    for block in blocks
-      for target in native/targets(index[:terms][block[0]])
-        predecessors[target] = [@predecessors[target], block[0]]
-      end
     end
     let changed: bool = true
     while changed

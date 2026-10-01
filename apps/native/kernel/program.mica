@@ -6,6 +6,12 @@ verb native_kernel/pointer(name: string) -> list
   return output
 end
 
+verb native_kernel/check_column_mask(builder: map, arity: map, mask: map, failure) -> map
+  let result: map = native_gen/when(builder, native_gen/less(arity, native_gen/ref(builder, "kernel_64")),
+    fn(arm) => native_gen/unless(arm, native_kernel/absent(native_gen/shift_right(mask, arity)), failure))
+  return result
+end
+
 verb native_kernel/schemas() -> list
   let node: list = native_kernel/pointer("Node")
   let relation: list = native_kernel/pointer("Relation")
@@ -223,30 +229,40 @@ verb native_kernel/types(input: map) -> map
   return context
 end
 
-verb native_kernel/tracing(input: map) -> map
-  let context: map = input
-  let collection: list = native_memory/record_pointer("MemoryCollection")
-  let object: list = native_memory/record_pointer("MemoryObject")
-  let bytes: list = native_memory/pointer(:U8)
-  context = native_kernel/declare(context, "trace", :Void, [["collection", collection, :Borrow], ["object", object, :Gc]])
-  let cases: list = []
-  for spec in native_kernel/schemas()
-    let body: list = [native/let_statement("header", native_kernel/pointer(spec[0]), native/unary_expression(:PointerCast, "payload"))]
-    for field in spec[1]
-      if native/is_pointer(field[1])
-        body = [@body, @native_value/trace_external("header", field[0], field[1])]
-      elseif field[1] == native_value/word()
-        body = [@body, @native_value/trace_word_field("header", field[0])]
-      end
+verb native_kernel/trace_record(builder: map, schema: list, collection: map, payload: map) -> map
+  let [header: map, with_header: map] = native_gen/bind(builder, "header", native_gen/cast(native_kernel/pointer(schema[0]), payload))
+  let current: map = with_header
+  for field in schema[1]
+    if native/is_pointer(field[1])
+      current = native_value/trace_external(current, header, field[0], collection)
+    elseif field[1] == native_value/word()
+      current = native_value/trace_word_field(current, header, field[0], collection)
     end
-    cases = [@cases, native/case_arm(string_concat("kernel_layout_", spec[0]),
-      [@native/rename_bindings(body, native_value/trace_bindings(body, spec[0])), native/return_void()])]
   end
-  context = native_kernel/define(context, "trace", [
-    native/let_statement("layout", :U64, native_memory/field(:U64, "object", "layout")),
-    native/let_call("payload", bytes, "memory_payload", ["object"]),
-    native/switch_statement(:U64, "layout", cases, [native_memory/call("value_trace", ["collection", "object"]), native/return_void()])])
-  return context
+  current = native_gen/return_void(current)
+  return current
+end
+
+verb native_kernel/tracing(input: map) -> map
+  let context: map = native_kernel/declare(input, "trace", :Void,
+    [["collection", native_memory/record_pointer("MemoryCollection"), :Borrow],
+      ["object", native_memory/record_pointer("MemoryObject"), :Gc]])
+  let builder: map = native_gen/context(context, "kernel_trace")
+  let collection: map = native_gen/ref(builder, "collection")
+  let object: map = native_gen/ref(builder, "object")
+  let [layout: map, with_layout: map] = native_gen/bind(builder, "layout", native_gen/read(native_gen/field(builder, object, "layout")))
+  let [payload: map, with_payload: map] = native_gen/bind(with_layout, "payload", native_gen/call(with_layout, "memory_payload", [object]))
+  let cases: list = []
+  for schema in native_kernel/schemas()
+    cases = [@cases, [native_gen/ref(with_payload, string_concat("kernel_layout_", schema[0])),
+      fn(body) => native_kernel/trace_record(body, schema, collection, payload)]]
+  end
+  builder = native_gen/switch(with_payload, layout, cases, fn(fallback)
+    let current: map = native_gen/do_call(fallback, "value_trace", [collection, object])
+    return native_gen/return_void(current)
+  end)
+  let result: map = native_gen/finish(context, builder)
+  return result
 end
 
 verb native_kernel/program() -> map

@@ -139,10 +139,23 @@ end
 // by-value cycles and empty C records are rejected.
 verb native/check_records(state)
   let records = {}
+  let fields_by_record: map = native/group_rows(state[:fields], 0)
+  let record_counts: map = {}
+  for row in state[:records]
+    let count: int = 0
+    if map_contains_key(record_counts, row[0])
+      count = record_counts[row[0]]
+    end
+    record_counts[row[0]] = count + 1
+  end
   for row in state[:records]
     native/identifier(row[1])
     native/ensure(!map_contains_key(records, row[1]), "duplicate record name")
-    let fields = native/ordered(native/owned(state[:fields], 0, row[0]), 1)
+    let owned: list = []
+    if map_contains_key(fields_by_record, row[0])
+      owned = fields_by_record[row[0]]
+    end
+    let fields = native/ordered(owned, 1)
     native/ensure(len(fields) > 0, "empty record")
     let names = []
     let position = 0
@@ -157,7 +170,7 @@ verb native/check_records(state)
     records[row[1]] = fields
   end
   for field in state[:fields]
-    native/ensure(len(native/owned(state[:records], 0, field[0])) == 1, "field has unknown record")
+    native/ensure(map_contains_key(record_counts, field[0]) && record_counts[field[0]] == 1, "field has unknown record")
     native/check_type(records, field[3])
   end
   return records

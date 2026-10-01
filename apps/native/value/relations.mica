@@ -161,29 +161,22 @@ verb native_value/relation_accessors(input: map) -> map
   ])
   context = native/declare_function(context, "value_relation_column", [:Record, "IdResult"],
     [["value", word, :Gc], ["symbol", :U32, :Value]], [], [:ReadMemory], :Value, "")
-  context = native/define_function(context, "value_relation_column", [
-    @read,
-    native/let_field("heading", [:Pointer, :U32, :Mutable], "relation", "heading"),
-    native/let_statement("low", :U64, "zero"),
-    native/let_field("high", :U64, "relation", "arity"),
-    native/while_statement(native/binary_expression(:Less, "low", "high"), [
-      native/let_statement("distance", :U64, native/binary_expression(:Subtract, "high", "low")),
-      native/set_statement("distance", native/binary_expression(:Divide, "distance", "two")),
-      native/let_statement("middle", :U64, native/binary_expression(:Add, "low", "distance")),
-      native/let_offset("slot", [:Pointer, :U32, :Mutable], "heading", "middle"),
-      native/let_load("candidate", :U32, "slot"),
-      native/when_statement(
-        native/binary_expression(:Equal, "candidate", "symbol"),
-        [native/return_record(["true", "middle"])]
-      ),
-      native/if_statement(
-        native/binary_expression(:Less, "candidate", "symbol"),
-        [native/set_statement("low", native/binary_expression(:Add, "middle", "one"))],
-        [native/set_statement("high", "middle")]
-      )
-    ]),
-    native/return_zero()
-  ])
+  let builder: map = native_gen/context(context, "value_relation_column")
+  let [checked: map, with_checked: map] = native_value/checked_result(builder, "value_relation_view",
+    [native_gen/ref(builder, "value")], fn(failed) => native_gen/return_zero(failed))
+  let [view: map, with_view: map] = native_gen/bind(with_checked, "relation",
+    native_gen/field(with_checked, checked, "relation"))
+  let [heading: map, with_heading: map] = native_gen/bind(with_view, "heading", native_gen/field(with_view, view, "heading"))
+  let [arity: map, with_arity: map] = native_gen/bind(with_heading, "arity", native_gen/field(with_heading, view, "arity"))
+  let symbol: map = native_gen/ref(with_arity, "symbol")
+  builder = native_sequence/search_return(with_arity, native_sequence/span(heading, arity), fn(body, candidate)
+      return [native_gen/equal(candidate, symbol), native_gen/less(candidate, symbol), body]
+    end, fn(found, index, candidate)
+      return native_gen/return_value(found, native_gen/record(found, [:Record, "IdResult"],
+        {"ok" -> native_gen/ref(found, "true"), "number" -> index}))
+    end)
+  builder = native_gen/return_zero(builder)
+  context = native_gen/finish(context, builder)
   return context
 end
 
@@ -304,170 +297,189 @@ verb native_value/relation_sort(input: map, kind: string, element: list) -> map
   return context
 end
 
-verb native_value/relation_constructor(input: map) -> map
-  let context: map = input
-  let word: list = native_value/word()
-  let tuple: list = [:Record, "ValueTuple"]
-  let relation: list = [:Record, "HeapRelation"]
+// Validate the complete source before allocating the canonical relation.
+verb native_value/relation_validate_rows(builder: map, source: map, arity: map, length: map) -> map
+  let result: map = native_gen/for_range(builder, "validate_row", native_gen/zero(:U64), length, fn(initial_body, index)
+    let [row: map, with_row: map] = native_gen/bind(initial_body, "row", native_gen/load(native_gen/offset(source, index)))
+    let body: map = native_gen/unless(with_row,
+      native_gen/equal(native_gen/field(with_row, row, "arity"), arity),
+      fn(failed) => native_gen/return_zero(failed))
+    return native_gen/unless(body, native_gen/equal(arity, native_gen/zero(:U64)), fn(nonempty)
+      let data: map = native_gen/field(nonempty, row, "data")
+      let borrowed: map = native_gen/freeze(data)
+      return native_gen/when(nonempty,
+        native_gen/equal(borrowed, native_gen/ref(nonempty, "null_values")),
+        fn(failed) => native_gen/return_zero(failed))
+    end)
+  end)
+  return result
+end
+
+// The upper bound on arity makes these products safe before the allocation
+// limit check. The returned sizes are bound once and used to partition storage.
+verb native_value/relation_sizes(builder: map, arity: map, length: map) -> list
+  let [header: map, with_header: map] = native_gen/bind(builder, "header_size", native_gen/sizeof([:Record, "HeapRelation"]))
+  let [symbol: map, with_symbol: map] = native_gen/bind(with_header, "symbol_size", native_gen/sizeof(:U32))
+  let [heading: map, with_heading: map] = native_gen/bind(with_symbol, "heading_size", native_gen/multiply(arity, symbol))
+  let current: map = native_gen/assign(with_heading, heading,
+    native_gen/add(heading, native_gen/ref(with_heading, "alignment_slack")))
+  current = native_gen/assign(current, heading, native_gen/bit_and(heading, native_gen/ref(current, "alignment_mask")))
+  let [prefix: map, with_prefix: map] = native_gen/bind(current, "prefix", native_gen/add(header, heading))
+  let [tuple: map, with_tuple: map] = native_gen/bind(with_prefix, "tuple_size", native_gen/sizeof([:Record, "ValueTuple"]))
+  let [word: map, with_word: map] = native_gen/bind(with_tuple, "word_size", native_gen/sizeof(native_value/word()))
+  let [cell: map, with_cell: map] = native_gen/bind(with_word, "cell_size", native_gen/multiply(arity, word))
+  let [row: map, with_row: map] = native_gen/bind(with_cell, "row_size", native_gen/add(tuple, cell))
+  let [limit: map, with_limit: map] = native_gen/bind(with_row, "limit",
+    native_gen/subtract(native_gen/ref(with_row, "allocation_limit"), prefix))
+  current = native_gen/assign(with_limit, limit, native_gen/divide(limit, row))
+  current = native_gen/when(current, native_gen/less(limit, length), fn(failed) => native_gen/return_zero(failed))
+  return [{:header -> header, :prefix -> prefix, :tuple -> tuple, :row -> row}, current]
+end
+
+verb native_value/relation_count(builder: map, arity: map, length: map) -> list
+  let [count: map, with_count: map] = native_gen/bind(builder, "count", length)
+  let result: map = native_gen/when(with_count, native_gen/equal(arity, native_gen/zero(:U64)), fn(initial_unit)
+    let unit: map = native_gen/when(initial_unit, native_gen/equal(length, native_gen/zero(:U64)), fn(empty)
+      let value: map = native_gen/call(empty, "value_empty_relation", [])
+      let result: map = native_gen/record(empty, [:Record, "ValueResult"],
+        {"ok" -> native_gen/ref(empty, "true"), "value" -> value})
+      return native_gen/return_value(empty, result)
+    end)
+    return native_gen/assign(unit, count, native_gen/ref(unit, "one"))
+  end)
+  return [count, result]
+end
+
+// Sort (symbol, source-position) descriptors before writing a canonical
+// heading. The source position is retained for every projected row.
+verb native_value/relation_columns(builder: map, worker: map, heading: map, arity: map) -> list
   let column: list = [:Record, "RelationColumn"]
-  let tuples: list = [:Pointer, tuple, :Mutable]
   let columns: list = [:Pointer, column, :Mutable]
-  let values: list = [:Pointer, word, :Mutable]
-  let bytes: list = [:Pointer, :U8, :Mutable]
-  let fail: list = [native/return_zero()]
-  context = native/declare_function(context, "value_relation", [:Record, "ValueResult"], [
-    ["worker", [:Pointer, [:Record, "MemoryWorker"], :Mutable], :Borrow],
+  let [order: map, with_order: map] = native_gen/bind(builder, "order", native_gen/zero(columns))
+  let result: map = native_gen/unless(with_order, native_gen/equal(arity, native_gen/zero(:U64)), fn(initial_columns)
+    let [column_size: map, with_size: map] = native_gen/bind(initial_columns, "column_size", native_gen/sizeof(column))
+    let [order_bytes: map, with_bytes: map] = native_gen/bind(with_size, "order_bytes", native_gen/multiply(arity, column_size))
+    let [raw: map, with_raw: map] = native_memory/reserve(with_bytes, worker, order_bytes, "layout_opaque",
+      fn(failed) => native_gen/return_zero(failed))
+    let current: map = native_gen/assign(with_raw, order, native_gen/cast(columns, raw))
+    current = native_gen/for_range(current, "column", native_gen/zero(:U64), arity, fn(cell, index)
+      let [symbol: map, with_symbol: map] = native_gen/bind(cell, "symbol", native_gen/load(native_gen/offset(heading, index)))
+      let descriptor: map = native_gen/record(with_symbol, column, {"symbol" -> symbol, "source" -> index})
+      return native_gen/store(with_symbol, native_gen/offset(order, index), descriptor)
+    end)
+    current = native_gen/unless(current,
+      native_gen/call(current, "relation_sort_columns", [worker, order, arity]),
+      fn(failed) => native_gen/return_zero(failed))
+    return native_gen/for_range(current, "column", native_gen/ref(current, "one"), arity, fn(cell, index)
+      let previous: map = native_gen/load(native_gen/offset(order, native_gen/subtract(index, native_gen/ref(cell, "one"))))
+      let candidate: map = native_gen/load(native_gen/offset(order, index))
+      return native_gen/when(cell,
+        native_gen/equal(native_gen/field(cell, previous, "symbol"), native_gen/field(cell, candidate, "symbol")),
+        fn(failed) => native_gen/return_zero(failed))
+    end)
+  end)
+  return [order, result]
+end
+
+// One allocation holds the relation header, aligned heading, row headers, and
+// value cells. The builder returns typed references to those component pointers.
+verb native_value/relation_storage(builder: map, worker: map, count: map, sizes: map) -> list
+  let [rows_size: map, with_rows: map] = native_gen/bind(builder, "rows_size", native_gen/multiply(count, sizes[:row]))
+  let [total: map, with_total: map] = native_gen/bind(with_rows, "total", native_gen/add(sizes[:prefix], rows_size))
+  let [raw: map, with_raw: map] = native_memory/reserve(with_total, worker, total, "layout_relation",
+    fn(failed) => native_gen/return_zero(failed))
+  let [target: map, with_target: map] = native_gen/bind(with_raw, "target",
+    native_gen/cast([:Pointer, [:Record, "HeapRelation"], :Mutable], raw))
+  let [raw_heading: map, with_heading: map] = native_gen/bind(with_target, "raw_heading", native_gen/offset(raw, sizes[:header]))
+  let [canonical: map, with_canonical: map] = native_gen/bind(with_heading, "canonical_heading",
+    native_gen/cast([:Pointer, :U32, :Mutable], raw_heading))
+  let [raw_rows: map, with_raw_rows: map] = native_gen/bind(with_canonical, "raw_rows", native_gen/offset(raw, sizes[:prefix]))
+  let [rows: map, with_rows_pointer: map] = native_gen/bind(with_raw_rows, "rows",
+    native_gen/cast([:Pointer, [:Record, "ValueTuple"], :Mutable], raw_rows))
+  let [tuple_bytes: map, with_tuple_bytes: map] = native_gen/bind(with_rows_pointer, "tuple_bytes",
+    native_gen/multiply(count, sizes[:tuple]))
+  let [raw_cells: map, with_raw_cells: map] = native_gen/bind(with_tuple_bytes, "raw_cells",
+    native_gen/offset(raw_rows, tuple_bytes))
+  let [cells: map, result: map] = native_gen/bind(with_raw_cells, "cells",
+    native_gen/cast([:Pointer, native_value/word(), :Mutable], raw_cells))
+  return [{:target -> target, :heading -> canonical, :rows -> rows, :cells -> cells}, result]
+end
+
+verb native_value/relation_write_heading(builder: map, order: map, arity: map, canonical: map) -> map
+  let result: map = native_gen/for_range(builder, "heading", native_gen/zero(:U64), arity, fn(body, index)
+    let descriptor: map = native_gen/load(native_gen/offset(order, index))
+    return native_gen/store(body, native_gen/offset(canonical, index), native_gen/field(body, descriptor, "symbol"))
+  end)
+  return result
+end
+
+verb native_value/relation_project_rows(builder: map, source: map, order: map, arity: map, count: map, rows: map, cells: map) -> map
+  let tuple: list = [:Record, "ValueTuple"]
+  let result: map = native_gen/for_range(builder, "row", native_gen/zero(:U64), count, fn(initial_row, index)
+    let [input: map, with_input: map] = native_gen/bind(initial_row, "row", native_gen/load(native_gen/offset(source, index)))
+    let data: map = native_gen/field(with_input, input, "data")
+    let body: map = native_gen/for_range(with_input, "cell", native_gen/zero(:U64), arity, fn(cell, position)
+      let descriptor: map = native_gen/load(native_gen/offset(order, position))
+      let source_index: map = native_gen/field(cell, descriptor, "source")
+      return native_gen/store(cell, native_gen/offset(cells, position),
+        native_gen/load(native_gen/offset(data, source_index)))
+    end)
+    body = native_gen/store(body, native_gen/offset(rows, index),
+      native_gen/record(body, tuple, {"data" -> cells, "arity" -> arity}))
+    return native_gen/assign(body, cells, native_gen/offset(cells, arity))
+  end)
+  return result
+end
+
+verb native_value/relation_compact_rows(builder: map, worker: map, rows: map, count: map) -> list
+  let sorted: map = native_gen/unless(builder,
+    native_gen/call(builder, "relation_sort_rows", [worker, rows, count]),
+    fn(failed) => native_gen/return_zero(failed))
+  let compacted: list = native_sequence/compact_sorted(sorted, native_sequence/span(rows, count),
+    fn(body, left, right)
+      let [comparison: map, current: map] = native_value/checked_result(body,
+        "value_tuple_compare", [left, right], fn(failed) => native_gen/return_zero(failed))
+      return [native_gen/field(current, comparison, "number"), current]
+    end,
+    fn(equal, preceding, entry) => equal)
+  return compacted
+end
+
+verb native_value/relation_constructor(input: map) -> map
+  let context: map = native/declare_function(input, "value_relation", [:Record, "ValueResult"], [
+    ["worker", native_memory/record_pointer("MemoryWorker"), :Borrow],
     ["heading", [:Pointer, :U32, :Const], :Borrow], ["arity", :U64, :Value],
-    ["source", [:Pointer, tuple, :Const], :Gc], ["length", :U64, :Value]], [],
+    ["source", [:Pointer, [:Record, "ValueTuple"], :Const], :Gc], ["length", :U64, :Value]], [],
     [:Allocate, :ReadMemory, :WriteMemory], :Gc, "")
-  context = native/define_function(context, "value_relation", [
-    native/when_statement(native/binary_expression(:Less, "relation_max_arity", "arity"), fail),
-    native/unless_statement(
-      native/binary_expression(:Equal, "arity", "zero"),
-      [native/when_statement(native/binary_expression(:Equal, "heading", "null_heading"), fail)]
-    ),
-    native/unless_statement(
-      native/binary_expression(:Equal, "length", "zero"),
-      [native/when_statement(native/binary_expression(:Equal, "source", "null_rows"), fail)]
-    ),
-    native/let_statement("header_size", :U64, native/unary_expression(:SizeOf, relation)),
-    native/let_statement("symbol_size", :U64, native/unary_expression(:SizeOf, :U32)),
-    native/let_statement("heading_size", :U64, native/binary_expression(:Multiply, "arity", "symbol_size")),
-    native/set_statement("heading_size", native/binary_expression(:Add, "heading_size", "alignment_slack")),
-    native/set_statement("heading_size", native/binary_expression(:BitAnd, "heading_size", "alignment_mask")),
-    native/let_statement("prefix", :U64, native/binary_expression(:Add, "header_size", "heading_size")),
-    native/let_statement("tuple_size", :U64, native/unary_expression(:SizeOf, tuple)),
-    native/let_statement("word_size", :U64, native/unary_expression(:SizeOf, word)),
-    native/let_statement("cell_size", :U64, native/binary_expression(:Multiply, "arity", "word_size")),
-    native/let_statement("row_size", :U64, native/binary_expression(:Add, "tuple_size", "cell_size")),
-    native/let_statement("limit", :U64, native/binary_expression(:Subtract, "allocation_limit", "prefix")),
-    native/set_statement("limit", native/binary_expression(:Divide, "limit", "row_size")),
-    native/when_statement(native/binary_expression(:Less, "limit", "length"), fail),
-    @native/for_range("i", "zero", "length", [
-        native/let_offset("source_slot", [:Pointer, tuple, :Const], "source", "i"),
-        native/let_load("row", tuple, "source_slot"),
-        native/unless_statement(
-          native/binary_expression(:Equal, native/typed_field(:U64, "row", "arity"), "arity"),
-          fail
-        ),
-        native/unless_statement(native/binary_expression(:Equal, "arity", "zero"), [
-          native/let_field("row_data", values, "row", "data"),
-          native/let_statement("borrowed", [:Pointer, word, :Const], native/unary_expression(:Freeze, "row_data")),
-          native/when_statement(native/binary_expression(:Equal, "borrowed", "null_values"), fail)
-        ])]),
-    native/let_statement("count", :U64, "length"),
-    native/when_statement(native/binary_expression(:Equal, "arity", "zero"), [
-      native/when_statement(
-        native/binary_expression(:Equal, "length", "zero"),
-        [native/return_record(["true", native/typed_call(word, "value_empty_relation", [])])]
-      ),
-      native/set_statement("count", "one")
-    ]),
-    native/let_statement("order", columns, native/zero_expression()),
-    native/unless_statement(native/binary_expression(:Equal, "arity", "zero"), [
-      native/let_statement("column_size", :U64, native/unary_expression(:SizeOf, column)),
-      native/let_statement("order_bytes", :U64, native/binary_expression(:Multiply, "arity", "column_size")),
-      @native_memory/allocate("raw_order", "order_bytes", "layout_opaque", fail),
-      native/set_statement("order", native/unary_expression(:PointerCast, "raw_order")),
-      native/set_statement("i", "zero"),
-      native/while_statement(native/binary_expression(:Less, "i", "arity"), [
-        native/let_offset("heading_slot", [:Pointer, :U32, :Const], "heading", "i"),
-        native/let_load("symbol", :U32, "heading_slot"),
-        native/let_offset("column_slot", columns, "order", "i"),
-        native/store_statement("column_slot", native/typed_record(column, ["symbol", "i"])),
-        native/set_statement("i", native/binary_expression(:Add, "i", "one"))
-      ]),
-      native/unless_statement(native/call_expression("relation_sort_columns", ["worker", "order", "arity"]), fail),
-      native/set_statement("i", "one"),
-      native/while_statement(native/binary_expression(:Less, "i", "arity"), [
-        native/let_statement("previous", :U64, native/binary_expression(:Subtract, "i", "one")),
-        native/let_offset("previous_slot", columns, "order", "previous"),
-        native/let_load("previous_column", column, "previous_slot"),
-        native/set_statement("column_slot", native/offset_expression("order", "i")),
-        native/let_load("current_column", column, "column_slot"),
-        native/when_statement(
-          native/binary_expression(
-            :Equal,
-            native/typed_field(:U32, "previous_column", "symbol"),
-            native/typed_field(:U32, "current_column", "symbol")
-          ),
-          fail
-        ),
-        native/set_statement("i", native/binary_expression(:Add, "i", "one"))
-      ])
-    ]),
-    native/let_statement("rows_size", :U64, native/binary_expression(:Multiply, "count", "row_size")),
-    native/let_statement("total", :U64, native/binary_expression(:Add, "prefix", "rows_size")),
-    @native_memory/allocate("raw", "total", "layout_relation", fail),
-    native/let_statement("target", [:Pointer, relation, :Mutable], native/unary_expression(:PointerCast, "raw")),
-    native/let_offset("raw_heading", bytes, "raw", "header_size"),
-    native/let_statement(
-      "canonical_heading",
-      [:Pointer, :U32, :Mutable],
-      native/unary_expression(:PointerCast, "raw_heading")
-    ),
-    native/let_offset("raw_rows", bytes, "raw", "prefix"),
-    native/let_statement("rows", tuples, native/unary_expression(:PointerCast, "raw_rows")),
-    native/let_statement("tuple_bytes", :U64, native/binary_expression(:Multiply, "count", "tuple_size")),
-    native/let_offset("raw_cells", bytes, "raw_rows", "tuple_bytes"),
-    native/let_statement("cells", values, native/unary_expression(:PointerCast, "raw_cells")),
-    native/set_statement("i", "zero"),
-    native/while_statement(native/binary_expression(:Less, "i", "arity"), [
-      native/set_statement("column_slot", native/offset_expression("order", "i")),
-      native/set_statement("current_column", native/load_expression("column_slot")),
-      native/let_offset("destination_symbol", [:Pointer, :U32, :Mutable], "canonical_heading", "i"),
-      native/store_statement("destination_symbol", native/typed_field(:U32, "current_column", "symbol")),
-      native/set_statement("i", native/binary_expression(:Add, "i", "one"))
-    ]),
-    native/set_statement("i", "zero"),
-    native/while_statement(native/binary_expression(:Less, "i", "count"), [
-      native/set_statement("source_slot", native/offset_expression("source", "i")),
-      native/set_statement("row", native/load_expression("source_slot")),
-      native/set_statement("row_data", native/field_expression("row", "data")),
-      @native/for_range("j", "zero", "arity", [
-        native/set_statement("column_slot", native/offset_expression("order", "j")),
-        native/set_statement("current_column", native/load_expression("column_slot")),
-        native/let_field("position", :U64, "current_column", "source"),
-        native/let_offset("input_cell", values, "row_data", "position"),
-        native/let_offset("output_cell", values, "cells", "j"),
-        native/store_statement("output_cell", native/typed_load(word, "input_cell"))]),
-      native/let_offset("output_row", tuples, "rows", "i"),
-      native/store_statement("output_row", native/typed_record(tuple, ["cells", "arity"])),
-      native/set_statement("cells", native/offset_expression("cells", "arity")),
-      native/set_statement("i", native/binary_expression(:Add, "i", "one"))
-    ]),
-    native/unless_statement(native/call_expression("relation_sort_rows", ["worker", "rows", "count"]), fail),
-    native/let_statement("write", :U64, "zero"),
-    native/set_statement("i", "zero"),
-    native/while_statement(native/binary_expression(:Less, "i", "count"), [
-      native/let_offset("input_row", tuples, "rows", "i"),
-      native/set_statement("row", native/load_expression("input_row")),
-      native/let_statement("keep", :Bool, "true"),
-      native/unless_statement(native/binary_expression(:Equal, "write", "zero"), [
-        native/set_statement("previous", native/binary_expression(:Subtract, "write", "one")),
-        native/set_statement("output_row", native/offset_expression("rows", "previous")),
-        native/let_load("previous_row", tuple, "output_row"),
-        @native/try_call("comparison", [:Record, "IntResult"], "value_tuple_compare", ["previous_row", "row"], fail),
-        native/when_statement(
-          native/binary_expression(:Equal, native/typed_field(:I64, "comparison", "number"), "int_zero"),
-          [native/set_statement("keep", "false")]
-        )
-      ]),
-      native/when_statement("keep", [
-        native/set_statement("output_row", native/offset_expression("rows", "write")),
-        native/store_statement("output_row", "row"),
-        native/set_statement("write", native/binary_expression(:Add, "write", "one"))
-      ]),
-      native/set_statement("i", native/binary_expression(:Add, "i", "one"))
-    ]),
-    native/note_statement(
-      :Invariant,
-      "Publish canonical headings and sorted unique rows. The collector traces child values."
-    ),
-    native/store_statement("target", native/typed_record(relation, ["canonical_heading", "arity", "rows", "write"])),
-    native/return_record(
-      ["true", native/typed_expression(word, native/binary_expression(:PackPointer, "target", "tag_relation"))]
-    )
-  ])
-  return context
+  let builder: map = native_gen/context(context, "value_relation")
+  let worker: map = native_gen/ref(builder, "worker")
+  let heading: map = native_gen/ref(builder, "heading")
+  let arity: map = native_gen/ref(builder, "arity")
+  let source: map = native_gen/ref(builder, "source")
+  let length: map = native_gen/ref(builder, "length")
+  builder = native_gen/when(builder, native_gen/less(native_gen/ref(builder, "relation_max_arity"), arity),
+    fn(failed) => native_gen/return_zero(failed))
+  builder = native_gen/unless(builder, native_gen/equal(arity, native_gen/zero(:U64)), fn(nonempty)
+    return native_gen/when(nonempty, native_gen/equal(heading, native_gen/ref(nonempty, "null_heading")),
+      fn(failed) => native_gen/return_zero(failed))
+  end)
+  builder = native_gen/unless(builder, native_gen/equal(length, native_gen/zero(:U64)), fn(nonempty)
+    return native_gen/when(nonempty, native_gen/equal(source, native_gen/ref(nonempty, "null_rows")),
+      fn(failed) => native_gen/return_zero(failed))
+  end)
+  let [sizes: map, with_sizes: map] = native_value/relation_sizes(builder, arity, length)
+  builder = native_value/relation_validate_rows(with_sizes, source, arity, length)
+  let [count: map, with_count: map] = native_value/relation_count(builder, arity, length)
+  let [order: map, with_order: map] = native_value/relation_columns(with_count, worker, heading, arity)
+  let [storage: map, with_storage: map] = native_value/relation_storage(with_order, worker, count, sizes)
+  builder = native_value/relation_write_heading(with_storage, order, arity, storage[:heading])
+  builder = native_value/relation_project_rows(builder, source, order, arity, count, storage[:rows], storage[:cells])
+  let [written: map, with_written: map] = native_value/relation_compact_rows(builder, worker, storage[:rows], count)
+  builder = native_gen/note(with_written, :Invariant,
+    "Publish canonical headings and sorted unique rows. The collector traces child values.")
+  builder = native_gen/store(builder, storage[:target], native_gen/record(builder, [:Record, "HeapRelation"],
+    {"heading" -> storage[:heading], "arity" -> arity, "rows" -> storage[:rows], "length" -> written}))
+  builder = native_gen/return_value(builder, native_value/packed_result(builder, storage[:target], "relation"))
+  let result: map = native_gen/finish(context, builder)
+  return result
 end

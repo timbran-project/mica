@@ -135,7 +135,7 @@ end
 
 // Validation completes before any output is returned. Calls retain separate,
 // ordered statements; a final pure comparison can become a C condition.
-verb native/c_declarations(state, index, public: bool)
+verb native/c_declarations(state, index, order: map, public: bool)
   let functions = native/ordered(state[:functions], 1)
   let lines = ["#include <stdint.h>", "#include <stdbool.h>", "#include <limits.h>", "#include <stddef.h>", "#include <string.h>", "#include <stdlib.h>", "#include <math.h>", "#include <float.h>",
                "_Static_assert(sizeof(float) == 4 && FLT_RADIX == 2 && FLT_MANT_DIG == 24 && FLT_MAX_EXP == 128, \"binary32 required\");",
@@ -200,7 +200,6 @@ verb native/c_declarations(state, index, public: bool)
     constant_notes = [@constant_notes, @native/c_notes(index, row[0], "")]
   end
   lines = [@lines, @sort(constant_notes)]
-  let order: map = native/function_order(state, index)
   for fn_row in functions
     if !public && !map_contains_key(index[:foreign], fn_row[0]) && !map_contains_key(order[:declare], fn_row[0])
       continue
@@ -254,8 +253,7 @@ verb native/c_local_declarations(index: map, locals: list) -> list
   return lines
 end
 
-verb native/c_definitions(state, index)
-  let order: map = native/function_order(state, index)
+verb native/c_definitions(state, index, order: map)
   let functions: list = [index[:functions][id] for id in order[:order]]
   let lines = [@native/c_globals(state, index, false),
     "/* Lowering can retain unused locals and parameters. Scope these warnings to generated definitions. */",
@@ -341,18 +339,20 @@ verb native/c_statement_emission(index, row)
 end
 
 verb native/emit_c(state)
-  let index = native/emission_index(state, native/check(state))
-  return string_concat(string_join([@native/c_declarations(state, index, false), @native/c_definitions(state, index)], "\n"), "\n")
+  let index = native/check(state)
+  let order: map = native/function_order(state, index)
+  return string_concat(string_join([@native/c_declarations(state, index, order, false), @native/c_definitions(state, index, order)], "\n"), "\n")
 end
 
 // The caller writes these artifacts. Emission performs no filesystem effects.
 verb native/emit_module(state, spelling)
   native/identifier(spelling)
-  let index = native/emission_index(state, native/check(state))
+  let index = native/check(state)
+  let order: map = native/function_order(state, index)
   let guard = string_concat("MICA_GENERATED_", spelling, "_H")
   let header = string_concat(string_join([string_concat("#ifndef ", guard), string_concat("#define ", guard),
-    @native/c_declarations(state, index, true), "#endif"], "\n"), "\n")
-  let source = string_concat("#include \"", spelling, ".h\"\n", string_join(native/c_definitions(state, index), "\n"), "\n")
+    @native/c_declarations(state, index, order, true), "#endif"], "\n"), "\n")
+  let source = string_concat("#include \"", spelling, ".h\"\n", string_join(native/c_definitions(state, index, order), "\n"), "\n")
   let symbols = [[row[1], native/c_function(index, row[0])] for row in native/ordered(state[:functions], 1)]
   return {:header_name -> string_concat(spelling, ".h"), :header -> header,
           :source_name -> string_concat(spelling, ".c"), :source -> source, :symbols -> symbols,

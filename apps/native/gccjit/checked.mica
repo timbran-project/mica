@@ -4,9 +4,9 @@
 // Bounds are expressions in the target program, not Mica calculations. And/Or
 // retain libgccjit's short-circuit operators, protecting division predicates.
 verb native_jit/signed_expression(term)
-  let integer = native_jit/cache(:Type, "n5")
-  let boolean = native_jit/cache(:Type, "n7")
-  let float_type = native_jit/cache(:Type, "n6")
+  let integer = native_jit/primitive_type(:I64)
+  let boolean = native_jit/primitive_type(:Bool)
+  let float_type = native_jit/primitive_type(:F32)
   if is_kind(term, :symbol)
     let atoms: map = {:Left -> "left", :Right -> "right",
       :Zero -> native_jit/j("zero", ["ctx", integer]),
@@ -89,8 +89,8 @@ end
 
 verb native_jit/checked_cases() -> list
   let h: list = native_jit/handle()
-  let integer = native_jit/cache(:Type, "n5")
-  let boolean = native_jit/cache(:Type, "n7")
+  let integer = native_jit/primitive_type(:I64)
+  let boolean = native_jit/primitive_type(:Bool)
   let zero = native_jit/j("zero", ["ctx", integer])
   let minus_one = native_jit/j("integer", ["ctx", integer, "signed_minus_one"])
   let truth = native_jit/integer("n1", boolean)

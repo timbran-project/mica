@@ -112,9 +112,8 @@ verb native_kernel/check_declaration_name(builder: map, cursor: map, name: map) 
 end
 
 verb native_kernel/check_declaration_mask(builder: map, arity: map, keys: map, indexes: map) -> map
-  let result: map = native_gen/when(builder, native_gen/less(arity, native_gen/ref(builder, "kernel_64")),
-    fn(arm) => native_gen/unless(arm, native_kernel/absent(native_gen/shift_right(native_gen/bit_or(keys, indexes), arity)),
-      fn(failed) => native_kernel/status(failed, "kernel_schema")))
+  let result: map = native_kernel/check_column_mask(builder, arity, native_gen/bit_or(keys, indexes),
+    fn(failed) => native_kernel/status(failed, "kernel_schema"))
   return result
 end
 
@@ -200,9 +199,10 @@ verb native_kernel/write_body(module: map) -> map
   builder = native_gen/when(with_change, native_kernel/absent(change), fn(arm) => native_kernel/create_change(arm, worker, change, work, relation))
   let [updated, with_after] = native_gen/bind(builder, "after", native_gen/call(builder, "kernel_apply", [worker, relation, row, asserted]))
   builder = native_gen/when(with_after, native_kernel/absent(updated), fn(arm) => native_kernel/status(arm, "kernel_oom"))
-  let [written, with_written] = native_gen/bind(builder, "written", native_gen/call(builder, "kernel_set",
-    [worker, native_kernel/load_field(builder, change, "writes"), row, native_gen/ref(builder, "zero"), native_gen/ref(builder, "false"), asserted]))
-  builder = native_gen/unless(with_written, native_gen/field(with_written, written, "ok"), fn(arm) => native_kernel/status(arm, "kernel_oom"))
+  let [written, with_written] = native_gen/checked_bind(builder, "written", native_gen/call(builder, "kernel_set",
+    [worker, native_kernel/load_field(builder, change, "writes"), row, native_gen/ref(builder, "zero"), native_gen/ref(builder, "false"), asserted]),
+    "ok", fn(arm) => native_kernel/status(arm, "kernel_oom"))
+  builder = with_written
   builder = native_kernel/store_field(builder, change, "after", updated)
   builder = native_kernel/store_field(builder, change, "writes", native_gen/field(builder, written, "node"))
   builder = native_kernel/status(builder, "kernel_ok")

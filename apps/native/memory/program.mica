@@ -10,6 +10,28 @@ verb native_memory/record_pointer(name: string) -> list
   return result
 end
 
+verb native_memory/object_schema() -> list
+  let object: list = native_memory/record_pointer("MemoryObject")
+  let page: list = native_memory/record_pointer("MemoryPage")
+  let heap: list = native_memory/record_pointer("MemoryHeap")
+  return ["MemoryObject", [
+    ["next", object], ["work", object], ["forward", object], ["page", page], ["heap", heap],
+    ["size", :U64], ["layout", :U64], ["mark", :U64], ["state", :U64]]]
+end
+
+verb native_memory/page_schema() -> list
+  let page: list = native_memory/record_pointer("MemoryPage")
+  return ["MemoryPage", [
+    ["next", page], ["stride", :U64], ["capacity", :U64], ["live", :U64], ["bucket", :U64]]]
+end
+
+verb native_memory/collection_schema() -> list
+  let heap: list = native_memory/record_pointer("MemoryHeap")
+  let object: list = native_memory/record_pointer("MemoryObject")
+  return ["MemoryCollection", [
+    ["heap", heap], ["work", object], ["phase", :U64], ["failed", :Bool], ["copied", :U64]]]
+end
+
 verb native_memory/field(type_id, pointer, name: string) -> list
   let result: list = native/typed_load(type_id,
     native/typed_expression(native_memory/pointer(type_id), native/field_pointer_expression(pointer, name)))
@@ -40,6 +62,15 @@ end
 
 verb native_memory/call(name: string, arguments: list) -> list
   let result: list = native/do_statement(native/call_expression(name, arguments))
+  return result
+end
+
+// Allocation and nursery walking must agree on the aligned object stride.
+verb native_memory/object_extent(payload: string, header_size: string, total: string) -> list
+  let result: list = [
+    native/let_statement(total, :U64, native/binary_expression(:Add, payload, header_size)),
+    native/set_statement(total, native/binary_expression(:Add, total, "memory_n7")),
+    native/set_statement(total, native/binary_expression(:BitAnd, total, "memory_alignment_mask"))]
   return result
 end
 
@@ -178,11 +209,10 @@ verb native_memory/context(input: map) -> map
   let [trace, initial] = native/function_pointer_type(context[:state], "MemoryTrace", :Void,
     [["collection", collection, :Borrow], ["object", object, :Gc]], effects, :Value, "")
   let state: map = initial
-  state = native/record_type(state, "MemoryObject", [
-    ["next", object], ["work", object], ["forward", object], ["page", page], ["heap", heap],
-    ["size", :U64], ["layout", :U64], ["mark", :U64], ["state", :U64]])[1]
-  state = native/record_type(state, "MemoryPage", [
-    ["next", page], ["stride", :U64], ["capacity", :U64], ["live", :U64], ["bucket", :U64]])[1]
+  let object_schema: list = native_memory/object_schema()
+  let page_schema: list = native_memory/page_schema()
+  state = native/record_type(state, object_schema[0], object_schema[1])[1]
+  state = native/record_type(state, page_schema[0], page_schema[1])[1]
   state = native/record_type(state, "MemoryRoot", [
     ["next", root], ["pointer", bytes], ["bits", :U64], ["registration", :U64]])[1]
   state = native/record_type(state, "MemoryWorker", [
@@ -192,8 +222,8 @@ verb native_memory/context(input: map) -> map
     ["pages", page], ["free", [:Array, object, 10]], ["workers", worker], ["roots", root], ["trace", trace],
     ["mutex", bytes], ["collecting", :Bool], ["collection_ok", :Bool], ["epoch", :U64],
     ["allocated", :U64], ["retained", :U64], ["copied", :U64], ["collections", :U64]])[1]
-  state = native/record_type(state, "MemoryCollection", [
-    ["heap", heap], ["work", object], ["phase", :U64], ["failed", :Bool], ["copied", :U64]])[1]
+  let collection_schema: list = native_memory/collection_schema()
+  state = native/record_type(state, collection_schema[0], collection_schema[1])[1]
   let declarations: list = [
     ["memory_object_free", :U64, "0000000000000000"],
     ["memory_object_nursery", :U64, "0000000000000001"],

@@ -1,6 +1,54 @@
 // Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
+verb native_value/layout(name: string, id: int, record: string, policy: symbol) -> map
+  return {:name -> name, :id -> id, :record -> record, :policy -> policy}
+end
+
+// Allocation IDs and tracing policies describe the same physical layouts.
+verb native_value/layouts() -> list
+  let plan: list = [
+    native_value/layout("opaque", 0, "", :Opaque),
+    native_value/layout("string", 7, "HeapString", :String),
+    native_value/layout("bytes", 8, "HeapBytes", :Bytes),
+    native_value/layout("list", 9, "HeapList", :List),
+    native_value/layout("map", 10, "HeapMap", :Map),
+    native_value/layout("range", 11, "HeapRange", :Fixed),
+    native_value/layout("error", 12, "HeapError", :Fixed),
+    native_value/layout("frob", 14, "HeapFrob", :Fixed),
+    native_value/layout("relation", 16, "HeapRelation", :InlineRelation),
+    native_value/layout("string_view", 17, "HeapString", :View),
+    native_value/layout("list_view", 18, "HeapList", :View),
+    native_value/layout("bytes_view", 19, "HeapBytes", :ExternalBytes),
+    native_value/layout("values", 20, "", :Values),
+    native_value/layout("buffer", 23, "ValueBuffer", :ExternalBytes),
+    native_value/layout("relation_copy", 24, "HeapRelation", :SeparateRows)]
+  let names: map = {}
+  let ids: map = {}
+  for layout in plan
+    native/ensure(!map_contains_key(names, layout[:name]), "duplicate managed layout name")
+    native/ensure(!map_contains_key(ids, layout[:id]), "duplicate managed layout ID")
+    names[layout[:name]] = layout
+    ids[layout[:id]] = true
+  end
+  for kind in native_value/kinds()
+    if kind[2]
+      native/ensure(map_contains_key(names, kind[0]), "heap value kind requires a managed layout")
+      native/ensure(names[kind[0]][:id] == kind[1], "heap value layout must match its tag")
+    end
+  end
+  return plan
+end
+
+// String and list storage immediately follows the allocation's value header.
+verb native_value/inline_storage_owner(builder: map, storage: map, header_size: map) -> list
+  native/ensure(native/is_pointer(storage[:type]) && storage[:type][1] == :U8, "inline storage owner requires a byte pointer")
+  let [offset: map, with_offset: map] = native_gen/bind(builder, "offset",
+    native_gen/bitcast(:I64, native_gen/subtract(native_gen/ref(builder, "zero"), header_size)))
+  let [base: map, result: map] = native_gen/bind(with_offset, "base", native_gen/offset(storage, offset))
+  return [base, result]
+end
+
 // Returning value helpers never collect. Their callers root live results and
 // reach a safepoint between operations; allocation can spill into mature pages.
 verb native_value/memory(input: map) -> map
@@ -8,11 +56,7 @@ verb native_value/memory(input: map) -> map
   context = native_memory/allocation(context)
   context = native_memory/collection(context)
   context = native_memory/lifecycle(context)
-  let layouts: list = [["opaque", 0], ["string", 7], ["bytes", 8], ["list", 9],
-    ["map", 10], ["range", 11], ["error", 12], ["frob", 14], ["relation", 16],
-    ["string_view", 17], ["list_view", 18], ["bytes_view", 19], ["values", 20],
-    ["buffer", 23], ["relation_copy", 24]]
-  let declarations: list = [[string_concat("layout_", spec[0]), :U64, native_value/hex(spec[1])] for spec in layouts]
+  let declarations: list = [[string_concat("layout_", spec[:name]), :U64, native_value/hex(spec[:id])] for spec in native_value/layouts()]
   let [constants, state] = native/constants(context[:state],
     [@declarations, ["value_tag_shift", :U64, "0000000000000038"]])
   context[:state] = state
@@ -37,13 +81,16 @@ verb native_value/memory(input: map) -> map
       native/typed_expression([:FunctionPointer, "MemoryTrace"], native/function_address_expression("value_trace"))]))])
   context = native_memory/declare(context, "value_storage_private", :Bool,
     [["storage", bytes, :Gc], ["header_size", :U64, :Value]], [:ReadMemory], :Value, "")
-  context = native/define_function(context, "value_storage_private", [
-    native/let_statement("offset", :I64, native/unary_expression(:Bitcast, native/typed_expression(:U64, native/binary_expression(:Subtract, "zero", "header_size")))),
-    native/let_offset("base", bytes, "storage", "offset"),
-    native/let_call("object", object, "memory_object", ["base"]),
-    native/let_statement("state", :U64, native_memory/field(:U64, "object", "state")),
-    native/when_statement(native/binary_expression(:Equal, "state", "memory_object_nursery"), [native/return_value("true")]),
-    native/return_value(native/binary_expression(:Equal, "state", "memory_object_private"))])
+  let private: map = native_gen/context(context, "value_storage_private")
+  let [base: map, with_base: map] = native_value/inline_storage_owner(private,
+    native_gen/ref(private, "storage"), native_gen/ref(private, "header_size"))
+  let [owner: map, with_owner: map] = native_gen/bind(with_base, "object", native_gen/call(with_base, "memory_object", [base]))
+  let [owner_state: map, with_owner_state: map] = native_gen/bind(with_owner, "state", native_gen/read(native_gen/field(with_owner, owner, "state")))
+  private = native_gen/when(with_owner_state,
+    native_gen/equal(owner_state, native_gen/ref(with_owner_state, "memory_object_nursery")),
+    fn(nursery) => native_gen/return_value(nursery, native_gen/ref(nursery, "true")))
+  private = native_gen/return_value(private, native_gen/equal(owner_state, native_gen/ref(private, "memory_object_private")))
+  context = native_gen/finish(context, private)
   context = native_memory/declare(context, "value_root_set", :Void,
     [["root", root, :Borrow], ["value", word, :Gc]], [:ReadMemory, :WriteMemory], :Value, "")
   context = native_memory/declare(context, "value_root_get", word,

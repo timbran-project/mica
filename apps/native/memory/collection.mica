@@ -1,28 +1,268 @@
 // Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-// Visit every cell in a page. The body receives a managed `item` pointer.
-verb native_memory/page_cells(body: list, prefix: string) -> list
+// The callback is inlined into the cell loop while retaining typed bindings
+// for the page, stride, and managed cell pointer.
+verb native_memory/visit_page_cells(builder: map, page: map, visit) -> list
   let bytes: list = native_memory/pointer(:U8)
   let object: list = native_memory/record_pointer("MemoryObject")
-  let statements: list = [
-    native/let_statement("page_bytes", bytes, native/unary_expression(:PointerCast, "page")),
-    native/let_statement("managed_bytes", bytes, native/manage_expression("page_bytes")),
-    native/let_offset("cells", bytes, "managed_bytes", native/typed_expression(:U64, native/unary_expression(:SizeOf, [:Record, "MemoryPage"]))),
-    native/let_statement("count", :U64, native_memory/field(:U64, "page", "capacity")),
-    native/let_statement("stride", :U64, native_memory/field(:U64, "page", "stride")),
-    native/let_statement("index", :U64, "memory_n0"),
-    native/while_statement(native/binary_expression(:Less, "index", "count"), [
-      native/let_statement("offset", :U64, native/binary_expression(:Multiply, "index", "stride")),
-      native/let_offset("cell", bytes, "cells", "offset"),
-      native/let_statement("item", object, native/unary_expression(:PointerCast, "cell")),
-      @body,
-      native/set_statement("index", native/binary_expression(:Add, "index", "memory_n1"))])]
-  let names: map = {}
-  for name in ["page_bytes", "managed_bytes", "cells", "count", "stride", "index", "offset", "cell", "item"]
-    names[name] = string_concat(prefix, name)
-  end
-  let result: list = native/rename_bindings(statements, names)
+  let [page_bytes: map, with_page: map] = native_gen/bind(builder, "page_bytes", native_gen/cast(bytes, page))
+  let [managed: map, with_managed: map] = native_gen/bind(with_page, "managed_bytes", native_gen/manage(page_bytes))
+  let [cells: map, with_cells: map] = native_gen/bind(with_managed, "cells",
+    native_gen/offset(managed, native_gen/sizeof([:Record, "MemoryPage"])))
+  let [count: map, with_count: map] = native_gen/bind(with_cells, "count", native_gen/read(native_gen/field(with_cells, page, "capacity")))
+  let [stride: map, with_stride: map] = native_gen/bind(with_count, "stride", native_gen/read(native_gen/field(with_count, page, "stride")))
+  let [index: map, ready: map] = native_gen/bind(with_stride, "index", native_gen/ref(with_stride, "memory_n0"))
+  let result: map = native_gen/while_loop(ready, native_gen/less(index, count), fn(initial_body)
+    let body: map = initial_body
+    let [offset: map, with_offset: map] = native_gen/bind(body, "offset", native_gen/multiply(index, stride))
+    let [cell: map, with_cell: map] = native_gen/bind(with_offset, "cell", native_gen/offset(cells, offset))
+    let [item: map, with_item: map] = native_gen/bind(with_cell, "item", native_gen/cast(object, cell))
+    body = visit(with_item, item)
+    return native_gen/assign(body, index, native_gen/add(index, native_gen/ref(body, "memory_n1")))
+  end)
+  return [{:managed_bytes -> managed, :count -> count, :stride -> stride}, result]
+end
+
+// Shared roots precede worker-private roots in both collection phases.
+verb native_memory/visit_registered_roots(builder: map, heap: map, collection: map) -> map
+  let [shared: map, ready: map] = native_gen/bind(builder, "shared_root", native_gen/read(native_gen/field(builder, heap, "roots")))
+  ready = native_gen/while_loop(ready, native_gen/ref(ready, "memory_true"), fn(initial_body)
+    let body: map = native_gen/when(initial_body,
+      native_gen/equal(shared, native_gen/ref(initial_body, "memory_null_root")),
+      fn(done) => native_gen/break_loop(done))
+    let slot: map = native_gen/field(body, shared, "pointer")
+    let [pointer: map, with_pointer: map] = native_gen/bind(body, "shared_pointer", native_gen/root_read(slot))
+    let [moved: map, with_moved: map] = native_gen/bind(with_pointer, "shared_relocated",
+      native_gen/call(with_pointer, "memory_visit", [collection, pointer]))
+    body = native_gen/root_write(with_moved, slot, moved)
+    return native_gen/assign(body, shared, native_gen/read(native_gen/field(body, shared, "next")))
+  end)
+  let [worker: map, with_worker: map] = native_gen/bind(ready, "worker", native_gen/read(native_gen/field(ready, heap, "workers")))
+  ready = native_gen/while_loop(with_worker, native_gen/ref(with_worker, "memory_true"), fn(initial_worker)
+    let body: map = native_gen/when(initial_worker,
+      native_gen/equal(worker, native_gen/ref(initial_worker, "memory_null_worker")),
+      fn(done) => native_gen/break_loop(done))
+    let [root: map, with_root: map] = native_gen/bind(body, "root", native_gen/read(native_gen/field(body, worker, "roots")))
+    body = native_gen/while_loop(with_root, native_gen/ref(with_root, "memory_true"), fn(initial_root)
+      let root_body: map = native_gen/when(initial_root,
+        native_gen/equal(root, native_gen/ref(initial_root, "memory_null_root")),
+        fn(done) => native_gen/break_loop(done))
+      let slot: map = native_gen/field(root_body, root, "pointer")
+      let [pointer: map, with_pointer: map] = native_gen/bind(root_body, "pointer", native_gen/root_read(slot))
+      let [moved: map, with_moved: map] = native_gen/bind(with_pointer, "relocated",
+        native_gen/call(with_pointer, "memory_visit", [collection, pointer]))
+      root_body = native_gen/root_write(with_moved, slot, moved)
+      return native_gen/assign(root_body, root, native_gen/read(native_gen/field(root_body, root, "next")))
+    end)
+    return native_gen/assign(body, worker, native_gen/read(native_gen/field(body, worker, "next")))
+  end)
+  return ready
+end
+
+verb native_memory/trace_pending(builder: map, collection: map, trace: map) -> map
+  let result: map = native_gen/while_loop(builder, native_gen/ref(builder, "memory_true"), fn(initial_body)
+    let body: map = native_gen/when(initial_body,
+      native_gen/read(native_gen/field(initial_body, collection, "failed")),
+      fn(done) => native_gen/break_loop(done))
+    let [item: map, with_item: map] = native_gen/bind(body, "item",
+      native_gen/root_read(native_gen/field(body, collection, "work")))
+    body = native_gen/when(with_item,
+      native_gen/equal(item, native_gen/ref(with_item, "memory_null_object")),
+      fn(done) => native_gen/break_loop(done))
+    body = native_gen/root_write(body, native_gen/field(body, collection, "work"),
+      native_gen/read(native_gen/field(body, item, "work")))
+    return native_gen/branch(body, native_gen/equal(trace, native_gen/ref(body, "memory_null_trace")),
+      fn(untraced) => native_gen/unless(untraced,
+        native_gen/equal(native_gen/read(native_gen/field(untraced, item, "layout")), native_gen/ref(untraced, "memory_n0")),
+        fn(failed) => native_gen/write(failed, native_gen/field(failed, collection, "failed"), native_gen/ref(failed, "memory_true"))),
+      fn(traced) => native_gen/do_indirect_call(traced, trace, [collection, item]))
+  end)
+  return result
+end
+
+verb native_memory/rollback_workers(builder: map, heap: map) -> map
+  let [worker: map, ready: map] = native_gen/bind(builder, "worker", native_gen/read(native_gen/field(builder, heap, "workers")))
+  let result: map = native_gen/while_loop(ready, native_gen/ref(ready, "memory_true"), fn(initial_body)
+    let body: map = native_gen/when(initial_body,
+      native_gen/equal(worker, native_gen/ref(initial_body, "memory_null_worker")),
+      fn(done) => native_gen/break_loop(done))
+    body = native_gen/do_call(body, "memory_rollback_nursery", [worker])
+    let [next: map, with_next: map] = native_gen/bind(body, "next_worker",
+      native_gen/read(native_gen/field(body, worker, "next")))
+    return native_gen/assign(with_next, worker, next)
+  end)
+  return result
+end
+
+verb native_memory/rewrite_page(builder: map, page: map, collection: map, trace: map) -> map
+  let [span: map, result: map] = native_memory/visit_page_cells(builder, page, fn(initial_body, item)
+    return native_gen/when(initial_body,
+      native_gen/equal(native_gen/read(native_gen/field(initial_body, item, "mark")), native_gen/ref(initial_body, "memory_n1")),
+      fn(marked)
+        let body: map = native_gen/unless(marked, native_gen/equal(trace, native_gen/ref(marked, "memory_null_trace")),
+          fn(traced) => native_gen/do_indirect_call(traced, trace, [collection, item]))
+        // Promotion reservations have already succeeded before this store.
+        return native_gen/write(body, native_gen/field(body, item, "state"), native_gen/ref(body, "memory_object_shared"))
+      end)
+  end)
+  return result
+end
+
+verb native_memory/rewrite_pages(builder: map, heap: map, collection: map, trace: map) -> map
+  let [page: map, ready: map] = native_gen/bind(builder, "page", native_gen/read(native_gen/field(builder, heap, "pages")))
+  let result: map = native_gen/while_loop(ready, native_gen/ref(ready, "memory_true"), fn(initial_body)
+    let body: map = native_gen/when(initial_body,
+      native_gen/equal(page, native_gen/ref(initial_body, "memory_null_page")),
+      fn(done) => native_gen/break_loop(done))
+    body = native_memory/rewrite_page(body, page, collection, trace)
+    let [next: map, with_next: map] = native_gen/bind(body, "next_page",
+      native_gen/read(native_gen/field(body, page, "next")))
+    return native_gen/assign(with_next, page, next)
+  end)
+  return result
+end
+
+verb native_memory/reset_workers(builder: map, heap: map) -> map
+  let [worker: map, ready: map] = native_gen/bind(builder, "worker", native_gen/read(native_gen/field(builder, heap, "workers")))
+  let result: map = native_gen/while_loop(ready, native_gen/ref(ready, "memory_true"), fn(initial_body)
+    let body: map = native_gen/when(initial_body,
+      native_gen/equal(worker, native_gen/ref(initial_body, "memory_null_worker")),
+      fn(done) => native_gen/break_loop(done))
+    body = native_gen/write(body, native_gen/field(body, worker, "used"), native_gen/ref(body, "memory_n0"))
+    body = native_gen/write(body, native_gen/field(body, worker, "pressure"), native_gen/ref(body, "memory_false"))
+    let [next: map, with_next: map] = native_gen/bind(body, "next_worker",
+      native_gen/read(native_gen/field(body, worker, "next")))
+    return native_gen/assign(with_next, worker, next)
+  end)
+  return result
+end
+
+verb native_memory/collect_stopped_body(module: map) -> map
+  let builder: map = native_gen/context(module, "memory_collect_stopped")
+  let heap: map = native_gen/ref(builder, "heap")
+  let state_type: list = [:Record, "MemoryCollection"]
+  let [state: map, with_state: map] = native_gen/bind(builder, "state", native_gen/record(builder, state_type,
+    {"heap" -> heap, "work" -> native_gen/ref(builder, "memory_null_object"),
+      "phase" -> native_gen/ref(builder, "memory_n0"), "failed" -> native_gen/ref(builder, "memory_false"),
+      "copied" -> native_gen/ref(builder, "memory_n0")}))
+  let [collection: map, with_collection: map] = native_gen/bind(with_state, "collection", native_gen/address(state))
+  let [trace: map, with_trace: map] = native_gen/bind(with_collection, "trace",
+    native_gen/read(native_gen/field(with_collection, heap, "trace")))
+  builder = native_memory/visit_registered_roots(with_trace, heap, collection)
+  builder = native_memory/trace_pending(builder, collection, trace)
+  builder = native_gen/when(builder, native_gen/read(native_gen/field(builder, collection, "failed")), fn(initial_failure)
+    let failure: map = native_memory/rollback_workers(initial_failure, heap)
+    failure = native_gen/do_call(failure, "memory_sweep", [heap, native_gen/ref(failure, "memory_false")])
+    return native_gen/return_value(failure, native_gen/ref(failure, "memory_false"))
+  end)
+  builder = native_gen/write(builder, native_gen/field(builder, collection, "phase"), native_gen/ref(builder, "memory_n1"))
+  builder = native_memory/visit_registered_roots(builder, heap, collection)
+  builder = native_memory/rewrite_pages(builder, heap, collection, trace)
+  builder = native_gen/do_call(builder, "memory_sweep", [heap, native_gen/ref(builder, "memory_true")])
+  builder = native_memory/reset_workers(builder, heap)
+  builder = native_gen/write(builder, native_gen/field(builder, heap, "copied"),
+    native_gen/add(native_gen/read(native_gen/field(builder, heap, "copied")),
+      native_gen/read(native_gen/field(builder, collection, "copied"))))
+  builder = native_gen/write(builder, native_gen/field(builder, heap, "collections"),
+    native_gen/add(native_gen/read(native_gen/field(builder, heap, "collections")), native_gen/ref(builder, "memory_n1")))
+  builder = native_gen/return_value(builder, native_gen/ref(builder, "memory_true"))
+  let result: map = native_gen/finish(module, builder)
+  return result
+end
+
+verb native_memory/free_slot_at(builder: map, heap: map, bucket: map) -> map
+  let object: list = native_memory/record_pointer("MemoryObject")
+  let free: map = native_gen/field(builder, heap, "free")
+  let pointer: map = native_gen/expression(native_memory/pointer(object), :ElementPointer, [free[:pointer], bucket])
+  let slot: map = native_gen/location(pointer)
+  return slot
+end
+
+verb native_memory/sweep_live_cell(builder: map, item: map, heap: map, reclaim: map, live: map) -> map
+  let body: map = native_gen/when(builder, reclaim, fn(reclaiming)
+    return native_gen/when(reclaiming,
+      native_gen/equal(native_gen/read(native_gen/field(reclaiming, item, "mark")), native_gen/ref(reclaiming, "memory_n0")),
+      fn(freeing) => native_gen/write(freeing, native_gen/field(freeing, item, "state"), native_gen/ref(freeing, "memory_object_free")))
+  end)
+  body = native_gen/write(body, native_gen/field(body, item, "mark"), native_gen/ref(body, "memory_n0"))
+  body = native_gen/write(body, native_gen/field(body, item, "work"), native_gen/ref(body, "memory_null_object"))
+  body = native_gen/write(body, native_gen/field(body, item, "forward"), native_gen/ref(body, "memory_null_object"))
+  let result: map = native_gen/unless(body,
+    native_gen/equal(native_gen/read(native_gen/field(body, item, "state")), native_gen/ref(body, "memory_object_free")),
+    fn(retained)
+      let current: map = native_gen/assign(retained, live, native_gen/add(live, native_gen/ref(retained, "memory_n1")))
+      return native_gen/write(current, native_gen/field(current, heap, "retained"),
+        native_gen/add(native_gen/read(native_gen/field(current, heap, "retained")),
+          native_gen/read(native_gen/field(current, item, "size"))))
+    end)
+  return result
+end
+
+verb native_memory/sweep_free_cell(builder: map, item: map, heap: map, bucket: map) -> map
+  let result: map = native_gen/when(builder,
+    native_gen/equal(native_gen/read(native_gen/field(builder, item, "state")), native_gen/ref(builder, "memory_object_free")),
+    fn(freeing)
+      let slot: map = native_memory/free_slot_at(freeing, heap, bucket)
+      let current: map = native_gen/write(freeing, native_gen/field(freeing, item, "next"), native_gen/root_read(slot))
+      return native_gen/root_write(current, native_memory/free_slot_at(current, heap, bucket), item)
+    end)
+  return result
+end
+
+verb native_memory/sweep_body(module: map) -> map
+  let builder: map = native_gen/context(module, "memory_sweep")
+  let heap: map = native_gen/ref(builder, "heap")
+  let reclaim: map = native_gen/ref(builder, "reclaim")
+  let [bucket: map, with_bucket: map] = native_gen/bind(builder, "bucket", native_gen/ref(builder, "memory_n0"))
+  builder = native_gen/while_loop(with_bucket,
+    native_gen/less(bucket, native_gen/ref(with_bucket, "memory_n10")), fn(initial_body)
+      let body: map = native_gen/root_write(initial_body, native_memory/free_slot_at(initial_body, heap, bucket),
+        native_gen/ref(initial_body, "memory_null_object"))
+      return native_gen/assign(body, bucket, native_gen/add(bucket, native_gen/ref(body, "memory_n1")))
+    end)
+  builder = native_gen/write(builder, native_gen/field(builder, heap, "retained"), native_gen/ref(builder, "memory_n0"))
+  let [link: map, with_link: map] = native_gen/bind(builder, "link", native_gen/field(builder, heap, "pages")[:pointer])
+  builder = native_gen/while_loop(with_link, native_gen/ref(with_link, "memory_true"), fn(initial_body)
+    let [page: map, with_page: map] = native_gen/bind(initial_body, "page", native_gen/load(link))
+    let body: map = native_gen/when(with_page,
+      native_gen/equal(page, native_gen/ref(with_page, "memory_null_page")),
+      fn(done) => native_gen/break_loop(done))
+    let [next: map, with_next: map] = native_gen/bind(body, "next", native_gen/read(native_gen/field(body, page, "next")))
+    let [live: map, with_live: map] = native_gen/bind(with_next, "live", native_gen/ref(with_next, "memory_n0"))
+    let [span: map, with_cells: map] = native_memory/visit_page_cells(with_live, page,
+      fn(cell_body, item) => native_memory/sweep_live_cell(cell_body, item, heap, reclaim, live))
+    return native_gen/branch(with_cells, native_gen/equal(live, native_gen/ref(with_cells, "memory_n0")),
+      fn(empty)
+        let released: map = native_gen/store(empty, link, next)
+        let [page_size: map, with_size: map] = native_gen/bind(released, "page_size", native_gen/sizeof([:Record, "MemoryPage"]))
+        let [allocation_size: map, with_allocation: map] = native_gen/bind(with_size, "allocation_size",
+          native_gen/add(page_size, native_gen/multiply(span[:stride], span[:count])))
+        let current: map = native_gen/write(with_allocation, native_gen/field(with_allocation, heap, "allocated"),
+          native_gen/subtract(native_gen/read(native_gen/field(with_allocation, heap, "allocated")), allocation_size))
+        return native_gen/do_call(current, "memory_platform_release", [span[:managed_bytes]])
+      end,
+      fn(retained)
+        let current: map = native_gen/write(retained, native_gen/field(retained, page, "live"), live)
+        return native_gen/assign(current, link, native_gen/field(current, page, "next")[:pointer])
+      end)
+  end)
+  let [page: map, with_page: map] = native_gen/bind(builder, "page", native_gen/read(native_gen/field(builder, heap, "pages")))
+  builder = native_gen/while_loop(with_page, native_gen/ref(with_page, "memory_true"), fn(initial_body)
+    let body: map = native_gen/when(initial_body,
+      native_gen/equal(page, native_gen/ref(initial_body, "memory_null_page")),
+      fn(done) => native_gen/break_loop(done))
+    body = native_gen/assign(body, bucket, native_gen/read(native_gen/field(body, page, "bucket")))
+    body = native_gen/when(body, native_gen/less(bucket, native_gen/ref(body, "memory_n10")), fn(small)
+      let [span: map, visited: map] = native_memory/visit_page_cells(small, page,
+        fn(cell_body, item) => native_memory/sweep_free_cell(cell_body, item, heap, bucket))
+      return visited
+    end)
+    let [next: map, with_next: map] = native_gen/bind(body, "next", native_gen/read(native_gen/field(body, page, "next")))
+    return native_gen/assign(with_next, page, next)
+  end)
+  builder = native_gen/return_void(builder)
+  let result: map = native_gen/finish(module, builder)
   return result
 end
 
@@ -90,135 +330,12 @@ verb native_memory/collection(input: map) -> map
       native_memory/store(:U64, "item", "mark", "memory_n0"),
       native_memory/store(object, "item", "work", "memory_null_object"),
       native/let_statement("size", :U64, native_memory/field(:U64, "item", "size")),
-      native/let_statement("total", :U64, native/binary_expression(:Add, "size", "header_size")),
-      native/set_statement("total", native/binary_expression(:Add, "total", "memory_n7")),
-      native/set_statement("total", native/binary_expression(:BitAnd, "total", "memory_alignment_mask")),
+      @native_memory/object_extent("size", "header_size", "total"),
       native/set_statement("position", native/binary_expression(:Add, "position", "total"))]),
     native/return_void()])
 
-  context = native/define_function(context, "memory_sweep", [
-    native/let_statement("bucket", :U64, "memory_n0"),
-    native/while_statement(native/binary_expression(:Less, "bucket", "memory_n10"), [
-      native/root_store_statement(native_memory/free_slot("heap", "bucket"), "memory_null_object"),
-      native/set_statement("bucket", native/binary_expression(:Add, "bucket", "memory_n1"))]),
-    native_memory/store(:U64, "heap", "retained", "memory_n0"),
-    native/let_statement("link", native_memory/pointer(page), native/field_pointer_expression("heap", "pages")),
-    native/while_statement("memory_true", [
-      native/let_load("page", page, "link"),
-      native/when_statement(native/binary_expression(:Equal, "page", "memory_null_page"), [native/break_statement()]),
-      native/let_statement("next", page, native_memory/field(page, "page", "next")),
-      native/let_statement("live", :U64, "memory_n0"),
-      @native_memory/page_cells([
-        native/when_statement("reclaim", [
-          native/when_statement(native/binary_expression(:Equal, native_memory/field(:U64, "item", "mark"), "memory_n0"), [
-            native_memory/store(:U64, "item", "state", "memory_object_free")])]),
-        native_memory/store(:U64, "item", "mark", "memory_n0"),
-        native_memory/store(object, "item", "work", "memory_null_object"),
-        native_memory/store(object, "item", "forward", "memory_null_object"),
-        native/unless_statement(native/binary_expression(:Equal, native_memory/field(:U64, "item", "state"), "memory_object_free"), [
-          native/set_statement("live", native/binary_expression(:Add, "live", "memory_n1")),
-          native_memory/store(:U64, "heap", "retained", native/typed_expression(:U64,
-            native/binary_expression(:Add, native_memory/field(:U64, "heap", "retained"), native_memory/field(:U64, "item", "size"))))])], ""),
-      native/if_statement(native/binary_expression(:Equal, "live", "memory_n0"), [
-        native/store_statement("link", "next"),
-        native/let_statement("page_size", :U64, native/unary_expression(:SizeOf, [:Record, "MemoryPage"])),
-        native/let_statement("allocation_size", :U64, native/binary_expression(:Add, "page_size",
-          native/typed_expression(:U64, native/binary_expression(:Multiply, "stride", "count")))),
-        native_memory/store(:U64, "heap", "allocated", native/typed_expression(:U64,
-          native/binary_expression(:Subtract, native_memory/field(:U64, "heap", "allocated"), "allocation_size"))),
-        native_memory/call("memory_platform_release", ["managed_bytes"])
-      ], [
-        native_memory/store(:U64, "page", "live", "live"),
-        native/set_statement("link", native/field_pointer_expression("page", "next"))])]),
-    native/set_statement("page", native_memory/field(page, "heap", "pages")),
-    native/while_statement("memory_true", [
-      native/when_statement(native/binary_expression(:Equal, "page", "memory_null_page"), [native/break_statement()]),
-      native/set_statement("bucket", native_memory/field(:U64, "page", "bucket")),
-      native/when_statement(native/binary_expression(:Less, "bucket", "memory_n10"), [
-        @native_memory/page_cells([
-          native/when_statement(native/binary_expression(:Equal, native_memory/field(:U64, "item", "state"), "memory_object_free"), [
-            native_memory/store(object, "item", "next", native/typed_expression(object, native/root_load_expression(native_memory/free_slot("heap", "bucket")))),
-            native/root_store_statement(native_memory/free_slot("heap", "bucket"), "item")])], "free_")]),
-      native/set_statement("next", native_memory/field(page, "page", "next")),
-      native/set_statement("page", "next")]),
-    native/return_void()])
+  context = native_memory/sweep_body(context)
 
-  let visit_roots: list = [
-    native/let_statement("shared_root", root, native_memory/field(root, "heap", "roots")),
-    native/while_statement("memory_true", [
-      native/when_statement(native/binary_expression(:Equal, "shared_root", "memory_null_root"), [native/break_statement()]),
-      native/let_statement("shared_pointer", bytes, native_memory/root(bytes, "shared_root", "pointer")),
-      native/let_call("shared_relocated", bytes, "memory_visit", ["collection", "shared_pointer"]),
-      native_memory/store_root(bytes, "shared_root", "pointer", "shared_relocated"),
-      native/let_statement("shared_next", root, native_memory/field(root, "shared_root", "next")),
-      native/set_statement("shared_root", "shared_next")]),
-    native/let_statement("worker", worker, native_memory/field(worker, "heap", "workers")),
-    native/while_statement("memory_true", [
-      native/when_statement(native/binary_expression(:Equal, "worker", "memory_null_worker"), [native/break_statement()]),
-      native/let_statement("root", root, native_memory/field(root, "worker", "roots")),
-      native/while_statement("memory_true", [
-        native/when_statement(native/binary_expression(:Equal, "root", "memory_null_root"), [native/break_statement()]),
-        native/let_statement("pointer", bytes, native_memory/root(bytes, "root", "pointer")),
-        native/let_call("relocated", bytes, "memory_visit", ["collection", "pointer"]),
-        native_memory/store_root(bytes, "root", "pointer", "relocated"),
-        native/let_statement("next_root", root, native_memory/field(root, "root", "next")),
-        native/set_statement("root", "next_root")]),
-      native/let_statement("next_worker", worker, native_memory/field(worker, "worker", "next")),
-      native/set_statement("worker", "next_worker")])]
-  let preparing: map = {}
-  let relocating: map = {}
-  for name in ["worker", "root", "pointer", "relocated", "next_root", "next_worker", "shared_root", "shared_pointer", "shared_relocated", "shared_next"]
-    preparing[name] = string_concat("prepare_", name)
-    relocating[name] = string_concat("relocate_", name)
-  end
-  context = native/define_function(context, "memory_collect_stopped", [
-    native/let_statement("state", collection, native/record_expression(["heap", "memory_null_object", "memory_n0", "memory_false", "memory_n0"])),
-    native/let_statement("collection", native_memory/pointer(collection), native/unary_expression(:Address, "state")),
-    native/let_statement("trace", trace, native_memory/field(trace, "heap", "trace")),
-    @native/rename_bindings(visit_roots, preparing),
-    native/while_statement("memory_true", [
-      native/when_statement(native_memory/field(:Bool, "collection", "failed"), [native/break_statement()]),
-      native/let_statement("item", object, native_memory/root(object, "collection", "work")),
-      native/when_statement(native/binary_expression(:Equal, "item", "memory_null_object"), [native/break_statement()]),
-      native_memory/store_root(object, "collection", "work", native_memory/field(object, "item", "work")),
-      native/if_statement(native/binary_expression(:Equal, "trace", "memory_null_trace"), [
-        native/unless_statement(native/binary_expression(:Equal, native_memory/field(:U64, "item", "layout"), "memory_n0"), [
-          native_memory/store(:Bool, "collection", "failed", "memory_true")])
-      ], [native/do_statement(native/indirect_call_expression("trace", ["collection", "item"]))])]),
-    native/when_statement(native_memory/field(:Bool, "collection", "failed"), [
-      native/let_statement("worker", worker, native_memory/field(worker, "heap", "workers")),
-      native/while_statement("memory_true", [
-        native/when_statement(native/binary_expression(:Equal, "worker", "memory_null_worker"), [native/break_statement()]),
-        native_memory/call("memory_rollback_nursery", ["worker"]),
-        native/let_statement("next_worker", worker, native_memory/field(worker, "worker", "next")),
-        native/set_statement("worker", "next_worker")]),
-      native_memory/call("memory_sweep", ["heap", "memory_false"]),
-      native/return_value("memory_false")]),
-    native_memory/store(:U64, "collection", "phase", "memory_n1"),
-    @native/rename_bindings(visit_roots, relocating),
-    native/let_statement("page", page, native_memory/field(page, "heap", "pages")),
-    native/while_statement("memory_true", [
-      native/when_statement(native/binary_expression(:Equal, "page", "memory_null_page"), [native/break_statement()]),
-      @native_memory/page_cells([
-        native/when_statement(native/binary_expression(:Equal, native_memory/field(:U64, "item", "mark"), "memory_n1"), [
-          native/unless_statement(native/binary_expression(:Equal, "trace", "memory_null_trace"), [
-            native/do_statement(native/indirect_call_expression("trace", ["collection", "item"]))]),
-          // Freeze overflow storage only after all promotion reservations succeed.
-          native_memory/store(:U64, "item", "state", "memory_object_shared")])], "rewrite_"),
-      native/let_statement("next_page", page, native_memory/field(page, "page", "next")),
-      native/set_statement("page", "next_page")]),
-    native_memory/call("memory_sweep", ["heap", "memory_true"]),
-    native/set_statement("worker", native_memory/field(worker, "heap", "workers")),
-    native/while_statement("memory_true", [
-      native/when_statement(native/binary_expression(:Equal, "worker", "memory_null_worker"), [native/break_statement()]),
-      native_memory/store(:U64, "worker", "used", "memory_n0"),
-      native_memory/store(:Bool, "worker", "pressure", "memory_false"),
-      native/set_statement("next_worker", native_memory/field(worker, "worker", "next")),
-      native/set_statement("worker", "next_worker")]),
-    native_memory/store(:U64, "heap", "copied", native/typed_expression(:U64,
-      native/binary_expression(:Add, native_memory/field(:U64, "heap", "copied"), native_memory/field(:U64, "collection", "copied")))),
-    native_memory/store(:U64, "heap", "collections", native/typed_expression(:U64,
-      native/binary_expression(:Add, native_memory/field(:U64, "heap", "collections"), "memory_n1"))),
-    native/return_value("memory_true")])
+  context = native_memory/collect_stopped_body(context)
   return context
 end

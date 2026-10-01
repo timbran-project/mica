@@ -232,7 +232,7 @@ verb native/c_region(index: map, flow: map, input: map, start, stop, enter_loop:
 end
 
 verb native/c_function_body(state: map, index: map, fn_id: int) -> list
-  let flow: map = native/flow_analysis(state, index, fn_id)
+  let flow: map = native/flow_analysis(index, fn_id)
   let context: map = {:seen -> {}, :loops -> [], :switch_depth -> 0}
   let [nodes: list, emitted: map] = native/c_region(index, flow, context, flow[:entry], :Exit, false)
   context = emitted

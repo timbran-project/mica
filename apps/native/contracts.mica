@@ -122,6 +122,49 @@ verb native/indirect_signature(index: map, fn_id: int, row: list) -> list
   return signature
 end
 
+// Direct and indirect calls use the same checked ownership signature.
+// The first operand remains a function ID or callee value, respectively.
+verb native/call_signature(index: map, fn_id: int, row: list) -> list
+  if row[3] == :Call
+    let signature: list = index[:function_signatures][row[5][0]]
+    return signature
+  end
+  let signature: list = native/indirect_signature(index, fn_id, row)
+  return signature
+end
+
+verb native/check_call_arguments(index: map, origins: map, row: list)
+  let fn_id: int = index[:blocks][row[1]][1]
+  let signature: list = native/call_signature(index, fn_id, row)
+  let indirect: bool = row[3] == :CallIndirect
+  let position: int = 1
+  for parameter in signature[1]
+    let sources: list = origins[row[5][position]]
+    if is_kind(parameter[2], :list)
+      let owner: int = native/signature_owner(signature, parameter[2][1])
+      let message: string = "argument does not share borrow region at "
+      if indirect
+        message = "indirect argument does not share borrow region at "
+      end
+      for origin in sources
+        native/ensure(origin[0] == :Static || native/contains(origins[row[5][owner + 1]], origin),
+          string_concat(message, native/instruction_location(index, row)))
+      end
+    end
+    if parameter[2] == :Consume
+      let message: string = "cannot consume borrowed storage at "
+      if indirect
+        message = "cannot consume borrowed storage in indirect call at "
+      end
+      for origin in sources
+        native/ensure(origin[0] == :Owned || origin[0] == :Consume,
+          string_concat(message, native/instruction_location(index, row)))
+      end
+    end
+    position = position + 1
+  end
+end
+
 verb native/check_contracts(state, input_index)
   let index = input_index
   let foreign = {}
@@ -359,43 +402,8 @@ verb native/check_ownership(state, index)
         native/ensure(origin[0] != :Borrow || native/contains(origins[row[5][0]], origin), string_concat("borrow escapes through store at ", native/instruction_location(index, row)))
       end
     end
-    if row[3] == :CallIndirect
-      let fn_id: int = index[:blocks][row[1]][1]
-      let signature: list = native/indirect_signature(index, fn_id, row)
-      let position: int = 1
-      for parameter in signature[1]
-        let sources: list = origins[row[5][position]]
-        if is_kind(parameter[2], :list)
-          let owner: int = native/signature_owner(signature, parameter[2][1])
-          for origin in sources
-            native/ensure(origin[0] == :Static || native/contains(origins[row[5][owner + 1]], origin), string_concat("indirect argument does not share borrow region at ", native/instruction_location(index, row)))
-          end
-        end
-        if parameter[2] == :Consume
-          for origin in sources
-            native/ensure(origin[0] == :Owned || origin[0] == :Consume, string_concat("cannot consume borrowed storage in indirect call at ", native/instruction_location(index, row)))
-          end
-        end
-        position = position + 1
-      end
-    end
-    if row[3] != :Call
-      continue
-    end
-    for parameter in native/owned(state[:parameters], 1, row[5][0])
-      if map_contains_key(index[:parameter_owners], parameter[0])
-        let owner_id = index[:parameter_owners][parameter[0]]
-        let owner_parameter = [p for p in state[:parameters] if p[0] == owner_id][0]
-        let owner_origins = origins[row[5][owner_parameter[2] + 1]]
-        for origin in origins[row[5][parameter[2] + 1]]
-          native/ensure(origin[0] == :Static || native/contains(owner_origins, origin), string_concat("argument does not share borrow region at ", native/instruction_location(index, row)))
-        end
-      end
-      if map_contains_key(index[:parameter_modes], parameter[0]) && index[:parameter_modes][parameter[0]] == :Consume
-        for origin in origins[row[5][parameter[2] + 1]]
-          native/ensure(origin[0] == :Owned || origin[0] == :Consume, string_concat("cannot consume borrowed storage at ", native/instruction_location(index, row)))
-        end
-      end
+    if row[3] == :Call || row[3] == :CallIndirect
+      native/check_call_arguments(index, origins, row)
     end
   end
   for term in state[:terminators]
@@ -436,16 +444,6 @@ verb native/result_origins(state, index, origins, row)
   if row[3] == :Manage || row[3] == :RootLoad
     return [[:Gc, 0]]
   end
-  if row[3] == :CallIndirect
-    let signature: list = native/indirect_signature(index, index[:blocks][row[1]][1], row)
-    if signature[3] == :Static || signature[3] == :Owned || signature[3] == :Gc
-      return [[signature[3], row[0]]]
-    end
-    if signature[3] == :Borrow
-      return origins[row[5][native/signature_owner(signature, signature[4]) + 1]]
-    end
-    return []
-  end
   if row[3] == :Adopt
     // The owner now keeps the allocation alive; the result borrows its region.
     return origins[row[5][0]]
@@ -456,22 +454,13 @@ verb native/result_origins(state, index, origins, row)
   if row[3] == :Address
     return native/union([[:Stack, row[5][0]]], origins[row[5][0]])
   end
-  if row[3] == :Call
-    let contract = index[:contracts][row[5][0]]
-    if contract[2] == :Immediate
-      return []
+  if row[3] == :Call || row[3] == :CallIndirect
+    let signature: list = native/call_signature(index, index[:blocks][row[1]][1], row)
+    if signature[3] == :Static || signature[3] == :Owned || signature[3] == :Gc
+      return [[signature[3], row[0]]]
     end
-    if contract[2] == :Static || contract[2] == :Owned || contract[2] == :Gc
-      return [[contract[2], row[0]]]
-    end
-    for parameter in native/owned(state[:parameters], 1, row[5][0])
-      if parameter[3] == contract[3]
-        let owner = parameter
-        if map_contains_key(index[:parameter_owners], parameter[0])
-          owner = [p for p in state[:parameters] if p[0] == index[:parameter_owners][parameter[0]]][0]
-        end
-        return origins[row[5][owner[2] + 1]]
-      end
+    if signature[3] == :Borrow
+      return origins[row[5][native/signature_owner(signature, signature[4]) + 1]]
     end
     return []
   end

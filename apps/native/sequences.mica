@@ -40,6 +40,33 @@ verb native_sequence/is_ordered(builder: map, span: map, compare) -> list
   return [ordered, current]
 end
 
+// Compact equal runs in place after sorting. The callback decides whether an
+// equal element replaces the preceding output, as maps do, or is discarded.
+verb native_sequence/compact_sorted(builder: map, span: map, compare, on_equal) -> list
+  let [written: map, current: map] = native_gen/bind(builder, "written", native_gen/zero(:U64))
+  current = native_gen/for_range(current, "read", native_gen/zero(:U64), span[:length], fn(input_body, index)
+    let body: map = input_body
+    let [entry: map, with_entry: map] = native_gen/bind(body, "entry", native_gen/read(native_sequence/at(span, index)))
+    body = with_entry
+    let [duplicate: map, with_duplicate: map] = native_gen/bind(body, "duplicate", native_gen/zero(:Bool))
+    body = with_duplicate
+    body = native_gen/unless(body, native_gen/equal(written, native_gen/zero(:U64)), fn(input_previous)
+      let previous: map = input_previous
+      let preceding: map = native_sequence/at(span, native_gen/subtract(written, native_gen/ref(previous, "one")))
+      let [order: map, with_order: map] = compare(previous, native_gen/read(preceding), entry)
+      previous = with_order
+      previous = native_gen/assign(previous, duplicate, native_gen/equal(order, native_gen/zero(:I64)))
+      return native_gen/when(previous, duplicate, fn(equal) => on_equal(equal, preceding, entry))
+    end)
+    return native_gen/unless(body, duplicate, fn(input_append)
+      let append: map = input_append
+      append = native_gen/write(append, native_sequence/at(span, written), entry)
+      return native_gen/assign(append, written, native_gen/add(written, native_gen/ref(append, "one")))
+    end)
+  end)
+  return [written, current]
+end
+
 // Stable bottom-up merging. Storage and failure policy belong to the caller.
 // The returned pointer can be either input buffer; equality takes the left run.
 // Length must fit the allocation limit and be below 2^63, so doubling cannot wrap.
@@ -113,14 +140,12 @@ verb native_sequence/merge_choice(builder: map, source: map, left: map, right: m
   return [chosen, current]
 end
 
-// Search a sorted unique span. The comparator returns signed order relative
-// to the sought key. A miss returns its insertion position.
-verb native_sequence/search(builder: map, span: map, compare) -> list
+// The two search policies share one bounded binary-search loop. The comparator
+// returns equality and whether the candidate precedes the sought key.
+verb native_sequence/search_loop(builder: map, span: map, compare, on_equal) -> list
   let [low: map, current: map] = native_gen/bind(builder, "low", native_gen/zero(:U64))
   let [high: map, with_high: map] = native_gen/bind(current, "high", span[:length])
   current = with_high
-  let [found: map, with_found: map] = native_gen/bind(current, "found", native_gen/zero(:Bool))
-  current = with_found
   current = native_gen/while_loop(current, native_gen/less(low, high), fn(initial_body)
     let body: map = initial_body
     let distance: map = native_gen/subtract(high, low)
@@ -128,15 +153,14 @@ verb native_sequence/search(builder: map, span: map, compare) -> list
     body = with_middle
     let [element: map, with_element: map] = native_gen/bind(body, "candidate", native_gen/read(native_sequence/at(span, middle)))
     body = with_element
-    let [order: map, with_order: map] = compare(body, element)
-    body = with_order
-    body = native_gen/when(body, native_gen/equal(order, native_gen/zero(:I64)), fn(initial_equal)
-      let equal: map = initial_equal
-      equal = native_gen/assign(equal, low, middle)
-      equal = native_gen/assign(equal, found, native_gen/ref(equal, "true"))
-      return native_gen/break_loop(equal)
+    let [equal: map, before: map, compared: map] = compare(body, element)
+    body = compared
+    body = native_gen/when(body, equal, fn(matched)
+      let completed: map = on_equal(matched, low, middle, element)
+      native/ensure(completed[:closed], "sorted search match must return or break")
+      return completed
     end)
-    return native_gen/branch(body, native_gen/less(order, native_gen/zero(:I64)), fn(initial_later)
+    return native_gen/branch(body, before, fn(initial_later)
       let later: map = initial_later
       return native_gen/assign(later, low, native_gen/add(middle, native_gen/ref(later, "one")))
     end, fn(initial_earlier)
@@ -144,5 +168,24 @@ verb native_sequence/search(builder: map, span: map, compare) -> list
       return native_gen/assign(earlier, high, middle)
     end)
   end)
-  return [low, found, current]
+  return [low, current]
+end
+
+// Keep the insertion position for a caller that may update the sorted span.
+verb native_sequence/search(builder: map, span: map, compare) -> list
+  let [found: map, with_found: map] = native_gen/bind(builder, "found", native_gen/zero(:Bool))
+  let [position: map, current: map] = native_sequence/search_loop(with_found, span, compare,
+    fn(matched, low, middle, element)
+      let result: map = native_gen/assign(matched, low, middle)
+      result = native_gen/assign(result, found, native_gen/ref(result, "true"))
+      return native_gen/break_loop(result)
+    end)
+  return [position, found, current]
+end
+
+// Return from the generated function on a hit; a caller emits the miss path.
+verb native_sequence/search_return(builder: map, span: map, compare, on_equal) -> map
+  let [position: map, current: map] = native_sequence/search_loop(builder, span, compare,
+    fn(matched, low, middle, element) => on_equal(matched, middle, element))
+  return current
 end

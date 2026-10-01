@@ -29,10 +29,10 @@ verb native_jit/define_instructions(input: map) -> map
     cases = [@cases, native/case_arm(native_jit/n(native_jit/position(native_jit/opcodes(), op)), [native/set_statement("value", expression)])]
   end
   for spec in [[:Add, "add"], [:Subtract, "sub"], [:Multiply, "mul"], [:BitAnd, "and"], [:BitOr, "or"], [:BitXor, "xor"]]
-    let unsigned_type = native_jit/cache(:Type, "n4")
+    let unsigned_type = native_jit/primitive_type(:U64)
     let widened = native_jit/j(spec[1], ["ctx", unsigned_type, native_jit/j("cast", ["ctx", "left", unsigned_type]), native_jit/j("cast", ["ctx", "right", unsigned_type])])
     cases = [@cases, native/case_arm(native_jit/n(native_jit/position(native_jit/opcodes(), spec[0])), [
-      native/if_statement(native/binary_expression(:Equal, "kind", "n6"), [native/set_statement("value", native_jit/j(spec[1], ["ctx", "type", "left", "right"]))], [native/set_statement("value", native_jit/j("cast", ["ctx", widened, "type"]))])])]
+      native/if_statement(native/binary_expression(:Equal, "kind", native_jit/type_kind(:F32)), [native/set_statement("value", native_jit/j(spec[1], ["ctx", "type", "left", "right"]))], [native/set_statement("value", native_jit/j("cast", ["ctx", widened, "type"]))])])]
   end
   for opcode in [:Call, :Record]
     let first: int = native_jit/tail_start(:Instruction)
@@ -43,10 +43,8 @@ verb native_jit/define_instructions(input: map) -> map
       api = "call"
       prefix = ["ctx", native_jit/cache(:Declaration, "a")]
     end
-    // Each switch arm receives distinct native local names.
     let body: list = native_jit/consume_operands(first, api, prefix, [:Set, "value"])
-    let names: map = {"argument" -> string_concat("argument", to_literal(first)), "argument_count" -> string_concat("argument_count", to_literal(first))}
-    cases = [@cases, native/case_arm(native_jit/n(native_jit/position(native_jit/opcodes(), opcode)), native_jit/rename(body, names))]
+    cases = [@cases, native_jit/case(opcode, body)]
   end
   for op in [:Store, :RootStore]
     cases = [@cases, native/case_arm(native_jit/n(native_jit/position(native_jit/opcodes(), op)), [

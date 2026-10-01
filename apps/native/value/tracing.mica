@@ -1,79 +1,182 @@
 // Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-// Relocate a field known to point inside this allocation. The collector keeps
-// the original base until every copied object's interior pointers are repaired.
-verb native_value/trace_internal(record, field: string, type_id) -> list
-  let bytes: list = native_memory/pointer(:U8)
-  let names: map = {}
-  for name in ["address", "raw", "distance", "moved"]
-    names[name] = string_concat(record, "_", field, "_", name)
+verb native_value/trace_plan() -> list
+  let records: map = {}
+  for record in native_value/fixed_records()
+    records[record[0]] = record
   end
-  let body: list = [
-    native/let_statement("address", type_id, native_memory/field(type_id, record, field)),
-    native/unless_statement(native/binary_expression(:Equal, "address", native/typed_zero(type_id)), [
-    native/let_statement("raw", bytes, native/unary_expression(:PointerCast, "address")),
-    native/let_statement("distance", :I64, native/pointer_distance_expression("raw", "original")),
-    native/let_statement("moved", bytes, native/offset_expression("payload", "distance")),
-    native_memory/store(type_id, record, field, native/typed_expression(type_id, native/unary_expression(:PointerCast, "moved")))])]
-  let result: list = native/rename_bindings(body, names)
+  let policies: list = [:Opaque, :Values, :Bytes, :String, :List, :Map, :Fixed,
+    :View, :ExternalBytes, :InlineRelation, :SeparateRows]
+  let plan: list = []
+  for layout in native_value/layouts()
+    native/ensure(native/contains(policies, layout[:policy]), "managed layout requires a tracing policy")
+    if layout[:policy] == :Fixed
+      native/ensure(map_contains_key(records, layout[:name]), "fixed layout requires a record schema")
+      let record: list = records[layout[:name]]
+      native/ensure(record[1] == layout[:record], "fixed layout record schema mismatch")
+      layout[:fields] = record[2]
+    end
+    plan = [@plan, layout]
+  end
+  return plan
+end
+
+// Repair a pointer inside this allocation using its distance from the original
+// base. The collector keeps that base until all interior pointers are repaired.
+verb native_value/trace_internal(builder: map, record: map, field: string, payload: map, original: map) -> map
+  let slot: map = native_gen/field(builder, record, field)
+  let type_id = slot[:type]
+  native/ensure(native/is_pointer(type_id), "internal trace edge requires a pointer field")
+  let [address: map, with_address: map] = native_gen/bind(builder, "address", native_gen/read(slot))
+  let result: map = native_gen/unless(with_address, native_gen/equal(address, native_gen/zero(type_id)), fn(initial_edge)
+    let [raw: map, with_raw: map] = native_gen/bind(initial_edge, "raw", native_gen/cast(native_memory/pointer(:U8), address))
+    let [distance: map, with_distance: map] = native_gen/bind(with_raw, "distance", native_gen/pointer_distance(raw, original))
+    let [moved: map, with_moved: map] = native_gen/bind(with_distance, "moved", native_gen/offset(payload, distance))
+    return native_gen/write(with_moved, native_gen/field(with_moved, record, field), native_gen/cast(type_id, moved))
+  end)
   return result
 end
 
-// Relocate a field that points at the start of another managed allocation.
-verb native_value/trace_external(record, field: string, type_id) -> list
-  let bytes: list = native_memory/pointer(:U8)
-  let names: map = {}
-  for name in ["address", "raw", "moved"]
-    names[name] = string_concat(record, "_", field, "_", name)
-  end
-  let body: list = [
-    native/let_statement("address", type_id, native_memory/field(type_id, record, field)),
-    native/let_statement("raw", bytes, native/unary_expression(:PointerCast, "address")),
-    native/let_call("moved", bytes, "memory_visit", ["collection", "raw"]),
-    native_memory/store(type_id, record, field, native/typed_expression(type_id, native/unary_expression(:PointerCast, "moved")))]
-  let result: list = native/rename_bindings(body, names)
+// External edges point at the start of another managed allocation.
+verb native_value/trace_external(builder: map, record: map, field: string, collection: map) -> map
+  let slot: map = native_gen/field(builder, record, field)
+  let type_id = slot[:type]
+  native/ensure(native/is_pointer(type_id), "external trace edge requires a pointer field")
+  let [address: map, with_address: map] = native_gen/bind(builder, "address", native_gen/read(slot))
+  let [raw: map, with_raw: map] = native_gen/bind(with_address, "raw", native_gen/cast(native_memory/pointer(:U8), address))
+  let [moved: map, with_moved: map] = native_gen/bind(with_raw, "moved", native_gen/call(with_raw, "memory_visit", [collection, raw]))
+  let result: map = native_gen/write(with_moved, native_gen/field(with_moved, record, field), native_gen/cast(type_id, moved))
   return result
 end
 
-verb native_value/trace_word_field(record, field: string) -> list
-  let word: list = native_value/word()
-  let name: string = string_concat(record, "_", field, "_visited")
-  return [native/let_call(name, word, "value_trace_word", ["collection", native_memory/field(word, record, field)]),
-    native_memory/store(word, record, field, name)]
+verb native_value/trace_word_field(builder: map, record: map, field: string, collection: map) -> map
+  let value: map = native_gen/read(native_gen/field(builder, record, field))
+  let [moved: map, with_moved: map] = native_gen/bind(builder, "visited", native_gen/call(builder, "value_trace_word", [collection, value]))
+  let result: map = native_gen/write(with_moved, native_gen/field(with_moved, record, field), moved)
+  return result
 end
 
-verb native_value/trace_record_fields(record: string, fields: list) -> list
-  let body: list = []
+verb native_value/trace_record_fields(builder: map, record: map, fields: list, collection: map) -> map
+  let current: map = builder
   for field in fields
     if field[2] == :Gc
-      let trace: list = native_value/trace_word_field(record, field[0])
-      if field[3] != ""
-        trace = [native/when_statement(native_memory/field(:Bool, record, field[3]), trace)]
+      if field[3] == ""
+        current = native_value/trace_word_field(current, record, field[0], collection)
+      else
+        current = native_gen/when(current, native_gen/read(native_gen/field(current, record, field[3])),
+          fn(present) => native_value/trace_word_field(present, record, field[0], collection))
       end
-      body = [@body, @trace]
     end
   end
-  return body
+  return current
 end
 
-verb native_value/trace_view(header: string, storage: string, data_type) -> list
-  let bytes: list = native_memory/pointer(:U8)
-  let backing: list = native_memory/record_pointer(storage)
-  return [
-    native/let_statement("backing", backing, native_memory/field(backing, "header", "storage")),
-    native/let_statement("storage_bytes", bytes, native/unary_expression(:PointerCast, "backing")),
-    native/let_statement("size", :U64, native/unary_expression(:SizeOf, [:Record, header])),
-    native/let_statement("back", :I64, native/unary_expression(:Bitcast, native/typed_expression(:U64, native/binary_expression(:Subtract, "zero", "size")))),
-    native/let_offset("owner", bytes, "storage_bytes", "back"),
-    native/let_statement("data", data_type, native_memory/field(data_type, "header", "data")),
-    native/let_statement("raw_data", bytes, native/unary_expression(:PointerCast, "data")),
-    native/let_statement("distance", :I64, native/pointer_distance_expression("raw_data", "owner")),
-    native/let_call("moved_owner", bytes, "memory_visit", ["collection", "owner"]),
-    native/let_offset("moved_storage", bytes, "moved_owner", "size"),
-    native/let_offset("moved_data", bytes, "moved_owner", "distance"),
-    native_memory/store(backing, "header", "storage", native/typed_expression(backing, native/unary_expression(:PointerCast, "moved_storage"))),
-    native_memory/store(data_type, "header", "data", native/typed_expression(data_type, native/unary_expression(:PointerCast, "moved_data")))]
+// A slice retains its owner's storage and its own data offset within that owner.
+verb native_value/trace_view(builder: map, header: map, collection: map) -> map
+  let storage_slot: map = native_gen/field(builder, header, "storage")
+  let backing_type = storage_slot[:type]
+  let [backing: map, with_backing: map] = native_gen/bind(builder, "backing", native_gen/read(storage_slot))
+  let [storage_bytes: map, with_bytes: map] = native_gen/bind(with_backing, "storage_bytes", native_gen/cast(native_memory/pointer(:U8), backing))
+  let [size: map, with_size: map] = native_gen/bind(with_bytes, "size", native_gen/sizeof(header[:type][1]))
+  let [owner: map, with_owner: map] = native_value/inline_storage_owner(with_size, storage_bytes, size)
+  let data_slot: map = native_gen/field(with_owner, header, "data")
+  let data_type = data_slot[:type]
+  let [data: map, with_data: map] = native_gen/bind(with_owner, "data", native_gen/read(data_slot))
+  let [raw_data: map, with_raw: map] = native_gen/bind(with_data, "raw_data", native_gen/cast(native_memory/pointer(:U8), data))
+  let [distance: map, with_distance: map] = native_gen/bind(with_raw, "distance", native_gen/pointer_distance(raw_data, owner))
+  let [moved_owner: map, with_moved: map] = native_gen/bind(with_distance, "moved_owner",
+    native_gen/call(with_distance, "memory_visit", [collection, owner]))
+  let [moved_storage: map, with_storage: map] = native_gen/bind(with_moved, "moved_storage", native_gen/offset(moved_owner, size))
+  let [moved_data: map, with_moved_data: map] = native_gen/bind(with_storage, "moved_data", native_gen/offset(moved_owner, distance))
+  let current: map = native_gen/write(with_moved_data, native_gen/field(with_moved_data, header, "storage"), native_gen/cast(backing_type, moved_storage))
+  current = native_gen/write(current, native_gen/field(current, header, "data"), native_gen/cast(data_type, moved_data))
+  return current
+end
+
+verb native_value/trace_map(builder: map, header: map, collection: map, payload: map, original: map) -> map
+  let [data: map, with_data: map] = native_gen/bind(builder, "data", native_gen/read(native_gen/field(builder, header, "data")))
+  let [raw_data: map, with_raw: map] = native_gen/bind(with_data, "raw_data", native_gen/cast(native_memory/pointer(:U8), data))
+  let [header_size: map, with_size: map] = native_gen/bind(with_raw, "header_size", native_gen/sizeof([:Record, "HeapMap"]))
+  let [internal: map, with_internal: map] = native_gen/bind(with_size, "internal", native_gen/offset(original, header_size))
+  let current: map = native_gen/branch(with_internal, native_gen/equal(raw_data, internal),
+    fn(inline) => native_value/trace_internal(inline, header, "data", payload, original),
+    fn(external) => native_value/trace_external(external, header, "data", collection))
+  current = native_gen/assign(current, data, native_gen/read(native_gen/field(current, header, "data")))
+  let [length: map, with_length: map] = native_gen/bind(current, "length", native_gen/read(native_gen/field(current, header, "length")))
+  current = native_gen/for_range(with_length, "entry", native_gen/ref(with_length, "zero"), length, fn(initial_entry, index)
+    let [entry: map, with_entry: map] = native_gen/bind(initial_entry, "entry", native_gen/offset(data, index))
+    let body: map = native_value/trace_word_field(with_entry, entry, "key", collection)
+    return native_value/trace_word_field(body, entry, "value", collection)
+  end)
+  return current
+end
+
+verb native_value/trace_relation(builder: map, header: map, collection: map, payload: map, original: map, separate_rows: bool) -> map
+  let current: map = native_value/trace_internal(builder, header, "heading", payload, original)
+  current = native_value/trace_internal(current, header, "rows", payload, original)
+  let [rows: map, with_rows: map] = native_gen/bind(current, "rows", native_gen/read(native_gen/field(current, header, "rows")))
+  let [length: map, with_length: map] = native_gen/bind(with_rows, "length", native_gen/read(native_gen/field(with_rows, header, "length")))
+  current = native_gen/for_range(with_length, "row", native_gen/ref(with_length, "zero"), length, fn(initial_row, index)
+    let [row: map, with_row: map] = native_gen/bind(initial_row, "row", native_gen/offset(rows, index))
+    if separate_rows
+      return native_value/trace_external(with_row, row, "data", collection)
+    end
+    let body: map = native_value/trace_internal(with_row, row, "data", payload, original)
+    return native_gen/do_call(body, "value_trace_slots", [collection,
+      native_gen/read(native_gen/field(body, row, "data")), native_gen/read(native_gen/field(body, row, "arity"))])
+  end)
+  return current
+end
+
+verb native_value/trace_layout(builder: map, layout: map, collection: map, payload: map, original: map) -> map
+  let [header: map, with_header: map] = native_gen/bind(builder, "header", native_gen/cast(native_memory/record_pointer(layout[:record]), payload))
+  let current: map = with_header
+  let policy: symbol = layout[:policy]
+  if policy == :Bytes || policy == :String
+    current = native_value/trace_internal(current, header, "data", payload, original)
+  end
+  if policy == :String || policy == :List
+    if policy == :List
+      current = native_value/trace_internal(current, header, "data", payload, original)
+    end
+    current = native_value/trace_internal(current, header, "storage", payload, original)
+    let [backing: map, with_backing: map] = native_gen/bind(current, "backing", native_gen/read(native_gen/field(current, header, "storage")))
+    current = native_value/trace_internal(with_backing, backing, "data", payload, original)
+    if policy == :String
+      current = native_value/trace_internal(current, backing, "index", payload, original)
+    else
+      current = native_gen/do_call(current, "value_trace_slots", [collection,
+        native_gen/read(native_gen/field(current, backing, "data")), native_gen/read(native_gen/field(current, backing, "used"))])
+    end
+  end
+  if policy == :Map
+    current = native_value/trace_map(current, header, collection, payload, original)
+  end
+  if policy == :Fixed
+    current = native_value/trace_record_fields(current, header, layout[:fields], collection)
+  end
+  if policy == :View
+    current = native_value/trace_view(current, header, collection)
+  end
+  if policy == :ExternalBytes
+    current = native_value/trace_external(current, header, "data", collection)
+  end
+  if policy == :InlineRelation || policy == :SeparateRows
+    current = native_value/trace_relation(current, header, collection, payload, original, policy == :SeparateRows)
+  end
+  current = native_gen/return_void(current)
+  return current
+end
+
+verb native_value/trace_values(builder: map, collection: map, object: map, payload: map) -> map
+  let [size: map, with_size: map] = native_gen/bind(builder, "size", native_gen/read(native_gen/field(builder, object, "size")))
+  let [width: map, with_width: map] = native_gen/bind(with_size, "width", native_gen/sizeof(native_value/word()))
+  let [length: map, with_length: map] = native_gen/bind(with_width, "length", native_gen/divide(size, width))
+  let [data: map, with_data: map] = native_gen/bind(with_length, "data", native_gen/cast(native_memory/pointer(native_value/word()), payload))
+  let current: map = native_gen/do_call(with_data, "value_trace_slots", [collection, data, length])
+  current = native_gen/return_void(current)
+  return current
 end
 
 verb native_value/tracing(input: map) -> map
@@ -81,137 +184,66 @@ verb native_value/tracing(input: map) -> map
   let word: list = native_value/word()
   let bytes: list = native_memory/pointer(:U8)
   let values: list = native_memory/pointer(word)
-  let collection: list = native_memory/record_pointer("MemoryCollection")
-  let object: list = native_memory/record_pointer("MemoryObject")
+  let collection_type: list = native_memory/record_pointer("MemoryCollection")
   let effects: list = [:ReadMemory, :WriteMemory, :Allocate, :Release]
   context = native_memory/declare(context, "value_trace_word", word,
-    [["collection", collection, :Borrow], ["value", word, :Gc]], effects, :Gc, "")
+    [["collection", collection_type, :Borrow], ["value", word, :Gc]], effects, :Gc, "")
   context = native_memory/declare(context, "value_trace_slots", :Void,
-    [["collection", collection, :Borrow], ["data", values, :Gc], ["length", :U64, :Value]], effects, :Value, "")
-  let branches: list = []
+    [["collection", collection_type, :Borrow], ["data", values, :Gc], ["length", :U64, :Value]], effects, :Value, "")
+
+  let words: map = native_gen/context(context, "value_trace_word")
+  let value: map = native_gen/ref(words, "value")
+  let [tag: map, with_tag: map] = native_gen/bind(words, "tag", native_gen/expression(:U8, :Tag, [value]))
+  let [is_pointer: map, with_pointer_flag: map] = native_gen/bind(with_tag, "is_pointer", native_gen/ref(with_tag, "false"))
+  words = with_pointer_flag
   for kind in native_value/kinds()
     if kind[2]
-      branches = [@branches, native/when_statement(native/binary_expression(:Equal, "tag", string_concat("tag_", kind[0])), [native/set_statement("is_pointer", "true")])]
+      words = native_gen/when(words, native_gen/equal(tag, native_gen/ref(words, string_concat("tag_", kind[0]))),
+        fn(pointer_kind) => native_gen/assign(pointer_kind, is_pointer, native_gen/ref(pointer_kind, "true")))
     end
   end
-  context = native/define_function(context, "value_trace_word", [
-    native/let_statement("tag", :U8, native/unary_expression(:Tag, "value")),
-    native/let_statement("is_pointer", :Bool, "false"), @branches,
-    native/unless_statement("is_pointer", [native/return_value("value")]),
-    native/let_statement("pointer", bytes, native/unary_expression(:UnpackPointer, "value")),
-    native/let_call("moved", bytes, "memory_visit", ["collection", "pointer"]),
-    native/return_value(native/binary_expression(:PackPointer, "moved", "tag"))])
-  context = native/define_function(context, "value_trace_slots", [
-    @native/for_range("i", "zero", "length", [
-      native/let_offset("slot", values, "data", "i"),
-      native/let_load("value", word, "slot"),
-      native/let_call("moved", word, "value_trace_word", ["collection", "value"]),
-      native/store_statement("slot", "moved")]), native/return_void()])
+  words = native_gen/unless(words, is_pointer, fn(immediate) => native_gen/return_value(immediate, value))
+  let [pointer: map, with_pointer: map] = native_gen/bind(words, "pointer", native_gen/expression(bytes, :UnpackPointer, [value]))
+  let [moved: map, with_moved: map] = native_gen/bind(with_pointer, "moved",
+    native_gen/call(with_pointer, "memory_visit", [native_gen/ref(with_pointer, "collection"), pointer]))
+  words = native_gen/return_value(with_moved, native_gen/expression(word, :PackPointer, [moved, tag]))
+  context = native_gen/finish(context, words)
 
-  let descriptors: list = []
-  let records: list = native_value/fixed_records()
-  for spec in [["bytes", "HeapBytes"], ["string", "HeapString"], ["list", "HeapList"],
-    ["map", "HeapMap"], ["range", "HeapRange"], ["error", "HeapError"], ["frob", "HeapFrob"],
-    ["relation", "HeapRelation"], ["string_view", "HeapString"], ["list_view", "HeapList"],
-    ["bytes_view", "HeapBytes"], ["buffer", "ValueBuffer"], ["relation_copy", "HeapRelation"]]
-    let kind: string = spec[0]
-    let type_id: list = native_memory/record_pointer(spec[1])
-    let body: list = [native/let_statement("header", type_id, native/unary_expression(:PointerCast, "payload"))]
-    if kind == "bytes" || kind == "string"
-      body = [@body, @native_value/trace_internal("header", "data", bytes)]
-    end
-    if kind == "string"
-      let storage: list = native_memory/record_pointer("StringStorage")
-      body = [@body, @native_value/trace_internal("header", "storage", storage),
-        native/let_statement("backing", storage, native_memory/field(storage, "header", "storage")),
-        @native_value/trace_internal("backing", "data", bytes),
-        @native_value/trace_internal("backing", "index", native_memory/pointer(:U64))]
-    end
-    if kind == "list"
-      let storage: list = native_memory/record_pointer("ListStorage")
-      body = [@body, @native_value/trace_internal("header", "data", values),
-        @native_value/trace_internal("header", "storage", storage),
-        native/let_statement("backing", storage, native_memory/field(storage, "header", "storage")),
-        @native_value/trace_internal("backing", "data", values),
-        native_memory/call("value_trace_slots", ["collection", native_memory/field(values, "backing", "data"), native_memory/field(:U64, "backing", "used")])]
-    end
-    if kind == "map"
-      let entries: list = native_memory/record_pointer("ValueMapEntry")
-      let external: list = native_value/trace_external("header", "data", entries)
-      external = native/rename_bindings(external, native_value/trace_bindings(external, "external"))
-      body = [@body,
-        native/let_statement("data", entries, native_memory/field(entries, "header", "data")),
-        native/let_statement("raw_data", bytes, native/unary_expression(:PointerCast, "data")),
-        native/let_statement("header_size", :U64, native/unary_expression(:SizeOf, [:Record, "HeapMap"])),
-        native/let_offset("internal", bytes, "original", "header_size"),
-        native/if_statement(native/binary_expression(:Equal, "raw_data", "internal"),
-          native_value/trace_internal("header", "data", entries), external),
-        native/set_statement("data", native_memory/field(entries, "header", "data")),
-        native/let_statement("length", :U64, native_memory/field(:U64, "header", "length")),
-        @native/for_range("i", "zero", "length", [
-          native/let_offset("entry", entries, "data", "i"),
-          @native_value/trace_word_field("entry", "key"), @native_value/trace_word_field("entry", "value")])]
-    end
-    for record in records
-      if kind == record[0]
-        body = [@body, @native_value/trace_record_fields("header", record[2])]
-      end
-    end
-    if kind == "string_view"
-      body = [@body, @native_value/trace_view("HeapString", "StringStorage", bytes)]
-    end
-    if kind == "list_view"
-      body = [@body, @native_value/trace_view("HeapList", "ListStorage", values)]
-    end
-    if kind == "bytes_view" || kind == "buffer"
-      body = [@body, @native_value/trace_external("header", "data", bytes)]
-    end
-    if kind == "relation" || kind == "relation_copy"
-      let rows: list = native_memory/record_pointer("ValueTuple")
-      let cell_trace: list = native_value/trace_external("row", "data", values)
-      if kind == "relation"
-        cell_trace = [@native_value/trace_internal("row", "data", values),
-          native_memory/call("value_trace_slots", ["collection", native_memory/field(values, "row", "data"), native_memory/field(:U64, "row", "arity")])]
-      end
-      body = [@body,
-        @native_value/trace_internal("header", "heading", native_memory/pointer(:U32)),
-        @native_value/trace_internal("header", "rows", rows),
-        native/let_statement("rows", rows, native_memory/field(rows, "header", "rows")),
-        native/let_statement("length", :U64, native_memory/field(:U64, "header", "length")),
-        @native/for_range("i", "zero", "length", [
-          native/let_offset("row", rows, "rows", "i"), @cell_trace])]
-    end
-    // Structured locals have function scope. Prefix each descriptor's bindings.
-    let names: map = native_value/trace_bindings(body, kind)
-    descriptors = [@descriptors, native/when_statement(native/binary_expression(:Equal, "layout", string_concat("layout_", kind)),
-      [@native/rename_bindings(body, names), native/return_void()])]
-  end
-  context = native/define_function(context, "value_trace", [
-    native/let_statement("layout", :U64, native_memory/field(:U64, "object", "layout")),
-    native/when_statement(native/binary_expression(:Equal, "layout", "layout_opaque"), [native/return_void()]),
-    native/let_call("payload", bytes, "memory_payload", ["object"]),
-    native/let_call("original", bytes, "memory_original", ["object"]),
-    native/when_statement(native/binary_expression(:Equal, "layout", "layout_values"), [
-      native/let_statement("size", :U64, native_memory/field(:U64, "object", "size")),
-      native/let_statement("width", :U64, native/unary_expression(:SizeOf, word)),
-      native/let_statement("length", :U64, native/binary_expression(:Divide, "size", "width")),
-      native/let_statement("data", values, native/unary_expression(:PointerCast, "payload")),
-      native_memory/call("value_trace_slots", ["collection", "data", "length"]), native/return_void()]),
-    @descriptors, native_memory/store(:Bool, "collection", "failed", "true"), native/return_void()])
-  return context
-end
+  let slots: map = native_gen/context(context, "value_trace_slots")
+  let data: map = native_gen/ref(slots, "data")
+  let slot_collection: map = native_gen/ref(slots, "collection")
+  slots = native_gen/for_range(slots, "slot", native_gen/ref(slots, "zero"), native_gen/ref(slots, "length"), fn(body, index)
+    let [slot: map, with_slot: map] = native_gen/bind(body, "slot", native_gen/offset(data, index))
+    let [value: map, with_value: map] = native_gen/bind(with_slot, "value", native_gen/load(slot))
+    let [moved: map, with_moved: map] = native_gen/bind(with_value, "moved", native_gen/call(with_value, "value_trace_word", [slot_collection, value]))
+    return native_gen/store(with_moved, slot, moved)
+  end)
+  slots = native_gen/return_void(slots)
+  context = native_gen/finish(context, slots)
 
-verb native_value/trace_bindings(tree: list, prefix: string) -> map
-  let names: map = {}
-  if len(tree) > 0 && tree[0] == :Let
-    names[tree[1]] = string_concat(prefix, "_", tree[1])
-  end
-  for child in tree
-    if is_kind(child, :list)
-      for name, renamed in native_value/trace_bindings(child, prefix)
-        names[name] = renamed
-      end
+  let builder: map = native_gen/context(context, "value_trace")
+  let collection: map = native_gen/ref(builder, "collection")
+  let object: map = native_gen/ref(builder, "object")
+  let [layout: map, with_layout: map] = native_gen/bind(builder, "layout", native_gen/read(native_gen/field(builder, object, "layout")))
+  builder = native_gen/when(with_layout, native_gen/equal(layout, native_gen/ref(with_layout, "layout_opaque")),
+    fn(opaque) => native_gen/return_void(opaque))
+  let [payload: map, with_payload: map] = native_gen/bind(builder, "payload", native_gen/call(builder, "memory_payload", [object]))
+  let [original: map, with_original: map] = native_gen/bind(with_payload, "original", native_gen/call(with_payload, "memory_original", [object]))
+  let cases: list = []
+  for descriptor in native_value/trace_plan()
+    if descriptor[:policy] != :Opaque
+      cases = [@cases, [native_gen/ref(with_original, string_concat("layout_", descriptor[:name])), fn(body)
+        if descriptor[:policy] == :Values
+          return native_value/trace_values(body, collection, object, payload)
+        end
+        return native_value/trace_layout(body, descriptor, collection, payload, original)
+      end]]
     end
   end
-  return names
+  builder = native_gen/switch(with_original, layout, cases, fn(unknown)
+    let failed: map = native_gen/write(unknown, native_gen/field(unknown, collection, "failed"), native_gen/ref(unknown, "true"))
+    return native_gen/return_void(failed)
+  end)
+  let result: map = native_gen/finish(context, builder)
+  return result
 end

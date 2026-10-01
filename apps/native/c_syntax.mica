@@ -48,6 +48,38 @@ verb native/c_goto(block: int) -> map
   return {:kind -> :Goto, :block -> block}
 end
 
+// Thread generator state through child bodies in lexical order. The visitor
+// returns a replacement body and the state for the next child.
+verb native/c_map_child_bodies(input: map, initial: map, visit) -> list
+  let node: map = input
+  let context: map = initial
+  if node[:kind] == :If
+    let [yes: list, after_yes: map] = visit(node[:yes], context)
+    let [no: list, after_no: map] = visit(node[:no], after_yes)
+    node[:yes] = yes
+    node[:no] = no
+    return [node, after_no]
+  end
+  if node[:kind] == :Loop
+    let [body: list, after_body: map] = visit(node[:body], context)
+    node[:body] = body
+    return [node, after_body]
+  end
+  if node[:kind] == :Switch
+    let cases: list = []
+    for arm in node[:cases]
+      let [body: list, following: map] = visit(arm[:body], context)
+      context = following
+      cases = [@cases, native/c_case(arm[:value], body)]
+    end
+    let [fallback: list, following: map] = visit(node[:fallback], context)
+    node[:cases] = cases
+    node[:fallback] = fallback
+    return [node, following]
+  end
+  return [node, context]
+end
+
 verb native/c_tree_exits(nodes: list) -> bool
   if len(nodes) == 0
     return false
@@ -84,19 +116,9 @@ verb native/c_tree_labels(nodes: list, input: map) -> map
     if node[:kind] == :Goto
       labels[node[:block]] = true
     end
-    if node[:kind] == :If
-      labels = native/c_tree_labels(node[:yes], labels)
-      labels = native/c_tree_labels(node[:no], labels)
-    end
-    if node[:kind] == :Loop
-      labels = native/c_tree_labels(node[:body], labels)
-    end
-    if node[:kind] == :Switch
-      for arm in node[:cases]
-        labels = native/c_tree_labels(arm[:body], labels)
-      end
-      labels = native/c_tree_labels(node[:fallback], labels)
-    end
+    let [visited: map, following: map] = native/c_map_child_bodies(node, labels,
+      fn(body, current) => [body, native/c_tree_labels(body, current)])
+    labels = following
   end
   return labels
 end

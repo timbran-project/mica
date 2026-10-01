@@ -7,33 +7,6 @@ verb native_value/map_order(builder: map, left: map, right: map) -> list
   return [native_gen/field(current, comparison, "number"), current]
 end
 
-// Sorted runs preserve input order. Compaction replaces the preceding entry
-// on equality, so the last input value wins without changing the source array.
-verb native_value/compact_map(builder: map, span: map) -> list
-  let [written: map, current: map] = native_gen/bind(builder, "written", native_gen/zero(:U64))
-  current = native_gen/for_range(current, "read", native_gen/zero(:U64), span[:length], fn(input_body, index)
-    let body: map = input_body
-    let [entry: map, with_entry: map] = native_gen/bind(body, "entry", native_gen/read(native_sequence/at(span, index)))
-    body = with_entry
-    let [duplicate: map, with_duplicate: map] = native_gen/bind(body, "duplicate", native_gen/zero(:Bool))
-    body = with_duplicate
-    body = native_gen/unless(body, native_gen/equal(written, native_gen/zero(:U64)), fn(input_previous)
-      let previous: map = input_previous
-      let preceding: map = native_sequence/at(span, native_gen/subtract(written, native_gen/ref(previous, "one")))
-      let [order: map, with_order: map] = native_value/map_order(previous, native_gen/read(preceding), entry)
-      previous = with_order
-      previous = native_gen/assign(previous, duplicate, native_gen/equal(order, native_gen/zero(:I64)))
-      return native_gen/when(previous, duplicate, fn(replace) => native_gen/write(replace, preceding, entry))
-    end)
-    return native_gen/unless(body, duplicate, fn(input_append)
-      let append: map = input_append
-      append = native_gen/write(append, native_sequence/at(span, written), entry)
-      return native_gen/assign(append, written, native_gen/add(written, native_gen/ref(append, "one")))
-    end)
-  end)
-  return [written, current]
-end
-
 verb native_value/maps(input: map) -> map
   let context: map = input
   let entry: list = [:Record, "ValueMapEntry"]
@@ -74,7 +47,11 @@ verb native_value/maps(input: map) -> map
     let [result: map, with_result: map] = native_sequence/stable_merge(sort, native_sequence/span(data, length), scratch, ordered)
     sort = with_result
     sort = native_gen/assign(sort, sorted, result)
-    let [written: map, with_written: map] = native_value/compact_map(sort, native_sequence/span(sorted, length))
+    // Stable sorting keeps duplicate keys in source order; replacing the
+    // preceding entry makes the final input value win.
+    let [written: map, with_written: map] = native_sequence/compact_sorted(sort, native_sequence/span(sorted, length),
+      fn(body, left, right) => native_value/map_order(body, left, right),
+      fn(replace, preceding, entry) => native_gen/write(replace, preceding, entry))
     sort = with_written
     return native_gen/assign(sort, count, written)
   end)
@@ -85,12 +62,18 @@ verb native_value/maps(input: map) -> map
   return context
 end
 
+verb native_value/map_key_search_order(builder: map, candidate: map, key: map) -> list
+  let [comparison: map, current: map] = native_value/checked_result(builder, "value_compare",
+    [native_gen/field(builder, candidate, "key"), key], fn(failed) => native_gen/return_zero(failed))
+  let order: map = native_gen/field(current, comparison, "number")
+  return [native_gen/equal(order, native_gen/ref(current, "int_zero")),
+    native_gen/less(order, native_gen/ref(current, "int_zero")), current]
+end
+
 verb native_value/map_search(builder: map, header: map, key: map) -> list
   let span: map = native_sequence/span(native_gen/field(builder, header, "data"), native_gen/field(builder, header, "length"))
-  let result: list = native_sequence/search(builder, span, fn(body, candidate)
-    let [comparison: map, current: map] = native_value/checked_result(body, "value_compare", [native_gen/field(body, candidate, "key"), key], fn(failed) => native_gen/return_zero(failed))
-    return [native_gen/field(current, comparison, "number"), current]
-  end)
+  let result: list = native_sequence/search(builder, span,
+    fn(body, candidate) => native_value/map_key_search_order(body, candidate, key))
   return result
 end
 
@@ -107,11 +90,15 @@ verb native_value/map_lookup(input: map) -> map
   let builder: map = native_gen/context(context, "value_map_get")
   let [header: map, with_header: map] = native_value/open_value(builder, native_gen/ref(builder, "map"), "map", "HeapMap", fn(failed) => native_gen/return_zero(failed))
   builder = with_header
-  let [index: map, found: map, with_index: map] = native_value/map_search(builder, header, native_gen/ref(builder, "key"))
-  builder = with_index
-  builder = native_gen/unless(builder, found, fn(missing) => native_gen/return_zero(missing))
-  let entry: map = native_gen/load(native_gen/offset(native_gen/field(builder, header, "data"), index))
-  builder = native_gen/return_value(builder, native_gen/record(builder, result, {"ok" -> native_gen/ref(builder, "true"), "value" -> native_gen/field(builder, entry, "value")}))
+  let data: map = native_gen/field(builder, header, "data")
+  let length: map = native_gen/field(builder, header, "length")
+  let key: map = native_gen/ref(builder, "key")
+  builder = native_sequence/search_return(builder, native_sequence/span(data, length),
+    fn(body, candidate) => native_value/map_key_search_order(body, candidate, key), fn(found, index, entry)
+    return native_gen/return_value(found, native_gen/record(found, result,
+      {"ok" -> native_gen/ref(found, "true"), "value" -> native_gen/field(found, entry, "value")}))
+  end)
+  builder = native_gen/return_zero(builder)
   context = native_gen/finish(context, builder)
   return context
 end

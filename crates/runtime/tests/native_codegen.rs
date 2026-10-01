@@ -2127,6 +2127,10 @@ int main(void) {
     assert(mica_generated_order() == UINT64_MAX && calls == 2);
     calls = 0;
     assert(mica_generated_once() == 2 && calls == 1);
+    for (uint64_t choice = 0; choice < 12; ++choice)
+        assert(mica_generated_switch(choice) == (choice == 1 ? 10 : choice == 3 ? 3 : 0));
+    calls = 0;
+    assert(mica_generated_switch_once() == 10 && calls == 1);
     return 0;
 }
 "#,
@@ -2183,6 +2187,10 @@ int main(void) {
     let failures = [
         ("generated_scope_failure", "reference escaped its scope"),
         (
+            "generated_switch_label_failure",
+            "switch label requires a constant",
+        ),
+        (
             "generated_const_failure",
             "write requires a mutable location",
         ),
@@ -2201,6 +2209,14 @@ int main(void) {
         (
             "generated_call_context_failure",
             "expression belongs to another context",
+        ),
+        (
+            "generated_call_arity_failure",
+            "generated call arity mismatch",
+        ),
+        (
+            "generated_call_type_failure",
+            "generated call argument type mismatch",
         ),
         (
             "generated_fork_failure",
