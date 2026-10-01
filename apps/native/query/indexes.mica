@@ -1,0 +1,122 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+// Query indexes belong exclusively to one execution. Insertion mutates their
+// nodes in place; only rows escape through materialized results. Persistent
+// relation indexes never enter these functions.
+verb native_query/height(builder: map, node: map) -> map
+  let result: map = native_gen/call(builder, "kernel_height", [node])
+  return result
+end
+verb native_query/update_height(builder: map, node: map) -> map
+  let [height: map, ready: map] = native_gen/bind(builder, "height", native_query/height(builder, native_kernel/load_field(builder, node, "left")))
+  let [other: map, with_other: map] = native_gen/bind(ready, "other_height", native_query/height(ready, native_kernel/load_field(ready, node, "right")))
+  ready = native_gen/when(with_other, native_gen/less(height, other), fn(taller) => native_gen/assign(taller, height, other))
+  let result: map = native_kernel/store_field(ready, node, "height", native_gen/add(height, native_gen/ref(ready, "one")))
+  return result
+end
+verb native_query/rotate_body(module: map, heavy: string, light: string) -> map
+  let builder: map = native_gen/context(module, string_concat("kernel_query_rotate_", heavy))
+  let node: map = native_gen/ref(builder, "node")
+  let [pivot: map, ready: map] = native_gen/bind(builder, "pivot", native_kernel/load_field(builder, node, heavy))
+  ready = native_kernel/store_field(ready, node, heavy, native_kernel/load_field(ready, pivot, light))
+  ready = native_kernel/store_field(ready, pivot, light, node)
+  ready = native_query/update_height(ready, node)
+  ready = native_query/update_height(ready, pivot)
+  ready = native_gen/return_value(ready, pivot)
+  let result: map = native_gen/finish(module, ready)
+  return result
+end
+verb native_query/rebalance(builder: map, node: map, heavy: string, light: string) -> map
+  let [pivot: map, ready: map] = native_gen/bind(builder, "pivot", native_kernel/load_field(builder, node, heavy))
+  let outer: map = native_query/height(ready, native_kernel/load_field(ready, pivot, heavy))
+  let inner: map = native_query/height(ready, native_kernel/load_field(ready, pivot, light))
+  ready = native_gen/when(ready, native_gen/less(outer, inner), fn(double)
+    let result: map = native_kernel/store_field(double, node, heavy,
+      native_gen/call(double, string_concat("kernel_query_rotate_", light), [pivot]))
+    return result
+  end)
+  let result: map = native_gen/return_value(ready, native_gen/call(ready, string_concat("kernel_query_rotate_", heavy), [node]))
+  return result
+end
+verb native_query/insert_child(builder: map, node: map, row: map, side: string) -> map
+  let [child: map, ready: map] = native_gen/bind(builder, "child", native_gen/call(builder, "kernel_query_insert",
+    [native_gen/ref(builder, "worker"), native_kernel/load_field(builder, node, side), row]))
+  ready = native_gen/when(ready, native_kernel/absent(child), fn(failed) => native_gen/return_value(failed, child))
+  let result: map = native_kernel/store_field(ready, node, side, child)
+  return result
+end
+verb native_query/insert_body(module: map) -> map
+  let builder: map = native_gen/context(module, "kernel_query_insert")
+  let node: map = native_gen/ref(builder, "node")
+  let row: map = native_gen/ref(builder, "row")
+  builder = native_gen/when(builder, native_kernel/absent(node), fn(leaf)
+    let result: map = native_gen/return_value(leaf, native_gen/call(leaf, "kernel_make", [native_gen/ref(leaf, "worker"),
+      node, node, row, native_gen/ref(leaf, "true")]))
+    return result
+  end)
+  let [order: map, ready: map] = native_gen/bind(builder, "order", native_kernel/compare_rows(builder, row,
+    native_kernel/load_field(builder, node, "row"), native_kernel/tuple_order(native_gen/zero(:U64))))
+  ready = native_gen/when(ready, native_kernel/absent(order), fn(equal) => native_gen/return_value(equal, node))
+  ready = native_gen/branch(ready, native_gen/less(order, native_gen/ref(ready, "int_zero")),
+    fn(left) => native_query/insert_child(left, node, row, "left"),
+    fn(right) => native_query/insert_child(right, node, row, "right"))
+  ready = native_query/update_height(ready, node)
+  for sides in [["left", "right"], ["right", "left"]]
+    let heavy: map = native_query/height(ready, native_kernel/load_field(ready, node, sides[0]))
+    let light: map = native_query/height(ready, native_kernel/load_field(ready, node, sides[1]))
+    ready = native_gen/when(ready, native_gen/less(native_gen/add(light, native_gen/ref(ready, "one")), heavy),
+      fn(unbalanced) => native_query/rebalance(unbalanced, node, sides[0], sides[1]))
+  end
+  ready = native_gen/return_value(ready, node)
+  let result: map = native_gen/finish(module, ready)
+  return result
+end
+verb native_query/indexes(module: map) -> map
+  let context: map = native_query/rotate_body(module, "left", "right")
+  context = native_query/rotate_body(context, "right", "left")
+  let result: map = native_query/insert_body(context)
+  return result
+end
+
+verb native_query/join_index(builder: map, rows: map, positions: map) -> list
+  let [tree: map, ready: map] = native_query/row_set(builder)
+  ready = native_query/each_row(ready, rows, fn(iteration, row)
+    let [key: map, projected: map] = native_query/project_row(iteration, row, positions)
+    let [entry: map, with_entry: map] = native_query/index_entry(projected, key, row)
+    let generated_result: map = native_query/offer(with_entry, tree, entry)
+    return generated_result
+  end)
+  return [tree, ready]
+end
+
+verb native_query/join_matches_body(module: map) -> map
+  let builder: map = native_gen/context(module, "kernel_query_join_matches")
+  let node: map = native_gen/ref(builder, "node")
+  let key: map = native_gen/ref(builder, "key")
+  let left: map = native_gen/ref(builder, "left")
+  let output: map = native_gen/ref(builder, "output")
+  builder = native_gen/when(builder, native_kernel/absent(node), fn(empty) => native_gen/return_value(empty, native_gen/ref(empty, "kernel_ok")))
+  let [entry: map, with_entry: map] = native_gen/bind(builder, "entry", native_kernel/load_field(builder, node, "row"))
+  let [comparison: map, ready: map] = native_gen/checked_bind(with_entry, "comparison", native_gen/call(with_entry, "value_compare",
+    [native_query/cell(with_entry, entry, native_gen/zero(:U64)), key]), "ok", fn(failed) => native_query/error(failed, "schema"))
+  let order: map = native_gen/field(ready, comparison, "number")
+  for side in ["left", "right"]
+    let descend: map = native_gen/negate(native_gen/less(order, native_gen/ref(ready, "int_zero")))
+    if side == "right"
+      descend = native_gen/negate(native_gen/less(native_gen/ref(ready, "int_zero"), order))
+    end
+    ready = native_gen/when(ready, descend, fn(branch) => native_query/status_call(branch, "kernel_query_join_matches",
+      [native_gen/ref(branch, "worker"), native_kernel/load_field(branch, node, side), key, left, output]))
+  end
+  ready = native_gen/when(ready, native_kernel/absent(order), fn(matched)
+    let [joined: map, with_joined: map] = native_query/concat_rows(matched, left, native_query/cell(matched, entry, native_gen/ref(matched, "one")))
+    let [tree: map, with_tree: map] = native_gen/bind(with_joined, "output_tree", native_gen/root_read(native_gen/location(output)))
+    let inserted: map = native_query/offer(with_tree, tree, joined)
+    let generated_result: map = native_gen/root_write(inserted, native_gen/location(output), tree)
+    return generated_result
+  end)
+  ready = native_gen/return_value(ready, native_gen/ref(ready, "kernel_ok"))
+  let generated_result: map = native_gen/finish(module, ready)
+  return generated_result
+end

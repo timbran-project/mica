@@ -1,0 +1,167 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+// Query builders specialize row operations into native functions. They own
+// iteration, allocation checks, and canonical set construction; operators
+// describe which rows and columns to keep.
+verb native_query/width(builder: map, row: map) -> map
+  let generated_result: map = native_gen/call(builder, "kernel_width", [row])
+  return generated_result
+end
+verb native_query/cell(builder: map, row: map, position: map) -> map
+  let generated_result: map = native_gen/call(builder, "kernel_cell", [row, position])
+  return generated_result
+end
+verb native_query/fail(builder: map, status: map) -> map
+  if builder[:result] == :U64
+    let generated_result: map = native_gen/return_value(builder, status)
+    return generated_result
+  end
+  if builder[:result] == [:Record, "ValueResult"]
+    let generated_result: map = native_gen/return_value(builder, native_gen/zero(builder[:result]))
+    return generated_result
+  end
+  let generated_result: map = native_gen/return_value(builder, native_gen/record(builder, [:Record, "KernelQueryResult"],
+    {"status" -> status, "arity" -> native_gen/zero(:U64), "rows" -> native_gen/zero(native_value/word())}))
+  return generated_result
+end
+verb native_query/error(builder: map, name: string) -> map
+  let generated_result: map = native_query/fail(builder, native_gen/ref(builder, string_concat("kernel_", name)))
+  return generated_result
+end
+verb native_query/check(builder: map, condition: map, error: string) -> map
+  let generated_result: map = native_gen/unless(builder, condition, fn(failed) => native_query/error(failed, error))
+  return generated_result
+end
+verb native_query/value(builder: map, name: string, arguments: list) -> list
+  let [result: map, ready: map] = native_gen/checked_bind(builder, "value", native_gen/call(builder, name, arguments), "ok",
+    fn(failed) => native_query/error(failed, "oom"))
+  return [native_gen/field(ready, result, "value"), ready]
+end
+verb native_query/status_call(builder: map, name: string, arguments: list) -> map
+  let [status: map, ready: map] = native_gen/bind(builder, "status", native_gen/call(builder, name, arguments))
+  let generated_result: map = native_gen/unless(ready, native_kernel/absent(status), fn(failed) => native_query/fail(failed, status))
+  return generated_result
+end
+verb native_query/each_row(builder: map, rows: map, body) -> map
+  let generated_result: map = native_gen/for_range(builder, "row_index", native_gen/zero(:U64), native_query/width(builder, rows), fn(iteration, index)
+    let [row: map, ready: map] = native_gen/bind(iteration, "row", native_query/cell(iteration, rows, index))
+    return body(ready, row)
+  end)
+  return generated_result
+end
+
+// Allocate the complete row once. No operation here is a safepoint; its
+// descriptor sees the initialized row only after this helper returns.
+verb native_query/build_row(builder: map, width: map, cell) -> list
+  let [header: map, ready: map] = native_gen/bind(builder, "row_storage", native_gen/call(builder, "list_allocate",
+    [native_gen/ref(builder, "worker"), width, width]))
+  ready = native_query/check(ready, native_gen/negate(native_kernel/absent(header)), "oom")
+  let [data: map, with_data: map] = native_gen/bind(ready, "cells", native_kernel/load_field(ready, header, "data"))
+  ready = native_gen/for_range(with_data, "column", native_gen/zero(:U64), width, fn(iteration, position)
+    let generated_result: map = native_gen/store(iteration, native_gen/offset(data, position), cell(iteration, position))
+    return generated_result
+  end)
+  let [row: map, completed: map] = native_gen/bind(ready, "row", native_gen/expression(native_value/word(), :PackPointer,
+    [header, native_gen/ref(ready, "tag_list")]))
+  return [row, completed]
+end
+verb native_query/project_row(builder: map, row: map, positions: map) -> list
+  let generated_result: list = native_query/build_row(builder, native_query/width(builder, positions), fn(iteration, index)
+    let position: map = native_gen/expression(:U64, :Payload, [native_query/cell(iteration, positions, index)])
+    return native_query/cell(iteration, row, position)
+  end)
+  return generated_result
+end
+verb native_query/check_positions(builder: map, positions: map, arity: map) -> map
+  let ready: map = native_query/check(builder,
+    native_gen/equal(native_gen/expression(:U8, :Tag, [positions]), native_gen/ref(builder, "tag_list")), "schema")
+  let generated_result: map = native_query/each_row(ready, positions, fn(iteration, value)
+    let [position: map, checked: map] = native_gen/checked_bind(iteration, "position", native_gen/call(iteration, "value_as_int", [value]), "ok",
+      fn(failed) => native_query/error(failed, "schema"))
+    let number: map = native_gen/field(checked, position, "number")
+    checked = native_query/check(checked, native_gen/negate(native_gen/less(number, native_gen/ref(checked, "int_zero"))), "schema")
+    return native_query/check(checked, native_gen/less(native_gen/expression(:U64, :Convert, [number]), arity), "schema")
+  end)
+  return generated_result
+end
+verb native_query/row_set(builder: map) -> list
+  let generated_result: list = native_gen/bind(builder, "rows", native_gen/zero(native_kernel/pointer("Node")))
+  return generated_result
+end
+verb native_query/offer(builder: map, tree: map, row: map) -> map
+  let [updated: map, ready: map] = native_gen/bind(builder, "inserted", native_gen/call(builder, "kernel_query_insert",
+    [native_gen/ref(builder, "worker"), tree, row]))
+  ready = native_query/check(ready, native_gen/negate(native_kernel/absent(updated)), "oom")
+  let result: map = native_gen/assign(ready, tree, updated)
+  return result
+end
+verb native_query/finish_rows(builder: map, tree: map, arity: map) -> map
+  let generated_result: map = native_gen/return_value(builder, native_gen/call(builder, "kernel_query_finish",
+    [native_gen/ref(builder, "worker"), tree, arity]))
+  return generated_result
+end
+verb native_query/checked_query(builder: map, name: string, arguments: list) -> list
+  let [result: map, ready: map] = native_gen/bind(builder, "query_result", native_gen/call(builder, name, arguments))
+  ready = native_gen/unless(ready, native_kernel/absent(native_gen/field(ready, result, "status")),
+    fn(failed) => native_gen/return_value(failed, result))
+  return [result, ready]
+end
+
+// Index entries store [projected key, original row]. Ordered key lists
+// preserve arbitrary column order and repeated positions.
+verb native_query/index_entry(builder: map, key: map, row: map) -> list
+  let [entry: map, ready: map] = native_query/build_row(builder, native_gen/ref(builder, "two"), fn(body, position) => native_gen/zero(native_value/word()))
+  let header: map = native_gen/expression(native_memory/record_pointer("HeapList"), :UnpackPointer, [entry])
+  let data: map = native_kernel/load_field(ready, header, "data")
+  ready = native_gen/store(ready, data, key)
+  ready = native_gen/store(ready, native_gen/offset(data, native_gen/ref(ready, "one")), row)
+  return [entry, ready]
+end
+
+verb native_query/concat_rows(builder: map, left: map, right: map) -> list
+  let width: map = native_gen/add(native_query/width(builder, left), native_query/width(builder, right))
+  let [row: map, ready: map] = native_query/build_row(builder, width, fn(body, index) => native_gen/zero(native_value/word()))
+  let header: map = native_gen/expression(native_memory/record_pointer("HeapList"), :UnpackPointer, [row])
+  let data: map = native_kernel/load_field(ready, header, "data")
+  let offset: map = native_gen/zero(:U64)
+  for input in [left, right]
+    ready = native_gen/for_range(ready, "column", native_gen/zero(:U64), native_query/width(ready, input), fn(body, index)
+      let generated_result: map = native_gen/store(body, native_gen/offset(data, native_gen/add(offset, index)), native_query/cell(body, input, index))
+      return generated_result
+    end)
+    offset = native_query/width(ready, left)
+  end
+  return [row, ready]
+end
+
+verb native_query/gather_body(module: map) -> map
+  let builder: map = native_gen/context(module, "kernel_query_gather")
+  let node: map = native_gen/ref(builder, "node")
+  let worker: map = native_gen/ref(builder, "worker")
+  let rows: map = native_gen/ref(builder, "rows")
+  builder = native_gen/when(builder, native_kernel/absent(node), fn(empty)
+    let generated_result: map = native_gen/return_value(empty, native_gen/record(empty, [:Record, "ValueResult"],
+      {"ok" -> native_gen/ref(empty, "true"), "value" -> rows}))
+    return generated_result
+  end)
+  let [before: map, with_before: map] = native_query/value(builder, "kernel_query_gather",
+    [worker, native_kernel/load_field(builder, node, "left"), rows])
+  let [through: map, with_through: map] = native_query/value(with_before, "value_list_append",
+    [worker, before, native_kernel/load_field(with_before, node, "row")])
+  builder = native_gen/return_value(with_through, native_gen/call(with_through, "kernel_query_gather",
+    [worker, native_kernel/load_field(with_through, node, "right"), through]))
+  let generated_result: map = native_gen/finish(module, builder)
+  return generated_result
+end
+
+verb native_query/finish_body(module: map) -> map
+  let builder: map = native_gen/context(module, "kernel_query_finish")
+  let [empty: map, with_empty: map] = native_query/build_row(builder, native_gen/zero(:U64), fn(body, position) => native_gen/zero(native_value/word()))
+  let [rows: map, ready: map] = native_query/value(with_empty, "kernel_query_gather",
+    [native_gen/ref(with_empty, "worker"), native_gen/ref(with_empty, "tree"), empty])
+  builder = native_gen/return_value(ready, native_gen/record(ready, [:Record, "KernelQueryResult"],
+    {"status" -> native_gen/ref(ready, "kernel_ok"), "arity" -> native_gen/ref(ready, "arity"), "rows" -> rows}))
+  let generated_result: map = native_gen/finish(module, builder)
+  return generated_result
+end

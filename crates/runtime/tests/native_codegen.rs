@@ -2040,6 +2040,11 @@ fn native_relation_kernel_executes_on_both_mica_tiers() {
             include_str!("../../../apps/native/kernel/relations.mica"),
             include_str!("../../../apps/native/kernel/transactions.mica"),
             include_str!("../../../apps/native/kernel/lifecycle.mica"),
+            include_str!("../../../apps/native/query/builders.mica"),
+            include_str!("../../../apps/native/query/indexes.mica"),
+            include_str!("../../../apps/native/query/operators.mica"),
+            include_str!("../../../apps/native/query/sources.mica"),
+            include_str!("../../../apps/native/query/program.mica"),
         ] {
             runner.run_filein(source).unwrap_or_else(|error| {
                 panic!("{}", runner.render_source_task_error(&error));

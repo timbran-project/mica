@@ -11,10 +11,10 @@ use std::time::Instant;
 
 use clap::Parser;
 use mica_relation_kernel::{
-    ConflictPolicy, FactChangeKind, KernelError, RelationKernel, RelationMetadata, Transaction,
-    Tuple,
+    ConflictPolicy, ExecutionContext, FactChangeKind, KernelError, QueryPlan, RelationKernel,
+    RelationMetadata, Transaction, Tuple,
 };
-use mica_var::{Identity, Symbol, Value};
+use mica_var::{Identity, RelationValue, Symbol, Value};
 use serde_json::json;
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
@@ -31,6 +31,9 @@ struct Options {
     cases: NonZeroU32,
     #[arg(long)]
     bench: bool,
+    /// Measure composed queries over two 1,024-row relations.
+    #[arg(long)]
+    query_bench: bool,
     #[arg(long, default_value = "5")]
     samples: NonZeroU32,
     #[arg(long, default_value = "128")]
@@ -124,6 +127,7 @@ fn corpus(options: &Options) -> Vec<Step> {
             let b = (next(&mut seed) % 16) as i64 - 8;
             steps.push(Step::new(op, 0, relation, a, b, 0));
             steps.push(Step::new('q', 0, relation, a, b, next(&mut seed) % 4));
+            steps.push(Step::new('p', 0, relation, a, b, next(&mut seed) % 32));
         }
         if !case.is_multiple_of(4) {
             steps.push(Step::control('c', 0));
@@ -145,6 +149,28 @@ fn corpus(options: &Options) -> Vec<Step> {
         steps.push(Step::control('e', 0));
     }
     steps
+}
+fn query_plan(relation: u64, a: i64, b: i64, options: u64) -> QueryPlan {
+    let left = QueryPlan::scan(id(relation), [(options & 8 != 0).then(|| integer(a)), None]);
+    let right = QueryPlan::scan(id(3 - relation), [None, None]);
+    let lp = [0];
+    let rp = [((options >> 4) & 1) as u16];
+    match options & 7 {
+        0 => left.project([1, 0, 1]),
+        1 => QueryPlan::join_eq(left, right, lp, rp),
+        2 => QueryPlan::semi_join(left, right, lp, rp),
+        3 => QueryPlan::anti_join(left, right, lp, rp),
+        4 => QueryPlan::union(left, right),
+        5 => QueryPlan::difference(left, right),
+        6 => QueryPlan::join_eq(left, right, lp, rp).project([1, 3]),
+        _ => QueryPlan::union(
+            left,
+            QueryPlan::input(
+                RelationValue::new([Symbol::intern("a"), Symbol::intern("b")], [tuple(a, b)])
+                    .unwrap(),
+            ),
+        ),
+    }
 }
 fn reference(steps: &[Step]) -> Vec<String> {
     let kernel = kernel();
@@ -199,6 +225,25 @@ fn reference(steps: &[Step]) -> Vec<String> {
                         row.values()[0].as_int().unwrap(),
                         row.values()[1].as_int().unwrap()
                     );
+                }
+                reply
+            }
+            'p' => {
+                let rows = query_plan(relation, a, b, mask)
+                    .execute(
+                        transactions[slot].as_ref().unwrap(),
+                        &ExecutionContext::serial(),
+                    )
+                    .unwrap();
+                let mut reply = format!("p 0 {}", rows.len());
+                for row in rows {
+                    reply.push(' ');
+                    reply += &row
+                        .values()
+                        .iter()
+                        .map(|value| value.as_int().unwrap().to_string())
+                        .collect::<Vec<_>>()
+                        .join(":");
                 }
                 reply
             }
@@ -288,7 +333,36 @@ fn correctness(options: &Options) -> Result<()> {
     );
     Ok(())
 }
+fn rust_query_bench(name: &str, rounds: u32) -> (u128, u64, u64) {
+    let kernel = kernel();
+    let mut tx = kernel.begin();
+    for i in 0..1024 {
+        tx.assert(id(1), tuple(i, i % 64)).unwrap();
+        tx.assert(id(2), tuple(i, i % 32)).unwrap();
+    }
+    tx.commit().unwrap();
+    let tx = kernel.begin();
+    let operation = match name {
+        "query-project" => 0,
+        "query-join" => 1,
+        "query-semi" => 2,
+        _ => 6,
+    };
+    let plan = query_plan(1, 0, 0, operation).prepare();
+    let expected = if operation == 6 { 64 } else { 1024 };
+    let start = Instant::now();
+    let mut sum = 0;
+    for _ in 0..rounds {
+        let rows = plan.execute(&tx, &ExecutionContext::serial()).unwrap();
+        assert_eq!(rows.len(), expected);
+        sum += rows.len() as u64;
+    }
+    (start.elapsed().as_nanos(), sum, 0)
+}
 fn rust_bench(name: &str, rounds: u32, threads: usize) -> (u128, u64, u64) {
+    if name.starts_with("query-") {
+        return rust_query_bench(name, rounds);
+    }
     let kernel = kernel();
     let rows = match name {
         "read" => 4096,
@@ -386,13 +460,23 @@ fn benchmark(options: &Options) -> Result<()> {
     if cfg!(debug_assertions) {
         return Err("benchmarks require --release".into());
     }
-    for (name, threads) in [
-        ("read", 1),
-        ("update", 1),
-        ("disjoint", 1),
-        ("disjoint", 4),
-        ("contended", 4),
-    ] {
+    let workloads = if options.query_bench {
+        vec![
+            ("query-project", 1),
+            ("query-join", 1),
+            ("query-semi", 1),
+            ("query-compose", 1),
+        ]
+    } else {
+        vec![
+            ("read", 1),
+            ("update", 1),
+            ("disjoint", 1),
+            ("disjoint", 4),
+            ("contended", 4),
+        ]
+    };
+    for (name, threads) in workloads {
         let rounds = options.rounds.get() * if name == "read" { 16 } else { 1 };
         let (mut rust, mut native) = (Vec::new(), Vec::new());
         for sample in 0..options.samples.get() {
@@ -449,7 +533,7 @@ fn main() -> Result<()> {
         return Err("--cases must not exceed 1024".into());
     }
     correctness(&options)?;
-    if options.bench {
+    if options.bench || options.query_bench {
         benchmark(&options)?;
     }
     Ok(())

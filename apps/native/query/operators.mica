@@ -1,0 +1,93 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+verb native_query/project_body(module: map) -> map
+  let builder: map = native_gen/context(module, "kernel_query_project_rows")
+  let rows: map = native_gen/ref(builder, "rows")
+  let positions: map = native_gen/ref(builder, "positions")
+  builder = native_query/check_positions(builder, positions, native_gen/ref(builder, "arity"))
+  builder = native_query/check(builder, native_gen/negate(native_gen/less(native_gen/ref(builder, "kernel_64"), native_query/width(builder, positions))), "arity")
+  let [output: map, ready: map] = native_query/row_set(builder)
+  builder = native_query/each_row(ready, rows, fn(iteration, row)
+    let [projected: map, with_row: map] = native_query/project_row(iteration, row, positions)
+    let generated_result: map = native_query/offer(with_row, output, projected)
+    return generated_result
+  end)
+  builder = native_query/finish_rows(builder, output, native_query/width(builder, positions))
+  let generated_result: map = native_gen/finish(module, builder)
+  return generated_result
+end
+
+verb native_query/join_body(module: map, kind: string) -> map
+  let builder: map = native_gen/context(module, string_concat("kernel_query_", kind, "_rows"))
+  let left: map = native_gen/ref(builder, "left")
+  let right: map = native_gen/ref(builder, "right")
+  let left_positions: map = native_gen/ref(builder, "left_positions")
+  let right_positions: map = native_gen/ref(builder, "right_positions")
+  builder = native_query/check_positions(builder, left_positions, native_gen/ref(builder, "left_arity"))
+  builder = native_query/check_positions(builder, right_positions, native_gen/ref(builder, "right_arity"))
+  builder = native_query/check(builder, native_gen/equal(native_query/width(builder, left_positions), native_query/width(builder, right_positions)), "schema")
+  let arity: map = native_gen/ref(builder, "left_arity")
+  if kind == "join"
+    arity = native_gen/add(arity, native_gen/ref(builder, "right_arity"))
+    builder = native_query/check(builder, native_gen/negate(native_gen/less(native_gen/ref(builder, "kernel_64"), arity)), "arity")
+  end
+  let [index: map, indexed: map] = native_query/join_index(builder, right, right_positions)
+  let [output: map, ready: map] = native_query/row_set(indexed)
+  builder = native_query/each_row(ready, left, fn(iteration, row)
+    let [key: map, projected: map] = native_query/project_row(iteration, row, left_positions)
+    if kind == "join"
+      let generated_result: map = native_query/status_call(projected, "kernel_query_join_matches",
+        [native_gen/ref(projected, "worker"), index, key, row, native_gen/address(output)])
+      return generated_result
+    end
+    let [probe: map, with_probe: map] = native_query/index_entry(projected, key, row)
+    let [found: map, with_found: map] = native_gen/bind(with_probe, "found", native_gen/call(with_probe, "kernel_find",
+      [index, probe, native_gen/ref(with_probe, "one"), native_gen/ref(with_probe, "true")]))
+    let keep: map = native_kernel/absent(found)
+    if kind == "semi"
+      keep = native_gen/negate(keep)
+    end
+    let generated_result: map = native_gen/when(with_found, keep, fn(selected) => native_query/offer(selected, output, row))
+    return generated_result
+  end)
+  builder = native_query/finish_rows(builder, output, arity)
+  let generated_result: map = native_gen/finish(module, builder)
+  return generated_result
+end
+verb native_query/set_body(module: map, kind: string) -> map
+  let builder: map = native_gen/context(module, string_concat("kernel_query_", kind, "_rows"))
+  builder = native_query/check(builder, native_gen/equal(native_gen/ref(builder, "left_arity"), native_gen/ref(builder, "right_arity")), "arity")
+  let [right: map, indexed: map] = native_query/row_set(builder)
+  indexed = native_query/each_row(indexed, native_gen/ref(indexed, "right"), fn(body, row) => native_query/offer(body, right, row))
+  let [output: map, ready: map] = native_query/row_set(indexed)
+  if kind == "union"
+    ready = native_gen/assign(ready, output, right)
+  end
+  builder = native_query/each_row(ready, native_gen/ref(ready, "left"), fn(body, row)
+    if kind == "union"
+      let generated_result: map = native_query/offer(body, output, row)
+      return generated_result
+    end
+    let found: map = native_gen/call(body, "kernel_find", [right, row, native_gen/zero(:U64), native_gen/ref(body, "false")])
+    let generated_result: map = native_gen/when(body, native_kernel/absent(found), fn(selected) => native_query/offer(selected, output, row))
+    return generated_result
+  end)
+  builder = native_query/finish_rows(builder, output, native_gen/ref(builder, "left_arity"))
+  let generated_result: map = native_gen/finish(module, builder)
+  return generated_result
+end
+
+verb native_query/operators(module: map) -> map
+  let context: map = native_query/gather_body(module)
+  context = native_query/finish_body(context)
+  context = native_query/project_body(context)
+  context = native_query/join_matches_body(context)
+  for kind in ["join", "semi", "anti"]
+    context = native_query/join_body(context, kind)
+  end
+  for kind in ["union", "difference"]
+    context = native_query/set_body(context, kind)
+  end
+  return context
+end

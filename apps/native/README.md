@@ -62,7 +62,7 @@ Generated source, binaries, and measurement output stay outside source control.
 
 ## Transactional relation kernel
 
-`native_kernel/program()` generates the value library, managed heap, and in-memory relation store as one module.
+`native_kernel/program()` generates values, managed memory, the in-memory relation store, and query execution as one module.
 All storage, indexing, conflict checks, publication, and tracing algorithms come from Mica source.
 The platform bindings supply allocation and pthread primitives.
 
@@ -150,6 +150,56 @@ Other workers can read and commit concurrently. Callers park workers before exte
 `kernel_work(transaction)` exposes the last commit status and its conflicting relation and tuple.
 The current layer supports relation creation. Relation removal, transactional buffers, durable storage, rules, computed relations, authority, and dispatch remain separate work.
 
+### Query execution
+
+The Mica generators in `apps/native/query/` produce immutable query plans and a native executor.
+Plans compose at runtime. Scan leaves read the transaction snapshot and its staged writes.
+
+| Plan constructor | Operation |
+| --- | --- |
+| `kernel_query_scan(worker, relation, pattern, mask)` | Read a stored relation with bound columns |
+| `kernel_query_input(worker, value)` | Read a first-class relation value in canonical heading order |
+| `kernel_query_project(worker, input, positions)` | Select, reorder, or repeat columns; eliminate duplicate rows |
+| `kernel_query_join(worker, left, right, left_positions, right_positions)` | Match exact keys and concatenate both rows |
+| `kernel_query_semi(worker, left, right, left_positions, right_positions)` | Keep left rows with a matching right key |
+| `kernel_query_anti(worker, left, right, left_positions, right_positions)` | Keep left rows without a matching right key |
+| `kernel_query_union(worker, left, right)` | Combine rows with the same arity and eliminate duplicates |
+| `kernel_query_difference(worker, left, right)` | Remove matching right rows from the left input |
+
+Constructors return a managed `KernelQuery` pointer, or null on allocation failure.
+Positions are Mica lists of zero-based integers. Join position lists must have equal lengths.
+Empty join keys produce a Cartesian product. Projection onto no columns produces at most one empty row.
+Equality uses canonical value equality, including distinct integer and float keys.
+
+`kernel_query_execute(transaction, plan)` returns `KernelQueryResult` with `status`, `arity`, and `rows`.
+Successful rows form a sorted, duplicate-free Mica list of row lists.
+Errors use kernel status codes and return no partial result.
+Invalid columns, missing operands, and excessive plan depth return status 7.
+Incompatible arities return status 2. Plans permit at most 64 levels and results permit at most 64 columns.
+Query errors leave the transaction unchanged.
+
+Execution materializes intermediate results. Equality joins build an index on the right projected key.
+Unbound scans walk the existing ordered tree. Bound scans reuse 64-row pages from the indexed scan interface.
+Temporary query indexes use private mutable AVL nodes. They never mutate persistent relation indexes.
+Query execution does not collect or relocate objects inside the call.
+Large queries can therefore delay collection and exhaust allocation before returning.
+Streaming operators, internal GC polling, join planning, and shared-subplan caching remain future work.
+
+Plans and results use the generated heap and tracing descriptors.
+Before a safepoint, register roots for every retained plan and result.
+After collection, reload them through those roots. A rooted result can outlive its transaction.
+
+The authoring layer separates row mechanics from operator definitions:
+
+- `each_row` traverses materialized rows.
+- `build_row` and `project_row` allocate and fill row storage.
+- `join_index` and `join_matches_body` build and probe projected keys.
+- `row_set`, `offer`, and `finish_rows` produce canonical results.
+- `checked_query` and `status_call` propagate errors without partial results.
+
+These builders specialize Mica callbacks during generation. Native execution does not allocate callback objects.
+Operator definitions live in `query/operators.mica`; source access and plan execution have separate modules.
+
 ### Kernel checks and measurements
 
 Run the sanitizer fixture through C, libgccjit object code, and libgccjit shared code:
@@ -163,7 +213,7 @@ cargo test -p mica-runtime --test native_codegen native_relation_kernel_executes
 ```
 
 The fixture covers snapshots, catalogue atomicity, allocation failure, heap-valued tuples, AVL rotations, bounded scans, and concurrent commits.
-The Rust comparison checks complete query results and net commit deltas for reproducible transaction sequences.
+The Rust comparison checks composed queries, scan results, and net commit deltas for reproducible transaction sequences.
 It includes aborted transactions, collection between operations, and competing functional writes.
 The integration test requires identical generated C from both bootstrap execution tiers.
 
@@ -180,6 +230,10 @@ The benchmark measures indexed reads, small updates, disjoint writes, and conten
 It includes native collection and thread creation for parallel workloads. Initial store construction stays outside the measured interval.
 Samples alternate implementation order and report elapsed time, operation count, and conflicts.
 Write workloads verify the final stored tuples outside the measured interval.
+For query measurements, replace `--bench` with `--query-bench`.
+This measures projection, equality joins, semi joins, and join-plus-projection over two 1,024-row relations.
+Plan construction and store population stay outside the timer. Native allocation and collection remain inside it.
+The query benchmark checks result counts; the differential corpus checks complete rows.
 Generated modules, executables, and measurement output belong under ignored `target/` paths.
 
 ## Construction API
