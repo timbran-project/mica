@@ -71,6 +71,10 @@ static void value_graph(void) {
     mica_memory_root_push(&worker, &wire_root);
     mica_value_root_set(&root, graph);
     mica_value_root_set(&wire_root, wire);
+    // Exercise every descriptor through publication copying before major GC.
+    root.f_pointer = mica_memory_share(&worker, root.f_pointer);
+    assert(root.f_pointer);
+    assert(mica_value_hash(mica_value_root_get(&root)).f_number == hash.f_number);
     collect(&worker);
     graph = mica_value_root_get(&root);
     wire = mica_value_root_get(&wire_root);

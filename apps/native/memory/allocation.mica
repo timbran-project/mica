@@ -23,7 +23,7 @@ verb native_memory/allocation(input: map) -> map
     native/return_value(native/unary_expression(:PointerCast, "end"))])
   context = native/define_function(context, "memory_original", [
     native/let_statement("state", :U64, native_memory/field(:U64, "object", "state")),
-    native/when_statement(native/binary_expression(:Equal, "state", "memory_object_shared"), [
+    native/unless_statement(native/binary_expression(:Equal, "state", "memory_object_nursery"), [
       native/let_statement("source", object, native_memory/field(object, "object", "forward")),
       native/unless_statement(native/binary_expression(:Equal, "source", "memory_null_object"), [
         native/return_value(native/call_expression("memory_payload", ["source"]))])]),
@@ -103,7 +103,7 @@ verb native_memory/allocation(input: map) -> map
     native_memory/store(:U64, "candidate", "size", "size"),
     native_memory/store(:U64, "candidate", "layout", "layout"),
     native_memory/store(:U64, "candidate", "mark", "memory_n0"),
-    native_memory/store(:U64, "candidate", "state", "memory_object_shared"),
+    native_memory/store(:U64, "candidate", "state", "memory_object_mature"),
     native_memory/store(object, "candidate", "next", "memory_null_object"),
     native_memory/store(object, "candidate", "work", "memory_null_object"),
     native_memory/store(object, "candidate", "forward", "memory_null_object"),

@@ -80,15 +80,24 @@ Failed commits leave the published snapshot unchanged and retain the transaction
 After an allocation failure, the caller can retry the same transaction.
 After a conflict, the caller must begin a fresh transaction and repeat its work.
 
-One mutex serializes commit validation and publication.
-Workers leave the active heap set before they wait for this mutex.
-A commit roots its candidate, completes collection, then replaces the shared snapshot root.
-Every managed pointer used after collection comes from the registered transaction root.
-Allocation failure leaves the previous shared root intact.
+Commit preparation runs outside the publication mutex against a retained snapshot.
+It validates the transaction, builds persistent index paths, and calculates net deltas.
+Publication copies the candidate graph into mature storage and reuses immutable published subgraphs.
+The heap mutex protects this copy and its allocation metadata. Other workers can continue execution.
+Allocation failure preserves the source graph and the previous published root.
 
-The current collector scans the full live heap at publication.
-This cost affects small commits over large relations, even though index updates copy only search paths.
-Parallel commit preparation and incremental collection remain performance work.
+The kernel mutex protects snapshot capture and the final compare-and-install operation.
+Workers leave the active heap set before they wait for this mutex.
+If another writer publishes first, the transaction revalidates and rebuilds against that snapshot outside the mutex.
+Disjoint writes within one relation preserve both commits. Existing conflict policies still apply.
+After 64 lost publication attempts, the commit returns a conflict status.
+Every managed pointer used after a possible collection comes from the registered transaction root.
+
+Major collection runs at explicit requests or allocation pressure, independently of successful commits.
+Nursery exhaustion requests collection at the next safepoint.
+Mature allocation requests collection after page storage reaches twice its size after the last collection, with a 1 MiB minimum.
+Major collection still stops active workers and scans the full live heap.
+Publication copying does not reclaim storage or reset nurseries.
 
 ### Kernel interface
 
@@ -695,10 +704,16 @@ Promotion reserves destinations before it rewrites references. Failed reservatio
 It also preserves the private state of overflow allocations.
 
 Child values must belong to the same managed heap. Worker-private values cannot cross thread boundaries.
-`mica_memory_publish` promotes a registered root and retains it in the shared root registry.
+`mica_memory_share` copies a private graph into immutable mature storage without a safepoint or source relocation.
+It preserves cycles and shared edges, and reuses previously published immutable subgraphs.
+The caller must retain the result in a registered root before its next safepoint.
+`mica_memory_publish` first polls for collection, then copies a registered root and retains it in the shared root registry.
+It updates the source root to the immutable copy. Other private aliases keep their original objects.
 Another worker uses `mica_memory_acquire` to obtain its own registered root.
 `mica_memory_unpublish` removes the shared root. Acquired roots continue to retain the graph.
 Published graphs must be immutable. Mutable scratch buffers remain private to their owning worker.
+Mature GC survivors and published immutable objects have separate states.
+A mutable transaction record can survive collection and then receive fresh nursery references.
 A successful collection freezes surviving string and list backing storage, including overflow allocations. Their subsequent append operations allocate fresh backing storage.
 
 Remove private roots in reverse registration order with `mica_memory_root_pop`.

@@ -397,7 +397,7 @@ verb native/check_ownership(state, index)
     end
     if row[3] == :Store
       for origin in origins[row[5][1]]
-        native/ensure(origin[0] != :Gc || native/gc_origins(origins[row[5][0]]), "managed reference requires a managed object or RootStore")
+        native/ensure(origin[0] != :Gc || native/gc_origins(origins[row[5][0]]), string_concat("managed reference requires a managed object or RootStore at ", native/instruction_location(index, row)))
         native/ensure(origin[0] != :Stack, string_concat("stack address escapes through store at ", native/instruction_location(index, row)))
         native/ensure(origin[0] != :Borrow || native/contains(origins[row[5][0]], origin), string_concat("borrow escapes through store at ", native/instruction_location(index, row)))
       end

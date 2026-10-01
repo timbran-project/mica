@@ -10,6 +10,9 @@ verb native_memory/record_pointer(name: string) -> list
   return result
 end
 
+// Live-object next is normally null. Publication preparation temporarily uses
+// it for source-to-copy forwarding and links the copies through their next fields.
+// A copy retains its source in forward until interior pointers are repaired.
 verb native_memory/object_schema() -> list
   let object: list = native_memory/record_pointer("MemoryObject")
   let page: list = native_memory/record_pointer("MemoryPage")
@@ -29,7 +32,7 @@ verb native_memory/collection_schema() -> list
   let heap: list = native_memory/record_pointer("MemoryHeap")
   let object: list = native_memory/record_pointer("MemoryObject")
   return ["MemoryCollection", [
-    ["heap", heap], ["work", object], ["phase", :U64], ["failed", :Bool], ["copied", :U64]]]
+    ["heap", heap], ["work", object], ["copies", object], ["phase", :U64], ["failed", :Bool], ["copied", :U64]]]
 end
 
 verb native_memory/field(type_id, pointer, name: string) -> list
@@ -221,14 +224,19 @@ verb native_memory/context(input: map) -> map
   state = native/record_type(state, "MemoryHeap", [
     ["pages", page], ["free", [:Array, object, 10]], ["workers", worker], ["roots", root], ["trace", trace],
     ["mutex", bytes], ["collecting", :Bool], ["collection_ok", :Bool], ["epoch", :U64],
-    ["allocated", :U64], ["retained", :U64], ["copied", :U64], ["collections", :U64]])[1]
+    ["allocated", :U64], ["collection_limit", :U64], ["retained", :U64], ["copied", :U64], ["collections", :U64]])[1]
   let collection_schema: list = native_memory/collection_schema()
   state = native/record_type(state, collection_schema[0], collection_schema[1])[1]
   let declarations: list = [
     ["memory_object_free", :U64, "0000000000000000"],
     ["memory_object_nursery", :U64, "0000000000000001"],
-    ["memory_object_shared", :U64, "0000000000000002"],
+    ["memory_object_mature", :U64, "0000000000000002"],
     ["memory_object_private", :U64, "0000000000000003"],
+    ["memory_object_frozen", :U64, "0000000000000004"],
+    ["memory_trace_prepare", :U64, "0000000000000000"],
+    ["memory_trace_rewrite", :U64, "0000000000000001"],
+    ["memory_share_prepare", :U64, "0000000000000002"],
+    ["memory_share_rewrite", :U64, "0000000000000003"],
     ["memory_null_bytes", bytes, "null"], ["memory_null_object", object, "null"],
     ["memory_null_page", page, "null"], ["memory_null_worker", worker, "null"],
     ["memory_null_root", root, "null"], ["memory_null_trace", trace, "null"],
@@ -236,6 +244,7 @@ verb native_memory/context(input: map) -> map
     ["memory_previous", :I64, "-0000000000000001"],
     ["memory_cell_size", :U64, "0000000000000080"],
     ["memory_page_size", :U64, "0000000000010000"],
+    ["memory_collection_floor", :U64, "0000000000100000"],
     ["memory_alignment_mask", :U64, "fffffffffffffff8"],
     ["memory_allocation_limit", :U64, "7fffffffffff0000"]]
   let n: int = 0
@@ -267,6 +276,12 @@ verb native_memory/context(input: map) -> map
     [:ReadMemory, :WriteMemory, :Allocate], :Gc, "")
   context = native_memory/declare(context, "memory_visit", bytes,
     [["collection", collection, :Borrow], ["pointer", bytes, :Gc]], effects, :Gc, "")
+  context = native_memory/declare(context, "memory_share_visit", bytes,
+    [["collection", collection, :Borrow], ["pointer", bytes, :Gc]], effects, :Gc, "")
+  context = native_memory/declare(context, "memory_share", bytes,
+    [["worker", worker, :Borrow], ["pointer", bytes, :Gc]], effects, :Gc, "")
+  context = native_memory/declare(context, "memory_discard", :Void,
+    [["heap", heap, :Borrow], ["object", object, :Gc]], effects, :Value, "")
   context = native_memory/declare(context, "memory_sweep", :Void,
     [["heap", heap, :Borrow], ["reclaim", :Bool, :Value]], [:ReadMemory, :WriteMemory, :Release], :Value, "")
   context = native_memory/declare(context, "memory_rollback_nursery", :Void,

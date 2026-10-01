@@ -94,14 +94,34 @@ verb native_value/trace_view(builder: map, header: map, collection: map) -> map
   return current
 end
 
+// During publication, an existing immutable entry array needs no edge rewrites.
+// A reserved copy also has the frozen state, but still has a forwarding source.
+// Major collection must trace both kinds of storage to retain their descendants.
+verb native_value/shared_map_storage(builder: map, collection: map, raw_data: map, internal: map) -> list
+  let [shared_storage: map, with_shared: map] = native_gen/bind(builder, "shared_storage", native_gen/ref(builder, "false"))
+  let ready: map = native_gen/when(with_shared, native_gen/less(native_gen/ref(with_shared, "memory_trace_rewrite"),
+    native_gen/read(native_gen/field(with_shared, collection, "phase"))), fn(sharing)
+    return native_gen/unless(sharing, native_gen/equal(raw_data, internal), fn(external)
+      let [owner: map, with_owner: map] = native_gen/bind(external, "owner", native_gen/call(external, "memory_object", [raw_data]))
+      return native_gen/when(with_owner,
+        native_gen/equal(native_gen/read(native_gen/field(with_owner, owner, "state")), native_gen/ref(with_owner, "memory_object_frozen")),
+        fn(frozen) => native_gen/assign(frozen, shared_storage,
+          native_gen/equal(native_gen/read(native_gen/field(frozen, owner, "forward")), native_gen/ref(frozen, "memory_null_object"))))
+    end)
+  end)
+  return [shared_storage, ready]
+end
+
 verb native_value/trace_map(builder: map, header: map, collection: map, payload: map, original: map) -> map
   let [data: map, with_data: map] = native_gen/bind(builder, "data", native_gen/read(native_gen/field(builder, header, "data")))
   let [raw_data: map, with_raw: map] = native_gen/bind(with_data, "raw_data", native_gen/cast(native_memory/pointer(:U8), data))
   let [header_size: map, with_size: map] = native_gen/bind(with_raw, "header_size", native_gen/sizeof([:Record, "HeapMap"]))
   let [internal: map, with_internal: map] = native_gen/bind(with_size, "internal", native_gen/offset(original, header_size))
-  let current: map = native_gen/branch(with_internal, native_gen/equal(raw_data, internal),
+  let [shared_storage: map, ready: map] = native_value/shared_map_storage(with_internal, collection, raw_data, internal)
+  let current: map = native_gen/branch(ready, native_gen/equal(raw_data, internal),
     fn(inline) => native_value/trace_internal(inline, header, "data", payload, original),
     fn(external) => native_value/trace_external(external, header, "data", collection))
+  current = native_gen/when(current, shared_storage, fn(shared) => native_gen/return_void(shared))
   current = native_gen/assign(current, data, native_gen/read(native_gen/field(current, header, "data")))
   let [length: map, with_length: map] = native_gen/bind(current, "length", native_gen/read(native_gen/field(current, header, "length")))
   current = native_gen/for_range(with_length, "entry", native_gen/ref(with_length, "zero"), length, fn(initial_entry, index)

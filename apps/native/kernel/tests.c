@@ -252,6 +252,69 @@ static void conflicts(void) {
     destroy(&f);
 }
 
+static void prepared_publication_rebases(void) {
+    struct fixture f;
+    init(&f);
+    declare(&f, 1, SET);
+    struct mica_KernelTransaction retained, a, b;
+    begin(&f, &retained);
+    begin(&f, &a);
+    assert(write_pair(&a, 1, 10, 20, true) == OK);
+    // Preparation must work while the publication mutex is already held.
+    mica_foreign_memory_lock(f.kernel.f_mutex);
+    assert(mica_kernel_prepare(&a) == OK);
+    mica_foreign_memory_unlock(f.kernel.f_mutex);
+    struct mica_KernelWork *work = mica_kernel_work(&a);
+    work->f_candidate = (void *)mica_memory_share(&f.worker, (void *)work->f_candidate);
+    assert(work->f_candidate);
+    uint64_t collections = f.heap.f_collections;
+    begin(&f, &b);
+    assert(write_pair(&b, 1, 30, 40, true) == OK);
+    assert(mica_kernel_commit(&b) == OK);
+    assert(mica_kernel_end(&b));
+    assert(!mica_kernel_try_publish(&a));
+    assert(!mica_kernel_work(&a)->f_done);
+    assert(mica_kernel_commit(&a) == OK);
+    assert(f.heap.f_collections == collections);
+    unsigned deltas = 0;
+    for (struct mica_KernelDelta *d = mica_kernel_deltas(&a); d; d = d->f_next) {
+        assert(d->f_asserted && cell(d->f_row, 0) == 10);
+        ++deltas;
+    }
+    assert(deltas == 1 && mica_kernel_end(&a));
+    assert(mica_memory_safepoint(&f.worker, true));
+    assert(count(&retained, 1) == 0);
+    begin(&f, &a);
+    assert(count(&a, 1) == 2);
+    assert(mica_kernel_end(&a) && mica_kernel_end(&retained));
+    destroy(&f);
+}
+
+static void small_commit_copies_changed_paths(void) {
+    struct fixture f;
+    init(&f);
+    declare(&f, 1, FUNCTIONAL);
+    struct mica_KernelTransaction tx;
+    begin(&f, &tx);
+    for (unsigned i = 0; i < 1024; ++i) assert(write_pair(&tx, 1, i, i, true) == OK);
+    assert(mica_kernel_commit(&tx) == OK && mica_kernel_end(&tx));
+    assert(mica_memory_safepoint(&f.worker, true));
+    uint64_t live = f.heap.f_retained;
+    uint64_t copied = f.heap.f_copied, collections = f.heap.f_collections;
+    begin(&f, &tx);
+    assert(write_pair(&tx, 1, 511, 511, false) == OK);
+    assert(write_pair(&tx, 1, 511, 9000, true) == OK);
+    assert(mica_kernel_commit(&tx) == OK && mica_kernel_end(&tx));
+    assert(f.heap.f_collections == collections);
+    assert(f.heap.f_copied > copied && f.heap.f_copied - copied < live / 8);
+    begin(&f, &tx);
+    assert(count(&tx, 1) == 1024);
+    mica_type_Value rows[1];
+    assert(scan(&tx, 1, 511, 0, 1, rows, 1).f_count == 1 && cell(rows[0], 1) == 9000);
+    assert(mica_kernel_end(&tx));
+    destroy(&f);
+}
+
 struct parallel {
     struct fixture *fixture;
     unsigned id, rounds;
@@ -507,6 +570,8 @@ int main(int argc, char **argv) {
     basics();
     indexes_and_gc();
     conflicts();
+    prepared_publication_rebases();
+    small_commit_copies_changed_paths();
     concurrency();
     allocation_failures();
     return 0;

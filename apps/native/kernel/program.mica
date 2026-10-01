@@ -25,7 +25,7 @@ verb native_kernel/schemas() -> list
     ["Change", [["next", native_kernel/pointer("Change")], ["before", relation], ["after", relation], ["writes", node]]],
     ["Delta", [["next", native_kernel/pointer("Delta")], ["relation", :U64], ["row", word], ["asserted", :Bool]]],
     ["Work", [["base", native_kernel/pointer("Snapshot")], ["changes", native_kernel/pointer("Change")],
-      ["candidate", native_kernel/pointer("Snapshot")], ["deltas", native_kernel/pointer("Delta")],
+      ["checked", native_kernel/pointer("Snapshot")], ["candidate", native_kernel/pointer("Snapshot")], ["deltas", native_kernel/pointer("Delta")],
       ["status", :U64], ["conflict_relation", :U64], ["conflict_tuple", word], ["done", :Bool]]]]
 end
 

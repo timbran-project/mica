@@ -202,6 +202,113 @@ static void sweep_unlinks_empty_pages_from_free_lists(void) {
     for (unsigned i = 0; i < 10; ++i) assert(heap.f_free.elements[i] == NULL);
 }
 
+// Copying for publication must preserve private aliases, cycles, and views.
+static void share_graph_without_collection(void) {
+    struct mica_MemoryHeap heap = {0};
+    struct mica_MemoryWorker worker = {0};
+    struct mica_MemoryRoot root = {0}, shared = {0};
+    assert(mica_memory_heap_init(&heap, mica_memory_test_trace));
+    assert(mica_memory_worker_init(&worker, &heap, 32768));
+    assert(mica_memory_enter(&worker));
+    assert(mica_memory_root_push(&worker, &root));
+    struct mica_MemoryTestPair *pair = (void *)mica_memory_allocate(&worker, sizeof(*pair), 1);
+    *pair = (struct mica_MemoryTestPair){.f_value = 71};
+    root.f_pointer = (void *)pair;
+    // Surviving GC alone must not make a mutable worker object immutable.
+    assert(mica_memory_safepoint(&worker, true));
+    pair = (void *)root.f_pointer;
+    struct mica_MemoryTestView *view = (void *)mica_memory_allocate(&worker, sizeof(*view), 2);
+    uint8_t *bytes = mica_memory_allocate(&worker, 100, 0);
+    memset(bytes, 0x79, 100);
+    *view = (struct mica_MemoryTestView){.f_base = bytes, .f_offset = 9, .f_data = bytes + 9};
+    pair->f_left = (void *)pair;
+    pair->f_right = (void *)view;
+    uint64_t collections = heap.f_collections, used = worker.f_used;
+    struct mica_MemoryTestPair *copy = (void *)mica_memory_share(&worker, (void *)pair);
+    assert(copy && copy != pair && copy->f_left == (void *)copy && copy->f_value == 71);
+    assert(pair->f_left == (void *)pair && pair->f_right == (void *)view);
+    struct mica_MemoryTestView *copied_view = (void *)copy->f_right;
+    assert(copied_view != view && copied_view->f_base != bytes);
+    assert(copied_view->f_data == copied_view->f_base + 9 && copied_view->f_data[0] == 0x79);
+    assert(heap.f_collections == collections && worker.f_used == used);
+    assert(mica_memory_object((void *)pair)->f_next == NULL);
+    root.f_pointer = (void *)copy;
+    uint64_t copied = heap.f_copied;
+    assert(mica_memory_share(&worker, (void *)copy) == (void *)copy);
+    assert(heap.f_copied == copied);
+    assert(mica_memory_publish(&worker, &root, &shared));
+    assert(heap.f_collections == collections && heap.f_copied == copied);
+    assert(mica_memory_root_pop(&worker, &root));
+    assert(mica_memory_leave(&worker));
+    assert(mica_memory_worker_release(&worker));
+    // The published graph outlives the worker and its nursery.
+    assert(mica_memory_worker_init(&worker, &heap, 1024));
+    assert(mica_memory_enter(&worker));
+    assert(mica_memory_safepoint(&worker, true));
+    assert(shared.f_pointer == (void *)copy && copy->f_left == (void *)copy);
+    assert(copied_view->f_data[0] == 0x79);
+    copied = heap.f_copied;
+    assert(mica_memory_share(&worker, shared.f_pointer) == shared.f_pointer);
+    assert(heap.f_copied == copied); // Major GC preserves the immutable state.
+    assert(mica_memory_unpublish(&worker, &shared));
+    assert(mica_memory_safepoint(&worker, true));
+    assert(heap.f_retained == 0);
+    assert(mica_memory_leave(&worker));
+    assert(mica_memory_worker_release(&worker));
+    assert(mica_memory_heap_release(&heap));
+}
+
+static void failed_share_preserves_source(void) {
+    struct mica_MemoryHeap heap = {0};
+    struct mica_MemoryWorker worker = {0};
+    assert(mica_memory_heap_init(&heap, mica_memory_test_trace));
+    assert(mica_memory_worker_init(&worker, &heap, 262144));
+    assert(mica_memory_enter(&worker));
+    struct mica_MemoryTestPair *pair = (void *)mica_memory_allocate(&worker, sizeof(*pair), 1);
+    uint8_t *bytes = mica_memory_allocate(&worker, 100000, 0);
+    memset(bytes, 0x38, 100000);
+    *pair = (struct mica_MemoryTestPair){.f_left = bytes, .f_right = (void *)pair};
+    uint64_t used = worker.f_used;
+    fail_after = 1; // Reserve the pair, then fail on its large child.
+    assert(!mica_memory_share(&worker, (void *)pair));
+    fail_after = SIZE_MAX;
+    assert(pair->f_left == bytes && pair->f_right == (void *)pair);
+    assert(bytes[99999] == 0x38 && worker.f_used == used);
+    assert(mica_memory_object((void *)pair)->f_next == NULL);
+    assert(mica_memory_object((void *)pair)->f_work == NULL);
+    assert(mica_memory_object(bytes)->f_next == NULL);
+    assert(heap.f_copied == 0 && heap.f_collections == 0);
+    struct mica_MemoryTestPair *copy = (void *)mica_memory_share(&worker, (void *)pair);
+    assert(copy && copy->f_right == (void *)copy && copy->f_left[99999] == 0x38);
+    assert(mica_memory_leave(&worker));
+    assert(mica_memory_worker_release(&worker));
+    assert(mica_memory_heap_release(&heap));
+}
+
+static void heap_growth_requests_collection(void) {
+    struct mica_MemoryHeap heap = {0};
+    struct mica_MemoryWorker worker = {0};
+    struct mica_MemoryRoot root = {0};
+    assert(mica_memory_heap_init(&heap, mica_memory_test_trace));
+    assert(mica_memory_worker_init(&worker, &heap, 262144));
+    assert(mica_memory_enter(&worker));
+    assert(mica_memory_root_push(&worker, &root));
+    root.f_pointer = mica_memory_allocate(&worker, 100000, 0);
+    assert(root.f_pointer);
+    memset(root.f_pointer, 0x82, 100000);
+    for (unsigned i = 0; i < 20; ++i) assert(mica_memory_share(&worker, root.f_pointer));
+    assert(!worker.f_pressure && heap.f_allocated >= heap.f_collection_limit);
+    assert(heap.f_collections == 0);
+    assert(mica_memory_safepoint(&worker, false));
+    assert(heap.f_collections == 1 && heap.f_retained == 100000);
+    assert(root.f_pointer[99999] == 0x82);
+    assert(mica_memory_root_pop(&worker, &root));
+    assert(mica_memory_safepoint(&worker, true));
+    assert(mica_memory_leave(&worker));
+    assert(mica_memory_worker_release(&worker));
+    assert(mica_memory_heap_release(&heap));
+}
+
 struct worker_test {
     struct mica_MemoryHeap *heap;
     unsigned rounds;
@@ -271,6 +378,9 @@ int main(void) {
     page_reuse_and_large_objects();
     failed_collection_preserves_private_allocations();
     sweep_unlinks_empty_pages_from_free_lists();
+    share_graph_without_collection();
+    failed_share_preserves_source();
+    heap_growth_requests_collection();
     worker_lifecycle();
     assert(allocations == releases);
     return 0;

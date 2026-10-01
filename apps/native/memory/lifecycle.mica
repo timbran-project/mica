@@ -70,6 +70,7 @@ verb native_memory/lifecycle(input: map) -> map
     native/let_statement("slot", native_memory/pointer(bytes), native/field_pointer_expression("heap", "mutex")),
     native/let_statement("adopted", bytes, native/binary_expression(:Adopt, "slot", "sync")),
     native_memory/store(trace, "heap", "trace", "trace"),
+    native_memory/store(:U64, "heap", "collection_limit", "memory_collection_floor"),
     native_memory/store(:Bool, "heap", "collection_ok", "memory_true"),
     native/return_value("memory_true")])
   context = native/define_function(context, "memory_heap_release", [
@@ -135,6 +136,9 @@ verb native_memory/lifecycle(input: map) -> map
     native/if_statement("requested", wait, [
       native/let_statement("pressure", :Bool, native_memory/field(:Bool, "worker", "pressure")),
       native/let_statement("should_collect", :Bool, "collect"),
+      native/unless_statement(native/binary_expression(:Less,
+        native_memory/field(:U64, "heap", "allocated"), native_memory/field(:U64, "heap", "collection_limit")),
+        [native/set_statement("should_collect", "memory_true")]),
       native/when_statement("pressure", [native/set_statement("should_collect", "memory_true")]),
       native/when_statement("should_collect", [
         native_memory/store(:Bool, "heap", "collecting", "memory_true"),
@@ -189,10 +193,15 @@ verb native_memory/lifecycle(input: map) -> map
       native/when_statement(native/binary_expression(:Equal, "candidate", "memory_null_root"), [native/return_value("memory_false")]),
       native/when_statement(native/binary_expression(:Equal, "candidate", "source"), [native/break_statement()]),
       native/set_statement("candidate", native_memory/field(root, "candidate", "next"))]),
-    native/unless_statement(native/call_expression("memory_safepoint", ["worker", "memory_true"]), [native/return_value("memory_false")]),
+    native/unless_statement(native/call_expression("memory_safepoint", ["worker", "memory_false"]), [native/return_value("memory_false")]),
+    native/let_statement("original", bytes, native_memory/root(bytes, "source", "pointer")),
+    native/let_call("prepared", bytes, "memory_share", ["worker", "original"]),
+    native/unless_statement(native/binary_expression(:Equal, "original", "memory_null_bytes"), [
+      native/when_statement(native/binary_expression(:Equal, "prepared", "memory_null_bytes"), [native/return_value("memory_false")])]),
     @worker_heap, @sync,
     native/unless_statement(native/binary_expression(:Equal, native_memory/field(:U64, "shared", "registration"), "memory_n0"), failed),
-    native_memory/store_root(bytes, "shared", "pointer", native_memory/root(bytes, "source", "pointer")),
+    native_memory/store_root(bytes, "source", "pointer", "prepared"),
+    native_memory/store_root(bytes, "shared", "pointer", "prepared"),
     native_memory/store(:U64, "shared", "bits", native_memory/field(:U64, "source", "bits")),
     native_memory/store_root(root, "shared", "next", native_memory/root(root, "heap", "roots")),
     native_memory/store_root(root, "heap", "roots", native/typed_expression(root, native/manage_expression("shared"))),
@@ -210,5 +219,6 @@ verb native_memory/lifecycle(input: map) -> map
     @active, @worker_heap, @sync, @find_shared,
     native/root_store_statement("link", native_memory/root(root, "shared", "next")),
     native/store_statement("shared", native/typed_expression([:Record, "MemoryRoot"], [:Zero])), @success])
+  context = native_memory/sharing(context)
   return context
 end
