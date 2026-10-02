@@ -27,7 +27,7 @@ void mica_foreign_memory_platform_release(uint8_t *pointer) { free(pointer); }
 #endif
 
 // These values are the public status and conflict-policy codes.
-enum { OK, UNKNOWN, ARITY, NONPERSISTENT, KEY, CONFLICT, NAME, SCHEMA, OOM, CLOSED, LIMIT, CANCELLED };
+enum { OK, UNKNOWN, ARITY, NONPERSISTENT, KEY, CONFLICT, NAME, SCHEMA, OOM, CLOSED, LIMIT, CANCELLED, PERMISSION };
 enum { SET, FUNCTIONAL, EVENT };
 
 struct fixture {
@@ -57,7 +57,7 @@ static void init(struct fixture *f) {
     assert(mica_kernel_heap_init(&f->heap));
     assert(mica_memory_worker_init(&f->worker, &f->heap, 32768));
     assert(mica_memory_enter(&f->worker));
-    assert(mica_kernel_init(&f->kernel, &f->worker));
+    assert(mica_kernel_init(&f->kernel, &f->worker, integer(7)));
 }
 static void destroy(struct fixture *f) {
     assert(mica_kernel_release(&f->kernel, &f->worker));
@@ -69,7 +69,7 @@ static void destroy(struct fixture *f) {
 }
 static void begin(struct fixture *f, struct mica_KernelTransaction *tx) {
     memset(tx, 0, sizeof(*tx));
-    assert(mica_kernel_begin(&f->kernel, &f->worker, tx) == OK);
+    assert(mica_kernel_begin(&f->kernel, &f->worker, tx, integer(7)) == OK);
 }
 static void declare(struct fixture *f, uint64_t id, uint64_t policy) {
     struct mica_KernelTransaction tx = {0};
@@ -355,7 +355,7 @@ static void *parallel_worker(void *opaque) {
     for (unsigned i = 0; i < p->rounds; ++i) {
         for (;;) {
             struct mica_KernelTransaction tx = {0};
-            assert(mica_kernel_begin(&p->fixture->kernel, &worker, &tx) == OK);
+            assert(mica_kernel_begin(&p->fixture->kernel, &worker, &tx, integer(7)) == OK);
             if (p->contended) {
                 mica_type_Value rows[1];
                 struct mica_KernelScanResult read = scan(&tx, 1, 0, 0, 1, rows, 1);
@@ -458,7 +458,7 @@ static struct mica_KernelRuleDef *self_rule(struct mica_MemoryWorker *worker, ui
     if (!atom) return NULL;
     struct mica_ValueResult source = mica_value_string(worker, (const uint8_t *)"", 0);
     if (!source.f_ok) return NULL;
-    return mica_kernel_rule_definition(worker, head, terms, atom, NULL, integer(1), source.f_value);
+    return mica_kernel_rule_definition(worker, head, terms, atom, NULL, integer(7), source.f_value);
 }
 static uint64_t stage_self_rule(struct mica_KernelTransaction *tx, uint64_t id, uint64_t head, unsigned arity, bool active, bool replace) {
     struct mica_KernelRuleDef *definition = NULL;
@@ -962,7 +962,7 @@ static void *rule_parallel_worker(void *opaque) {
         bool committed = false;
         for (unsigned attempt = 0; attempt < 1000 && !committed; ++attempt) {
             struct mica_KernelTransaction tx = {0};
-            assert(mica_kernel_begin(&job->fixture->kernel, &worker, &tx) == OK);
+            assert(mica_kernel_begin(&job->fixture->kernel, &worker, &tx, integer(7)) == OK);
             // Reading and toggling one shared definition forces task retries.
             struct mica_KernelRuleResult current = mica_kernel_rule(&tx, 1);
             assert(current.f_status == OK);
@@ -1085,7 +1085,7 @@ static int trace(void) {
         assert(slot < 2);
         struct mica_KernelTransaction *tx = &transactions[slot];
         uint64_t status = OK;
-        if (op == 'b') status = mica_kernel_begin(&f.kernel, &f.worker, tx);
+        if (op == 'b') status = mica_kernel_begin(&f.kernel, &f.worker, tx, integer(7));
         else if (op == 'e') assert(mica_kernel_end(tx));
         else if (op == 'g') assert(mica_memory_safepoint(&f.worker, true));
         else if (op == 'a' || op == 'r') status = write_pair(tx, id, a, b, op == 'a');
@@ -2479,8 +2479,24 @@ static void preparation_cancellation(void) {
 #endif
 }
 
+// Trigger after observable evaluation progress, independent of page reuse.
+struct round_cancellation {
+    struct mica_KernelTransaction *transaction;
+    struct mica_KernelBudget *budget;
+    uint64_t rows;
+    bool cancelled;
+};
+static bool cancel_after_round_progress(uint8_t *context, uint64_t bytes, uint64_t steps) {
+    struct round_cancellation *control = (void *)context;
+    (void)bytes;
+    (void)steps;
+    if (!control->cancelled && control->budget->f_rows < control->rows) {
+        assert(mica_kernel_cancel(control->transaction));
+        control->cancelled = true;
+    }
+    return true;
+}
 static void fixpoint_cancellation(void) {
-#ifdef MICA_MEMORY_TEST_ALLOCATOR
     struct fixture f;
     init(&f);
     struct mica_KernelTransaction tx;
@@ -2509,16 +2525,15 @@ static void fixpoint_cancellation(void) {
     struct mica_MemoryRoot round = {.f_pointer = (uint8_t *)component};
     assert(mica_memory_root_push(&f.worker, &round));
     assert(mica_memory_safepoint(&f.worker, true));
-    atomic_store(&allocation_transaction, &tx);
-    uint64_t row_allowance = budget.f_rows;
-    atomic_store(&cancellation_allocation, 2);
+    struct round_cancellation state = {.transaction = &tx, .budget = &budget, .rows = budget.f_rows};
+    struct mica_MemoryControl control = {.f_context = (void *)&state, .f_check = cancel_after_round_progress};
+    mica_memory_control_push(&f.worker, &control);
     assert(mica_kernel_rule_round(&f.worker, (struct mica_KernelRuleEvaluation *)evaluation.f_pointer,
         (struct mica_KernelRuleComponent *)round.f_pointer, false, false, &budget) == CANCELLED);
-    assert(atomic_load(&cancellation_allocation) == 0);
-    atomic_store(&allocation_transaction, NULL);
-    atomic_store(&cancellation_allocation, -1);
+    assert(state.cancelled && f.worker.f_control == &control);
+    mica_memory_control_pop(&f.worker);
     assert(f.worker.f_roots == &round && budget.f_status == CANCELLED);
-    assert(budget.f_rows < row_allowance);
+    assert(budget.f_rows < state.rows);
     assert(mica_memory_root_pop(&f.worker, &round));
     assert(mica_memory_root_pop(&f.worker, &evaluation));
     assert(mica_kernel_commit(&tx) == CANCELLED && mica_kernel_end(&tx));
@@ -2526,7 +2541,6 @@ static void fixpoint_cancellation(void) {
     assert(count(&tx, 1) == 0 && count(&tx, 2) == 0);
     assert(mica_kernel_end(&tx));
     destroy(&f);
-#endif
 }
 
 struct publication_cancellation {
@@ -2651,25 +2665,25 @@ static void snapshot_admission(void) {
     assert(!mica_kernel_release(&f.kernel, &f.worker));
     assert(mica_kernel_set_retention_limit(&f.kernel, &f.worker, 0) == LIMIT);
     assert(f.kernel.f_retention_limit == 1);
-    assert(mica_kernel_begin(&f.kernel, &f.worker, &refused) == LIMIT);
+    assert(mica_kernel_begin(&f.kernel, &f.worker, &refused, integer(7)) == LIMIT);
     assert(!refused.f_worker && !refused.f_signal && !refused.f_root.f_registration);
     assert(f.worker.f_roots == &tx.f_root && !f.worker.f_control);
     assert(mica_kernel_declare(&tx, 1, 1, 2, SET, 0, 0) == OK);
     assert(write_pair(&tx, 1, 1, 2, true) == OK);
     assert(mica_kernel_commit(&tx) == OK);
     assert(f.kernel.f_retained_transactions == 1); // Commit still retains the transaction's roots.
-    assert(mica_kernel_begin(&f.kernel, &f.worker, &refused) == LIMIT);
+    assert(mica_kernel_begin(&f.kernel, &f.worker, &refused, integer(7)) == LIMIT);
     uint64_t allocated = f.heap.f_allocated;
     assert(mica_kernel_end(&tx));
     assert(!f.kernel.f_retained_transactions && f.heap.f_allocated == allocated);
     begin(&f, &tx);
     assert(count(&tx, 1) == 1);
     assert(mica_kernel_cancel(&tx));
-    assert(mica_kernel_begin(&f.kernel, &f.worker, &refused) == LIMIT);
+    assert(mica_kernel_begin(&f.kernel, &f.worker, &refused, integer(7)) == LIMIT);
     assert(mica_kernel_end(&tx));
     assert(!f.kernel.f_retained_transactions);
     assert(mica_kernel_set_retention_limit(&f.kernel, &f.worker, 0) == OK);
-    assert(mica_kernel_begin(&f.kernel, &f.worker, &refused) == LIMIT);
+    assert(mica_kernel_begin(&f.kernel, &f.worker, &refused, integer(7)) == LIMIT);
     assert(!f.kernel.f_retained_transactions && !refused.f_worker);
     assert(mica_kernel_set_retention_limit(&f.kernel, &f.worker, 1) == OK);
     begin(&f, &tx);
@@ -2689,7 +2703,7 @@ static void heap_admission(void) {
     assert(mica_memory_allocate(&f.worker, remaining - sizeof(struct mica_MemoryObject), 0));
     assert(f.worker.f_used == f.worker.f_capacity);
     struct mica_KernelTransaction tx = {0};
-    assert(mica_kernel_begin(&f.kernel, &f.worker, &tx) == LIMIT);
+    assert(mica_kernel_begin(&f.kernel, &f.worker, &tx, integer(7)) == LIMIT);
     assert(!f.kernel.f_retained_transactions && !tx.f_worker && !f.worker.f_control);
     assert(f.heap.f_allocated + f.heap.f_nursery_bytes == capacity);
     assert(mica_memory_safepoint(&f.worker, true));
@@ -2766,7 +2780,7 @@ static void *admit_snapshot(void *opaque) {
     struct mica_KernelTransaction tx = {0};
     assert(mica_memory_worker_init(&worker, &job->fixture->heap, 8192));
     assert(mica_memory_enter(&worker));
-    uint64_t status = mica_kernel_begin(&job->fixture->kernel, &worker, &tx);
+    uint64_t status = mica_kernel_begin(&job->fixture->kernel, &worker, &tx, integer(7));
     assert(status == OK || status == LIMIT);
     if (status == OK) atomic_fetch_add(&job->admitted, 1);
     assert(mica_memory_leave(&worker));
@@ -2918,10 +2932,360 @@ static void authority_projection(void) {
     destroy(&f);
 }
 
+// Policy IDs 1..6 are read/write/export/catalogue/grant/root projections.
+static void begin_tenant(struct fixture *f, struct mica_KernelTransaction *tx, int64_t tenant) {
+    memset(tx, 0, sizeof(*tx));
+    assert(mica_kernel_begin(&f->kernel, &f->worker, tx, integer(tenant)) == OK);
+}
+static struct mica_KernelRuleDef *tenant_definition(struct mica_KernelTransaction *tx, int64_t tenant,
+                                                    uint64_t head, uint64_t source, bool negative) {
+    struct mica_MemoryWorker *worker = tx->f_worker;
+    struct mica_KernelRuleAtom *atoms = rule_atom_pair(worker, source, negative, NULL);
+    if (negative) atoms = rule_atom_pair(worker, 14, false, atoms);
+    struct mica_ValueResult text = mica_value_string(worker, (const uint8_t *)"policy fixture", 14);
+    assert(text.f_ok);
+    struct mica_KernelRuleDef *definition = mica_kernel_rule_definition(worker, head,
+        rule_pair(worker), atoms, NULL, integer(tenant), text.f_value);
+    assert(definition);
+    return definition;
+}
+static uint64_t tenant_edge(struct mica_KernelTransaction *tx, uint64_t id, int64_t tenant,
+                            uint64_t head, uint64_t source, bool negative) {
+    return mica_kernel_rule_add(tx, id, tenant_definition(tx, tenant, head, source, negative), true);
+}
+static uint64_t read_status(struct mica_KernelTransaction *tx, uint64_t id) {
+    struct mica_KernelBudget budget = operation_budget(tx);
+    return mica_kernel_read(tx, id, &budget).f_status;
+}
+static void configure_policy(struct fixture *f) {
+    struct mica_KernelTransaction tx;
+    begin(f, &tx);
+    for (uint64_t id = 1; id <= 6; ++id)
+        assert(mica_kernel_declare(&tx, id, id, id <= 3 ? 2 : 1, SET, 0, 0) == OK);
+    for (uint64_t id = 10; id <= 17; ++id)
+        assert(mica_kernel_declare(&tx, id, id, 2, SET, 0, 0) == OK);
+    policy_fact(&tx, 6, 7, 0, true);
+    for (int64_t tenant = 8; tenant <= 12; ++tenant) {
+        if (tenant != 9) policy_fact(&tx, 4, tenant, 0, true);
+    }
+    for (uint64_t id = 10; id <= 14; ++id) {
+        if (id != 12) policy_fact(&tx, 1, 8, id, true);
+    }
+    policy_fact(&tx, 2, 8, 10, true);
+    policy_fact(&tx, 3, 8, 12, true);
+    policy_fact(&tx, 3, 8, 15, true);
+    policy_fact(&tx, 1, 9, 12, true);
+    policy_fact(&tx, 1, 9, 15, true);
+    policy_fact(&tx, 1, 10, 10, true); // Source read alone cannot export.
+    policy_fact(&tx, 3, 11, 12, true); // Head export alone cannot read sources.
+    policy_fact(&tx, 1, 12, 10, true);
+    policy_fact(&tx, 3, 12, 12, true);
+    assert(write_pair(&tx, 10, 1, 2, true) == OK);
+    assert(write_pair(&tx, 11, 3, 4, true) == OK);
+    assert(write_pair(&tx, 13, 1, 2, true) == OK);
+    assert(write_pair(&tx, 14, 1, 2, true) == OK);
+    assert(write_pair(&tx, 14, 3, 4, true) == OK);
+    assert(mica_kernel_set_authority_policy(&tx, 6, 4, 5, 1, 2, 3) == OK);
+    assert(mica_kernel_commit(&tx) == OK && mica_kernel_end(&tx));
+}
+static void inactive_authority(void) {
+    struct fixture f;
+    init(&f);
+    configure_policy(&f);
+    struct mica_KernelTransaction tx;
+    begin(&f, &tx);
+    assert(mica_kernel_rule_add(&tx, 1, tenant_definition(&tx, 8, 12, 10, false), false) == OK);
+    policy_fact(&tx, 3, 8, 12, false);
+    assert(mica_kernel_commit(&tx) == PERMISSION);
+    assert(!mica_kernel_work(&tx)->f_candidate);
+    assert(mica_kernel_rule_remove(&tx, 1) == OK);
+    assert(mica_kernel_commit(&tx) == OK && mica_kernel_end(&tx));
+    begin(&f, &tx);
+    policy_fact(&tx, 3, 8, 12, true);
+    assert(mica_kernel_rule_add(&tx, 1, tenant_definition(&tx, 8, 12, 10, false), false) == OK);
+    assert(mica_kernel_commit(&tx) == OK && mica_kernel_end(&tx));
+    // An existing inactive definition does not retain publishing authority.
+    begin(&f, &tx);
+    policy_fact(&tx, 3, 8, 12, false);
+    assert(mica_kernel_commit(&tx) == OK && mica_kernel_end(&tx));
+    begin(&f, &tx);
+    struct mica_KernelRuleResult rule = mica_kernel_rule(&tx, 1);
+    assert(rule.f_status == OK && !rule.f_rule->f_active);
+    assert(mica_kernel_rule_update(&tx, 1, rule.f_rule->f_definition, true) == PERMISSION);
+    policy_fact(&tx, 3, 8, 12, true);
+    assert(mica_kernel_commit(&tx) == OK && mica_kernel_end(&tx));
+    // Replacing an inactive definition is another installation, even though
+    // it emits no rows. Final-candidate source authorization still applies.
+    begin(&f, &tx);
+    assert(mica_kernel_rule_update(&tx, 1, tenant_definition(&tx, 8, 12, 11, false), false) == OK);
+    policy_fact(&tx, 1, 8, 11, false);
+    assert(mica_kernel_commit(&tx) == PERMISSION);
+    assert(mica_kernel_rule_remove(&tx, 1) == OK);
+    assert(mica_kernel_commit(&tx) == OK && mica_kernel_end(&tx));
+    destroy(&f);
+}
+static void transactional_authority(void) {
+    struct fixture f;
+    init(&f);
+    struct mica_KernelTransaction tx, reader, concurrent;
+    begin_tenant(&f, &tx, 8);
+    assert(mica_kernel_declare(&tx, 1, 1, 2, SET, 0, 0) == PERMISSION);
+    assert(mica_kernel_rules(&tx).f_status == PERMISSION);
+    assert(read_status(&tx, 1) == PERMISSION);
+    assert(mica_kernel_end(&tx));
+    // An all-zero configuration revokes implicit bootstrap ownership. Rollback
+    // restores the unconfigured world; the draft task's boundary cache is fixed.
+    begin(&f, &tx);
+    assert(mica_kernel_set_authority_policy(&tx, 0, 0, 0, 0, 0, 0) == OK);
+    assert(refresh(&tx) == OK && mica_kernel_work(&tx)->f_authority->f_root);
+    assert(mica_kernel_end(&tx));
+    configure_policy(&f);
+    begin_tenant(&f, &tx, 8);
+    assert(count(&tx, 10) == 1);
+    assert(read_status(&tx, 12) == PERMISSION);
+    assert(write_pair(&tx, 11, 1, 2, true) == PERMISSION);
+    assert(mica_kernel_set_authority_policy(&tx, 0, 0, 0, 0, 0, 0) == PERMISSION);
+    assert(mica_kernel_declare(&tx, 18, 18, 2, SET, 0, 0) == PERMISSION);
+    assert(mica_kernel_rule_evaluate(&tx).f_status == PERMISSION);
+    assert(tenant_edge(&tx, 1, 7, 12, 10, false) == PERMISSION);
+    assert(tenant_edge(&tx, 1, 8, 16, 10, false) == PERMISSION);
+    assert(tenant_edge(&tx, 1, 8, 12, 10, false) == OK);
+    assert(tenant_edge(&tx, 2, 8, 15, 13, true) == OK);
+    assert(mica_kernel_commit(&tx) == OK && mica_kernel_end(&tx));
+    begin_tenant(&f, &tx, 10);
+    assert(tenant_edge(&tx, 3, 10, 12, 10, false) == PERMISSION);
+    assert(mica_kernel_rule_remove(&tx, 1) == PERMISSION);
+    assert(mica_kernel_end(&tx));
+    begin_tenant(&f, &tx, 11);
+    assert(tenant_edge(&tx, 3, 11, 12, 10, false) == PERMISSION);
+    assert(mica_kernel_end(&tx));
+    begin_tenant(&f, &reader, 9);
+    assert(mica_kernel_rules(&reader).f_status == PERMISSION);
+    assert(read_status(&reader, 10) == PERMISSION);
+    struct mica_KernelQueryResult denied = mica_kernel_query_execute(&reader, query_scan(&f, 10));
+    assert(denied.f_status == PERMISSION && !denied.f_rows);
+    // A fused anti-join must reject an unreadable source, not treat it as empty.
+    struct mica_KernelQuery *left = query_scan(&f, 12);
+    struct mica_KernelQuery *right = query_scan(&f, 13);
+    mica_type_Value positions = query_columns(&f.worker, (int64_t[]){0, 1}, 2);
+    struct mica_KernelQuery *anti = mica_kernel_query_anti(&f.worker, left, right, positions, positions);
+    denied = mica_kernel_query_execute(&reader, anti);
+    assert(denied.f_status == PERMISSION && !denied.f_rows);
+    assert(count(&reader, 12) == 1);
+    // This reader cannot see the blocked source. Its existing world row still
+    // suppresses (1,2), leaving only (3,4) in the negated head.
+    mica_type_Value rows[4];
+    struct mica_KernelScanResult scanned = scan(&reader, 15, 0, 0, 0, rows, 4);
+    assert(scanned.f_status == OK && scanned.f_count == 1 && cell(rows[0], 0) == 3);
+    uint64_t policy_revision = mica_kernel_work(&reader)->f_base->f_policy_revision;
+    begin(&f, &concurrent);
+    assert(write_pair(&concurrent, 17, 5, 6, true) == OK);
+    assert(mica_kernel_commit(&concurrent) == OK);
+    assert(mica_kernel_work(&concurrent)->f_candidate->f_policy_revision == policy_revision);
+    assert(mica_kernel_end(&concurrent));
+    assert(mica_kernel_commit(&reader) == OK && mica_kernel_end(&reader));
+    // A changed policy invalidates a permission-dependent read-only commit.
+    begin_tenant(&f, &reader, 9);
+    assert(count(&reader, 12) == 1);
+    begin(&f, &concurrent);
+    policy_fact(&concurrent, 1, 9, 12, false);
+    assert(mica_kernel_commit(&concurrent) == OK && mica_kernel_end(&concurrent));
+    assert(mica_memory_safepoint(&f.worker, true));
+    assert(count(&reader, 12) == 1); // Immutable historical snapshot and cache.
+    assert(mica_kernel_commit(&reader) == CONFLICT && mica_kernel_end(&reader));
+    begin_tenant(&f, &reader, 9);
+    assert(read_status(&reader, 12) == PERMISSION && mica_kernel_end(&reader));
+    // A permission check can precede a rejected operation without recording
+    // fact or catalogue dependencies. The unchanged-commit fast path still
+    // has to validate the policy generation.
+    begin_tenant(&f, &reader, 8);
+    assert(mica_kernel_write(&reader, 10, integer(1), true) == ARITY);
+    assert(!mica_kernel_work(&reader)->f_changes && !mica_kernel_work(&reader)->f_rule_dependencies);
+    begin(&f, &concurrent);
+    policy_fact(&concurrent, 2, 8, 10, false);
+    assert(mica_kernel_commit(&concurrent) == OK && mica_kernel_end(&concurrent));
+    assert(mica_kernel_commit(&reader) == CONFLICT && mica_kernel_end(&reader));
+    // A caught denial also observes policy. A later grant invalidates that
+    // observation even when the task has no staged writes.
+    begin_tenant(&f, &reader, 9);
+    assert(read_status(&reader, 10) == PERMISSION);
+    begin(&f, &concurrent);
+    policy_fact(&concurrent, 1, 9, 10, true);
+    assert(mica_kernel_commit(&concurrent) == OK && mica_kernel_end(&concurrent));
+    assert(mica_kernel_commit(&reader) == CONFLICT && mica_kernel_end(&reader));
+    // Catalogue-only access also records policy use (no fact read dependency).
+    begin_tenant(&f, &reader, 8);
+    assert(mica_kernel_rule_plan(&reader).f_status == OK);
+    begin(&f, &concurrent);
+    policy_fact(&concurrent, 4, 8, 0, false);
+    assert(mica_kernel_commit(&concurrent) == OK && mica_kernel_end(&concurrent));
+    assert(mica_kernel_commit(&reader) == CONFLICT && mica_kernel_end(&reader));
+    begin(&f, &tx);
+    policy_fact(&tx, 4, 8, 0, true);
+    policy_fact(&tx, 1, 9, 12, true);
+    assert(mica_kernel_commit(&tx) == OK && mica_kernel_end(&tx));
+    // Two tenants independently support the same conclusion.
+    begin_tenant(&f, &tx, 12);
+    assert(tenant_edge(&tx, 3, 12, 12, 10, false) == OK);
+    assert(mica_kernel_commit(&tx) == OK && mica_kernel_end(&tx));
+    begin(&f, &tx);
+    policy_fact(&tx, 3, 8, 12, false);
+    assert(refresh(&tx) == PERMISSION);
+    assert(mica_kernel_rule_evaluate(&tx).f_status == PERMISSION);
+    assert(mica_kernel_commit(&tx) == PERMISSION);
+    assert(!mica_kernel_work(&tx)->f_candidate && mica_kernel_work(&tx)->f_dirty);
+    begin_tenant(&f, &reader, 9);
+    assert(count(&reader, 12) == 1 && mica_kernel_end(&reader));
+    // Repair the private draft by exact deactivation, then publish together.
+    struct mica_KernelRuleResult rule = mica_kernel_rule(&tx, 1);
+    assert(rule.f_status == OK);
+    assert(mica_kernel_rule_update(&tx, 1, rule.f_rule->f_definition, false) == OK);
+    assert(mica_kernel_commit(&tx) == OK && mica_kernel_end(&tx));
+    begin_tenant(&f, &reader, 9);
+    assert(count(&reader, 12) == 1 && mica_kernel_end(&reader));
+    begin(&f, &tx);
+    // Revoking the remaining source permission requires removing that rule.
+    policy_fact(&tx, 1, 12, 10, false);
+    assert(mica_kernel_commit(&tx) == PERMISSION);
+    assert(mica_kernel_rule_remove(&tx, 3) == OK);
+    assert(mica_kernel_commit(&tx) == OK && mica_kernel_end(&tx));
+    begin_tenant(&f, &reader, 9);
+    assert(count(&reader, 12) == 0 && mica_kernel_end(&reader));
+    // Configuration is transactional even without any extensional writes.
+    begin(&f, &tx);
+    assert(mica_kernel_set_authority_policy(&tx, 0, 0, 0, 0, 0, 0) == OK);
+    assert(mica_kernel_rule_remove(&tx, 2) == OK);
+    assert(mica_kernel_commit(&tx) == OK && mica_kernel_end(&tx));
+    begin(&f, &tx);
+    assert(!mica_kernel_work(&tx)->f_authority->f_root);
+    assert(mica_kernel_rules(&tx).f_status == PERMISSION && mica_kernel_end(&tx));
+    destroy(&f);
+}
+
+static bool refuse_authority_allocation(uint8_t *context, uint64_t bytes, uint64_t steps) {
+    struct mica_KernelTransaction *tx = (void *)context;
+    (void)steps;
+    // Work allocation precedes admission. Refuse the subsequent cache build.
+    return !bytes || !tx->f_worker || !tx->f_root.f_registration || !tx->f_kernel->f_retained_transactions;
+}
+static void derived_authority(void) {
+    struct fixture f;
+    init(&f);
+    configure_policy(&f);
+    struct mica_KernelTransaction tx, reader = {0};
+    struct mica_MemoryControl refused = {.f_context = (void *)&reader, .f_check = refuse_authority_allocation};
+    mica_memory_control_push(&f.worker, &refused);
+    assert(mica_kernel_begin(&f.kernel, &f.worker, &reader, integer(9)) == LIMIT);
+    assert(!reader.f_worker && !reader.f_signal && !reader.f_root.f_registration);
+    assert(!f.kernel.f_retained_transactions && !f.worker.f_roots && f.worker.f_control == &refused);
+    mica_memory_control_pop(&f.worker);
+    begin(&f, &tx);
+    assert(mica_kernel_declare(&tx, 18, 18, 2, SET, 0, 0) == OK);
+    mica_type_Value cells[] = {integer(14), relation_identity(12)};
+    struct mica_ValueResult row = mica_value_list(&f.worker, cells, 2);
+    assert(row.f_ok && mica_kernel_write(&tx, 18, row.f_value, true) == OK);
+    assert(install_edge(&tx, 100, 1, 18, false) == OK);
+    assert(mica_kernel_commit(&tx) == OK && mica_kernel_end(&tx));
+    begin_tenant(&f, &reader, 14);
+    assert(count(&reader, 12) == 0);
+    begin(&f, &tx);
+    row = mica_value_list(&f.worker, cells, 2);
+    assert(row.f_ok && mica_kernel_write(&tx, 18, row.f_value, false) == OK);
+    assert(mica_kernel_commit(&tx) == OK && mica_kernel_end(&tx));
+    assert(mica_kernel_commit(&reader) == CONFLICT && mica_kernel_end(&reader));
+    begin_tenant(&f, &reader, 14);
+    assert(read_status(&reader, 12) == PERMISSION && mica_kernel_end(&reader));
+    // A malformed tenant projection fails admission after capture. It must
+    // release its retention slot, root, cancellation signal, and memory control.
+    begin(&f, &tx);
+    assert(write_pair(&tx, 1, 15, 12, true) == OK);
+    assert(mica_kernel_commit(&tx) == OK && mica_kernel_end(&tx));
+    for (unsigned i = 0; i < 8; ++i) {
+        assert(mica_kernel_begin(&f.kernel, &f.worker, &reader, integer(15)) == SCHEMA);
+        assert(!reader.f_worker && !reader.f_signal && !reader.f_root.f_registration);
+        assert(!f.kernel.f_retained_transactions && !f.worker.f_roots && !f.worker.f_control);
+    }
+    destroy(&f);
+}
+static void authority_tenant_collection(void) {
+    struct fixture f = {0};
+    assert(mica_kernel_heap_init(&f.heap));
+    assert(mica_memory_worker_init(&f.worker, &f.heap, 32768));
+    assert(mica_memory_enter(&f.worker));
+    const char *name = "tenant-with-managed-storage";
+    struct mica_ValueResult owner = mica_value_string(&f.worker, (const uint8_t *)name, strlen(name));
+    assert(owner.f_ok && mica_kernel_init(&f.kernel, &f.worker, owner.f_value));
+    struct mica_ValueResult tenant = mica_value_string(&f.worker, (const uint8_t *)name, strlen(name));
+    assert(tenant.f_ok);
+    // Admission's first safepoint must root the incoming tenant before moving
+    // its nursery payload. The equal owner already lives in the shared heap.
+    f.heap.f_pressure = true;
+    uint64_t epoch = f.heap.f_epoch;
+    struct mica_KernelTransaction tx = {0};
+    assert(mica_kernel_begin(&f.kernel, &f.worker, &tx, tenant.f_value) == OK);
+    assert(f.heap.f_epoch > epoch && f.worker.f_roots == &tx.f_root);
+    assert(mica_kernel_work(&tx)->f_authority->f_root);
+    assert(mica_memory_safepoint(&f.worker, true));
+    struct mica_KernelWork *work = mica_kernel_work(&tx);
+    struct mica_BoolResult equal = mica_value_equal(work->f_tenant, work->f_base->f_owner);
+    assert(equal.f_ok && equal.f_value);
+    assert(mica_kernel_declare(&tx, 1, 1, 2, SET, 0, 0) == OK);
+    assert(mica_kernel_commit(&tx) == OK && mica_kernel_end(&tx));
+    destroy(&f);
+}
+static void authority_controls(void) {
+    struct fixture f;
+    init(&f);
+    configure_policy(&f);
+    struct mica_KernelTransaction tx, reader;
+    // Cancellation and budget failures publish neither grants nor configuration.
+    begin(&f, &tx);
+    policy_fact(&tx, 1, 9, 10, true);
+    assert(mica_kernel_set_authority_policy(&tx, 6, 4, 5, 1, 2, 3) == OK);
+    assert(mica_kernel_cancel(&tx));
+    assert(mica_kernel_commit(&tx) == CANCELLED && mica_kernel_end(&tx));
+    unsigned limited = 0;
+    for (uint64_t budget = 1; budget <= 256; budget *= 2) {
+        begin(&f, &tx);
+        policy_fact(&tx, 1, 9, 10, true);
+        assert(mica_kernel_set_limits(&tx, budget, UINT64_MAX, UINT64_MAX, UINT64_MAX) == OK);
+        uint64_t status = mica_kernel_commit(&tx);
+        assert(status == LIMIT || status == OK);
+        if (status == LIMIT) {
+            ++limited;
+            assert(!mica_kernel_work(&tx)->f_candidate && !mica_kernel_work(&tx)->f_done);
+            assert(f.worker.f_roots == &tx.f_root && !f.worker.f_control);
+        }
+        assert(mica_kernel_end(&tx));
+        begin_tenant(&f, &reader, 9);
+        assert(read_status(&reader, 10) == (status == OK ? OK : PERMISSION));
+        assert(mica_kernel_end(&reader));
+        if (status == OK) {
+            begin(&f, &tx);
+            policy_fact(&tx, 1, 9, 10, false);
+            assert(mica_kernel_commit(&tx) == OK && mica_kernel_end(&tx));
+        }
+    }
+    assert(limited > 0);
+    begin(&f, &tx);
+    assert(mica_kernel_set_authority_policy(&tx, 0, 0, 0, 0, 0, 0) == OK);
+    assert(!mica_kernel_work(&tx)->f_changes && !mica_kernel_work(&tx)->f_rule_changes);
+    assert(mica_kernel_commit(&tx) == OK && mica_kernel_end(&tx));
+    begin(&f, &tx);
+    assert(mica_kernel_declare(&tx, 19, 19, 2, SET, 0, 0) == PERMISSION);
+    assert(mica_kernel_end(&tx));
+    destroy(&f);
+}
+
 int main(int argc, char **argv) {
     if (argc == 2 && !strcmp(argv[1], "trace")) return trace();
     if (argc == 5 && !strcmp(argv[1], "bench")) return benchmark(argv[2], (unsigned)strtoul(argv[3], NULL, 10), (unsigned)strtoul(argv[4], NULL, 10));
     assert(argc == 1);
+    inactive_authority();
+    transactional_authority();
+    derived_authority();
+    authority_controls();
+    authority_tenant_collection();
     authority_projection();
     snapshot_admission();
     heap_admission();

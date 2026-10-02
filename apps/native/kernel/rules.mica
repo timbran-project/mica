@@ -96,7 +96,7 @@ verb native_kernel/rule_read_body(module: map, all: bool) -> map
     name = "kernel_rules"
   end
   let [work, opened] = native_kernel/rule_transaction(module, name)
-  let ready: map = opened
+  let ready: map = native_authority/check_permission(opened, work, "catalogue")
   let builder = ready
   if all
     let [output, rooted] = native_roots/retain(ready, "catalogue", native_gen/zero(native_kernel/pointer("Rule")))
@@ -127,7 +127,7 @@ end
 // index. An OOM leaves the previous staged definition usable and committable.
 verb native_kernel/rule_stage_body(module: map, operation: string) -> map
   let [work, opened] = native_kernel/rule_transaction(module, string_concat("kernel_rule_", operation))
-  let builder = opened
+  let builder = native_authority/check_permission(opened, work, "catalogue")
   let transaction = native_gen/ref(builder, "transaction")
   let id = native_gen/ref(builder, "id")
   let [worker, with_worker] = native_gen/bind(builder, "worker", native_kernel/load_field(builder, transaction, "worker"))
@@ -138,6 +138,24 @@ verb native_kernel/rule_stage_body(module: map, operation: string) -> map
     builder = native_gen/unless(builder, native_kernel/absent(existing), fn(duplicate) => native_kernel/status(duplicate, "kernel_schema"))
   else
     builder = native_gen/when(builder, native_kernel/absent(existing), fn(missing) => native_kernel/status(missing, "kernel_unknown"))
+  end
+  builder = native_gen/unless(builder, native_kernel/absent(existing), fn(present)
+    return native_authority/require_tenant(present, work, native_rules/read(present, native_rules/read(present, existing, "definition"), "tenant"))
+  end)
+  if operation != "remove"
+    let definition: map = native_rules/ref(builder, "definition")
+    builder = native_rules/check(builder, native_gen/negate(native_kernel/absent(definition)), "schema")
+    builder = native_authority/require_tenant(builder, work, native_rules/read(builder, definition, "tenant"))
+    // An exact deactivation must remain possible after a policy edit makes the
+    // existing definition unauthorized. New and changed definitions are checked.
+    let [authorize: map, marked: map] = native_gen/bind(builder, "authorize", native_gen/ref(builder, "true"))
+    builder = marked
+    if operation == "update"
+      builder = native_gen/unless(builder, native_gen/ref(builder, "active"), fn(inactive)
+        return native_gen/assign(inactive, authorize, native_gen/not_equal(definition, native_rules/read(inactive, existing, "definition")))
+      end)
+    end
+    builder = native_gen/when(builder, authorize, fn(required) => native_rules/status_call(required, "authority_stage", [transaction, definition, native_roots/ref(required, "budget")]))
   end
   let [entry, with_entry] = native_gen/bind(builder, "entry", native_gen/zero(native_kernel/pointer("Rule")))
   builder = with_entry

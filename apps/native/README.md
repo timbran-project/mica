@@ -111,10 +111,11 @@ The heap uses `kernel_heap_init`, which installs both kernel and value descripto
 
 | Function | Contract |
 | --- | --- |
-| `kernel_init(kernel, worker)` | Create the empty published snapshot on an active worker |
-| `kernel_begin(kernel, worker, transaction)` | Retain the current snapshot and register transaction roots |
+| `kernel_init(kernel, worker, owner)` | Create the empty published snapshot with a bootstrap owner |
+| `kernel_begin(kernel, worker, transaction, tenant)` | Capture the snapshot and compile permissions for the authenticated tenant |
 | `kernel_set_retention_limit(kernel, worker, limit)` | Set the maximum number of transactions that retain snapshot roots |
 | `kernel_declare(transaction, id, name, arity, policy, keys, indexes)` | Stage a relation declaration with caller-assigned identity and symbol IDs |
+| `kernel_set_authority_policy(transaction, root, catalogue, grant, read, write, export)` | Stage effective-policy relation IDs; zero means no permission source |
 | `kernel_write(transaction, id, tuple, asserted)` | Stage an assertion or retraction of a list-valued tuple |
 | `kernel_scan(transaction, id, pattern, mask, after, output, capacity)` | Read a bounded batch into a caller-owned array of value words |
 | `kernel_commit(transaction)` | Validate, publish, and retain net stored-fact deltas on success |
@@ -155,7 +156,7 @@ Other workers can read and commit concurrently. Callers park workers before exte
 | 0 | Success |
 | 1 | Unknown relation or rule |
 | 2 | Tuple or pattern arity mismatch |
-| 3 | Non-persistable tuple |
+| 3 | Non-persistable tuple or tenant |
 | 4 | Functional key violation |
 | 5 | Commit conflict |
 | 6 | Duplicate relation name |
@@ -164,21 +165,24 @@ Other workers can read and commit concurrently. Callers park workers before exte
 | 9 | Closed transaction or invalid lifecycle operation |
 | 10 | Rule planning, maintenance, or dependency traversal resource limit exceeded |
 | 11 | Transaction cancellation won before publication |
+| 12 | Permission denied or active rule authorization invalidated |
 
 `kernel_work(transaction)` exposes the last commit status, conflicting relation and tuple, and conflicting rule identity.
 The current layer supports relation creation, transactional rule definitions, dependency planning, and automatic maintenance of derived rows.
-Relation removal, transactional buffers, durable storage, computed relations, authority, and dispatch remain separate work.
+Relation removal, transactional buffers, durable storage, computed relations, and dispatch remain separate work.
 
 ### Rule definitions and dependency plans
 
 `rules/` generates rule definitions, structural validation, and dependency planning.
 `kernel/rules.mica` stages and publishes definitions with ordinary fact changes.
-Source parsing and enforcement of rule authority remain separate work.
+Source parsing remains separate work.
 Installing an active definition changes the derived view at the next read or commit.
 
 Definitions contain a head relation, head terms, body atoms, comparison guards, defining tenant, and source text.
 The tenant field records identity; it does not grant authority.
-These are trusted kernel APIs. Tenant-facing installation still requires source-read and head-export authorization.
+Rule installation requires catalogue permission, read permission for every source, and export permission for the head.
+Ordinary tenants can install or edit only their own rules. Explicit root authority permits administration on behalf of another tenant.
+The defining tenant must still hold source-read and head-export permissions.
 
 `kernel/authority.mica` generates the permission-cache builder used by that boundary.
 `kernel_authority_compile(worker, tenant, root, catalogue, grant, read, write, export, budget)` returns a status and a managed `Authority` pointer.
@@ -194,7 +198,30 @@ Zero masks, unknown bits, relation zero, and null contexts return false.
 `kernel_authority_catalogue(context)` and `kernel_authority_grant(context)` check their separate flags.
 Contexts are immutable after construction and require ordinary roots across collection.
 Rebuilding a context observes changed effective policy; it does not mutate an earlier task's context.
-These functions are trusted runtime primitives. Transaction entry, operation checks, and commit-time revocation validation still need integration.
+`kernel/policy.mica` connects these caches to transactions and rule maintenance.
+The trusted caller supplies the authenticated tenant to `kernel_begin`.
+Before policy configuration, only the bootstrap owner has root authority.
+After configuration, all permissions come from effective policy rows. An all-zero configuration grants nothing, including to the bootstrap owner.
+
+Transaction entry captures the snapshot under the publication lock, then compiles the cache outside that lock.
+Policy configuration requires grant permission and participates in ordinary transaction rollback and commit.
+Reads and writes check cached relation permissions. Relation declarations require grant permission; catalogue access requires catalogue permission.
+The full reference evaluator requires root authority because its result exposes every relation.
+Low-level constructors, raw views, and maintenance helpers remain trusted runtime primitives.
+
+A task keeps its entry cache throughout the transaction. Its own policy edits do not grant it additional task permissions.
+Rule installation checks the defining tenant against complete effective draft policy.
+Draft reads and commit preparation validate active rules against the resulting effective policy.
+Commit also rechecks new or replaced inactive definitions. Existing inactive definitions need no continuing source-read or head-export permission.
+Revocation returns status 12 unless the transaction also removes or deactivates every affected rule.
+The same atomic publication removes unauthorized conclusions and preserves conclusions with another authorized support.
+Historical snapshots retain their original facts, rules, and policy.
+
+Permission use records a dependency on the snapshot policy revision.
+A concurrent change to effective policy causes commit conflict, including for transactions with no writes.
+The current revision covers the whole world, so policy changes for unrelated tenants can also cause conflicts.
+Unrelated fact commits preserve the revision when effective policy trees remain shared.
+Authorization and derivation occur outside the publication lock. Snapshots retain policy views, but never task permission caches.
 
 | Constructor | Result |
 | --- | --- |

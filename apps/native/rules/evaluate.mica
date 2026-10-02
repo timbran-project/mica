@@ -100,7 +100,7 @@ verb native_rules/advance_body(module: map) -> map
 end
 verb native_rules/evaluate_body(module: map) -> map
   let [work: map, opened: map] = native_kernel/rule_transaction(module, "kernel_rule_evaluate")
-  let builder: map = opened
+  let builder: map = native_authority/check_permission(opened, work, "root")
   builder = native_kernel/store_field(builder, work, "rules_read", native_rules/ref(builder, "true"))
   let [plan: map, with_plan: map] = native_roots/retain(builder, "plan", native_rules/read(builder, work, "rule_plan"))
   let [captured: map, with_capture: map] = native_rules/checked_call(with_plan, "rule_capture", [native_roots/worker(with_plan), native_rules/read(with_plan, native_rules/read(with_plan, work, "base"), "relations"), native_rules/read(with_plan, work, "changes"), plan, native_rules/ref(with_plan, "budget")], "evaluation")
@@ -136,6 +136,9 @@ verb native_rules/evaluate_body(module: map) -> map
     return generated_result
   end)
   builder = native_rules/status_call(builder, "rule_finish", [native_roots/worker(builder), evaluation, native_rules/ref(builder, "budget")])
+  let [views: map, authorized: map] = native_authority/prepare_views(builder, native_authority/owner(builder, work), native_rules/read(builder, work, "policy"), evaluation, plan,
+    native_rules/read(builder, work, "authorized_views"), native_rules/read(builder, work, "authorized_plan"))
+  builder = authorized
   builder = native_rules/result(builder, native_rules/ref(builder, "kernel_ok"), {"evaluation" -> evaluation})
   let generated_result: map = native_gen/finish(module, builder)
   return generated_result

@@ -273,7 +273,11 @@ verb native_rules/refresh_body(module: map) -> map
   let [work: map, opened: map] = native_kernel/rule_transaction(module, "kernel_rule_refresh")
   let builder: map = native_gen/unless(opened, native_rules/read(opened, work, "dirty"), fn(clean) => native_gen/unless(clean, native_kernel/absent(native_rules/read(clean, work, "evaluation")), fn(cached) => native_kernel/status(cached, "kernel_ok")))
   let [evaluation: map, computed: map] = native_rules/checked_call(builder, "rule_maintain", [native_roots/worker(builder), native_rules/read(builder, native_rules/read(builder, work, "base"), "relations"), native_rules/read(builder, work, "changes"), native_rules/read(builder, work, "rule_plan"), native_rules/read(builder, work, "evaluation"), native_rules/ref(builder, "budget")], "evaluation")
-  builder = native_kernel/store_field(computed, work, "evaluation", evaluation)
+  let [rooted_evaluation: map, rooted: map] = native_roots/retain(computed, "evaluation", evaluation)
+  let [views: map, authorized: map] = native_authority/prepare_views(rooted, native_authority/owner(rooted, work), native_rules/read(rooted, work, "policy"), rooted_evaluation, native_rules/read(rooted, work, "rule_plan"), native_rules/read(rooted, work, "authorized_views"), native_rules/read(rooted, work, "authorized_plan"))
+  builder = native_kernel/store_field(authorized, work, "authorized_views", views)
+  builder = native_kernel/store_field(builder, work, "authorized_plan", native_rules/read(builder, work, "rule_plan"))
+  builder = native_kernel/store_field(builder, work, "evaluation", rooted_evaluation)
   builder = native_kernel/store_field(builder, work, "dirty", native_rules/ref(builder, "false"))
   builder = native_kernel/status(builder, "kernel_ok")
   let result: map = native_gen/finish(module, builder)
@@ -281,7 +285,8 @@ verb native_rules/refresh_body(module: map) -> map
 end
 verb native_rules/read_body(module: map) -> map
   let [work: map, opened: map] = native_kernel/rule_transaction(module, "kernel_read")
-  let builder: map = native_rules/status_call(opened, "rule_refresh", [native_rules/ref(opened, "transaction"), native_rules/ref(opened, "budget")])
+  let permitted: map = native_authority/check_permission(opened, work, "read", native_rules/ref(opened, "id"))
+  let builder: map = native_rules/status_call(permitted, "rule_refresh", [native_rules/ref(permitted, "transaction"), native_rules/ref(permitted, "budget")])
   builder = native_rules/status_call(builder, "rule_depend", [native_rules/ref(builder, "transaction"), native_rules/ref(builder, "id"), native_rules/ref(builder, "budget")])
   let [rows: map, found: map] = native_gen/bind(builder, "rows", native_rules/rows_lookup(builder, native_rules/read(builder, work, "evaluation"), native_rules/ref(builder, "id")))
   builder = native_rules/check(found, native_gen/negate(native_kernel/absent(rows)), "unknown")

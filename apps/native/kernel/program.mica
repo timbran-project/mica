@@ -23,13 +23,13 @@ verb native_kernel/schemas() -> list
     let pointer: list = native_kernel/pointer(spec[1])
     indexes = [@indexes, [spec[1], [["left", pointer], ["right", pointer], ["entry", native_kernel/pointer(spec[2])], ["height", :U64]]]]
   end
-  return [@native_rules/schemas(), @native_authority/schemas(), @indexes,
+  return [@native_rules/schemas(), @native_authority/schemas(), @native_authority/policy_schemas(), @indexes,
     ["Scan", [["pattern", word], ["after", word], ["rows", word], ["order", :U64], ["mask", :U64], ["prefix", :U64], ["capacity", :U64], ["count", :U64], ["visited", :U64], ["more", :Bool]]],
     ["Node", [["left", node], ["right", node], ["row", word], ["height", :U64], ["present", :Bool]]],
     ["Index", [["next", native_kernel/pointer("Index")], ["mask", :U64], ["tree", node]]],
     ["Relation", [["next", relation], ["id", :U64], ["name", :U64], ["arity", :U64],
       ["policy", :U64], ["keys", :U64], ["schema_revision", :U64], ["indexes", native_kernel/pointer("Index")]]],
-    ["Snapshot", [["evaluation", native_kernel/pointer("RuleEvaluation")], ["version", :U64], ["relations", relation], ["rules", native_kernel/pointer("RuleIndex")], ["schemas", native_kernel/pointer("RuleSchemaIndex")], ["rule_heads", native_kernel/pointer("RuleGenerationIndex")], ["rule_plan", native_kernel/pointer("RulePlan")]]],
+    ["Snapshot", [["owner", word], ["policy", native_kernel/pointer("AuthorityPolicy")], ["policy_views", native_kernel/pointer("AuthorityViews")], ["policy_revision", :U64], ["evaluation", native_kernel/pointer("RuleEvaluation")], ["version", :U64], ["relations", relation], ["rules", native_kernel/pointer("RuleIndex")], ["schemas", native_kernel/pointer("RuleSchemaIndex")], ["rule_heads", native_kernel/pointer("RuleGenerationIndex")], ["rule_plan", native_kernel/pointer("RulePlan")]]],
     ["Rule", [["next", rule], ["id", :U64], ["head", :U64], ["arity", :U64], ["active", :Bool], ["revision", :U64], ["definition", native_kernel/pointer("RuleDef")]]],
     ["RuleIndex", [["left", native_kernel/pointer("RuleIndex")], ["right", native_kernel/pointer("RuleIndex")], ["entry", rule], ["height", :U64]]],
     ["RuleObservationIndex", [["left", native_kernel/pointer("RuleObservationIndex")], ["right", native_kernel/pointer("RuleObservationIndex")], ["entry", rule_change], ["height", :U64]]],
@@ -39,7 +39,7 @@ verb native_kernel/schemas() -> list
     ["Query", [["kind", :U64], ["relation", :U64], ["pattern", word], ["mask", :U64],
       ["left", native_kernel/pointer("Query")], ["right", native_kernel/pointer("Query")],
       ["positions", word], ["right_positions", word], ["input", word]]],
-    ["Work", [["evaluation", native_kernel/pointer("RuleEvaluation")], ["dirty", :Bool], ["base", native_kernel/pointer("Snapshot")], ["changes", native_kernel/pointer("Change")],
+    ["Work", [["tenant", word], ["authority", native_kernel/pointer("Authority")], ["policy", native_kernel/pointer("AuthorityPolicy")], ["policy_used", :Bool], ["authorized_views", native_kernel/pointer("AuthorityViews")], ["authorized_plan", native_kernel/pointer("RulePlan")], ["evaluation", native_kernel/pointer("RuleEvaluation")], ["dirty", :Bool], ["base", native_kernel/pointer("Snapshot")], ["changes", native_kernel/pointer("Change")],
       ["rule_changes", rule_change], ["rule_observations", native_kernel/pointer("RuleObservationIndex")],
       ["rule_index", native_kernel/pointer("RuleIndex")], ["rules", rule], ["rules_cached", :Bool], ["rules_read", :Bool], ["rule_plan", native_kernel/pointer("RulePlan")],
       ["rule_dependencies", native_kernel/pointer("RuleDependency")], ["rule_dependency_index", native_kernel/pointer("RuleDependencyIndex")], ["rule_limit", :U64], ["rows_limit", :U64], ["rounds_limit", :U64], ["bytes_limit", :U64],
@@ -161,7 +161,7 @@ verb native_kernel/declare(context: map, name: string, result, parameters: list,
     effects = [@effects, :Relocate]
   end
   let mode: symbol = :Value
-  if native/is_pointer(result) || result == native_value/word() || native/contains([[:Record, "KernelAuthorityResult"], [:Record, "KernelAuthorityIndexResult"], [:Record, "KernelRuleResult"], [:Record, "KernelRuleTreeResult"], [:Record, "KernelRuleIndexResult"], [:Record, "KernelRuleObservationIndexResult"]], result) || native/contains(native_rules/result_types(), result) || result == [:Record, "KernelNodeResult"] || result == [:Record, "KernelQueryResult"] || result == [:Record, "ValueResult"]
+  if native/is_pointer(result) || result == native_value/word() || native/contains([[:Record, "KernelAuthorityViewsResult"], [:Record, "KernelAuthorityResult"], [:Record, "KernelAuthorityIndexResult"], [:Record, "KernelRuleResult"], [:Record, "KernelRuleTreeResult"], [:Record, "KernelRuleIndexResult"], [:Record, "KernelRuleObservationIndexResult"]], result) || native/contains(native_rules/result_types(), result) || result == [:Record, "KernelNodeResult"] || result == [:Record, "KernelQueryResult"] || result == [:Record, "ValueResult"]
     mode = :Gc
   end
   let output: map = native_memory/declare(context, string_concat("kernel_", name), result, parameters, effects, mode, "")
@@ -204,7 +204,7 @@ verb native_kernel/types(input: map) -> map
   let state: map = context[:state]
   let constants: list = [
     ["authority_read", :U64, native_value/hex(1)], ["authority_write", :U64, native_value/hex(2)], ["authority_export", :U64, native_value/hex(4)], ["authority_all", :U64, native_value/hex(7)],
-    ["kernel_ok", :U64, native_value/hex(0)], ["kernel_unknown", :U64, native_value/hex(1)],
+    ["kernel_permission", :U64, native_value/hex(12)], ["kernel_ok", :U64, native_value/hex(0)], ["kernel_unknown", :U64, native_value/hex(1)],
     ["kernel_arity", :U64, native_value/hex(2)], ["kernel_nonpersistent", :U64, native_value/hex(3)],
     ["kernel_key", :U64, native_value/hex(4)], ["kernel_conflict", :U64, native_value/hex(5)],
     ["kernel_name", :U64, native_value/hex(6)], ["kernel_schema", :U64, native_value/hex(7)],
@@ -223,6 +223,7 @@ verb native_kernel/types(input: map) -> map
     ["Kernel", [["heap", native_memory/record_pointer("MemoryHeap")], ["mutex", bytes], ["current", root], ["retained_transactions", :U64], ["retention_limit", :U64]]],
     ["KernelBudget", [["steps", :U64], ["rows", :U64], ["rounds", :U64], ["bytes", :U64], ["status", :U64], ["signal", bytes]]],
     ["KernelTransaction", [["signal", bytes], ["kernel", native_memory/record_pointer("Kernel")], ["worker", worker], ["root", root]]],
+    ["KernelAuthorityViewsResult", [["status", :U64], ["views", native_kernel/pointer("AuthorityViews")]]],
     ["KernelAuthorityResult", [["status", :U64], ["authority", native_kernel/pointer("Authority")]]],
     ["KernelAuthorityIndexResult", [["ok", :Bool], ["node", native_kernel/pointer("AuthorityIndex")]]],
     ["KernelQueryResult", [["status", :U64], ["arity", :U64], ["rows", word]]],
@@ -303,6 +304,7 @@ verb native_kernel/program() -> map
   context = native_kernel/indexes(context)
   context = native_query/declarations(context)
   context = native_authority/declarations(context)
+  context = native_authority/policy_declarations(context)
   context = native_kernel/relations(context)
   context = native_kernel/transactions(context)
   context = native_rules/declarations(context)
@@ -313,6 +315,7 @@ verb native_kernel/program() -> map
   context = native_rules/evaluation_program(context)
   context = native_rules/maintenance_program(context)
   context = native_authority/program(context)
+  context = native_authority/policy_program(context)
   let state: map = context[:state]
   return state
 end

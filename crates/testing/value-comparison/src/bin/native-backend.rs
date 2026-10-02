@@ -142,6 +142,7 @@ fn run() -> Result<()> {
         "kernel/program",
         "kernel/execution",
         "kernel/authority",
+        "kernel/policy",
         "kernel/indexes",
         "kernel/relations",
         "kernel/transactions",
