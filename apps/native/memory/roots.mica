@@ -101,6 +101,19 @@ verb native_roots/poll(builder: map) -> map
   let result: map = native_gen/unless(ready, polled, fn(failed) => native_roots/fail(failed, "oom"))
   return result
 end
+
+// Temporary scans can register cursors inside a generated branch or loop.
+// Unlink those roots before their native storage leaves scope. Error returns
+// still unwind the complete function through its original scope_parent.
+verb native_roots/temporary(builder: map, body) -> map
+  let roots: list = builder[:scope_roots]
+  let worker: map = native_roots/worker(builder)
+  let [parent: map, ready: map] = native_gen/bind(builder, "temporary_parent", native_gen/read(native_gen/field(builder, worker, "roots")))
+  let completed: map = body(ready)
+  completed = native_gen/root_write(completed, native_gen/field(completed, worker, "roots"), native_gen/manage(parent))
+  completed[:scope_roots] = roots
+  return completed
+end
 verb native_roots/context(module: map, name: string, failure) -> map
   let result: map = native_roots/open_scope(native_gen/context(module, name), failure)
   return result

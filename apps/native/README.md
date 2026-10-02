@@ -173,12 +173,28 @@ Relation removal, transactional buffers, durable storage, computed relations, au
 
 `rules/` generates rule definitions, structural validation, and dependency planning.
 `kernel/rules.mica` stages and publishes definitions with ordinary fact changes.
-Source parsing and authority checks remain separate work.
+Source parsing and enforcement of rule authority remain separate work.
 Installing an active definition changes the derived view at the next read or commit.
 
 Definitions contain a head relation, head terms, body atoms, comparison guards, defining tenant, and source text.
 The tenant field records identity; it does not grant authority.
 These are trusted kernel APIs. Tenant-facing installation still requires source-read and head-export authorization.
+
+`kernel/authority.mica` generates the permission-cache builder used by that boundary.
+`kernel_authority_compile(worker, tenant, root, catalogue, grant, read, write, export, budget)` returns a status and a managed `Authority` pointer.
+The six relation arguments are complete effective policy views from one snapshot or draft. Null arguments grant no permissions.
+Root, catalogue, and grant views contain unary tenant tuples. Read, write, and export views contain `(tenant, relation_identity)` tuples.
+Relation references must be nonzero Mica identity values. Tenant values must be persistable.
+An explicit root-policy row grants all supported rights. Grant permission alone does not grant read, export, or catalogue permission.
+
+Projection uses the tenant prefix of each relation index and shares the caller's operation budget and memory control.
+It merges relation permissions into a managed AVL index. Checks do not allocate or query policy relations.
+`kernel_authority_allows(context, relation, mask)` requires every requested bit: read is 1, write is 2, and export is 4.
+Zero masks, unknown bits, relation zero, and null contexts return false.
+`kernel_authority_catalogue(context)` and `kernel_authority_grant(context)` check their separate flags.
+Contexts are immutable after construction and require ordinary roots across collection.
+Rebuilding a context observes changed effective policy; it does not mutate an earlier task's context.
+These functions are trusted runtime primitives. Transaction entry, operation checks, and commit-time revocation validation still need integration.
 
 | Constructor | Result |
 | --- | --- |

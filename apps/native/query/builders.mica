@@ -27,22 +27,14 @@ verb native_query/cell(builder: map, row: map, position: map) -> map
   return generated_result
 end
 verb native_query/fail(builder: map, status: map) -> map
-  if builder[:result] == [:Record, "KernelScanResult"]
-    let result: map = native_rules/fail(builder, status)
+  if builder[:result] == [:Record, "ValueResult"]
+    let result: map = native_roots/return_value(builder, native_gen/zero(builder[:result]))
     return result
   end
-  if builder[:result] == :U64
-    let generated_result: map = native_roots/return_value(builder, status)
-    return generated_result
-  end
-  if builder[:result] == [:Record, "ValueResult"]
-    let generated_result: map = native_roots/return_value(builder, native_gen/zero(builder[:result]))
-    return generated_result
-  end
-  let generated_result: map = native_roots/return_value(builder, native_gen/record(builder, [:Record, "KernelQueryResult"],
-    {"status" -> status, "arity" -> native_gen/zero(:U64), "rows" -> native_gen/zero(native_value/word())}))
-  return generated_result
+  let result: map = native_execution/fail(builder, status)
+  return result
 end
+
 verb native_query/error(input: map, name: string) -> map
   let builder: map = input
   if name == "oom" && native_execution/has(builder, "budget")

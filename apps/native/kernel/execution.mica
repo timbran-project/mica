@@ -22,6 +22,22 @@ end
 verb native_execution/has(builder: map, name: string) -> bool
   return map_contains_key(builder[:bindings], name) || (map_contains_key(builder, :scope_bindings) && map_contains_key(builder[:scope_bindings], name))
 end
+
+// Status-bearing APIs return zero payloads on failure. Use the declared
+// result schema so new consumers can share query and traversal builders.
+verb native_execution/fail(builder: map, status: map) -> map
+  if builder[:result] == :U64
+    let result: map = native_roots/return_value(builder, status)
+    return result
+  end
+  let fields: map = {}
+  for field in native/record_fields({:records -> builder[:records]}, builder[:result])
+    fields[field[2]] = native_gen/zero(field[3])
+  end
+  fields["status"] = status
+  let result: map = native_roots/return_value(builder, native_gen/record(builder, builder[:result], fields))
+  return result
+end
 verb native_execution/local_budget(input: map, allowance: map) -> map
   let builder: map = input
   let fields: map = {"steps" -> allowance, "rows" -> native_roots/ref(builder, "kernel_unlimited"), "rounds" -> native_roots/ref(builder, "kernel_unlimited"), "bytes" -> native_roots/ref(builder, "kernel_unlimited"), "status" -> native_roots/ref(builder, "kernel_ok"), "signal" -> native_gen/zero(native_memory/pointer(:U8))}

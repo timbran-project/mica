@@ -2045,6 +2045,7 @@ fn native_relation_kernel_executes_on_both_mica_tiers() {
             include_str!("../../../apps/native/rules/program.mica"),
             include_str!("../../../apps/native/kernel/program.mica"),
             include_str!("../../../apps/native/kernel/execution.mica"),
+            include_str!("../../../apps/native/kernel/authority.mica"),
             include_str!("../../../apps/native/kernel/indexes.mica"),
             include_str!("../../../apps/native/kernel/relations.mica"),
             include_str!("../../../apps/native/kernel/transactions.mica"),

@@ -10,26 +10,16 @@ verb native_rules/read(builder: map, object: map, name: string) -> map
   return result
 end
 verb native_rules/fail(builder: map, status: map) -> map
-  if builder[:result] == [:Record, "KernelScanResult"]
-    let result: map = native_roots/return_value(builder, native_gen/record(builder, builder[:result], {"status" -> status, "count" -> native_gen/zero(:U64), "visited" -> native_gen/zero(:U64), "more" -> native_gen/zero(:Bool)}))
-    return result
-  end
-  if builder[:result] == [:Record, "KernelQueryResult"]
-    let result: map = native_query/fail(builder, status)
-    return result
-  end
-  if builder[:result] == [:Record, "KernelRuleTreeResult"] || builder[:result] == [:Record, "KernelRuleResult"]
-    let result: map = native_kernel/rule_result(builder, status, native_gen/zero(native_kernel/rule_result_pointer(builder)))
-    return result
-  end
-  if builder[:result] == :U64
-    let result: map = native_roots/return_value(builder, status)
-    return result
-  end
-  let result: map = native_rules/result(builder, status, {})
+  let result: map = native_execution/fail(builder, status)
   return result
 end
-verb native_rules/error(builder: map, name: string) -> map
+
+verb native_rules/error(input: map, name: string) -> map
+  let builder: map = input
+  if name == "oom" && native_execution/has(builder, "budget")
+    let status: map = native_rules/read(builder, native_roots/ref(builder, "budget"), "status")
+    builder = native_gen/unless(builder, native_kernel/absent(status), fn(failed) => native_rules/fail(failed, status))
+  end
   let result: map = native_rules/fail(builder, native_rules/ref(builder, string_concat("kernel_", name)))
   return result
 end

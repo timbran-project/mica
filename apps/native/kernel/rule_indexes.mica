@@ -5,7 +5,7 @@
 // observations. An operation follows a bounded AVL path and does not collect;
 // callers poll between operations and root the returned tree before polling.
 verb native_kernel/id_index_specs() -> list
-  return [["rule_index", "RuleIndex", "Rule"], ["observation_index", "RuleObservationIndex", "RuleChange"], @native_rules/index_specs()]
+  return [["rule_index", "RuleIndex", "Rule"], ["observation_index", "RuleObservationIndex", "RuleChange"], ["authority_index", "AuthorityIndex", "AuthorityPermission"], @native_rules/index_specs()]
 end
 verb native_kernel/id_index_call(builder: map, operation: string, arguments: list) -> map
   let spec: list = builder[:id_index]

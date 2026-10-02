@@ -23,7 +23,7 @@ verb native_kernel/schemas() -> list
     let pointer: list = native_kernel/pointer(spec[1])
     indexes = [@indexes, [spec[1], [["left", pointer], ["right", pointer], ["entry", native_kernel/pointer(spec[2])], ["height", :U64]]]]
   end
-  return [@native_rules/schemas(), @indexes,
+  return [@native_rules/schemas(), @native_authority/schemas(), @indexes,
     ["Scan", [["pattern", word], ["after", word], ["rows", word], ["order", :U64], ["mask", :U64], ["prefix", :U64], ["capacity", :U64], ["count", :U64], ["visited", :U64], ["more", :Bool]]],
     ["Node", [["left", node], ["right", node], ["row", word], ["height", :U64], ["present", :Bool]]],
     ["Index", [["next", native_kernel/pointer("Index")], ["mask", :U64], ["tree", node]]],
@@ -161,7 +161,7 @@ verb native_kernel/declare(context: map, name: string, result, parameters: list,
     effects = [@effects, :Relocate]
   end
   let mode: symbol = :Value
-  if native/is_pointer(result) || result == native_value/word() || native/contains([[:Record, "KernelRuleResult"], [:Record, "KernelRuleTreeResult"], [:Record, "KernelRuleIndexResult"], [:Record, "KernelRuleObservationIndexResult"]], result) || native/contains(native_rules/result_types(), result) || result == [:Record, "KernelNodeResult"] || result == [:Record, "KernelQueryResult"] || result == [:Record, "ValueResult"]
+  if native/is_pointer(result) || result == native_value/word() || native/contains([[:Record, "KernelAuthorityResult"], [:Record, "KernelAuthorityIndexResult"], [:Record, "KernelRuleResult"], [:Record, "KernelRuleTreeResult"], [:Record, "KernelRuleIndexResult"], [:Record, "KernelRuleObservationIndexResult"]], result) || native/contains(native_rules/result_types(), result) || result == [:Record, "KernelNodeResult"] || result == [:Record, "KernelQueryResult"] || result == [:Record, "ValueResult"]
     mode = :Gc
   end
   let output: map = native_memory/declare(context, string_concat("kernel_", name), result, parameters, effects, mode, "")
@@ -203,6 +203,7 @@ verb native_kernel/types(input: map) -> map
   let bytes: list = native_memory/pointer(:U8)
   let state: map = context[:state]
   let constants: list = [
+    ["authority_read", :U64, native_value/hex(1)], ["authority_write", :U64, native_value/hex(2)], ["authority_export", :U64, native_value/hex(4)], ["authority_all", :U64, native_value/hex(7)],
     ["kernel_ok", :U64, native_value/hex(0)], ["kernel_unknown", :U64, native_value/hex(1)],
     ["kernel_arity", :U64, native_value/hex(2)], ["kernel_nonpersistent", :U64, native_value/hex(3)],
     ["kernel_key", :U64, native_value/hex(4)], ["kernel_conflict", :U64, native_value/hex(5)],
@@ -222,6 +223,8 @@ verb native_kernel/types(input: map) -> map
     ["Kernel", [["heap", native_memory/record_pointer("MemoryHeap")], ["mutex", bytes], ["current", root], ["retained_transactions", :U64], ["retention_limit", :U64]]],
     ["KernelBudget", [["steps", :U64], ["rows", :U64], ["rounds", :U64], ["bytes", :U64], ["status", :U64], ["signal", bytes]]],
     ["KernelTransaction", [["signal", bytes], ["kernel", native_memory/record_pointer("Kernel")], ["worker", worker], ["root", root]]],
+    ["KernelAuthorityResult", [["status", :U64], ["authority", native_kernel/pointer("Authority")]]],
+    ["KernelAuthorityIndexResult", [["ok", :Bool], ["node", native_kernel/pointer("AuthorityIndex")]]],
     ["KernelQueryResult", [["status", :U64], ["arity", :U64], ["rows", word]]],
     ["KernelRuleIndexResult", [["ok", :Bool], ["node", native_kernel/pointer("RuleIndex")]]],
     ["KernelRuleObservationIndexResult", [["ok", :Bool], ["node", native_kernel/pointer("RuleObservationIndex")]]],
@@ -299,6 +302,7 @@ verb native_kernel/program() -> map
   context = native_kernel/tracing(context)
   context = native_kernel/indexes(context)
   context = native_query/declarations(context)
+  context = native_authority/declarations(context)
   context = native_kernel/relations(context)
   context = native_kernel/transactions(context)
   context = native_rules/declarations(context)
@@ -308,6 +312,7 @@ verb native_kernel/program() -> map
   context = native_query/program(context)
   context = native_rules/evaluation_program(context)
   context = native_rules/maintenance_program(context)
+  context = native_authority/program(context)
   let state: map = context[:state]
   return state
 end

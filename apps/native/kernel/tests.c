@@ -2797,10 +2797,132 @@ static void concurrent_snapshot_admission(void) {
     destroy(&f);
 }
 
+static mica_type_Value relation_identity(uint64_t id) {
+    struct mica_ValueResult result = mica_value_identity(id);
+    assert(result.f_ok);
+    return result.f_value;
+}
+static void policy_fact(struct mica_KernelTransaction *tx, uint64_t policy, int64_t tenant, uint64_t relation, bool asserted) {
+    mica_type_Value cells[] = {integer(tenant), relation_identity(relation)};
+    uint64_t width = policy <= 3 ? 2 : 1;
+    struct mica_ValueResult row = mica_value_list(tx->f_worker, cells, width);
+    assert(row.f_ok && mica_kernel_write(tx, policy, row.f_value, asserted) == OK);
+}
+static struct mica_KernelAuthorityResult compile_authority(struct mica_KernelTransaction *tx, int64_t tenant, uint64_t steps) {
+    struct mica_KernelBudget budget = operation_budget(tx);
+    budget.f_steps = steps;
+    struct mica_MemoryControl control = {.f_context = (void *)&budget, .f_check = mica_kernel_memory_check};
+    mica_memory_control_push(tx->f_worker, &control);
+    struct mica_KernelAuthorityResult result = mica_kernel_authority_compile(tx->f_worker, integer(tenant),
+        mica_kernel_view(tx, 6), mica_kernel_view(tx, 4), mica_kernel_view(tx, 5),
+        mica_kernel_view(tx, 1), mica_kernel_view(tx, 2), mica_kernel_view(tx, 3), &budget);
+    mica_memory_control_pop(tx->f_worker);
+    return result;
+}
+static void authority_projection(void) {
+    struct fixture f;
+    init(&f);
+    struct mica_KernelTransaction tx;
+    begin(&f, &tx);
+    for (uint64_t id = 1; id <= 6; ++id)
+        assert(mica_kernel_declare(&tx, id, id, id <= 3 ? 2 : 1, SET, 0, 0) == OK);
+    for (int64_t tenant = 100; tenant < 1124; ++tenant)
+        policy_fact(&tx, 1, tenant, 99, true);
+    policy_fact(&tx, 1, 7, 10, true);
+    policy_fact(&tx, 1, 7, 20, true);
+    policy_fact(&tx, 2, 7, 20, true);
+    policy_fact(&tx, 3, 7, 20, true);
+    policy_fact(&tx, 4, 7, 0, true);
+    policy_fact(&tx, 5, 8, 0, true);
+    policy_fact(&tx, 6, 9, 0, true);
+    assert(mica_kernel_commit(&tx) == OK && mica_kernel_end(&tx));
+    begin(&f, &tx);
+    struct mica_MemoryRoot *parent = f.worker.f_roots;
+    // Only this tenant's indexed prefix consumes the row budget.
+    struct mica_KernelAuthorityResult result = compile_authority(&tx, 7, 128);
+    assert(result.f_status == OK && result.f_authority && f.worker.f_roots == parent);
+    struct mica_KernelAuthority *authority = result.f_authority;
+    assert(mica_kernel_authority_allows(authority, 10, 1));
+    assert(!mica_kernel_authority_allows(authority, 10, 2));
+    assert(!mica_kernel_authority_allows(authority, 10, 4));
+    assert(mica_kernel_authority_allows(authority, 20, 7));
+    assert(!mica_kernel_authority_allows(authority, 99, 1));
+    assert(!mica_kernel_authority_allows(authority, 20, 8));
+    assert(!mica_kernel_authority_allows(authority, 20, 0));
+    assert(mica_kernel_authority_catalogue(authority) && !mica_kernel_authority_grant(authority));
+    struct mica_MemoryRoot cached = {0};
+    assert(mica_memory_root_push(&f.worker, &cached));
+    cached.f_pointer = (void *)authority;
+    assert(mica_memory_safepoint(&f.worker, true));
+    authority = (void *)cached.f_pointer;
+    assert(mica_kernel_authority_allows(authority, 20, 7));
+    assert(mica_value_as_int(authority->f_tenant).f_number == 7);
+    policy_fact(&tx, 3, 7, 20, false);
+    // The captured context is immutable until the next task boundary.
+    result = compile_authority(&tx, 7, 128);
+    assert(result.f_status == OK && !mica_kernel_authority_allows(result.f_authority, 20, 4));
+    assert(mica_kernel_authority_allows((void *)cached.f_pointer, 20, 4));
+    result = compile_authority(&tx, 8, 128);
+    assert(result.f_status == OK && mica_kernel_authority_grant(result.f_authority));
+    assert(!mica_kernel_authority_catalogue(result.f_authority));
+    assert(!mica_kernel_authority_allows(result.f_authority, 20, 1));
+    result = compile_authority(&tx, 9, 128);
+    assert(result.f_status == OK && mica_kernel_authority_catalogue(result.f_authority));
+    assert(mica_kernel_authority_grant(result.f_authority));
+    assert(mica_kernel_authority_allows(result.f_authority, 1234, 7));
+    assert(!mica_kernel_authority_allows(result.f_authority, 0, 1));
+    assert(!mica_kernel_authority_allows(result.f_authority, 20, 8));
+    result = compile_authority(&tx, 10, 128);
+    assert(result.f_status == OK && !mica_kernel_authority_catalogue(result.f_authority));
+    assert(!mica_kernel_authority_allows(result.f_authority, 20, 1));
+    unsigned limited = 0;
+    for (uint64_t steps = 1; steps < 128; ++steps) {
+        result = compile_authority(&tx, 7, steps);
+        assert(f.worker.f_roots == &cached);
+        if (result.f_status == LIMIT) {
+            assert(!result.f_authority);
+            ++limited;
+        } else {
+            assert(result.f_status == OK && mica_kernel_authority_allows(result.f_authority, 10, 1));
+        }
+    }
+    assert(limited > 0);
+    result = compile_authority(&tx, 7, 0);
+    assert(result.f_status == LIMIT && !result.f_authority && f.worker.f_roots == &cached);
+    assert(!mica_kernel_authority_allows(NULL, 20, 1));
+    assert(!mica_kernel_authority_catalogue(NULL) && !mica_kernel_authority_grant(NULL));
+    // Effective views include rule-derived grants, not just stored rows.
+    assert(mica_kernel_declare(&tx, 7, 7, 2, SET, 0, 0) == OK);
+    mica_type_Value granted[] = {integer(11), relation_identity(42)};
+    struct mica_ValueResult grant_row = mica_value_list(&f.worker, granted, 2);
+    assert(grant_row.f_ok && mica_kernel_write(&tx, 7, grant_row.f_value, true) == OK);
+    assert(install_edge(&tx, 1, 1, 7, false) == OK && refresh(&tx) == OK);
+    struct mica_KernelRelation *effective = mica_kernel_rule_rows_index_lookup(mica_kernel_work(&tx)->f_evaluation->f_rows, 1)->f_view;
+    struct mica_KernelBudget budget = operation_budget(&tx);
+    budget.f_steps = 128;
+    result = mica_kernel_authority_compile(&f.worker, integer(11), NULL, NULL, NULL, effective, NULL, NULL, &budget);
+    assert(result.f_status == OK && mica_kernel_authority_allows(result.f_authority, 42, 1));
+    assert(!mica_kernel_authority_allows(result.f_authority, 42, 4));
+    budget = operation_budget(&tx);
+    result = mica_kernel_authority_compile(&f.worker, integer(7), NULL, NULL, NULL, mica_kernel_view(&tx, 4), NULL, NULL, &budget);
+    assert(result.f_status == ARITY && !result.f_authority && f.worker.f_roots == &cached);
+    // Matching malformed rows fail closed, with no partially built context.
+    assert(write_pair(&tx, 1, 7, 50, true) == OK);
+    result = compile_authority(&tx, 7, 128);
+    assert(result.f_status == SCHEMA && !result.f_authority && f.worker.f_roots == &cached);
+    assert(mica_kernel_cancel(&tx));
+    result = compile_authority(&tx, 7, 128);
+    assert(result.f_status == CANCELLED && !result.f_authority && f.worker.f_roots == &cached);
+    assert(mica_memory_root_pop(&f.worker, &cached));
+    assert(mica_kernel_end(&tx));
+    destroy(&f);
+}
+
 int main(int argc, char **argv) {
     if (argc == 2 && !strcmp(argv[1], "trace")) return trace();
     if (argc == 5 && !strcmp(argv[1], "bench")) return benchmark(argv[2], (unsigned)strtoul(argv[3], NULL, 10), (unsigned)strtoul(argv[4], NULL, 10));
     assert(argc == 1);
+    authority_projection();
     snapshot_admission();
     heap_admission();
     retained_snapshot_reclamation();

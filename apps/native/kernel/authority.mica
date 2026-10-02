@@ -1,0 +1,131 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+// Effective policy relations are complete snapshot views. Project one tenant
+// at a transaction boundary; hot checks only consult the resulting ID index.
+verb native_authority/schemas() -> list
+  let permissions: list = native_kernel/pointer("AuthorityIndex")
+  return [
+    ["AuthorityPermission", [["id", :U64], ["mask", :U64]]],
+    ["AuthorityIndex", [["left", permissions], ["right", permissions], ["entry", native_kernel/pointer("AuthorityPermission")], ["height", :U64]]],
+    ["Authority", [["tenant", native_value/word()], ["permissions", permissions], ["root", :Bool], ["catalogue", :Bool], ["grant", :Bool]]]]
+end
+verb native_authority/policies() -> list
+  return [["root", 1], ["catalogue", 1], ["grant", 1], ["read", 2], ["write", 2], ["export", 2]]
+end
+verb native_authority/declarations(input: map) -> map
+  let module: map = input
+  let parameters: list = [["worker", native_memory/record_pointer("MemoryWorker"), :Borrow], ["tenant", native_value/word(), :Gc]]
+  for policy in native_authority/policies()
+    parameters = [@parameters, [policy[0], native_kernel/pointer("Relation"), :Gc]]
+  end
+  parameters = [@parameters, ["budget", native_kernel/pointer("Budget"), :Borrow]]
+  module = native_kernel/declare(module, "authority_compile", [:Record, "KernelAuthorityResult"], parameters, true)
+  module = native_kernel/declare(module, "authority_allows", :Bool,
+    [["authority", native_kernel/pointer("Authority"), :Gc], ["relation", :U64, :Value], ["mask", :U64, :Value]])
+  for name in ["catalogue", "grant"]
+    module = native_kernel/declare(module, string_concat("authority_", name), :Bool, [["authority", native_kernel/pointer("Authority"), :Gc]])
+  end
+  return module
+end
+
+verb native_authority/permission(builder: map, authority: map, row: map, mask: map) -> map
+  let reference: map = native_query/cell(builder, row, native_gen/ref(builder, "one"))
+  let [identity: map, decoded: map] = native_gen/checked_bind(builder, "relation_identity", native_gen/call(builder, "value_as_identity", [reference]), "ok",
+    fn(invalid) => native_rules/error(invalid, "schema"))
+  let id: map = native_gen/field(decoded, identity, "number")
+  let ready: map = native_rules/check(decoded, native_gen/negate(native_kernel/absent(id)), "schema")
+  let [tree: map, with_tree: map] = native_gen/bind(ready, "permissions", native_rules/read(ready, authority, "permissions"))
+  let [before: map, found: map] = native_gen/bind(with_tree, "permission", native_gen/call(with_tree, "kernel_authority_index_lookup", [tree, id]))
+  let [merged: map, with_mask: map] = native_gen/bind(found, "rights", mask)
+  ready = native_gen/unless(with_mask, native_kernel/absent(before), fn(existing) => native_gen/assign(existing, merged,
+    native_gen/bit_or(merged, native_rules/read(existing, before, "mask"))))
+  let [entry: map, allocated: map] = native_rules/allocate(ready, "AuthorityPermission", {"id" -> id, "mask" -> merged})
+  let [updated: map, inserted: map] = native_gen/checked_bind(allocated, "indexed", native_gen/call(allocated, "kernel_authority_index_put",
+    [native_roots/worker(allocated), tree, id, entry]), "ok", fn(failed) => native_rules/error(failed, "oom"))
+  let result: map = native_kernel/store_field(inserted, authority, "permissions", native_gen/field(inserted, updated, "node"))
+  return result
+end
+
+verb native_authority/project(builder: map, authority: map, policy: list) -> map
+  let relation: map = native_roots/ref(builder, policy[0])
+  let result: map = native_gen/unless(builder, native_kernel/absent(relation), fn(present) => native_roots/temporary(present, fn(scoped)
+    let width: map = native_gen/ref(scoped, "one")
+    if policy[1] == 2
+      width = native_gen/ref(scoped, "two")
+    end
+    let [empty: map, allocated: map] = native_rules/empty_binding(scoped, width)
+    let [pattern: map, rooted: map] = native_roots/retain(allocated, "tenant_pattern", empty)
+    let ready: map = native_rules/row_store(rooted, pattern, native_gen/ref(rooted, "zero"), native_roots/ref(rooted, "tenant"))
+    let [ticks: map, with_ticks: map] = native_gen/bind(ready, "policy_rows", native_gen/zero(:U64))
+    ready = native_query/scan_rows(with_ticks, relation, pattern, native_gen/ref(with_ticks, "one"), native_gen/address(ticks), fn(row_scope, row)
+      if policy[1] == 1
+        let matched: map = native_kernel/store_field(row_scope, authority, policy[0], native_gen/ref(row_scope, "true"))
+        return native_gen/break_loop(matched)
+      end
+      let mask: map = native_gen/ref(row_scope, string_concat("authority_", policy[0]))
+      return native_authority/permission(row_scope, authority, row, mask)
+    end)
+    return ready
+  end))
+  return result
+end
+
+verb native_authority/compile_body(module: map) -> map
+  let builder: map = native_rules/context(module, "authority_compile")
+  builder = native_rules/check(builder, native_gen/call(builder, "value_is_persistable", [native_roots/ref(builder, "tenant")]), "nonpersistent")
+  for policy in native_authority/policies()
+    let relation: map = native_roots/ref(builder, policy[0])
+    builder = native_gen/unless(builder, native_kernel/absent(relation), fn(present)
+      let width: map = native_gen/ref(present, "one")
+      if policy[1] == 2
+        width = native_gen/ref(present, "two")
+      end
+      return native_rules/check(present, native_gen/equal(native_rules/read(present, relation, "arity"), width), "arity")
+    end)
+  end
+  let [allocated: map, with_allocation: map] = native_rules/allocate(builder, "Authority", {
+    "tenant" -> native_roots/ref(builder, "tenant"), "permissions" -> native_gen/zero(native_kernel/pointer("AuthorityIndex")),
+    "root" -> native_gen/ref(builder, "false"), "catalogue" -> native_gen/ref(builder, "false"), "grant" -> native_gen/ref(builder, "false")})
+  let [authority: map, rooted: map] = native_roots/retain(with_allocation, "authority", allocated)
+  builder = rooted
+  for policy in native_authority/policies()
+    builder = native_authority/project(builder, authority, policy)
+    if policy[0] == "root"
+      builder = native_gen/when(builder, native_rules/read(builder, authority, "root"), fn(root)
+        return native_roots/return_value(root, native_gen/record(root, [:Record, "KernelAuthorityResult"], {"status" -> native_gen/ref(root, "kernel_ok"), "authority" -> authority}))
+      end)
+    end
+  end
+  builder = native_roots/return_value(builder, native_gen/record(builder, [:Record, "KernelAuthorityResult"], {
+    "status" -> native_gen/ref(builder, "kernel_ok"), "authority" -> authority}))
+  let result: map = native_gen/finish(module, builder)
+  return result
+end
+
+verb native_authority/program(input: map) -> map
+  let module: map = native_authority/compile_body(input)
+  let builder: map = native_gen/context(module, "kernel_authority_allows")
+  let authority: map = native_gen/ref(builder, "authority")
+  builder = native_gen/when(builder, native_kernel/absent(authority), fn(absent) => native_gen/return_value(absent, native_gen/ref(absent, "false")))
+  let mask: map = native_gen/ref(builder, "mask")
+  let all: map = native_gen/ref(builder, "authority_all")
+  builder = native_gen/when(builder, native_kernel/absent(mask), fn(empty) => native_gen/return_value(empty, native_gen/ref(empty, "false")))
+  builder = native_gen/unless(builder, native_gen/equal(native_gen/bit_and(mask, all), mask), fn(unknown) => native_gen/return_value(unknown, native_gen/ref(unknown, "false")))
+  builder = native_gen/when(builder, native_kernel/absent(native_gen/ref(builder, "relation")), fn(invalid) => native_gen/return_value(invalid, native_gen/ref(invalid, "false")))
+  builder = native_gen/when(builder, native_rules/read(builder, authority, "root"), fn(root) => native_gen/return_value(root, native_gen/ref(root, "true")))
+  let [permission: map, found: map] = native_gen/bind(builder, "permission", native_gen/call(builder, "kernel_authority_index_lookup",
+    [native_rules/read(builder, authority, "permissions"), native_gen/ref(builder, "relation")]))
+  builder = native_gen/when(found, native_kernel/absent(permission), fn(absent) => native_gen/return_value(absent, native_gen/ref(absent, "false")))
+  builder = native_gen/return_value(builder, native_gen/equal(native_gen/bit_and(native_rules/read(builder, permission, "mask"), mask), mask))
+  module = native_gen/finish(module, builder)
+  for name in ["catalogue", "grant"]
+    builder = native_gen/context(module, string_concat("kernel_authority_", name))
+    authority = native_gen/ref(builder, "authority")
+    builder = native_gen/when(builder, native_kernel/absent(authority), fn(absent) => native_gen/return_value(absent, native_gen/ref(absent, "false")))
+    builder = native_gen/when(builder, native_rules/read(builder, authority, "root"), fn(root) => native_gen/return_value(root, native_gen/ref(root, "true")))
+    builder = native_gen/return_value(builder, native_rules/read(builder, authority, name))
+    module = native_gen/finish(module, builder)
+  end
+  return module
+end
