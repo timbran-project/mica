@@ -1071,11 +1071,19 @@ static struct mica_KernelQuery *trace_query(struct fixture *f, uint64_t relation
     }
     }
 }
-static int trace(void) {
+static void oracle_install(struct mica_KernelTransaction *tx);
+static int trace(bool rules) {
     struct fixture f;
     init(&f);
-    declare(&f, 1, FUNCTIONAL);
-    declare(&f, 2, SET);
+    if (rules) {
+        struct mica_KernelTransaction setup;
+        begin(&f, &setup);
+        oracle_install(&setup);
+        assert(mica_kernel_commit(&setup) == OK && mica_kernel_end(&setup));
+    } else {
+        declare(&f, 1, FUNCTIONAL);
+        declare(&f, 2, SET);
+    }
     struct mica_KernelTransaction transactions[2] = {{0}};
     char op;
     unsigned slot;
@@ -1112,6 +1120,10 @@ static int trace(void) {
             continue;
         } else if (op == 'c') {
             status = mica_kernel_commit(tx);
+            if (rules) {
+                printf("c %llu\n", (unsigned long long)status);
+                continue;
+            }
             struct trace_delta changes[4096];
             size_t length = 0;
             for (struct mica_KernelDelta *d = mica_kernel_deltas(tx); d; d = d->f_next) {
@@ -3387,7 +3399,8 @@ static void source_rules(void) {
 }
 
 int main(int argc, char **argv) {
-    if (argc == 2 && !strcmp(argv[1], "trace")) return trace();
+    if (argc == 2 && !strcmp(argv[1], "trace")) return trace(false);
+    if (argc == 2 && !strcmp(argv[1], "rules")) return trace(true);
     if (argc == 5 && !strcmp(argv[1], "bench")) return benchmark(argv[2], (unsigned)strtoul(argv[3], NULL, 10), (unsigned)strtoul(argv[4], NULL, 10));
     assert(argc == 1);
     source_rules();

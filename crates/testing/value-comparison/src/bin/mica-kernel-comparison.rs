@@ -17,6 +17,9 @@ use mica_relation_kernel::{
 use mica_var::{Identity, RelationValue, Symbol, Value};
 use serde_json::json;
 
+#[path = "kernel_comparison/rules.rs"]
+mod rules;
+
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
 #[derive(Parser)]
@@ -172,8 +175,7 @@ fn query_plan(relation: u64, a: i64, b: i64, options: u64) -> QueryPlan {
         ),
     }
 }
-fn reference(steps: &[Step]) -> Vec<String> {
-    let kernel = kernel();
+fn reference(steps: &[Step], kernel: &RelationKernel, rules: bool) -> Vec<String> {
     let mut transactions: [Option<Transaction<'_>>; 2] = [None, None];
     let mut output = Vec::new();
     for &Step {
@@ -248,6 +250,7 @@ fn reference(steps: &[Step]) -> Vec<String> {
                 reply
             }
             'c' => match transactions[slot].take().unwrap().commit() {
+                Ok(_) if rules => "c 0".into(),
                 Ok(result) => {
                     let mut changes = result
                         .commit()
@@ -278,9 +281,7 @@ fn reference(steps: &[Step]) -> Vec<String> {
     }
     output
 }
-fn correctness(options: &Options) -> Result<()> {
-    let steps = corpus(options);
-    let expected = reference(&steps);
+fn compare_trace(options: &Options, mode: &str, steps: &[Step], expected: &[String]) -> Result<()> {
     let input = steps
         .iter()
         .map(|s| {
@@ -291,7 +292,7 @@ fn correctness(options: &Options) -> Result<()> {
         })
         .collect::<String>();
     let mut child = Command::new(&options.native_executable)
-        .arg("trace")
+        .arg(mode)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -329,7 +330,8 @@ fn correctness(options: &Options) -> Result<()> {
     }
     println!(
         "{}",
-        json!({"correctness":"passed","seed":options.seed,"steps":steps.len()})
+        json!({"correctness":"passed","suite":mode,"seed":options.seed,"steps":steps.len(),
+            "canonical_row_checks": steps.iter().filter(|s| s.op == 'q' || s.op == 'p').count()})
     );
     Ok(())
 }
@@ -532,7 +534,14 @@ fn main() -> Result<()> {
     if options.cases.get() > 1024 {
         return Err("--cases must not exceed 1024".into());
     }
-    correctness(&options)?;
+    let steps = corpus(&options);
+    compare_trace(
+        &options,
+        "trace",
+        &steps,
+        &reference(&steps, &kernel(), false),
+    )?;
+    rules::correctness(&options)?;
     if options.bench || options.query_bench {
         benchmark(&options)?;
     }

@@ -514,6 +514,10 @@ cargo test -p mica-runtime --test native_codegen native_relation_kernel_executes
 The fixture covers snapshots, catalogue atomicity, allocation failure, heap-valued tuples, AVL rotations, bounded scans, and concurrent commits.
 The Rust comparison checks composed queries, scan results, and net commit deltas for reproducible transaction sequences.
 It includes aborted transactions, collection between operations, and competing functional writes.
+A separate rule corpus compares canonical logical rows after draft edits, commits, rollbacks, and reads from retained snapshots.
+It covers mutual recursion, duplicate supports, stored/derived overlap, recursive deletion, stratified negation, constants, holes, and comparison guards.
+Each run reports its seed, step count, and canonical-row check count for both corpora.
+Rust compares shared derivation semantics only. Transactional catalogue changes and export policy use the native fixture's independent expectations.
 The integration test requires identical generated C from both bootstrap execution tiers.
 
 Rebuild the fixture without sanitizers before measuring:
