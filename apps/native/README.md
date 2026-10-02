@@ -113,6 +113,7 @@ The heap uses `kernel_heap_init`, which installs both kernel and value descripto
 | --- | --- |
 | `kernel_init(kernel, worker)` | Create the empty published snapshot on an active worker |
 | `kernel_begin(kernel, worker, transaction)` | Retain the current snapshot and register transaction roots |
+| `kernel_set_retention_limit(kernel, worker, limit)` | Set the maximum number of transactions that retain snapshot roots |
 | `kernel_declare(transaction, id, name, arity, policy, keys, indexes)` | Stage a relation declaration with caller-assigned identity and symbol IDs |
 | `kernel_write(transaction, id, tuple, asserted)` | Stage an assertion or retraction of a list-valued tuple |
 | `kernel_scan(transaction, id, pattern, mask, after, output, capacity)` | Read a bounded batch into a caller-owned array of value words |
@@ -121,6 +122,17 @@ The heap uses `kernel_heap_init`, which installs both kernel and value descripto
 | `kernel_deltas(transaction)` | Read committed stored-fact additions and removals until the transaction ends |
 | `kernel_end(transaction)` | Release transaction roots and discard any uncommitted changes |
 | `kernel_release(kernel, worker)` | Remove the shared snapshot root under exclusive ownership of the kernel control |
+
+The default retention limit is 1,024 open transactions per kernel.
+Committed and cancelled transactions retain their slot until `kernel_end` releases their roots.
+This counts transaction handles, not distinct snapshot versions. Several transactions can share one version.
+Each admitted transaction can also retain a checked snapshot and a private publication candidate.
+Admission returns `kernel_limit` without registering a transaction when all slots are occupied.
+Reducing the limit below current use also returns `kernel_limit` and preserves the existing limit.
+Workspace allocation occurs before the publication lock; admission accounting and snapshot capture occur under that lock.
+`kernel_begin`, `kernel_end`, and `kernel_set_retention_limit` can join a collection while acquiring the lock.
+Callers must root live managed values across these operations.
+`kernel_release` rejects kernels with open transactions.
 
 The policy codes are 0 for set, 1 for functional keys, and 2 for event append.
 Arity ranges from 0 through 64. Masks use one bit per column.
@@ -256,7 +268,8 @@ Failure discards all destination copies and clears source forwarding metadata be
 This cleanup must finish even after cancellation. Its work depends on the number of copies already admitted.
 The step allowance defaults to 16,777,216. Row and round allowances default to unlimited.
 Row allowances count intermediate row construction and result-buffer entries, including candidates later deduplicated.
-Heap admission, retained-snapshot caps, and resumable scheduling remain separate work.
+Heap capacity and transaction retention have separate limits, described in the kernel and memory interfaces.
+Resumable scheduling remains separate work.
 
 Lower-level operations accept a caller-owned `KernelBudget` pointer.
 These include `kernel_read`, `kernel_rule_refresh`, `kernel_rule_depend`, and `kernel_rule_rows`.
@@ -951,6 +964,17 @@ Heap, worker, and registered root controls must keep stable addresses until rele
 The worker initializer accepts the nursery capacity in bytes. Zero capacity sends allocations directly to mature pages for allocation-failure tests.
 Enter the worker with `mica_memory_enter` before accessing managed values.
 Each worker has one mutator thread at a time. Workers in the same heap can execute concurrently.
+
+The default managed heap capacity is 1 GiB. Use `mica_memory_set_capacity(heap, bytes)` to change it.
+Capacity counts reserved nursery bytes and whole managed pages, including headers and unused cells.
+It excludes native control structs, synchronization objects, and allocator overhead; it does not bound process RSS.
+Reducing capacity below currently reserved storage returns false and preserves the existing capacity.
+Nursery admission and page allocation check capacity under the heap mutex.
+An allocation refusal requests collection at the next safepoint. Releasing roots does not immediately release page capacity.
+Collection promotions also need capacity. Failed promotion preserves roots and nursery contents, allowing recovery after roots are released or capacity increases.
+Kernel operations return `kernel_limit` for capacity refusal and `kernel_oom` for allocator failure.
+Low-level value allocators retain their null or failed-result contract; an active `MemoryControl` records capacity refusal in `denied`.
+The internal mature allocator returns `MemoryAllocationResult`, containing `object` and `limited`, so callers can distinguish those outcomes.
 
 Value helpers do not collect. Nursery exhaustion uses mature storage and requests collection at the next safepoint.
 These overflow allocations remain worker-private until a successful collection, so string and list appends can reuse their spare capacity.

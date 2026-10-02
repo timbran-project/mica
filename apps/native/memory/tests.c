@@ -26,7 +26,7 @@ void mica_foreign_memory_platform_release(uint8_t *pointer) {
 }
 
 static void relocation_and_cycles(void) {
-    struct mica_MemoryHeap heap = {.f_trace = mica_memory_test_trace};
+    struct mica_MemoryHeap heap = {.f_trace = mica_memory_test_trace, .f_capacity_limit = UINT64_MAX};
     struct mica_MemoryWorker worker = {.f_heap = &heap, .f_capacity = 65536};
     worker.f_nursery = malloc(worker.f_capacity);
     assert(worker.f_nursery);
@@ -65,7 +65,7 @@ static void relocation_and_cycles(void) {
 }
 
 static void failed_promotion_preserves_roots(void) {
-    struct mica_MemoryHeap heap = {.f_trace = mica_memory_test_trace};
+    struct mica_MemoryHeap heap = {.f_trace = mica_memory_test_trace, .f_capacity_limit = UINT64_MAX};
     struct mica_MemoryWorker worker = {.f_heap = &heap, .f_capacity = 65536};
     worker.f_nursery = malloc(worker.f_capacity);
     assert(worker.f_nursery);
@@ -97,12 +97,12 @@ static void failed_promotion_preserves_roots(void) {
 }
 
 static void page_reuse_and_large_objects(void) {
-    struct mica_MemoryHeap heap = {0};
+    struct mica_MemoryHeap heap = {.f_capacity_limit = UINT64_MAX};
     struct mica_MemoryWorker worker = {.f_heap = &heap};
     heap.f_workers = &worker;
-    struct mica_MemoryObject *kept = mica_memory_mature_allocate(&heap, 27, 0);
-    struct mica_MemoryObject *discarded = mica_memory_mature_allocate(&heap, 31, 0);
-    struct mica_MemoryObject *large = mica_memory_mature_allocate(&heap, 1000003, 0);
+    struct mica_MemoryObject *kept = mica_memory_mature_allocate(&heap, 27, 0).f_object;
+    struct mica_MemoryObject *discarded = mica_memory_mature_allocate(&heap, 31, 0).f_object;
+    struct mica_MemoryObject *large = mica_memory_mature_allocate(&heap, 1000003, 0).f_object;
     assert(kept && discarded && large);
     memset(mica_memory_payload(kept), 0x66, 27);
     memset(mica_memory_payload(large), 0x77, 1000003);
@@ -112,7 +112,7 @@ static void page_reuse_and_large_objects(void) {
     assert(mica_memory_collect_stopped(&heap));
     assert(heap.f_retained == 27 + 1000003);
     uint64_t allocated = heap.f_allocated;
-    assert(mica_memory_mature_allocate(&heap, 19, 0));
+    assert(mica_memory_mature_allocate(&heap, 19, 0).f_object);
     assert(heap.f_allocated == allocated);
     assert(first.f_pointer[26] == 0x66 && second.f_pointer[1000002] == 0x77);
     first.f_next = NULL;
@@ -121,8 +121,8 @@ static void page_reuse_and_large_objects(void) {
     worker.f_roots = NULL;
     assert(mica_memory_collect_stopped(&heap));
     assert(heap.f_allocated == 0);
-    assert(!mica_memory_mature_allocate(&heap, 0, 0));
-    assert(!mica_memory_mature_allocate(&heap, UINT64_MAX, 0));
+    assert(!mica_memory_mature_allocate(&heap, 0, 0).f_object);
+    assert(!mica_memory_mature_allocate(&heap, UINT64_MAX, 0).f_object);
     assert(!mica_memory_nursery_allocate(&worker, UINT64_MAX, 0));
 }
 
@@ -168,17 +168,17 @@ static void failed_collection_preserves_private_allocations(void) {
 }
 
 static void sweep_unlinks_empty_pages_from_free_lists(void) {
-    struct mica_MemoryHeap heap = {0};
+    struct mica_MemoryHeap heap = {.f_capacity_limit = UINT64_MAX};
     struct mica_MemoryRoot roots[2] = {{0}, {0}};
     struct mica_MemoryWorker worker = {.f_heap = &heap, .f_roots = roots};
     heap.f_workers = &worker;
     roots[0].f_next = &roots[1];
-    struct mica_MemoryObject *first = mica_memory_mature_allocate(&heap, 4096, 0);
+    struct mica_MemoryObject *first = mica_memory_mature_allocate(&heap, 4096, 0).f_object;
     assert(first);
     uint64_t capacity = first->f_page->f_capacity;
     roots[0].f_pointer = mica_memory_payload(first);
     for (uint64_t i = 1; i < 3 * capacity; ++i) {
-        struct mica_MemoryObject *object = mica_memory_mature_allocate(&heap, 4096, 0);
+        struct mica_MemoryObject *object = mica_memory_mature_allocate(&heap, 4096, 0).f_object;
         assert(object);
         if (i == 2 * capacity) roots[1].f_pointer = mica_memory_payload(object);
     }
@@ -188,13 +188,13 @@ static void sweep_unlinks_empty_pages_from_free_lists(void) {
     assert(heap.f_pages && heap.f_pages->f_next && !heap.f_pages->f_next->f_next);
     size_t before = allocations;
     for (uint64_t i = 0; i < 2 * capacity - 2; ++i) {
-        struct mica_MemoryObject *object = mica_memory_mature_allocate(&heap, 4096, 0);
+        struct mica_MemoryObject *object = mica_memory_mature_allocate(&heap, 4096, 0).f_object;
         assert(object);
         assert(object->f_page == heap.f_pages || object->f_page == heap.f_pages->f_next);
         memset(mica_memory_payload(object), 0x81, 4096);
     }
     assert(allocations == before);
-    assert(mica_memory_mature_allocate(&heap, 4096, 0));
+    assert(mica_memory_mature_allocate(&heap, 4096, 0).f_object);
     assert(allocations == before + 1);
     worker.f_roots = NULL;
     assert(mica_memory_collect_stopped(&heap));
@@ -462,7 +462,125 @@ static void worker_lifecycle(void) {
     assert(mica_memory_heap_release(&heap));
 }
 
+static void capacity_admission(void) {
+    struct mica_MemoryHeap heap = {0};
+    struct mica_MemoryWorker worker = {0}, other = {0};
+    assert(mica_memory_heap_init(&heap, mica_memory_test_trace));
+    assert(mica_memory_set_capacity(&heap, 8192));
+    assert(mica_memory_worker_init(&worker, &heap, 8192));
+    assert(heap.f_nursery_bytes == 8192);
+    assert(!mica_memory_worker_init(&other, &heap, 1));
+    assert(!other.f_heap && heap.f_nursery_bytes == 8192);
+    assert(!mica_memory_set_capacity(&heap, 8191) && heap.f_capacity_limit == 8192);
+    assert(mica_memory_enter(&worker));
+    struct copy_control accounting = {.remaining = UINT64_MAX};
+    struct mica_MemoryControl control = {.f_context = (void *)&accounting, .f_check = check_copy_control};
+    mica_memory_control_push(&worker, &control);
+    size_t before = allocations;
+    assert(!mica_memory_allocate(&worker, 90000, 0));
+    assert(control.f_denied && allocations == before && !heap.f_allocated);
+    mica_memory_control_pop(&worker);
+    uint64_t page = sizeof(struct mica_MemoryPage) + ((90000 + sizeof(struct mica_MemoryObject) + 7) & ~UINT64_C(7));
+    assert(mica_memory_set_capacity(&heap, 8192 + page));
+    struct mica_MemoryRoot root = {0};
+    assert(mica_memory_root_push(&worker, &root));
+    root.f_pointer = mica_memory_allocate(&worker, 90000, 0);
+    assert(root.f_pointer && heap.f_allocated == page);
+    assert(!mica_memory_set_capacity(&heap, 8192 + page - 1));
+    assert(!mica_memory_allocate(&worker, 16000, 0));
+    assert(mica_memory_root_pop(&worker, &root));
+    assert(heap.f_allocated == page); // Root release is not reclamation.
+    assert(mica_memory_safepoint(&worker, false)); // Pressure requests collection.
+    assert(!heap.f_allocated && !heap.f_pressure);
+    assert(mica_memory_set_capacity(&heap, 8192 + page));
+    mica_memory_control_push(&worker, &control);
+    fail_after = 0;
+    assert(!mica_memory_allocate(&worker, 90000, 0));
+    fail_after = SIZE_MAX;
+    assert(!control.f_denied && !heap.f_allocated); // Actual allocator failure.
+    mica_memory_control_pop(&worker);
+    assert(mica_memory_leave(&worker));
+    fail_after = 0;
+    assert(!mica_memory_worker_init(&other, &heap, 1024));
+    fail_after = SIZE_MAX;
+    assert(heap.f_nursery_bytes == 8192 && !other.f_heap);
+    assert(mica_memory_worker_release(&worker));
+    assert(!heap.f_nursery_bytes && mica_memory_set_capacity(&heap, 0));
+    assert(mica_memory_worker_init(&other, &heap, 0));
+    assert(mica_memory_worker_release(&other));
+    assert(mica_memory_heap_release(&heap));
+}
+
+static void bounded_collection_and_sharing(void) {
+    struct mica_MemoryHeap heap = {0};
+    struct mica_MemoryWorker worker = {0};
+    assert(mica_memory_heap_init(&heap, mica_memory_test_trace));
+    assert(mica_memory_set_capacity(&heap, 16384));
+    assert(mica_memory_worker_init(&worker, &heap, 16384));
+    assert(mica_memory_enter(&worker));
+    struct mica_MemoryRoot root = {0};
+    assert(mica_memory_root_push(&worker, &root));
+    root.f_pointer = mica_memory_allocate(&worker, 7000, 0);
+    assert(root.f_pointer);
+    uint8_t *source = root.f_pointer;
+    memset(source, 0x45, 7000);
+    uint64_t used = worker.f_used;
+    struct copy_control accounting = {.remaining = UINT64_MAX};
+    struct mica_MemoryControl control = {.f_context = (void *)&accounting, .f_check = check_copy_control};
+    mica_memory_control_push(&worker, &control);
+    assert(!mica_memory_share(&worker, source));
+    assert(control.f_denied && !heap.f_allocated);
+    assert(!mica_memory_object(source)->f_next && !mica_memory_object(source)->f_work);
+    mica_memory_control_pop(&worker);
+    mica_memory_control_push(&worker, &control);
+    assert(!mica_memory_safepoint(&worker, true));
+    assert(control.f_denied && heap.f_collection_limited && heap.f_pressure);
+    assert(root.f_pointer == source && worker.f_used == used && !heap.f_allocated);
+    for (unsigned i = 0; i < 7000; ++i) assert(source[i] == 0x45);
+    mica_memory_control_pop(&worker);
+    assert(mica_memory_root_pop(&worker, &root));
+    assert(worker.f_used == used);
+    assert(mica_memory_safepoint(&worker, false));
+    assert(!heap.f_collection_limited && !heap.f_pressure && !worker.f_used);
+    assert(mica_memory_leave(&worker));
+    assert(mica_memory_worker_release(&worker));
+    assert(mica_memory_heap_release(&heap));
+}
+
+struct nursery_admission {
+    struct mica_MemoryHeap *heap;
+    _Atomic unsigned attempted, admitted;
+    _Atomic bool release;
+};
+static void *admit_nursery(void *opaque) {
+    struct nursery_admission *job = opaque;
+    struct mica_MemoryWorker worker = {0};
+    bool admitted = mica_memory_worker_init(&worker, job->heap, 4096);
+    if (admitted) atomic_fetch_add(&job->admitted, 1);
+    atomic_fetch_add(&job->attempted, 1);
+    while (!atomic_load(&job->release)) sched_yield();
+    if (admitted) assert(mica_memory_worker_release(&worker));
+    return NULL;
+}
+static void concurrent_capacity_admission(void) {
+    struct mica_MemoryHeap heap = {0};
+    assert(mica_memory_heap_init(&heap, mica_memory_test_trace));
+    assert(mica_memory_set_capacity(&heap, 4 * 4096));
+    struct nursery_admission job = {.heap = &heap};
+    pthread_t threads[8];
+    for (unsigned i = 0; i < 8; ++i) assert(!pthread_create(&threads[i], NULL, admit_nursery, &job));
+    while (atomic_load(&job.attempted) != 8) sched_yield();
+    assert(atomic_load(&job.admitted) == 4 && heap.f_nursery_bytes == 4 * 4096);
+    atomic_store(&job.release, true);
+    for (unsigned i = 0; i < 8; ++i) assert(!pthread_join(threads[i], NULL));
+    assert(!heap.f_nursery_bytes);
+    assert(mica_memory_heap_release(&heap));
+}
+
 int main(void) {
+    capacity_admission();
+    bounded_collection_and_sharing();
+    concurrent_capacity_admission();
     relocation_and_cycles();
     failed_promotion_preserves_roots();
     page_reuse_and_large_objects();

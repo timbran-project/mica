@@ -308,7 +308,7 @@ verb native_rules/maintenance_program(input: map) -> map
   module = native_rules/refresh_body(module)
   module = native_rules/read_body(module)
   let [work: map, opened: map] = native_kernel/rule_transaction(module, "kernel_scan")
-  let bounded: map = native_execution/local_budget(opened, native_rules/read(opened, work, "rule_limit"))
+  let bounded: map = opened
   let [relation: map, scan_ready: map] = native_rules/checked_call(bounded, "read", [native_rules/ref(bounded, "transaction"), native_rules/ref(bounded, "id"), native_rules/ref(bounded, "budget")], "relation")
   let scanned: map = native_roots/return_value(scan_ready, native_gen/call(scan_ready, "kernel_relation_scan", [native_roots/worker(scan_ready), relation, native_rules/ref(scan_ready, "pattern"), native_rules/ref(scan_ready, "mask"), native_rules/ref(scan_ready, "after"), native_rules/ref(scan_ready, "output"), native_rules/ref(scan_ready, "capacity"), native_rules/ref(scan_ready, "budget")]))
   module = native_gen/finish(module, scanned)

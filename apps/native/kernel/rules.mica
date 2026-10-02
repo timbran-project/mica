@@ -46,6 +46,9 @@ verb native_kernel/rule_transaction(module: map, name: string) -> list
   let [work, opened] = native_kernel/open_transaction(builder, fn(failed) => native_kernel/rule_error(failed, "kernel_closed"))
   let scoped = native_roots/open_scope(opened, fn(failed, reason) => native_kernel/rule_error(failed, string_concat("kernel_", reason)))
   let [rooted, ready] = native_roots/retain(scoped, "work", work)
+  if !native_execution/has(ready, "budget")
+    ready = native_execution/local_budget(ready, native_kernel/load_field(ready, rooted, "rule_limit"))
+  end
   ready = native_roots/poll(ready)
   let signal: map = native_kernel/load_field(ready, native_gen/ref(ready, "transaction"), "signal")
   ready = native_gen/when(ready, native_gen/equal(native_gen/call(ready, "memory_atomic_load", [signal]), native_gen/ref(ready, "one")), fn(cancelled) => native_kernel/rule_error(cancelled, "kernel_cancelled"))
@@ -93,7 +96,7 @@ verb native_kernel/rule_read_body(module: map, all: bool) -> map
     name = "kernel_rules"
   end
   let [work, opened] = native_kernel/rule_transaction(module, name)
-  let ready: map = native_execution/local_budget(opened, native_kernel/load_field(opened, work, "rule_limit"))
+  let ready: map = opened
   let builder = ready
   if all
     let [output, rooted] = native_roots/retain(ready, "catalogue", native_gen/zero(native_kernel/pointer("Rule")))
@@ -124,7 +127,7 @@ end
 // index. An OOM leaves the previous staged definition usable and committable.
 verb native_kernel/rule_stage_body(module: map, operation: string) -> map
   let [work, opened] = native_kernel/rule_transaction(module, string_concat("kernel_rule_", operation))
-  let builder = native_rules/local_budget(opened, native_rules/read(opened, work, "rule_limit"))
+  let builder = opened
   let transaction = native_gen/ref(builder, "transaction")
   let id = native_gen/ref(builder, "id")
   let [worker, with_worker] = native_gen/bind(builder, "worker", native_kernel/load_field(builder, transaction, "worker"))

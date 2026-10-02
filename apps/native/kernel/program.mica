@@ -207,6 +207,7 @@ verb native_kernel/types(input: map) -> map
     ["kernel_arity", :U64, native_value/hex(2)], ["kernel_nonpersistent", :U64, native_value/hex(3)],
     ["kernel_key", :U64, native_value/hex(4)], ["kernel_conflict", :U64, native_value/hex(5)],
     ["kernel_name", :U64, native_value/hex(6)], ["kernel_schema", :U64, native_value/hex(7)],
+    ["kernel_default_retention", :U64, native_value/hex(1024)],
     ["kernel_unlimited", :U64, "ffffffffffffffff"], ["kernel_cancelled", :U64, native_value/hex(11)], ["kernel_limit", :U64, native_value/hex(10)], ["rule_default_limit", :U64, native_value/hex(16777216)], ["rule_default_bytes", :U64, native_value/hex(67108864)],
     ["kernel_oom", :U64, native_value/hex(8)], ["kernel_closed", :U64, native_value/hex(9)],
     ["kernel_policy_set", :U64, native_value/hex(0)], ["kernel_policy_functional", :U64, native_value/hex(1)],
@@ -218,7 +219,7 @@ verb native_kernel/types(input: map) -> map
     layout = layout + 1
   end
   for spec in [
-    ["Kernel", [["heap", native_memory/record_pointer("MemoryHeap")], ["mutex", bytes], ["current", root]]],
+    ["Kernel", [["heap", native_memory/record_pointer("MemoryHeap")], ["mutex", bytes], ["current", root], ["retained_transactions", :U64], ["retention_limit", :U64]]],
     ["KernelBudget", [["steps", :U64], ["rows", :U64], ["rounds", :U64], ["bytes", :U64], ["status", :U64], ["signal", bytes]]],
     ["KernelTransaction", [["signal", bytes], ["kernel", native_memory/record_pointer("Kernel")], ["worker", worker], ["root", root]]],
     ["KernelQueryResult", [["status", :U64], ["arity", :U64], ["rows", word]]],

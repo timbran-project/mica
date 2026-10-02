@@ -39,6 +39,7 @@ verb native_memory/lifecycle(input: map) -> map
   end
   for spec in [
     ["memory_heap_init", :Bool, [["heap", heap, :Borrow], ["trace", trace, :Value]], effects, :Value],
+    ["memory_set_capacity", :Bool, [["heap", heap, :Borrow], ["limit", :U64, :Value]], [:ReadMemory, :WriteMemory], :Value],
     ["memory_heap_release", :Bool, [["heap", heap, :Borrow]], effects, :Value],
     ["memory_worker_init", :Bool, [["worker", worker, :Borrow], ["heap", heap, :Borrow], ["capacity", :U64, :Value]], effects, :Value],
     ["memory_worker_release", :Bool, [["worker", worker, :Borrow]], effects, :Value],
@@ -65,6 +66,17 @@ verb native_memory/lifecycle(input: map) -> map
     native_memory/call("memory_wait", ["sync"])])]
   let failed: list = [@unlock, native/return_value("memory_false")]
   let success: list = [@unlock, native/return_value("memory_true")]
+  context = native/define_function(context, "memory_control_deny", [
+    native/unless_statement(native/binary_expression(:Equal, "control", native/typed_zero(control)), [native_memory/store(:Bool, "control", "denied", "memory_true")]),
+    native/return_void()])
+  context = native/define_function(context, "memory_set_capacity", [
+    native/when_statement(native/binary_expression(:Equal, native_memory/field(bytes, "heap", "mutex"), "memory_null_bytes"), [native/return_value("memory_false")]),
+    @sync,
+    native/let_statement("used", :U64, native_memory/field(:U64, "heap", "allocated")),
+    native/when_statement(native/binary_expression(:Less, "limit", "used"), failed),
+    native/let_statement("remaining", :U64, native/binary_expression(:Subtract, "limit", "used")),
+    native/when_statement(native/binary_expression(:Less, "remaining", native_memory/field(:U64, "heap", "nursery_bytes")), failed),
+    native_memory/store(:U64, "heap", "capacity_limit", "limit"), @success])
   // Like roots, controls borrow native frames for a strict dynamic extent.
   // The caller must pop before that frame returns; callbacks cannot relocate.
   context = native/define_function(context, "memory_control_push", [
@@ -97,6 +109,7 @@ verb native_memory/lifecycle(input: map) -> map
     native/let_statement("adopted", bytes, native/binary_expression(:Adopt, "slot", "sync")),
     native_memory/store(trace, "heap", "trace", "trace"),
     native_memory/store(:U64, "heap", "collection_limit", "memory_collection_floor"),
+    native_memory/store(:U64, "heap", "capacity_limit", "memory_default_capacity"),
     native_memory/store(:Bool, "heap", "collection_ok", "memory_true"),
     native/return_value("memory_true")])
   context = native/define_function(context, "memory_heap_release", [
@@ -110,16 +123,18 @@ verb native_memory/lifecycle(input: map) -> map
   context = native/define_function(context, "memory_worker_init", [
     native/unless_statement(native/binary_expression(:Equal, native_memory/field(heap, "worker", "heap"), "memory_null_heap"), [native/return_value("memory_false")]),
     native/when_statement(native/binary_expression(:Less, "memory_allocation_limit", "capacity"), [native/return_value("memory_false")]),
+    @sync, @wait,
+    native/unless_statement(native/call_expression("memory_has_capacity", ["heap", "capacity"]), failed),
     native/let_statement("nursery", bytes, "memory_null_bytes"),
     native/unless_statement(native/binary_expression(:Equal, "capacity", "memory_n0"), [
       native/set_statement("nursery", native/call_expression("memory_platform_allocate", ["capacity"])),
-      native/when_statement(native/binary_expression(:Equal, "nursery", "memory_null_bytes"), [native/return_value("memory_false")])]),
-    @sync, @wait,
+      native/when_statement(native/binary_expression(:Equal, "nursery", "memory_null_bytes"), failed)]),
     native/store_statement("worker", native/typed_expression([:Record, "MemoryWorker"], [:Zero])),
     native/let_statement("slot", native_memory/pointer(bytes), native/field_pointer_expression("worker", "nursery")),
     native/unless_statement(native/binary_expression(:Equal, "nursery", "memory_null_bytes"), [
       native/let_statement("adopted", bytes, native/binary_expression(:Adopt, "slot", "nursery"))]),
     native_memory/store(:U64, "worker", "capacity", "capacity"),
+    native_memory/store(:U64, "heap", "nursery_bytes", native/typed_expression(:U64, native/binary_expression(:Add, native_memory/field(:U64, "heap", "nursery_bytes"), "capacity"))),
     native_memory/store_root(heap, "worker", "heap", native/typed_expression(heap, native/manage_expression("heap"))),
     native_memory/store_root(worker, "worker", "next", native_memory/root(worker, "heap", "workers")),
     native_memory/store_root(worker, "heap", "workers", native/typed_expression(worker, native/manage_expression("worker"))),
@@ -135,6 +150,7 @@ verb native_memory/lifecycle(input: map) -> map
     native/root_store_statement("link", native_memory/root(worker, "worker", "next")),
     native/let_statement("nursery", bytes, native_memory/root(bytes, "worker", "nursery")),
     native_memory/call("memory_platform_release", ["nursery"]),
+    native_memory/store(:U64, "heap", "nursery_bytes", native/typed_expression(:U64, native/binary_expression(:Subtract, native_memory/field(:U64, "heap", "nursery_bytes"), native_memory/field(:U64, "worker", "capacity")))),
     native/store_statement("worker", native/typed_expression([:Record, "MemoryWorker"], [:Zero])), @success])
   for operation in ["enter", "leave"]
     let body: list = [@worker_heap, @sync]
@@ -163,6 +179,7 @@ verb native_memory/lifecycle(input: map) -> map
       // Nursery overflow uses managed pages. The heap growth limit decides
       // when to collect; a small nursery must not trigger repeated full scans.
       native/let_statement("should_collect", :Bool, "collect"),
+      native/when_statement(native_memory/field(:Bool, "heap", "pressure"), [native/set_statement("should_collect", "memory_true")]),
       native/unless_statement(native/binary_expression(:Less,
         native_memory/field(:U64, "heap", "allocated"), native_memory/field(:U64, "heap", "collection_limit")),
         [native/set_statement("should_collect", "memory_true")]),
@@ -185,6 +202,8 @@ verb native_memory/lifecycle(input: map) -> map
         native_memory/call("memory_wake", ["sync"])])]),
     native_memory/store(:Bool, "worker", "active", "memory_true"),
     native/let_statement("result", :Bool, native_memory/field(:Bool, "heap", "collection_ok")),
+    native/unless_statement("result", [native/when_statement(native_memory/field(:Bool, "heap", "collection_limited"), [
+      native_memory/call("memory_control_deny", [native_memory/field(control, "worker", "control")])])]),
     @unlock, native/return_value("result")])
   context = native/define_function(context, "memory_allocate", [
     native/let_statement("active", :Bool, native_memory/field(:Bool, "worker", "active")),
@@ -193,7 +212,10 @@ verb native_memory/lifecycle(input: map) -> map
     native/let_call("allocation", bytes, "memory_nursery_allocate", ["worker", "size", "layout"]),
     native/unless_statement(native/binary_expression(:Equal, "allocation", "memory_null_bytes"), [native/return_value("allocation")]),
     @worker_heap, @sync,
-    native/let_call("object", object, "memory_mature_allocate", ["heap", "size", "layout"]),
+    native/let_call("allocation_result", [:Record, "MemoryAllocationResult"], "memory_mature_allocate", ["heap", "size", "layout"]),
+    native/let_statement("object", object, native/field_expression("allocation_result", "object")),
+    native/when_statement(native/typed_expression(:Bool, native/field_expression("allocation_result", "limited")), [
+      native_memory/call("memory_control_deny", [native_memory/field(control, "worker", "control")])]),
     @unlock,
     native/when_statement(native/binary_expression(:Equal, "object", "memory_null_object"), [native/return_value("memory_null_bytes")]),
     // Overflow storage remains worker-private until a successful collection.

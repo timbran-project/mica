@@ -15,6 +15,19 @@ verb native_memory/allocation(input: map) -> map
   let object: list = native_memory/record_pointer("MemoryObject")
   let page: list = native_memory/record_pointer("MemoryPage")
   let header: list = [:Record, "MemoryObject"]
+  // The caller holds the heap mutex. Count reserved nursery storage and whole
+  // managed pages, including free cells, without overflowing either sum.
+  let check: map = native_gen/context(context, "memory_has_capacity")
+  let heap: map = native_gen/ref(check, "heap")
+  let [remaining: map, ready: map] = native_gen/bind(check, "remaining", native_gen/read(native_gen/field(check, heap, "capacity_limit")))
+  check = ready
+  for field in ["nursery_bytes", "allocated"]
+    let used: map = native_gen/read(native_gen/field(check, heap, field))
+    check = native_gen/when(check, native_gen/less(remaining, used), fn(full) => native_gen/return_value(full, native_gen/ref(full, "memory_false")))
+    check = native_gen/assign(check, remaining, native_gen/subtract(remaining, used))
+  end
+  check = native_gen/return_value(check, native_gen/negate(native_gen/less(remaining, native_gen/ref(check, "size"))))
+  context = native_gen/finish(context, check)
   context = native/define_function(context, "memory_object", [
     native/let_statement("header", object, native/unary_expression(:PointerCast, "pointer")),
     native/return_value(native/offset_expression("header", "memory_previous"))])
@@ -53,8 +66,8 @@ verb native_memory/allocation(input: map) -> map
   // Ten size classes cover 128-byte through 64-KiB cells. Larger objects own
   // one page. Collection returns unused cells to the class free lists.
   context = native/define_function(context, "memory_mature_allocate", [
-    native/when_statement(native/binary_expression(:Equal, "size", "memory_n0"), [native/return_value("memory_null_object")]),
-    native/when_statement(native/binary_expression(:Less, "memory_allocation_limit", "size"), [native/return_value("memory_null_object")]),
+    native/when_statement(native/binary_expression(:Equal, "size", "memory_n0"), [native/return_zero()]),
+    native/when_statement(native/binary_expression(:Less, "memory_allocation_limit", "size"), [native/return_zero()]),
     native/let_statement("header_size", :U64, native/unary_expression(:SizeOf, header)),
     @native_memory/object_extent("size", "header_size", "total"),
     native/let_statement("stride", :U64, "memory_cell_size"),
@@ -73,8 +86,11 @@ verb native_memory/allocation(input: map) -> map
       native/let_statement("page_size", :U64, native/unary_expression(:SizeOf, [:Record, "MemoryPage"])),
       native/let_statement("payload_size", :U64, native/binary_expression(:Multiply, "count", "stride")),
       native/let_statement("allocation_size", :U64, native/binary_expression(:Add, "page_size", "payload_size")),
+      native/unless_statement(native/call_expression("memory_has_capacity", ["heap", "allocation_size"]), [
+        native_memory/store(:Bool, "heap", "pressure", "memory_true"),
+        native/return_value([:Record, "memory_null_object", "memory_true"])]),
       native/let_call("allocation", bytes, "memory_platform_allocate", ["allocation_size"]),
-      native/when_statement(native/binary_expression(:Equal, "allocation", "memory_null_bytes"), [native/return_value("memory_null_object")]),
+      native/when_statement(native/binary_expression(:Equal, "allocation", "memory_null_bytes"), [native/return_zero()]),
       native/let_statement("owned_page", page, native/unary_expression(:PointerCast, "allocation")),
       native/let_statement("previous", page, native_memory/field(page, "heap", "pages")),
       native/let_statement("page_slot", native_memory/pointer(page), native/field_pointer_expression("heap", "pages")),
@@ -110,6 +126,6 @@ verb native_memory/allocation(input: map) -> map
     native/let_statement("owner", page, native_memory/field(page, "candidate", "page")),
     native_memory/store(:U64, "owner", "live", native/typed_expression(:U64,
       native/binary_expression(:Add, native_memory/field(:U64, "owner", "live"), "memory_n1"))),
-    native/return_value("candidate")])
+    native/return_value([:Record, "candidate", "memory_false"])])
   return context
 end

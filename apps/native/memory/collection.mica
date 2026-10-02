@@ -143,7 +143,7 @@ verb native_memory/trace_state(builder: map, heap: map, phase: string) -> map
   let result: map = native_gen/record(builder, [:Record, "MemoryCollection"],
     {"heap" -> heap, "work" -> native_gen/ref(builder, "memory_null_object"),
       "copies" -> native_gen/ref(builder, "memory_null_object"),
-      "phase" -> native_gen/ref(builder, phase), "failed" -> native_gen/ref(builder, "memory_false"),
+      "phase" -> native_gen/ref(builder, phase), "failed" -> native_gen/ref(builder, "memory_false"), "limited" -> native_gen/ref(builder, "memory_false"),
       "copied" -> native_gen/ref(builder, "memory_n0"), "control" -> native_gen/zero(native_memory/record_pointer("MemoryControl"))})
   return result
 end
@@ -166,6 +166,7 @@ end
 verb native_memory/collect_stopped_body(module: map) -> map
   let builder: map = native_gen/context(module, "memory_collect_stopped")
   let heap: map = native_gen/ref(builder, "heap")
+  builder = native_gen/write(builder, native_gen/field(builder, heap, "collection_limited"), native_gen/ref(builder, "memory_false"))
   let [state: map, with_state: map] = native_gen/bind(builder, "state", native_memory/trace_state(builder, heap, "memory_trace_prepare"))
   let [collection: map, with_collection: map] = native_gen/bind(with_state, "collection", native_gen/address(state))
   let [trace: map, with_trace: map] = native_gen/bind(with_collection, "trace",
@@ -173,7 +174,9 @@ verb native_memory/collect_stopped_body(module: map) -> map
   builder = native_memory/visit_registered_roots(with_trace, heap, collection)
   builder = native_memory/trace_pending(builder, collection, trace)
   builder = native_gen/when(builder, native_gen/read(native_gen/field(builder, collection, "failed")), fn(initial_failure)
-    let failure: map = native_memory/rollback_workers(initial_failure, heap)
+    let failure: map = native_gen/write(initial_failure, native_gen/field(initial_failure, heap, "collection_limited"), native_gen/read(native_gen/field(initial_failure, collection, "limited")))
+    failure = native_gen/write(failure, native_gen/field(failure, heap, "pressure"), native_gen/ref(failure, "memory_true"))
+    failure = native_memory/rollback_workers(failure, heap)
     failure = native_gen/do_call(failure, "memory_sweep", [heap, native_gen/ref(failure, "memory_false")])
     return native_gen/return_value(failure, native_gen/ref(failure, "memory_false"))
   end)
@@ -182,6 +185,7 @@ verb native_memory/collect_stopped_body(module: map) -> map
   builder = native_memory/rewrite_pages(builder, heap, collection, trace)
   builder = native_gen/do_call(builder, "memory_sweep", [heap, native_gen/ref(builder, "memory_true")])
   builder = native_memory/reset_workers(builder, heap)
+  builder = native_gen/write(builder, native_gen/field(builder, heap, "pressure"), native_gen/ref(builder, "memory_false"))
   builder = native_memory/update_collection_limit(builder, heap)
   builder = native_gen/write(builder, native_gen/field(builder, heap, "copied"),
     native_gen/add(native_gen/read(native_gen/field(builder, heap, "copied")),
@@ -327,7 +331,9 @@ verb native_memory/collection(input: map) -> map
     native/when_statement(native/binary_expression(:Equal, "state", "memory_object_nursery"), [
       native/let_statement("size", :U64, native_memory/field(:U64, "object", "size")),
       native/let_statement("layout", :U64, native_memory/field(:U64, "object", "layout")),
-      native/let_call("target", object, "memory_mature_allocate", ["heap", "size", "layout"]),
+      native/let_call("allocation", [:Record, "MemoryAllocationResult"], "memory_mature_allocate", ["heap", "size", "layout"]),
+      native/let_statement("target", object, native/field_expression("allocation", "object")),
+      native/when_statement(native/typed_expression(:Bool, native/field_expression("allocation", "limited")), [native_memory/store(:Bool, "collection", "limited", "memory_true")]),
       native/when_statement(native/binary_expression(:Equal, "target", "memory_null_object"), [
         native_memory/store(:Bool, "collection", "failed", "memory_true"), native/return_value("pointer")]),
       native/let_call("destination", bytes, "memory_payload", ["target"]),
@@ -436,8 +442,10 @@ verb native_memory/share_visit_body(module: map) -> map
   let [size: map, with_size: map] = native_gen/bind(builder, "size", native_gen/read(native_gen/field(builder, object, "size")))
   builder = native_memory/check_copy(with_size, collection, size, native_gen/ref(with_size, "memory_n0"))
   builder = native_gen/when(builder, native_gen/read(native_gen/field(builder, collection, "failed")), fn(failed) => native_gen/return_value(failed, pointer))
-  let [target: map, with_target: map] = native_gen/bind(builder, "target", native_gen/call(builder, "memory_mature_allocate",
+  let [allocation: map, with_allocation: map] = native_gen/bind(builder, "allocation", native_gen/call(builder, "memory_mature_allocate",
     [heap, size, native_gen/read(native_gen/field(builder, object, "layout"))]))
+  builder = native_gen/when(with_allocation, native_gen/field(with_allocation, allocation, "limited"), fn(limited) => native_gen/do_call(limited, "memory_control_deny", [native_gen/read(native_gen/field(limited, collection, "control"))]))
+  let [target: map, with_target: map] = native_gen/bind(builder, "target", native_gen/field(builder, allocation, "object"))
   builder = native_gen/when(with_target, native_gen/equal(target, native_gen/ref(with_target, "memory_null_object")),
     fn(failure) => native_memory/share_failure(failure, collection))
   let [payload: map, with_payload: map] = native_gen/bind(builder, "payload", native_gen/call(builder, "memory_payload", [target]))

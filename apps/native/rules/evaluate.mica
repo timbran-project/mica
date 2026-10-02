@@ -36,10 +36,6 @@ verb native_rules/evaluation_declarations(input: map) -> map
   end
   return module
 end
-verb native_rules/local_budget(builder: map, allowance: map) -> map
-  let result: map = native_execution/local_budget(builder, allowance)
-  return result
-end
 verb native_rules/round_body(module: map) -> map
   let builder: map = native_rules/context(module, "rule_round")
   builder = native_execution/charge(builder, native_rules/ref(builder, "zero"), native_rules/ref(builder, "zero"), native_rules/ref(builder, "one"), fn(failed, status) => native_rules/fail(failed, status))
@@ -104,7 +100,7 @@ verb native_rules/advance_body(module: map) -> map
 end
 verb native_rules/evaluate_body(module: map) -> map
   let [work: map, opened: map] = native_kernel/rule_transaction(module, "kernel_rule_evaluate")
-  let builder: map = native_rules/local_budget(opened, native_rules/read(opened, work, "rule_limit"))
+  let builder: map = opened
   builder = native_kernel/store_field(builder, work, "rules_read", native_rules/ref(builder, "true"))
   let [plan: map, with_plan: map] = native_roots/retain(builder, "plan", native_rules/read(builder, work, "rule_plan"))
   let [captured: map, with_capture: map] = native_rules/checked_call(with_plan, "rule_capture", [native_roots/worker(with_plan), native_rules/read(with_plan, native_rules/read(with_plan, work, "base"), "relations"), native_rules/read(with_plan, work, "changes"), plan, native_rules/ref(with_plan, "budget")], "evaluation")

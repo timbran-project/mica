@@ -34,6 +34,12 @@ verb native_execution/local_budget(input: map, allowance: map) -> map
       fields[field] = native_kernel/load_field(builder, work, string_concat(field, "_limit"))
     end
   end
+  let worker: map = native_kernel/load_field(builder, native_roots/ref(builder, "transaction"), "worker")
+  let result: map = native_execution/budget_scope(builder, worker, fields)
+  return result
+end
+
+verb native_execution/budget_scope(builder: map, worker: map, fields: map) -> map
   let [budget: map, ready: map] = native_gen/bind(builder, "allowance", native_gen/record(builder, [:Record, "KernelBudget"], fields))
   let bindings: map = {}
   if map_contains_key(ready, :scope_bindings)
@@ -41,7 +47,6 @@ verb native_execution/local_budget(input: map, allowance: map) -> map
   end
   bindings["budget"] = native_gen/address(budget)
   ready[:scope_bindings] = bindings
-  let worker: map = native_kernel/load_field(ready, native_roots/ref(ready, "transaction"), "worker")
   let [control: map, attached: map] = native_gen/bind(ready, "memory_control", native_gen/record(ready, [:Record, "MemoryControl"],
     {"parent" -> native_gen/zero(native_memory/record_pointer("MemoryControl")), "context" -> native_gen/cast(native_memory/pointer(:U8), native_gen/address(budget)),
       "check" -> native_gen/expression([:FunctionPointer, "MemoryCheck"], :FunctionAddress, ["kernel_memory_check"]), "denied" -> native_gen/ref(ready, "false")}))

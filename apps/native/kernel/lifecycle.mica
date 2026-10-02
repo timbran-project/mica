@@ -293,6 +293,87 @@ verb native_kernel/commit_body(module: map) -> map
   return result
 end
 
+// A transaction retains no snapshot until admission succeeds. Build and root
+// its empty workspace first; only capture and handle accounting use the lock.
+verb native_kernel/initial_work(builder: map) -> map
+  let fields: map = {}
+  for field in native_kernel/schema("Work")[1]
+    fields[field[0]] = native_gen/zero(field[1])
+  end
+  fields["rule_limit"] = native_gen/ref(builder, "rule_default_limit")
+  fields["bytes_limit"] = native_gen/ref(builder, "rule_default_bytes")
+  fields["rows_limit"] = native_gen/ref(builder, "kernel_unlimited")
+  fields["rounds_limit"] = native_gen/ref(builder, "kernel_unlimited")
+  return fields
+end
+
+verb native_kernel/clear_transaction(builder: map, transaction: map) -> map
+  let body: map = native_gen/do_call(builder, "memory_atomic_destroy", [native_kernel/load_field(builder, transaction, "signal")])
+  let result: map = native_gen/store(body, transaction, native_gen/zero([:Record, "KernelTransaction"]))
+  return result
+end
+
+verb native_kernel/begin_body(module: map) -> map
+  let builder: map = native_gen/context(module, "kernel_begin")
+  let kernel: map = native_gen/ref(builder, "kernel")
+  let worker: map = native_gen/ref(builder, "worker")
+  let transaction: map = native_gen/ref(builder, "transaction")
+  let root: map = native_gen/field(builder, transaction, "root")[:pointer]
+  builder = native_gen/unless(builder, native_kernel/absent(native_kernel/load_field(builder, root, "registration")), fn(busy) => native_kernel/status(busy, "kernel_closed"))
+  builder = native_gen/when(builder, native_kernel/absent(native_kernel/load_field(builder, kernel, "mutex")), fn(closed) => native_kernel/status(closed, "kernel_closed"))
+  builder = native_gen/unless(builder, native_gen/equal(native_kernel/load_field(builder, worker, "heap"), native_kernel/load_field(builder, kernel, "heap")), fn(wrong) => native_kernel/status(wrong, "kernel_schema"))
+  builder = native_execution/budget_scope(builder, worker, {
+    "steps" -> native_gen/ref(builder, "rule_default_limit"), "rows" -> native_gen/ref(builder, "kernel_unlimited"),
+    "rounds" -> native_gen/ref(builder, "kernel_unlimited"), "bytes" -> native_gen/ref(builder, "rule_default_bytes"),
+    "status" -> native_gen/ref(builder, "kernel_ok"), "signal" -> native_gen/zero(native_memory/pointer(:U8))})
+  builder = native_gen/unless(builder, native_gen/call(builder, "memory_safepoint", [worker, native_gen/ref(builder, "false")]), fn(failed) => native_kernel/status(failed, "kernel_oom"))
+  let [work: map, allocated: map] = native_gen/bind(builder, "work", native_kernel/allocate_record(builder, worker, "Work", native_kernel/initial_work(builder)))
+  builder = native_gen/when(allocated, native_kernel/absent(work), fn(failed) => native_kernel/status(failed, "kernel_oom"))
+  let [signal: map, with_signal: map] = native_gen/bind(builder, "signal", native_gen/call(builder, "memory_atomic_create", [native_gen/ref(builder, "zero")]))
+  builder = native_gen/when(with_signal, native_kernel/absent(signal), fn(failed) => native_kernel/status(failed, "kernel_oom"))
+  for field, value in {"signal" -> signal, "worker" -> worker, "kernel" -> kernel}
+    builder = native_gen/root_write(builder, native_gen/field(builder, transaction, field), native_gen/manage(value))
+  end
+  builder = native_gen/root_write(builder, native_gen/field(builder, root, "pointer"), native_gen/cast(native_memory/pointer(:U8), work))
+  builder = native_gen/unless(builder, native_gen/call(builder, "memory_root_push", [worker, root]), fn(failed) => native_kernel/status(native_kernel/clear_transaction(failed, transaction), "kernel_closed"))
+  builder = native_gen/on_return(builder, fn(leaving, result)
+    return native_gen/unless(leaving, native_kernel/absent(result), fn(failed)
+      let [popped: map, with_pop: map] = native_gen/bind(failed, "popped", native_gen/call(failed, "memory_root_pop", [worker, root]))
+      return native_kernel/clear_transaction(with_pop, transaction)
+    end)
+  end)
+  builder = native_gen/unless(builder, native_gen/call(builder, "kernel_lock", [kernel, worker]), fn(closed) => native_kernel/status(closed, "kernel_closed"))
+  let retained: map = native_kernel/load_field(builder, kernel, "retained_transactions")
+  builder = native_gen/unless(builder, native_gen/less(retained, native_kernel/load_field(builder, kernel, "retention_limit")), fn(full) => native_kernel/status(native_kernel/unlock_kernel(full, kernel), "kernel_limit"))
+  let [base: map, captured: map] = native_gen/bind(builder, "base", native_gen/cast(native_kernel/pointer("Snapshot"), native_gen/root_read(native_kernel/snapshot_slot(builder, kernel))))
+  let [current_work: map, reloaded: map] = native_gen/bind(captured, "current_work", native_gen/call(captured, "kernel_work", [transaction]))
+  builder = reloaded
+  for field in ["base", "checked"]
+    builder = native_kernel/store_field(builder, current_work, field, base)
+  end
+  for field, source in {"evaluation" -> "evaluation", "rule_index" -> "rules", "rule_plan" -> "rule_plan"}
+    builder = native_kernel/store_field(builder, current_work, field, native_kernel/load_field(builder, base, source))
+  end
+  builder = native_kernel/store_field(builder, kernel, "retained_transactions", native_gen/add(retained, native_gen/ref(builder, "one")))
+  builder = native_kernel/status(native_kernel/unlock_kernel(builder, kernel), "kernel_ok")
+  let result: map = native_gen/finish(module, builder)
+  return result
+end
+
+verb native_kernel/retention_body(module: map) -> map
+  let builder: map = native_gen/context(module, "kernel_set_retention_limit")
+  let kernel: map = native_gen/ref(builder, "kernel")
+  let worker: map = native_gen/ref(builder, "worker")
+  builder = native_gen/when(builder, native_kernel/absent(native_kernel/load_field(builder, kernel, "mutex")), fn(closed) => native_kernel/status(closed, "kernel_closed"))
+  builder = native_gen/unless(builder, native_gen/equal(native_kernel/load_field(builder, kernel, "heap"), native_kernel/load_field(builder, worker, "heap")), fn(wrong) => native_kernel/status(wrong, "kernel_schema"))
+  builder = native_gen/unless(builder, native_gen/call(builder, "kernel_lock", [kernel, worker]), fn(closed) => native_kernel/status(closed, "kernel_closed"))
+  builder = native_gen/when(builder, native_gen/less(native_gen/ref(builder, "limit"), native_kernel/load_field(builder, kernel, "retained_transactions")), fn(full) => native_kernel/status(native_kernel/unlock_kernel(full, kernel), "kernel_limit"))
+  builder = native_kernel/store_field(builder, kernel, "retention_limit", native_gen/ref(builder, "limit"))
+  builder = native_kernel/status(native_kernel/unlock_kernel(builder, kernel), "kernel_ok")
+  let result: map = native_gen/finish(module, builder)
+  return result
+end
+
 verb native_kernel/lifecycle(input: map) -> map
   let context: map = input
   let kernel: list = native_memory/record_pointer("Kernel")
@@ -313,7 +394,8 @@ verb native_kernel/lifecycle(input: map) -> map
     ["init", :Bool, [["kernel", kernel, :Borrow], ["worker", worker, :Borrow]], true],
     ["release", :Bool, [["kernel", kernel, :Borrow], ["worker", worker, :Borrow]], false],
     ["begin", :U64, [["kernel", kernel, :Borrow], ["worker", worker, :Borrow], ["transaction", tx, :Borrow]], true],
-    ["end", :Bool, [["transaction", tx, :Borrow]], false],
+    ["end", :Bool, [["transaction", tx, :Borrow]], true],
+    ["set_retention_limit", :U64, [["kernel", kernel, :Borrow], ["worker", worker, :Borrow], ["limit", :U64, :Value]], true],
     ["commit", :U64, [["transaction", tx, :Borrow]], true],
     ["prepare_catalog", [:Record, "KernelRelationResult"], [["worker", worker, :Borrow], ["work", native_kernel/pointer("Work"), :Gc], ["current", native_kernel/pointer("Snapshot"), :Gc], ["budget", native_kernel/pointer("Budget"), :Borrow]], true],
     ["prepare", :U64, [["transaction", tx, :Borrow], ["budget", native_kernel/pointer("Budget"), :Borrow]], true],
@@ -335,6 +417,8 @@ verb native_kernel/lifecycle(input: map) -> map
     native/let_statement("slot", native_memory/pointer(bytes), native/field_pointer_expression("kernel", "mutex")),
     native/let_statement("adopted", bytes, native/binary_expression(:Adopt, "slot", "mutex")),
     native_memory/store_root(heap, "kernel", "heap", native/typed_expression(heap, native/manage_expression(native_memory/field(heap, "worker", "heap")))),
+    native_memory/store(:U64, "kernel", "retention_limit", "kernel_default_retention"),
+    native_memory/store(:U64, "kernel", "retained_transactions", "zero"),
     native/let_statement("snapshot", snapshot, native_kernel/construct("Snapshot", {"evaluation" -> native_kernel/null("RuleEvaluation"), "version" -> "zero", "relations" -> native_kernel/null("Relation"), "rules" -> native_kernel/null("RuleIndex"), "schemas" -> native_kernel/null("RuleSchemaIndex"), "rule_heads" -> native_kernel/null("RuleGenerationIndex"), "rule_plan" -> native_kernel/null("RulePlan")})),
     native/when_statement(native_kernel/is_null("Snapshot", "snapshot"), [
       native_memory/call("memory_sync_destroy", ["mutex"]), native_memory/store(bytes, "kernel", "mutex", "null_bytes"), native/return_value("false")]),
@@ -349,29 +433,20 @@ verb native_kernel/lifecycle(input: map) -> map
   // Release requires exclusive ownership of the control object. Transactions
   // must be ended first; snapshots remain managed and are reclaimed by GC.
   context = native_kernel/define(context, "release", [
+    native/unless_statement(native_kernel/binary(:Equal, native_memory/field(:U64, "kernel", "retained_transactions"), "zero"), [native/return_value("false")]),
     native/unless_statement(native/call_expression("memory_unpublish", ["worker", native_kernel/shared_root()]), [native/return_value("false")]),
     native_memory/call("memory_sync_destroy", [native_memory/field(bytes, "kernel", "mutex")]),
     native/store_statement("kernel", native/typed_zero([:Record, "Kernel"])), native/return_value("true")])
-  context = native_kernel/define(context, "begin", [
-    native/unless_statement(native_kernel/binary(:Equal, native_memory/field(:U64, native_kernel/transaction_root(), "registration"), "zero"), [native/return_value("kernel_closed")]),
-    native/unless_statement(native_kernel/binary(:Equal, native_memory/field(heap, "worker", "heap"), native_memory/field(heap, "kernel", "heap")), [native/return_value("kernel_schema")]),
-    native/unless_statement(native/call_expression("kernel_lock", ["kernel", "worker"]), [native/return_value("kernel_closed")]),
-    native/let_statement("current", bytes, native_memory/root(bytes, native_kernel/shared_root(), "pointer")),
-    native/let_statement("base", snapshot, native/unary_expression(:PointerCast, "current")),
-    @unlock,
-    native/let_statement("work", work, native_kernel/construct("Work", {"evaluation" -> native_kernel/read("Snapshot", "base", "evaluation"), "dirty" -> "false", "base" -> "base", "checked" -> "base", "changes" -> native_kernel/null("Change"), "rule_changes" -> native_kernel/null("RuleChange"), "rule_index" -> native_kernel/read("Snapshot", "base", "rules"), "rule_observations" -> native_kernel/null("RuleObservationIndex"), "rules" -> native_kernel/null("Rule"), "rules_cached" -> "false", "rules_read" -> "false", "rule_plan" -> native_kernel/read("Snapshot", "base", "rule_plan"), "rule_dependencies" -> native_kernel/null("RuleDependency"), "rule_dependency_index" -> native_kernel/null("RuleDependencyIndex"), "rule_limit" -> "rule_default_limit", "rows_limit" -> "kernel_unlimited", "rounds_limit" -> "kernel_unlimited", "bytes_limit" -> "rule_default_bytes", "candidate" -> native_kernel/null("Snapshot"), "deltas" -> native_kernel/null("Delta"), "status" -> "kernel_ok", "conflict_rule" -> "zero", "conflict_relation" -> "zero", "conflict_tuple" -> native/typed_zero(word), "done" -> "false"})),
-    native/when_statement(native_kernel/is_null("Work", "work"), [native/return_value("kernel_oom")]),
-    native/let_call("signal", bytes, "memory_atomic_create", ["zero"]),
-    native/when_statement(native_kernel/binary(:Equal, "signal", "null_bytes"), [native/return_value("kernel_oom")]),
-    native_memory/store_root(bytes, "transaction", "signal", native/typed_expression(bytes, native/manage_expression("signal"))),
-    native_memory/store_root(kernel, "transaction", "kernel", native/typed_expression(kernel, native/manage_expression("kernel"))), native_memory/store_root(worker, "transaction", "worker", native/typed_expression(worker, native/manage_expression("worker"))),
-    native_memory/store_root(bytes, native_kernel/transaction_root(), "pointer", native/typed_expression(bytes, native/unary_expression(:PointerCast, "work"))),
-    native/let_call("pushed", :Bool, "memory_root_push", ["worker", native_kernel/transaction_root()]),
-    native/return_value("kernel_ok")])
+  context = native_kernel/begin_body(context)
+  context = native_kernel/retention_body(context)
   context = native_kernel/define(context, "end", [
     native/let_statement("worker", worker, native_memory/field(worker, "transaction", "worker")),
     native/when_statement(native_kernel/binary(:Equal, "worker", "memory_null_worker"), [native/return_value("false")]),
-    native/unless_statement(native/call_expression("memory_root_pop", ["worker", native_kernel/transaction_root()]), [native/return_value("false")]),
+    native/let_statement("kernel", kernel, native_memory/field(kernel, "transaction", "kernel")),
+    native/unless_statement(native/call_expression("kernel_lock", ["kernel", "worker"]), [native/return_value("false")]),
+    native/unless_statement(native/call_expression("memory_root_pop", ["worker", native_kernel/transaction_root()]), [@unlock, native/return_value("false")]),
+    native_memory/store(:U64, "kernel", "retained_transactions", native/typed_expression(:U64, native/binary_expression(:Subtract, native_memory/field(:U64, "kernel", "retained_transactions"), "one"))),
+    @unlock,
     native_memory/call("memory_atomic_destroy", [native_memory/field(bytes, "transaction", "signal")]),
     native/store_statement("transaction", native/typed_zero([:Record, "KernelTransaction"])), native/return_value("true")])
   context = native_kernel/empty_indexes_body(context)

@@ -2641,10 +2641,170 @@ static void allocation_controls(void) {
     destroy(&f);
 }
 
+static void snapshot_admission(void) {
+    struct fixture f;
+    init(&f);
+    assert(mica_kernel_set_retention_limit(&f.kernel, &f.worker, 1) == OK);
+    struct mica_KernelTransaction tx, refused = {0};
+    begin(&f, &tx);
+    assert(f.kernel.f_retained_transactions == 1);
+    assert(!mica_kernel_release(&f.kernel, &f.worker));
+    assert(mica_kernel_set_retention_limit(&f.kernel, &f.worker, 0) == LIMIT);
+    assert(f.kernel.f_retention_limit == 1);
+    assert(mica_kernel_begin(&f.kernel, &f.worker, &refused) == LIMIT);
+    assert(!refused.f_worker && !refused.f_signal && !refused.f_root.f_registration);
+    assert(f.worker.f_roots == &tx.f_root && !f.worker.f_control);
+    assert(mica_kernel_declare(&tx, 1, 1, 2, SET, 0, 0) == OK);
+    assert(write_pair(&tx, 1, 1, 2, true) == OK);
+    assert(mica_kernel_commit(&tx) == OK);
+    assert(f.kernel.f_retained_transactions == 1); // Commit still retains the transaction's roots.
+    assert(mica_kernel_begin(&f.kernel, &f.worker, &refused) == LIMIT);
+    uint64_t allocated = f.heap.f_allocated;
+    assert(mica_kernel_end(&tx));
+    assert(!f.kernel.f_retained_transactions && f.heap.f_allocated == allocated);
+    begin(&f, &tx);
+    assert(count(&tx, 1) == 1);
+    assert(mica_kernel_cancel(&tx));
+    assert(mica_kernel_begin(&f.kernel, &f.worker, &refused) == LIMIT);
+    assert(mica_kernel_end(&tx));
+    assert(!f.kernel.f_retained_transactions);
+    assert(mica_kernel_set_retention_limit(&f.kernel, &f.worker, 0) == OK);
+    assert(mica_kernel_begin(&f.kernel, &f.worker, &refused) == LIMIT);
+    assert(!f.kernel.f_retained_transactions && !refused.f_worker);
+    assert(mica_kernel_set_retention_limit(&f.kernel, &f.worker, 1) == OK);
+    begin(&f, &tx);
+    assert(write_pair(&tx, 1, 3, 4, true) == OK);
+    assert(mica_kernel_end(&tx)); // Rollback also releases admission.
+    begin(&f, &tx);
+    assert(count(&tx, 1) == 1 && mica_kernel_end(&tx));
+    destroy(&f);
+}
+
+static void heap_admission(void) {
+    struct fixture f;
+    init(&f);
+    uint64_t capacity = f.heap.f_allocated + f.heap.f_nursery_bytes;
+    assert(mica_memory_set_capacity(&f.heap, capacity));
+    uint64_t remaining = f.worker.f_capacity - f.worker.f_used;
+    assert(mica_memory_allocate(&f.worker, remaining - sizeof(struct mica_MemoryObject), 0));
+    assert(f.worker.f_used == f.worker.f_capacity);
+    struct mica_KernelTransaction tx = {0};
+    assert(mica_kernel_begin(&f.kernel, &f.worker, &tx) == LIMIT);
+    assert(!f.kernel.f_retained_transactions && !tx.f_worker && !f.worker.f_control);
+    assert(f.heap.f_allocated + f.heap.f_nursery_bytes == capacity);
+    assert(mica_memory_safepoint(&f.worker, true));
+    begin(&f, &tx); // Collection reclaimed the unrooted nursery payload.
+    assert(mica_kernel_end(&tx));
+    destroy(&f);
+
+    init(&f);
+    capacity = f.heap.f_allocated + f.heap.f_nursery_bytes;
+    assert(mica_memory_set_capacity(&f.heap, capacity));
+    begin(&f, &tx);
+    assert(mica_kernel_declare(&tx, 1, 1, 2, SET, 0, 0) == OK);
+    assert(write_pair(&tx, 1, 1, 2, true) == OK);
+    assert(mica_kernel_commit(&tx) == LIMIT);
+    assert(mica_kernel_work(&tx)->f_status == LIMIT && !mica_kernel_work(&tx)->f_done);
+    assert(!mica_kernel_work(&tx)->f_candidate && !mica_kernel_work(&tx)->f_deltas);
+    assert(f.kernel.f_retained_transactions == 1 && !f.worker.f_control);
+    assert(mica_kernel_end(&tx));
+    begin(&f, &tx);
+    assert(!mica_kernel_view(&tx, 1));
+    assert(mica_kernel_end(&tx));
+    destroy(&f);
+
+    init(&f);
+    capacity = f.heap.f_allocated + f.heap.f_nursery_bytes;
+    assert(mica_memory_set_capacity(&f.heap, capacity));
+    begin(&f, &tx);
+    assert(!mica_memory_allocate(&f.worker, 90000, 0));
+    assert(f.heap.f_pressure);
+    assert(mica_kernel_rule(&tx, 9).f_status == LIMIT); // Collection failed before catalogue access.
+    assert(f.heap.f_collection_limited && f.worker.f_roots == &tx.f_root && !f.worker.f_control);
+    assert(mica_kernel_end(&tx));
+    begin(&f, &tx); // Released roots no longer require promotion.
+    assert(mica_kernel_end(&tx));
+    destroy(&f);
+}
+
+static void retained_snapshot_reclamation(void) {
+    struct fixture f;
+    init(&f);
+    declare(&f, 1, SET);
+    assert(mica_kernel_set_retention_limit(&f.kernel, &f.worker, 4) == OK);
+    struct mica_KernelTransaction history[3], writer;
+    for (unsigned version = 0; version < 3; ++version) {
+        begin(&f, &history[version]);
+        assert(count(&history[version], 1) == version * 32);
+        begin(&f, &writer);
+        for (unsigned row = version * 32; row < (version + 1) * 32; ++row)
+            assert(write_pair(&writer, 1, row, row + 1, true) == OK);
+        assert(mica_kernel_commit(&writer) == OK && mica_kernel_end(&writer));
+    }
+    assert(mica_memory_safepoint(&f.worker, true));
+    uint64_t retained = f.heap.f_retained;
+    for (unsigned version = 0; version < 3; ++version)
+        assert(count(&history[version], 1) == version * 32);
+    for (unsigned version = 3; version > 0; --version)
+        assert(mica_kernel_end(&history[version - 1]));
+    assert(!f.kernel.f_retained_transactions && f.heap.f_retained == retained);
+    assert(mica_memory_safepoint(&f.worker, true));
+    assert(f.heap.f_retained < retained);
+    begin(&f, &writer);
+    assert(count(&writer, 1) == 96 && mica_kernel_end(&writer));
+    destroy(&f);
+}
+
+struct snapshot_admission_job {
+    struct fixture *fixture;
+    _Atomic unsigned attempted, admitted;
+    _Atomic bool release;
+};
+static void *admit_snapshot(void *opaque) {
+    struct snapshot_admission_job *job = opaque;
+    struct mica_MemoryWorker worker = {0};
+    struct mica_KernelTransaction tx = {0};
+    assert(mica_memory_worker_init(&worker, &job->fixture->heap, 8192));
+    assert(mica_memory_enter(&worker));
+    uint64_t status = mica_kernel_begin(&job->fixture->kernel, &worker, &tx);
+    assert(status == OK || status == LIMIT);
+    if (status == OK) atomic_fetch_add(&job->admitted, 1);
+    assert(mica_memory_leave(&worker));
+    atomic_fetch_add(&job->attempted, 1);
+    while (!atomic_load(&job->release)) sched_yield();
+    if (status == OK) {
+        assert(mica_memory_enter(&worker));
+        assert(mica_kernel_end(&tx));
+        assert(mica_memory_leave(&worker));
+    }
+    assert(mica_memory_worker_release(&worker));
+    return NULL;
+}
+static void concurrent_snapshot_admission(void) {
+    struct fixture f;
+    init(&f);
+    assert(mica_kernel_set_retention_limit(&f.kernel, &f.worker, 3) == OK);
+    assert(mica_memory_leave(&f.worker));
+    struct snapshot_admission_job job = {.fixture = &f};
+    pthread_t threads[8];
+    for (unsigned i = 0; i < 8; ++i) assert(!pthread_create(&threads[i], NULL, admit_snapshot, &job));
+    while (atomic_load(&job.attempted) != 8) sched_yield();
+    assert(atomic_load(&job.admitted) == 3 && f.kernel.f_retained_transactions == 3);
+    atomic_store(&job.release, true);
+    for (unsigned i = 0; i < 8; ++i) assert(!pthread_join(threads[i], NULL));
+    assert(!f.kernel.f_retained_transactions);
+    assert(mica_memory_enter(&f.worker));
+    destroy(&f);
+}
+
 int main(int argc, char **argv) {
     if (argc == 2 && !strcmp(argv[1], "trace")) return trace();
     if (argc == 5 && !strcmp(argv[1], "bench")) return benchmark(argv[2], (unsigned)strtoul(argv[3], NULL, 10), (unsigned)strtoul(argv[4], NULL, 10));
     assert(argc == 1);
+    snapshot_admission();
+    heap_admission();
+    retained_snapshot_reclamation();
+    concurrent_snapshot_admission();
     allocation_controls();
     publication_cancellation();
     rule_catalogue();
