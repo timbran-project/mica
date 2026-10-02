@@ -1,0 +1,225 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+// Pool constants before opening generated functions. Descriptions contain
+// literal-pool positions, never bootstrap-world values or native addresses.
+verb native_rules/source_pool_literal(input: map, literal: map) -> list
+  let pool: list = input[:source_literals]
+  let index: int = 0
+  while index < len(pool)
+    if pool[index][0] == literal
+      return [pool[index][1], input]
+    end
+    index = index + 1
+  end
+  let name: string = string_concat(input[:source_prefix], "_literal_", to_literal(index))
+  let [prepared: map, ready: map] = native_literal/prepare(input, name, literal)
+  ready[:source_literals] = [@pool, [literal, prepared]]
+  return [prepared, ready]
+end
+verb native_rules/source_number(input: map, number: int) -> list
+  let name: string = string_concat(input[:source_prefix], "_number_", to_literal(number))
+  let module: map = input
+  if !map_contains_key(module[:constants], name)
+    module = native_literal/constant(module, name, :U64, native_value/hex(number))
+  end
+  return [name, module]
+end
+verb native_rules/prepare_term(input: map, term: map) -> list
+  let prepared: map = term
+  let module: map = input
+  if term[:kind] == :Variable
+    let [name: string, ready: map] = native_rules/source_number(module, term[:id])
+    prepared[:name] = name
+    module = ready
+  elseif term[:kind] == :Constant
+    let [literal: map, ready: map] = native_rules/source_pool_literal(module, term[:literal])
+    prepared[:literal] = literal
+    module = ready
+  end
+  let result: list = native_rules/source_term_function(module, prepared)
+  return result
+end
+verb native_rules/prepare_atom(input: map, atom: map) -> list
+  let [name: string, opened: map] = native_rules/source_number(input, atom[:relation])
+  let module: map = opened
+  let terms: list = []
+  for term in atom[:terms]
+    let [prepared: map, ready: map] = native_rules/prepare_term(module, term)
+    terms = [@terms, prepared]
+    module = ready
+  end
+  return [{:name -> name, :negative -> atom[:negative], :terms -> terms}, module]
+end
+verb native_rules/prepare_source(input: map, rule: map) -> list
+  let [head: map, opened: map] = native_rules/prepare_atom(input, rule[:head])
+  let module: map = opened
+  let atoms: list = []
+  for atom in rule[:atoms]
+    let [prepared: map, ready: map] = native_rules/prepare_atom(module, atom)
+    atoms = [@atoms, prepared]
+    module = ready
+  end
+  let guards: list = []
+  for guard in rule[:guards]
+    let [left: map, with_left: map] = native_rules/prepare_term(module, guard[:left])
+    let [right: map, with_right: map] = native_rules/prepare_term(with_left, guard[:right])
+    let [operation: string, ready: map] = native_rules/source_number(with_right, guard[:operation])
+    guards = [@guards, {:operation -> operation, :left -> left, :right -> right}]
+    module = ready
+  end
+  let [source: map, ready: map] = native_rules/source_pool_literal(module, {:kind -> :String, :value -> rule[:source]})
+  return [{:head -> head, :atoms -> atoms, :guards -> guards, :source -> source}, ready]
+end
+
+verb native_rules/source_allocate(builder: map, constructor: string, arguments: list) -> list
+  let [value: map, allocated: map] = native_gen/bind(builder, constructor, native_gen/call(builder, string_concat("kernel_", constructor), [native_roots/worker(builder), @arguments]))
+  let checked: map = native_rules/check(allocated, native_gen/negate(native_kernel/absent(value)), "oom")
+  return [value, checked]
+end
+// Account for literal scans and copies before entering value constructors.
+verb native_rules/emit_source_literal(builder: map, literal: map) -> list
+  let ready: map = builder
+  if map_contains_key(literal, :length)
+    ready = native_execution/charge(ready, native_gen/ref(ready, literal[:name]), native_rules/ref(ready, "zero"), native_rules/ref(ready, "zero"), fn(failed, status) => native_rules/fail(failed, status))
+  end
+  let result: list = native_literal/emit(ready, literal, native_gen/ref(ready, "symbols"), fn(failed) => native_rules/error(failed, "oom"))
+  return result
+end
+verb native_rules/emit_source_term(builder: map, term: map, next: map) -> list
+  let ready: map = native_rules/tick(builder)
+  if term[:kind] == :Hole
+    let result: list = native_rules/source_allocate(ready, "rule_hole", [next])
+    return result
+  end
+  if term[:kind] == :Variable
+    let result: list = native_rules/source_allocate(ready, "rule_variable", [native_gen/ref(ready, term[:name]), next])
+    return result
+  end
+  let [value: map, with_value: map] = native_rules/emit_source_literal(ready, term[:literal])
+  let result: list = native_rules/source_allocate(with_value, "rule_constant", [value, next])
+  return result
+end
+// Reuse a small generated constructor for each distinct term. Installer
+// functions compose these calls instead of inlining allocation and root checks.
+verb native_rules/source_term_function(input: map, term: map) -> list
+  let prepared: map = term
+  let pool: list = input[:source_terms]
+  for entry in pool
+    if entry[0] == term
+      prepared[:function] = entry[1]
+      return [prepared, input]
+    end
+  end
+  let name: string = string_concat(input[:source_prefix], "_term_", to_literal(len(pool)))
+  let result_type: list = [:Record, "RuleSourceTermResult"]
+  let module: map = native_memory/declare(input, string_concat("kernel_", name), result_type, [
+    ["worker", native_memory/record_pointer("MemoryWorker"), :Borrow],
+    ["symbols", native_memory/record_pointer("SymbolTable"), :Borrow],
+    ["next", native_kernel/pointer("RuleTerm"), :Gc],
+    ["budget", native_kernel/pointer("Budget"), :Borrow]],
+    [:ReadMemory, :WriteMemory, :Allocate, :Release, :Relocate, :Block], :Gc, "")
+  let builder: map = native_rules/context(module, name)
+  let [created: map, ready: map] = native_rules/emit_source_term(builder, term, native_rules/ref(builder, "next"))
+  builder = native_roots/return_value(ready, native_gen/record(ready, result_type,
+    {"status" -> native_rules/ref(ready, "kernel_ok"), "term" -> created}))
+  module = native_gen/finish(module, builder)
+  module[:source_terms] = [@pool, [term, name]]
+  prepared[:function] = name
+  return [prepared, module]
+end
+verb native_rules/emit_source_terms(builder: map, terms: list) -> list
+  let [chain: map, opened: map] = native_roots/retain(builder, "terms", native_gen/zero(native_kernel/pointer("RuleTerm")))
+  let ready: map = opened
+  let index: int = len(terms)
+  while index > 0
+    index = index - 1
+    let [term: map, updated: map] = native_rules/checked_call(ready, terms[index][:function],
+      [native_roots/worker(ready), native_gen/ref(ready, "symbols"), chain, native_rules/ref(ready, "budget")], "term")
+    ready = native_roots/store(updated, chain, term)
+  end
+  return [chain, ready]
+end
+verb native_rules/emit_source_atoms(builder: map, atoms: list) -> list
+  let [chain: map, opened: map] = native_roots/retain(builder, "atoms", native_gen/zero(native_kernel/pointer("RuleAtom")))
+  let ready: map = opened
+  let index: int = len(atoms)
+  while index > 0
+    index = index - 1
+    let atom: map = atoms[index]
+    let [terms: map, with_terms: map] = native_rules/emit_source_terms(ready, atom[:terms])
+    let negative: string = "false"
+    if atom[:negative]
+      negative = "true"
+    end
+    let [created: map, updated: map] = native_rules/source_allocate(with_terms, "rule_atom",
+      [native_gen/ref(with_terms, atom[:name]), native_gen/ref(with_terms, negative), terms, chain])
+    ready = native_roots/store(updated, chain, created)
+  end
+  return [chain, ready]
+end
+verb native_rules/emit_source_guards(builder: map, guards: list) -> list
+  let [chain: map, opened: map] = native_roots/retain(builder, "guards", native_gen/zero(native_kernel/pointer("RuleGuard")))
+  let ready: map = opened
+  let index: int = len(guards)
+  while index > 0
+    index = index - 1
+    let guard: map = guards[index]
+    let [left: map, with_left: map] = native_rules/emit_source_terms(ready, [guard[:left]])
+    let [right: map, with_right: map] = native_rules/emit_source_terms(with_left, [guard[:right]])
+    let [created: map, updated: map] = native_rules/source_allocate(with_right, "rule_guard",
+      [native_gen/ref(with_right, guard[:operation]), left, right, chain])
+    ready = native_roots/store(updated, chain, created)
+  end
+  return [chain, ready]
+end
+verb native_rules/source_function(input: map, name: string, rule: map) -> map
+  let module: map = native_memory/declare(input, string_concat("kernel_", name), :U64, [
+    ["transaction", native_kernel/pointer("Transaction"), :Borrow],
+    ["symbols", native_memory/record_pointer("SymbolTable"), :Borrow],
+    ["id", :U64, :Value], ["replace", :Bool, :Value], ["active", :Bool, :Value]],
+    [:ReadMemory, :WriteMemory, :Allocate, :Release, :Relocate, :Block], :Value, "")
+  let [work: map, opened: map] = native_kernel/rule_transaction(module, string_concat("kernel_", name))
+  let builder: map = native_authority/check_permission(opened, work, "catalogue")
+  let [head: map, with_head: map] = native_rules/emit_source_terms(builder, rule[:head][:terms])
+  let [atoms: map, with_atoms: map] = native_rules/emit_source_atoms(with_head, rule[:atoms])
+  let [guards: map, with_guards: map] = native_rules/emit_source_guards(with_atoms, rule[:guards])
+  let [source: map, with_source: map] = native_rules/emit_source_literal(with_guards, rule[:source])
+  let [definition: map, ready: map] = native_rules/source_allocate(with_source, "rule_definition", [native_gen/ref(with_source, rule[:head][:name]), head, atoms, guards,
+    native_rules/read(with_source, work, "tenant"), source])
+  builder = native_gen/when(ready, native_gen/ref(ready, "replace"), fn(replacing)
+    let args: list = [native_gen/ref(replacing, "transaction"), native_gen/ref(replacing, "id"), definition, native_gen/ref(replacing, "active")]
+    return native_roots/return_value(replacing, native_gen/call(replacing, "kernel_rule_update", args))
+  end)
+  builder = native_roots/return_value(builder, native_gen/call(builder, "kernel_rule_add", [native_gen/ref(builder, "transaction"), native_gen/ref(builder, "id"), definition, native_gen/ref(builder, "active")]))
+  let result: map = native_gen/finish(module, builder)
+  return result
+end
+
+// One generated staging function per source definition, in source order.
+// The caller supplies rule IDs and controls commit/rollback of the whole unit.
+verb native_rules/source_module(input: map, prefix: string, source: string, relations: map, ?identities: map = {}) -> map
+  native/identifier(prefix)
+  let parsed: map = native_rules/parse_source(source, relations, identities)
+  native/ensure(parsed[:ok], string_concat("invalid rule source: ", to_literal(parsed[:errors])))
+  let module: map = input
+  module[:source_prefix] = prefix
+  module[:source_literals] = []
+  module[:source_terms] = []
+  if !native/contains([row[1] for row in module[:state][:records]], "RuleSourceTermResult")
+    module[:state] = native/record_type(module[:state], "RuleSourceTermResult",
+      [["status", :U64], ["term", native_kernel/pointer("RuleTerm")]])[1]
+  end
+  let rules: list = []
+  for rule in parsed[:rules]
+    let [prepared: map, ready: map] = native_rules/prepare_source(module, rule)
+    rules = [@rules, prepared]
+    module = ready
+  end
+  let index: int = 0
+  for rule in rules
+    module = native_rules/source_function(module, string_concat(prefix, "_", to_literal(index)), rule)
+    index = index + 1
+  end
+  return module
+end

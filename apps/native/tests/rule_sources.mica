@@ -1,0 +1,19 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+verb native_rules/test_program() -> map
+  let module: map = native_kernel/definitions()
+  let source: string = string_join([
+    "Reach(x, y) :- Edge(x, y)",
+    "Reach(x, z) :- Reach(x, y), Edge(y, z)",
+    "Eligible(x, y) :- Reach(x, y), not Blocked(x, y), x != y, x >= -1.5",
+    "Constants(-7, 1.5, true, \"é🙂\", b\"AP8=\", :\"é\", #bound, E_DIV) :- Trigger()",
+    "Reach(x, y) :- Edge(x, _)",
+    "Reach(x) :- Edge(x, y)",
+    "Reach(x, y) :- Edge(x)",
+    "Reach(x, y) :- Unknown(x, y)"], "\n")
+  module = native_rules/source_module(module, "source", source,
+    {"Edge" -> 40, "Reach" -> 41, "Blocked" -> 42, "Eligible" -> 43, "Constants" -> 44, "Trigger" -> 45, "Unknown" -> 46}, {"bound" -> 1234})
+  let state: map = module[:state]
+  return state
+end

@@ -1,0 +1,182 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+// Generation-time encodings. Native symbols are interned in the caller's table;
+// no bootstrap symbol IDs or managed addresses enter the generated module.
+verb native_literal/utf8(text: string) -> list
+  let bytes: list = []
+  let position: int = 0
+  while position < string_len(text)
+    let scalar: int = text[position]
+    position = position + 1
+    if scalar < 128
+      bytes = [@bytes, scalar]
+      continue
+    end
+    let suffix: list = []
+    let rest: int = scalar
+    let limit: int = 32
+    let lead: int = 192
+    while rest >= limit
+      suffix = [128 + rest % 64, @suffix]
+      rest = (rest - rest % 64) / 64
+      if len(suffix) == 1 && rest >= 32
+        limit = 16
+        lead = 224
+      elseif len(suffix) == 2 && rest >= 16
+        limit = 8
+        lead = 240
+      end
+    end
+    bytes = [@bytes, lead + rest, @suffix]
+  end
+  return bytes
+end
+verb native_literal/float_bits(value: float) -> string
+  if value == 0.0
+    return "00000000"
+  end
+  let sign: int = 0
+  let magnitude: float = value
+  if magnitude < 0.0
+    sign = 2147483648
+    magnitude = -magnitude
+  end
+  let exponent: int = 127
+  while magnitude >= 2.0
+    magnitude = magnitude / 2.0
+    exponent = exponent + 1
+  end
+  while magnitude < 1.0 && exponent > 1
+    magnitude = magnitude * 2.0
+    exponent = exponent - 1
+  end
+  let mantissa: int = to_int(magnitude * 8388608.0)
+  if magnitude < 1.0
+    exponent = 0
+  else
+    mantissa = mantissa - 8388608
+  end
+  return string_slice(native_value/hex(sign + exponent * 8388608 + mantissa), 8, 16)
+end
+// Keep negative values negative while extracting digits. The minimum signed
+// Mica integer has no representable positive magnitude in the bootstrap host.
+verb native_literal/integer_encoding(number: int) -> string
+  if number >= 0
+    let encoding: string = native_value/hex(number)
+    return encoding
+  end
+  let digits: list = string_chars("0123456789abcdef")
+  let rest: int = number
+  let encoding: string = ""
+  let position: int = 0
+  while position < 16
+    let digit: int = -(rest % 16)
+    encoding = string_concat(digits[digit], encoding)
+    rest = (rest + digit) / 16
+    position = position + 1
+  end
+  return string_concat("-", encoding)
+end
+verb native_literal/constant(input: map, name: string, type_id, encoding: string) -> map
+  native/ensure(!map_contains_key(input[:constants], name), "duplicate literal constant")
+  let module: map = input
+  let [id: int, state: map] = native/add_constant(module[:state], type_id, encoding)
+  module[:state] = state
+  let constants: map = module[:constants]
+  constants[name] = id
+  module[:constants] = constants
+  return module
+end
+
+// Return a prepared literal and the extended module, before opening a builder.
+verb native_literal/prepare(input: map, name: string, literal: map) -> list
+  let module: map = input
+  let kind: symbol = literal[:kind]
+  let prepared: map = {:kind -> kind, :name -> name}
+  if kind == :Bool
+    prepared[:name] = "false"
+    if literal[:value]
+      prepared[:name] = "true"
+    end
+    return [prepared, module]
+  end
+  if kind == :Integer || kind == :Identity || kind == :Float
+    let type_id: symbol = :U64
+    let encoding: string = ""
+    if kind == :Float
+      type_id = :F32
+      encoding = native_literal/float_bits(literal[:value])
+    else
+      let number: int = literal[:value]
+      if kind == :Integer
+        type_id = :I64
+      end
+      encoding = native_literal/integer_encoding(number)
+    end
+    module = native_literal/constant(module, name, type_id, encoding)
+    return [prepared, module]
+  end
+  native/ensure(native/contains([:String, :Bytes, :Symbol, :ErrorCode], kind), "unsupported source literal kind")
+  let bytes: list = []
+  if kind == :Bytes
+    let value: bytes = literal[:value]
+    let index: int = 0
+    while index < len(value)
+      bytes = [@bytes, value[index]]
+      index = index + 1
+    end
+  else
+    bytes = native_literal/utf8(literal[:value])
+  end
+  prepared[:length] = len(bytes)
+  module = native_literal/constant(module, name, :U64, native_value/hex(len(bytes)))
+  // C has no zero-length array; the explicit length excludes this padding.
+  if len(bytes) == 0
+    bytes = [0]
+  end
+  let array: list = [:Array, :U8, len(bytes)]
+  let [global: int, state: map] = native/add_global(module[:state], name, array, :Constant, bytes)
+  module[:state] = state
+  let global_name: string = string_concat(name, "_data")
+  let constants: map = module[:constants]
+  constants[global_name] = global
+  module[:constants] = constants
+  prepared[:global] = global_name
+  prepared[:array] = array
+  return [prepared, module]
+end
+verb native_literal/emit(builder: map, literal: map, table: map, failure) -> list
+  let kind: symbol = literal[:kind]
+  let argument: map = native_gen/ref(builder, literal[:name])
+  if kind == :Bool
+    return [native_gen/call(builder, "value_bool", [argument]), builder]
+  end
+  let scalar: map = {:Integer -> "value_int", :Identity -> "value_identity", :Float -> "value_float"}
+  let call: map = native_gen/zero(native_value/word())
+  let ready: map = builder
+  if map_contains_key(scalar, kind)
+    call = native_gen/call(ready, scalar[kind], [argument])
+  else
+    let array: list = literal[:array]
+    let address: map = native_gen/expression([:Pointer, array, :Const], :GlobalAddress, [literal[:global]])
+    let data: map = native_gen/cast([:Pointer, :U8, :Const], address)
+    if kind == :Symbol || kind == :ErrorCode
+      let [interned: map, checked: map] = native_gen/checked_bind(ready, "symbol", native_gen/call(ready, "value_symbol_intern", [table, data, argument]), "ok", failure)
+      ready = checked
+      let constructor: string = "value_symbol"
+      if kind == :ErrorCode
+        constructor = "value_error_code"
+      end
+      call = native_gen/call(ready, constructor, [native_gen/convert(:U32, native_gen/field(ready, interned, "number"))])
+    else
+      let constructor: string = "value_string"
+      if kind == :Bytes
+        constructor = "value_bytes"
+      end
+      call = native_gen/call(ready, constructor, [native_roots/worker(ready), data, argument])
+    end
+  end
+  let [result: map, checked: map] = native_gen/checked_bind(ready, "literal", call, "ok", failure)
+  return [native_gen/field(checked, result, "value"), checked]
+end

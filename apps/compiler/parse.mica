@@ -468,7 +468,11 @@ verb parse_rule_body(input_state)
   let state = input_state
   let items = []
   state = skip_newlines(state)
-  while !at_separator(state) && !at(state, :Eof)
+  while true
+    if at_separator(state) || at(state, :Eof)
+      state = error_here(state, "expected rule body item")
+      break
+    end
     let [expr, after_expr] = parse_expression(state)
     state = after_expr
     items = [@items, expr]

@@ -14,6 +14,7 @@ const SOURCES: &[(&str, &str)] = &[
         "parse.mica",
         include_str!("../../../apps/compiler/parse.mica"),
     ),
+    ("ast.mica", include_str!("../../../apps/compiler/ast.mica")),
     (
         "emit.mica",
         include_str!("../../../apps/compiler/emit.mica"),
@@ -84,6 +85,8 @@ fn mica_frontend_parses_language_forms_and_reports_malformed_input() {
             "let = 7",
             "if true\n 1",
             "return [1,",
+            "Reach(x) :-",
+            "Reach(x) :- Edge(x),",
             "return \"unterminated",
         ] {
             let parsed = invoke(&mut runner, "parse_rows", source);

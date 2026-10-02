@@ -2029,8 +2029,8 @@ fn native_relation_kernel_executes_on_both_mica_tiers() {
     let mut previous = None;
     for interpreter_only in [true, false] {
         let mut runner = runner(interpreter_only).with_task_limits(TaskLimits {
-            // Includes transactional maintenance, dependency planning, and C emission.
-            instruction_budget: 6_000_000_000,
+            // Includes the kernel, source installers, dependency planning, and C emission.
+            instruction_budget: 8_000_000_000,
             max_call_depth: 256,
             ..TaskLimits::default()
         });
@@ -2065,14 +2065,24 @@ fn native_relation_kernel_executes_on_both_mica_tiers() {
             include_str!("../../../apps/native/rules/bindings.mica"),
             include_str!("../../../apps/native/rules/evaluate.mica"),
             include_str!("../../../apps/native/rules/maintain.mica"),
+            include_str!("../../../apps/compiler/lex.mica"),
+            include_str!("../../../apps/compiler/parse.mica"),
+            include_str!("../../../apps/compiler/ast.mica"),
+            include_str!("../../../apps/native/value/literals.mica"),
+            include_str!("../../../apps/native/rules/source.mica"),
+            include_str!("../../../apps/native/rules/install.mica"),
+            include_str!("../../../apps/native/tests/rule_sources.mica"),
         ] {
             runner.run_filein(source).unwrap_or_else(|error| {
                 panic!("{}", runner.render_source_task_error(&error));
             });
         }
-        let generated = eval(&mut runner, "return native/emit_c(native_kernel/program())")
-            .with_str(str::to_owned)
-            .unwrap();
+        let generated = eval(
+            &mut runner,
+            "return native/emit_c(native_rules/test_program())",
+        )
+        .with_str(str::to_owned)
+        .unwrap();
         if let Some(previous) = &previous {
             assert_eq!(&generated, previous);
         }
@@ -2403,5 +2413,75 @@ return true
             );
             assert!(report.render().contains(message), "{}", report.render());
         }
+    }
+}
+
+#[test]
+fn native_rule_source_preserves_terms_and_rejects_invalid_forms() {
+    for interpreter_only in [true, false] {
+        let mut runner = runner(interpreter_only);
+        for source in [
+            include_str!("../../../apps/compiler/lex.mica"),
+            include_str!("../../../apps/compiler/parse.mica"),
+            include_str!("../../../apps/compiler/ast.mica"),
+            include_str!("../../../apps/native/rules/source.mica"),
+            include_str!("../../../apps/native/value/program.mica"),
+            include_str!("../../../apps/native/value/literals.mica"),
+            include_str!("../../../apps/native/rules/install.mica"),
+        ] {
+            runner.run_filein(source).unwrap_or_else(|error| {
+                panic!("{}", runner.render_source_task_error(&error));
+            });
+        }
+        assert_eq!(
+            eval(
+                &mut runner,
+                r#"
+require native_literal/utf8("Aé€🙂") == [65, 195, 169, 226, 130, 172, 240, 159, 153, 130]
+require native_literal/utf8("") == []
+require native_literal/integer_encoding(-36028797018963968) == "-0080000000000000"
+require native_literal/integer_encoding(36028797018963967) == "007fffffffffffff"
+require native_literal/integer_encoding(-7) == "-0000000000000007"
+require native_literal/float_bits(1.5) == "3fc00000"
+require native_literal/float_bits(-1.5) == "bfc00000"
+require native_literal/float_bits(0.0) == "00000000"
+require native_literal/float_bits(1.401298464324817e-45) == "00000001"
+let relations = {"Reach" -> 11, "Edge" -> 12, "Blocked" -> 13}
+let source = "Reach(x, z) :- Edge(?x, y), Reach(y, z), not Blocked(z), x != -1.5"
+let compiled = native_rules/parse_source(source, relations)
+require compiled[:ok]
+let rule = compiled[:rules][0]
+require rule[:source] == source
+require rule[:head][:relation] == 11
+require rule[:head][:terms] == [{:kind -> :Variable, :id -> 0}, {:kind -> :Variable, :id -> 1}]
+require rule[:atoms][0][:terms] == [{:kind -> :Variable, :id -> 0}, {:kind -> :Variable, :id -> 2}]
+require rule[:atoms][1][:terms] == [{:kind -> :Variable, :id -> 2}, {:kind -> :Variable, :id -> 1}]
+require rule[:atoms][2][:negative]
+require rule[:guards] == [{:operation -> 1, :left -> {:kind -> :Variable, :id -> 0}, :right -> {:kind -> :Constant, :literal -> {:kind -> :Float, :value -> -1.5}}}]
+let constants = native_rules/parse_source("Reach(#native, :\"é\") :- Edge(-7, true), Edge(\"hi\", b\"AP8=\"), Edge(E_DIV, _)", relations, {"native" -> 42})
+require constants[:ok]
+let values = constants[:rules][0]
+require values[:head][:terms][0][:literal] == {:kind -> :Identity, :value -> 42}
+require values[:head][:terms][1][:literal] == {:kind -> :Symbol, :value -> "é"}
+require values[:atoms][0][:terms][0][:literal] == {:kind -> :Integer, :value -> -7}
+require values[:atoms][0][:terms][1][:literal] == {:kind -> :Bool, :value -> true}
+require values[:atoms][1][:terms][0][:literal] == {:kind -> :String, :value -> "hi"}
+require values[:atoms][1][:terms][1][:literal][:kind] == :Bytes
+require values[:atoms][2][:terms][0][:literal] == {:kind -> :ErrorCode, :value -> "E_DIV"}
+require values[:atoms][2][:terms][1] == {:kind -> :Hole}
+let separate = native_rules/parse_source("Reach(a, b) :- Edge(a, b)\nReach(c, d) :- Edge(c, d)", relations)
+require separate[:ok]
+require separate[:rules][0][:head][:terms] == separate[:rules][1][:head][:terms]
+for bad in ["return 1", "Reach(x, y) :- Missing(x, y)", "Reach(#missing, x) :- Edge(x, y)", "Reach(_, x) :- Edge(x, y)", "Reach(x, y) :- not Edge(_, y)", "Reach(x, y) :- Edge(x, y), x == _", "Reach(x, y) :- Edge(first: x, y)", "Reach(x, y) :- Edge(x + 1, y)", "Reach(x, y) :- Edge(x, y), x + y", "Reach(x, y) :- Edge(x, y),"]
+  let rejected = native_rules/parse_source(bad, relations)
+  require !rejected[:ok]
+  require len(rejected[:errors]) > 0
+  require rejected[:rules] == []
+end
+return true
+"#
+            ),
+            Value::bool(true)
+        );
     }
 }

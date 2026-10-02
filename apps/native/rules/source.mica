@@ -1,0 +1,183 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+// Compile source at generation time. World identities come from explicit
+// bindings; symbols retain their spelling until native installation.
+verb native_rules/source_error(message: string)
+  raise E_INVARG, string_concat("rule source: ", message)
+end
+verb native_rules/source_attribute(rows: list, node: int, role: symbol)
+  let [present: bool, value] = ast_attr(rows, node, role)
+  if !present
+    native_rules/source_error(string_concat("missing AST attribute ", to_literal(role)))
+  end
+  return value
+end
+verb native_rules/source_name(rows: list, node: int) -> string
+  if ast_kind(rows, node) != :Name
+    native_rules/source_error("a predicate must name a relation")
+  end
+  return string_join(ast_children(rows, node, :part), "/")
+end
+verb native_rules/source_identity(bindings: map, name: string) -> int
+  if !map_contains_key(bindings, name)
+    native_rules/source_error(string_concat("unbound identity: ", name))
+  end
+  let value = bindings[name]
+  if !is_kind(value, :int) || value < 0
+    native_rules/source_error(string_concat("identity must be a nonnegative integer: ", name))
+  end
+  let identity: int = value
+  return identity
+end
+verb native_rules/source_literal(text: string)
+  let parsed: relation = from_literal(text)
+  if parsed[0][:case] != :ok
+    native_rules/source_error(string_concat("invalid literal: ", text))
+  end
+  return parsed[0][:value]
+end
+verb native_rules/source_constant(rows: list, node: int, identities: map) -> map
+  let kind: symbol = ast_kind(rows, node)
+  if kind == :Identity_Literal
+    let name: string = native_rules/source_attribute(rows, node, :name)
+    return {:kind -> :Identity, :value -> native_rules/source_identity(identities, name)}
+  end
+  if kind == :Symbol_Literal
+    let name: string = native_rules/source_attribute(rows, node, :name)
+    if string_slice(name, 0, 1) == "\""
+      name = native_rules/source_literal(name)
+    end
+    return {:kind -> :Symbol, :value -> name}
+  end
+  if kind == :Bool_Literal
+    return {:kind -> :Bool, :value -> native_rules/source_attribute(rows, node, :value)}
+  end
+  if kind == :Unary
+    let operation: symbol = native_rules/source_attribute(rows, node, :op)
+    let operand: int = native_rules/source_attribute(rows, node, :operand)
+    let inner: symbol = ast_kind(rows, operand)
+    if operation == :neg && (inner == :Int_Literal || inner == :Float_Literal)
+      let text: string = native_rules/source_attribute(rows, operand, :text)
+      let value = native_rules/source_literal(string_concat("-", text))
+      let target: symbol = :Integer
+      if inner == :Float_Literal
+        target = :Float
+      end
+      return {:kind -> target, :value -> value}
+    end
+  end
+  let kinds: map = {:Int_Literal -> :Integer, :Float_Literal -> :Float, :String_Literal -> :String,
+    :Bytes_Literal -> :Bytes, :Error_Code_Literal -> :ErrorCode}
+  if map_contains_key(kinds, kind)
+    let text: string = native_rules/source_attribute(rows, node, :text)
+    let value = native_rules/source_literal(text)
+    if kind == :Error_Code_Literal
+      return {:kind -> :ErrorCode, :value -> text}
+    end
+    return {:kind -> kinds[kind], :value -> value}
+  end
+  native_rules/source_error("a rule term must be a variable or a literal value")
+  return {}
+end
+verb native_rules/source_term(rows: list, node: int, input_variables: map, identities: map, holes: bool) -> list
+  let kind: symbol = ast_kind(rows, node)
+  if kind == :Wildcard
+    if !holes
+      native_rules/source_error("holes are allowed only in positive body predicates")
+    end
+    return [{:kind -> :Hole}, input_variables]
+  end
+  if kind == :Name || kind == :Query_Variable
+    let name: string = ""
+    if kind == :Name
+      name = native_rules/source_name(rows, node)
+    else
+      name = native_rules/source_attribute(rows, node, :name)
+    end
+    let variables: map = input_variables
+    if !map_contains_key(variables, name)
+      variables[name] = len(variables)
+    end
+    return [{:kind -> :Variable, :id -> variables[name]}, variables]
+  end
+  return [{:kind -> :Constant, :literal -> native_rules/source_constant(rows, node, identities)}, input_variables]
+end
+verb native_rules/source_atom(rows: list, node: int, variables: map, relations: map, identities: map, negative: bool, holes: bool) -> list
+  if ast_kind(rows, node) != :Call
+    native_rules/source_error("a predicate must be a relation call")
+  end
+  let callee: int = native_rules/source_attribute(rows, node, :callee)
+  let name: string = native_rules/source_name(rows, callee)
+  if !map_contains_key(relations, name)
+    native_rules/source_error(string_concat("unknown relation: ", name))
+  end
+  let relation: int = native_rules/source_identity(relations, name)
+  let terms: list = []
+  let names: map = variables
+  for argument in ast_children(rows, node, :arg)
+    let [named: bool, _] = ast_attr(rows, argument, :role)
+    if named
+      native_rules/source_error("rule predicates require positional arguments")
+    end
+    let expression: int = native_rules/source_attribute(rows, argument, :expr)
+    let [term: map, updated: map] = native_rules/source_term(rows, expression, names, identities, holes)
+    terms = [@terms, term]
+    names = updated
+  end
+  return [{:relation -> relation, :negative -> negative, :terms -> terms}, names]
+end
+verb native_rules/source_definition(rows: list, node: int, relations: map, identities: map) -> map
+  let head_node: int = native_rules/source_attribute(rows, node, :head)
+  let [head: map, initial: map] = native_rules/source_atom(rows, head_node, {}, relations, identities, false, false)
+  let variables: map = initial
+  let atoms: list = []
+  let guards: list = []
+  let comparisons: map = {:eq -> 0, :ne -> 1, :lt -> 2, :le -> 3, :gt -> 4, :ge -> 5}
+  for item in ast_children(rows, node, :body)
+    let kind: symbol = ast_kind(rows, item)
+    if kind == :Binary
+      let operation: symbol = native_rules/source_attribute(rows, item, :op)
+      if !map_contains_key(comparisons, operation)
+        native_rules/source_error("rule guards require a comparison")
+      end
+      let [left: map, with_left: map] = native_rules/source_term(rows, native_rules/source_attribute(rows, item, :left), variables, identities, false)
+      let [right: map, with_right: map] = native_rules/source_term(rows, native_rules/source_attribute(rows, item, :right), with_left, identities, false)
+      guards = [@guards, {:operation -> comparisons[operation], :left -> left, :right -> right}]
+      variables = with_right
+      continue
+    end
+    let predicate: int = item
+    let negative: bool = false
+    if kind == :Unary && native_rules/source_attribute(rows, item, :op) == :not_op
+      predicate = native_rules/source_attribute(rows, item, :operand)
+      negative = true
+    end
+    let [atom: map, updated: map] = native_rules/source_atom(rows, predicate, variables, relations, identities, negative, !negative)
+    atoms = [@atoms, atom]
+    variables = updated
+  end
+  return {:head -> head, :atoms -> atoms, :guards -> guards, :source -> native_rules/source_attribute(rows, node, :source)}
+end
+
+// Structural errors fail before code generation. Safety, schema, authority,
+// and stratification are validated against the actual native transaction.
+verb native_rules/parse_source(source: string, relations: map, ?identities: map = {}) -> map
+  let parsed: map = parse_rows(source)
+  if len(parsed[:errors]) > 0
+    return {:ok -> false, :rules -> [], :errors -> parsed[:errors]}
+  end
+  let rows: list = sort_ast_rows(parsed[:rows])
+  let rules: list = []
+  try
+    for item in ast_children(rows, parsed[:root], :item)
+      if ast_kind(rows, item) != :RuleItem
+        native_rules/source_error("expected a rule definition")
+      end
+      rules = [@rules, native_rules/source_definition(rows, item, relations, identities)]
+    end
+  catch E_INVARG as problem
+    return {:ok -> false, :rules -> [], :errors -> [problem]}
+  end
+  return {:ok -> true, :rules -> rules, :errors -> []}
+end

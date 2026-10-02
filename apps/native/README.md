@@ -223,6 +223,40 @@ The current revision covers the whole world, so policy changes for unrelated ten
 Unrelated fact commits preserve the revision when effective policy trees remain shared.
 Authorization and derivation occur outside the publication lock. Snapshots retain policy views, but never task permission caches.
 
+### Rule source installation
+
+`native_rules/source_module(module, prefix, source, relations, identities = {})` adds native installers to a kernel module.
+`native_kernel/definitions()` returns the module context for this composition.
+`native_kernel/program()` returns the kernel IR without application installers.
+
+The frontend uses `apps/compiler/lex.mica`, `parse.mica`, and `ast.mica` at generation time.
+It accepts rule definitions with variables, scalar literals, positive holes, negation, and comparison guards.
+Relation names and identity literals resolve through explicit maps to native IDs.
+Symbols and error codes retain their names until installation in the native symbol table.
+
+```mica
+let module = native_kernel/definitions()
+module = native_rules/source_module(module, "paths",
+  "Reach(x, y) :- Edge(x, y)\nReach(x, z) :- Reach(x, y), Edge(y, z)",
+  {"Edge" -> 40, "Reach" -> 41})
+return native/emit_c(module[:state])
+```
+
+This example generates `mica_kernel_paths_0` and `mica_kernel_paths_1`, in source order.
+Each function takes `(transaction, symbols, id, replace, active)` and returns a kernel status.
+The caller supplies the world's symbol table and keeps it alive while those symbol IDs remain in use.
+`replace = false` installs an absent rule ID; `replace = true` replaces an existing definition.
+The defining tenant comes from the transaction. Native validation checks safety, schema, authority, and stratification.
+
+Each installer stages one rule. The caller controls the transaction that contains the whole source unit.
+If any installer fails, abort the unit's transaction to discard earlier successful staging calls.
+Commit publishes the rules, facts, and complete derived state together.
+The generated functions preserve source text and root their intermediate definitions across collection polls.
+
+This path generates native staging functions from fixed source. It does not parse source at native runtime.
+The generated functions call the standalone native kernel and value implementation.
+The fixture in `tests/rule_sources.mica` exercises this path through both generation tiers and the C and gccjit backends.
+
 | Constructor | Result |
 | --- | --- |
 | `kernel_rule_variable(worker, id, next)` | Variable term; IDs are local to the definition |

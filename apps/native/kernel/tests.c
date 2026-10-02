@@ -3277,10 +3277,120 @@ static void authority_controls(void) {
     destroy(&f);
 }
 
+// Installers below are generated from tests/rule_sources.mica through the
+// shared Mica parser. These expectations do not use the native rule evaluator
+// as an oracle.
+static bool collect_source_allocations(uint8_t *context, uint64_t bytes, uint64_t steps) {
+    struct mica_MemoryHeap *heap = (void *)context;
+    (void)steps;
+    // This fixture has one worker. Request collection after each allocation;
+    // the next generated poll must preserve partially constructed definitions.
+    if (bytes) heap->f_collection_limit = 0;
+    return true;
+}
+static void source_rules(void) {
+    struct fixture f;
+    init(&f);
+    struct mica_SymbolTable symbols = {0};
+    assert(mica_value_symbol_table_init(&symbols));
+    struct mica_KernelTransaction tx, old;
+    begin(&f, &tx);
+    for (uint64_t id = 40; id <= 43; ++id)
+        assert(mica_kernel_declare(&tx, id, id, 2, SET, 0, 0) == OK);
+    assert(mica_kernel_declare(&tx, 44, 44, 8, SET, 0, 0) == OK);
+    assert(mica_kernel_declare(&tx, 45, 45, 0, SET, 0, 0) == OK);
+    assert(mica_kernel_commit(&tx) == OK && mica_kernel_end(&tx));
+    begin(&f, &old);
+    begin(&f, &tx);
+    assert(mica_kernel_source_0(&tx, &symbols, 100, false, true) == OK);
+    assert(mica_kernel_source_1(&tx, &symbols, 101, false, true) == OK);
+    assert(mica_kernel_source_2(&tx, &symbols, 102, false, true) == OK);
+    assert(write_pair(&tx, 40, 1, 2, true) == OK);
+    assert(write_pair(&tx, 40, 2, 3, true) == OK);
+    assert(write_pair(&tx, 42, 1, 3, true) == OK);
+    assert(count(&tx, 41) == 3 && count(&tx, 43) == 2);
+    assert(count(&old, 41) == 0 && rule_count(&old) == 0);
+    assert(mica_kernel_end(&tx)); // Discard rules, facts, and draft closure.
+    begin(&f, &tx);
+    assert(rule_count(&tx) == 0 && count(&tx, 40) == 0);
+    // Force collections while source terms and chains are being constructed.
+    uint64_t collection_limit = f.heap.f_collection_limit;
+    struct mica_MemoryControl collection = {.f_context = (void *)&f.heap, .f_check = collect_source_allocations};
+    mica_memory_control_push(&f.worker, &collection);
+    uint64_t epoch = f.heap.f_epoch;
+    assert(mica_kernel_source_0(&tx, &symbols, 100, false, true) == OK);
+    assert(mica_kernel_source_1(&tx, &symbols, 101, false, true) == OK);
+    assert(mica_kernel_source_2(&tx, &symbols, 102, false, true) == OK);
+    assert(mica_kernel_source_3(&tx, &symbols, 103, false, true) == OK);
+    assert(f.heap.f_epoch > epoch + 4 && f.worker.f_control == &collection);
+    mica_memory_control_pop(&f.worker);
+    f.heap.f_collection_limit = collection_limit;
+    assert(write_pair(&tx, 40, 1, 2, true) == OK);
+    assert(write_pair(&tx, 40, 2, 3, true) == OK);
+    assert(write_pair(&tx, 42, 1, 3, true) == OK);
+    struct mica_ValueResult unit = mica_value_list(&f.worker, NULL, 0);
+    assert(unit.f_ok && mica_kernel_write(&tx, 45, unit.f_value, true) == OK);
+    assert(mica_kernel_commit(&tx) == OK && mica_kernel_end(&tx));
+    assert(count(&old, 41) == 0 && mica_kernel_end(&old));
+    assert(mica_memory_safepoint(&f.worker, true));
+    begin(&f, &tx);
+    assert(count(&tx, 41) == 3 && count(&tx, 43) == 2);
+    struct mica_KernelRuleResult installed = mica_kernel_rule(&tx, 103);
+    assert(installed.f_status == OK && installed.f_rule);
+    const struct mica_HeapString *source = mica_value_as_string(installed.f_rule->f_definition->f_source).f_header;
+    assert(source && source->f_length > 20);
+    // Native identities and interned names are independent of bootstrap IDs.
+    mica_type_Value pattern_cells[8] = {0}, rows[2];
+    struct mica_ValueResult pattern = mica_value_list(&f.worker, pattern_cells, 8);
+    assert(pattern.f_ok);
+    struct mica_KernelScanResult found = mica_kernel_scan(&tx, 44, pattern.f_value, 0, 0, rows, 2);
+    assert(found.f_status == OK && found.f_count == 1 && !found.f_more);
+    assert(cell(rows[0], 0) == -7);
+    assert(mica_value_as_float(mica_kernel_cell(rows[0], 1)).f_number == 1.5f);
+    assert(mica_value_as_bool(mica_kernel_cell(rows[0], 2)).f_value);
+    const struct mica_HeapString *text = mica_value_as_string(mica_kernel_cell(rows[0], 3)).f_header;
+    const uint8_t utf8[] = {0xc3, 0xa9, 0xf0, 0x9f, 0x99, 0x82};
+    assert(text->f_length == sizeof(utf8) && !memcmp(text->f_data, utf8, sizeof(utf8)));
+    const struct mica_HeapBytes *bytes = mica_value_as_bytes(mica_kernel_cell(rows[0], 4)).f_header;
+    assert(bytes->f_length == 2 && bytes->f_data[0] == 0 && bytes->f_data[1] == 255);
+    struct mica_IdResult symbol = mica_value_as_symbol(mica_kernel_cell(rows[0], 5));
+    struct mica_SymbolText name = mica_value_symbol_text(&symbols, (uint32_t)symbol.f_number);
+    assert(symbol.f_ok && name.f_ok && name.f_length == 2 && !memcmp(name.f_data, utf8, 2));
+    assert(mica_value_as_identity(mica_kernel_cell(rows[0], 6)).f_number == 1234);
+    struct mica_IdResult error = mica_value_as_error_code(mica_kernel_cell(rows[0], 7));
+    name = mica_value_symbol_text(&symbols, (uint32_t)error.f_number);
+    assert(error.f_ok && name.f_ok && name.f_length == 5 && !memcmp(name.f_data, "E_DIV", 5));
+    assert(mica_kernel_source_4(&tx, &symbols, 104, false, true) == SCHEMA);
+    assert(mica_kernel_source_5(&tx, &symbols, 104, false, true) == SCHEMA);
+    assert(mica_kernel_source_6(&tx, &symbols, 104, false, true) == SCHEMA);
+    assert(mica_kernel_source_7(&tx, &symbols, 104, false, true) == UNKNOWN);
+    assert(rule_count(&tx) == 4);
+    assert(mica_kernel_source_0(&tx, &symbols, 100, false, true) == SCHEMA);
+    assert(mica_kernel_source_1(&tx, &symbols, 101, true, false) == OK);
+    assert(count(&tx, 41) == 2);
+    assert(mica_kernel_commit(&tx) == OK && mica_kernel_end(&tx));
+    begin(&f, &tx);
+    assert(mica_kernel_set_limits(&tx, 0, UINT64_MAX, UINT64_MAX, UINT64_MAX) == OK);
+    assert(mica_kernel_source_0(&tx, &symbols, 200, false, true) == LIMIT);
+    assert(mica_kernel_end(&tx));
+    begin(&f, &tx);
+    assert(mica_kernel_cancel(&tx));
+    assert(mica_kernel_source_0(&tx, &symbols, 200, false, true) == CANCELLED);
+    assert(mica_kernel_end(&tx));
+    assert(mica_kernel_source_0(&tx, &symbols, 200, false, true) == CLOSED);
+    struct mica_KernelTransaction denied = {0};
+    assert(mica_kernel_begin(&f.kernel, &f.worker, &denied, integer(99)) == OK);
+    assert(mica_kernel_source_0(&denied, &symbols, 200, false, true) == PERMISSION);
+    assert(mica_kernel_end(&denied));
+    mica_value_symbol_table_release(&symbols);
+    destroy(&f);
+}
+
 int main(int argc, char **argv) {
     if (argc == 2 && !strcmp(argv[1], "trace")) return trace();
     if (argc == 5 && !strcmp(argv[1], "bench")) return benchmark(argv[2], (unsigned)strtoul(argv[3], NULL, 10), (unsigned)strtoul(argv[4], NULL, 10));
     assert(argc == 1);
+    source_rules();
     inactive_authority();
     transactional_authority();
     derived_authority();

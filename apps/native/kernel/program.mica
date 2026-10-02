@@ -294,7 +294,7 @@ verb native_kernel/tracing(input: map) -> map
   return result
 end
 
-verb native_kernel/program() -> map
+verb native_kernel/definitions() -> map
   let context: map = native_value/definitions()
   context = native_kernel/types(context)
   context = native_execution/declarations(context)
@@ -316,6 +316,11 @@ verb native_kernel/program() -> map
   context = native_rules/maintenance_program(context)
   context = native_authority/program(context)
   context = native_authority/policy_program(context)
+  return context
+end
+
+verb native_kernel/program() -> map
+  let context: map = native_kernel/definitions()
   let state: map = context[:state]
   return state
 end

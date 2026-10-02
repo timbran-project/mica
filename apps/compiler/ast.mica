@@ -1,0 +1,80 @@
+// Shared readers for the relational AST produced by parse_rows.
+// AST lookup routines derive from omica bfb368c.
+
+verb sort_ast_rows(rows)
+  return sort(rows)
+end
+
+// The first row index whose node id is `node_id`, or the insertion point when
+// absent. Rows must be sorted by node id. Mica integer division is exact, so
+// the midpoint forces an even numerator rather than writing `(low + high) / 2`.
+verb lower_bound(rows, node_id)
+  let low = 0
+  let high = len(rows)
+  while low < high
+    let sum = low + high
+    let mid = (sum - (sum % 2)) / 2
+    if rows[mid][0] < node_id
+      low = mid + 1
+    else
+      high = mid
+    end
+  end
+  return low
+end
+
+// The :kind target of a node, or :Unknown.
+verb ast_kind(rows, node_id)
+  let index = lower_bound(rows, node_id)
+  while index < len(rows) && rows[index][0] == node_id
+    if rows[index][1] == :kind
+      return rows[index][2]
+    end
+    index = index + 1
+  end
+  return :Unknown
+end
+
+// The first target for (node, role) as [found, target].
+verb ast_attr(rows, node_id, role)
+  let index = lower_bound(rows, node_id)
+  while index < len(rows) && rows[index][0] == node_id
+    if rows[index][1] == role
+      return [true, rows[index][2]]
+    end
+    index = index + 1
+  end
+  return [false, 0]
+end
+
+// Every target for (node, role), ordered by ordinal. The node's block is
+// small, so scanning it once per ordinal is cheap.
+verb ast_children(rows, node_id, role)
+  let start = lower_bound(rows, node_id)
+  let finish = start
+  while finish < len(rows) && rows[finish][0] == node_id
+    finish = finish + 1
+  end
+  let count = 0
+  let index = start
+  while index < finish
+    if rows[index][1] == role
+      count = count + 1
+    end
+    index = index + 1
+  end
+  let targets = []
+  let ordinal = 0
+  while ordinal < count
+    index = start
+    while index < finish
+      if rows[index][1] == role && rows[index][3] == ordinal
+        targets = [@targets, rows[index][2]]
+        break
+      end
+      index = index + 1
+    end
+    ordinal = ordinal + 1
+  end
+  return targets
+end

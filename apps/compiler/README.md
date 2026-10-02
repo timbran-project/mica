@@ -1,13 +1,14 @@
 # Mica compiler
 
 The lexer and parser are written in Mica. They are ported from omica revision
-`bfb368c0b7586ab98c3915c0ae7cd3b46843fc8f`. Load `lex.mica`, `parse.mica`, and `emit.mica` in that
+`bfb368c0b7586ab98c3915c0ae7cd3b46843fc8f`. Load `lex.mica`, `parse.mica`, `ast.mica`, and `emit.mica` in that
 order. Load `install.mica` afterward to install and run compiled modules.
 
 - `lex(source)` returns `[tokens, errors]`. Tokens record Unicode scalar offsets, lines, and
   columns.
 - `parse_rows(source)` returns `{:root, :rows, :errors}`. Each AST row is
   `[node, role, target, ordinal]`.
+- `ast.mica` provides shared readers for sorted AST rows. Both emitters use these readers.
 - `parse(source)` returns `{:root, :nodes, :errors}`. Its nodes are a relation value with the same
   four columns.
 
@@ -99,7 +100,7 @@ explicit policy grants. To compile an expression without installing its artifact
 
 ```sh
 cargo run --bin mica -- filein \
-  apps/compiler/lex.mica apps/compiler/parse.mica apps/compiler/emit.mica \
+  apps/compiler/lex.mica apps/compiler/parse.mica apps/compiler/ast.mica apps/compiler/emit.mica \
   /dev/stdin <<'MICA'
 return emit_source("return 2 + 3")[:ok]
 MICA
@@ -109,7 +110,7 @@ To compile, install, and run an expression:
 
 ```sh
 cargo run --bin mica -- filein \
-  apps/compiler/lex.mica apps/compiler/parse.mica apps/compiler/emit.mica \
+  apps/compiler/lex.mica apps/compiler/parse.mica apps/compiler/ast.mica apps/compiler/emit.mica \
   apps/compiler/install.mica /dev/stdin <<'MICA'
 return compiler/run("return 2 + 3", :example)[:value]
 MICA
