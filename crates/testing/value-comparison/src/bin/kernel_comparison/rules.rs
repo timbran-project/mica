@@ -1,6 +1,10 @@
 // Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
+use std::fs;
+use std::path::Path;
+use std::process::Command;
+
 use mica_relation_kernel::{Atom, Rule, RuleBodyItem, RuleComparisonOp, RuleGuard, Term};
 
 use super::{
@@ -163,4 +167,93 @@ pub(super) fn correctness(options: &Options) -> Result<()> {
         &steps,
         &reference(&steps, &kernel(), true),
     )
+}
+
+// Compile only selected generated functions with entry/exit hooks. All timing
+// code and lock wrappers live in the fixture, outside the generated runtime.
+fn profile_fixture(directory: &Path) -> Result<std::path::PathBuf> {
+    let selected = [
+        "mica_kernel_prepare_catalog",
+        "mica_kernel_rules_rebase",
+        "mica_kernel_rule_maintain",
+        "mica_kernel_try_publish",
+        "mica_memory_collect_stopped",
+        "mica_memory_share",
+        "mica_kernel_authority_views",
+        "mica_kernel_authority_validate",
+        "mica_kernel_authority_changes",
+    ];
+    let header = fs::read_to_string(directory.join("module.h"))?;
+    let excluded = header
+        .lines()
+        .filter_map(|line| {
+            let (prefix, _) = line.split_once('(')?;
+            let name = prefix.split_whitespace().last()?;
+            (name.starts_with("mica_") && !selected.iter().any(|selected| selected.contains(name)))
+                .then_some(name)
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    let executable = fs::canonicalize(directory)?.join("rule-profile");
+    let output = Command::new(std::env::var_os("GCC").unwrap_or_else(|| "gcc".into()))
+        .current_dir(directory)
+        .args([
+            "-std=c11",
+            "-O3",
+            "-g",
+            "-Wall",
+            "-Wextra",
+            "-Werror",
+            "-pedantic",
+            "-pthread",
+            "-ffp-contract=off",
+            "-fno-fast-math",
+            "-DMICA_KERNEL_PROFILE",
+            "-finstrument-functions",
+            "-finstrument-functions-exclude-file-list=check.c,measurements.c",
+            "-Wl,--wrap=mica_foreign_memory_lock",
+            "-Wl,--wrap=mica_foreign_memory_unlock",
+        ])
+        .arg(format!(
+            "-finstrument-functions-exclude-function-list={excluded}"
+        ))
+        .args(["check.c", "module.c", "-lm", "-o"])
+        .arg(&executable)
+        .output()?;
+    if !output.status.success() {
+        return Err(format!(
+            "kernel profiling build: {}",
+            String::from_utf8_lossy(&output.stderr)
+        )
+        .into());
+    }
+    Ok(executable)
+}
+pub(super) fn benchmark(options: &Options) -> Result<()> {
+    if cfg!(debug_assertions) {
+        return Err("benchmarks require --release".into());
+    }
+    if options.samples.get() > 100 {
+        return Err("rule measurements support at most 100 samples".into());
+    }
+    let run = |executable: &Path| -> Result<()> {
+        let output = Command::new(executable)
+            .args(["rule-bench", &options.samples.to_string()])
+            .output()?;
+        if !output.status.success() || !output.stderr.is_empty() {
+            return Err(format!(
+                "rule measurements: {}: {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr)
+            )
+            .into());
+        }
+        print!("{}", String::from_utf8(output.stdout)?);
+        Ok(())
+    };
+    run(&options.native_executable)?;
+    if let Some(directory) = &options.rule_profile {
+        run(&profile_fixture(directory)?)?;
+    }
+    Ok(())
 }

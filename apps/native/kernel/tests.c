@@ -952,7 +952,7 @@ static void rule_prepared_publication(void) {
     destroy(&f);
 }
 
-struct rule_parallel { struct fixture *fixture; unsigned id; };
+struct rule_parallel { struct fixture *fixture; unsigned id; uint64_t conflicts; };
 static void *rule_parallel_worker(void *opaque) {
     struct rule_parallel *job = opaque;
     struct mica_MemoryWorker worker = {0};
@@ -974,6 +974,7 @@ static void *rule_parallel_worker(void *opaque) {
             uint64_t status = mica_kernel_commit(&tx);
             assert(status == OK || status == CONFLICT);
             committed = status == OK;
+            job->conflicts += status == CONFLICT;
             assert(mica_kernel_end(&tx));
             if (round % 7 == 0) assert(mica_memory_safepoint(&worker, true));
         }
@@ -983,7 +984,7 @@ static void *rule_parallel_worker(void *opaque) {
     assert(mica_memory_worker_release(&worker));
     return NULL;
 }
-static void rule_concurrency(void) {
+static uint64_t rule_concurrency(void) {
     struct fixture f;
     init(&f);
     declare(&f, 1, SET);
@@ -1007,6 +1008,9 @@ static void rule_concurrency(void) {
     assert(count(&tx, 1) == THREADS * 20);
     assert(mica_kernel_end(&tx));
     destroy(&f);
+    uint64_t conflicts = 0;
+    for (unsigned i = 0; i < THREADS; ++i) conflicts += jobs[i].conflicts;
+    return conflicts;
 }
 
 static int trace_row_order(const void *left, const void *right) {
@@ -3398,8 +3402,11 @@ static void source_rules(void) {
     destroy(&f);
 }
 
+#include "measurements.c"
+
 int main(int argc, char **argv) {
     if (argc == 2 && !strcmp(argv[1], "trace")) return trace(false);
+    if (argc == 3 && !strcmp(argv[1], "rule-bench")) return rule_measurements((unsigned)strtoul(argv[2], NULL, 10));
     if (argc == 2 && !strcmp(argv[1], "rules")) return trace(true);
     if (argc == 5 && !strcmp(argv[1], "bench")) return benchmark(argv[2], (unsigned)strtoul(argv[3], NULL, 10), (unsigned)strtoul(argv[4], NULL, 10));
     assert(argc == 1);

@@ -2091,6 +2091,11 @@ fn native_relation_kernel_executes_on_both_mica_tiers() {
             .with_str(str::to_owned)
             .unwrap();
         let scratch = Scratch::new();
+        fs::write(
+            scratch.0.join("measurements.c"),
+            include_str!("../../../apps/native/kernel/measurements.c"),
+        )
+        .unwrap();
         let source = scratch.0.join("kernel.c");
         let binary = scratch.0.join("kernel");
         fs::write(

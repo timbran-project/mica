@@ -37,6 +37,12 @@ struct Options {
     /// Measure composed queries over two 1,024-row relations.
     #[arg(long)]
     query_bench: bool,
+    /// Measure recursive maintenance, bulk loading, and retention in the native kernel.
+    #[arg(long)]
+    rule_bench: bool,
+    /// Also build a GCC-instrumented diagnostic from this generated kernel directory.
+    #[arg(long, requires = "rule_bench")]
+    rule_profile: Option<PathBuf>,
     #[arg(long, default_value = "5")]
     samples: NonZeroU32,
     #[arg(long, default_value = "128")]
@@ -542,6 +548,9 @@ fn main() -> Result<()> {
         &reference(&steps, &kernel(), false),
     )?;
     rules::correctness(&options)?;
+    if options.rule_bench {
+        rules::benchmark(&options)?;
+    }
     if options.bench || options.query_bench {
         benchmark(&options)?;
     }

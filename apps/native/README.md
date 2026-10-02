@@ -539,6 +539,42 @@ Plan construction and store population stay outside the timer. Native allocation
 The query benchmark checks result counts; the differential corpus checks complete rows.
 Generated modules, executables, and measurement output belong under ignored `target/` paths.
 
+### Rule maintenance measurements
+
+Use an unsanitized kernel fixture for timings:
+
+```sh
+cargo run --release -p mica-value-comparison --bin mica-kernel-comparison -- \
+  --native-executable target/native-gccjit/kernel/check --rule-bench --samples 5 \
+  --rule-profile target/native-gccjit/kernel
+```
+
+The ordinary run reports whole-commit latency and evaluator counters for two independent recursive closures with 32, 64, and 128 edges each.
+Each sample changes one edge, checks the result against full recomputation, and verifies sharing of the unaffected closure.
+Retractions clear the affected closure; additions extend it. Results include visited candidate rows (`probes`), evaluator steps, rounds, cleared rows, and reused, extended, or recomputed SCC counts.
+Bulk loading stages both graphs in one transaction. Retained readers must see the previous complete closure throughout loading.
+Additional workloads measure four-worker fact/catalogue contention and storage retained by historical snapshots, cancelled work, and superseded candidates.
+Root release and collection are separate measurement points.
+
+`--rule-profile` builds a separate diagnostic executable from `module.c`, `module.h`, and `check.c` in the supplied directory.
+It requires GCC (`GCC` selects the executable) and GNU-compatible linker wrapping.
+Compiler hooks time catalogue validation, authority validation, derivation, candidate sharing, publication, and collection.
+Wrapped kernel mutex operations measure lock hold after acquisition, excluding lock wait.
+Assertions reject preparation under the publication lock and multiple derivations during an unread bulk load.
+`candidate_builds` counts prepared catalogue candidates, including rebuild attempts; it does not count individual copied heap objects.
+
+Only records with `instrumented: true` contain phase timings and candidate/collection call counts. Those fields are zero in the ordinary run.
+Collection timings cover the collector while workers are stopped; retention measurements also report full safepoint latency.
+Collection time can overlap derivation or sharing, so these durations must not be added together.
+Diagnostic overhead and compiler differences make these timings unsuitable for estimating instrumentation overhead or comparing compiler speed.
+The generated runtime has no profiling dependency.
+
+The update workloads allow four retained transactions, 256 MiB of heap capacity, and 256 MiB of cumulative allocation per operation.
+They also set limits of 50 million steps, one million intermediate rows, and 100,000 rounds.
+The retention workload uses three transaction slots and 64 MiB of heap capacity, and checks refusal of a fourth transaction.
+These are explicit workload allowances, not proposed production tenant quotas.
+On this workload, a 64 MiB cumulative allocation allowance rejected the 128-edge bulk load despite much lower live storage.
+
 ## Construction API
 
 `native/program()` returns an empty construction state.

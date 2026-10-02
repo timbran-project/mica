@@ -528,6 +528,12 @@ fn check_fixtures(
             ),
             _ => unreachable!(),
         };
+        if name == "kernel" {
+            fs::copy(
+                root.join("apps/native/kernel/measurements.c"),
+                directory.join("measurements.c"),
+            )?;
+        }
         fs::write(
             directory.join("check.c"),
             format!("#include \"module.h\"\n{oracle}"),
