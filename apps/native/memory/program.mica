@@ -32,7 +32,7 @@ verb native_memory/collection_schema() -> list
   let heap: list = native_memory/record_pointer("MemoryHeap")
   let object: list = native_memory/record_pointer("MemoryObject")
   return ["MemoryCollection", [
-    ["heap", heap], ["work", object], ["copies", object], ["phase", :U64], ["failed", :Bool], ["copied", :U64]]]
+    ["heap", heap], ["work", object], ["copies", object], ["phase", :U64], ["failed", :Bool], ["copied", :U64], ["control", native_memory/record_pointer("MemoryControl")]]]
 end
 
 verb native_memory/field(type_id, pointer, name: string) -> list
@@ -211,7 +211,10 @@ verb native_memory/context(input: map) -> map
   let effects: list = [:ReadMemory, :WriteMemory, :Allocate, :Release]
   let [trace, initial] = native/function_pointer_type(context[:state], "MemoryTrace", :Void,
     [["collection", collection, :Borrow], ["object", object, :Gc]], effects, :Value, "")
-  let state: map = initial
+  let [check, with_check] = native/function_pointer_type(initial, "MemoryCheck", :Bool,
+    [["context", bytes, :Borrow], ["bytes", :U64, :Value], ["steps", :U64, :Value]], [:ReadMemory, :WriteMemory], :Value, "")
+  let state: map = with_check
+  state = native/record_type(state, "MemoryControl", [["parent", native_memory/record_pointer("MemoryControl")], ["context", bytes], ["check", check], ["denied", :Bool]])[1]
   let object_schema: list = native_memory/object_schema()
   let page_schema: list = native_memory/page_schema()
   state = native/record_type(state, object_schema[0], object_schema[1])[1]
@@ -220,7 +223,7 @@ verb native_memory/context(input: map) -> map
     ["next", root], ["pointer", bytes], ["bits", :U64], ["registration", :U64]])[1]
   state = native/record_type(state, "MemoryWorker", [
     ["next", worker], ["heap", heap], ["roots", root], ["nursery", bytes],
-    ["capacity", :U64], ["used", :U64], ["active", :Bool]])[1]
+    ["capacity", :U64], ["used", :U64], ["active", :Bool], ["control", native_memory/record_pointer("MemoryControl")]])[1]
   state = native/record_type(state, "MemoryHeap", [
     ["pages", page], ["free", [:Array, object, 10]], ["workers", worker], ["roots", root], ["trace", trace],
     ["mutex", bytes], ["collecting", :Bool], ["collection_ok", :Bool], ["epoch", :U64],
@@ -242,6 +245,8 @@ verb native_memory/context(input: map) -> map
     ["memory_null_root", root, "null"], ["memory_null_trace", trace, "null"],
     ["memory_null_heap", heap, "null"], ["memory_true", :Bool, "true"], ["memory_false", :Bool, "false"],
     ["memory_previous", :I64, "-0000000000000001"],
+    ["memory_copy_chunk", :U64, "0000000000001000"],
+    ["memory_trace_mask", :U64, "000000000000003f"],
     ["memory_cell_size", :U64, "0000000000000080"],
     ["memory_page_size", :U64, "0000000000010000"],
     ["memory_collection_floor", :U64, "0000000000100000"],
@@ -265,6 +270,8 @@ verb native_memory/context(input: map) -> map
     context = native/declare_function(context, spec[0], spec[1], spec[2], [], spec[3], spec[4], "")
     context[:state] = native/foreign(context[:state], context[:functions][spec[0]])
   end
+  context = native_memory/declare(context, "memory_control_check", :Bool,
+    [["control", native_memory/record_pointer("MemoryControl"), :Borrow], ["bytes", :U64, :Value], ["steps", :U64, :Value]], [:ReadMemory, :WriteMemory], :Value, "")
   context = native_memory/declare(context, "memory_object", object, [["pointer", bytes, :Gc]], [], :Gc, "")
   context = native_memory/declare(context, "memory_payload", bytes, [["object", object, :Gc]], [], :Gc, "")
   context = native_memory/declare(context, "memory_original", bytes, [["object", object, :Gc]], [:ReadMemory], :Gc, "")

@@ -92,7 +92,8 @@ verb native_kernel/rule_read_body(module: map, all: bool) -> map
   if all
     name = "kernel_rules"
   end
-  let [work, ready] = native_kernel/rule_transaction(module, name)
+  let [work, opened] = native_kernel/rule_transaction(module, name)
+  let ready: map = native_execution/local_budget(opened, native_kernel/load_field(opened, work, "rule_limit"))
   let builder = ready
   if all
     let [output, rooted] = native_roots/retain(ready, "catalogue", native_gen/zero(native_kernel/pointer("Rule")))
@@ -123,10 +124,10 @@ end
 // index. An OOM leaves the previous staged definition usable and committable.
 verb native_kernel/rule_stage_body(module: map, operation: string) -> map
   let [work, opened] = native_kernel/rule_transaction(module, string_concat("kernel_rule_", operation))
-  let builder = opened
+  let builder = native_rules/local_budget(opened, native_rules/read(opened, work, "rule_limit"))
   let transaction = native_gen/ref(builder, "transaction")
   let id = native_gen/ref(builder, "id")
-  let [worker, with_worker] = native_gen/bind(opened, "worker", native_kernel/load_field(opened, transaction, "worker"))
+  let [worker, with_worker] = native_gen/bind(builder, "worker", native_kernel/load_field(builder, transaction, "worker"))
   let [change, observed] = native_gen/bind(with_worker, "change", native_gen/call(with_worker, "kernel_rule_observe", [worker, work, id]))
   builder = native_gen/when(observed, native_kernel/absent(change), fn(failed) => native_kernel/status(failed, "kernel_oom"))
   let existing = native_kernel/load_field(builder, change, "after")
@@ -151,7 +152,7 @@ verb native_kernel/rule_stage_body(module: map, operation: string) -> map
   end
   let [rules, staged] = native_kernel/rule_index_edit(builder, "kernel_rule_index_put", native_kernel/load_field(builder, work, "rule_index"), id, entry)
   let [candidate: map, rooted: map] = native_roots/retain(staged, "candidate", rules)
-  let with_budget: map = native_rules/local_budget(rooted, native_rules/read(rooted, work, "rule_limit"))
+  let with_budget: map = rooted
   let budget: map = native_roots/ref(with_budget, "budget")
   let [metadata: map, indexed: map] = native_rules/checked_call(with_budget, "rule_schemas", [worker, work, native_gen/ref(with_budget, "true"), budget], "schemas")
   let [schemas: map, with_schemas: map] = native_roots/retain(indexed, "schemas", metadata)

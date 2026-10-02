@@ -14,7 +14,8 @@ verb native_execution/declarations(input: map) -> map
     module = native/declare_function(module, spec[0], spec[1], spec[2], [], spec[3], spec[4], "")
     module[:state] = native/foreign(module[:state], module[:functions][spec[0]])
   end
-  module = native_kernel/declare(module, "budget_check", :U64, [["budget", native_kernel/pointer("Budget"), :Borrow], ["steps", :U64, :Value], ["rows", :U64, :Value], ["rounds", :U64, :Value]])
+  module = native_memory/declare(module, "kernel_budget_check", :U64, [["budget", native_kernel/pointer("Budget"), :Borrow], ["steps", :U64, :Value], ["rows", :U64, :Value], ["rounds", :U64, :Value]], [:ReadMemory, :WriteMemory], :Value, "")
+  module = native_memory/declare(module, "kernel_memory_check", :Bool, [["context", bytes, :Borrow], ["bytes", :U64, :Value], ["steps", :U64, :Value]], [:ReadMemory, :WriteMemory], :Value, "")
   module = native_kernel/declare(module, "cancel", :Bool, [["transaction", native_kernel/pointer("Transaction"), :Borrow]])
   return module
 end
@@ -23,13 +24,13 @@ verb native_execution/has(builder: map, name: string) -> bool
 end
 verb native_execution/local_budget(input: map, allowance: map) -> map
   let builder: map = input
-  let fields: map = {"steps" -> allowance, "rows" -> native_roots/ref(builder, "kernel_unlimited"), "rounds" -> native_roots/ref(builder, "kernel_unlimited"), "status" -> native_roots/ref(builder, "kernel_ok"), "signal" -> native_gen/zero(native_memory/pointer(:U8))}
+  let fields: map = {"steps" -> allowance, "rows" -> native_roots/ref(builder, "kernel_unlimited"), "rounds" -> native_roots/ref(builder, "kernel_unlimited"), "bytes" -> native_roots/ref(builder, "kernel_unlimited"), "status" -> native_roots/ref(builder, "kernel_ok"), "signal" -> native_gen/zero(native_memory/pointer(:U8))}
   if native_execution/has(builder, "transaction")
     let transaction: map = native_roots/ref(builder, "transaction")
     fields["signal"] = native_kernel/load_field(builder, transaction, "signal")
     let [work: map, ready: map] = native_gen/bind(builder, "control_work", native_gen/call(builder, "kernel_work", [transaction]))
     builder = ready
-    for field in ["rows", "rounds"]
+    for field in ["rows", "rounds", "bytes"]
       fields[field] = native_kernel/load_field(builder, work, string_concat(field, "_limit"))
     end
   end
@@ -40,7 +41,72 @@ verb native_execution/local_budget(input: map, allowance: map) -> map
   end
   bindings["budget"] = native_gen/address(budget)
   ready[:scope_bindings] = bindings
-  return ready
+  let worker: map = native_kernel/load_field(ready, native_roots/ref(ready, "transaction"), "worker")
+  let [control: map, attached: map] = native_gen/bind(ready, "memory_control", native_gen/record(ready, [:Record, "MemoryControl"],
+    {"parent" -> native_gen/zero(native_memory/record_pointer("MemoryControl")), "context" -> native_gen/cast(native_memory/pointer(:U8), native_gen/address(budget)),
+      "check" -> native_gen/expression([:FunctionPointer, "MemoryCheck"], :FunctionAddress, ["kernel_memory_check"]), "denied" -> native_gen/ref(ready, "false")}))
+  ready = native_gen/do_call(attached, "memory_control_push", [worker, native_gen/address(control)])
+  ready = native_gen/on_return(ready, fn(leaving, result) => native_execution/leave(leaving, result, worker, native_gen/address(budget), native_gen/address(control)))
+  let result: map = native_execution/charge(ready, native_gen/zero(:U64), native_gen/zero(:U64), native_gen/zero(:U64), fn(failed, status)
+    if failed[:result] == :U64
+      return native_roots/return_value(failed, status)
+    end
+    let [failure: map, with_failure: map] = native_gen/bind(failed, "failure", native_gen/zero(failed[:result]))
+    let body: map = native_gen/write(with_failure, native_gen/field(with_failure, native_gen/address(failure), "status"), status)
+    return native_roots/return_value(body, failure)
+  end)
+  return result
+end
+// The memory callback may report a limit through a value allocator's null
+// result. Restore the enclosing control and preserve the precise status.
+verb native_execution/leave(builder: map, result: map, worker: map, budget: map, control: map) -> map
+  // A parent can refuse after this budget allowed the allocation. Preserve
+  // that refusal as LIMIT, with cancellation taking precedence for this task.
+  let ready: map = native_gen/when(builder, native_kernel/load_field(builder, control, "denied"), fn(denied)
+    let [checked: map, polled: map] = native_gen/bind(denied, "failure_status", native_gen/call(denied, "kernel_budget_check", [budget, native_gen/zero(:U64), native_gen/zero(:U64), native_gen/zero(:U64)]))
+    return native_gen/when(polled, native_kernel/absent(checked), fn(limited) => native_kernel/store_field(limited, budget, "status", native_gen/ref(limited, "kernel_limit")))
+  end)
+  ready = native_gen/do_call(ready, "memory_control_pop", [worker])
+  let status: map = native_kernel/load_field(ready, budget, "status")
+  let completed: map = native_gen/unless(ready, native_kernel/absent(status), fn(failed)
+    let body: map = failed
+    if builder[:result] == :U64
+      body = native_gen/assign(body, result, status)
+    else
+      body = native_gen/assign(body, result, native_gen/zero(builder[:result]))
+      body = native_gen/write(body, native_gen/field(body, native_gen/address(result), "status"), status)
+    end
+    if builder[:name] == "kernel_commit"
+      let work: map = native_gen/call(body, "kernel_work", [native_roots/ref(body, "transaction")])
+      body = native_kernel/store_field(body, work, "status", status)
+    end
+    return body
+  end)
+  return completed
+end
+verb native_execution/memory_check_body(module: map) -> map
+  let builder: map = native_gen/context(module, "kernel_memory_check")
+  let budget: map = native_gen/cast(native_kernel/pointer("Budget"), native_gen/ref(builder, "context"))
+  let [status: map, checked: map] = native_gen/bind(builder, "status", native_gen/call(builder, "kernel_budget_check", [budget, native_gen/ref(builder, "steps"), native_gen/ref(builder, "zero"), native_gen/ref(builder, "zero")]))
+  builder = native_gen/unless(checked, native_kernel/absent(status), fn(failed) => native_gen/return_value(failed, native_gen/ref(failed, "false")))
+  let bytes: map = native_gen/ref(builder, "bytes")
+  builder = native_gen/when(builder, native_kernel/absent(bytes), fn(empty) => native_gen/return_value(empty, native_gen/ref(empty, "true")))
+  // Charge aligned object storage, including the header. Pool slack and
+  // collector copies belong to heap admission rather than this operation.
+  let overhead: map = native_gen/add(native_gen/sizeof([:Record, "MemoryObject"]), native_gen/ref(builder, "memory_n7"))
+  builder = native_gen/when(builder, native_gen/less(native_gen/subtract(native_gen/ref(builder, "kernel_unlimited"), overhead), bytes), fn(overflow)
+    let failed: map = native_kernel/store_field(overflow, budget, "status", native_gen/ref(overflow, "kernel_limit"))
+    return native_gen/return_value(failed, native_gen/ref(failed, "false"))
+  end)
+  let total: map = native_gen/bit_and(native_gen/add(bytes, overhead), native_gen/ref(builder, "memory_alignment_mask"))
+  builder = native_gen/when(builder, native_gen/less(native_kernel/load_field(builder, budget, "bytes"), total), fn(exhausted)
+    let failed: map = native_kernel/store_field(exhausted, budget, "status", native_gen/ref(exhausted, "kernel_limit"))
+    return native_gen/return_value(failed, native_gen/ref(failed, "false"))
+  end)
+  builder = native_kernel/store_field(builder, budget, "bytes", native_gen/subtract(native_kernel/load_field(builder, budget, "bytes"), total))
+  builder = native_gen/return_value(builder, native_gen/ref(builder, "true"))
+  let result: map = native_gen/finish(module, builder)
+  return result
 end
 verb native_execution/charge(builder: map, steps: map, rows: map, rounds: map, failure) -> map
   let [status: map, ready: map] = native_gen/bind(builder, "execution_status", native_gen/call(builder, "kernel_budget_check", [native_roots/ref(builder, "budget"), steps, rows, rounds]))
@@ -68,6 +134,7 @@ verb native_execution/program(input: map) -> map
   end
   builder = native_kernel/status(builder, "kernel_ok")
   module = native_gen/finish(module, builder)
+  module = native_execution/memory_check_body(module)
   builder = native_gen/context(module, "kernel_cancel")
   let cancel_signal: map = native_kernel/load_field(builder, native_roots/ref(builder, "transaction"), "signal")
   builder = native_gen/when(builder, native_kernel/absent(cancel_signal), fn(closed) => native_gen/return_value(closed, native_roots/ref(closed, "false")))

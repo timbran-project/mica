@@ -144,7 +144,7 @@ verb native_memory/trace_state(builder: map, heap: map, phase: string) -> map
     {"heap" -> heap, "work" -> native_gen/ref(builder, "memory_null_object"),
       "copies" -> native_gen/ref(builder, "memory_null_object"),
       "phase" -> native_gen/ref(builder, phase), "failed" -> native_gen/ref(builder, "memory_false"),
-      "copied" -> native_gen/ref(builder, "memory_n0")})
+      "copied" -> native_gen/ref(builder, "memory_n0"), "control" -> native_gen/zero(native_memory/record_pointer("MemoryControl"))})
   return result
 end
 
@@ -385,10 +385,42 @@ end
 // subgraphs are immutable and can be shared without tracing their descendants.
 // The heap mutex protects forwarding metadata and allocation; workers keep
 // running, and an active caller prevents major collection during this copy.
+verb native_memory/check_copy(builder: map, collection: map, bytes: map, steps: map) -> map
+  let allowed: map = native_gen/call(builder, "memory_control_check", [native_gen/read(native_gen/field(builder, collection, "control")), bytes, steps])
+  let result: map = native_gen/unless(builder, allowed, fn(failed) => native_gen/write(failed, native_gen/field(failed, collection, "failed"), native_gen/ref(failed, "memory_true")))
+  return result
+end
+
+// Trace variable-size payloads in bounded batches, including immediate values
+// that have no pointer visitor. Ordinary collection carries no control.
+verb native_memory/trace_checkpoint(builder: map, collection: map, index: map) -> map
+  let result: map = native_gen/when(builder, native_gen/equal(native_gen/bit_and(index, native_gen/ref(builder, "memory_trace_mask")), native_gen/ref(builder, "memory_n0")), fn(batch)
+    let checked: map = native_memory/check_copy(batch, collection, native_gen/ref(batch, "memory_n0"), native_gen/ref(batch, "memory_n1"))
+    return native_gen/when(checked, native_gen/read(native_gen/field(checked, collection, "failed")), fn(failed) => native_gen/return_void(failed))
+  end)
+  return result
+end
+
+verb native_memory/copy_payload(builder: map, collection: map, target: map, source: map, size: map) -> map
+  let [offset: map, ready: map] = native_gen/bind(builder, "copied_bytes", native_gen/ref(builder, "memory_n0"))
+  let result: map = native_gen/while_loop(ready, native_gen/less(offset, size), fn(chunk)
+    let checked: map = native_memory/check_copy(chunk, collection, native_gen/ref(chunk, "memory_n0"), native_gen/ref(chunk, "memory_n1"))
+    checked = native_gen/when(checked, native_gen/read(native_gen/field(checked, collection, "failed")), fn(failed) => native_gen/break_loop(failed))
+    let [length: map, bounded: map] = native_gen/bind(checked, "chunk_bytes", native_gen/subtract(size, offset))
+    bounded = native_gen/when(bounded, native_gen/less(native_gen/ref(bounded, "memory_copy_chunk"), length), fn(large) => native_gen/assign(large, length, native_gen/ref(large, "memory_copy_chunk")))
+    let copied: map = native_gen/copy_bytes(bounded, native_gen/offset(target, offset), native_gen/offset(source, offset), length)
+    return native_gen/assign(copied, offset, native_gen/add(offset, length))
+  end)
+  return result
+end
+
 verb native_memory/share_visit_body(module: map) -> map
   let builder: map = native_gen/context(module, "memory_share_visit")
   let collection: map = native_gen/ref(builder, "collection")
   let pointer: map = native_gen/ref(builder, "pointer")
+  builder = native_gen/when(builder, native_gen/read(native_gen/field(builder, collection, "failed")), fn(failed) => native_gen/return_value(failed, pointer))
+  builder = native_memory/check_copy(builder, collection, native_gen/ref(builder, "memory_n0"), native_gen/ref(builder, "memory_n1"))
+  builder = native_gen/when(builder, native_gen/read(native_gen/field(builder, collection, "failed")), fn(failed) => native_gen/return_value(failed, pointer))
   let [object: map, ready: map] = native_gen/bind(builder, "source", native_gen/call(builder, "memory_object", [pointer]))
   let [heap: map, with_heap: map] = native_gen/bind(ready, "heap", native_gen/read(native_gen/field(ready, collection, "heap")))
   builder = native_gen/unless(with_heap, native_gen/equal(heap, native_gen/read(native_gen/field(with_heap, object, "heap"))),
@@ -402,13 +434,16 @@ verb native_memory/share_visit_body(module: map) -> map
   builder = native_gen/unless(with_forward, native_gen/equal(forward, native_gen/ref(with_forward, "memory_null_object")),
     fn(copied) => native_gen/return_value(copied, pointer))
   let [size: map, with_size: map] = native_gen/bind(builder, "size", native_gen/read(native_gen/field(builder, object, "size")))
-  let [target: map, with_target: map] = native_gen/bind(with_size, "target", native_gen/call(with_size, "memory_mature_allocate",
-    [heap, size, native_gen/read(native_gen/field(with_size, object, "layout"))]))
+  builder = native_memory/check_copy(with_size, collection, size, native_gen/ref(with_size, "memory_n0"))
+  builder = native_gen/when(builder, native_gen/read(native_gen/field(builder, collection, "failed")), fn(failed) => native_gen/return_value(failed, pointer))
+  let [target: map, with_target: map] = native_gen/bind(builder, "target", native_gen/call(builder, "memory_mature_allocate",
+    [heap, size, native_gen/read(native_gen/field(builder, object, "layout"))]))
   builder = native_gen/when(with_target, native_gen/equal(target, native_gen/ref(with_target, "memory_null_object")),
     fn(failure) => native_memory/share_failure(failure, collection))
   let [payload: map, with_payload: map] = native_gen/bind(builder, "payload", native_gen/call(builder, "memory_payload", [target]))
-  builder = native_gen/copy_bytes(with_payload, payload, pointer, size)
-  builder = native_memory/register_copy(builder, collection, object, target, size)
+  // Register first so interrupted copies are included in rollback.
+  builder = native_memory/register_copy(with_payload, collection, object, target, size)
+  builder = native_memory/copy_payload(builder, collection, payload, pointer, size)
   builder = native_gen/return_value(builder, pointer)
   let result: map = native_gen/finish(module, builder)
   return result
@@ -458,7 +493,9 @@ verb native_memory/rewrite_copies(builder: map, collection: map, trace: map, poi
   ready = native_gen/assign(ready, result, native_gen/call(ready, "memory_visit", [collection, pointer]))
   let [copy: map, with_copy: map] = native_gen/bind(ready, "copy", native_gen/root_read(native_gen/field(ready, collection, "copies")))
   let rewritten: map = native_gen/while_loop(with_copy, native_gen/not_equal(copy, native_gen/ref(with_copy, "memory_null_object")), fn(body)
-    let traced: map = native_gen/unless(body, native_gen/equal(trace, native_gen/ref(body, "memory_null_trace")),
+    let checked: map = native_memory/check_copy(body, collection, native_gen/ref(body, "memory_n0"), native_gen/ref(body, "memory_n1"))
+    checked = native_gen/when(checked, native_gen/read(native_gen/field(checked, collection, "failed")), fn(failed) => native_gen/break_loop(failed))
+    let traced: map = native_gen/unless(checked, native_gen/equal(trace, native_gen/ref(checked, "memory_null_trace")),
       fn(known) => native_gen/do_indirect_call(known, trace, [collection, copy]))
     return native_gen/assign(traced, copy, native_gen/read(native_gen/field(traced, copy, "next")))
   end)
@@ -492,12 +529,14 @@ verb native_memory/share_body(module: map) -> map
   builder = native_gen/do_call(with_mutex, "memory_lock", [mutex])
   let [state: map, with_state: map] = native_gen/bind(builder, "state", native_memory/trace_state(builder, heap, "memory_share_prepare"))
   let [collection: map, with_collection: map] = native_gen/bind(with_state, "collection", native_gen/address(state))
-  let [result: map, with_result: map] = native_gen/bind(with_collection, "result", native_gen/call(with_collection, "memory_visit", [collection, pointer]))
+  builder = native_gen/write(with_collection, native_gen/field(with_collection, collection, "control"), native_gen/read(native_gen/field(with_collection, worker, "control")))
+  let [result: map, with_result: map] = native_gen/bind(builder, "result", native_gen/call(builder, "memory_visit", [collection, pointer]))
   let [trace: map, with_trace: map] = native_gen/bind(with_result, "trace", native_gen/read(native_gen/field(with_result, heap, "trace")))
   builder = native_memory/trace_pending(with_trace, collection, trace)
   let [failed: map, with_failed: map] = native_gen/bind(builder, "failed", native_gen/read(native_gen/field(builder, collection, "failed")))
   builder = native_gen/unless(with_failed, failed,
     fn(rewrite) => native_memory/rewrite_copies(rewrite, collection, trace, pointer, result))
+  builder = native_gen/assign(builder, failed, native_gen/read(native_gen/field(builder, collection, "failed")))
   builder = native_memory/finish_copies(builder, heap, collection, failed)
   builder = native_gen/branch(builder, failed,
     fn(failure) => native_gen/assign(failure, result, native_gen/ref(failure, "memory_null_bytes")),

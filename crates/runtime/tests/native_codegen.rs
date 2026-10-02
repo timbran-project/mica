@@ -2150,6 +2150,10 @@ int main(void) {
     assert(mica_generated_order() == UINT64_MAX && calls == 2);
     calls = 0;
     assert(mica_generated_once() == 2 && calls == 1);
+    calls = 0;
+    assert(mica_generated_cleanup(0) == 1 && calls == 1);
+    calls = 0;
+    assert(mica_generated_cleanup(1) == 4 && calls == 2);
     for (uint64_t choice = 0; choice < 12; ++choice)
         assert(mica_generated_switch(choice) == (choice == 1 ? 10 : choice == 3 ? 3 : 0));
     calls = 0;

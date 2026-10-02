@@ -125,7 +125,7 @@ verb native_value/trace_map(builder: map, header: map, collection: map, payload:
   current = native_gen/assign(current, data, native_gen/read(native_gen/field(current, header, "data")))
   let [length: map, with_length: map] = native_gen/bind(current, "length", native_gen/read(native_gen/field(current, header, "length")))
   current = native_gen/for_range(with_length, "entry", native_gen/ref(with_length, "zero"), length, fn(initial_entry, index)
-    let [entry: map, with_entry: map] = native_gen/bind(initial_entry, "entry", native_gen/offset(data, index))
+    let [entry: map, with_entry: map] = native_gen/bind(native_memory/trace_checkpoint(initial_entry, collection, index), "entry", native_gen/offset(data, index))
     let body: map = native_value/trace_word_field(with_entry, entry, "key", collection)
     return native_value/trace_word_field(body, entry, "value", collection)
   end)
@@ -138,7 +138,7 @@ verb native_value/trace_relation(builder: map, header: map, collection: map, pay
   let [rows: map, with_rows: map] = native_gen/bind(current, "rows", native_gen/read(native_gen/field(current, header, "rows")))
   let [length: map, with_length: map] = native_gen/bind(with_rows, "length", native_gen/read(native_gen/field(with_rows, header, "length")))
   current = native_gen/for_range(with_length, "row", native_gen/ref(with_length, "zero"), length, fn(initial_row, index)
-    let [row: map, with_row: map] = native_gen/bind(initial_row, "row", native_gen/offset(rows, index))
+    let [row: map, with_row: map] = native_gen/bind(native_memory/trace_checkpoint(initial_row, collection, index), "row", native_gen/offset(rows, index))
     if separate_rows
       return native_value/trace_external(with_row, row, "data", collection)
     end
@@ -233,7 +233,7 @@ verb native_value/tracing(input: map) -> map
   let data: map = native_gen/ref(slots, "data")
   let slot_collection: map = native_gen/ref(slots, "collection")
   slots = native_gen/for_range(slots, "slot", native_gen/ref(slots, "zero"), native_gen/ref(slots, "length"), fn(body, index)
-    let [slot: map, with_slot: map] = native_gen/bind(body, "slot", native_gen/offset(data, index))
+    let [slot: map, with_slot: map] = native_gen/bind(native_memory/trace_checkpoint(body, slot_collection, index), "slot", native_gen/offset(data, index))
     let [value: map, with_value: map] = native_gen/bind(with_slot, "value", native_gen/load(slot))
     let [moved: map, with_moved: map] = native_gen/bind(with_value, "moved", native_gen/call(with_value, "value_trace_word", [slot_collection, value]))
     return native_gen/store(with_moved, slot, moved)

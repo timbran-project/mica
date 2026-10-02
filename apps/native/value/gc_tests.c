@@ -276,7 +276,52 @@ static void published_values(uint64_t nursery_capacity) {
     assert(mica_memory_heap_release(&heap));
 }
 
+static bool trace_allowance(uint8_t *context, uint64_t bytes, uint64_t steps) {
+    uint64_t *remaining = (void *)context;
+    (void)bytes;
+    (void)steps;
+    if (!*remaining) return false;
+    --*remaining;
+    return true;
+}
+
+// Immediate-only arrays still need checkpoints: no pointer visitor sees them.
+static void bounded_value_tracing(void) {
+    struct mica_MemoryHeap heap = {0};
+    struct mica_MemoryWorker worker = {0};
+    assert(mica_value_heap_init(&heap));
+    assert(mica_memory_worker_init(&worker, &heap, 65536));
+    assert(mica_memory_enter(&worker));
+    mica_type_Value cells[1024];
+    for (unsigned i = 0; i < 1024; ++i) cells[i] = integer(i);
+    mica_type_Value value = checked(mica_value_list(&worker, cells, 1024));
+    const struct mica_HeapList *source = mica_value_as_list(value).f_header;
+    bool completed = false;
+    unsigned failures = 0;
+    for (uint64_t allowance = 0; allowance < 128; ++allowance) {
+        uint64_t remaining = allowance;
+        struct mica_MemoryControl control = {.f_context = (void *)&remaining, .f_check = trace_allowance};
+        mica_memory_control_push(&worker, &control);
+        const struct mica_HeapList *copy = (void *)mica_memory_share(&worker, (void *)source);
+        mica_memory_control_pop(&worker);
+        assert(!memcmp(source->f_data, cells, sizeof(cells)));
+        assert(!mica_memory_object((void *)source)->f_next);
+        if (copy) {
+            assert(copy != source && copy->f_length == 1024);
+            assert(!memcmp(copy->f_data, cells, sizeof(cells)));
+            completed = true;
+            break;
+        }
+        ++failures;
+    }
+    assert(completed && failures >= 32);
+    assert(mica_memory_leave(&worker));
+    assert(mica_memory_worker_release(&worker));
+    assert(mica_memory_heap_release(&heap));
+}
+
 int main(void) {
+    bounded_value_tracing();
     value_graph();
     tuple_and_buffer();
     overflow_append();

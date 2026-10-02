@@ -192,7 +192,7 @@ Callers must root managed pointers across safepoints and treat definitions and p
 | `kernel_rules(transaction)` | Enumerate the draft catalogue |
 | `kernel_rule_plan(transaction)` | Read the draft dependency plan and record a whole-catalogue dependency |
 | `kernel_rule_depend(transaction, relation, budget)` | Record head-generation and schema dependencies through the draft plan |
-| `kernel_set_limits(transaction, steps, rows, rounds)` | Set operation work, row-construction, and evaluation-round allowances |
+| `kernel_set_limits(transaction, steps, rows, rounds, bytes)` | Set operation work, row-construction, evaluation-round, and allocation allowances |
 | `kernel_cancel(transaction)` | Request cancellation from any native thread before publication wins |
 
 Writes return kernel status codes. Definition reads return `KernelRuleResult` with `status` and `rule`.
@@ -237,12 +237,26 @@ Publication claims the same atomic signal before swapping the snapshot root.
 Cancellation cannot undo a successful commit.
 The caller must join cancellation requesters before ending or reusing the transaction control.
 
-Each top-level query, scan, or rule operation creates one `KernelBudget` with step, row-construction, and round allowances.
+Queries, scans, allocating rule operations, fact writes, declarations, and commits each create one `KernelBudget`.
+The budget includes step, row-construction, round, and allocation-byte allowances.
 Children, draft refresh, dependency tracking, and result construction consume the same budget.
 Commit retries also share one budget. Limits return status 10. Cancellation returns status 11.
+The default allocation allowance is 64 MiB per operation.
+Allocation charges include object headers and alignment, including copies prepared for publication.
+Pool slack and collector copies do not consume this allowance. This allowance does not bound total retained heap storage.
+
+A worker borrows its active allocation control until the operation returns.
+Generated return cleanup restores the enclosing control on success and failure.
+Internal functions that accept a `KernelBudget*` use the caller's active memory control for allocation charges.
+Callers of these internal functions must also register the budget through `memory_control_push` and remove it through `memory_control_pop`.
+Callbacks cannot allocate, relocate objects, block, or retain their borrowed context.
+
+Publication checks cancellation between 4 KiB copy chunks and batches of at most 64 variable-size trace entries.
+Failure discards all destination copies and clears source forwarding metadata before returning.
+This cleanup must finish even after cancellation. Its work depends on the number of copies already admitted.
 The step allowance defaults to 16,777,216. Row and round allowances default to unlimited.
 Row allowances count intermediate row construction and result-buffer entries, including candidates later deduplicated.
-Allocation-byte caps, snapshot admission, and resumable scheduling remain separate work.
+Heap admission, retained-snapshot caps, and resumable scheduling remain separate work.
 
 Lower-level operations accept a caller-owned `KernelBudget` pointer.
 These include `kernel_read`, `kernel_rule_refresh`, `kernel_rule_depend`, and `kernel_rule_rows`.

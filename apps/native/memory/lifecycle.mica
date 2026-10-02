@@ -25,6 +25,7 @@ verb native_memory/lifecycle(input: map) -> map
   let root: list = native_memory/record_pointer("MemoryRoot")
   let object: list = native_memory/record_pointer("MemoryObject")
   let trace: list = [:FunctionPointer, "MemoryTrace"]
+  let control: list = native_memory/record_pointer("MemoryControl")
   let effects: list = [:ReadMemory, :WriteMemory, :Allocate, :Release]
   for spec in [
     ["memory_sync_create", bytes, [], [:Allocate], :Owned],
@@ -45,6 +46,8 @@ verb native_memory/lifecycle(input: map) -> map
     ["memory_leave", :Bool, [["worker", worker, :Borrow]], effects, :Value],
     ["memory_safepoint", :Bool, [["worker", worker, :Borrow], ["collect", :Bool, :Value]], [@effects, :Relocate], :Value],
     ["memory_allocate", bytes, [["worker", worker, :Borrow], ["size", :U64, :Value], ["layout", :U64, :Value]], [:ReadMemory, :WriteMemory, :Allocate], :Gc],
+    ["memory_control_push", :Void, [["worker", worker, :Borrow], ["control", control, :Borrow]], [:ReadMemory, :WriteMemory], :Value],
+    ["memory_control_pop", :Void, [["worker", worker, :Borrow]], [:ReadMemory, :WriteMemory], :Value],
     ["memory_root_push", :Bool, [["worker", worker, :Borrow], ["root", root, :Borrow]], [:ReadMemory, :WriteMemory], :Value],
     ["memory_root_pop", :Bool, [["worker", worker, :Borrow], ["root", root, :Borrow]], [:ReadMemory, :WriteMemory], :Value],
     ["memory_publish", :Bool, [["worker", worker, :Borrow], ["source", root, :Borrow], ["shared", root, :Borrow]], [@effects, :Relocate], :Value],
@@ -62,6 +65,29 @@ verb native_memory/lifecycle(input: map) -> map
     native_memory/call("memory_wait", ["sync"])])]
   let failed: list = [@unlock, native/return_value("memory_false")]
   let success: list = [@unlock, native/return_value("memory_true")]
+  // Like roots, controls borrow native frames for a strict dynamic extent.
+  // The caller must pop before that frame returns; callbacks cannot relocate.
+  context = native/define_function(context, "memory_control_push", [
+    native_memory/store(:Bool, "control", "denied", "memory_false"),
+    native_memory/store_root(control, "control", "parent", native_memory/root(control, "worker", "control")),
+    native_memory/store_root(control, "worker", "control", native/typed_expression(control, native/manage_expression("control"))),
+    native/return_void()])
+  context = native/define_function(context, "memory_control_pop", [
+    native/let_statement("control", control, native_memory/root(control, "worker", "control")),
+    native_memory/store_root(control, "worker", "control", native_memory/root(control, "control", "parent")),
+    native/return_void()])
+  let checked: map = native_gen/context(context, "memory_control_check")
+  let [cursor: map, with_cursor: map] = native_gen/bind(checked, "cursor", native_gen/ref(checked, "control"))
+  checked = native_gen/while_loop(with_cursor, native_gen/not_equal(cursor, native_gen/zero(control)), fn(step)
+    let callback: map = native_gen/read(native_gen/field(step, cursor, "check"))
+    let ready: map = native_gen/unless(step, native_gen/call_indirect(step, callback, [native_gen/read(native_gen/field(step, cursor, "context")), native_gen/ref(step, "bytes"), native_gen/ref(step, "steps")]), fn(failed)
+      let marked: map = native_gen/write(failed, native_gen/field(failed, native_gen/ref(failed, "control"), "denied"), native_gen/ref(failed, "memory_true"))
+      return native_gen/return_value(marked, native_gen/ref(marked, "memory_false"))
+    end)
+    return native_gen/assign(ready, cursor, native_gen/read(native_gen/field(ready, cursor, "parent")))
+  end)
+  checked = native_gen/return_value(checked, native_gen/ref(checked, "memory_true"))
+  context = native_gen/finish(context, checked)
   context = native/define_function(context, "memory_heap_init", [
     native/unless_statement(native/binary_expression(:Equal, native_memory/field(bytes, "heap", "mutex"), "memory_null_bytes"), [native/return_value("memory_false")]),
     native/let_call("sync", bytes, "memory_sync_create", []),
@@ -163,6 +189,7 @@ verb native_memory/lifecycle(input: map) -> map
   context = native/define_function(context, "memory_allocate", [
     native/let_statement("active", :Bool, native_memory/field(:Bool, "worker", "active")),
     native/unless_statement("active", [native/return_value("memory_null_bytes")]),
+    native/unless_statement(native/call_expression("memory_control_check", [native_memory/field(control, "worker", "control"), "size", "memory_n1"]), [native/return_value("memory_null_bytes")]),
     native/let_call("allocation", bytes, "memory_nursery_allocate", ["worker", "size", "layout"]),
     native/unless_statement(native/binary_expression(:Equal, "allocation", "memory_null_bytes"), [native/return_value("allocation")]),
     @worker_heap, @sync,

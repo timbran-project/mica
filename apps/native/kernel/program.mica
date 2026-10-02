@@ -42,7 +42,7 @@ verb native_kernel/schemas() -> list
     ["Work", [["evaluation", native_kernel/pointer("RuleEvaluation")], ["dirty", :Bool], ["base", native_kernel/pointer("Snapshot")], ["changes", native_kernel/pointer("Change")],
       ["rule_changes", rule_change], ["rule_observations", native_kernel/pointer("RuleObservationIndex")],
       ["rule_index", native_kernel/pointer("RuleIndex")], ["rules", rule], ["rules_cached", :Bool], ["rules_read", :Bool], ["rule_plan", native_kernel/pointer("RulePlan")],
-      ["rule_dependencies", native_kernel/pointer("RuleDependency")], ["rule_dependency_index", native_kernel/pointer("RuleDependencyIndex")], ["rule_limit", :U64], ["rows_limit", :U64], ["rounds_limit", :U64],
+      ["rule_dependencies", native_kernel/pointer("RuleDependency")], ["rule_dependency_index", native_kernel/pointer("RuleDependencyIndex")], ["rule_limit", :U64], ["rows_limit", :U64], ["rounds_limit", :U64], ["bytes_limit", :U64],
       ["checked", native_kernel/pointer("Snapshot")], ["candidate", native_kernel/pointer("Snapshot")], ["deltas", native_kernel/pointer("Delta")],
       ["status", :U64], ["conflict_rule", :U64], ["conflict_relation", :U64], ["conflict_tuple", word], ["done", :Bool]]]]
 end
@@ -207,7 +207,7 @@ verb native_kernel/types(input: map) -> map
     ["kernel_arity", :U64, native_value/hex(2)], ["kernel_nonpersistent", :U64, native_value/hex(3)],
     ["kernel_key", :U64, native_value/hex(4)], ["kernel_conflict", :U64, native_value/hex(5)],
     ["kernel_name", :U64, native_value/hex(6)], ["kernel_schema", :U64, native_value/hex(7)],
-    ["kernel_unlimited", :U64, "ffffffffffffffff"], ["kernel_cancelled", :U64, native_value/hex(11)], ["kernel_limit", :U64, native_value/hex(10)], ["rule_default_limit", :U64, native_value/hex(16777216)],
+    ["kernel_unlimited", :U64, "ffffffffffffffff"], ["kernel_cancelled", :U64, native_value/hex(11)], ["kernel_limit", :U64, native_value/hex(10)], ["rule_default_limit", :U64, native_value/hex(16777216)], ["rule_default_bytes", :U64, native_value/hex(67108864)],
     ["kernel_oom", :U64, native_value/hex(8)], ["kernel_closed", :U64, native_value/hex(9)],
     ["kernel_policy_set", :U64, native_value/hex(0)], ["kernel_policy_functional", :U64, native_value/hex(1)],
     ["kernel_policy_event", :U64, native_value/hex(2)], ["kernel_64", :U64, native_value/hex(64)]]
@@ -219,7 +219,7 @@ verb native_kernel/types(input: map) -> map
   end
   for spec in [
     ["Kernel", [["heap", native_memory/record_pointer("MemoryHeap")], ["mutex", bytes], ["current", root]]],
-    ["KernelBudget", [["steps", :U64], ["rows", :U64], ["rounds", :U64], ["status", :U64], ["signal", bytes]]],
+    ["KernelBudget", [["steps", :U64], ["rows", :U64], ["rounds", :U64], ["bytes", :U64], ["status", :U64], ["signal", bytes]]],
     ["KernelTransaction", [["signal", bytes], ["kernel", native_memory/record_pointer("Kernel")], ["worker", worker], ["root", root]]],
     ["KernelQueryResult", [["status", :U64], ["arity", :U64], ["rows", word]]],
     ["KernelRuleIndexResult", [["ok", :Bool], ["node", native_kernel/pointer("RuleIndex")]]],

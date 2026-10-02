@@ -121,7 +121,7 @@ verb native_rules/catalogue(input: map) -> map
   builder = native_gen/context(module, "kernel_set_limits")
   let [limit_work: map, limit_opened: map] = native_kernel/open_transaction(builder, fn(failed) => native_rules/error(failed, "closed"))
   builder = native_kernel/store_field(limit_opened, limit_work, "rule_limit", native_rules/ref(limit_opened, "steps"))
-  for field in ["rows", "rounds"]
+  for field in ["rows", "rounds", "bytes"]
     builder = native_kernel/store_field(builder, limit_work, string_concat(field, "_limit"), native_rules/ref(builder, field))
   end
   builder = native_kernel/status(builder, "kernel_ok")

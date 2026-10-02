@@ -285,6 +285,70 @@ static void failed_share_preserves_source(void) {
     assert(mica_memory_heap_release(&heap));
 }
 
+struct copy_control { uint64_t remaining, calls, bytes; };
+static bool check_copy_control(uint8_t *context, uint64_t bytes, uint64_t steps) {
+    struct copy_control *control = (void *)context;
+    (void)steps;
+    ++control->calls;
+    control->bytes += bytes;
+    if (!control->remaining) return false;
+    --control->remaining;
+    return true;
+}
+
+// Refuse every checkpoint in turn, including partial payload copying and
+// destination rewriting. No failed attempt may change the source graph.
+static void bounded_publication(void) {
+    struct mica_MemoryHeap heap = {0};
+    struct mica_MemoryWorker worker = {0};
+    assert(mica_memory_heap_init(&heap, mica_memory_test_trace));
+    assert(mica_memory_worker_init(&worker, &heap, 262144));
+    assert(mica_memory_enter(&worker));
+    struct mica_MemoryTestPair *pair = (void *)mica_memory_allocate(&worker, sizeof(*pair), 1);
+    uint8_t *bytes = mica_memory_allocate(&worker, 100000, 0);
+    assert(pair && bytes);
+    memset(bytes, 0x38, 100000);
+    *pair = (struct mica_MemoryTestPair){.f_left = bytes, .f_right = (void *)pair};
+    unsigned failures = 0;
+    bool succeeded = false;
+    for (unsigned allowance = 0; allowance < 100; ++allowance) {
+        struct copy_control accounting = {.remaining = allowance};
+        struct mica_MemoryControl control = {.f_context = (void *)&accounting, .f_check = check_copy_control};
+        mica_memory_control_push(&worker, &control);
+        struct mica_MemoryTestPair *copy = (void *)mica_memory_share(&worker, (void *)pair);
+        mica_memory_control_pop(&worker);
+        assert(!worker.f_control);
+        assert(pair->f_left == bytes && pair->f_right == (void *)pair);
+        for (unsigned i = 0; i < 100000; ++i) assert(bytes[i] == 0x38);
+        assert(!mica_memory_object((void *)pair)->f_next && !mica_memory_object((void *)pair)->f_work);
+        assert(!mica_memory_object(bytes)->f_next && !mica_memory_object(bytes)->f_work);
+        if (copy) {
+            assert(copy != pair && copy->f_left != bytes && copy->f_right == (void *)copy);
+            assert(!memcmp(copy->f_left, bytes, 100000));
+            assert(accounting.bytes == sizeof(*pair) + 100000);
+            succeeded = true;
+            break;
+        }
+        ++failures;
+        assert(!heap.f_copied && !heap.f_collections);
+    }
+    assert(succeeded && failures > 25);
+    struct copy_control outer = {.remaining = 0}, inner = {.remaining = UINT64_MAX};
+    struct mica_MemoryControl a = {.f_context = (void *)&outer, .f_check = check_copy_control};
+    struct mica_MemoryControl b = {.f_context = (void *)&inner, .f_check = check_copy_control};
+    mica_memory_control_push(&worker, &a);
+    mica_memory_control_push(&worker, &b);
+    assert(!mica_memory_allocate(&worker, 16, 0));
+    assert(outer.calls == 1 && inner.calls == 1);
+    mica_memory_control_pop(&worker);
+    assert(worker.f_control == &a);
+    mica_memory_control_pop(&worker);
+    assert(!worker.f_control && mica_memory_allocate(&worker, 16, 0));
+    assert(mica_memory_leave(&worker));
+    assert(mica_memory_worker_release(&worker));
+    assert(mica_memory_heap_release(&heap));
+}
+
 static void nursery_spill_uses_heap_budget(void) {
     struct mica_MemoryHeap heap = {0};
     struct mica_MemoryWorker worker = {0};
@@ -406,6 +470,7 @@ int main(void) {
     sweep_unlinks_empty_pages_from_free_lists();
     share_graph_without_collection();
     failed_share_preserves_source();
+    bounded_publication();
     nursery_spill_uses_heap_budget();
     heap_growth_requests_collection();
     worker_lifecycle();

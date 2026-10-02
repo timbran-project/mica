@@ -41,7 +41,7 @@ verb native_rules/declarations(input: map) -> map
     ["rule_dependencies_validate", :U64, [worker, work, budget], true],
     ["rule_depend", :U64, [tx, id, budget], true],
     ["rule_plan", [:Record, "KernelRulePlanResult"], [tx], true],
-    ["set_limits", :U64, [tx, ["steps", :U64, :Value], ["rows", :U64, :Value], ["rounds", :U64, :Value]], false]]
+    ["set_limits", :U64, [tx, ["steps", :U64, :Value], ["rows", :U64, :Value], ["rounds", :U64, :Value], ["bytes", :U64, :Value]], false]]
     module = native_kernel/declare(module, spec[0], spec[1], spec[2], spec[3])
   end
   for spec in native_rules/constructor_specs()
