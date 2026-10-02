@@ -2127,6 +2127,58 @@ static void rule_maintenance_catalogue(void) {
     assert(mica_kernel_end(&tx));
     destroy(&f);
 }
+// Catalogue transitions with independently specified rows. The head has no
+// recursive rules, so surviving support cannot hide behind a recursive cycle.
+static void rule_catalogue_visibility(void) {
+    struct fixture f;
+    init(&f);
+    struct mica_KernelTransaction tx, old, reader;
+    begin(&f, &tx);
+    for (unsigned id = 1; id <= 5; ++id)
+        assert(mica_kernel_declare(&tx, id, id, 2, SET, 0, 0) == OK);
+    assert(write_pair(&tx, 1, 1, 2, true) == OK);
+    assert(write_pair(&tx, 2, 1, 2, true) == OK);
+    assert(write_pair(&tx, 2, 3, 4, true) == OK);
+    assert(install_edge(&tx, 1, 3, 1, false) == OK);
+    assert(install_edge(&tx, 2, 3, 2, false) == OK);
+    assert(mica_kernel_commit(&tx) == OK && mica_kernel_end(&tx));
+    begin(&f, &tx);
+    assert(mica_kernel_rule_remove(&tx, 1) == OK);
+    assert(count(&tx, 3) == 2); // Both rows survive through the second definition.
+    assert(mica_kernel_commit(&tx) == OK && mica_kernel_end(&tx));
+    begin(&f, &old);
+    assert(count(&old, 3) == 2 && count(&old, 4) == 0);
+    begin(&f, &tx);
+    struct mica_KernelRuleDef *replacement = fixture_rule(&f.worker, 4,
+        rule_pair(&f.worker), rule_atom_pair(&f.worker, 1, false, NULL), NULL);
+    assert(mica_kernel_rule_update(&tx, 2, replacement, true) == OK);
+    assert(count(&tx, 3) == 0 && count(&tx, 4) == 1);
+    assert(count(&old, 3) == 2 && count(&old, 4) == 0);
+    assert(mica_kernel_commit(&tx) == OK && mica_kernel_end(&tx));
+    assert(mica_memory_safepoint(&f.worker, true));
+    assert(count(&old, 3) == 2 && count(&old, 4) == 0);
+    begin(&f, &reader);
+    assert(count(&reader, 3) == 0 && count(&reader, 4) == 1);
+    assert(mica_kernel_end(&reader));
+    assert(mica_kernel_commit(&old) == CONFLICT && mica_kernel_end(&old));
+    // Read an empty head without naming a rule. A newly installed producer
+    // must invalidate that observation through the head's generation.
+    begin(&f, &old);
+    assert(count(&old, 5) == 0);
+    begin(&f, &tx);
+    assert(install_edge(&tx, 99, 5, 4, false) == OK);
+    assert(mica_kernel_commit(&tx) == OK && mica_kernel_end(&tx));
+    assert(count(&old, 5) == 0);
+    assert(mica_kernel_commit(&old) == CONFLICT);
+    assert(mica_kernel_work(&old)->f_conflict_relation == 5 && mica_kernel_end(&old));
+    begin(&f, &reader);
+    mica_type_Value rows[2];
+    struct mica_KernelScanResult found = scan(&reader, 5, 0, 0, 0, rows, 2);
+    assert(found.f_status == OK && found.f_count == 1);
+    assert(cell(rows[0], 0) == 1 && cell(rows[0], 1) == 2);
+    assert(mica_kernel_end(&reader));
+    destroy(&f);
+}
 static void rule_maintenance_conflicts(void) {
     struct fixture f;
     init(&f);
@@ -3432,6 +3484,7 @@ int main(int argc, char **argv) {
     rule_evaluation_values();
     rule_maintenance();
     rule_maintenance_catalogue();
+    rule_catalogue_visibility();
     rule_maintenance_conflicts();
     rule_execution_controls();
     preparation_controls();

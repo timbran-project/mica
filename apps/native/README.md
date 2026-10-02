@@ -520,6 +520,23 @@ Each run reports its seed, step count, and canonical-row check count for both co
 Rust compares shared derivation semantics only. Transactional catalogue changes and export policy use the native fixture's independent expectations.
 The integration test requires identical generated C from both bootstrap execution tiers.
 
+The rule acceptance cases are exercised by these fixture groups in `kernel/tests.c`:
+
+| Contract cases | Executable evidence |
+| --- | --- |
+| 1–6, 10, 16: recursion, support, overlap, deletion, negation, draft reads | `rule_evaluation`, `rule_maintenance`, `rule_maintenance_catalogue`; independent finite-domain oracle and Rust row comparison |
+| 7–8, 17: transactional installation, replacement, surviving nonrecursive support | `source_rules`, `rule_catalogue`, `rule_catalogue_visibility` |
+| 9, 18: concurrent catalogue changes and newly installed producers | `rule_dependency_planning`, `rule_conflicts`, `rule_catalogue_visibility` |
+| 11: atomic bulk loading | `measurement_updates` in `kernel/measurements.c`, including retained readers and derivation-count assertions |
+| 12, 19: cancellation and distinct limit/conflict outcomes | `fixpoint_cancellation`, `query_mid_join_cancellation`, `preparation_cancellation`, `publication_cancellation`, `rule_execution_controls` |
+| 13: small retractions over established closures | `measurement_updates`, with full-result comparison and unaffected-tree sharing assertions |
+| 14, 20: head export, complete-world negation, atomic revocation | `transactional_authority`, `derived_authority`, `inactive_authority` |
+| 15: body schema and existence validation | `rule_definition_validation`, `source_rules` |
+
+`rule_collection`, `preparation_collection`, and `retained_snapshot_reclamation` exercise managed roots and historical storage.
+`measurement_retention` measures cancelled, superseded, and historical graphs before and after collection.
+The numbered rule cases do not include scheduler fairness, authority-relative views, or provenance-based deletion; those remain outside this implementation.
+
 Rebuild the fixture without sanitizers before measuring:
 
 ```sh
