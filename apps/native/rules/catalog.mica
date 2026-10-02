@@ -34,6 +34,17 @@ verb native_rules/dependencies_body(module: map) -> map
       let failed: map = native_kernel/store_field(conflict, work, "conflict_relation", id)
       return native_rules/error(failed, "conflict")
     end))
+    checked = native_gen/when(checked, native_rules/read(checked, dependency, "head_read"), fn(observed)
+      let base: map = native_rules/read(observed, work, "base")
+      let before: map = native_gen/call(observed, "kernel_rule_stored", [native_rules/read(observed, base, "evaluation"), id])
+      let current_tree: map = native_gen/call(observed, "kernel_rule_stored", [native_rules/read(observed, current, "evaluation"), id])
+      let result: map = native_gen/unless(observed, native_gen/equal(before, current_tree), fn(conflict)
+        let failed: map = native_kernel/store_field(conflict, work, "conflict_relation", id)
+        let result: map = native_rules/error(failed, "conflict")
+        return result
+      end)
+      return result
+    end)
     let [relation: map, found: map] = native_gen/bind(checked, "relation", native_gen/call(checked, "kernel_rule_schema_index_lookup", [schemas, id]))
     let [schema: map, ready: map] = native_gen/bind(found, "schema", native_rules/ref(found, "zero"))
     ready = native_gen/unless(ready, native_kernel/absent(relation), fn(present) => native_gen/assign(present, schema, native_rules/read(present, relation, "schema_revision")))

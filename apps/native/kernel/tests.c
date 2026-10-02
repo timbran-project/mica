@@ -1730,7 +1730,7 @@ static void oracle_check(struct mica_MemoryWorker *worker, struct mica_MemoryRoo
         struct mica_KernelRuleEvaluation *evaluation = (struct mica_KernelRuleEvaluation *)root->f_pointer;
         struct mica_KernelRuleRows *captured = mica_kernel_rule_rows_index_lookup(evaluation->f_rows, id);
         // Completed results must not retain per-round scratch indexes.
-        assert(!evaluation->f_executables && captured && !captured->f_delta && !captured->f_pending);
+        assert(!evaluation->f_executables && captured && !captured->f_delta && !captured->f_pending && !captured->f_previous && !captured->f_added);
         for (unsigned mode = 0; mode < 2; ++mode) {
             struct mica_KernelQueryResult result = mica_kernel_rule_rows(worker, (struct mica_KernelRuleEvaluation *)root->f_pointer, id, mode != 0, UINT64_MAX);
             assert(result.f_status == OK && result.f_arity == 2);
@@ -1833,6 +1833,7 @@ static void rule_evaluation(void) {
         assert(evaluated.f_status == LIMIT || evaluated.f_status == OK);
         if (evaluated.f_status == LIMIT) assert(!evaluated.f_evaluation);
         assert(f.worker.f_roots == parent && !mica_kernel_work(&tx)->f_done);
+        assert(mica_kernel_rule_set_limit(&tx, UINT64_MAX) == OK);
         assert(count(&tx, 1) == 1);
     }
     assert(mica_kernel_end(&tx));
@@ -1887,8 +1888,9 @@ static void rule_evaluation_capture(void) {
     struct mica_MemoryRoot *parent = f.worker.f_roots;
     struct mica_KernelRuleEvaluationResult result = mica_kernel_rule_evaluate(&tx);
     assert(result.f_status == LIMIT && !result.f_evaluation && f.worker.f_roots == parent);
-    assert(count(&tx, 255) == 1 && count(&tx, 256) == 0);
     assert(mica_kernel_rule_set_limit(&tx, 65536) == OK);
+    assert(count(&tx, 255) == 1 && count(&tx, 256) == 1);
+    assert(!mica_kernel_index(mica_kernel_view(&tx, 256), 0));
     result = mica_kernel_rule_evaluate(&tx);
     assert(result.f_status == OK);
     retained.f_pointer = (uint8_t *)result.f_evaluation;
@@ -1982,6 +1984,163 @@ static void rule_evaluation_values(void) {
     destroy(&f);
 }
 
+// Compare maintained draft and committed rows against the independent oracle.
+static void maintained_oracle_check(struct mica_KernelTransaction *tx, const uint64_t *stored) {
+    assert(mica_kernel_rule_refresh(tx) == OK);
+    struct mica_MemoryRoot root = {.f_pointer = (uint8_t *)mica_kernel_work(tx)->f_evaluation};
+    assert(mica_memory_root_push(tx->f_worker, &root));
+    oracle_check(tx->f_worker, &root, stored);
+    uint64_t all[RULE_RELATIONS], derived[RULE_RELATIONS];
+    oracle_evaluate(stored, all, derived);
+    for (unsigned id = 1; id < RULE_RELATIONS; ++id) {
+        unsigned expected = (unsigned)__builtin_popcountll(all[id]);
+        assert(count(tx, id) == expected);
+        struct mica_KernelQuery *query = mica_kernel_query_scan(tx->f_worker, id, tuple(tx->f_worker, 0, 0), 0);
+        assert(query && query_count(tx, query, 2) == expected);
+    }
+    assert(mica_memory_root_pop(tx->f_worker, &root));
+}
+static void rule_maintenance(void) {
+    struct fixture f;
+    init(&f);
+    struct mica_KernelTransaction tx;
+    begin(&f, &tx);
+    oracle_install(&tx);
+    assert(mica_kernel_commit(&tx) == OK && mica_kernel_end(&tx));
+    uint64_t stored[RULE_RELATIONS] = {0};
+    uint64_t random = 7919;
+    for (unsigned sample = 0; sample < 32; ++sample) {
+        begin(&f, &tx);
+        for (unsigned edit = 0; edit < 3; ++edit) {
+            random ^= random << 13; random ^= random >> 7; random ^= random << 17;
+            unsigned id = (unsigned[]){1, 2, 4}[edit];
+            unsigned x = random % RULE_DOMAIN, y = random / RULE_DOMAIN % RULE_DOMAIN;
+            uint64_t bit = oracle_bit(x, y);
+            bool asserted = !(stored[id] & bit);
+            assert(write_pair(&tx, id, x, y, asserted) == OK);
+            stored[id] ^= bit;
+            maintained_oracle_check(&tx, stored);
+        }
+        assert(mica_kernel_commit(&tx) == OK && mica_kernel_end(&tx));
+        begin(&f, &tx);
+        maintained_oracle_check(&tx, stored);
+        assert(mica_kernel_end(&tx));
+    }
+    destroy(&f);
+}
+static void rule_maintenance_catalogue(void) {
+    struct fixture f;
+    init(&f);
+    struct mica_KernelTransaction tx;
+    begin(&f, &tx);
+    for (unsigned id = 1; id <= 7; ++id)
+        assert(mica_kernel_declare(&tx, id, id, 2, SET, 0, 0) == OK);
+    assert(install_edge(&tx, 1, 2, 1, false) == OK);
+    assert(install_edge(&tx, 2, 2, 3, false) == OK);
+    assert(install_edge(&tx, 3, 3, 2, false) == OK);
+    struct mica_KernelRuleAtom *atoms = rule_atom_pair(&f.worker, 2, false, rule_atom_pair(&f.worker, 4, true, NULL));
+    assert(mica_kernel_rule_add(&tx, 4, fixture_rule(&f.worker, 5, rule_pair(&f.worker), atoms, NULL), true) == OK);
+    assert(install_edge(&tx, 6, 7, 6, false) == OK); // Independent component.
+    assert(write_pair(&tx, 1, 10, 20, true) == OK);
+    assert(write_pair(&tx, 6, 30, 40, true) == OK);
+    assert(count(&tx, 5) == 1 && count(&tx, 7) == 1);
+    assert(mica_kernel_commit(&tx) == OK && mica_kernel_end(&tx));
+    begin(&f, &tx);
+    assert(write_pair(&tx, 1, 11, 21, true) == OK);
+    assert(count(&tx, 5) == 2);
+    for (unsigned kind = 0; kind < 3; ++kind) {
+        mica_type_Value positions = query_columns(&f.worker, (int64_t[]){0}, 1);
+        struct mica_KernelQuery *left = query_scan(&f, 2), *right = query_scan(&f, 5);
+        struct mica_KernelQuery *query = kind == 0 ? mica_kernel_query_join(&f.worker, left, right, positions, positions) :
+            kind == 1 ? mica_kernel_query_semi(&f.worker, left, right, positions, positions) :
+            mica_kernel_query_anti(&f.worker, left, right, positions, positions);
+        assert(query_count(&tx, query, kind == 0 ? 4 : 2) == (kind == 2 ? 0 : 2));
+    }
+    struct mica_KernelRuleEvaluation *evaluation = mica_kernel_work(&tx)->f_evaluation;
+    assert(evaluation->f_extended > 0 && evaluation->f_reused >= 2);
+    struct mica_KernelRuleRows *base = mica_kernel_rule_rows_index_lookup(mica_kernel_work(&tx)->f_base->f_evaluation->f_rows, 7);
+    struct mica_KernelRuleRows *current = mica_kernel_rule_rows_index_lookup(evaluation->f_rows, 7);
+    assert(base->f_all == current->f_all && base->f_derived == current->f_derived);
+    // Remove support from a mutually recursive component, including old edges.
+    assert(mica_kernel_rule_remove(&tx, 1) == OK);
+    assert(count(&tx, 2) == 0 && count(&tx, 3) == 0 && count(&tx, 5) == 0);
+    assert(install_edge(&tx, 1, 2, 1, false) == OK);
+    assert(install_edge(&tx, 5, 2, 1, false) == OK);
+    assert(count(&tx, 2) == 2);
+    assert(mica_kernel_rule_remove(&tx, 1) == OK);
+    assert(count(&tx, 2) == 2); // Surviving rule still supports both rows.
+    struct mica_KernelRuleDef *definition = fixture_rule(&f.worker, 2, rule_pair(&f.worker), rule_atom_pair(&f.worker, 1, false, NULL), NULL);
+    assert(mica_kernel_rule_update(&tx, 5, definition, false) == OK);
+    assert(count(&tx, 2) == 0 && count(&tx, 3) == 0);
+    assert(install_edge(&tx, 1, 2, 1, false) == OK);
+    definition = fixture_rule(&f.worker, 4, rule_pair(&f.worker), rule_atom_pair(&f.worker, 1, false, NULL), NULL);
+    assert(mica_kernel_rule_update(&tx, 5, definition, true) == OK);
+    assert(count(&tx, 5) == 0); // A new rule can invalidate negated consumers.
+    assert(mica_kernel_rule_remove(&tx, 5) == OK);
+    assert(count(&tx, 4) == 0 && count(&tx, 5) == 2);
+    assert(mica_kernel_work(&tx)->f_evaluation->f_cleared >= 2);
+    assert(mica_kernel_end(&tx));
+    begin(&f, &tx);
+    assert(count(&tx, 2) == 1 && count(&tx, 5) == 1); // Rollback kept the published closure.
+    assert(mica_kernel_end(&tx));
+    destroy(&f);
+}
+static void rule_maintenance_conflicts(void) {
+    struct fixture f;
+    init(&f);
+    struct mica_KernelTransaction tx, reader, writer;
+    begin(&f, &tx);
+    for (unsigned id = 1; id <= 3; ++id)
+        assert(mica_kernel_declare(&tx, id, id, 2, SET, 0, 0) == OK);
+    assert(install_edge(&tx, 1, 2, 1, false) == OK);
+    assert(mica_kernel_commit(&tx) == OK && mica_kernel_end(&tx));
+    begin(&f, &reader);
+    assert(count(&reader, 2) == 0);
+    begin(&f, &writer);
+    assert(write_pair(&writer, 1, 1, 2, true) == OK);
+    assert(mica_kernel_commit(&writer) == OK && mica_kernel_end(&writer));
+    assert(count(&reader, 2) == 0); // Existing readers retain their snapshot.
+    assert(mica_kernel_commit(&reader) == CONFLICT);
+    assert(mica_kernel_end(&reader));
+    // Explicit closure results also consume fact inputs, including unruled ones.
+    begin(&f, &reader);
+    assert(mica_kernel_rule_evaluate(&reader).f_status == OK);
+    begin(&f, &writer);
+    assert(write_pair(&writer, 3, 9, 10, true) == OK);
+    assert(mica_kernel_commit(&writer) == OK && mica_kernel_end(&writer));
+    assert(mica_kernel_commit(&reader) == CONFLICT && mica_kernel_end(&reader));
+    begin(&f, &writer);
+    assert(write_pair(&writer, 3, 9, 10, false) == OK);
+    assert(mica_kernel_commit(&writer) == OK && mica_kernel_end(&writer));
+    begin(&f, &reader);
+    assert(count(&reader, 2) == 1);
+    assert(write_pair(&reader, 3, 3, 4, true) == OK);
+    begin(&f, &writer);
+    assert(write_pair(&writer, 3, 5, 6, true) == OK);
+    assert(mica_kernel_commit(&writer) == OK && mica_kernel_end(&writer));
+    assert(mica_kernel_commit(&reader) == OK && mica_kernel_end(&reader));
+    begin(&f, &tx);
+    assert(count(&tx, 2) == 1 && count(&tx, 3) == 2);
+    assert(write_pair(&tx, 1, 7, 8, true) == OK);
+    assert(mica_kernel_rule_set_limit(&tx, 0) == OK);
+    struct mica_KernelRuleEvaluation *complete = mica_kernel_work(&tx)->f_evaluation;
+    mica_type_Value buffer[4];
+    struct mica_MemoryRoot *parent = f.worker.f_roots;
+    assert(scan(&tx, 2, 0, 0, 0, buffer, 4).f_status == LIMIT);
+    assert(f.worker.f_roots == parent && mica_kernel_work(&tx)->f_evaluation == complete);
+    assert(mica_kernel_work(&tx)->f_dirty);
+    assert(mica_kernel_rule_set_limit(&tx, UINT64_MAX) == OK);
+    assert(count(&tx, 2) == 2);
+    assert(mica_kernel_rule_set_limit(&tx, 0) == OK);
+    assert(mica_kernel_commit(&tx) == LIMIT);
+    assert(!mica_kernel_work(&tx)->f_done && !mica_kernel_work(&tx)->f_candidate);
+    assert(mica_kernel_end(&tx));
+    begin(&f, &tx);
+    assert(count(&tx, 1) == 1 && count(&tx, 2) == 1);
+    assert(mica_kernel_end(&tx));
+    destroy(&f);
+}
+
 int main(int argc, char **argv) {
     if (argc == 2 && !strcmp(argv[1], "trace")) return trace();
     if (argc == 5 && !strcmp(argv[1], "bench")) return benchmark(argv[2], (unsigned)strtoul(argv[3], NULL, 10), (unsigned)strtoul(argv[4], NULL, 10));
@@ -1993,6 +2152,9 @@ int main(int argc, char **argv) {
     rule_evaluation();
     rule_evaluation_capture();
     rule_evaluation_values();
+    rule_maintenance();
+    rule_maintenance_catalogue();
+    rule_maintenance_conflicts();
     rule_conflicts();
     rule_allocation_failures();
     rule_prepared_publication();

@@ -2029,8 +2029,8 @@ fn native_relation_kernel_executes_on_both_mica_tiers() {
     let mut previous = None;
     for interpreter_only in [true, false] {
         let mut runner = runner(interpreter_only).with_task_limits(TaskLimits {
-            // Includes definition validation and SCC/dependency-plan generation.
-            instruction_budget: 3_000_000_000,
+            // Includes transactional maintenance, dependency planning, and C emission.
+            instruction_budget: 6_000_000_000,
             max_call_depth: 256,
             ..TaskLimits::default()
         });
@@ -2061,6 +2061,7 @@ fn native_relation_kernel_executes_on_both_mica_tiers() {
             include_str!("../../../apps/native/rules/lower.mica"),
             include_str!("../../../apps/native/rules/bindings.mica"),
             include_str!("../../../apps/native/rules/evaluate.mica"),
+            include_str!("../../../apps/native/rules/maintain.mica"),
         ] {
             runner.run_filein(source).unwrap_or_else(|error| {
                 panic!("{}", runner.render_source_task_error(&error));

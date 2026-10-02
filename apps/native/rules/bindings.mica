@@ -52,7 +52,8 @@ verb native_rules/bind_atom(builder: map, atom: map, source: map, tree: map, bin
   end)
   let [matched: map, with_matched: map] = native_gen/bind(ready, "matched", native_rules/ref(ready, "false"))
   ready = native_rules/probe_tree(with_matched, tree, pattern, prefix, fn(input_step, row)
-    let step: map = input_step
+    let evaluation: map = native_rules/ref(input_step, "evaluation")
+    let step: map = native_kernel/store_field(input_step, evaluation, "probes", native_gen/add(native_rules/read(input_step, evaluation, "probes"), native_rules/ref(input_step, "one")))
     let [result: map, checked: map] = native_gen/bind(step, "match", native_gen/call(step, "kernel_rule_match", [native_roots/worker(step), native_rules/read(step, atom, "terms"), binding, row, native_rules/ref(step, "budget")]))
     checked = native_gen/unless(checked, native_kernel/absent(native_gen/field(checked, result, "status")), fn(failed) => native_rules/fail(failed, native_gen/field(failed, result, "status")))
     let generated_result: map = native_gen/when(checked, native_gen/field(checked, result, "matched"), fn(found)
@@ -72,7 +73,11 @@ verb native_rules/apply_atom_body(module: map) -> map
   let atom: map = native_rules/ref(builder, "atom")
   let [source: map, ready: map] = native_roots/retain(builder, "source", native_rules/rows_lookup(builder, native_rules/ref(builder, "evaluation"), native_rules/read(builder, atom, "relation")))
   let [tree: map, with_tree: map] = native_roots/retain(ready, "source_tree", native_rules/read(ready, source, "all"))
-  builder = native_gen/when(with_tree, native_rules/ref(with_tree, "delta"), fn(delta) => native_roots/store(delta, tree, native_rules/read(delta, source, "delta")))
+  builder = native_gen/when(with_tree, native_rules/ref(with_tree, "delta"), fn(delta)
+    let ready: map = native_roots/store(delta, tree, native_rules/read(delta, source, "delta"))
+    let result: map = native_gen/when(ready, native_rules/ref(ready, "seed"), fn(seed) => native_roots/store(seed, tree, native_rules/read(seed, source, "added")))
+    return result
+  end)
   let [output: map, with_output: map] = native_roots/retain(builder, "output", native_gen/zero(native_kernel/pointer("Node")))
   builder = native_rules/tree_walk(with_output, native_rules/ref(with_output, "input"), fn(step, binding) => native_rules/bind_atom(step, atom, source, tree, binding, output))
   builder = native_rules/result(builder, native_rules/ref(builder, "kernel_ok"), {"tree" -> output})
@@ -111,7 +116,7 @@ verb native_rules/emit_body(module: map) -> map
     let generated_result: map = native_gen/assign(step, position, native_gen/add(position, native_rules/ref(step, "one")))
     return generated_result
   end)
-  builder = native_rules/offer_field(builder, head, "derived", row, false)
+  builder = native_rules/offer_field(builder, head, "derived", row, true)
   let present: map = native_gen/call(builder, "kernel_find", [native_rules/read(builder, head, "all"), row, native_rules/ref(builder, "zero"), native_rules/ref(builder, "false")])
   builder = native_gen/when(builder, native_kernel/absent(present), fn(fresh) => native_rules/offer_field(fresh, head, "pending", row, false))
   builder = native_kernel/status(builder, "kernel_ok")
@@ -128,7 +133,7 @@ verb native_rules/run_rule_body(module: map) -> map
     builder = native_rules/each(builder, "atom", native_rules/read(builder, executable, field), fn(input_step, atom)
       let step: map = input_step
       let [tree: map, evaluated: map] = native_rules/checked_call(step, "rule_apply_atom", [native_roots/worker(step), native_rules/ref(step, "evaluation"), atom, bindings,
-        native_gen/equal(atom, native_rules/ref(step, "delta_atom")), native_rules/ref(step, "budget")], "tree")
+        native_gen/equal(atom, native_rules/ref(step, "delta_atom")), native_rules/ref(step, "seed"), native_rules/ref(step, "budget")], "tree")
       let updated: map = native_roots/store(evaluated, bindings, tree)
       let generated_result: map = native_gen/when(updated, native_kernel/absent(bindings), fn(empty) => native_kernel/status(empty, "kernel_ok"))
       return generated_result

@@ -161,6 +161,7 @@ verb native_kernel/declare_body(module: map) -> map
       "after" -> relation, "writes" -> native_gen/zero(native_kernel/pointer("Node"))}))
   builder = native_gen/when(with_created, native_kernel/absent(created), fn(arm) => native_kernel/status(arm, "kernel_oom"))
   builder = native_kernel/store_field(builder, work, "changes", created)
+  builder = native_kernel/store_field(builder, work, "dirty", native_gen/ref(builder, "true"))
   builder = native_kernel/status(builder, "kernel_ok")
   let result: map = native_gen/finish(module, builder)
   return result
@@ -209,6 +210,7 @@ verb native_kernel/write_body(module: map) -> map
   builder = with_written
   builder = native_kernel/store_field(builder, change, "after", updated)
   builder = native_kernel/store_field(builder, change, "writes", native_gen/field(builder, written, "node"))
+  builder = native_kernel/store_field(builder, work, "dirty", native_gen/ref(builder, "true"))
   builder = native_kernel/status(builder, "kernel_ok")
   let result: map = native_gen/finish(module, builder)
   return result
@@ -319,7 +321,7 @@ verb native_kernel/transactions(input: map) -> map
     ["validate", :Bool, [["work", work, :Gc], ["writes", node, :Gc], ["before", relation, :Gc], ["current", relation, :Gc]]],
     ["apply_writes", relation, [worker, ["work", work, :Gc], ["writes", node, :Gc], ["before", relation, :Gc], ["current", relation, :Gc], ["asserted", :Bool, :Value]]],
     ["version", :U64, [tx]], ["deltas", delta, [tx]]]
-    context = native_kernel/declare(context, spec[0], spec[1], spec[2])
+    context = native_kernel/declare(context, spec[0], spec[1], spec[2], spec[0] == "scan")
   end
   context = native_kernel/define(context, "work", [
     native/let_statement("pointer", native_memory/pointer(:U8), native_memory/root(native_memory/pointer(:U8), native_kernel/transaction_root(), "pointer")),
@@ -336,9 +338,6 @@ verb native_kernel/transactions(input: map) -> map
     native/return_value(native/call_expression("kernel_relation", [native_kernel/read("Snapshot", native_kernel/read("Work", "work", "base"), "relations"), "id"]))])
   context = native_kernel/declare_body(context)
   context = native_kernel/write_body(context)
-  context = native_kernel/define(context, "scan", [
-    @native_kernel/require_transaction([native/return_record(["kernel_closed", "zero", "zero", "false"])]),
-    native/return_value(native/call_expression("kernel_relation_scan", [native_kernel/call(relation, "view", ["transaction", "id"]), "pattern", "mask", "after", "output", "capacity"]))])
   context = native_kernel/define(context, "version", [@load_work,
     native/when_statement(native_kernel/is_null("Work", "work"), [native/return_value("zero")]),
     native/let_statement("snapshot", snapshot, native_kernel/read("Work", "work", "candidate")),

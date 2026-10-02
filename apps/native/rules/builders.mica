@@ -10,6 +10,10 @@ verb native_rules/read(builder: map, object: map, name: string) -> map
   return result
 end
 verb native_rules/fail(builder: map, status: map) -> map
+  if builder[:result] == [:Record, "KernelScanResult"]
+    let result: map = native_roots/return_value(builder, native_gen/record(builder, builder[:result], {"status" -> status, "count" -> native_gen/zero(:U64), "visited" -> native_gen/zero(:U64), "more" -> native_gen/zero(:Bool)}))
+    return result
+  end
   if builder[:result] == [:Record, "KernelQueryResult"]
     let result: map = native_query/fail(builder, status)
     return result

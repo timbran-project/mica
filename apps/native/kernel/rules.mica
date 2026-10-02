@@ -19,7 +19,7 @@ verb native_kernel/rule_result(builder: map, status: map, rule: map, ?extra: map
 end
 
 verb native_kernel/rule_error(builder: map, status: string) -> map
-  if native/contains(native_rules/result_types(), builder[:result])
+  if native/contains(native_rules/result_types(), builder[:result]) || builder[:result] == [:Record, "KernelScanResult"]
     let result: map = native_rules/fail(builder, native_gen/ref(builder, status))
     return result
   end
@@ -154,6 +154,7 @@ verb native_kernel/rule_stage_body(module: map, operation: string) -> map
   // All allocation and validation completes before publishing the draft edit.
   builder = native_kernel/store_field(planned, work, "rule_index", candidate)
   builder = native_kernel/store_field(builder, work, "rule_plan", plan)
+  builder = native_kernel/store_field(builder, work, "dirty", native_gen/ref(builder, "true"))
   let [observation: map, reloaded: map] = native_gen/bind(builder, "observed", native_gen/call(builder, "kernel_observation_index_lookup", [native_kernel/load_field(builder, work, "rule_observations"), id]))
   builder = reloaded
   change = observation

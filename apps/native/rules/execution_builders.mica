@@ -9,9 +9,10 @@ verb native_rules/rows_lookup(builder: map, evaluation: map, id: map) -> map
 end
 // Capture immutable rows without retaining mutable transaction changes.
 verb native_rules/capture_relation(builder: map, evaluation: map, relation: map) -> map
-  let [rows: map, allocated: map] = native_rules/allocate(builder, "RuleRows", {"id" -> native_rules/read(builder, relation, "id"), "arity" -> native_rules/read(builder, relation, "arity"), "all" -> native_gen/call(builder, "kernel_index", [relation, native_rules/ref(builder, "zero")])})
+  let [rows: map, allocated: map] = native_rules/allocate(builder, "RuleRows", {"next" -> native_rules/read(builder, evaluation, "first"), "relation" -> relation, "id" -> native_rules/read(builder, relation, "id"), "arity" -> native_rules/read(builder, relation, "arity"), "stored" -> native_gen/call(builder, "kernel_index", [relation, native_rules/ref(builder, "zero")]), "all" -> native_gen/call(builder, "kernel_index", [relation, native_rules/ref(builder, "zero")])})
   let [index: map, indexed: map] = native_rules/index_put(allocated, "rule_rows_index", native_rules/read(allocated, evaluation, "rows"), rows)
-  let generated_result: map = native_kernel/store_field(indexed, evaluation, "rows", index)
+  let ready: map = native_kernel/store_field(indexed, evaluation, "rows", index)
+  let generated_result: map = native_kernel/store_field(ready, evaluation, "first", rows)
   return generated_result
 end
 verb native_rules/tree_walk(builder: map, tree: map, body) -> map

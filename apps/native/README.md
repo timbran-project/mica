@@ -112,9 +112,9 @@ The heap uses `kernel_heap_init`, which installs both kernel and value descripto
 | `kernel_declare(transaction, id, name, arity, policy, keys, indexes)` | Stage a relation declaration with caller-assigned identity and symbol IDs |
 | `kernel_write(transaction, id, tuple, asserted)` | Stage an assertion or retraction of a list-valued tuple |
 | `kernel_scan(transaction, id, pattern, mask, after, output, capacity)` | Read a bounded batch into a caller-owned array of value words |
-| `kernel_commit(transaction)` | Validate, publish, and retain net fact deltas on success |
+| `kernel_commit(transaction)` | Validate, publish, and retain net stored-fact deltas on success |
 | `kernel_version(transaction)` | Read the base version, or the published version after commit |
-| `kernel_deltas(transaction)` | Read committed additions and removals until the transaction ends |
+| `kernel_deltas(transaction)` | Read committed stored-fact additions and removals until the transaction ends |
 | `kernel_end(transaction)` | Release transaction roots and discard any uncommitted changes |
 | `kernel_release(kernel, worker)` | Remove the shared snapshot root under exclusive ownership of the kernel control |
 
@@ -146,18 +146,18 @@ Other workers can read and commit concurrently. Callers park workers before exte
 | 7 | Invalid schema, identity, mask, or output buffer |
 | 8 | Allocation or collection failure |
 | 9 | Closed transaction or invalid lifecycle operation |
-| 10 | Rule planning or dependency traversal work limit exceeded |
+| 10 | Rule planning, maintenance, or dependency traversal work limit exceeded |
 
 `kernel_work(transaction)` exposes the last commit status, conflicting relation and tuple, and conflicting rule identity.
-The current layer supports relation creation, transactional rule definitions, and dependency planning.
-Relation removal, transactional buffers, durable storage, automatic rule maintenance, computed relations, authority, and dispatch remain separate work.
+The current layer supports relation creation, transactional rule definitions, dependency planning, and automatic maintenance of derived rows.
+Relation removal, transactional buffers, durable storage, computed relations, authority, and dispatch remain separate work.
 
 ### Rule definitions and dependency plans
 
 `rules/` generates rule definitions, structural validation, and dependency planning.
 `kernel/rules.mica` stages and publishes definitions with ordinary fact changes.
-Automatic rule maintenance, source parsing, and authority checks remain separate work.
-Installing an active definition makes it available to explicit evaluation.
+Source parsing and authority checks remain separate work.
+Installing an active definition changes the derived view at the next read or commit.
 
 Definitions contain a head relation, head terms, body atoms, comparison guards, defining tenant, and source text.
 The tenant field records identity; it does not grant authority.
@@ -259,9 +259,48 @@ Result extraction has its own `limit` argument. Exhaustion returns status 10 wit
 Allocation failure returns status 8. Both failures preserve the draft and restore the caller's root chain.
 Limits count logical work; individual value comparisons and buffer copies are not constant-time operations.
 
-Access the evaluated closure through `kernel_rule_rows`; ordinary query scans still read stored facts.
-Automatic draft invalidation, affected-component maintenance, and atomic publication of derived rows remain the next layer.
+The explicit evaluator recomputes the full closure independently of the maintained cache.
+It remains a correctness reference for automatic maintenance.
 These trusted kernel APIs do not perform tenant authorization.
+
+### Transactional rule maintenance
+
+`kernel_scan` and query plans read the union of stored and derived rows.
+`kernel_read(transaction, relation)` returns this view as a managed `KernelRelationResult`.
+The internal `kernel_view` function exposes stored facts for writes and validation.
+Scans can allocate and reach collection safepoints.
+
+Successful declarations, fact writes, and rule edits invalidate the draft cache.
+The next read refreshes the complete closure before it returns rows.
+Repeated reads reuse the completed cache until another edit occurs.
+A bulk load can stage many writes before one read or commit triggers maintenance.
+
+Maintenance captures the current stored rows and compares them with the previous complete closure.
+Unchanged components share their immutable row indexes.
+Positive additions seed delta rounds from changed inputs.
+Retractions, changed definitions, and changed negative inputs clear affected components before recomputation.
+Invalidation includes the previous dependency graph, so removed edges and split recursive components cannot preserve unsupported rows.
+
+Commit preparation computes the candidate closure outside the publication lock.
+Facts, definitions, and derived rows publish through one snapshot root.
+`kernel_deltas` still reports stored-fact changes; it does not expose a derived-row change stream.
+Existing readers retain their original snapshot.
+An unrelated publication race rebuilds the candidate against the winner.
+A change to a consumed dependency returns a transaction conflict.
+Ordinary reads track transitive rule generations, schemas, and stored input indexes at relation granularity.
+Explicit full evaluation tracks every captured relation as an input.
+
+A failed refresh retains the previous complete cache and leaves the draft invalidated.
+A failed commit publishes nothing.
+Work exhaustion and allocation failure retain their distinct status codes.
+Commit retries share one work allowance.
+Cancellation and resumable scheduling remain separate work.
+
+Completed evaluations expose `recomputed`, `extended`, `reused`, `rounds`, `steps`, `probes`, and `cleared` counters.
+These counters describe one maintenance pass.
+Unchanged row indexes remain shared, but each pass still traverses relation metadata.
+Changed stored relations currently require row comparisons to find their net changes.
+Derived union views use the natural tuple index. Stored-only views retain their configured secondary indexes.
 
 ### Query execution
 

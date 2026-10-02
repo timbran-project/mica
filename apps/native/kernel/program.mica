@@ -28,7 +28,7 @@ verb native_kernel/schemas() -> list
     ["Index", [["next", native_kernel/pointer("Index")], ["mask", :U64], ["tree", node]]],
     ["Relation", [["next", relation], ["id", :U64], ["name", :U64], ["arity", :U64],
       ["policy", :U64], ["keys", :U64], ["schema_revision", :U64], ["indexes", native_kernel/pointer("Index")]]],
-    ["Snapshot", [["version", :U64], ["relations", relation], ["rules", native_kernel/pointer("RuleIndex")], ["schemas", native_kernel/pointer("RuleSchemaIndex")], ["rule_heads", native_kernel/pointer("RuleGenerationIndex")], ["rule_plan", native_kernel/pointer("RulePlan")]]],
+    ["Snapshot", [["evaluation", native_kernel/pointer("RuleEvaluation")], ["version", :U64], ["relations", relation], ["rules", native_kernel/pointer("RuleIndex")], ["schemas", native_kernel/pointer("RuleSchemaIndex")], ["rule_heads", native_kernel/pointer("RuleGenerationIndex")], ["rule_plan", native_kernel/pointer("RulePlan")]]],
     ["Rule", [["next", rule], ["id", :U64], ["head", :U64], ["arity", :U64], ["active", :Bool], ["revision", :U64], ["definition", native_kernel/pointer("RuleDef")]]],
     ["RuleIndex", [["left", native_kernel/pointer("RuleIndex")], ["right", native_kernel/pointer("RuleIndex")], ["entry", rule], ["height", :U64]]],
     ["RuleObservationIndex", [["left", native_kernel/pointer("RuleObservationIndex")], ["right", native_kernel/pointer("RuleObservationIndex")], ["entry", rule_change], ["height", :U64]]],
@@ -38,7 +38,7 @@ verb native_kernel/schemas() -> list
     ["Query", [["kind", :U64], ["relation", :U64], ["pattern", word], ["mask", :U64],
       ["left", native_kernel/pointer("Query")], ["right", native_kernel/pointer("Query")],
       ["positions", word], ["right_positions", word], ["input", word]]],
-    ["Work", [["base", native_kernel/pointer("Snapshot")], ["changes", native_kernel/pointer("Change")],
+    ["Work", [["evaluation", native_kernel/pointer("RuleEvaluation")], ["dirty", :Bool], ["base", native_kernel/pointer("Snapshot")], ["changes", native_kernel/pointer("Change")],
       ["rule_changes", rule_change], ["rule_observations", native_kernel/pointer("RuleObservationIndex")],
       ["rule_index", native_kernel/pointer("RuleIndex")], ["rules", rule], ["rules_cached", :Bool], ["rules_read", :Bool], ["rule_plan", native_kernel/pointer("RulePlan")],
       ["rule_dependencies", native_kernel/pointer("RuleDependency")], ["rule_dependency_index", native_kernel/pointer("RuleDependencyIndex")], ["rule_limit", :U64],
@@ -292,6 +292,7 @@ end
 verb native_kernel/program() -> map
   let context: map = native_value/definitions()
   context = native_kernel/types(context)
+  context = native_rules/maintenance_declarations(context)
   context = native_kernel/tracing(context)
   context = native_kernel/indexes(context)
   context = native_kernel/relations(context)
@@ -302,6 +303,7 @@ verb native_kernel/program() -> map
   context = native_kernel/lifecycle(context)
   context = native_query/program(context)
   context = native_rules/evaluation_program(context)
+  context = native_rules/maintenance_program(context)
   let state: map = context[:state]
   return state
 end

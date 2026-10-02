@@ -37,8 +37,8 @@ verb native_query/seek_body(module: map) -> map
 end
 
 verb native_query/scan_relation(builder: map, query: map) -> list
-  let [relation: map, ready: map] = native_gen/bind(builder, "relation", native_gen/call(builder, "kernel_view",
-    [native_roots/ref(builder, "transaction"), native_kernel/load_field(builder, query, "relation")]))
+  let [relation: map, ready: map] = native_rules/checked_call(builder, "read",
+    [native_roots/ref(builder, "transaction"), native_kernel/load_field(builder, query, "relation")], "relation")
   ready = native_query/check(ready, native_gen/negate(native_kernel/absent(relation)), "unknown")
   ready = native_kernel/check_tuple(ready, native_kernel/load_field(ready, query, "pattern"), relation,
     fn(failed) => native_query/error(failed, "arity"))

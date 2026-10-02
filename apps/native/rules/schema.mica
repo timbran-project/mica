@@ -15,9 +15,9 @@ verb native_rules/schemas() -> list
   let dependency: list = native_kernel/pointer("RuleDependency")
   return [
     ["RuleSlot", [["id", :U64], ["position", :U64]]],
-    ["RuleRows", [["id", :U64], ["arity", :U64], ["component", :U64], ["all", native_kernel/pointer("Node")], ["derived", native_kernel/pointer("Node")], ["delta", native_kernel/pointer("Node")], ["pending", native_kernel/pointer("Node")]]],
+    ["RuleRows", [["next", native_kernel/pointer("RuleRows")], ["relation", native_kernel/pointer("Relation")], ["previous", native_kernel/pointer("RuleRows")], ["stored", native_kernel/pointer("Node")], ["added", native_kernel/pointer("Node")], ["removed", :Bool], ["reset", :Bool], ["rules", native_kernel/pointer("RulePlanEntry")], ["view", native_kernel/pointer("Relation")], ["id", :U64], ["arity", :U64], ["component", :U64], ["all", native_kernel/pointer("Node")], ["derived", native_kernel/pointer("Node")], ["delta", native_kernel/pointer("Node")], ["pending", native_kernel/pointer("Node")]]],
     ["RuleExecutable", [["id", :U64], ["width", :U64], ["slots", native_kernel/pointer("RuleSlotIndex")], ["head", native_kernel/pointer("RuleRows")], ["terms", term], ["positive", atom], ["negative", atom], ["guards", guard]]],
-    ["RuleEvaluation", [["catalog", native_kernel/pointer("Relation")], ["rows", native_kernel/pointer("RuleRowsIndex")], ["executables", native_kernel/pointer("RuleExecutableIndex")], ["rounds", :U64]]],
+    ["RuleEvaluation", [["first", native_kernel/pointer("RuleRows")], ["plan", native_kernel/pointer("RulePlan")], ["recomputed", :U64], ["extended", :U64], ["reused", :U64], ["steps", :U64], ["probes", :U64], ["cleared", :U64], ["catalog", native_kernel/pointer("Relation")], ["rows", native_kernel/pointer("RuleRowsIndex")], ["executables", native_kernel/pointer("RuleExecutableIndex")], ["rounds", :U64]]],
     ["RuleSchema", [["id", :U64], ["arity", :U64], ["schema_revision", :U64]]],
     ["RuleTerm", [["next", term], ["kind", :U64], ["id", :U64], ["value", native_value/word()]]],
     ["RuleAtom", [["next", atom], ["relation", :U64], ["negative", :Bool], ["terms", term]]],
@@ -44,6 +44,7 @@ end
 
 verb native_rules/result_schemas() -> list
   let results: list = [
+    ["KernelRelationResult", [["status", :U64], ["relation", native_kernel/pointer("Relation")]]],
     ["KernelRuleEvaluationResult", [["status", :U64], ["evaluation", native_kernel/pointer("RuleEvaluation")]]],
     ["KernelRuleRowsResult", [["status", :U64], ["tree", native_kernel/pointer("Node")]]],
     ["KernelRuleMatchResult", [["status", :U64], ["matched", :Bool], ["binding", native_value/word()]]],
