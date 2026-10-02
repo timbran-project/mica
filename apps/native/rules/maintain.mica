@@ -14,7 +14,7 @@ verb native_rules/maintenance_declarations(input: map) -> map
   let evaluation: list = ["evaluation", native_kernel/pointer("RuleEvaluation"), :Gc]
   let plan: list = ["plan", native_kernel/pointer("RulePlan"), :Gc]
   let previous: list = ["previous", native_kernel/pointer("RuleEvaluation"), :Gc]
-  let budget: list = ["budget", native_memory/pointer(:U64), :Borrow]
+  let budget: list = ["budget", native_kernel/pointer("Budget"), :Borrow]
   let catalog: list = ["catalog", native_kernel/pointer("Relation"), :Gc]
   let changes: list = ["changes", native_kernel/pointer("Change"), :Gc]
   let tx: list = ["transaction", native_kernel/pointer("Transaction"), :Borrow]
@@ -256,7 +256,7 @@ verb native_rules/maintain_body(module: map) -> map
   let builder: map = native_rules/context(module, "rule_maintain")
   let plan: map = native_rules/ref(builder, "plan")
   let previous: map = native_rules/ref(builder, "previous")
-  let [allowance: map, started: map] = native_gen/bind(builder, "allowance", native_gen/load(native_rules/ref(builder, "budget")))
+  let [allowance: map, started: map] = native_gen/bind(builder, "allowance", native_rules/read(builder, native_rules/ref(builder, "budget"), "steps"))
   builder = started
   let [captured: map, with_capture: map] = native_rules/checked_call(builder, "rule_capture", [native_roots/worker(builder), native_rules/ref(builder, "catalog"), native_rules/ref(builder, "changes"), plan, native_rules/ref(builder, "budget")], "evaluation")
   let [evaluation: map, ready: map] = native_roots/retain(with_capture, "evaluation", captured)
@@ -264,7 +264,7 @@ verb native_rules/maintain_body(module: map) -> map
   builder = native_rules/status_call(builder, "rule_old_invalidations", [native_roots/worker(builder), evaluation, previous, native_rules/ref(builder, "budget")])
   builder = native_gen/unless(builder, native_kernel/absent(plan), fn(planned) => native_rules/each(planned, "component", native_rules/read(planned, plan, "components"), fn(step, component) => native_rules/status_call(step, "rule_maintain_component", [native_roots/worker(step), evaluation, component, native_rules/ref(step, "budget")])))
   builder = native_rules/status_call(builder, "rule_finish", [native_roots/worker(builder), evaluation, native_rules/ref(builder, "budget")])
-  builder = native_kernel/store_field(builder, evaluation, "steps", native_gen/subtract(allowance, native_gen/load(native_rules/ref(builder, "budget"))))
+  builder = native_kernel/store_field(builder, evaluation, "steps", native_gen/subtract(allowance, native_rules/read(builder, native_rules/ref(builder, "budget"), "steps")))
   builder = native_rules/result(builder, native_rules/ref(builder, "kernel_ok"), {"evaluation" -> evaluation})
   let result: map = native_gen/finish(module, builder)
   return result

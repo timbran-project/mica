@@ -70,10 +70,7 @@ end
 // Budget is shared by validation, graph construction, and SCC traversal. It
 // bounds malformed cyclic input as well as legitimate large definitions.
 verb native_rules/tick(builder: map) -> map
-  let budget: map = native_gen/location(native_rules/ref(builder, "budget"))
-  let remaining: map = native_gen/read(budget)
-  let ready: map = native_rules/check(builder, native_gen/negate(native_kernel/absent(remaining)), "limit")
-  ready = native_gen/write(ready, budget, native_gen/subtract(remaining, native_rules/ref(ready, "one")))
+  let ready: map = native_execution/charge(builder, native_rules/ref(builder, "one"), native_rules/ref(builder, "zero"), native_rules/ref(builder, "zero"), fn(failed, status) => native_rules/fail(failed, status))
   let result: map = native_roots/poll(ready)
   return result
 end

@@ -6,6 +6,17 @@
 verb native_memory/platform() -> string
   return string_join([
     "#include <stdlib.h>", "#include <pthread.h>",
+    "#include <stdatomic.h>",
+    "uint8_t *mica_foreign_memory_atomic_create(uint64_t value) {",
+    "    _Atomic uint64_t *cell = malloc(sizeof(*cell));",
+    "    if (cell) atomic_init(cell, value);",
+    "    return (uint8_t *)cell;",
+    "}",
+    "void mica_foreign_memory_atomic_destroy(uint8_t *cell) { free(cell); }",
+    "uint64_t mica_foreign_memory_atomic_load(uint8_t *cell) { return atomic_load((_Atomic uint64_t *)cell); }",
+    "bool mica_foreign_memory_atomic_compare_exchange(uint8_t *cell, uint64_t expected, uint64_t desired) {",
+    "    return atomic_compare_exchange_strong((_Atomic uint64_t *)cell, &expected, desired);",
+    "}",
     "#ifndef MICA_MEMORY_TEST_ALLOCATOR",
     "uint8_t *mica_foreign_memory_platform_allocate(uint64_t size) { return malloc(size); }",
     "void mica_foreign_memory_platform_release(uint8_t *pointer) { free(pointer); }",

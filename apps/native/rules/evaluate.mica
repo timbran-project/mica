@@ -13,7 +13,7 @@ verb native_rules/evaluation_declarations(input: map) -> map
   end
   module[:constants] = merged
   let worker: list = ["worker", native_memory/record_pointer("MemoryWorker"), :Borrow]
-  let budget: list = ["budget", native_memory/pointer(:U64), :Borrow]
+  let budget: list = ["budget", native_kernel/pointer("Budget"), :Borrow]
   let executable: list = ["executable", native_kernel/pointer("RuleExecutable"), :Gc]
   let evaluation: list = ["evaluation", native_kernel/pointer("RuleEvaluation"), :Gc]
   let component: list = ["component", native_kernel/pointer("RuleComponent"), :Gc]
@@ -37,14 +37,12 @@ verb native_rules/evaluation_declarations(input: map) -> map
   return module
 end
 verb native_rules/local_budget(builder: map, allowance: map) -> map
-  let [remaining: map, ready: map] = native_gen/bind(builder, "remaining", allowance)
-  let bindings: map = ready[:scope_bindings]
-  bindings["budget"] = native_gen/address(remaining)
-  ready[:scope_bindings] = bindings
-  return ready
+  let result: map = native_execution/local_budget(builder, allowance)
+  return result
 end
 verb native_rules/round_body(module: map) -> map
   let builder: map = native_rules/context(module, "rule_round")
+  builder = native_execution/charge(builder, native_rules/ref(builder, "zero"), native_rules/ref(builder, "zero"), native_rules/ref(builder, "one"), fn(failed, status) => native_rules/fail(failed, status))
   let evaluation: map = native_rules/ref(builder, "evaluation")
   let component: map = native_rules/ref(builder, "component")
   builder = native_rules/each(builder, "member", native_rules/read(builder, component, "members"), fn(input_step, member)

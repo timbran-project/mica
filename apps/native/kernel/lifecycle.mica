@@ -53,7 +53,13 @@ verb native_kernel/commit_collision(builder: map, work: map, id: map) -> map
 end
 
 verb native_kernel/commit_unchanged(builder: map, kernel: map, work: map, current: map) -> map
-  let ready: map = native_kernel/store_field(builder, work, "candidate", current)
+  let signal: map = native_kernel/load_field(builder, native_gen/ref(builder, "transaction"), "signal")
+  let claimed: map = native_gen/call(builder, "memory_atomic_compare_exchange", [signal, native_gen/ref(builder, "zero"), native_gen/ref(builder, "two")])
+  let checked: map = native_gen/unless(builder, claimed, fn(cancelled)
+    let failed: map = native_kernel/store_field(cancelled, work, "status", native_gen/ref(cancelled, "kernel_cancelled"))
+    return native_kernel/status(native_kernel/unlock_kernel(failed, kernel), "kernel_cancelled")
+  end)
+  let ready: map = native_kernel/store_field(checked, work, "candidate", current)
   ready = native_kernel/store_field(ready, work, "done", native_gen/ref(ready, "true"))
   ready = native_kernel/unlock_kernel(ready, kernel)
   let result: map = native_kernel/status(ready, "kernel_ok")
@@ -198,14 +204,20 @@ verb native_kernel/publish_commit_candidate(builder: map, transaction: map, work
   let [published: map, with_published: map] = native_gen/bind(builder, "published", native_gen/call(builder, "kernel_try_publish", [transaction]))
   let ready: map = native_kernel/reload_work(with_published, transaction, work)
   ready = native_gen/when(ready, published, fn(winner) => native_kernel/status(winner, "kernel_ok"))
-  let result: map = native_kernel/discard_candidate(ready, work)
+  let cleared: map = native_kernel/discard_candidate(ready, work)
+  let result: map = native_gen/when(cleared, native_gen/equal(native_kernel/load_field(cleared, work, "status"), native_gen/ref(cleared, "kernel_cancelled")), fn(cancelled) => native_kernel/status(cancelled, "kernel_cancelled"))
   return result
 end
 
 // These builders emit one attempt. A lost publication falls through to the next
 // attempt; success, conflict, and allocation failure return from the generated commit.
 verb native_kernel/commit_attempt(builder: map, transaction: map, worker: map, kernel: map, work: map, budget: map) -> map
-  let ready: map = native_kernel/poll_commit(builder, transaction, worker, work)
+  let [status: map, checked: map] = native_gen/bind(builder, "execution_status", native_gen/call(builder, "kernel_budget_check", [budget, native_gen/ref(builder, "zero"), native_gen/ref(builder, "zero"), native_gen/ref(builder, "zero")]))
+  let validated: map = native_gen/unless(checked, native_kernel/absent(status), fn(failed)
+    let recorded: map = native_kernel/store_field(failed, work, "status", status)
+    return native_gen/return_value(recorded, status)
+  end)
+  let ready: map = native_kernel/poll_commit(validated, transaction, worker, work)
   ready = native_kernel/capture_commit_snapshot(ready, transaction, worker, kernel, work)
   ready = native_kernel/prepare_commit_candidate(ready, transaction, worker, work, budget)
   let result: map = native_kernel/publish_commit_candidate(ready, transaction, work)
@@ -228,7 +240,13 @@ verb native_kernel/try_publish_body(module: map) -> map
   end)
   let [heap: map, with_heap: map] = native_gen/bind(builder, "heap", native_kernel/load_field(builder, kernel, "heap"))
   let [mutex: map, with_mutex: map] = native_gen/bind(with_heap, "heap_mutex", native_kernel/load_field(with_heap, heap, "mutex"))
-  builder = native_gen/do_call(with_mutex, "memory_lock", [mutex])
+  let signal: map = native_kernel/load_field(with_mutex, transaction, "signal")
+  let claimed: map = native_gen/call(with_mutex, "memory_atomic_compare_exchange", [signal, native_gen/ref(with_mutex, "zero"), native_gen/ref(with_mutex, "two")])
+  builder = native_gen/unless(with_mutex, claimed, fn(cancelled)
+    let failed: map = native_kernel/store_field(cancelled, work, "status", native_gen/ref(cancelled, "kernel_cancelled"))
+    return native_gen/return_value(native_kernel/unlock_kernel(failed, kernel), native_gen/ref(failed, "false"))
+  end)
+  builder = native_gen/do_call(builder, "memory_lock", [mutex])
   builder = native_gen/root_write(builder, native_kernel/snapshot_slot(builder, kernel),
     native_gen/cast(native_memory/pointer(:U8), native_kernel/load_field(builder, work, "candidate")))
   builder = native_gen/do_call(builder, "memory_unlock", [mutex])
@@ -246,9 +264,9 @@ verb native_kernel/commit_body(module: map) -> map
   let [worker: map, with_worker: map] = native_gen/bind(opened, "worker", native_kernel/load_field(opened, transaction, "worker"))
   let [kernel: map, with_kernel: map] = native_gen/bind(with_worker, "kernel", native_kernel/load_field(with_worker, transaction, "kernel"))
   // Lost publication attempts share the same allowance within this commit.
-  let [remaining: map, with_budget: map] = native_gen/bind(with_kernel, "remaining", native_kernel/load_field(with_kernel, work, "rule_limit"))
+  let with_budget: map = native_execution/local_budget(with_kernel, native_kernel/load_field(with_kernel, work, "rule_limit"))
   builder = native_gen/for_range(with_budget, "attempt", native_gen/ref(with_budget, "zero"), native_gen/ref(with_budget, "kernel_64"),
-    fn(body, attempt) => native_kernel/commit_attempt(body, transaction, worker, kernel, work, native_gen/address(remaining)))
+    fn(body, attempt) => native_kernel/commit_attempt(body, transaction, worker, kernel, work, native_roots/ref(body, "budget")))
   builder = native_kernel/store_field(builder, work, "status", native_gen/ref(builder, "kernel_conflict"))
   builder = native_kernel/status(builder, "kernel_conflict")
   let result: map = native_gen/finish(module, builder)
@@ -277,7 +295,7 @@ verb native_kernel/lifecycle(input: map) -> map
     ["begin", :U64, [["kernel", kernel, :Borrow], ["worker", worker, :Borrow], ["transaction", tx, :Borrow]], true],
     ["end", :Bool, [["transaction", tx, :Borrow]], false],
     ["commit", :U64, [["transaction", tx, :Borrow]], true],
-    ["prepare", :U64, [["transaction", tx, :Borrow], ["budget", native_memory/pointer(:U64), :Borrow]], true],
+    ["prepare", :U64, [["transaction", tx, :Borrow], ["budget", native_kernel/pointer("Budget"), :Borrow]], true],
     ["try_publish", :Bool, [["transaction", tx, :Borrow]], true],
     ["empty_indexes", index, [["worker", worker, :Borrow], ["index", index, :Gc]], false]]
     context = native_kernel/declare(context, spec[0], spec[1], spec[2], spec[3])
@@ -320,8 +338,11 @@ verb native_kernel/lifecycle(input: map) -> map
     native/let_statement("current", bytes, native_memory/root(bytes, native_kernel/shared_root(), "pointer")),
     native/let_statement("base", snapshot, native/unary_expression(:PointerCast, "current")),
     @unlock,
-    native/let_statement("work", work, native_kernel/construct("Work", {"evaluation" -> native_kernel/read("Snapshot", "base", "evaluation"), "dirty" -> "false", "base" -> "base", "checked" -> "base", "changes" -> native_kernel/null("Change"), "rule_changes" -> native_kernel/null("RuleChange"), "rule_index" -> native_kernel/read("Snapshot", "base", "rules"), "rule_observations" -> native_kernel/null("RuleObservationIndex"), "rules" -> native_kernel/null("Rule"), "rules_cached" -> "false", "rules_read" -> "false", "rule_plan" -> native_kernel/read("Snapshot", "base", "rule_plan"), "rule_dependencies" -> native_kernel/null("RuleDependency"), "rule_dependency_index" -> native_kernel/null("RuleDependencyIndex"), "rule_limit" -> "rule_default_limit", "candidate" -> native_kernel/null("Snapshot"), "deltas" -> native_kernel/null("Delta"), "status" -> "kernel_ok", "conflict_rule" -> "zero", "conflict_relation" -> "zero", "conflict_tuple" -> native/typed_zero(word), "done" -> "false"})),
+    native/let_statement("work", work, native_kernel/construct("Work", {"evaluation" -> native_kernel/read("Snapshot", "base", "evaluation"), "dirty" -> "false", "base" -> "base", "checked" -> "base", "changes" -> native_kernel/null("Change"), "rule_changes" -> native_kernel/null("RuleChange"), "rule_index" -> native_kernel/read("Snapshot", "base", "rules"), "rule_observations" -> native_kernel/null("RuleObservationIndex"), "rules" -> native_kernel/null("Rule"), "rules_cached" -> "false", "rules_read" -> "false", "rule_plan" -> native_kernel/read("Snapshot", "base", "rule_plan"), "rule_dependencies" -> native_kernel/null("RuleDependency"), "rule_dependency_index" -> native_kernel/null("RuleDependencyIndex"), "rule_limit" -> "rule_default_limit", "rows_limit" -> "kernel_unlimited", "rounds_limit" -> "kernel_unlimited", "candidate" -> native_kernel/null("Snapshot"), "deltas" -> native_kernel/null("Delta"), "status" -> "kernel_ok", "conflict_rule" -> "zero", "conflict_relation" -> "zero", "conflict_tuple" -> native/typed_zero(word), "done" -> "false"})),
     native/when_statement(native_kernel/is_null("Work", "work"), [native/return_value("kernel_oom")]),
+    native/let_call("signal", bytes, "memory_atomic_create", ["zero"]),
+    native/when_statement(native_kernel/binary(:Equal, "signal", "null_bytes"), [native/return_value("kernel_oom")]),
+    native_memory/store_root(bytes, "transaction", "signal", native/typed_expression(bytes, native/manage_expression("signal"))),
     native_memory/store_root(kernel, "transaction", "kernel", native/typed_expression(kernel, native/manage_expression("kernel"))), native_memory/store_root(worker, "transaction", "worker", native/typed_expression(worker, native/manage_expression("worker"))),
     native_memory/store_root(bytes, native_kernel/transaction_root(), "pointer", native/typed_expression(bytes, native/unary_expression(:PointerCast, "work"))),
     native/let_call("pushed", :Bool, "memory_root_push", ["worker", native_kernel/transaction_root()]),
@@ -330,6 +351,7 @@ verb native_kernel/lifecycle(input: map) -> map
     native/let_statement("worker", worker, native_memory/field(worker, "transaction", "worker")),
     native/when_statement(native_kernel/binary(:Equal, "worker", "memory_null_worker"), [native/return_value("false")]),
     native/unless_statement(native/call_expression("memory_root_pop", ["worker", native_kernel/transaction_root()]), [native/return_value("false")]),
+    native_memory/call("memory_atomic_destroy", [native_memory/field(bytes, "transaction", "signal")]),
     native/store_statement("transaction", native/typed_zero([:Record, "KernelTransaction"])), native/return_value("true")])
   context = native_kernel/empty_indexes_body(context)
   context = native_kernel/prepare_body(context)

@@ -16,7 +16,7 @@ verb native_rules/declarations(input: map) -> map
   let work: list = ["work", native_kernel/pointer("Work"), :Gc]
   let schemas: list = ["schemas", native_kernel/pointer("RuleSchemaIndex"), :Gc]
   let draft: list = ["draft", :Bool, :Value]
-  let budget: list = ["budget", native_memory/pointer(:U64), :Borrow]
+  let budget: list = ["budget", native_kernel/pointer("Budget"), :Borrow]
   let plan: list = ["plan", native_kernel/pointer("RulePlan"), :Gc]
   let vertex: list = ["vertex", native_kernel/pointer("RuleVertex"), :Gc]
   let root: list = native_memory/record_pointer("MemoryRoot")
@@ -41,7 +41,7 @@ verb native_rules/declarations(input: map) -> map
     ["rule_dependencies_validate", :U64, [worker, work, budget], true],
     ["rule_depend", :U64, [tx, id], true],
     ["rule_plan", [:Record, "KernelRulePlanResult"], [tx], true],
-    ["rule_set_limit", :U64, [tx, ["steps", :U64, :Value]], false]]
+    ["set_limits", :U64, [tx, ["steps", :U64, :Value], ["rows", :U64, :Value], ["rounds", :U64, :Value]], false]]
     module = native_kernel/declare(module, spec[0], spec[1], spec[2], spec[3])
   end
   for spec in native_rules/constructor_specs()

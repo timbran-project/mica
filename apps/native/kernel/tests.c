@@ -22,7 +22,7 @@ void mica_foreign_memory_platform_release(uint8_t *pointer) { free(pointer); }
 #endif
 
 // These values are the public status and conflict-policy codes.
-enum { OK, UNKNOWN, ARITY, NONPERSISTENT, KEY, CONFLICT, NAME, SCHEMA, OOM, CLOSED, LIMIT };
+enum { OK, UNKNOWN, ARITY, NONPERSISTENT, KEY, CONFLICT, NAME, SCHEMA, OOM, CLOSED, LIMIT, CANCELLED };
 enum { SET, FUNCTIONAL, EVENT };
 
 struct fixture {
@@ -264,7 +264,7 @@ static void prepared_publication_rebases(void) {
     begin(&f, &a);
     assert(write_pair(&a, 1, 10, 20, true) == OK);
     // Preparation must work while the publication mutex is already held.
-    uint64_t budget = mica_kernel_work(&a)->f_rule_limit;
+    struct mica_KernelBudget budget = {.f_steps = mica_kernel_work(&a)->f_rule_limit, .f_rows = UINT64_MAX, .f_rounds = UINT64_MAX, .f_signal = a.f_signal};
     mica_foreign_memory_lock(f.kernel.f_mutex);
     assert(mica_kernel_prepare(&a, &budget) == OK);
     mica_foreign_memory_unlock(f.kernel.f_mutex);
@@ -621,15 +621,15 @@ static void rule_dependency_planning(void) {
     assert(!mica_kernel_rule(&tx, 90).f_rule->f_active);
     assert(mica_kernel_end(&tx));
     begin(&f, &tx);
-    assert(mica_kernel_rule_set_limit(&tx, 0) == OK);
+    assert(mica_kernel_set_limits(&tx, 0, UINT64_MAX, UINT64_MAX) == OK);
     assert(install_edge(&tx, 10, 5, 2, false) == LIMIT);
     assert(mica_kernel_rule(&tx, 10).f_status == UNKNOWN);
-    assert(mica_kernel_rule_set_limit(&tx, UINT64_MAX) == OK);
+    assert(mica_kernel_set_limits(&tx, UINT64_MAX, UINT64_MAX, UINT64_MAX) == OK);
     assert(install_edge(&tx, 10, 5, 2, false) == OK);
-    assert(mica_kernel_rule_set_limit(&tx, 0) == OK);
+    assert(mica_kernel_set_limits(&tx, 0, UINT64_MAX, UINT64_MAX) == OK);
     assert(mica_kernel_commit(&tx) == LIMIT);
     assert(mica_kernel_work(&tx)->f_status == LIMIT && mica_kernel_work(&tx)->f_candidate == NULL);
-    assert(mica_kernel_rule_set_limit(&tx, UINT64_MAX) == OK);
+    assert(mica_kernel_set_limits(&tx, UINT64_MAX, UINT64_MAX, UINT64_MAX) == OK);
     assert(mica_kernel_commit(&tx) == OK && mica_kernel_end(&tx));
     destroy(&f);
 }
@@ -643,13 +643,13 @@ static void rule_work_limits(void) {
     struct mica_MemoryRoot *parent = f.worker.f_roots;
     // Point reads need validation even when there are no writes or head reads.
     for (unsigned limit = 0; limit < 4; ++limit) {
-        assert(mica_kernel_rule_set_limit(&tx, limit) == OK);
+        assert(mica_kernel_set_limits(&tx, limit, UINT64_MAX, UINT64_MAX) == OK);
         assert(mica_kernel_commit(&tx) == LIMIT);
         assert(f.worker.f_roots == parent);
         assert(mica_kernel_work(&tx)->f_status == LIMIT);
         assert(!mica_kernel_work(&tx)->f_done && !mica_kernel_work(&tx)->f_candidate);
     }
-    assert(mica_kernel_rule_set_limit(&tx, 4) == OK);
+    assert(mica_kernel_set_limits(&tx, 4, UINT64_MAX, UINT64_MAX) == OK);
     assert(mica_kernel_commit(&tx) == OK && mica_kernel_end(&tx));
 
     begin(&f, &tx);
@@ -660,7 +660,7 @@ static void rule_work_limits(void) {
     // Schema preparation, its dependency, and 65 catalogue observations leave
     // four steps of this allowance. The definition cannot finish validation.
     // Resetting the allowance at compilation incorrectly makes this succeed.
-    assert(mica_kernel_rule_set_limit(&tx, 71) == OK);
+    assert(mica_kernel_set_limits(&tx, 71, UINT64_MAX, UINT64_MAX) == OK);
     assert(mica_kernel_commit(&tx) == LIMIT);
     assert(f.worker.f_roots == parent);
     assert(mica_kernel_work(&tx)->f_status == LIMIT);
@@ -671,7 +671,7 @@ static void rule_work_limits(void) {
     assert(!mica_kernel_view(&observer, 1));
     assert(mica_kernel_rule(&observer, 1).f_status == UNKNOWN);
     assert(mica_kernel_end(&observer));
-    assert(mica_kernel_rule_set_limit(&tx, UINT64_MAX) == OK);
+    assert(mica_kernel_set_limits(&tx, UINT64_MAX, UINT64_MAX, UINT64_MAX) == OK);
     assert(mica_kernel_commit(&tx) == OK && mica_kernel_end(&tx));
     destroy(&f);
 }
@@ -904,7 +904,7 @@ static void rule_prepared_publication(void) {
     struct mica_KernelTransaction a, b;
     begin(&f, &a);
     assert(add_rule(&a, 1, 1, 2, true) == OK);
-    uint64_t budget = mica_kernel_work(&a)->f_rule_limit;
+    struct mica_KernelBudget budget = {.f_steps = mica_kernel_work(&a)->f_rule_limit, .f_rows = UINT64_MAX, .f_rounds = UINT64_MAX, .f_signal = a.f_signal};
     mica_foreign_memory_lock(f.kernel.f_mutex);
     assert(mica_kernel_prepare(&a, &budget) == OK); // No publication lock needed to prepare rules.
     mica_foreign_memory_unlock(f.kernel.f_mutex);
@@ -1490,7 +1490,7 @@ static void rule_collection(bool preparing) {
         if (requested) break;
         sched_yield();
     }
-    uint64_t budget = mica_kernel_work(&tx)->f_rule_limit;
+    struct mica_KernelBudget budget = {.f_steps = mica_kernel_work(&tx)->f_rule_limit, .f_rows = UINT64_MAX, .f_rounds = UINT64_MAX, .f_signal = tx.f_signal};
     if (preparing) assert(mica_kernel_prepare(&tx, &budget) == OK);
     else assert(rule_count(&tx) == 1024);
     assert(f.heap.f_epoch > epoch && f.worker.f_roots == parent);
@@ -1535,7 +1535,7 @@ static void rule_deep_planning(void) {
         if (requested) break;
         sched_yield();
     }
-    uint64_t budget = VERTICES * 16;
+    struct mica_KernelBudget budget = {.f_steps = VERTICES * 16, .f_rows = UINT64_MAX, .f_rounds = UINT64_MAX};
     assert(mica_kernel_rule_stratify(&f.worker, (struct mica_KernelRulePlan *)root.f_pointer, &budget) == OK);
     assert(f.heap.f_epoch > epoch && f.worker.f_roots == &root);
     plan = (struct mica_KernelRulePlan *)root.f_pointer;
@@ -1593,7 +1593,7 @@ static void rule_graph_oracle(void) {
         assert(plan);
         struct mica_MemoryRoot root = {.f_pointer = (uint8_t *)plan};
         assert(mica_memory_root_push(&f.worker, &root));
-        uint64_t budget = 10000;
+        struct mica_KernelBudget budget = {.f_steps = 10000, .f_rows = UINT64_MAX, .f_rounds = UINT64_MAX};
         uint64_t status = mica_kernel_rule_stratify(&f.worker, plan, &budget);
         assert(status == (invalid ? SCHEMA : OK));
         if (!invalid) {
@@ -1828,12 +1828,12 @@ static void rule_evaluation(void) {
     assert(write_pair(&tx, 1, 0, 1, true) == OK);
     struct mica_MemoryRoot *parent = f.worker.f_roots;
     for (uint64_t limit = 0; limit < 4096; limit = limit ? limit * 2 : 1) {
-        assert(mica_kernel_rule_set_limit(&tx, limit) == OK);
+        assert(mica_kernel_set_limits(&tx, limit, UINT64_MAX, UINT64_MAX) == OK);
         evaluated = mica_kernel_rule_evaluate(&tx);
         assert(evaluated.f_status == LIMIT || evaluated.f_status == OK);
         if (evaluated.f_status == LIMIT) assert(!evaluated.f_evaluation);
         assert(f.worker.f_roots == parent && !mica_kernel_work(&tx)->f_done);
-        assert(mica_kernel_rule_set_limit(&tx, UINT64_MAX) == OK);
+        assert(mica_kernel_set_limits(&tx, UINT64_MAX, UINT64_MAX, UINT64_MAX) == OK);
         assert(count(&tx, 1) == 1);
     }
     assert(mica_kernel_end(&tx));
@@ -1884,11 +1884,11 @@ static void rule_evaluation_capture(void) {
     begin(&f, &tx);
     // Catalogue visits consume allowance even when most relations are unrelated.
     // The two rule dependencies are at the end of the committed catalogue.
-    assert(mica_kernel_rule_set_limit(&tx, 128) == OK);
+    assert(mica_kernel_set_limits(&tx, 128, UINT64_MAX, UINT64_MAX) == OK);
     struct mica_MemoryRoot *parent = f.worker.f_roots;
     struct mica_KernelRuleEvaluationResult result = mica_kernel_rule_evaluate(&tx);
     assert(result.f_status == LIMIT && !result.f_evaluation && f.worker.f_roots == parent);
-    assert(mica_kernel_rule_set_limit(&tx, 65536) == OK);
+    assert(mica_kernel_set_limits(&tx, 65536, UINT64_MAX, UINT64_MAX) == OK);
     assert(count(&tx, 255) == 1 && count(&tx, 256) == 1);
     assert(!mica_kernel_index(mica_kernel_view(&tx, 256), 0));
     result = mica_kernel_rule_evaluate(&tx);
@@ -2122,22 +2122,98 @@ static void rule_maintenance_conflicts(void) {
     begin(&f, &tx);
     assert(count(&tx, 2) == 1 && count(&tx, 3) == 2);
     assert(write_pair(&tx, 1, 7, 8, true) == OK);
-    assert(mica_kernel_rule_set_limit(&tx, 0) == OK);
+    assert(mica_kernel_set_limits(&tx, 0, UINT64_MAX, UINT64_MAX) == OK);
     struct mica_KernelRuleEvaluation *complete = mica_kernel_work(&tx)->f_evaluation;
     mica_type_Value buffer[4];
     struct mica_MemoryRoot *parent = f.worker.f_roots;
     assert(scan(&tx, 2, 0, 0, 0, buffer, 4).f_status == LIMIT);
     assert(f.worker.f_roots == parent && mica_kernel_work(&tx)->f_evaluation == complete);
     assert(mica_kernel_work(&tx)->f_dirty);
-    assert(mica_kernel_rule_set_limit(&tx, UINT64_MAX) == OK);
+    assert(mica_kernel_set_limits(&tx, UINT64_MAX, UINT64_MAX, UINT64_MAX) == OK);
     assert(count(&tx, 2) == 2);
-    assert(mica_kernel_rule_set_limit(&tx, 0) == OK);
+    assert(mica_kernel_set_limits(&tx, 0, UINT64_MAX, UINT64_MAX) == OK);
     assert(mica_kernel_commit(&tx) == LIMIT);
     assert(!mica_kernel_work(&tx)->f_done && !mica_kernel_work(&tx)->f_candidate);
     assert(mica_kernel_end(&tx));
     begin(&f, &tx);
     assert(count(&tx, 1) == 1 && count(&tx, 2) == 1);
     assert(mica_kernel_end(&tx));
+    destroy(&f);
+}
+
+static void *cancel_transaction(void *opaque) {
+    assert(mica_kernel_cancel(opaque));
+    return NULL;
+}
+struct cancellation_race {
+    struct mica_KernelTransaction *tx;
+    _Atomic bool ready;
+    _Atomic bool go;
+    bool won;
+};
+static void *race_cancellation(void *opaque) {
+    struct cancellation_race *race = opaque;
+    atomic_store(&race->ready, true);
+    while (!atomic_load(&race->go)) sched_yield();
+    race->won = mica_kernel_cancel(race->tx);
+    return NULL;
+}
+static void rule_execution_controls(void) {
+    struct fixture f;
+    init(&f);
+    struct mica_KernelTransaction tx;
+    begin(&f, &tx);
+    for (unsigned id = 1; id <= 2; ++id)
+        assert(mica_kernel_declare(&tx, id, id, 2, SET, 0, 0) == OK);
+    assert(install_edge(&tx, 1, 2, 1, false) == OK);
+    assert(write_pair(&tx, 1, 1, 2, true) == OK);
+    assert(mica_kernel_commit(&tx) == OK);
+    assert(!mica_kernel_cancel(&tx)); // Publication already won.
+    assert(mica_kernel_end(&tx));
+    begin(&f, &tx);
+    assert(write_pair(&tx, 1, 3, 4, true) == OK);
+    struct mica_KernelRuleEvaluation *previous = mica_kernel_work(&tx)->f_evaluation;
+    assert(mica_kernel_set_limits(&tx, UINT64_MAX, 0, UINT64_MAX) == OK);
+    assert(mica_kernel_rule_refresh(&tx) == LIMIT);
+    assert(mica_kernel_work(&tx)->f_evaluation == previous);
+    assert(mica_kernel_set_limits(&tx, UINT64_MAX, UINT64_MAX, 0) == OK);
+    assert(mica_kernel_rule_refresh(&tx) == LIMIT);
+    assert(mica_kernel_work(&tx)->f_evaluation == previous);
+    assert(mica_kernel_set_limits(&tx, UINT64_MAX, UINT64_MAX, UINT64_MAX) == OK);
+    assert(mica_kernel_rule_refresh(&tx) == OK);
+    pthread_t canceller;
+    assert(!pthread_create(&canceller, NULL, cancel_transaction, &tx));
+    assert(!pthread_join(canceller, NULL));
+    assert(mica_kernel_rule_evaluate(&tx).f_status == CANCELLED);
+    assert(mica_kernel_commit(&tx) == CANCELLED);
+    assert(!mica_kernel_work(&tx)->f_done && !mica_kernel_work(&tx)->f_candidate);
+    assert(mica_kernel_end(&tx));
+    begin(&f, &tx);
+    assert(count(&tx, 1) == 1 && count(&tx, 2) == 1);
+    assert(write_pair(&tx, 1, 5, 6, true) == OK);
+    struct mica_KernelBudget budget = {.f_steps = UINT64_MAX, .f_rows = UINT64_MAX, .f_rounds = UINT64_MAX, .f_signal = tx.f_signal};
+    assert(mica_kernel_prepare(&tx, &budget) == OK);
+    assert(mica_kernel_cancel(&tx)); // Candidate is complete, but not published.
+    assert(!mica_kernel_try_publish(&tx));
+    assert(mica_kernel_work(&tx)->f_status == CANCELLED && !mica_kernel_work(&tx)->f_done);
+    assert(mica_kernel_end(&tx));
+    begin(&f, &tx);
+    assert(count(&tx, 2) == 1);
+    assert(mica_kernel_cancel(&tx));
+    assert(mica_kernel_commit(&tx) == CANCELLED); // Read-only fast path too.
+    assert(mica_kernel_end(&tx));
+    for (unsigned attempt = 0; attempt < 32; ++attempt) {
+        begin(&f, &tx);
+        struct cancellation_race race = {.tx = &tx};
+        assert(!pthread_create(&canceller, NULL, race_cancellation, &race));
+        while (!atomic_load(&race.ready)) sched_yield();
+        atomic_store(&race.go, true);
+        uint64_t status = mica_kernel_commit(&tx);
+        assert(!pthread_join(canceller, NULL));
+        assert(status == (race.won ? CANCELLED : OK));
+        assert(mica_kernel_work(&tx)->f_done == !race.won);
+        assert(mica_kernel_end(&tx));
+    }
     destroy(&f);
 }
 
@@ -2155,6 +2231,7 @@ int main(int argc, char **argv) {
     rule_maintenance();
     rule_maintenance_catalogue();
     rule_maintenance_conflicts();
+    rule_execution_controls();
     rule_conflicts();
     rule_allocation_failures();
     rule_prepared_publication();

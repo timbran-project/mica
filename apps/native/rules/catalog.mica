@@ -76,11 +76,7 @@ verb native_rules/depend_body(module: map) -> map
     let [entry: map, ready: map] = native_rules/allocate(found, "RuleMember", {"vertex" -> vertex})
     return native_roots/store(ready, stack, entry)
   end)
-  let [remaining: map, with_budget: map] = native_gen/bind(builder, "remaining", native_rules/read(builder, work, "rule_limit"))
-  builder = with_budget
-  let bindings: map = builder[:scope_bindings]
-  bindings["budget"] = native_gen/address(remaining)
-  builder[:scope_bindings] = bindings
+  builder = native_rules/local_budget(builder, native_rules/read(builder, work, "rule_limit"))
   builder = native_gen/while_loop(builder, native_gen/negate(native_kernel/absent(stack)), fn(iteration)
     let step: map = native_rules/tick(iteration)
     // Keep the current member rooted until its entire adjacency list is walked.
@@ -123,9 +119,12 @@ verb native_rules/catalogue(input: map) -> map
   builder = native_kernel/store_field(opened, work, "rules_read", native_rules/ref(opened, "true"))
   builder = native_rules/result(builder, native_rules/ref(builder, "kernel_ok"), {"plan" -> native_rules/read(builder, work, "rule_plan")})
   module = native_gen/finish(module, builder)
-  builder = native_gen/context(module, "kernel_rule_set_limit")
+  builder = native_gen/context(module, "kernel_set_limits")
   let [limit_work: map, limit_opened: map] = native_kernel/open_transaction(builder, fn(failed) => native_rules/error(failed, "closed"))
   builder = native_kernel/store_field(limit_opened, limit_work, "rule_limit", native_rules/ref(limit_opened, "steps"))
+  for field in ["rows", "rounds"]
+    builder = native_kernel/store_field(builder, limit_work, string_concat(field, "_limit"), native_rules/ref(builder, field))
+  end
   builder = native_kernel/status(builder, "kernel_ok")
   module = native_gen/finish(module, builder)
   return module

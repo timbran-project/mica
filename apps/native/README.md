@@ -146,7 +146,8 @@ Other workers can read and commit concurrently. Callers park workers before exte
 | 7 | Invalid schema, identity, mask, or output buffer |
 | 8 | Allocation or collection failure |
 | 9 | Closed transaction or invalid lifecycle operation |
-| 10 | Rule planning, maintenance, or dependency traversal work limit exceeded |
+| 10 | Rule planning, maintenance, or dependency traversal resource limit exceeded |
+| 11 | Transaction cancellation won before publication |
 
 `kernel_work(transaction)` exposes the last commit status, conflicting relation and tuple, and conflicting rule identity.
 The current layer supports relation creation, transactional rule definitions, dependency planning, and automatic maintenance of derived rows.
@@ -187,7 +188,8 @@ Callers must root managed pointers across safepoints and treat definitions and p
 | `kernel_rules(transaction)` | Enumerate the draft catalogue |
 | `kernel_rule_plan(transaction)` | Read the draft dependency plan and record a whole-catalogue dependency |
 | `kernel_rule_depend(transaction, relation)` | Record head-generation and schema dependencies through the draft plan |
-| `kernel_rule_set_limit(transaction, steps)` | Set the work allowance for planning and dependency traversal |
+| `kernel_set_limits(transaction, steps, rows, rounds)` | Set rule-operation work, row-construction, and evaluation-round allowances |
+| `kernel_cancel(transaction)` | Request cancellation from any native thread before publication wins |
 
 Writes return kernel status codes. Definition reads return `KernelRuleResult` with `status` and `rule`.
 Enumeration returns an ordered linked list; null means the catalogue is empty.
@@ -225,7 +227,17 @@ The default allowance is 16,777,216 steps per operation; callers can change it b
 Commit shares one allowance across schema preparation, dependency validation, catalogue rebasing, and plan compilation.
 Publication retries consume the same allowance.
 Exhaustion returns `kernel_limit` (10), preserves the draft, and publishes nothing.
-It is a resource error, not a transaction conflict. Cancellation and resumable scheduling remain separate work.
+It is a resource error, not a transaction conflict. Rule operations check cancellation at traversal and allocation boundaries.
+`kernel_cancel` returns true only when its request changes an open transaction to cancelled.
+Publication claims the same atomic signal before swapping the snapshot root.
+Cancellation cannot undo a successful commit.
+The caller must join cancellation requesters before ending or reusing the transaction control.
+
+Each rule operation receives a `KernelBudget` with step, row-construction, and round allowances.
+Commit retries share that budget. Limits return status 10; cancellation returns status 11.
+The step allowance defaults to 16,777,216; row and round allowances default to unlimited.
+Row allowances count constructed intermediate rows, including candidates later deduplicated.
+Ordinary query operators, allocation-byte caps, snapshot admission, and resumable scheduling still need execution controls.
 
 ### Rule evaluation
 
@@ -294,7 +306,17 @@ A failed refresh retains the previous complete cache and leaves the draft invali
 A failed commit publishes nothing.
 Work exhaustion and allocation failure retain their distinct status codes.
 Commit retries share one work allowance.
-Cancellation and resumable scheduling remain separate work.
+Rule operations check cancellation at traversal and allocation boundaries.
+`kernel_cancel` returns true only when its request changes an open transaction to cancelled.
+Publication claims the same atomic signal before swapping the snapshot root.
+Cancellation cannot undo a successful commit.
+The caller must join cancellation requesters before ending or reusing the transaction control.
+
+Each rule operation receives a `KernelBudget` with step, row-construction, and round allowances.
+Commit retries share that budget. Limits return status 10; cancellation returns status 11.
+The step allowance defaults to 16,777,216; row and round allowances default to unlimited.
+Row allowances count constructed intermediate rows, including candidates later deduplicated.
+Ordinary query operators, allocation-byte caps, snapshot admission, and resumable scheduling still need execution controls.
 
 Completed evaluations expose `recomputed`, `extended`, `reused`, `rounds`, `steps`, `probes`, and `cleared` counters.
 These counters describe one maintenance pass.

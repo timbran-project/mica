@@ -140,6 +140,7 @@ fn run() -> Result<()> {
         "rules/catalog",
         "rules/program",
         "kernel/program",
+        "kernel/execution",
         "kernel/indexes",
         "kernel/relations",
         "kernel/transactions",

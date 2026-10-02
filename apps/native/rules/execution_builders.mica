@@ -64,9 +64,7 @@ end
 verb native_rules/empty_binding(builder: map, width: map) -> list
   // Reserve the copy/allocation work before entering the non-relocating row builder.
   let [extent: map, with_extent: map] = native_gen/bind(builder, "binding_width", width)
-  let budget: map = native_gen/location(native_rules/ref(builder, "budget"))
-  let ready: map = native_rules/check(with_extent, native_gen/negate(native_gen/less(native_gen/read(budget), extent)), "limit")
-  ready = native_gen/write(ready, budget, native_gen/subtract(native_gen/read(budget), extent))
+  let ready: map = native_execution/charge(with_extent, extent, native_rules/ref(with_extent, "one"), native_rules/ref(with_extent, "zero"), fn(failed, status) => native_rules/fail(failed, status))
   let [header: map, allocated: map] = native_gen/bind(ready, "storage", native_gen/call(ready, "list_allocate", [native_roots/worker(ready), extent, extent]))
   ready = native_rules/check(allocated, native_gen/negate(native_kernel/absent(header)), "oom")
   ready = native_gen/for_range(ready, "cell", native_rules/ref(ready, "zero"), extent, fn(cell, position) => native_gen/store(cell,

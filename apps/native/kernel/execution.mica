@@ -1,0 +1,77 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+// Budgets belong to one operation; the cancellation signal belongs to its
+// transaction. Neither is part of a published snapshot or a managed graph.
+verb native_execution/declarations(input: map) -> map
+  let module: map = input
+  let bytes: list = native_memory/pointer(:U8)
+  for spec in [
+    ["memory_atomic_create", bytes, [["value", :U64, :Value]], [:Allocate], :Owned],
+    ["memory_atomic_destroy", :Void, [["cell", bytes, :Borrow]], [:Release], :Value],
+    ["memory_atomic_load", :U64, [["cell", bytes, :Borrow]], [:ReadMemory], :Value],
+    ["memory_atomic_compare_exchange", :Bool, [["cell", bytes, :Borrow], ["expected", :U64, :Value], ["desired", :U64, :Value]], [:ReadMemory, :WriteMemory], :Value]]
+    module = native/declare_function(module, spec[0], spec[1], spec[2], [], spec[3], spec[4], "")
+    module[:state] = native/foreign(module[:state], module[:functions][spec[0]])
+  end
+  module = native_kernel/declare(module, "budget_check", :U64, [["budget", native_kernel/pointer("Budget"), :Borrow], ["steps", :U64, :Value], ["rows", :U64, :Value], ["rounds", :U64, :Value]])
+  module = native_kernel/declare(module, "cancel", :Bool, [["transaction", native_kernel/pointer("Transaction"), :Borrow]])
+  return module
+end
+verb native_execution/has(builder: map, name: string) -> bool
+  return map_contains_key(builder[:bindings], name) || (map_contains_key(builder, :scope_bindings) && map_contains_key(builder[:scope_bindings], name))
+end
+verb native_execution/local_budget(input: map, allowance: map) -> map
+  let builder: map = input
+  let fields: map = {"steps" -> allowance, "rows" -> native_roots/ref(builder, "kernel_unlimited"), "rounds" -> native_roots/ref(builder, "kernel_unlimited"), "status" -> native_roots/ref(builder, "kernel_ok"), "signal" -> native_gen/zero(native_memory/pointer(:U8))}
+  if native_execution/has(builder, "transaction")
+    let transaction: map = native_roots/ref(builder, "transaction")
+    fields["signal"] = native_kernel/load_field(builder, transaction, "signal")
+    let [work: map, ready: map] = native_gen/bind(builder, "control_work", native_gen/call(builder, "kernel_work", [transaction]))
+    builder = ready
+    for field in ["rows", "rounds"]
+      fields[field] = native_kernel/load_field(builder, work, string_concat(field, "_limit"))
+    end
+  end
+  let [budget: map, ready: map] = native_gen/bind(builder, "allowance", native_gen/record(builder, [:Record, "KernelBudget"], fields))
+  let bindings: map = {}
+  if map_contains_key(ready, :scope_bindings)
+    bindings = ready[:scope_bindings]
+  end
+  bindings["budget"] = native_gen/address(budget)
+  ready[:scope_bindings] = bindings
+  return ready
+end
+verb native_execution/charge(builder: map, steps: map, rows: map, rounds: map, failure) -> map
+  let [status: map, ready: map] = native_gen/bind(builder, "execution_status", native_gen/call(builder, "kernel_budget_check", [native_roots/ref(builder, "budget"), steps, rows, rounds]))
+  let result: map = native_gen/unless(ready, native_kernel/absent(status), fn(failed) => failure(failed, status))
+  return result
+end
+verb native_execution/program(input: map) -> map
+  let module: map = input
+  let builder: map = native_gen/context(module, "kernel_budget_check")
+  let budget: map = native_roots/ref(builder, "budget")
+  let signal: map = native_kernel/load_field(builder, budget, "signal")
+  builder = native_gen/unless(builder, native_kernel/absent(signal), fn(present)
+    return native_gen/when(present, native_gen/equal(native_gen/call(present, "memory_atomic_load", [signal]), native_roots/ref(present, "one")), fn(cancelled) => native_kernel/store_field(cancelled, budget, "status", native_roots/ref(cancelled, "kernel_cancelled")))
+  end)
+  let status: map = native_kernel/load_field(builder, budget, "status")
+  builder = native_gen/unless(builder, native_kernel/absent(status), fn(failed) => native_gen/return_value(failed, status))
+  for field in ["steps", "rows", "rounds"]
+    builder = native_gen/when(builder, native_gen/less(native_kernel/load_field(builder, budget, field), native_roots/ref(builder, field)), fn(exhausted)
+      let failed: map = native_kernel/store_field(exhausted, budget, "status", native_roots/ref(exhausted, "kernel_limit"))
+      return native_gen/return_value(failed, native_roots/ref(failed, "kernel_limit"))
+    end)
+  end
+  for field in ["steps", "rows", "rounds"]
+    builder = native_kernel/store_field(builder, budget, field, native_gen/subtract(native_kernel/load_field(builder, budget, field), native_roots/ref(builder, field)))
+  end
+  builder = native_kernel/status(builder, "kernel_ok")
+  module = native_gen/finish(module, builder)
+  builder = native_gen/context(module, "kernel_cancel")
+  let cancel_signal: map = native_kernel/load_field(builder, native_roots/ref(builder, "transaction"), "signal")
+  builder = native_gen/when(builder, native_kernel/absent(cancel_signal), fn(closed) => native_gen/return_value(closed, native_roots/ref(closed, "false")))
+  builder = native_gen/return_value(builder, native_gen/call(builder, "memory_atomic_compare_exchange", [cancel_signal, native_roots/ref(builder, "zero"), native_roots/ref(builder, "one")]))
+  let result: map = native_gen/finish(module, builder)
+  return result
+end
