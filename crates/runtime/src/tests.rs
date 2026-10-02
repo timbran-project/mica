@@ -8096,6 +8096,50 @@ fn float_source_literal_round_trips() {
 }
 
 #[test]
+fn runner_byte_length_and_indexing_agree_across_tiers() {
+    let bytes = Value::bytes((0..=255).collect::<Vec<u8>>());
+    for interpreter_only in [true, false] {
+        let mut runner = SourceRunner::new_empty().with_interpreter_only(interpreter_only);
+        let source = format!(
+            r#"let data: bytes = {bytes}
+require len(data) == 256
+require len(b"") == 0
+let pass = 0
+while pass < 16
+  let index = 0
+  let sum = 0
+  while index < len(data)
+    let byte: int = data[index]
+    require byte == index
+    sum = sum + byte
+    index = index + 1
+  end
+  require sum == 32640
+  pass = pass + 1
+end
+return true"#
+        );
+        assert_completed_value(&runner.run_source(&source).unwrap(), Value::bool(true));
+        for operation in [
+            r#"b"AP8="[-1]"#,
+            r#"b"AP8="[2]"#,
+            r#"b""[0]"#,
+            r#"b"AP8="[1.0]"#,
+            r#"b"AP8="[true]"#,
+            r#"b"AP8="[:key]"#,
+            r#"b"AP8="[0..1]"#,
+            r#"b"AP8="[36028797018963967]"#,
+        ] {
+            let source = format!("try\nreturn {operation}\ncatch E_INDEX\nreturn 42\nend");
+            assert_completed_value(
+                &runner.run_source(&source).unwrap(),
+                Value::int(42).unwrap(),
+            );
+        }
+    }
+}
+
+#[test]
 fn runner_string_scalars_iteration_and_scanning() {
     for interpreter_only in [true, false] {
         let mut runner = SourceRunner::new_empty().with_interpreter_only(interpreter_only);

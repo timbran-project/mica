@@ -3475,6 +3475,12 @@ fn index_value(collection: &Value, index: &Value) -> Result<Value, Value> {
         && let Some(value) = collection
             .string_scalar_at(index as usize)
             .and_then(|scalar| Value::int(i64::from(u32::from(scalar))).ok())
+            .or_else(|| {
+                collection
+                    .with_bytes(|bytes| bytes.get(index as usize).copied())
+                    .flatten()
+                    .map(|byte| Value::int(i64::from(byte)).expect("byte fits Mica integer"))
+            })
             .or_else(|| collection.list_get(index as usize))
             .or_else(|| {
                 collection

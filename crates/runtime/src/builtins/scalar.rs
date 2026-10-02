@@ -145,10 +145,13 @@ fn len_builtin(
     };
     let len = value
         .string_len()
+        .or_else(|| value.with_bytes(<[u8]>::len))
         .or_else(|| value.list_len())
         .or_else(|| value.map_len())
         .or_else(|| value.with_relation(|relation| relation.len()))
-        .ok_or_else(|| invalid_builtin_call("len", "expected string, list, map, or relation"))?;
+        .ok_or_else(|| {
+            invalid_builtin_call("len", "expected string, bytes, list, map, or relation")
+        })?;
     Value::int(len as i64)
         .map_err(|_| invalid_builtin_call("len", "collection length is out of range"))
 }

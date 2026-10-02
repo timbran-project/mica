@@ -152,6 +152,17 @@ Byte literals contain **URL-safe, padded base64**, not text to encode as bytes. 
 uses `-` and `_` where standard base64 uses `+` and `/`. Invalid encoding is a compile error. Use
 bytes for opaque binary content and strings for text whose character encoding is already known.
 
+`len(bytes)` returns the number of bytes. Integer indexing starts at zero and returns a value from 0 through 255:
+
+```mica,eval
+let data = b"AP8="
+require len(data) == 2
+require data[0] == 0
+require data[1] == 255
+```
+
+A negative, non-integer, or out-of-bounds index raises `E_INDEX`. Byte indexing does not support ranges.
+
 Symbols are interned names used for selectors, relation names, policy surfaces, message tags, and
 other program-facing labels:
 
