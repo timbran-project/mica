@@ -1614,6 +1614,374 @@ static void rule_graph_oracle(void) {
     destroy(&f);
 }
 
+// Independent finite-domain oracle: enumerate substitutions, then repeatedly
+// apply all rules in each stratum. It uses no native binding or SCC machinery.
+enum { RULE_DOMAIN = 6, RULE_RELATIONS = 16, RULE_HOLE = -100 };
+struct oracle_atom { unsigned relation; bool negative; int term[2]; };
+struct oracle_rule {
+    unsigned head, stratum;
+    int term[2];
+    unsigned count;
+    struct oracle_atom atoms[2];
+    int guard; // -1, or one of == != < <= > >= against integer 1.
+};
+static const struct oracle_rule oracle_rules[] = {
+    {2, 0, {0, 1}, 1, {{1, false, {0, 1}}}, -1},
+    {2, 0, {0, 2}, 2, {{2, false, {0, 1}}, {1, false, {1, 2}}}, -1},
+    {2, 0, {0, 2}, 2, {{2, false, {0, 1}}, {2, false, {1, 2}}}, -1},
+    {3, 0, {0, 1}, 1, {{2, false, {0, 1}}}, -1},
+    {2, 0, {0, 1}, 1, {{3, false, {0, 1}}}, -1},
+    {5, 1, {0, 1}, 2, {{4, true, {0, 1}}, {2, false, {0, 1}}}, -1},
+    {6, 1, {0, 1}, 1, {{5, false, {0, 1}}}, 2},
+    {7, 0, {0, 0}, 1, {{1, false, {0, 0}}}, -1},
+    {4, 0, {0, 1}, 1, {{7, false, {0, 1}}}, -1},
+    {8, 0, {-3, 0}, 1, {{1, false, {0, -2}}}, -1},
+    {9, 0, {0, 0}, 1, {{1, false, {0, RULE_HOLE}}}, -1},
+    {2, 0, {0, 1}, 1, {{2, false, {0, 1}}}, -1},
+    {2, 0, {0, 1}, 1, {{1, false, {0, 1}}}, -1},
+    {10, 1, {0, 1}, 1, {{5, false, {0, 1}}}, 0},
+    {11, 1, {0, 1}, 1, {{5, false, {0, 1}}}, 1},
+    {12, 1, {0, 1}, 1, {{5, false, {0, 1}}}, 2},
+    {13, 1, {0, 1}, 1, {{5, false, {0, 1}}}, 3},
+    {14, 1, {0, 1}, 1, {{5, false, {0, 1}}}, 4},
+    {15, 1, {0, 1}, 1, {{5, false, {0, 1}}}, 5},
+};
+static unsigned oracle_term(int term, const unsigned *binding) {
+    return term < 0 ? (unsigned)(-term - 1) : binding[term];
+}
+static uint64_t oracle_bit(unsigned x, unsigned y) {
+    return UINT64_C(1) << (x * RULE_DOMAIN + y);
+}
+static bool oracle_matches(const struct oracle_atom *atom, const unsigned *binding, uint64_t rows) {
+    for (unsigned x = 0; x < RULE_DOMAIN; ++x)
+        for (unsigned y = 0; y < RULE_DOMAIN; ++y)
+            if ((rows & oracle_bit(x, y)) &&
+                (atom->term[0] == RULE_HOLE || oracle_term(atom->term[0], binding) == x) &&
+                (atom->term[1] == RULE_HOLE || oracle_term(atom->term[1], binding) == y)) return true;
+    return false;
+}
+static void oracle_evaluate(const uint64_t *stored, uint64_t *all, uint64_t *derived) {
+    memcpy(all, stored, RULE_RELATIONS * sizeof(*all));
+    memset(derived, 0, RULE_RELATIONS * sizeof(*derived));
+    for (unsigned stratum = 0; stratum < 2; ++stratum) {
+        bool changed;
+        do {
+            changed = false;
+            for (unsigned r = 0; r < sizeof(oracle_rules) / sizeof(*oracle_rules); ++r) {
+                const struct oracle_rule *rule = &oracle_rules[r];
+                if (rule->stratum != stratum) continue;
+                for (unsigned assignment = 0; assignment < RULE_DOMAIN * RULE_DOMAIN * RULE_DOMAIN; ++assignment) {
+                    unsigned binding[] = {assignment % RULE_DOMAIN, assignment / RULE_DOMAIN % RULE_DOMAIN, assignment / (RULE_DOMAIN * RULE_DOMAIN)};
+                    bool match = true;
+                    for (unsigned a = 0; a < rule->count; ++a) {
+                        const struct oracle_atom *atom = &rule->atoms[a];
+                        match &= oracle_matches(atom, binding, all[atom->relation]) != atom->negative;
+                    }
+                    if (rule->guard >= 0) {
+                        bool guards[] = {binding[0] == 1, binding[0] != 1, binding[0] < 1, binding[0] <= 1, binding[0] > 1, binding[0] >= 1};
+                        match &= guards[rule->guard];
+                    }
+                    if (!match) continue;
+                    uint64_t bit = oracle_bit(oracle_term(rule->term[0], binding), oracle_term(rule->term[1], binding));
+                    derived[rule->head] |= bit;
+                    changed |= !(all[rule->head] & bit);
+                    all[rule->head] |= bit;
+                }
+            }
+        } while (changed);
+    }
+}
+static struct mica_KernelRuleTerm *oracle_native_term(struct mica_MemoryWorker *worker, int term, struct mica_KernelRuleTerm *next) {
+    struct mica_KernelRuleTerm *result;
+    if (term == RULE_HOLE) result = mica_kernel_rule_hole(worker, next);
+    else if (term < 0) result = mica_kernel_rule_constant(worker, integer(-term - 1), next);
+    else result = mica_kernel_rule_variable(worker, (uint64_t)term, next);
+    assert(result);
+    return result;
+}
+static struct mica_KernelRuleTerm *oracle_native_terms(struct mica_MemoryWorker *worker, const int *terms) {
+    return oracle_native_term(worker, terms[0], oracle_native_term(worker, terms[1], NULL));
+}
+static void oracle_install(struct mica_KernelTransaction *tx) {
+    for (unsigned id = 1; id < RULE_RELATIONS; ++id)
+        assert(mica_kernel_declare(tx, id, id, 2, SET, 0, 0) == OK);
+    for (unsigned r = 0; r < sizeof(oracle_rules) / sizeof(*oracle_rules); ++r) {
+        const struct oracle_rule *rule = &oracle_rules[r];
+        struct mica_KernelRuleAtom *atoms = NULL;
+        for (unsigned a = rule->count; a > 0; --a) {
+            const struct oracle_atom *atom = &rule->atoms[a - 1];
+            atoms = mica_kernel_rule_atom(tx->f_worker, atom->relation, atom->negative, oracle_native_terms(tx->f_worker, atom->term), atoms);
+            assert(atoms);
+        }
+        struct mica_KernelRuleGuard *guard = NULL;
+        if (rule->guard >= 0) {
+            guard = mica_kernel_rule_guard(tx->f_worker, (uint64_t)rule->guard,
+                oracle_native_term(tx->f_worker, 0, NULL), oracle_native_term(tx->f_worker, -2, NULL), NULL);
+            assert(guard);
+        }
+        struct mica_KernelRuleDef *definition = fixture_rule(tx->f_worker, rule->head, oracle_native_terms(tx->f_worker, rule->term), atoms, guard);
+        assert(mica_kernel_rule_add(tx, r + 1, definition, true) == OK);
+    }
+}
+static void oracle_check(struct mica_MemoryWorker *worker, struct mica_MemoryRoot *root, const uint64_t *stored) {
+    uint64_t all[RULE_RELATIONS], derived[RULE_RELATIONS];
+    oracle_evaluate(stored, all, derived);
+    for (unsigned id = 1; id < RULE_RELATIONS; ++id) {
+        struct mica_KernelRuleEvaluation *evaluation = (struct mica_KernelRuleEvaluation *)root->f_pointer;
+        struct mica_KernelRuleRows *captured = mica_kernel_rule_rows_index_lookup(evaluation->f_rows, id);
+        // Completed results must not retain per-round scratch indexes.
+        assert(!evaluation->f_executables && captured && !captured->f_delta && !captured->f_pending);
+        for (unsigned mode = 0; mode < 2; ++mode) {
+            struct mica_KernelQueryResult result = mica_kernel_rule_rows(worker, (struct mica_KernelRuleEvaluation *)root->f_pointer, id, mode != 0, UINT64_MAX);
+            assert(result.f_status == OK && result.f_arity == 2);
+            uint64_t found = 0;
+            for (uint64_t i = 0; i < mica_kernel_width(result.f_rows); ++i) {
+                mica_type_Value row = mica_kernel_cell(result.f_rows, i);
+                unsigned x = (unsigned)cell(row, 0), y = (unsigned)cell(row, 1);
+                assert(x < RULE_DOMAIN && y < RULE_DOMAIN);
+                uint64_t bit = oracle_bit(x, y);
+                assert(!(found & bit));
+                found |= bit;
+            }
+            assert(found == (mode ? derived[id] : all[id]));
+        }
+    }
+}
+static void rule_evaluation(void) {
+    struct fixture f;
+    init(&f);
+    struct mica_KernelTransaction tx;
+    begin(&f, &tx);
+    oracle_install(&tx);
+    // The same evaluator handles staged definitions and declarations.
+    assert(write_pair(&tx, 1, 0, 1, true) == OK);
+    struct mica_KernelRuleEvaluationResult evaluated = mica_kernel_rule_evaluate(&tx);
+    assert(evaluated.f_status == OK && evaluated.f_evaluation);
+    struct mica_MemoryRoot root = {.f_pointer = (uint8_t *)evaluated.f_evaluation};
+    assert(mica_memory_root_push(&f.worker, &root));
+    uint64_t stored[RULE_RELATIONS] = {0};
+    stored[1] = oracle_bit(0, 1);
+    oracle_check(&f.worker, &root, stored);
+    assert(mica_memory_root_pop(&f.worker, &root));
+    assert(write_pair(&tx, 1, 0, 1, false) == OK);
+    assert(mica_kernel_commit(&tx) == OK && mica_kernel_end(&tx));
+    uint64_t random = 321;
+    for (unsigned sample = 0; sample < 24; ++sample) {
+        memset(stored, 0, sizeof(stored));
+        begin(&f, &tx);
+        for (unsigned x = 0; x < RULE_DOMAIN; ++x) {
+            for (unsigned y = 0; y < RULE_DOMAIN; ++y) {
+                random ^= random << 13; random ^= random >> 7; random ^= random << 17;
+                for (unsigned r = 0; r < 3; ++r) {
+                    unsigned id = (unsigned[]){1, 2, 4}[r];
+                    if (((random >> (r * 8)) & 7) != 0) continue;
+                    stored[id] |= oracle_bit(x, y);
+                    assert(write_pair(&tx, id, x, y, true) == OK);
+                }
+            }
+        }
+        struct collection_job job = {.heap = &f.heap};
+        pthread_t collector;
+        uint64_t epoch = f.heap.f_epoch;
+        if (sample == 0) {
+            assert(!pthread_create(&collector, NULL, collect_repeatedly, &job));
+            while (!atomic_load(&job.ready)) sched_yield();
+            for (;;) {
+                mica_foreign_memory_lock(f.heap.f_mutex);
+                bool requested = f.heap.f_collecting;
+                mica_foreign_memory_unlock(f.heap.f_mutex);
+                if (requested) break;
+                sched_yield();
+            }
+        }
+        evaluated = mica_kernel_rule_evaluate(&tx);
+        assert(evaluated.f_status == OK && evaluated.f_evaluation);
+        root.f_pointer = (uint8_t *)evaluated.f_evaluation;
+        assert(mica_memory_root_push(&f.worker, &root));
+        if (sample == 0) {
+            assert(f.heap.f_epoch > epoch);
+            assert(mica_memory_leave(&f.worker));
+            assert(!pthread_join(collector, NULL));
+            assert(mica_memory_enter(&f.worker));
+        }
+        assert(mica_memory_safepoint(&f.worker, true));
+        oracle_check(&f.worker, &root, stored);
+        // A fresh evaluation must not mutate an earlier retained result.
+        uint64_t previous[RULE_RELATIONS];
+        memcpy(previous, stored, sizeof(previous));
+        for (unsigned x = 0; x < RULE_DOMAIN; ++x)
+            for (unsigned y = 0; y < RULE_DOMAIN; ++y)
+                if (stored[1] & oracle_bit(x, y)) assert(write_pair(&tx, 1, x, y, false) == OK);
+        stored[1] = 0;
+        evaluated = mica_kernel_rule_evaluate(&tx);
+        assert(evaluated.f_status == OK);
+        struct mica_MemoryRoot after = {.f_pointer = (uint8_t *)evaluated.f_evaluation};
+        assert(mica_memory_root_push(&f.worker, &after));
+        oracle_check(&f.worker, &after, stored);
+        oracle_check(&f.worker, &root, previous);
+        assert(mica_memory_root_pop(&f.worker, &after));
+        assert(mica_memory_root_pop(&f.worker, &root));
+        assert(mica_kernel_end(&tx));
+    }
+    // Resource exhaustion returns no partial result and keeps the draft usable.
+    begin(&f, &tx);
+    assert(write_pair(&tx, 1, 0, 1, true) == OK);
+    struct mica_MemoryRoot *parent = f.worker.f_roots;
+    for (uint64_t limit = 0; limit < 4096; limit = limit ? limit * 2 : 1) {
+        assert(mica_kernel_rule_set_limit(&tx, limit) == OK);
+        evaluated = mica_kernel_rule_evaluate(&tx);
+        assert(evaluated.f_status == LIMIT || evaluated.f_status == OK);
+        if (evaluated.f_status == LIMIT) assert(!evaluated.f_evaluation);
+        assert(f.worker.f_roots == parent && !mica_kernel_work(&tx)->f_done);
+        assert(count(&tx, 1) == 1);
+    }
+    assert(mica_kernel_end(&tx));
+#ifdef MICA_MEMORY_TEST_ALLOCATOR
+    begin(&f, &tx);
+    assert(write_pair(&tx, 1, 0, 1, true) == OK);
+    assert(mica_memory_safepoint(&f.worker, true));
+    struct mica_MemoryRoot held[4096] = {{0}};
+    unsigned retained_count = 0;
+    bool failed = false;
+    atomic_store(&allocation_budget, 0);
+    while (retained_count < 4096) {
+        struct mica_MemoryRoot *before = f.worker.f_roots;
+        evaluated = mica_kernel_rule_evaluate(&tx);
+        assert(f.worker.f_roots == before);
+        if (evaluated.f_status == OOM) {
+            assert(!evaluated.f_evaluation);
+            failed = true;
+            break;
+        }
+        assert(evaluated.f_status == OK);
+        held[retained_count].f_pointer = (uint8_t *)evaluated.f_evaluation;
+        assert(mica_memory_root_push(&f.worker, &held[retained_count++]));
+    }
+    atomic_store(&allocation_budget, -1);
+    assert(failed && !mica_kernel_work(&tx)->f_done && count(&tx, 1) == 1);
+    while (retained_count) assert(mica_memory_root_pop(&f.worker, &held[--retained_count]));
+    assert(mica_kernel_rule_evaluate(&tx).f_status == OK);
+    assert(mica_kernel_end(&tx));
+#endif
+    struct mica_KernelTransaction closed = {0};
+    assert(mica_kernel_rule_evaluate(&closed).f_status == CLOSED);
+    destroy(&f);
+}
+
+static void rule_evaluation_capture(void) {
+    struct fixture f;
+    init(&f);
+    struct mica_MemoryRoot retained = {0};
+    assert(mica_memory_root_push(&f.worker, &retained));
+    struct mica_KernelTransaction tx;
+    begin(&f, &tx);
+    for (unsigned id = 256; id > 0; --id)
+        assert(mica_kernel_declare(&tx, id, id, 2, SET, 0, 0) == OK);
+    assert(install_edge(&tx, 1, 256, 255, false) == OK);
+    assert(write_pair(&tx, 255, 1, 2, true) == OK);
+    assert(mica_kernel_commit(&tx) == OK && mica_kernel_end(&tx));
+    begin(&f, &tx);
+    // Catalogue visits consume allowance even when most relations are unrelated.
+    // The two rule dependencies are at the end of the committed catalogue.
+    assert(mica_kernel_rule_set_limit(&tx, 128) == OK);
+    struct mica_MemoryRoot *parent = f.worker.f_roots;
+    struct mica_KernelRuleEvaluationResult result = mica_kernel_rule_evaluate(&tx);
+    assert(result.f_status == LIMIT && !result.f_evaluation && f.worker.f_roots == parent);
+    assert(count(&tx, 255) == 1 && count(&tx, 256) == 0);
+    assert(mica_kernel_rule_set_limit(&tx, 65536) == OK);
+    result = mica_kernel_rule_evaluate(&tx);
+    assert(result.f_status == OK);
+    retained.f_pointer = (uint8_t *)result.f_evaluation;
+    // Draft facts override captured base relations. New unrelated declarations
+    // remain accessible without being part of the dependency graph.
+    assert(write_pair(&tx, 255, 1, 2, false) == OK);
+    assert(write_pair(&tx, 255, 3, 4, true) == OK);
+    assert(mica_kernel_declare(&tx, 257, 257, 2, SET, 0, 0) == OK);
+    assert(write_pair(&tx, 257, 5, 6, true) == OK);
+    result = mica_kernel_rule_evaluate(&tx);
+    assert(result.f_status == OK);
+    struct mica_MemoryRoot draft = {.f_pointer = (uint8_t *)result.f_evaluation};
+    assert(mica_memory_root_push(&f.worker, &draft));
+    assert(mica_memory_safepoint(&f.worker, true));
+    struct mica_KernelQueryResult rows = mica_kernel_rule_rows(&f.worker, (struct mica_KernelRuleEvaluation *)draft.f_pointer, 256, true, UINT64_MAX);
+    assert(rows.f_status == OK && mica_kernel_width(rows.f_rows) == 1);
+    assert(cell(mica_kernel_cell(rows.f_rows, 0), 0) == 3 && cell(mica_kernel_cell(rows.f_rows, 0), 1) == 4);
+    rows = mica_kernel_rule_rows(&f.worker, (struct mica_KernelRuleEvaluation *)draft.f_pointer, 257, false, UINT64_MAX);
+    assert(rows.f_status == OK && mica_kernel_width(rows.f_rows) == 1);
+    assert(cell(mica_kernel_cell(rows.f_rows, 0), 0) == 5 && cell(mica_kernel_cell(rows.f_rows, 0), 1) == 6);
+    assert(mica_memory_root_pop(&f.worker, &draft));
+    assert(mica_kernel_end(&tx));
+    assert(mica_memory_safepoint(&f.worker, true));
+    rows = mica_kernel_rule_rows(&f.worker, (struct mica_KernelRuleEvaluation *)retained.f_pointer, 256, true, UINT64_MAX);
+    assert(rows.f_status == OK && mica_kernel_width(rows.f_rows) == 1);
+    assert(cell(mica_kernel_cell(rows.f_rows, 0), 0) == 1 && cell(mica_kernel_cell(rows.f_rows, 0), 1) == 2);
+    assert(mica_memory_root_pop(&f.worker, &retained));
+    destroy(&f);
+}
+
+static void rule_evaluation_values(void) {
+    struct fixture f;
+    init(&f);
+    struct mica_MemoryRoot retained = {0};
+    assert(mica_memory_root_push(&f.worker, &retained));
+    struct mica_KernelTransaction tx;
+    begin(&f, &tx);
+    for (unsigned id = 1; id <= 4; ++id)
+        assert(mica_kernel_declare(&tx, id, id, id == 3 ? 0 : 2, SET, 0, 0) == OK);
+    mica_type_Value cells[] = {mica_value_float(1.0f).f_value, integer(2)};
+    struct mica_ValueResult row = mica_value_list(&f.worker, cells, 2);
+    assert(row.f_ok && mica_kernel_write(&tx, 1, row.f_value, true) == OK);
+    assert(write_pair(&tx, 1, 1, 3, true) == OK);
+    struct mica_KernelRuleGuard *guard = mica_kernel_rule_guard(&f.worker, 0,
+        oracle_native_term(&f.worker, 0, NULL), mica_kernel_rule_constant(&f.worker, integer(1), NULL), NULL);
+    assert(guard);
+    struct mica_KernelRuleDef *definition = fixture_rule(&f.worker, 2, rule_pair(&f.worker), rule_atom_pair(&f.worker, 1, false, NULL), guard);
+    assert(mica_kernel_rule_add(&tx, 1, definition, true) == OK);
+    // An empty body derives the unit relation containing one zero-column row.
+    definition = fixture_rule(&f.worker, 3, NULL, NULL, NULL);
+    assert(mica_kernel_rule_add(&tx, 2, definition, true) == OK);
+    // Atom constants retain canonical numeric kinds, unlike guard equality.
+    int pattern[] = {-2, 1};
+    struct mica_KernelRuleAtom *atom = mica_kernel_rule_atom(&f.worker, 1, false, oracle_native_terms(&f.worker, pattern), NULL);
+    assert(atom);
+    definition = fixture_rule(&f.worker, 4, oracle_native_terms(&f.worker, pattern), atom, NULL);
+    assert(mica_kernel_rule_add(&tx, 3, definition, true) == OK);
+    struct mica_KernelRuleEvaluationResult result = mica_kernel_rule_evaluate(&tx);
+    assert(result.f_status == OK);
+    retained.f_pointer = (uint8_t *)result.f_evaluation;
+    assert(mica_kernel_end(&tx)); // Rollback leaves a rooted result usable.
+    assert(mica_memory_safepoint(&f.worker, true));
+    struct mica_KernelQueryResult rows = mica_kernel_rule_rows(&f.worker, (struct mica_KernelRuleEvaluation *)retained.f_pointer, 2, false, UINT64_MAX);
+    assert(rows.f_status == OK && mica_kernel_width(rows.f_rows) == 2);
+    rows = mica_kernel_rule_rows(&f.worker, (struct mica_KernelRuleEvaluation *)retained.f_pointer, 3, true, UINT64_MAX);
+    assert(rows.f_status == OK && rows.f_arity == 0 && mica_kernel_width(rows.f_rows) == 1);
+    assert(mica_kernel_width(mica_kernel_cell(rows.f_rows, 0)) == 0);
+    rows = mica_kernel_rule_rows(&f.worker, (struct mica_KernelRuleEvaluation *)retained.f_pointer, 4, false, UINT64_MAX);
+    assert(rows.f_status == OK && mica_kernel_width(rows.f_rows) == 1);
+    assert(cell(mica_kernel_cell(rows.f_rows, 0), 0) == 1 && cell(mica_kernel_cell(rows.f_rows, 0), 1) == 3);
+    rows = mica_kernel_rule_rows(&f.worker, (struct mica_KernelRuleEvaluation *)retained.f_pointer, 2, false, 0);
+    assert(rows.f_status == LIMIT && !rows.f_rows);
+    begin(&f, &tx);
+    assert(!mica_kernel_view(&tx, 1) && mica_kernel_rule(&tx, 1).f_status == UNKNOWN);
+    assert(mica_kernel_declare(&tx, 7, 7, 2, SET, 0, 0) == OK);
+    assert(write_pair(&tx, 7, 4, 5, true) == OK);
+    assert(mica_kernel_commit(&tx) == OK && mica_kernel_end(&tx));
+    begin(&f, &tx);
+    result = mica_kernel_rule_evaluate(&tx);
+    assert(result.f_status == OK);
+    retained.f_pointer = (uint8_t *)result.f_evaluation;
+    assert(write_pair(&tx, 7, 4, 5, false) == OK);
+    assert(mica_kernel_end(&tx));
+    assert(mica_memory_safepoint(&f.worker, true));
+    // A relation outside the rule graph still has its captured stored rows.
+    rows = mica_kernel_rule_rows(&f.worker, (struct mica_KernelRuleEvaluation *)retained.f_pointer, 7, false, UINT64_MAX);
+    assert(rows.f_status == OK && mica_kernel_width(rows.f_rows) == 1);
+    rows = mica_kernel_rule_rows(&f.worker, (struct mica_KernelRuleEvaluation *)retained.f_pointer, 7, true, UINT64_MAX);
+    assert(rows.f_status == OK && mica_kernel_width(rows.f_rows) == 0);
+    assert(mica_memory_root_pop(&f.worker, &retained));
+    destroy(&f);
+}
+
 int main(int argc, char **argv) {
     if (argc == 2 && !strcmp(argv[1], "trace")) return trace();
     if (argc == 5 && !strcmp(argv[1], "bench")) return benchmark(argv[2], (unsigned)strtoul(argv[3], NULL, 10), (unsigned)strtoul(argv[4], NULL, 10));
@@ -1622,6 +1990,9 @@ int main(int argc, char **argv) {
     rule_definition_validation();
     rule_dependency_planning();
     rule_work_limits();
+    rule_evaluation();
+    rule_evaluation_capture();
+    rule_evaluation_values();
     rule_conflicts();
     rule_allocation_failures();
     rule_prepared_publication();

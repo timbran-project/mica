@@ -1,0 +1,74 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+// Execution uses the query kernel's canonical row indexes and indexed seeks.
+// These builders add a shared allowance and roots around rule-specific work.
+verb native_rules/rows_lookup(builder: map, evaluation: map, id: map) -> map
+  let generated_result: map = native_gen/call(builder, "kernel_rule_rows_index_lookup", [native_rules/read(builder, evaluation, "rows"), id])
+  return generated_result
+end
+// Capture immutable rows without retaining mutable transaction changes.
+verb native_rules/capture_relation(builder: map, evaluation: map, relation: map) -> map
+  let [rows: map, allocated: map] = native_rules/allocate(builder, "RuleRows", {"id" -> native_rules/read(builder, relation, "id"), "arity" -> native_rules/read(builder, relation, "arity"), "all" -> native_gen/call(builder, "kernel_index", [relation, native_rules/ref(builder, "zero")])})
+  let [index: map, indexed: map] = native_rules/index_put(allocated, "rule_rows_index", native_rules/read(allocated, evaluation, "rows"), rows)
+  let generated_result: map = native_kernel/store_field(indexed, evaluation, "rows", index)
+  return generated_result
+end
+verb native_rules/tree_walk(builder: map, tree: map, body) -> map
+  let generated_result: map = native_rules/probe_tree(builder, tree, native_gen/zero(native_value/word()), native_rules/ref(builder, "zero"), body)
+  return generated_result
+end
+verb native_rules/probe_tree(builder: map, tree: map, pattern: map, prefix: map, body) -> map
+  let [root: map, rooted: map] = native_roots/retain(builder, "scan", tree)
+  let [cursor: map, ready: map] = native_roots/retain(rooted, "cursor", native_gen/zero(native_value/word()))
+  ready = native_gen/while_loop(ready, native_rules/ref(ready, "true"), fn(iteration)
+    let step: map = native_rules/tick(iteration)
+    let [node: map, found: map] = native_gen/bind(step, "node", native_gen/call(step, "kernel_query_seek", [root, pattern, cursor, native_rules/ref(step, "zero"), prefix]))
+    step = native_gen/when(found, native_kernel/absent(node), fn(done) => native_gen/break_loop(done))
+    step = native_roots/store(step, cursor, native_rules/read(step, node, "row"))
+    return body(step, cursor)
+  end)
+  ready = native_rules/release_root(ready, cursor)
+  let generated_result: map = native_rules/release_root(ready, root)
+  return generated_result
+end
+verb native_rules/offer_field(builder: map, record: map, field: string, row: map, persistent: bool) -> map
+  let tree: map = native_rules/read(builder, record, field)
+  if persistent
+    let [result: map, ready: map] = native_gen/checked_bind(builder, "inserted", native_gen/call(builder, "kernel_set", [native_roots/worker(builder), tree, row, native_rules/ref(builder, "zero"), native_rules/ref(builder, "false"), native_rules/ref(builder, "true")]), "ok", fn(failed) => native_rules/error(failed, "oom"))
+    let generated_result: map = native_kernel/store_field(ready, record, field, native_gen/field(ready, result, "node"))
+    return generated_result
+  end
+  let [node: map, ready: map] = native_gen/bind(builder, "inserted", native_gen/call(builder, "kernel_query_insert", [native_roots/worker(builder), tree, row]))
+  ready = native_rules/check(ready, native_gen/negate(native_kernel/absent(node)), "oom")
+  let generated_result: map = native_kernel/store_field(ready, record, field, node)
+  return generated_result
+end
+verb native_rules/offer_root(builder: map, output: map, row: map) -> map
+  let [node: map, ready: map] = native_gen/bind(builder, "inserted", native_gen/call(builder, "kernel_query_insert", [native_roots/worker(builder), output, row]))
+  ready = native_rules/check(ready, native_gen/negate(native_kernel/absent(node)), "oom")
+  let generated_result: map = native_roots/store(ready, output, node)
+  return generated_result
+end
+verb native_rules/term_value(builder: map, term: map, binding: map) -> list
+  let [value: map, ready: map] = native_gen/bind(builder, "value", native_rules/read(builder, term, "value"))
+  ready = native_gen/when(ready, native_gen/equal(native_rules/read(ready, term, "kind"), native_rules/ref(ready, "rule_variable")), fn(variable) => native_gen/assign(variable, value, native_query/cell(variable, binding, native_rules/read(variable, term, "id"))))
+  return [value, ready]
+end
+verb native_rules/row_store(builder: map, row: map, position: map, value: map) -> map
+  let header: map = native_gen/expression(native_memory/record_pointer("HeapList"), :UnpackPointer, [row])
+  let generated_result: map = native_gen/store(builder, native_gen/offset(native_rules/read(builder, header, "data"), position), value)
+  return generated_result
+end
+verb native_rules/empty_binding(builder: map, width: map) -> list
+  // Reserve the copy/allocation work before entering the non-relocating row builder.
+  let [extent: map, with_extent: map] = native_gen/bind(builder, "binding_width", width)
+  let budget: map = native_gen/location(native_rules/ref(builder, "budget"))
+  let ready: map = native_rules/check(with_extent, native_gen/negate(native_gen/less(native_gen/read(budget), extent)), "limit")
+  ready = native_gen/write(ready, budget, native_gen/subtract(native_gen/read(budget), extent))
+  let [header: map, allocated: map] = native_gen/bind(ready, "storage", native_gen/call(ready, "list_allocate", [native_roots/worker(ready), extent, extent]))
+  ready = native_rules/check(allocated, native_gen/negate(native_kernel/absent(header)), "oom")
+  ready = native_gen/for_range(ready, "cell", native_rules/ref(ready, "zero"), extent, fn(cell, position) => native_gen/store(cell,
+    native_gen/offset(native_rules/read(cell, header, "data"), position), native_gen/zero(native_value/word())))
+  return [native_gen/expression(native_value/word(), :PackPointer, [header, native_rules/ref(ready, "tag_list")]), ready]
+end

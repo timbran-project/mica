@@ -301,6 +301,7 @@ verb native_kernel/program() -> map
   context = native_rules/program(context)
   context = native_kernel/lifecycle(context)
   context = native_query/program(context)
+  context = native_rules/evaluation_program(context)
   let state: map = context[:state]
   return state
 end

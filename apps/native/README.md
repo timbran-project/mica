@@ -62,7 +62,7 @@ Generated source, binaries, and measurement output stay outside source control.
 
 ## Transactional relation kernel
 
-`native_kernel/program()` generates values, managed memory, the in-memory relation store, and query execution as one module.
+`native_kernel/program()` generates values, managed memory, the in-memory relation store, query execution, and rule evaluation as one module.
 All storage, indexing, conflict checks, publication, and tracing algorithms come from Mica source.
 The platform bindings supply allocation and pthread primitives.
 
@@ -150,14 +150,14 @@ Other workers can read and commit concurrently. Callers park workers before exte
 
 `kernel_work(transaction)` exposes the last commit status, conflicting relation and tuple, and conflicting rule identity.
 The current layer supports relation creation, transactional rule definitions, and dependency planning.
-Relation removal, transactional buffers, durable storage, rule evaluation, computed relations, authority, and dispatch remain separate work.
+Relation removal, transactional buffers, durable storage, automatic rule maintenance, computed relations, authority, and dispatch remain separate work.
 
 ### Rule definitions and dependency plans
 
 `rules/` generates rule definitions, structural validation, and dependency planning.
 `kernel/rules.mica` stages and publishes definitions with ordinary fact changes.
-Rule evaluation, source parsing, and authority checks remain separate work.
-Installing an active definition does not derive rows yet.
+Automatic rule maintenance, source parsing, and authority checks remain separate work.
+Installing an active definition makes it available to explicit evaluation.
 
 Definitions contain a head relation, head terms, body atoms, comparison guards, defining tenant, and source text.
 The tenant field records identity; it does not grant authority.
@@ -226,6 +226,42 @@ Commit shares one allowance across schema preparation, dependency validation, ca
 Publication retries consume the same allowance.
 Exhaustion returns `kernel_limit` (10), preserves the draft, and publishes nothing.
 It is a resource error, not a transaction conflict. Cancellation and resumable scheduling remain separate work.
+
+### Rule evaluation
+
+`kernel_rule_evaluate(transaction)` computes the complete closure of the current draft.
+It returns `KernelRuleEvaluationResult` with `status` and a managed `evaluation` pointer.
+`kernel_rule_rows(worker, evaluation, relation, derived, limit)` returns canonical rows as a `KernelQueryResult`.
+Set `derived` to true for derived rows alone, or false for their union with stored facts.
+Known relations without rules have empty derived rows. Unknown relations return status 1.
+
+Evaluation captures staged declarations, facts, retractions, and active definitions together.
+It records a whole-catalogue read, so concurrent rule edits cause a commit conflict.
+The result stays fixed across later draft edits, rollback, and commit.
+Root the evaluation across safepoints and reload it before each use.
+Results retain the base relation catalogue and captured draft rows until their roots are released and collection reclaims them.
+The evaluator never changes stored indexes or publishes a snapshot.
+
+Lowering assigns dense variable slots before processing rows.
+Binding operators use canonical equality for constants, shared variables, and repeated variables.
+Guards use language numeric comparison, including mixed integer/float comparisons.
+Positive atoms bind variables before negation and guards run; holes never bind variables.
+Bound leading columns probe the canonical row index. Other constraints filter candidate rows.
+
+Components run in dependency order. Each recursive component starts with its stored facts and completed lower components.
+Later rounds use at least one changed recursive input, then merge each head's new rows at a component-wide barrier.
+Duplicate support collapses to one row. Stored/derived overlap remains represented in both sets.
+Each explicit evaluation starts from stored facts; it cannot retain unsupported conclusions from an earlier evaluation.
+This is semi-naive evaluation within one draft, not incremental maintenance across commits.
+
+Evaluation shares the transaction's configured work allowance across lowering, probes, bindings, guards, rounds, and row construction.
+Result extraction has its own `limit` argument. Exhaustion returns status 10 with no partial result.
+Allocation failure returns status 8. Both failures preserve the draft and restore the caller's root chain.
+Limits count logical work; individual value comparisons and buffer copies are not constant-time operations.
+
+Access the evaluated closure through `kernel_rule_rows`; ordinary query scans still read stored facts.
+Automatic draft invalidation, affected-component maintenance, and atomic publication of derived rows remain the next layer.
+These trusted kernel APIs do not perform tenant authorization.
 
 ### Query execution
 

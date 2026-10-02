@@ -1,0 +1,96 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+// Variable identities become dense binding slots once, before evaluating rows.
+// Zero words mark unbound slots; stored values cannot contain that sentinel.
+verb native_rules/lower_terms_body(module: map) -> map
+  let builder: map = native_rules/context(module, "rule_lower_terms")
+  let executable: map = native_rules/ref(builder, "executable")
+  let output: map = native_roots/root_value(builder, native_rules/ref(builder, "output"), native_kernel/pointer("RuleTerm"))
+  let [tail: map, ready: map] = native_roots/retain(builder, "tail", native_gen/zero(native_kernel/pointer("RuleTerm")))
+  builder = native_rules/each(ready, "term", native_rules/ref(ready, "terms"), fn(input_step, term)
+    let step: map = input_step
+    let [id: map, bound: map] = native_gen/bind(step, "slot", native_rules/ref(step, "zero"))
+    step = native_gen/when(bound, native_gen/equal(native_rules/read(bound, term, "kind"), native_rules/ref(bound, "rule_variable")), fn(variable)
+      let [slot: map, found: map] = native_gen/bind(variable, "slot_entry", native_gen/call(variable, "kernel_rule_slot_index_lookup", [native_rules/read(variable, executable, "slots"), native_rules/read(variable, term, "id")]))
+      found = native_gen/when(found, native_kernel/absent(slot), fn(missing)
+        let checked: map = native_rules/check(missing, native_rules/ref(missing, "collect"), "schema")
+        let [created: map, allocated: map] = native_rules/allocate(checked, "RuleSlot", {"id" -> native_rules/read(checked, term, "id"), "position" -> native_rules/read(checked, executable, "width")})
+        let [index: map, indexed: map] = native_rules/index_put(allocated, "rule_slot_index", native_rules/read(allocated, executable, "slots"), created)
+        let added: map = native_kernel/store_field(indexed, executable, "slots", index)
+        added = native_kernel/store_field(added, executable, "width", native_gen/add(native_rules/read(added, executable, "width"), native_rules/ref(added, "one")))
+        let generated_result: map = native_gen/assign(added, slot, created)
+        return generated_result
+      end)
+      let generated_result: map = native_gen/assign(found, id, native_rules/read(found, slot, "position"))
+      return generated_result
+    end)
+    let [copy: map, allocated: map] = native_rules/allocate(step, "RuleTerm", {"kind" -> native_rules/read(step, term, "kind"), "id" -> id, "value" -> native_rules/read(step, term, "value")})
+    step = native_gen/branch(allocated, native_kernel/absent(tail), fn(first) => native_roots/store(first, output, copy), fn(next) => native_kernel/store_field(next, tail, "next", copy))
+    let generated_result: map = native_roots/store(step, tail, copy)
+    return generated_result
+  end)
+  builder = native_kernel/status(builder, "kernel_ok")
+  let generated_result: map = native_gen/finish(module, builder)
+  return generated_result
+end
+verb native_rules/lowered_terms(builder: map, executable: map, terms: map, collect: bool) -> list
+  let [output: map, ready: map] = native_roots/retain(builder, "terms", native_gen/zero(native_kernel/pointer("RuleTerm")))
+  let flag: string = "false"
+  if collect
+    flag = "true"
+  end
+  ready = native_rules/status_call(ready, "rule_lower_terms", [native_roots/worker(ready), executable, terms, native_rules/ref(ready, flag), output[:scope_root], native_rules/ref(ready, "budget")])
+  return [output, ready]
+end
+verb native_rules/lower_body(module: map) -> map
+  let builder: map = native_rules/context(module, "rule_lower")
+  let rule: map = native_rules/ref(builder, "rule")
+  let evaluation: map = native_rules/ref(builder, "evaluation")
+  let definition: map = native_rules/read(builder, rule, "definition")
+  let [created: map, allocated: map] = native_rules/allocate(builder, "RuleExecutable", {"id" -> native_rules/read(builder, rule, "id"), "head" -> native_rules/rows_lookup(builder, evaluation, native_rules/read(builder, rule, "head"))})
+  let [executable: map, ready: map] = native_roots/retain(allocated, "executable", created)
+  builder = ready
+  for negative in [false, true]
+    let field: string = "positive"
+    let flag: string = "false"
+    if negative
+      field = "negative"
+      flag = "true"
+    end
+    let [tail: map, with_tail: map] = native_roots/retain(builder, "atom_tail", native_gen/zero(native_kernel/pointer("RuleAtom")))
+    builder = native_rules/each(with_tail, "atom", native_rules/read(with_tail, definition, "atoms"), fn(input_step, atom)
+      let step: map = input_step
+      let generated_result: map = native_gen/when(step, native_gen/equal(native_rules/read(step, atom, "negative"), native_rules/ref(step, flag)), fn(selected)
+        let [terms: map, lowered: map] = native_rules/lowered_terms(selected, executable, native_rules/read(selected, atom, "terms"), !negative)
+        let [copy: map, allocated: map] = native_rules/allocate(lowered, "RuleAtom", {"relation" -> native_rules/read(lowered, atom, "relation"), "negative" -> native_rules/ref(lowered, flag), "terms" -> terms})
+        let linked: map = native_gen/branch(allocated, native_kernel/absent(tail),
+          fn(first) => native_kernel/store_field(first, executable, field, copy),
+          fn(next) => native_kernel/store_field(next, tail, "next", copy))
+        linked = native_roots/store(linked, tail, copy)
+        let generated_result: map = native_rules/release_root(linked, terms)
+        return generated_result
+      end)
+      return generated_result
+    end)
+    builder = native_rules/release_root(builder, tail)
+  end
+  let [head: map, with_head: map] = native_rules/lowered_terms(builder, executable, native_rules/read(builder, definition, "terms"), false)
+  builder = native_kernel/store_field(with_head, executable, "terms", head)
+  builder = native_rules/release_root(builder, head)
+  builder = native_rules/each(builder, "guard", native_rules/read(builder, definition, "guards"), fn(input_step, guard)
+    let step: map = input_step
+    let [left: map, with_left: map] = native_rules/lowered_terms(step, executable, native_rules/read(step, guard, "left"), false)
+    let [right: map, with_right: map] = native_rules/lowered_terms(with_left, executable, native_rules/read(with_left, guard, "right"), false)
+    let [copy: map, allocated: map] = native_rules/allocate(with_right, "RuleGuard", {"next" -> native_rules/read(with_right, executable, "guards"), "left" -> left, "right" -> right, "operation" -> native_rules/read(with_right, guard, "operation")})
+    let linked: map = native_kernel/store_field(allocated, executable, "guards", copy)
+    linked = native_rules/release_root(linked, right)
+    let generated_result: map = native_rules/release_root(linked, left)
+    return generated_result
+  end)
+  let [index: map, indexed: map] = native_rules/index_put(builder, "rule_executable_index", native_rules/read(builder, evaluation, "executables"), executable)
+  builder = native_kernel/store_field(indexed, evaluation, "executables", index)
+  builder = native_kernel/status(builder, "kernel_ok")
+  let generated_result: map = native_gen/finish(module, builder)
+  return generated_result
+end

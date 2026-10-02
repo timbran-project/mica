@@ -10,6 +10,10 @@ verb native_rules/read(builder: map, object: map, name: string) -> map
   return result
 end
 verb native_rules/fail(builder: map, status: map) -> map
+  if builder[:result] == [:Record, "KernelQueryResult"]
+    let result: map = native_query/fail(builder, status)
+    return result
+  end
   if builder[:result] == [:Record, "KernelRuleTreeResult"]
     let result: map = native_kernel/rule_result(builder, status, native_gen/zero(native_kernel/pointer("RuleIndex")))
     return result

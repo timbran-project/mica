@@ -1,0 +1,202 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+verb native_rules/evaluation_declarations(input: map) -> map
+  let module: map = input
+  let names: list = ["rule_guard_eq", "rule_guard_ne", "rule_guard_lt", "rule_guard_le", "rule_guard_gt", "rule_guard_ge"]
+  let constants: list = [[names[index], :U64, native_value/hex(index)] for index in 0..5]
+  let [bindings: map, state: map] = native/constants(module[:state], constants)
+  module[:state] = state
+  let merged: map = module[:constants]
+  for name, value in bindings
+    merged[name] = value
+  end
+  module[:constants] = merged
+  let worker: list = ["worker", native_memory/record_pointer("MemoryWorker"), :Borrow]
+  let budget: list = ["budget", native_memory/pointer(:U64), :Borrow]
+  let executable: list = ["executable", native_kernel/pointer("RuleExecutable"), :Gc]
+  let evaluation: list = ["evaluation", native_kernel/pointer("RuleEvaluation"), :Gc]
+  let component: list = ["component", native_kernel/pointer("RuleComponent"), :Gc]
+  let atom: list = ["atom", native_kernel/pointer("RuleAtom"), :Gc]
+  let terms: list = ["terms", native_kernel/pointer("RuleTerm"), :Gc]
+  let binding: list = ["binding", native_value/word(), :Gc]
+  let tx: list = ["transaction", native_kernel/pointer("Transaction"), :Borrow]
+  for spec in [
+    ["rule_lower_terms", :U64, [worker, executable, terms, ["collect", :Bool, :Value], ["output", native_memory/record_pointer("MemoryRoot"), :Borrow], budget]],
+    ["rule_lower", :U64, [worker, evaluation, ["rule", native_kernel/pointer("Rule"), :Gc], budget]],
+    ["rule_match", [:Record, "KernelRuleMatchResult"], [worker, terms, ["input", native_value/word(), :Gc], ["row", native_value/word(), :Gc], budget]],
+    ["rule_apply_atom", [:Record, "KernelRuleRowsResult"], [worker, evaluation, atom, ["input", native_kernel/pointer("Node"), :Gc], ["delta", :Bool, :Value], budget]],
+    ["rule_emit", :U64, [worker, executable, binding, budget]],
+    ["rule_run", :U64, [worker, evaluation, executable, ["delta_atom", native_kernel/pointer("RuleAtom"), :Gc], budget]],
+    ["rule_round", :U64, [worker, evaluation, component, ["incremental", :Bool, :Value], budget]],
+    ["rule_advance", :U64, [worker, evaluation, component, ["changed", native_memory/pointer(:Bool), :Borrow], budget]],
+    ["rule_evaluate", [:Record, "KernelRuleEvaluationResult"], [tx]],
+    ["rule_rows", [:Record, "KernelQueryResult"], [worker, evaluation, ["id", :U64, :Value], ["derived", :Bool, :Value], ["limit", :U64, :Value]]]]
+    module = native_kernel/declare(module, spec[0], spec[1], spec[2], true)
+  end
+  return module
+end
+verb native_rules/local_budget(builder: map, allowance: map) -> map
+  let [remaining: map, ready: map] = native_gen/bind(builder, "remaining", allowance)
+  let bindings: map = ready[:scope_bindings]
+  bindings["budget"] = native_gen/address(remaining)
+  ready[:scope_bindings] = bindings
+  return ready
+end
+verb native_rules/round_body(module: map) -> map
+  let builder: map = native_rules/context(module, "rule_round")
+  let evaluation: map = native_rules/ref(builder, "evaluation")
+  let component: map = native_rules/ref(builder, "component")
+  builder = native_rules/each(builder, "member", native_rules/read(builder, component, "members"), fn(input_step, member)
+    let step: map = input_step
+    let vertex: map = native_rules/read(step, member, "vertex")
+    let generated_result: map = native_rules/each(step, "entry", native_rules/read(step, vertex, "rules"), fn(rule_step, entry)
+      let rule: map = native_rules/read(rule_step, entry, "rule")
+      let [executable: map, ready: map] = native_roots/retain(rule_step, "executable", native_gen/call(rule_step, "kernel_rule_executable_index_lookup", [native_rules/read(rule_step, evaluation, "executables"), native_rules/read(rule_step, rule, "id")]))
+      ready = native_gen/branch(ready, native_rules/ref(ready, "incremental"), fn(delta)
+        let generated_result: map = native_rules/each(delta, "atom", native_rules/read(delta, executable, "positive"), fn(atom_step, atom)
+          let source: map = native_rules/rows_lookup(atom_step, evaluation, native_rules/read(atom_step, atom, "relation"))
+          let generated_result: map = native_gen/when(atom_step, native_gen/equal(native_rules/read(atom_step, source, "component"), native_rules/read(atom_step, component, "id")), fn(internal)
+            let generated_result: map = native_gen/unless(internal, native_kernel/absent(native_rules/read(internal, source, "delta")), fn(nonempty) => native_rules/status_call(nonempty, "rule_run", [native_roots/worker(nonempty), evaluation, executable, atom, native_rules/ref(nonempty, "budget")]))
+            return generated_result
+          end)
+          return generated_result
+        end)
+        return generated_result
+      end, fn(initial) => native_rules/status_call(initial, "rule_run", [native_roots/worker(initial), evaluation, executable, native_gen/zero(native_kernel/pointer("RuleAtom")), native_rules/ref(initial, "budget")]))
+      let generated_result: map = native_rules/release_root(ready, executable)
+      return generated_result
+    end)
+    return generated_result
+  end)
+  builder = native_kernel/store_field(builder, evaluation, "rounds", native_gen/add(native_rules/read(builder, evaluation, "rounds"), native_rules/ref(builder, "one")))
+  builder = native_kernel/status(builder, "kernel_ok")
+  let generated_result: map = native_gen/finish(module, builder)
+  return generated_result
+end
+// Finish an entire SCC round before making any pending row an input. A delta
+// contains only rows absent from the previous stored/derived union.
+verb native_rules/advance_body(module: map) -> map
+  let builder: map = native_rules/context(module, "rule_advance")
+  builder = native_gen/store(builder, native_rules/ref(builder, "changed"), native_rules/ref(builder, "false"))
+  builder = native_rules/each(builder, "member", native_rules/read(builder, native_rules/ref(builder, "component"), "members"), fn(input_step, member)
+    let step: map = input_step
+    let [rows: map, ready: map] = native_roots/retain(step, "rows", native_rules/rows_lookup(step, native_rules/ref(step, "evaluation"), native_rules/read(step, native_rules/read(step, member, "vertex"), "id")))
+    ready = native_kernel/store_field(ready, rows, "delta", native_rules/read(ready, rows, "pending"))
+    ready = native_kernel/store_field(ready, rows, "pending", native_gen/zero(native_kernel/pointer("Node")))
+    ready = native_gen/unless(ready, native_kernel/absent(native_rules/read(ready, rows, "delta")), fn(changed) => native_gen/store(changed, native_rules/ref(changed, "changed"), native_rules/ref(changed, "true")))
+    ready = native_rules/tree_walk(ready, native_rules/read(ready, rows, "delta"), fn(row_step, row) => native_rules/offer_field(row_step, rows, "all", row, true))
+    // Only recursive components need a subsequent round. Later components read
+    // the completed union, so a nonrecursive delta can be reclaimed now.
+    ready = native_gen/unless(ready, native_rules/read(ready, native_rules/ref(ready, "component"), "recursive"),
+      fn(done) => native_kernel/store_field(done, rows, "delta", native_gen/zero(native_kernel/pointer("Node"))))
+    let generated_result: map = native_rules/release_root(ready, rows)
+    return generated_result
+  end)
+  builder = native_kernel/status(builder, "kernel_ok")
+  let generated_result: map = native_gen/finish(module, builder)
+  return generated_result
+end
+verb native_rules/evaluate_body(module: map) -> map
+  let [work: map, opened: map] = native_kernel/rule_transaction(module, "kernel_rule_evaluate")
+  let builder: map = native_rules/local_budget(opened, native_rules/read(opened, work, "rule_limit"))
+  builder = native_kernel/store_field(builder, work, "rules_read", native_rules/ref(builder, "true"))
+  let [created: map, allocated: map] = native_rules/allocate(builder, "RuleEvaluation", {"catalog" -> native_rules/read(builder, native_rules/read(builder, work, "base"), "relations")})
+  let [evaluation: map, with_evaluation: map] = native_roots/retain(allocated, "evaluation", created)
+  let [plan: map, ready: map] = native_roots/retain(with_evaluation, "plan", native_rules/read(with_evaluation, work, "rule_plan"))
+  // Capture the draft overlay first, then fill its dependencies from one
+  // budgeted catalogue traversal. Unrelated base relations stay in catalog.
+  builder = native_rules/each(ready, "change", native_rules/read(ready, work, "changes"), fn(step, change)
+    let result: map = native_rules/capture_relation(step, evaluation, native_rules/read(step, change, "after"))
+    return result
+  end)
+  builder = native_gen/when(builder, native_kernel/absent(plan), fn(empty) => native_rules/result(empty, native_rules/ref(empty, "kernel_ok"), {"evaluation" -> evaluation}))
+  builder = native_rules/each(builder, "relation", native_rules/read(builder, evaluation, "catalog"), fn(step, relation)
+    let id: map = native_rules/read(step, relation, "id")
+    let vertex: map = native_gen/call(step, "kernel_rule_vertex_index_lookup", [native_rules/read(step, plan, "index"), id])
+    let result: map = native_gen/unless(step, native_kernel/absent(vertex), fn(dependency)
+      let result: map = native_gen/when(dependency, native_kernel/absent(native_rules/rows_lookup(dependency, evaluation, id)),
+        fn(missing) => native_rules/capture_relation(missing, evaluation, relation))
+      return result
+    end)
+    return result
+  end)
+  builder = native_rules/each(builder, "vertex", native_rules/read(builder, plan, "vertices"), fn(input_step, vertex)
+    let step: map = input_step
+    let id: map = native_rules/read(step, vertex, "id")
+    let [rows: map, found: map] = native_gen/bind(step, "rows", native_rules/rows_lookup(step, evaluation, id))
+    let checked: map = native_rules/check(found, native_gen/negate(native_kernel/absent(rows)), "unknown")
+    let generated_result: map = native_kernel/store_field(checked, rows, "component", native_rules/read(checked, vertex, "component"))
+    return generated_result
+  end)
+  builder = native_rules/each(builder, "vertex", native_rules/read(builder, plan, "vertices"), fn(input_step, vertex)
+    let step: map = input_step
+    let generated_result: map = native_rules/each(step, "entry", native_rules/read(step, vertex, "rules"), fn(rule_step, entry) => native_rules/status_call(rule_step, "rule_lower", [native_roots/worker(rule_step), evaluation, native_rules/read(rule_step, entry, "rule"), native_rules/ref(rule_step, "budget")]))
+    return generated_result
+  end)
+  builder = native_rules/each(builder, "component", native_rules/read(builder, plan, "components"), fn(input_step, component)
+    let step: map = input_step
+    let [incremental: map, with_incremental: map] = native_gen/bind(step, "incremental", native_rules/ref(step, "false"))
+    let [changed: map, ready: map] = native_gen/bind(with_incremental, "changed", native_rules/ref(with_incremental, "false"))
+    let generated_result: map = native_gen/while_loop(ready, native_rules/ref(ready, "true"), fn(round)
+      let evaluated: map = native_rules/status_call(round, "rule_round", [native_roots/worker(round), evaluation, component, incremental, native_rules/ref(round, "budget")])
+      evaluated = native_rules/status_call(evaluated, "rule_advance", [native_roots/worker(evaluated), evaluation, component, native_gen/address(changed), native_rules/ref(evaluated, "budget")])
+      evaluated = native_gen/unless(evaluated, changed, fn(done) => native_gen/break_loop(done))
+      evaluated = native_gen/unless(evaluated, native_rules/read(evaluated, component, "recursive"), fn(done) => native_gen/break_loop(done))
+      let generated_result: map = native_gen/assign(evaluated, incremental, native_rules/ref(evaluated, "true"))
+      return generated_result
+    end)
+    return generated_result
+  end)
+  // The public result keeps rows only. Binding plans are private scratch state.
+  builder = native_kernel/store_field(builder, evaluation, "executables", native_gen/zero(native_kernel/pointer("RuleExecutableIndex")))
+  builder = native_rules/result(builder, native_rules/ref(builder, "kernel_ok"), {"evaluation" -> evaluation})
+  let generated_result: map = native_gen/finish(module, builder)
+  return generated_result
+end
+verb native_rules/result_rows_body(module: map) -> map
+  let builder: map = native_rules/context(module, "rule_rows")
+  builder = native_rules/local_budget(builder, native_rules/ref(builder, "limit"))
+  builder = native_rules/check(builder, native_gen/negate(native_kernel/absent(native_rules/ref(builder, "evaluation"))), "schema")
+  let [source: map, ready: map] = native_roots/retain(builder, "source", native_rules/rows_lookup(builder, native_rules/ref(builder, "evaluation"), native_rules/ref(builder, "id")))
+  builder = native_gen/when(ready, native_kernel/absent(source), fn(stored)
+    let result: map = native_rules/each(stored, "relation", native_rules/read(stored, native_rules/ref(stored, "evaluation"), "catalog"), fn(step, relation)
+      let result: map = native_gen/when(step, native_gen/equal(native_rules/read(step, relation, "id"), native_rules/ref(step, "id")), fn(found)
+        let [rows: map, allocated: map] = native_rules/allocate(found, "RuleRows", {"id" -> native_rules/ref(found, "id"), "arity" -> native_rules/read(found, relation, "arity"), "all" -> native_gen/call(found, "kernel_index", [relation, native_rules/ref(found, "zero")])})
+        let linked: map = native_roots/store(allocated, source, rows)
+        let result: map = native_gen/break_loop(linked)
+        return result
+      end)
+      return result
+    end)
+    return result
+  end)
+  builder = native_rules/check(builder, native_gen/negate(native_kernel/absent(source)), "unknown")
+  let [tree: map, with_tree: map] = native_roots/retain(builder, "tree", native_rules/read(builder, source, "all"))
+  builder = native_gen/when(with_tree, native_rules/ref(with_tree, "derived"), fn(derived) => native_roots/store(derived, tree, native_rules/read(derived, source, "derived")))
+  let [empty: map, allocated: map] = native_rules/empty_binding(builder, native_rules/ref(builder, "zero"))
+  let [rows: map, rooted: map] = native_roots/retain(allocated, "rows", empty)
+  builder = native_rules/tree_walk(rooted, tree, fn(input_step, row)
+    let step: map = input_step
+    let [appended: map, ready: map] = native_gen/checked_bind(step, "appended", native_gen/call(step, "kernel_query_append", [native_roots/worker(step), rows, row]), "ok", fn(failed) => native_rules/error(failed, "oom"))
+    let generated_result: map = native_roots/store(ready, rows, native_gen/field(ready, appended, "value"))
+    return generated_result
+  end)
+  builder = native_roots/return_value(builder, native_gen/record(builder, [:Record, "KernelQueryResult"], {"status" -> native_rules/ref(builder, "kernel_ok"), "arity" -> native_rules/read(builder, source, "arity"), "rows" -> rows}))
+  let generated_result: map = native_gen/finish(module, builder)
+  return generated_result
+end
+verb native_rules/evaluation_program(input: map) -> map
+  let module: map = native_rules/evaluation_declarations(input)
+  module = native_rules/lower_terms_body(module)
+  module = native_rules/lower_body(module)
+  module = native_rules/match_body(module)
+  module = native_rules/apply_atom_body(module)
+  module = native_rules/emit_body(module)
+  module = native_rules/run_rule_body(module)
+  module = native_rules/round_body(module)
+  module = native_rules/advance_body(module)
+  module = native_rules/evaluate_body(module)
+  module = native_rules/result_rows_body(module)
+  return module
+end

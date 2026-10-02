@@ -2057,6 +2057,10 @@ fn native_relation_kernel_executes_on_both_mica_tiers() {
             include_str!("../../../apps/native/query/sources.mica"),
             include_str!("../../../apps/native/query/probes.mica"),
             include_str!("../../../apps/native/query/program.mica"),
+            include_str!("../../../apps/native/rules/execution_builders.mica"),
+            include_str!("../../../apps/native/rules/lower.mica"),
+            include_str!("../../../apps/native/rules/bindings.mica"),
+            include_str!("../../../apps/native/rules/evaluate.mica"),
         ] {
             runner.run_filein(source).unwrap_or_else(|error| {
                 panic!("{}", runner.render_source_task_error(&error));

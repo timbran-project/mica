@@ -77,7 +77,8 @@ fn run() -> Result<()> {
     let mut runner = SourceRunner::new_empty()
         .with_interpreter_only(true)
         .with_task_limits(TaskLimits {
-            instruction_budget: 3_000_000_000,
+            // Kernel generation includes rule evaluation and backend IR export.
+            instruction_budget: 6_000_000_000,
             max_call_depth: 256,
             ..TaskLimits::default()
         });
@@ -152,6 +153,10 @@ fn run() -> Result<()> {
         "query/sources",
         "query/probes",
         "query/program",
+        "rules/execution_builders",
+        "rules/lower",
+        "rules/bindings",
+        "rules/evaluate",
         "gccjit/data",
         "gccjit/bindings",
         "gccjit/program",

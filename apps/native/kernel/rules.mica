@@ -19,7 +19,7 @@ verb native_kernel/rule_result(builder: map, status: map, rule: map, ?extra: map
 end
 
 verb native_kernel/rule_error(builder: map, status: string) -> map
-  if builder[:result] == [:Record, "KernelRulePlanResult"]
+  if native/contains(native_rules/result_types(), builder[:result])
     let result: map = native_rules/fail(builder, native_gen/ref(builder, status))
     return result
   end

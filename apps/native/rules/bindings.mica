@@ -1,0 +1,141 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+verb native_rules/match_body(module: map) -> map
+  let builder: map = native_rules/context(module, "rule_match")
+  let input: map = native_rules/ref(builder, "input")
+  let [blank: map, allocated: map] = native_rules/empty_binding(builder, native_query/width(builder, input))
+  let [binding: map, ready: map] = native_roots/retain(allocated, "binding", blank)
+  builder = native_gen/for_range(ready, "slot", native_rules/ref(ready, "zero"), native_query/width(ready, input), fn(copy, slot) => native_rules/row_store(copy, binding, slot, native_query/cell(copy, input, slot)))
+  let [position: map, with_position: map] = native_gen/bind(builder, "position", native_rules/ref(builder, "zero"))
+  builder = native_rules/each(with_position, "term", native_rules/ref(with_position, "terms"), fn(input_step, term)
+    let step: map = input_step
+    let actual: map = native_query/cell(step, native_rules/ref(step, "row"), position)
+    let [expected: map, resolved: map] = native_rules/term_value(step, term, binding)
+    step = native_gen/unless(resolved, native_gen/equal(native_rules/read(resolved, term, "kind"), native_rules/ref(resolved, "rule_hole")), fn(constrained)
+      let generated_result: map = native_gen/branch(constrained, native_kernel/absent(expected),
+        fn(unbound) => native_rules/row_store(unbound, binding, native_rules/read(unbound, term, "id"), actual),
+        fn(bound)
+          let [comparison: map, checked: map] = native_gen/checked_bind(bound, "comparison", native_gen/call(bound, "value_compare", [expected, actual]), "ok", fn(failed) => native_rules/error(failed, "schema"))
+          let generated_result: map = native_gen/unless(checked, native_kernel/absent(native_gen/field(checked, comparison, "number")), fn(mismatch) => native_rules/result(mismatch, native_rules/ref(mismatch, "kernel_ok"), {}))
+          return generated_result
+        end)
+      return generated_result
+    end)
+    let generated_result: map = native_gen/assign(step, position, native_gen/add(position, native_rules/ref(step, "one")))
+    return generated_result
+  end)
+  builder = native_rules/result(builder, native_rules/ref(builder, "kernel_ok"), {"matched" -> native_rules/ref(builder, "true"), "binding" -> binding})
+  let generated_result: map = native_gen/finish(module, builder)
+  return generated_result
+end
+
+// Bind the natural index prefix before probing. Residual constants and repeated
+// variables are checked by rule_match, with canonical (not numeric) equality.
+verb native_rules/bind_atom(builder: map, atom: map, source: map, tree: map, binding: map, output: map) -> map
+  let [blank: map, allocated: map] = native_rules/empty_binding(builder, native_rules/read(builder, source, "arity"))
+  let [pattern: map, rooted: map] = native_roots/retain(allocated, "pattern", blank)
+  let [prefix: map, with_prefix: map] = native_gen/bind(rooted, "prefix", native_rules/ref(rooted, "zero"))
+  let [open: map, with_open: map] = native_gen/bind(with_prefix, "prefix_open", native_rules/ref(with_prefix, "true"))
+  let [position: map, with_position: map] = native_gen/bind(with_open, "position", native_rules/ref(with_open, "zero"))
+  let ready: map = native_rules/each(with_position, "term", native_rules/read(with_position, atom, "terms"), fn(input_step, term)
+    let step: map = input_step
+    let [value: map, resolved: map] = native_rules/term_value(step, term, binding)
+    step = native_rules/row_store(resolved, pattern, position, value)
+    step = native_gen/when(step, open, fn(prefix_step)
+      let generated_result: map = native_gen/branch(prefix_step, native_kernel/absent(value), fn(end_prefix) => native_gen/assign(end_prefix, open, native_rules/ref(end_prefix, "false")),
+        fn(bound) => native_gen/assign(bound, prefix, native_gen/bit_or(prefix, native_gen/shift_left(native_rules/ref(bound, "one"), position))))
+      return generated_result
+    end)
+    let generated_result: map = native_gen/assign(step, position, native_gen/add(position, native_rules/ref(step, "one")))
+    return generated_result
+  end)
+  let [matched: map, with_matched: map] = native_gen/bind(ready, "matched", native_rules/ref(ready, "false"))
+  ready = native_rules/probe_tree(with_matched, tree, pattern, prefix, fn(input_step, row)
+    let step: map = input_step
+    let [result: map, checked: map] = native_gen/bind(step, "match", native_gen/call(step, "kernel_rule_match", [native_roots/worker(step), native_rules/read(step, atom, "terms"), binding, row, native_rules/ref(step, "budget")]))
+    checked = native_gen/unless(checked, native_kernel/absent(native_gen/field(checked, result, "status")), fn(failed) => native_rules/fail(failed, native_gen/field(failed, result, "status")))
+    let generated_result: map = native_gen/when(checked, native_gen/field(checked, result, "matched"), fn(found)
+      let marked: map = native_gen/assign(found, matched, native_rules/ref(found, "true"))
+      marked = native_gen/when(marked, native_rules/read(marked, atom, "negative"), fn(done) => native_gen/break_loop(done))
+      let generated_result: map = native_rules/offer_root(marked, output, native_gen/field(marked, result, "binding"))
+      return generated_result
+    end)
+    return generated_result
+  end)
+  ready = native_gen/when(ready, native_rules/read(ready, atom, "negative"), fn(negative) => native_gen/unless(negative, matched, fn(absent) => native_rules/offer_root(absent, output, binding)))
+  let generated_result: map = native_rules/release_root(ready, pattern)
+  return generated_result
+end
+verb native_rules/apply_atom_body(module: map) -> map
+  let builder: map = native_rules/context(module, "rule_apply_atom")
+  let atom: map = native_rules/ref(builder, "atom")
+  let [source: map, ready: map] = native_roots/retain(builder, "source", native_rules/rows_lookup(builder, native_rules/ref(builder, "evaluation"), native_rules/read(builder, atom, "relation")))
+  let [tree: map, with_tree: map] = native_roots/retain(ready, "source_tree", native_rules/read(ready, source, "all"))
+  builder = native_gen/when(with_tree, native_rules/ref(with_tree, "delta"), fn(delta) => native_roots/store(delta, tree, native_rules/read(delta, source, "delta")))
+  let [output: map, with_output: map] = native_roots/retain(builder, "output", native_gen/zero(native_kernel/pointer("Node")))
+  builder = native_rules/tree_walk(with_output, native_rules/ref(with_output, "input"), fn(step, binding) => native_rules/bind_atom(step, atom, source, tree, binding, output))
+  builder = native_rules/result(builder, native_rules/ref(builder, "kernel_ok"), {"tree" -> output})
+  let generated_result: map = native_gen/finish(module, builder)
+  return generated_result
+end
+verb native_rules/emit_body(module: map) -> map
+  let builder: map = native_rules/context(module, "rule_emit")
+  let executable: map = native_rules/ref(builder, "executable")
+  let binding: map = native_rules/ref(builder, "binding")
+  builder = native_rules/each(builder, "guard", native_rules/read(builder, executable, "guards"), fn(input_step, guard)
+    let step: map = input_step
+    let [left: map, with_left: map] = native_rules/term_value(step, native_rules/read(step, guard, "left"), binding)
+    let [right: map, with_right: map] = native_rules/term_value(with_left, native_rules/read(with_left, guard, "right"), binding)
+    let [comparison: map, checked: map] = native_gen/checked_bind(with_right, "comparison", native_gen/call(with_right, "value_language_compare", [left, right]), "ok", fn(failed) => native_rules/error(failed, "schema"))
+    let order: map = native_gen/field(checked, comparison, "number")
+    let equal: map = native_kernel/absent(order)
+    let less: map = native_gen/less(order, native_rules/ref(checked, "int_zero"))
+    let greater: map = native_gen/less(native_rules/ref(checked, "int_zero"), order)
+    let conditions: list = [equal, native_gen/negate(equal), less, native_gen/negate(greater), greater, native_gen/negate(less)]
+    let cases: list = []
+    for index in 0..5
+      cases = [@cases, [native_rules/ref(checked, ["rule_guard_eq", "rule_guard_ne", "rule_guard_lt", "rule_guard_le", "rule_guard_gt", "rule_guard_ge"][index]), fn(arm) => native_gen/unless(arm, conditions[index], fn(filtered) => native_kernel/status(filtered, "kernel_ok"))]]
+    end
+    let generated_result: map = native_gen/switch(checked, native_rules/read(checked, guard, "operation"), cases, fn(invalid) => native_rules/error(invalid, "schema"))
+    return generated_result
+  end)
+  let head: map = native_rules/read(builder, executable, "head")
+  let [blank: map, allocated: map] = native_rules/empty_binding(builder, native_rules/read(builder, head, "arity"))
+  let [row: map, with_row: map] = native_roots/retain(allocated, "row", blank)
+  let [position: map, ready: map] = native_gen/bind(with_row, "position", native_rules/ref(with_row, "zero"))
+  builder = native_rules/each(ready, "term", native_rules/read(ready, executable, "terms"), fn(input_step, term)
+    let step: map = input_step
+    let [value: map, resolved: map] = native_rules/term_value(step, term, binding)
+    step = native_rules/row_store(resolved, row, position, value)
+    let generated_result: map = native_gen/assign(step, position, native_gen/add(position, native_rules/ref(step, "one")))
+    return generated_result
+  end)
+  builder = native_rules/offer_field(builder, head, "derived", row, false)
+  let present: map = native_gen/call(builder, "kernel_find", [native_rules/read(builder, head, "all"), row, native_rules/ref(builder, "zero"), native_rules/ref(builder, "false")])
+  builder = native_gen/when(builder, native_kernel/absent(present), fn(fresh) => native_rules/offer_field(fresh, head, "pending", row, false))
+  builder = native_kernel/status(builder, "kernel_ok")
+  let generated_result: map = native_gen/finish(module, builder)
+  return generated_result
+end
+verb native_rules/run_rule_body(module: map) -> map
+  let builder: map = native_rules/context(module, "rule_run")
+  let executable: map = native_rules/ref(builder, "executable")
+  let [blank: map, allocated: map] = native_rules/empty_binding(builder, native_rules/read(builder, executable, "width"))
+  let [bindings: map, with_bindings: map] = native_roots/retain(allocated, "bindings", native_gen/zero(native_kernel/pointer("Node")))
+  builder = native_rules/offer_root(with_bindings, bindings, blank)
+  for field in ["positive", "negative"]
+    builder = native_rules/each(builder, "atom", native_rules/read(builder, executable, field), fn(input_step, atom)
+      let step: map = input_step
+      let [tree: map, evaluated: map] = native_rules/checked_call(step, "rule_apply_atom", [native_roots/worker(step), native_rules/ref(step, "evaluation"), atom, bindings,
+        native_gen/equal(atom, native_rules/ref(step, "delta_atom")), native_rules/ref(step, "budget")], "tree")
+      let updated: map = native_roots/store(evaluated, bindings, tree)
+      let generated_result: map = native_gen/when(updated, native_kernel/absent(bindings), fn(empty) => native_kernel/status(empty, "kernel_ok"))
+      return generated_result
+    end)
+  end
+  builder = native_rules/tree_walk(builder, bindings, fn(step, binding) => native_rules/status_call(step, "rule_emit", [native_roots/worker(step), executable, binding, native_rules/ref(step, "budget")]))
+  builder = native_kernel/status(builder, "kernel_ok")
+  let generated_result: map = native_gen/finish(module, builder)
+  return generated_result
+end
