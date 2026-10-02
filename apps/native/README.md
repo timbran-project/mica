@@ -82,6 +82,10 @@ After a conflict, the caller must begin a fresh transaction and repeat its work.
 
 Commit preparation runs outside the publication mutex against a retained snapshot.
 It validates the transaction, builds persistent index paths, and calculates net deltas.
+Fact validation, write replay, catalogue lookup, and prefix copying share the commit budget.
+These traversals poll for collection and cancellation while retaining their private state through managed roots.
+Catalogue prefix copying uses a loop, so catalogue length does not determine native stack depth.
+A failed preparation releases its candidate and delta roots and preserves the specific failure status.
 Publication copies the candidate graph into mature storage and reuses immutable published subgraphs.
 The heap mutex protects this copy and its allocation metadata. Other workers can continue execution.
 Allocation failure preserves the source graph and the previous published root.

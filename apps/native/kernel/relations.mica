@@ -199,6 +199,37 @@ verb native_kernel/relation_scan_body(module: map) -> map
   return result
 end
 
+// Copy only the prefix before the replacement. The private prefix is mutable
+// until return; the untouched suffix remains shared with the source snapshot.
+verb native_kernel/catalog_put_body(module: map) -> map
+  let builder: map = native_rules/context(module, "catalog_put")
+  let entry: map = native_roots/ref(builder, "entry")
+  let [cursor: map, with_cursor: map] = native_roots/retain(builder, "cursor", native_roots/ref(builder, "head"))
+  let [head: map, with_head: map] = native_roots/retain(with_cursor, "prefix", native_gen/zero(native_kernel/pointer("Relation")))
+  let [tail: map, ready: map] = native_roots/retain(with_head, "tail", native_gen/zero(native_kernel/pointer("Relation")))
+  builder = native_gen/while_loop(ready, native_gen/negate(native_kernel/absent(cursor)), fn(step)
+    let checked: map = native_rules/tick(step)
+    checked = native_gen/unless(checked, native_gen/less(native_kernel/load_field(checked, cursor, "id"), native_kernel/load_field(checked, entry, "id")), fn(done) => native_gen/break_loop(done))
+    let [copy: map, copied: map] = native_gen/bind(checked, "copy", native_kernel/replace_record(checked, native_roots/worker(checked), "Relation", cursor, {"next" -> native_gen/zero(native_kernel/pointer("Relation"))}))
+    checked = native_rules/check(copied, native_gen/negate(native_kernel/absent(copy)), "oom")
+    checked = native_gen/branch(checked, native_kernel/absent(head),
+      fn(first) => native_roots/store(first, head, copy),
+      fn(next) => native_kernel/store_field(next, tail, "next", copy))
+    checked = native_roots/store(checked, tail, copy)
+    return native_roots/store(checked, cursor, native_kernel/load_field(checked, cursor, "next"))
+  end)
+  builder = native_gen/unless(builder, native_kernel/absent(cursor), fn(present)
+    return native_gen/when(present, native_gen/equal(native_kernel/load_field(present, cursor, "id"), native_kernel/load_field(present, entry, "id")), fn(replaced) => native_roots/store(replaced, cursor, native_kernel/load_field(replaced, cursor, "next")))
+  end)
+  builder = native_rules/tick(builder)
+  let [inserted: map, allocated: map] = native_gen/bind(builder, "inserted", native_kernel/replace_record(builder, native_roots/worker(builder), "Relation", entry, {"next" -> cursor}))
+  builder = native_rules/check(allocated, native_gen/negate(native_kernel/absent(inserted)), "oom")
+  builder = native_gen/branch(builder, native_kernel/absent(head), fn(first) => native_roots/store(first, head, inserted), fn(last) => native_kernel/store_field(last, tail, "next", inserted))
+  builder = native_rules/result(builder, native_roots/ref(builder, "kernel_ok"), {"relation" -> head})
+  let result: map = native_gen/finish(module, builder)
+  return result
+end
+
 verb native_kernel/relations(input: map) -> map
   let context: map = input
   let relation: list = native_kernel/pointer("Relation")
@@ -210,14 +241,14 @@ verb native_kernel/relations(input: map) -> map
   for spec in [
     ["relation", relation, [["head", relation, :Gc], ["id", :U64, :Value]]],
     ["named", relation, [["head", relation, :Gc], ["name", :U64, :Value]]],
-    ["catalog_put", relation, [worker, ["head", relation, :Gc], ["entry", relation, :Gc]]],
+    ["catalog_put", [:Record, "KernelRelationResult"], [worker, ["head", relation, :Gc], ["entry", relation, :Gc], ["budget", native_kernel/pointer("Budget"), :Borrow]]],
     ["index", node, [["relation", relation, :Gc], ["mask", :U64, :Value]]],
     ["index_update", index, [worker, ["index", index, :Gc], ["row", word, :Gc], ["asserted", :Bool, :Value]]],
     ["apply", relation, [worker, ["relation", relation, :Gc], ["row", word, :Gc], ["asserted", :Bool, :Value]]],
     ["scan_tree", :U64, [worker, ["node", node, :Gc], ["scan", scan, :Gc], ["budget", native_kernel/pointer("Budget"), :Borrow]]],
     ["relation_scan", [:Record, "KernelScanResult"], [worker, ["relation", relation, :Gc], ["pattern", word, :Gc],
       ["mask", :U64, :Value], ["after", word, :Gc], ["output", native_memory/pointer(word), :Borrow], ["capacity", :U64, :Value], ["budget", native_kernel/pointer("Budget"), :Borrow]]]]
-    context = native_kernel/declare(context, spec[0], spec[1], spec[2], native/contains(["scan_tree", "relation_scan"], spec[0]))
+    context = native_kernel/declare(context, spec[0], spec[1], spec[2], native/contains(["scan_tree", "relation_scan", "catalog_put"], spec[0]))
   end
   for field in ["id", "name"]
     let name: string = "relation"
@@ -229,16 +260,7 @@ verb native_kernel/relations(input: map) -> map
         native/when_statement(native_kernel/binary(:Equal, native_kernel/read("Relation", "cursor", field), field), [native/return_value("cursor")])],
         [native/return_value("cursor")]), native/return_value(native_kernel/null("Relation"))])
   end
-  context = native_kernel/define(context, "catalog_put", [
-    native/let_statement("tail", relation, "head"),
-    native/unless_statement(native_kernel/is_null("Relation", "head"), [
-      native/when_statement(native_kernel/binary(:Less, native_kernel/read("Relation", "head", "id"), native_kernel/read("Relation", "entry", "id")), [
-        native/let_call("suffix", relation, "kernel_catalog_put", ["worker", native_kernel/read("Relation", "head", "next"), "entry"]),
-        native/when_statement(native_kernel/is_null("Relation", "suffix"), [native/return_value(native_kernel/null("Relation"))]),
-        native/return_value(native_kernel/copy_record("Relation", "head", {"next" -> "suffix"}))]),
-      native/when_statement(native_kernel/binary(:Equal, native_kernel/read("Relation", "head", "id"), native_kernel/read("Relation", "entry", "id")), [
-        native/set_statement("tail", native_kernel/read("Relation", "head", "next"))])]),
-    native/return_value(native_kernel/copy_record("Relation", "entry", {"next" -> "tail"}))])
+  context = native_kernel/catalog_put_body(context)
   context = native_kernel/define(context, "index", [
     native/when_statement(native_kernel/is_null("Relation", "relation"), [native/return_value(native_kernel/null("Node"))]),
     @native_kernel/walk("Index", "cursor", native_kernel/read("Relation", "relation", "indexes"), [

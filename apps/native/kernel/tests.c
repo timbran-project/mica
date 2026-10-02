@@ -2370,6 +2370,157 @@ static void scan_collection(void) {
     destroy(&f);
 }
 
+static void preparation_controls(void) {
+    struct fixture f;
+    init(&f);
+    declare(&f, 1, SET);
+    struct mica_KernelTransaction tx, observer, concurrent;
+    begin(&f, &observer);
+    begin(&f, &tx);
+    for (int64_t i = 0; i < 512; ++i) assert(write_pair(&tx, 1, i, i % 8, true) == OK);
+    assert(mica_kernel_set_limits(&tx, 32, UINT64_MAX, UINT64_MAX) == OK);
+    struct mica_MemoryRoot *parent = f.worker.f_roots;
+    assert(mica_kernel_commit(&tx) == LIMIT);
+    assert(f.worker.f_roots == parent);
+    assert(!mica_kernel_work(&tx)->f_candidate && !mica_kernel_work(&tx)->f_deltas);
+    assert(mica_kernel_work(&tx)->f_status == LIMIT && !mica_kernel_work(&tx)->f_done);
+    assert(count(&observer, 1) == 0);
+    assert(mica_kernel_set_limits(&tx, UINT64_MAX, UINT64_MAX, UINT64_MAX) == OK);
+    assert(mica_kernel_commit(&tx) == OK && mica_kernel_end(&tx));
+    assert(mica_kernel_end(&observer));
+    begin(&f, &tx);
+    for (int64_t i = 512; i < 1024; ++i) assert(write_pair(&tx, 1, i, i % 8, true) == OK);
+    begin(&f, &concurrent);
+    assert(write_pair(&concurrent, 1, 2000, 1, true) == OK);
+    assert(mica_kernel_commit(&concurrent) == OK && mica_kernel_end(&concurrent));
+    // Validation now traverses the changed input tree before replay starts.
+    assert(mica_kernel_set_limits(&tx, 16, UINT64_MAX, UINT64_MAX) == OK);
+    assert(mica_kernel_commit(&tx) == LIMIT);
+    assert(mica_kernel_work(&tx)->f_status == LIMIT);
+    assert(!mica_kernel_work(&tx)->f_candidate && !mica_kernel_work(&tx)->f_deltas);
+    assert(mica_kernel_set_limits(&tx, UINT64_MAX, UINT64_MAX, UINT64_MAX) == OK);
+    assert(mica_kernel_commit(&tx) == OK && mica_kernel_end(&tx));
+    begin(&f, &tx);
+    assert(count(&tx, 1) == 1025);
+    assert(mica_kernel_end(&tx));
+    destroy(&f);
+}
+
+static void preparation_collection(void) {
+    struct fixture f;
+    init(&f);
+    struct mica_KernelTransaction tx;
+    begin(&f, &tx);
+    for (unsigned id = 1; id <= 64; ++id) {
+        assert(mica_kernel_declare(&tx, id, id, 2, SET, 0, 2) == OK);
+        assert(write_pair(&tx, id, id, id, true) == OK);
+    }
+    assert(mica_kernel_commit(&tx) == OK && mica_kernel_end(&tx));
+    begin(&f, &tx);
+    for (int64_t i = 0; i < 512; ++i) assert(write_pair(&tx, 64, i, i + 1, true) == OK);
+    struct collection_job job = {.heap = &f.heap};
+    pthread_t collector;
+    assert(!pthread_create(&collector, NULL, collect_repeatedly, &job));
+    while (!atomic_load(&job.ready)) sched_yield();
+    for (;;) {
+        mica_foreign_memory_lock(f.heap.f_mutex);
+        bool requested = f.heap.f_collecting;
+        mica_foreign_memory_unlock(f.heap.f_mutex);
+        if (requested) break;
+        sched_yield();
+    }
+    struct mica_MemoryRoot *parent = f.worker.f_roots;
+    assert(mica_kernel_commit(&tx) == OK);
+    assert(f.worker.f_roots == parent);
+    assert(mica_kernel_end(&tx));
+    assert(mica_memory_leave(&f.worker));
+    assert(!pthread_join(collector, NULL));
+    assert(mica_memory_enter(&f.worker));
+    begin(&f, &tx);
+    assert(count(&tx, 64) == 513 && count(&tx, 63) == 1);
+    assert(mica_kernel_end(&tx));
+    destroy(&f);
+}
+
+static void preparation_cancellation(void) {
+#ifdef MICA_MEMORY_TEST_ALLOCATOR
+    struct fixture f;
+    init(&f);
+    declare(&f, 1, SET);
+    struct mica_KernelTransaction tx;
+    begin(&f, &tx);
+    for (int64_t i = 0; i < 2048; ++i) assert(write_pair(&tx, 1, i, i % 8, true) == OK);
+    // Complete any pending promotion before arming the allocation trigger.
+    assert(mica_memory_safepoint(&f.worker, true));
+    struct mica_KernelBudget budget = operation_budget(&tx);
+    struct mica_MemoryRoot *parent = f.worker.f_roots;
+    atomic_store(&allocation_transaction, &tx);
+    atomic_store(&cancellation_allocation, 3);
+    assert(mica_kernel_prepare(&tx, &budget) == CANCELLED);
+    assert(atomic_load(&cancellation_allocation) == 0);
+    atomic_store(&allocation_transaction, NULL);
+    atomic_store(&cancellation_allocation, -1);
+    assert(f.worker.f_roots == parent);
+    assert(mica_kernel_work(&tx)->f_status == CANCELLED);
+    assert(!mica_kernel_work(&tx)->f_candidate && !mica_kernel_work(&tx)->f_deltas);
+    assert(mica_kernel_commit(&tx) == CANCELLED && mica_kernel_end(&tx));
+    begin(&f, &tx);
+    assert(count(&tx, 1) == 0);
+    assert(mica_kernel_end(&tx));
+    destroy(&f);
+#endif
+}
+
+static void fixpoint_cancellation(void) {
+#ifdef MICA_MEMORY_TEST_ALLOCATOR
+    struct fixture f;
+    init(&f);
+    struct mica_KernelTransaction tx;
+    begin(&f, &tx);
+    for (unsigned id = 1; id <= 2; ++id) assert(mica_kernel_declare(&tx, id, id, 2, SET, 0, 0) == OK);
+    assert(install_edge(&tx, 1, 2, 1, false) == OK);
+    assert(add_rule(&tx, 2, 2, 2, true) == OK);
+    assert(mica_kernel_commit(&tx) == OK && mica_kernel_end(&tx));
+    begin(&f, &tx);
+    for (int64_t i = 0; i < 512; ++i) assert(write_pair(&tx, 1, i, i + 1, true) == OK);
+    struct mica_KernelBudget budget = operation_budget(&tx);
+    struct mica_KernelWork *work = mica_kernel_work(&tx);
+    struct mica_KernelRuleEvaluationResult captured = mica_kernel_rule_capture(&f.worker,
+        work->f_base->f_relations, work->f_changes, work->f_rule_plan, &budget);
+    assert(captured.f_status == OK);
+    struct mica_MemoryRoot evaluation = {.f_pointer = (uint8_t *)captured.f_evaluation};
+    assert(mica_memory_root_push(&f.worker, &evaluation));
+    for (unsigned id = 1; id <= 2; ++id) {
+        struct mica_KernelRuleResult rule = mica_kernel_rule(&tx, id);
+        assert(rule.f_status == OK);
+        assert(mica_kernel_rule_lower(&f.worker, (struct mica_KernelRuleEvaluation *)evaluation.f_pointer, rule.f_rule, &budget) == OK);
+    }
+    struct mica_KernelRuleComponent *component = mica_kernel_work(&tx)->f_rule_plan->f_components;
+    while (component && !component->f_recursive) component = component->f_next;
+    assert(component);
+    struct mica_MemoryRoot round = {.f_pointer = (uint8_t *)component};
+    assert(mica_memory_root_push(&f.worker, &round));
+    assert(mica_memory_safepoint(&f.worker, true));
+    atomic_store(&allocation_transaction, &tx);
+    uint64_t row_allowance = budget.f_rows;
+    atomic_store(&cancellation_allocation, 2);
+    assert(mica_kernel_rule_round(&f.worker, (struct mica_KernelRuleEvaluation *)evaluation.f_pointer,
+        (struct mica_KernelRuleComponent *)round.f_pointer, false, false, &budget) == CANCELLED);
+    assert(atomic_load(&cancellation_allocation) == 0);
+    atomic_store(&allocation_transaction, NULL);
+    atomic_store(&cancellation_allocation, -1);
+    assert(f.worker.f_roots == &round && budget.f_status == CANCELLED);
+    assert(budget.f_rows < row_allowance);
+    assert(mica_memory_root_pop(&f.worker, &round));
+    assert(mica_memory_root_pop(&f.worker, &evaluation));
+    assert(mica_kernel_commit(&tx) == CANCELLED && mica_kernel_end(&tx));
+    begin(&f, &tx);
+    assert(count(&tx, 1) == 0 && count(&tx, 2) == 0);
+    assert(mica_kernel_end(&tx));
+    destroy(&f);
+#endif
+}
+
 int main(int argc, char **argv) {
     if (argc == 2 && !strcmp(argv[1], "trace")) return trace();
     if (argc == 5 && !strcmp(argv[1], "bench")) return benchmark(argv[2], (unsigned)strtoul(argv[3], NULL, 10), (unsigned)strtoul(argv[4], NULL, 10));
@@ -2385,6 +2536,10 @@ int main(int argc, char **argv) {
     rule_maintenance_catalogue();
     rule_maintenance_conflicts();
     rule_execution_controls();
+    preparation_controls();
+    preparation_collection();
+    preparation_cancellation();
+    fixpoint_cancellation();
     query_execution_controls();
     query_mid_join_cancellation();
     scan_collection();

@@ -44,14 +44,6 @@ verb native_kernel/commit_oom(builder: map, work: map) -> map
   return result
 end
 
-verb native_kernel/commit_collision(builder: map, work: map, id: map) -> map
-  let ready: map = native_kernel/store_field(builder, work, "status", native_gen/ref(builder, "kernel_conflict"))
-  ready = native_kernel/store_field(ready, work, "conflict_relation", id)
-  ready = native_kernel/store_field(ready, work, "deltas", native_gen/zero(native_kernel/pointer("Delta")))
-  let result: map = native_kernel/status(ready, "kernel_conflict")
-  return result
-end
-
 verb native_kernel/commit_unchanged(builder: map, kernel: map, work: map, current: map) -> map
   let signal: map = native_kernel/load_field(builder, native_gen/ref(builder, "transaction"), "signal")
   let claimed: map = native_gen/call(builder, "memory_atomic_compare_exchange", [signal, native_gen/ref(builder, "zero"), native_gen/ref(builder, "two")])
@@ -66,41 +58,68 @@ verb native_kernel/commit_unchanged(builder: map, kernel: map, work: map, curren
   return result
 end
 
-verb native_kernel/commit_new_relation(builder: map, worker: map, work: map, catalog: map, updated: map, id: map, entry: map) -> map
-  let ready: map = native_gen/unless(builder, native_kernel/absent(entry), fn(arm) => native_kernel/commit_collision(arm, work, id))
-  ready = native_gen/unless(ready, native_kernel/absent(native_gen/call(ready, "kernel_named",
-    [catalog, native_kernel/load_field(ready, updated, "name")])), fn(arm) => native_kernel/commit_collision(arm, work, id))
-  let [empty: map, with_empty: map] = native_gen/bind(ready, "empty", native_gen/call(ready, "kernel_empty_indexes",
-    [worker, native_kernel/load_field(ready, updated, "indexes")]))
-  ready = native_gen/when(with_empty, native_kernel/absent(empty), fn(arm) => native_kernel/commit_oom(arm, work))
-  ready = native_gen/assign(ready, entry, native_kernel/replace_record(ready, worker, "Relation", updated,
+verb native_kernel/prepare_relation(builder: map, worker: map, work: map, updated: map, id: map, entry: map) -> map
+  let [empty: map, with_empty: map] = native_gen/bind(builder, "empty", native_gen/call(builder, "kernel_empty_indexes",
+    [worker, native_kernel/load_field(builder, updated, "indexes")]))
+  let ready: map = native_rules/check(with_empty, native_gen/negate(native_kernel/absent(empty)), "oom")
+  ready = native_roots/store(ready, entry, native_kernel/replace_record(ready, worker, "Relation", updated,
     {"next" -> native_gen/zero(native_kernel/pointer("Relation")), "id" -> id, "schema_revision" -> native_gen/add(native_kernel/load_field(ready, native_kernel/load_field(ready, work, "checked"), "version"), native_gen/ref(ready, "one")), "indexes" -> empty}))
-  let result: map = native_gen/when(ready, native_kernel/absent(entry), fn(arm) => native_kernel/commit_oom(arm, work))
+  let result: map = native_rules/check(ready, native_gen/negate(native_kernel/absent(entry)), "oom")
   return result
 end
 
-verb native_kernel/commit_validation_failed(builder: map, work: map) -> map
-  let ready: map = native_kernel/store_field(builder, work, "deltas", native_gen/zero(native_kernel/pointer("Delta")))
-  let result: map = native_kernel/status(ready, "kernel_conflict")
+// Locate the target and validate new names in one interruptible catalogue walk.
+verb native_kernel/prepare_lookup(builder: map, work: map, catalog: map, before: map, updated: map, entry: map) -> map
+  let id: map = native_kernel/load_field(builder, updated, "id")
+  let result: map = native_rules/each(builder, "relation", catalog, fn(step, relation)
+    let ready: map = native_gen/when(step, native_gen/equal(native_kernel/load_field(step, relation, "id"), id), fn(found) => native_roots/store(found, entry, relation))
+    ready = native_gen/when(ready, native_kernel/absent(before), fn(declaration)
+      let checked: map = native_gen/unless(declaration, native_kernel/absent(entry), fn(duplicate)
+        let failed: map = native_kernel/store_field(duplicate, work, "conflict_relation", id)
+        return native_rules/error(failed, "conflict")
+      end)
+      return native_gen/when(checked, native_gen/equal(native_kernel/load_field(checked, relation, "name"), native_kernel/load_field(checked, updated, "name")), fn(duplicate)
+        let failed: map = native_kernel/store_field(duplicate, work, "conflict_relation", id)
+        return native_rules/error(failed, "conflict")
+      end)
+    end)
+    return native_gen/unless(ready, native_kernel/absent(entry), fn(found) => native_gen/break_loop(found))
+  end)
   return result
 end
 
-verb native_kernel/commit_change(builder: map, worker: map, work: map, catalog: map, change: map) -> map
-  let ready: map = native_gen/when(builder, native_kernel/absent(change), fn(arm) => native_gen/break_loop(arm))
-  let [before: map, with_before: map] = native_gen/bind(ready, "before", native_kernel/load_field(ready, change, "before"))
-  let [updated: map, with_after: map] = native_gen/bind(with_before, "after", native_kernel/load_field(with_before, change, "after"))
-  let [id: map, with_id: map] = native_gen/bind(with_after, "id", native_kernel/load_field(with_after, updated, "id"))
-  let [entry: map, with_entry: map] = native_gen/bind(with_id, "entry", native_gen/call(with_id, "kernel_relation", [catalog, id]))
-  ready = native_gen/branch(with_entry, native_kernel/absent(before),
-    fn(arm) => native_kernel/commit_new_relation(arm, worker, work, catalog, updated, id, entry),
-    fn(arm) => native_gen/unless(arm, native_gen/call(arm, "kernel_validate",
-      [work, native_kernel/load_field(arm, change, "writes"), before, entry]),
-      fn(failed) => native_kernel/commit_validation_failed(failed, work)))
-  ready = native_kernel/apply_write_phases(ready, worker, work, entry, native_kernel/load_field(ready, change, "writes"), before,
-    fn(failed) => native_kernel/commit_oom(failed, work))
-  ready = native_gen/assign(ready, catalog, native_gen/call(ready, "kernel_catalog_put", [worker, catalog, entry]))
-  ready = native_gen/when(ready, native_kernel/absent(catalog), fn(arm) => native_kernel/commit_oom(arm, work))
-  let result: map = native_gen/assign(ready, change, native_kernel/load_field(ready, change, "next"))
+verb native_kernel/prepare_change(builder: map, worker: map, work: map, catalog: map, change: map) -> map
+  let before: map = native_kernel/load_field(builder, change, "before")
+  let updated: map = native_kernel/load_field(builder, change, "after")
+  let [entry: map, ready: map] = native_roots/retain(builder, "entry", native_gen/zero(native_kernel/pointer("Relation")))
+  ready = native_kernel/prepare_lookup(ready, work, catalog, before, updated, entry)
+  ready = native_gen/branch(ready, native_kernel/absent(before),
+    fn(declaration) => native_kernel/prepare_relation(declaration, worker, work, updated, native_kernel/load_field(declaration, updated, "id"), entry),
+    fn(existing) => native_rules/status_call(existing, "validate", [worker, work, native_kernel/load_field(existing, change, "writes"), before, entry, native_roots/ref(existing, "budget")]))
+  ready = native_kernel/apply_write_phases(ready, worker, work, entry, native_kernel/load_field(ready, change, "writes"), before)
+  let [updated_catalog: map, replaced: map] = native_rules/checked_call(ready, "catalog_put", [worker, catalog, entry, native_roots/ref(ready, "budget")], "relation")
+  ready = native_roots/store(replaced, catalog, updated_catalog)
+  let result: map = native_rules/release_root(ready, entry)
+  return result
+end
+
+verb native_kernel/prepare_catalog_body(module: map) -> map
+  let builder: map = native_rules/context(module, "prepare_catalog")
+  let work: map = native_roots/ref(builder, "work")
+  let [catalog: map, ready: map] = native_roots/retain(builder, "catalog", native_kernel/load_field(builder, native_roots/ref(builder, "current"), "relations"))
+  builder = native_rules/each(ready, "change", native_kernel/load_field(ready, work, "changes"), fn(step, change)
+    return native_kernel/prepare_change(step, native_roots/worker(step), work, catalog, change)
+  end)
+  builder = native_rules/result(builder, native_roots/ref(builder, "kernel_ok"), {"relation" -> catalog})
+  let result: map = native_gen/finish(module, builder)
+  return result
+end
+
+// Every failed preparation drops all private publication state together.
+verb native_kernel/prepare_failed(builder: map, work: map, status: map) -> map
+  let ready: map = native_kernel/discard_candidate(builder, work)
+  ready = native_kernel/store_field(ready, work, "status", status)
+  let result: map = native_roots/return_value(ready, status)
   return result
 end
 
@@ -124,13 +143,10 @@ verb native_kernel/prepare_body(module: map) -> map
     return native_roots/return_value(ready, status)
   end)
   let [current: map, with_current: map] = native_roots/retain(builder, "current", native_kernel/load_field(builder, work, "checked"))
-  let [change: map, with_change: map] = native_gen/bind(with_current, "change", native_kernel/load_field(with_current, work, "changes"))
-  let [catalog: map, with_catalog: map] = native_gen/bind(with_change, "catalog", native_kernel/load_field(with_change, current, "relations"))
-  builder = native_gen/while_loop(with_catalog, native_gen/ref(with_catalog, "true"),
-    fn(iteration) => native_kernel/commit_change(iteration, worker, work, catalog, change))
-  let [rooted_catalog: map, with_rooted_catalog: map] = native_roots/retain(builder, "catalog", catalog)
-  catalog = rooted_catalog
-  builder = with_rooted_catalog
+  let [prepared: map, with_prepared: map] = native_gen/bind(with_current, "catalog_result", native_gen/call(with_current, "kernel_prepare_catalog", [worker, work, current, native_roots/ref(with_current, "budget")]))
+  builder = native_gen/unless(with_prepared, native_kernel/absent(native_gen/field(with_prepared, prepared, "status")), fn(failed) => native_kernel/prepare_failed(failed, work, native_gen/field(failed, prepared, "status")))
+  let [catalog: map, with_catalog: map] = native_roots/retain(builder, "catalog", native_gen/field(builder, prepared, "relation"))
+  builder = with_catalog
   let [rules_result: map, with_rules: map] = native_gen/bind(builder, "rules_result",
     native_gen/call(builder, "kernel_rules_rebase", [worker, work, catalog, native_gen/ref(builder, "budget")]))
   builder = native_gen/unless(with_rules, native_kernel/absent(native_gen/field(with_rules, rules_result, "status")), fn(failed)
@@ -299,6 +315,7 @@ verb native_kernel/lifecycle(input: map) -> map
     ["begin", :U64, [["kernel", kernel, :Borrow], ["worker", worker, :Borrow], ["transaction", tx, :Borrow]], true],
     ["end", :Bool, [["transaction", tx, :Borrow]], false],
     ["commit", :U64, [["transaction", tx, :Borrow]], true],
+    ["prepare_catalog", [:Record, "KernelRelationResult"], [["worker", worker, :Borrow], ["work", native_kernel/pointer("Work"), :Gc], ["current", native_kernel/pointer("Snapshot"), :Gc], ["budget", native_kernel/pointer("Budget"), :Borrow]], true],
     ["prepare", :U64, [["transaction", tx, :Borrow], ["budget", native_kernel/pointer("Budget"), :Borrow]], true],
     ["try_publish", :Bool, [["transaction", tx, :Borrow]], true],
     ["empty_indexes", index, [["worker", worker, :Borrow], ["index", index, :Gc]], false]]
@@ -358,6 +375,7 @@ verb native_kernel/lifecycle(input: map) -> map
     native_memory/call("memory_atomic_destroy", [native_memory/field(bytes, "transaction", "signal")]),
     native/store_statement("transaction", native/typed_zero([:Record, "KernelTransaction"])), native/return_value("true")])
   context = native_kernel/empty_indexes_body(context)
+  context = native_kernel/prepare_catalog_body(context)
   context = native_kernel/prepare_body(context)
   context = native_kernel/try_publish_body(context)
   context = native_kernel/commit_body(context)
