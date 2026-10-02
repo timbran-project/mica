@@ -38,7 +38,7 @@ end
 
 verb native_query/scan_relation(builder: map, query: map) -> list
   let [relation: map, ready: map] = native_rules/checked_call(builder, "read",
-    [native_roots/ref(builder, "transaction"), native_kernel/load_field(builder, query, "relation")], "relation")
+    [native_roots/ref(builder, "transaction"), native_kernel/load_field(builder, query, "relation"), native_roots/ref(builder, "budget")], "relation")
   ready = native_query/check(ready, native_gen/negate(native_kernel/absent(relation)), "unknown")
   ready = native_kernel/check_tuple(ready, native_kernel/load_field(ready, query, "pattern"), relation,
     fn(failed) => native_query/error(failed, "arity"))
@@ -57,7 +57,7 @@ verb native_query/scan_rows(builder: map, relation: map, pattern: map, mask: map
   let result: map = native_gen/while_loop(ready, native_roots/ref(ready, "true"), fn(step)
     let polled: map = native_query/poll_interval(step, native_gen/load(ticks))
     polled = native_gen/store(polled, ticks, native_gen/add(native_gen/load(ticks), native_roots/ref(polled, "one")))
-    let [node: map, found: map] = native_gen/bind(polled, "candidate", native_gen/call(polled, "kernel_query_seek", [tree, pattern, cursor, ordering, prefix]))
+    let [node: map, found: map] = native_gen/bind(polled, "candidate", native_query/call(polled, "kernel_query_seek", [tree, pattern, cursor, ordering, prefix]))
     found = native_gen/when(found, native_kernel/absent(node), fn(done) => native_gen/break_loop(done))
     let [row: map, with_row: map] = native_gen/bind(found, "row", native_kernel/load_field(found, node, "row"))
     found = native_roots/store(with_row, cursor, row)
@@ -85,7 +85,7 @@ verb native_query/scan_body(module: map, project: bool) -> map
     builder = native_query/check(builder, native_gen/negate(native_gen/less(native_roots/ref(builder, "kernel_64"), output_arity)), "arity")
   else
     builder = native_gen/when(builder, native_kernel/absent(native_kernel/load_field(builder, query, "mask")), fn(unbound)
-      let tree: map = native_gen/call(unbound, "kernel_index", [relation, native_gen/zero(:U64)])
+      let tree: map = native_query/call(unbound, "kernel_index", [relation, native_gen/zero(:U64)])
       return native_query/finish_rows(unbound, tree, arity)
     end)
   end
@@ -105,7 +105,7 @@ verb native_query/scan_body(module: map, project: bool) -> map
 end
 verb native_query/input_body(module: map) -> map
   let builder: map = native_query/context(module, "kernel_query_input_rows")
-  let [view: map, with_view: map] = native_gen/checked_bind(builder, "input", native_gen/call(builder, "value_relation_view", [native_roots/ref(builder, "input")]), "ok",
+  let [view: map, with_view: map] = native_gen/checked_bind(builder, "input", native_query/call(builder, "value_relation_view", [native_roots/ref(builder, "input")]), "ok",
     fn(failed) => native_query/error(failed, "schema"))
   let relation: map = native_gen/field(with_view, view, "relation")
   let [arity: map, with_arity: map] = native_gen/bind(with_view, "arity", native_gen/field(with_view, relation, "arity"))
@@ -113,11 +113,12 @@ verb native_query/input_body(module: map) -> map
   let [output: map, ready: map] = native_query/row_set(builder)
   builder = native_gen/for_range(ready, "row_index", native_gen/zero(:U64), native_gen/field(ready, relation, "length"), fn(iteration, index)
     let polled: map = native_query/poll_interval(iteration, index)
-    let [current_view: map, with_current: map] = native_gen/bind(polled, "view", native_gen/call(polled, "value_relation_view", [native_roots/ref(polled, "input")]))
+    let [current_view: map, with_current: map] = native_gen/bind(polled, "view", native_query/call(polled, "value_relation_view", [native_roots/ref(polled, "input")]))
     let current: map = native_gen/field(with_current, current_view, "relation")
     let tuple: map = native_gen/load(native_gen/offset(native_gen/field(with_current, current, "rows"), index))
     let source: map = native_gen/freeze(native_gen/field(iteration, tuple, "data"))
-    let [row: map, with_row: map] = native_query/value(with_current, "value_list", [native_roots/ref(with_current, "worker"), source, arity])
+    let charged: map = native_query/charge(with_current, arity, native_roots/ref(with_current, "one"))
+    let [row: map, with_row: map] = native_query/value(charged, "value_list", [native_roots/ref(with_current, "worker"), source, arity])
     let generated_result: map = native_query/offer(with_row, output, row)
     return generated_result
   end)

@@ -38,8 +38,11 @@ verb native_rules/check(builder: map, condition: map, name: string) -> map
   return result
 end
 verb native_rules/context(module: map, name: string) -> map
-  let result: map = native_roots/context(module, string_concat("kernel_", name), fn(failed, reason) => native_rules/error(failed, reason))
-  return result
+  let ready: map = native_roots/context(module, string_concat("kernel_", name), fn(failed, reason) => native_rules/error(failed, reason))
+  if native_execution/has(ready, "budget")
+    ready = native_execution/charge(ready, native_rules/ref(ready, "zero"), native_rules/ref(ready, "zero"), native_rules/ref(ready, "zero"), fn(failed, status) => native_rules/fail(failed, status))
+  end
+  return ready
 end
 verb native_rules/status_call(builder: map, name: string, arguments: list) -> map
   let [status: map, ready: map] = native_gen/bind(builder, "status", native_gen/call(builder, string_concat("kernel_", name), arguments))

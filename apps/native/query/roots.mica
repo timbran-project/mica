@@ -2,7 +2,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 verb native_query/context(module: map, name: string) -> map
-  let result: map = native_query/begin_roots(native_gen/context(module, name))
+  let rooted: map = native_query/begin_roots(native_gen/context(module, name))
+  let result: map = native_query/charge(rooted, native_roots/ref(rooted, "zero"), native_roots/ref(rooted, "zero"))
   return result
 end
 verb native_query/begin_roots(builder: map) -> map
@@ -10,7 +11,8 @@ verb native_query/begin_roots(builder: map) -> map
   return result
 end
 verb native_query/poll_interval(builder: map, progress: map) -> map
+  let charged: map = native_query/charge(builder, native_roots/ref(builder, "one"), native_roots/ref(builder, "zero"))
   let boundary: map = native_kernel/absent(native_gen/bit_and(progress, native_roots/ref(builder, "query_poll_mask")))
-  let result: map = native_gen/when(builder, boundary, fn(poll) => native_roots/poll(poll))
+  let result: map = native_gen/when(charged, boundary, fn(poll) => native_roots/poll(poll))
   return result
 end

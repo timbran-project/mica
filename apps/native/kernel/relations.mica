@@ -49,7 +49,7 @@ end
 // the buffer does not establish that, including when capacity is zero.
 verb native_kernel/scan_full(builder: map, scan: map) -> map
   let ready = native_kernel/store_field(builder, scan, "more", native_gen/ref(builder, "true"))
-  let result: map = native_gen/return_void(ready)
+  let result: map = native_kernel/status(ready, "kernel_ok")
   return result
 end
 
@@ -57,9 +57,8 @@ verb native_kernel/scan_offer(builder: map, scan: map, row: map) -> map
   let [count, ready] = native_gen/bind(builder, "count", native_kernel/load_field(builder, scan, "count"))
   ready = native_gen/when(ready, native_gen/equal(count, native_kernel/load_field(ready, scan, "capacity")),
     fn(arm) => native_kernel/scan_full(arm, scan))
-  let output = native_kernel/load_field(ready, scan, "output")
-  let [slot, with_slot] = native_gen/bind(ready, "slot", native_gen/offset(output, count))
-  ready = native_gen/root_write(with_slot, native_gen/location(slot), row)
+  let [appended: map, with_rows: map] = native_query/value(ready, "kernel_query_append", [native_roots/worker(ready), native_kernel/load_field(ready, scan, "rows"), row])
+  ready = native_kernel/store_field(with_rows, scan, "rows", appended)
   let result: map = native_kernel/store_field(ready, scan, "count", native_gen/add(count, native_gen/ref(ready, "one")))
   return result
 end
@@ -124,13 +123,15 @@ end
 // Prefix comparison prunes the chosen index. Remaining bindings are filters;
 // capacity bounds the result buffer and traversal stops at the next match.
 verb native_kernel/scan_tree_body(module: map) -> map
-  let builder = native_gen/context(module, "kernel_scan_tree")
-  let node = native_gen/ref(builder, "node")
-  let scan = native_gen/ref(builder, "scan")
-  builder = native_gen/when(builder, native_kernel/absent(node), fn(arm) => native_gen/return_void(arm))
-  builder = native_gen/when(builder, native_kernel/load_field(builder, scan, "more"), fn(arm) => native_gen/return_void(arm))
+  let builder = native_query/context(module, "kernel_scan_tree")
+  let node = native_roots/ref(builder, "node")
+  let scan = native_roots/ref(builder, "scan")
+  builder = native_gen/when(builder, native_kernel/absent(node), fn(arm) => native_kernel/status(arm, "kernel_ok"))
+  builder = native_gen/when(builder, native_kernel/load_field(builder, scan, "more"), fn(arm) => native_kernel/status(arm, "kernel_ok"))
+  builder = native_query/poll_interval(builder, native_kernel/load_field(builder, scan, "visited"))
   builder = native_kernel/store_field(builder, scan, "visited", native_gen/add(native_kernel/load_field(builder, scan, "visited"), native_gen/ref(builder, "one")))
-  let [row, with_row] = native_gen/bind(builder, "row", native_kernel/load_field(builder, node, "row"))
+  let row: map = native_kernel/load_field(builder, node, "row")
+  let with_row: map = builder
   let [past, with_past] = native_gen/bind(with_row, "past", native_gen/ref(with_row, "int_one"))
   let [updated, ready] = native_gen/bind(with_past, "after", native_gen/root_read(native_gen/field(with_past, scan, "after")))
   builder = native_gen/unless(ready, native_kernel/absent(updated),
@@ -139,18 +140,18 @@ verb native_kernel/scan_tree_body(module: map) -> map
   let [order, with_order] = native_gen/bind(builder, "order", native_kernel/scan_compare(builder, row, scan, "prefix", true, "pattern"))
   builder = native_gen/unless(with_order, native_gen/less(order, native_gen/ref(with_order, "int_zero")),
     fn(arm) => native_gen/when(arm, native_gen/less(native_gen/ref(arm, "int_zero"), past),
-      fn(before) => native_gen/do_call(before, "kernel_scan_tree", [native_kernel/load_field(before, node, "left"), scan])))
-  builder = native_gen/when(builder, native_kernel/load_field(builder, scan, "more"), fn(arm) => native_gen/return_void(arm))
+      fn(before) => native_query/status_call(before, "kernel_scan_tree", [native_roots/worker(before), native_kernel/load_field(before, node, "left"), scan])))
+  builder = native_gen/when(builder, native_kernel/load_field(builder, scan, "more"), fn(arm) => native_kernel/status(arm, "kernel_ok"))
   builder = native_gen/when(builder, native_kernel/absent(order), fn(arm) => native_kernel/offer_matching_row(arm, scan, row, past))
   builder = native_gen/unless(builder, native_gen/less(native_gen/ref(builder, "int_zero"), order),
-    fn(arm) => native_gen/do_call(arm, "kernel_scan_tree", [native_kernel/load_field(arm, node, "right"), scan]))
-  builder = native_gen/return_void(builder)
+    fn(arm) => native_query/status_call(arm, "kernel_scan_tree", [native_roots/worker(arm), native_kernel/load_field(arm, node, "right"), scan]))
+  builder = native_kernel/status(builder, "kernel_ok")
   let result: map = native_gen/finish(module, builder)
   return result
 end
 
 verb native_kernel/scan_error(builder: map, status: string) -> map
-  let result: map = native_gen/return_value(builder, native_gen/record(builder, [:Record, "KernelScanResult"],
+  let result: map = native_roots/return_value(builder, native_gen/record(builder, [:Record, "KernelScanResult"],
     {"status" -> native_gen/ref(builder, status), "count" -> native_gen/ref(builder, "zero"),
       "visited" -> native_gen/ref(builder, "zero"), "more" -> native_gen/ref(builder, "false")}))
   return result
@@ -164,13 +165,13 @@ verb native_kernel/check_scan_mask(builder: map, relation: map, mask: map) -> ma
 end
 
 verb native_kernel/relation_scan_body(module: map) -> map
-  let builder = native_gen/context(module, "kernel_relation_scan")
-  let relation = native_gen/ref(builder, "relation")
-  let pattern = native_gen/ref(builder, "pattern")
-  let updated = native_gen/ref(builder, "after")
-  let mask = native_gen/ref(builder, "mask")
-  let output = native_gen/ref(builder, "output")
-  let capacity = native_gen/ref(builder, "capacity")
+  let builder = native_query/context(module, "kernel_relation_scan")
+  let relation = native_roots/ref(builder, "relation")
+  let pattern = native_roots/ref(builder, "pattern")
+  let updated = native_roots/ref(builder, "after")
+  let mask = native_roots/ref(builder, "mask")
+  let output = native_roots/ref(builder, "output")
+  let capacity = native_roots/ref(builder, "capacity")
   builder = native_gen/when(builder, native_kernel/absent(relation), fn(arm) => native_kernel/scan_error(arm, "kernel_unknown"))
   builder = native_kernel/check_tuple(builder, pattern, relation, fn(arm) => native_kernel/scan_error(arm, "kernel_arity"))
   builder = native_gen/unless(builder, native_kernel/absent(updated),
@@ -179,15 +180,21 @@ verb native_kernel/relation_scan_body(module: map) -> map
   builder = native_gen/unless(builder, native_kernel/absent(capacity),
     fn(arm) => native_gen/when(arm, native_kernel/absent(output), fn(failed) => native_kernel/scan_error(failed, "kernel_schema")))
   let [tree, ordering, prefix, ready] = native_kernel/scan_plan(builder, relation, mask)
-  let [state, with_state] = native_gen/bind(ready, "state", native_gen/record(ready, [:Record, "KernelScan"],
+  let [rooted_tree: map, with_tree: map] = native_roots/retain(ready, "scan_tree", tree)
+  let [empty: map, with_empty: map] = native_query/build_row(with_tree, native_roots/ref(with_tree, "zero"), fn(step, position) => native_gen/zero(native_value/word()))
+  let [state: map, with_state: map] = native_rules/allocate(with_empty, "Scan",
     {"pattern" -> pattern, "after" -> updated, "order" -> ordering, "mask" -> mask, "prefix" -> prefix,
-      "output" -> output, "capacity" -> capacity, "count" -> native_gen/ref(ready, "zero"),
-      "visited" -> native_gen/ref(ready, "zero"), "more" -> native_gen/ref(ready, "false")}))
-  let [scan, with_scan] = native_gen/bind(with_state, "scan", native_gen/address(state))
-  builder = native_gen/do_call(with_scan, "kernel_scan_tree", [tree, scan])
-  builder = native_gen/return_value(builder, native_gen/record(builder, [:Record, "KernelScanResult"],
-    {"status" -> native_gen/ref(builder, "kernel_ok"), "count" -> native_gen/field(builder, state, "count"),
-      "visited" -> native_gen/field(builder, state, "visited"), "more" -> native_gen/field(builder, state, "more")}))
+      "rows" -> empty, "capacity" -> capacity})
+  let [scan: map, with_scan: map] = native_roots/retain(with_state, "scan_page", state)
+  builder = native_query/status_call(with_scan, "kernel_scan_tree", [native_roots/worker(with_scan), rooted_tree, scan])
+  let count: map = native_kernel/load_field(builder, scan, "count")
+  // Charge and check cancellation before touching caller storage. No poll or
+  // fallible operation occurs while copying the successful, rooted page.
+  builder = native_query/charge(builder, count, native_roots/ref(builder, "zero"))
+  builder = native_gen/for_range(builder, "output_index", native_roots/ref(builder, "zero"), count, fn(copy, index) => native_gen/root_write(copy, native_gen/location(native_gen/offset(output, index)), native_query/cell(copy, native_kernel/load_field(copy, scan, "rows"), index)))
+  builder = native_roots/return_value(builder, native_gen/record(builder, [:Record, "KernelScanResult"],
+    {"status" -> native_roots/ref(builder, "kernel_ok"), "count" -> count,
+      "visited" -> native_kernel/load_field(builder, scan, "visited"), "more" -> native_kernel/load_field(builder, scan, "more")}))
   let result: map = native_gen/finish(module, builder)
   return result
 end
@@ -207,10 +214,10 @@ verb native_kernel/relations(input: map) -> map
     ["index", node, [["relation", relation, :Gc], ["mask", :U64, :Value]]],
     ["index_update", index, [worker, ["index", index, :Gc], ["row", word, :Gc], ["asserted", :Bool, :Value]]],
     ["apply", relation, [worker, ["relation", relation, :Gc], ["row", word, :Gc], ["asserted", :Bool, :Value]]],
-    ["scan_tree", :Void, [["node", node, :Gc], ["scan", scan, :Borrow]]],
-    ["relation_scan", [:Record, "KernelScanResult"], [["relation", relation, :Gc], ["pattern", word, :Gc],
-      ["mask", :U64, :Value], ["after", word, :Gc], ["output", native_memory/pointer(word), :Borrow], ["capacity", :U64, :Value]]]]
-    context = native_kernel/declare(context, spec[0], spec[1], spec[2])
+    ["scan_tree", :U64, [worker, ["node", node, :Gc], ["scan", scan, :Gc], ["budget", native_kernel/pointer("Budget"), :Borrow]]],
+    ["relation_scan", [:Record, "KernelScanResult"], [worker, ["relation", relation, :Gc], ["pattern", word, :Gc],
+      ["mask", :U64, :Value], ["after", word, :Gc], ["output", native_memory/pointer(word), :Borrow], ["capacity", :U64, :Value], ["budget", native_kernel/pointer("Budget"), :Borrow]]]]
+    context = native_kernel/declare(context, spec[0], spec[1], spec[2], native/contains(["scan_tree", "relation_scan"], spec[0]))
   end
   for field in ["id", "name"]
     let name: string = "relation"

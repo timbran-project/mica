@@ -24,6 +24,7 @@ verb native_kernel/schemas() -> list
     indexes = [@indexes, [spec[1], [["left", pointer], ["right", pointer], ["entry", native_kernel/pointer(spec[2])], ["height", :U64]]]]
   end
   return [@native_rules/schemas(), @indexes,
+    ["Scan", [["pattern", word], ["after", word], ["rows", word], ["order", :U64], ["mask", :U64], ["prefix", :U64], ["capacity", :U64], ["count", :U64], ["visited", :U64], ["more", :Bool]]],
     ["Node", [["left", node], ["right", node], ["row", word], ["height", :U64], ["present", :Bool]]],
     ["Index", [["next", native_kernel/pointer("Index")], ["mask", :U64], ["tree", node]]],
     ["Relation", [["next", relation], ["id", :U64], ["name", :U64], ["arity", :U64],
@@ -227,8 +228,6 @@ verb native_kernel/types(input: map) -> map
     ["KernelRuleResult", [["status", :U64], ["rule", native_kernel/pointer("Rule")]]],
     @native_rules/result_schemas(),
     ["KernelNodeResult", [["ok", :Bool], ["node", native_kernel/pointer("Node")]]],
-    ["KernelScan", [["pattern", word], ["after", word], ["order", :U64], ["mask", :U64], ["prefix", :U64],
-      ["output", native_memory/pointer(word)], ["capacity", :U64], ["count", :U64], ["visited", :U64], ["more", :Bool]]],
     ["KernelScanResult", [["status", :U64], ["count", :U64], ["visited", :U64], ["more", :Bool]]]]
     state = native/record_type(state, spec[0], spec[1])[1]
   end
@@ -298,6 +297,7 @@ verb native_kernel/program() -> map
   context = native_rules/maintenance_declarations(context)
   context = native_kernel/tracing(context)
   context = native_kernel/indexes(context)
+  context = native_query/declarations(context)
   context = native_kernel/relations(context)
   context = native_kernel/transactions(context)
   context = native_rules/declarations(context)

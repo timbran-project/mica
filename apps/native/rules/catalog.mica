@@ -76,7 +76,6 @@ verb native_rules/depend_body(module: map) -> map
     let [entry: map, ready: map] = native_rules/allocate(found, "RuleMember", {"vertex" -> vertex})
     return native_roots/store(ready, stack, entry)
   end)
-  builder = native_rules/local_budget(builder, native_rules/read(builder, work, "rule_limit"))
   builder = native_gen/while_loop(builder, native_gen/negate(native_kernel/absent(stack)), fn(iteration)
     let step: map = native_rules/tick(iteration)
     // Keep the current member rooted until its entire adjacency list is walked.

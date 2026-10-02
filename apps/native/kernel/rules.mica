@@ -49,6 +49,9 @@ verb native_kernel/rule_transaction(module: map, name: string) -> list
   ready = native_roots/poll(ready)
   let signal: map = native_kernel/load_field(ready, native_gen/ref(ready, "transaction"), "signal")
   ready = native_gen/when(ready, native_gen/equal(native_gen/call(ready, "memory_atomic_load", [signal]), native_gen/ref(ready, "one")), fn(cancelled) => native_kernel/rule_error(cancelled, "kernel_cancelled"))
+  if native_execution/has(ready, "budget")
+    ready = native_execution/charge(ready, native_rules/ref(ready, "zero"), native_rules/ref(ready, "zero"), native_rules/ref(ready, "zero"), fn(failed, status) => native_rules/fail(failed, status))
+  end
   return [rooted, ready]
 end
 

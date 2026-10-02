@@ -9,6 +9,7 @@ verb native_query/declarations(input: map) -> map
   let word: list = native_value/word()
   let worker: list = ["worker", native_memory/record_pointer("MemoryWorker"), :Borrow]
   let tx: list = ["transaction", native_memory/record_pointer("KernelTransaction"), :Borrow]
+  let budget: list = ["budget", native_kernel/pointer("Budget"), :Borrow]
   let query: list = native_kernel/pointer("Query")
   let node: list = native_kernel/pointer("Node")
   let result: list = [:Record, "KernelQueryResult"]
@@ -43,7 +44,11 @@ verb native_query/declarations(input: map) -> map
     ["query_gather", [:Record, "ValueResult"], [worker, ["node", node, :Gc], ["rows", word, :Gc]]],
     ["query_finish", result, [worker, ["tree", node, :Gc], ["arity", :U64, :Value]]],
     ["query_join_matches", :U64, [worker, ["node", node, :Gc], ["key", word, :Gc], ["left", word, :Gc], ["output", native_memory/record_pointer("MemoryRoot"), :Borrow], ["ticks", native_memory/pointer(:U64), :Borrow]]]]
-    context = native_kernel/declare(context, spec[0], spec[1], spec[2], native/contains(["query_execute", "query_evaluate", "query_scan_rows", "query_project_scan", "query_select_tree", "query_input_rows", "query_project_rows", "query_gather", "query_finish", "query_join_matches"], spec[0]))
+    let parameters: list = spec[2]
+    if native/contains(["query_evaluate", "query_scan_rows", "query_select_tree", "query_project_scan", "query_input_rows", "query_project_rows", "query_append", "query_gather", "query_finish", "query_join_matches"], spec[0])
+      parameters = [@parameters, budget]
+    end
+    context = native_kernel/declare(context, spec[0], spec[1], parameters, native/contains(["query_execute", "query_evaluate", "query_scan_rows", "query_project_scan", "query_select_tree", "query_input_rows", "query_project_rows", "query_gather", "query_finish", "query_join_matches"], spec[0]))
   end
   for kind in ["join", "semi", "anti", "union", "difference"]
     let plan_parameters: list = [worker, ["left", query, :Gc], ["right", query, :Gc]]
@@ -53,13 +58,13 @@ verb native_query/declarations(input: map) -> map
       row_parameters = [@row_parameters, ["left_positions", word, :Gc], ["right_positions", word, :Gc]]
     end
     context = native_kernel/declare(context, string_concat("query_", kind), query, plan_parameters)
-    context = native_kernel/declare(context, string_concat("query_", kind, "_rows"), result, row_parameters, true)
+    context = native_kernel/declare(context, string_concat("query_", kind, "_rows"), result, [@row_parameters, budget], true)
   end
   for kind in ["join", "semi", "anti"]
     context = native_kernel/declare(context, string_concat("query_probe_", kind), :U64,
-      [worker, ["relation", native_kernel/pointer("Relation"), :Gc], ["pattern", word, :Gc], ["mask", :U64, :Value], ["left", word, :Gc], ["output", native_memory/record_pointer("MemoryRoot"), :Borrow], ["ticks", native_memory/pointer(:U64), :Borrow]], true)
+      [worker, ["relation", native_kernel/pointer("Relation"), :Gc], ["pattern", word, :Gc], ["mask", :U64, :Value], ["left", word, :Gc], ["output", native_memory/record_pointer("MemoryRoot"), :Borrow], ["ticks", native_memory/pointer(:U64), :Borrow], budget], true)
     context = native_kernel/declare(context, string_concat("query_", kind, "_scan"), result,
-      [worker, tx, ["query", query, :Gc], ["left", word, :Gc], ["left_arity", :U64, :Value], ["left_positions", word, :Gc], ["right_positions", word, :Gc]], true)
+      [worker, tx, ["query", query, :Gc], ["left", word, :Gc], ["left_arity", :U64, :Value], ["left_positions", word, :Gc], ["right_positions", word, :Gc], budget], true)
   end
   return context
 end
@@ -95,11 +100,11 @@ verb native_query/evaluate_operation(input: map, query: map, kind: string) -> ma
   let transaction: map = native_roots/ref(builder, "transaction")
   let worker: map = native_kernel/load_field(builder, transaction, "worker")
   if kind == "scan"
-    let generated_result: map = native_roots/return_value(builder, native_gen/call(builder, "kernel_query_scan_rows", [worker, transaction, query]))
+    let generated_result: map = native_roots/return_value(builder, native_query/call(builder, "kernel_query_scan_rows", [worker, transaction, query]))
     return generated_result
   end
   if kind == "input"
-    let generated_result: map = native_roots/return_value(builder, native_gen/call(builder, "kernel_query_input_rows", [worker, native_kernel/load_field(builder, query, "input")]))
+    let generated_result: map = native_roots/return_value(builder, native_query/call(builder, "kernel_query_input_rows", [worker, native_kernel/load_field(builder, query, "input")]))
     return generated_result
   end
   if kind == "project"
@@ -107,13 +112,13 @@ verb native_query/evaluate_operation(input: map, query: map, kind: string) -> ma
     builder = native_query/check(builder, native_gen/negate(native_kernel/absent(child)), "schema")
     builder = native_query/check(builder, native_gen/less(native_gen/add(native_roots/ref(builder, "depth"), native_roots/ref(builder, "one")), native_roots/ref(builder, "kernel_64")), "schema")
     builder = native_gen/when(builder, native_gen/equal(native_kernel/load_field(builder, child, "kind"), native_roots/ref(builder, "query_scan")), fn(fused)
-      return native_roots/return_value(fused, native_gen/call(fused, "kernel_query_project_scan", [worker, transaction, child,
+      return native_roots/return_value(fused, native_query/call(fused, "kernel_query_project_scan", [worker, transaction, child,
         native_kernel/load_field(fused, query, "positions")]))
     end)
   end
   let [left: map, ready: map] = native_query/evaluate_child(builder, query, "left")
   if kind == "project"
-    let generated_result: map = native_roots/return_value(ready, native_gen/call(ready, "kernel_query_project_rows", [worker,
+    let generated_result: map = native_roots/return_value(ready, native_query/call(ready, "kernel_query_project_rows", [worker,
       native_gen/field(ready, left, "rows"), native_gen/field(ready, left, "arity"), native_kernel/load_field(ready, query, "positions")]))
     return generated_result
   end
@@ -121,7 +126,7 @@ verb native_query/evaluate_operation(input: map, query: map, kind: string) -> ma
     let child: map = native_kernel/load_field(ready, query, "right")
     ready = native_query/check(ready, native_gen/negate(native_kernel/absent(child)), "schema")
     ready = native_gen/when(ready, native_gen/equal(native_kernel/load_field(ready, child, "kind"), native_roots/ref(ready, "query_scan")), fn(probe)
-      return native_roots/return_value(probe, native_gen/call(probe, string_concat("kernel_query_", kind, "_scan"), [worker, transaction, child,
+      return native_roots/return_value(probe, native_query/call(probe, string_concat("kernel_query_", kind, "_scan"), [worker, transaction, child,
         native_gen/field(probe, left, "rows"), native_gen/field(probe, left, "arity"), native_kernel/load_field(probe, query, "positions"), native_kernel/load_field(probe, query, "right_positions")]))
     end)
   end
@@ -131,7 +136,7 @@ verb native_query/evaluate_operation(input: map, query: map, kind: string) -> ma
   if native/contains(["join", "semi", "anti"], kind)
     arguments = [@arguments, native_kernel/load_field(with_right, query, "positions"), native_kernel/load_field(with_right, query, "right_positions")]
   end
-  let generated_result: map = native_roots/return_value(with_right, native_gen/call(with_right, string_concat("kernel_query_", kind, "_rows"), arguments))
+  let generated_result: map = native_roots/return_value(with_right, native_query/call(with_right, string_concat("kernel_query_", kind, "_rows"), arguments))
   return generated_result
 end
 verb native_query/evaluate_body(module: map) -> map
@@ -150,16 +155,18 @@ end
 verb native_query/execute_body(module: map) -> map
   let builder: map = native_gen/context(module, "kernel_query_execute")
   let transaction: map = native_roots/ref(builder, "transaction")
-  let [work: map, ready: map] = native_gen/bind(builder, "work", native_gen/call(builder, "kernel_work", [transaction]))
+  let [work: map, ready: map] = native_gen/bind(builder, "work", native_query/call(builder, "kernel_work", [transaction]))
   ready = native_query/check(ready, native_gen/negate(native_kernel/absent(work)), "closed")
   ready = native_query/check(ready, native_gen/negate(native_kernel/load_field(ready, work, "done")), "closed")
   ready = native_query/begin_roots(ready)
-  ready = native_roots/return_value(ready, native_gen/call(ready, "kernel_query_evaluate", [transaction, native_roots/ref(ready, "query"), native_gen/zero(:U64)]))
+  ready = native_execution/local_budget(ready, native_kernel/load_field(ready, native_query/call(ready, "kernel_work", [transaction]), "rule_limit"))
+  ready = native_query/charge(ready, native_roots/ref(ready, "zero"), native_roots/ref(ready, "zero"))
+  ready = native_roots/return_value(ready, native_query/call(ready, "kernel_query_evaluate", [transaction, native_roots/ref(ready, "query"), native_gen/zero(:U64)]))
   let generated_result: map = native_gen/finish(module, ready)
   return generated_result
 end
 verb native_query/program(module: map) -> map
-  let context: map = native_query/declarations(module)
+  let context: map = module
   context = native_query/constructors(context)
   context = native_query/indexes(context)
   context = native_query/operators(context)

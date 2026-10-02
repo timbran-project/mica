@@ -12,7 +12,12 @@
 
 #ifdef MICA_MEMORY_TEST_ALLOCATOR
 static _Atomic long allocation_budget = -1;
+static _Atomic long cancellation_allocation = -1;
+static _Atomic(struct mica_KernelTransaction *) allocation_transaction;
 uint8_t *mica_foreign_memory_platform_allocate(uint64_t size) {
+    long until_cancel = atomic_load(&cancellation_allocation);
+    if (until_cancel > 0 && atomic_fetch_sub(&cancellation_allocation, 1) == 1)
+        assert(mica_kernel_cancel(atomic_load(&allocation_transaction)));
     long remaining = atomic_load(&allocation_budget);
     if (remaining == 0) return NULL;
     if (remaining > 0) atomic_fetch_sub(&allocation_budget, 1);
@@ -72,6 +77,23 @@ static void declare(struct fixture *f, uint64_t id, uint64_t policy) {
     assert(mica_kernel_declare(&tx, id, id, 2, policy, policy == FUNCTIONAL ? 1 : 0, 2) == OK);
     assert(mica_kernel_commit(&tx) == OK);
     assert(mica_kernel_end(&tx));
+}
+static struct mica_KernelBudget operation_budget(struct mica_KernelTransaction *tx) {
+    struct mica_KernelWork *work = mica_kernel_work(tx);
+    return (struct mica_KernelBudget){.f_steps = work->f_rule_limit, .f_rows = work->f_rows_limit,
+        .f_rounds = work->f_rounds_limit, .f_signal = tx->f_signal};
+}
+static uint64_t refresh(struct mica_KernelTransaction *tx) {
+    struct mica_KernelBudget budget = operation_budget(tx);
+    return mica_kernel_rule_refresh(tx, &budget);
+}
+static uint64_t depend(struct mica_KernelTransaction *tx, uint64_t id) {
+    struct mica_KernelBudget budget = operation_budget(tx);
+    return mica_kernel_rule_depend(tx, id, &budget);
+}
+static struct mica_KernelQueryResult derived_rows(struct mica_MemoryWorker *worker, struct mica_KernelRuleEvaluation *evaluation, uint64_t id, bool derived, uint64_t steps) {
+    struct mica_KernelBudget budget = {.f_steps = steps, .f_rows = UINT64_MAX, .f_rounds = UINT64_MAX};
+    return mica_kernel_rule_rows(worker, evaluation, id, derived, &budget);
 }
 static uint64_t write_pair(struct mica_KernelTransaction *tx, uint64_t id, int64_t a, int64_t b, bool asserted) {
     return mica_kernel_write(tx, id, tuple(tx->f_worker, a, b), asserted);
@@ -590,7 +612,7 @@ static void rule_dependency_planning(void) {
     // A new rule feeding an indirectly queried head invalidates the consumer.
     begin(&f, &a);
     begin(&f, &b);
-    assert(mica_kernel_rule_depend(&a, 3) == OK);
+    assert(depend(&a, 3) == OK);
     assert(install_edge(&b, 8, 4, 2, false) == OK);
     assert(mica_kernel_commit(&b) == OK && mica_kernel_end(&b));
     assert(mica_kernel_commit(&a) == CONFLICT);
@@ -599,7 +621,7 @@ static void rule_dependency_planning(void) {
     // Unrelated heads do not force task retry.
     begin(&f, &a);
     begin(&f, &b);
-    assert(mica_kernel_rule_depend(&a, 1) == OK);
+    assert(depend(&a, 1) == OK);
     assert(install_edge(&b, 9, 5, 2, false) == OK);
     assert(mica_kernel_commit(&b) == OK && mica_kernel_end(&b));
     assert(mica_kernel_commit(&a) == OK && mica_kernel_end(&a));
@@ -607,7 +629,7 @@ static void rule_dependency_planning(void) {
     // the active head generation. Activation must check stratification again.
     begin(&f, &a);
     begin(&f, &b);
-    assert(mica_kernel_rule_depend(&a, 1) == OK);
+    assert(depend(&a, 1) == OK);
     struct mica_KernelRuleAtom *inactive_atoms = rule_atom_pair(&f.worker, 1, true, NULL);
     inactive_atoms = rule_atom_pair(&f.worker, 2, false, inactive_atoms);
     struct mica_KernelRuleDef *inactive = fixture_rule(&f.worker, 1, rule_pair(&f.worker), inactive_atoms, NULL);
@@ -1732,7 +1754,7 @@ static void oracle_check(struct mica_MemoryWorker *worker, struct mica_MemoryRoo
         // Completed results must not retain per-round scratch indexes.
         assert(!evaluation->f_executables && captured && !captured->f_delta && !captured->f_pending && !captured->f_previous && !captured->f_added);
         for (unsigned mode = 0; mode < 2; ++mode) {
-            struct mica_KernelQueryResult result = mica_kernel_rule_rows(worker, (struct mica_KernelRuleEvaluation *)root->f_pointer, id, mode != 0, UINT64_MAX);
+            struct mica_KernelQueryResult result = derived_rows(worker, (struct mica_KernelRuleEvaluation *)root->f_pointer, id, mode != 0, UINT64_MAX);
             assert(result.f_status == OK && result.f_arity == 2);
             uint64_t found = 0;
             for (uint64_t i = 0; i < mica_kernel_width(result.f_rows); ++i) {
@@ -1905,16 +1927,16 @@ static void rule_evaluation_capture(void) {
     struct mica_MemoryRoot draft = {.f_pointer = (uint8_t *)result.f_evaluation};
     assert(mica_memory_root_push(&f.worker, &draft));
     assert(mica_memory_safepoint(&f.worker, true));
-    struct mica_KernelQueryResult rows = mica_kernel_rule_rows(&f.worker, (struct mica_KernelRuleEvaluation *)draft.f_pointer, 256, true, UINT64_MAX);
+    struct mica_KernelQueryResult rows = derived_rows(&f.worker, (struct mica_KernelRuleEvaluation *)draft.f_pointer, 256, true, UINT64_MAX);
     assert(rows.f_status == OK && mica_kernel_width(rows.f_rows) == 1);
     assert(cell(mica_kernel_cell(rows.f_rows, 0), 0) == 3 && cell(mica_kernel_cell(rows.f_rows, 0), 1) == 4);
-    rows = mica_kernel_rule_rows(&f.worker, (struct mica_KernelRuleEvaluation *)draft.f_pointer, 257, false, UINT64_MAX);
+    rows = derived_rows(&f.worker, (struct mica_KernelRuleEvaluation *)draft.f_pointer, 257, false, UINT64_MAX);
     assert(rows.f_status == OK && mica_kernel_width(rows.f_rows) == 1);
     assert(cell(mica_kernel_cell(rows.f_rows, 0), 0) == 5 && cell(mica_kernel_cell(rows.f_rows, 0), 1) == 6);
     assert(mica_memory_root_pop(&f.worker, &draft));
     assert(mica_kernel_end(&tx));
     assert(mica_memory_safepoint(&f.worker, true));
-    rows = mica_kernel_rule_rows(&f.worker, (struct mica_KernelRuleEvaluation *)retained.f_pointer, 256, true, UINT64_MAX);
+    rows = derived_rows(&f.worker, (struct mica_KernelRuleEvaluation *)retained.f_pointer, 256, true, UINT64_MAX);
     assert(rows.f_status == OK && mica_kernel_width(rows.f_rows) == 1);
     assert(cell(mica_kernel_cell(rows.f_rows, 0), 0) == 1 && cell(mica_kernel_cell(rows.f_rows, 0), 1) == 2);
     assert(mica_memory_root_pop(&f.worker, &retained));
@@ -1953,15 +1975,15 @@ static void rule_evaluation_values(void) {
     retained.f_pointer = (uint8_t *)result.f_evaluation;
     assert(mica_kernel_end(&tx)); // Rollback leaves a rooted result usable.
     assert(mica_memory_safepoint(&f.worker, true));
-    struct mica_KernelQueryResult rows = mica_kernel_rule_rows(&f.worker, (struct mica_KernelRuleEvaluation *)retained.f_pointer, 2, false, UINT64_MAX);
+    struct mica_KernelQueryResult rows = derived_rows(&f.worker, (struct mica_KernelRuleEvaluation *)retained.f_pointer, 2, false, UINT64_MAX);
     assert(rows.f_status == OK && mica_kernel_width(rows.f_rows) == 2);
-    rows = mica_kernel_rule_rows(&f.worker, (struct mica_KernelRuleEvaluation *)retained.f_pointer, 3, true, UINT64_MAX);
+    rows = derived_rows(&f.worker, (struct mica_KernelRuleEvaluation *)retained.f_pointer, 3, true, UINT64_MAX);
     assert(rows.f_status == OK && rows.f_arity == 0 && mica_kernel_width(rows.f_rows) == 1);
     assert(mica_kernel_width(mica_kernel_cell(rows.f_rows, 0)) == 0);
-    rows = mica_kernel_rule_rows(&f.worker, (struct mica_KernelRuleEvaluation *)retained.f_pointer, 4, false, UINT64_MAX);
+    rows = derived_rows(&f.worker, (struct mica_KernelRuleEvaluation *)retained.f_pointer, 4, false, UINT64_MAX);
     assert(rows.f_status == OK && mica_kernel_width(rows.f_rows) == 1);
     assert(cell(mica_kernel_cell(rows.f_rows, 0), 0) == 1 && cell(mica_kernel_cell(rows.f_rows, 0), 1) == 3);
-    rows = mica_kernel_rule_rows(&f.worker, (struct mica_KernelRuleEvaluation *)retained.f_pointer, 2, false, 0);
+    rows = derived_rows(&f.worker, (struct mica_KernelRuleEvaluation *)retained.f_pointer, 2, false, 0);
     assert(rows.f_status == LIMIT && !rows.f_rows);
     begin(&f, &tx);
     assert(!mica_kernel_view(&tx, 1) && mica_kernel_rule(&tx, 1).f_status == UNKNOWN);
@@ -1976,9 +1998,9 @@ static void rule_evaluation_values(void) {
     assert(mica_kernel_end(&tx));
     assert(mica_memory_safepoint(&f.worker, true));
     // A relation outside the rule graph still has its captured stored rows.
-    rows = mica_kernel_rule_rows(&f.worker, (struct mica_KernelRuleEvaluation *)retained.f_pointer, 7, false, UINT64_MAX);
+    rows = derived_rows(&f.worker, (struct mica_KernelRuleEvaluation *)retained.f_pointer, 7, false, UINT64_MAX);
     assert(rows.f_status == OK && mica_kernel_width(rows.f_rows) == 1);
-    rows = mica_kernel_rule_rows(&f.worker, (struct mica_KernelRuleEvaluation *)retained.f_pointer, 7, true, UINT64_MAX);
+    rows = derived_rows(&f.worker, (struct mica_KernelRuleEvaluation *)retained.f_pointer, 7, true, UINT64_MAX);
     assert(rows.f_status == OK && mica_kernel_width(rows.f_rows) == 0);
     assert(mica_memory_root_pop(&f.worker, &retained));
     destroy(&f);
@@ -1986,7 +2008,7 @@ static void rule_evaluation_values(void) {
 
 // Compare maintained draft and committed rows against the independent oracle.
 static void maintained_oracle_check(struct mica_KernelTransaction *tx, const uint64_t *stored) {
-    assert(mica_kernel_rule_refresh(tx) == OK);
+    assert(refresh(tx) == OK);
     struct mica_MemoryRoot root = {.f_pointer = (uint8_t *)mica_kernel_work(tx)->f_evaluation};
     assert(mica_memory_root_push(tx->f_worker, &root));
     oracle_check(tx->f_worker, &root, stored);
@@ -2174,13 +2196,13 @@ static void rule_execution_controls(void) {
     assert(write_pair(&tx, 1, 3, 4, true) == OK);
     struct mica_KernelRuleEvaluation *previous = mica_kernel_work(&tx)->f_evaluation;
     assert(mica_kernel_set_limits(&tx, UINT64_MAX, 0, UINT64_MAX) == OK);
-    assert(mica_kernel_rule_refresh(&tx) == LIMIT);
+    assert(refresh(&tx) == LIMIT);
     assert(mica_kernel_work(&tx)->f_evaluation == previous);
     assert(mica_kernel_set_limits(&tx, UINT64_MAX, UINT64_MAX, 0) == OK);
-    assert(mica_kernel_rule_refresh(&tx) == LIMIT);
+    assert(refresh(&tx) == LIMIT);
     assert(mica_kernel_work(&tx)->f_evaluation == previous);
     assert(mica_kernel_set_limits(&tx, UINT64_MAX, UINT64_MAX, UINT64_MAX) == OK);
-    assert(mica_kernel_rule_refresh(&tx) == OK);
+    assert(refresh(&tx) == OK);
     pthread_t canceller;
     assert(!pthread_create(&canceller, NULL, cancel_transaction, &tx));
     assert(!pthread_join(canceller, NULL));
@@ -2217,6 +2239,137 @@ static void rule_execution_controls(void) {
     destroy(&f);
 }
 
+// Measure one operation's logical work, then enforce that same allowance
+// across its children. A per-child budget reset would incorrectly succeed.
+static void query_execution_controls(void) {
+    struct fixture f;
+    init(&f);
+    struct mica_KernelTransaction tx;
+    begin(&f, &tx);
+    for (unsigned id = 1; id <= 2; ++id) {
+        assert(mica_kernel_declare(&tx, id, id, 2, SET, 0, 0) == OK);
+        for (int64_t i = 0; i < 24; ++i) assert(write_pair(&tx, id, i, i % 4, true) == OK);
+    }
+    assert(mica_kernel_commit(&tx) == OK && mica_kernel_end(&tx));
+    begin(&f, &tx);
+    for (unsigned kind = 0; kind < 8; ++kind) {
+        struct mica_MemoryRoot plan = {.f_pointer = (uint8_t *)trace_query(&f, 1, 0, 0, kind)};
+        assert(mica_memory_root_push(&f.worker, &plan));
+        // Prime immutable draft metadata so both runs measure the same state.
+        assert(mica_kernel_set_limits(&tx, UINT64_MAX, UINT64_MAX, UINT64_MAX) == OK);
+        assert(mica_kernel_query_execute(&tx, (struct mica_KernelQuery *)plan.f_pointer).f_status == OK);
+        struct mica_KernelBudget budget = operation_budget(&tx);
+        assert(mica_kernel_query_evaluate(&tx, (struct mica_KernelQuery *)plan.f_pointer, 0, &budget).f_status == OK);
+        uint64_t steps = UINT64_MAX - budget.f_steps;
+        assert(steps > 1);
+        assert(mica_kernel_set_limits(&tx, steps - 1, UINT64_MAX, UINT64_MAX) == OK);
+        assert(mica_kernel_query_execute(&tx, (struct mica_KernelQuery *)plan.f_pointer).f_status == LIMIT);
+        assert(f.worker.f_roots == &plan);
+        assert(mica_kernel_set_limits(&tx, steps, UINT64_MAX, UINT64_MAX) == OK);
+        assert(mica_kernel_query_execute(&tx, (struct mica_KernelQuery *)plan.f_pointer).f_status == OK);
+        assert(mica_kernel_set_limits(&tx, UINT64_MAX, 0, UINT64_MAX) == OK);
+        assert(mica_kernel_query_execute(&tx, (struct mica_KernelQuery *)plan.f_pointer).f_status == LIMIT);
+        assert(f.worker.f_roots == &plan);
+        assert(mica_memory_root_pop(&f.worker, &plan));
+    }
+    mica_type_Value rows[24];
+    for (unsigned i = 0; i < 24; ++i) rows[i] = integer(-1);
+    assert(mica_kernel_set_limits(&tx, UINT64_MAX, 4, UINT64_MAX) == OK);
+    struct mica_KernelScanResult result = scan(&tx, 1, 0, 0, 0, rows, 24);
+    assert(result.f_status == LIMIT && result.f_count == 0);
+    for (unsigned i = 0; i < 24; ++i) assert(rows[i] == integer(-1));
+    assert(mica_kernel_set_limits(&tx, UINT64_MAX, UINT64_MAX, UINT64_MAX) == OK);
+    struct mica_KernelBudget failed = operation_budget(&tx);
+    failed.f_status = LIMIT;
+    assert(mica_kernel_rule_refresh(&tx, &failed) == LIMIT); // Cached view must not hide failure.
+    assert(mica_kernel_prepare(&tx, &failed) == LIMIT);
+    assert(!mica_kernel_work(&tx)->f_candidate);
+    assert(mica_kernel_cancel(&tx));
+    assert(scan(&tx, 1, 0, 0, 0, rows, 24).f_status == CANCELLED);
+    for (unsigned i = 0; i < 24; ++i) assert(rows[i] == integer(-1));
+    assert(mica_kernel_query_execute(&tx, query_scan(&f, 1)).f_status == CANCELLED);
+    assert(mica_kernel_end(&tx));
+    destroy(&f);
+}
+
+// Cancel at an actual allocation after the join starts. The allocator still
+// succeeds: cancellation must propagate as CANCELLED, rather than OOM.
+static void query_mid_join_cancellation(void) {
+#ifdef MICA_MEMORY_TEST_ALLOCATOR
+    struct fixture f;
+    init(&f);
+    declare(&f, 1, SET);
+    struct mica_KernelTransaction tx;
+    begin(&f, &tx);
+    mica_type_Value tuples[128];
+    for (unsigned i = 0; i < 128; ++i) tuples[i] = tuple(&f.worker, i, i % 8);
+    struct mica_ValueResult rows = mica_value_list(&f.worker, tuples, 128);
+    assert(rows.f_ok);
+    mica_type_Value empty = query_columns(&f.worker, NULL, 0);
+    struct mica_KernelBudget budget = operation_budget(&tx);
+    struct mica_MemoryRoot *parent = f.worker.f_roots;
+    atomic_store(&allocation_transaction, &tx);
+    atomic_store(&cancellation_allocation, 3);
+    struct mica_KernelQueryResult result = mica_kernel_query_join_rows(&f.worker,
+        rows.f_value, rows.f_value, 2, 2, empty, empty, &budget);
+    assert(atomic_load(&cancellation_allocation) == 0);
+    atomic_store(&allocation_transaction, NULL);
+    atomic_store(&cancellation_allocation, -1);
+    assert(result.f_status == CANCELLED && !result.f_rows);
+    assert(budget.f_status == CANCELLED && budget.f_rows < UINT64_MAX);
+    assert(f.worker.f_roots == parent);
+    assert(mica_kernel_commit(&tx) == CANCELLED);
+    assert(!mica_kernel_work(&tx)->f_candidate && !mica_kernel_work(&tx)->f_done);
+    assert(mica_kernel_end(&tx));
+    destroy(&f);
+#endif
+}
+
+// Pages must retain every selected tuple while collection relocates the tree.
+// Caller storage is populated only after the last safepoint in each scan.
+static void scan_collection(void) {
+    struct fixture f;
+    init(&f);
+    declare(&f, 1, SET);
+    struct mica_KernelTransaction tx;
+    begin(&f, &tx);
+    for (int64_t i = 0; i < 512; ++i) assert(write_pair(&tx, 1, i, i % 8, true) == OK);
+    assert(refresh(&tx) == OK);
+    struct collection_job job = {.heap = &f.heap};
+    pthread_t collector;
+    assert(!pthread_create(&collector, NULL, collect_repeatedly, &job));
+    while (!atomic_load(&job.ready)) sched_yield();
+    for (;;) {
+        mica_foreign_memory_lock(f.heap.f_mutex);
+        bool requested = f.heap.f_collecting;
+        mica_foreign_memory_unlock(f.heap.f_mutex);
+        if (requested) break;
+        sched_yield();
+    }
+    uint64_t total = 0;
+    mica_type_Value after = 0;
+    for (;;) {
+        mica_type_Value rows[73];
+        struct mica_MemoryRoot *roots = f.worker.f_roots;
+        struct mica_KernelScanResult page = mica_kernel_scan(&tx, 1, tuple(&f.worker, 0, 0), 0, after, rows, 73);
+        assert(page.f_status == OK && f.worker.f_roots == roots);
+        for (uint64_t i = 0; i < page.f_count; ++i) {
+            assert(cell(rows[i], 0) == (int64_t)total);
+            assert(cell(rows[i], 1) == (int64_t)(total % 8));
+            ++total;
+        }
+        if (!page.f_more) break;
+        assert(page.f_count == 73);
+        after = rows[page.f_count - 1];
+    }
+    assert(total == 512);
+    assert(mica_kernel_end(&tx));
+    assert(mica_memory_leave(&f.worker));
+    assert(!pthread_join(collector, NULL));
+    assert(mica_memory_enter(&f.worker));
+    destroy(&f);
+}
+
 int main(int argc, char **argv) {
     if (argc == 2 && !strcmp(argv[1], "trace")) return trace();
     if (argc == 5 && !strcmp(argv[1], "bench")) return benchmark(argv[2], (unsigned)strtoul(argv[3], NULL, 10), (unsigned)strtoul(argv[4], NULL, 10));
@@ -2232,6 +2385,9 @@ int main(int argc, char **argv) {
     rule_maintenance_catalogue();
     rule_maintenance_conflicts();
     rule_execution_controls();
+    query_execution_controls();
+    query_mid_join_cancellation();
+    scan_collection();
     rule_conflicts();
     rule_allocation_failures();
     rule_prepared_publication();

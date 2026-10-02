@@ -187,8 +187,8 @@ Callers must root managed pointers across safepoints and treat definitions and p
 | `kernel_rule(transaction, id)` | Read one definition from the draft |
 | `kernel_rules(transaction)` | Enumerate the draft catalogue |
 | `kernel_rule_plan(transaction)` | Read the draft dependency plan and record a whole-catalogue dependency |
-| `kernel_rule_depend(transaction, relation)` | Record head-generation and schema dependencies through the draft plan |
-| `kernel_set_limits(transaction, steps, rows, rounds)` | Set rule-operation work, row-construction, and evaluation-round allowances |
+| `kernel_rule_depend(transaction, relation, budget)` | Record head-generation and schema dependencies through the draft plan |
+| `kernel_set_limits(transaction, steps, rows, rounds)` | Set operation work, row-construction, and evaluation-round allowances |
 | `kernel_cancel(transaction)` | Request cancellation from any native thread before publication wins |
 
 Writes return kernel status codes. Definition reads return `KernelRuleResult` with `status` and `rule`.
@@ -221,7 +221,7 @@ Whole-catalogue reads remain conservative: any catalogue change conflicts.
 
 Each catalogue edit rebuilds and validates its candidate dependency plan.
 Unchanged catalogues reuse the committed plan during fact-only commits.
-This is dependency planning; incremental derived-row maintenance is not implemented yet.
+Fact changes refresh derived rows through the maintenance path described below.
 Planning and dependency walks poll for collection and consume a work allowance.
 The default allowance is 16,777,216 steps per operation; callers can change it before an operation.
 Commit shares one allowance across schema preparation, dependency validation, catalogue rebasing, and plan compilation.
@@ -233,17 +233,27 @@ Publication claims the same atomic signal before swapping the snapshot root.
 Cancellation cannot undo a successful commit.
 The caller must join cancellation requesters before ending or reusing the transaction control.
 
-Each rule operation receives a `KernelBudget` with step, row-construction, and round allowances.
-Commit retries share that budget. Limits return status 10; cancellation returns status 11.
-The step allowance defaults to 16,777,216; row and round allowances default to unlimited.
-Row allowances count constructed intermediate rows, including candidates later deduplicated.
-Ordinary query operators, allocation-byte caps, snapshot admission, and resumable scheduling still need execution controls.
+Each top-level query, scan, or rule operation creates one `KernelBudget` with step, row-construction, and round allowances.
+Children, draft refresh, dependency tracking, and result construction consume the same budget.
+Commit retries also share one budget. Limits return status 10. Cancellation returns status 11.
+The step allowance defaults to 16,777,216. Row and round allowances default to unlimited.
+Row allowances count intermediate row construction and result-buffer entries, including candidates later deduplicated.
+Allocation-byte caps, snapshot admission, and resumable scheduling remain separate work.
+
+Lower-level operations accept a caller-owned `KernelBudget` pointer.
+These include `kernel_read`, `kernel_rule_refresh`, `kernel_rule_depend`, and `kernel_rule_rows`.
+A failed budget remains failed until the caller supplies a fresh budget.
+
+Paged scans retain their private output in managed storage across collection polls.
+On success, the scanner copies the complete page into caller storage without another safepoint.
+On failure, the scanner returns zero rows and leaves caller storage unchanged.
+Callers must root returned values before any later safepoint.
 
 ### Rule evaluation
 
 `kernel_rule_evaluate(transaction)` computes the complete closure of the current draft.
 It returns `KernelRuleEvaluationResult` with `status` and a managed `evaluation` pointer.
-`kernel_rule_rows(worker, evaluation, relation, derived, limit)` returns canonical rows as a `KernelQueryResult`.
+`kernel_rule_rows(worker, evaluation, relation, derived, budget)` returns canonical rows as a `KernelQueryResult`.
 Set `derived` to true for derived rows alone, or false for their union with stored facts.
 Known relations without rules have empty derived rows. Unknown relations return status 1.
 
@@ -278,7 +288,7 @@ These trusted kernel APIs do not perform tenant authorization.
 ### Transactional rule maintenance
 
 `kernel_scan` and query plans read the union of stored and derived rows.
-`kernel_read(transaction, relation)` returns this view as a managed `KernelRelationResult`.
+`kernel_read(transaction, relation, budget)` returns this view as a managed `KernelRelationResult`.
 The internal `kernel_view` function exposes stored facts for writes and validation.
 Scans can allocate and reach collection safepoints.
 
@@ -312,11 +322,8 @@ Publication claims the same atomic signal before swapping the snapshot root.
 Cancellation cannot undo a successful commit.
 The caller must join cancellation requesters before ending or reusing the transaction control.
 
-Each rule operation receives a `KernelBudget` with step, row-construction, and round allowances.
-Commit retries share that budget. Limits return status 10; cancellation returns status 11.
-The step allowance defaults to 16,777,216; row and round allowances default to unlimited.
-Row allowances count constructed intermediate rows, including candidates later deduplicated.
-Ordinary query operators, allocation-byte caps, snapshot admission, and resumable scheduling still need execution controls.
+Queries and scans share their operation budget with any maintenance they trigger.
+The execution controls above apply to both cached reads and recomputed results.
 
 Completed evaluations expose `recomputed`, `extended`, `reused`, `rounds`, `steps`, `probes`, and `cleared` counters.
 These counters describe one maintenance pass.

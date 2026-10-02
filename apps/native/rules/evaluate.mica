@@ -31,7 +31,7 @@ verb native_rules/evaluation_declarations(input: map) -> map
     ["rule_round", :U64, [worker, evaluation, component, ["incremental", :Bool, :Value], ["seed", :Bool, :Value], budget]],
     ["rule_advance", :U64, [worker, evaluation, component, ["changed", native_memory/pointer(:Bool), :Borrow], budget]],
     ["rule_evaluate", [:Record, "KernelRuleEvaluationResult"], [tx]],
-    ["rule_rows", [:Record, "KernelQueryResult"], [worker, evaluation, ["id", :U64, :Value], ["derived", :Bool, :Value], ["limit", :U64, :Value]]]]
+    ["rule_rows", [:Record, "KernelQueryResult"], [worker, evaluation, ["id", :U64, :Value], ["derived", :Bool, :Value], budget]]]
     module = native_kernel/declare(module, spec[0], spec[1], spec[2], true)
   end
   return module
@@ -146,7 +146,6 @@ verb native_rules/evaluate_body(module: map) -> map
 end
 verb native_rules/result_rows_body(module: map) -> map
   let builder: map = native_rules/context(module, "rule_rows")
-  builder = native_rules/local_budget(builder, native_rules/ref(builder, "limit"))
   builder = native_rules/check(builder, native_gen/negate(native_kernel/absent(native_rules/ref(builder, "evaluation"))), "schema")
   let [source: map, ready: map] = native_roots/retain(builder, "source", native_rules/rows_lookup(builder, native_rules/ref(builder, "evaluation"), native_rules/ref(builder, "id")))
   builder = native_gen/when(ready, native_kernel/absent(source), fn(stored)
@@ -168,7 +167,7 @@ verb native_rules/result_rows_body(module: map) -> map
   let [rows: map, rooted: map] = native_roots/retain(allocated, "rows", empty)
   builder = native_rules/tree_walk(rooted, tree, fn(input_step, row)
     let step: map = input_step
-    let [appended: map, ready: map] = native_gen/checked_bind(step, "appended", native_gen/call(step, "kernel_query_append", [native_roots/worker(step), rows, row]), "ok", fn(failed) => native_rules/error(failed, "oom"))
+    let [appended: map, ready: map] = native_gen/checked_bind(step, "appended", native_query/call(step, "kernel_query_append", [native_roots/worker(step), rows, row]), "ok", fn(failed) => native_query/error(failed, "oom"))
     let generated_result: map = native_roots/store(ready, rows, native_gen/field(ready, appended, "value"))
     return generated_result
   end)
