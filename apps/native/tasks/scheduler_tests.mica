@@ -1,0 +1,73 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+verb native_tasks/test_scheduler(input: map) -> map
+  let module: map = input
+  module = native/declare_function(module, "task_test_complete", :U64, [["attempt", native_tasks/pointer("Attempt"), :Borrow]], [], native_tasks/effects(), :Value, "")
+  module = native/execution_function(module, "task_test_complete", :Tail)
+  let complete: map = native_tasks/entry_context(module, "task_test_complete")
+  complete = native_gen/return_value(complete, native_gen/call(complete, "task_request", [native_tasks/attempt(complete), native_gen/ref(complete, "task_boundary_complete")]))
+  module = native_gen/finish(module, complete)
+  module = native/declare_function(module, "task_test_suspend", :U64, [["attempt", native_tasks/pointer("Attempt"), :Borrow]], [], native_tasks/effects(), :Value, "")
+  module = native/execution_function(module, "task_test_suspend", :Tail)
+  let suspended: map = native_tasks/entry_context(module, "task_test_suspend")
+  let timer_image: map = native_tasks/saved(suspended, "current", native_tasks/pointer("Image"))
+  let timer_input: map = native_kernel/load_field(suspended, timer_image, "input")
+  suspended = native_gen/when(suspended, native_gen/field(suspended, native_gen/call(suspended, "value_as_int", [timer_input]), "ok"), fn(first)
+    let duration: map = native_kernel/load_field(first, timer_image, "environment")
+    let timeout: map = native_gen/bitcast(:U64, native_gen/field(first, native_gen/call(first, "value_as_int", [duration]), "number"))
+    return native_gen/return_value(first, native_gen/call(first, "task_suspend_request", [native_tasks/attempt_field(first, "worker"), native_tasks/attempt(first), timeout]))
+  end)
+  suspended = native_tasks/check(suspended, native_gen/call(suspended, "value_is_unit", [timer_input]), "schema")
+  suspended = native_gen/return_value(suspended, native_gen/call(suspended, "task_request", [native_tasks/attempt(suspended), native_gen/ref(suspended, "task_boundary_complete")]))
+  module = native_gen/finish(module, suspended)
+  module[:state] = native/record_type(module[:state], "TaskSchedulerProbe", [
+    ["hub", native_tasks/pointer("MailboxHub")], ["mutex", native_memory/pointer(:U8)], ["delivered", :U64], ["empty", :U64]])[1]
+  let [global: int, state: map] = native/add_global(module[:state], "task_scheduler_probe_state", [:Record, "TaskSchedulerProbe"], :Mutable, :Zero)
+  module[:state] = state
+  let constants: map = module[:constants]
+  constants["task_scheduler_probe_storage"] = global
+  module[:constants] = constants
+  module = native/declare_function(module, "task_scheduler_probe", native_tasks/pointer("SchedulerProbe"), [], [], [], :Static, "")
+  let builder: map = native_gen/context(module, "task_scheduler_probe")
+  builder = native_gen/return_value(builder, native_gen/expression(native_tasks/pointer("SchedulerProbe"), :GlobalAddress, ["task_scheduler_probe_storage"]))
+  module = native_gen/finish(module, builder)
+  module = native/declare_function(module, "task_test_receive", :U64, [["attempt", native_tasks/pointer("Attempt"), :Borrow]], [], native_tasks/effects(), :Value, "")
+  module = native/execution_function(module, "task_test_receive", :Tail)
+  builder = native_tasks/entry_context(module, "task_test_receive")
+  let image: map = native_tasks/saved(builder, "current", native_tasks/pointer("Image"))
+  let reply: map = native_kernel/load_field(builder, image, "input")
+  builder = native_gen/when(builder, native_gen/field(builder, native_gen/call(builder, "value_as_int", [reply]), "ok"), fn(first)
+    let environment: map = native_kernel/load_field(first, image, "environment")
+    let receivers: map = native_gen/field(first, native_gen/call(first, "value_list_get", [environment, native_gen/ref(first, "zero")]), "value")
+    let duration: map = native_gen/field(first, native_gen/call(first, "value_list_get", [environment, native_gen/ref(first, "one")]), "value")
+    let timeout: map = native_gen/bitcast(:U64, native_gen/field(first, native_gen/call(first, "value_as_int", [duration]), "number"))
+    return native_gen/return_value(first, native_gen/call(first, "task_mailbox_request", [
+      native_kernel/load_field(first, native_gen/call(first, "task_scheduler_probe", []), "hub"),
+      native_tasks/attempt_field(first, "worker"), native_tasks/attempt(first), receivers, timeout]))
+  end)
+  let [status: map, emitted: map] = native_gen/bind(builder, "emitted", native_gen/call(builder, "task_stage", [
+    native_tasks/attempt_field(builder, "worker"), native_tasks/slot(builder, "effects"), native_gen/ref(builder, "task_effect_emit"),
+    native_kernel/load_field(builder, image, "tenant"), reply]))
+  builder = native_gen/unless(emitted, native_kernel/absent(status), fn(failed) => native_gen/return_value(failed, status))
+  builder = native_gen/return_value(builder, native_gen/call(builder, "task_request", [native_tasks/attempt(builder), native_gen/ref(builder, "task_boundary_complete")]))
+  module = native_gen/finish(module, builder)
+
+  module = native_tasks/declare(module, "test_scheduler_emit", :U64, native_tasks/service_parameters())
+  builder = native_tasks/context(module, "test_scheduler_emit")
+  let probe: map = native_gen/cast(native_tasks/pointer("SchedulerProbe"), native_gen/ref(builder, "context"))
+  let mutex: map = native_kernel/load_field(builder, probe, "mutex")
+  builder = native_tasks/check(builder, native_gen/call(builder, "memory_leave", [native_gen/ref(builder, "worker")]), "closed")
+  builder = native_gen/do_call(builder, "memory_lock", [mutex])
+  builder = native_gen/on_return(builder, fn(leaving, result) => native_gen/do_call(leaving, "memory_unlock", [mutex]))
+  builder = native_tasks/check(builder, native_gen/call(builder, "memory_enter", [native_gen/ref(builder, "worker")]), "closed")
+  builder = native_tasks/check(builder, native_gen/call(builder, "memory_safepoint", [native_gen/ref(builder, "worker"), native_gen/ref(builder, "true")]), "oom")
+  let [list: map, decoded: map] = native_gen/bind(builder, "list", native_gen/call(builder, "value_as_list", [native_tasks/effect_field(builder, "payload")]))
+  builder = native_tasks/check(decoded, native_gen/field(decoded, list, "ok"), "schema")
+  builder = native_kernel/store_field(builder, probe, "delivered", native_gen/add(native_kernel/load_field(builder, probe, "delivered"), native_gen/ref(builder, "one")))
+  builder = native_gen/when(builder, native_kernel/absent(native_kernel/load_field(builder, native_gen/field(builder, list, "header"), "length")), fn(empty)
+    return native_kernel/store_field(empty, probe, "empty", native_gen/add(native_kernel/load_field(empty, probe, "empty"), native_gen/ref(empty, "one")))
+  end)
+  let result: map = native_gen/finish(module, native_tasks/attempt_status(builder, "ok"))
+  return result
+end

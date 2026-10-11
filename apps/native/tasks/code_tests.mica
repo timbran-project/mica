@@ -1,0 +1,49 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+// A separately loaded generated library makes lifetime assertions observable
+// through the OS loader, without adding runtime policy to the C fixture.
+verb native_code/test_library(input: map, complete: bool) -> map
+  // Reuse the exact runtime ABI, but none of its definitions or globals.
+  let state: map = native/program()
+  for table in [:next, :records, :fields, :function_types, :execution_types]
+    state[table] = input[table]
+  end
+  let boundary: int = 2
+  if complete
+    boundary = 1
+  end
+  let [constants: map, declared: map] = native/constants(state, [
+    ["zero", :U64, native_value/hex(0)], ["boundary", :U64, native_value/hex(boundary)]])
+  let [checkpoint: list, with_checkpoint: map] = native/function_pointer_type(declared, "CodeTestCheckpoint", :Void,
+    [["attempt", native_tasks/pointer("Attempt"), :Borrow]], native_tasks/effects(), :Value, "")
+  let [storage: int, with_storage: map] = native/add_global(with_checkpoint, "code_test_checkpoint", checkpoint, :Mutable, :Zero)
+  constants["checkpoint_storage"] = storage
+  let module: map = native/module_context(with_storage, constants)
+  module = native/declare_function(module, "code_test_set_checkpoint", :Void, [["checkpoint", checkpoint, :Value]], [], [:WriteMemory], :Value, "")
+  let builder: map = native_gen/context(module, "code_test_set_checkpoint")
+  let slot: map = native_gen/expression(native_memory/pointer(checkpoint), :GlobalAddress, ["checkpoint_storage"])
+  builder = native_gen/store(builder, slot, native_gen/ref(builder, "checkpoint"))
+  module = native_gen/finish(module, native_gen/return_void(builder))
+  module = native/declare_function(module, "code_test_identity", :U64, [["value", :U64, :Value]], [], [], :Value, "")
+  builder = native_gen/context(module, "code_test_identity")
+  module = native_gen/finish(module, native_gen/return_value(builder, native_gen/ref(builder, "value")))
+  module = native/declare_function(module, "code_test_entry", :U64, [["attempt", native_tasks/pointer("Attempt"), :Borrow]], [], native_tasks/effects(), :Value, "")
+  module = native/execution_function(module, "code_test_entry", :Tail)
+  builder = native_tasks/entry_context(module, "code_test_entry")
+  builder = native_kernel/store_field(builder, native_tasks/attempt(builder), "boundary", native_gen/ref(builder, "boundary"))
+  module = native_gen/finish(module, native_gen/return_value(builder, native_gen/ref(builder, "zero")))
+
+  // Drop this entry's image before collection. Only the execution pin retains
+  // this library when the fixture checkpoint runs inside its native frame.
+  module = native/declare_function(module, "code_test_advance", :U64, [["attempt", native_tasks/pointer("Attempt"), :Borrow]], [], native_tasks/effects(), :Value, "")
+  module = native/execution_function(module, "code_test_advance", :Tail)
+  builder = native_tasks/entry_context(module, "code_test_advance")
+  let current: map = native_tasks/saved(builder, "current", native_tasks/pointer("Image"))
+  let handler: map = native_kernel/load_field(builder, current, "handlers")
+  builder = native_roots/store(builder, current, native_kernel/load_field(builder, handler, "image"))
+  builder = native_gen/do_indirect_call(builder, native_gen/load(slot), [native_tasks/attempt(builder)])
+  module = native_gen/finish(module, native_gen/return_value(builder, native_gen/ref(builder, "zero")))
+  let result: map = module[:state]
+  return result
+end

@@ -1,0 +1,180 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+// The ready queue owns scalar task IDs, never worker pointers or managed
+// captures. Its owner keeps admitted task controls alive until workers drain
+// the queue and leave. Closing wakes idle workers; release follows their join.
+verb native_tasks/queue_field(builder: map, field: string) -> map
+  let result: map = native_kernel/load_field(builder, native_gen/ref(builder, "queue"), field)
+  return result
+end
+verb native_tasks/queue_store(builder: map, field: string, value: map) -> map
+  let result: map = native_kernel/store_field(builder, native_gen/ref(builder, "queue"), field, value)
+  return result
+end
+verb native_tasks/queue_unlock(builder: map) -> map
+  let result: map = native_gen/do_call(builder, "memory_unlock", [native_tasks/queue_field(builder, "mutex")])
+  return result
+end
+verb native_tasks/queue_result(builder: map, status: map, id: map) -> map
+  let result: map = native_gen/return_value(builder, native_gen/record(builder, [:Record, "TaskQueueResult"], {"status" -> status, "id" -> id}))
+  return result
+end
+
+verb native_tasks/queue_init_body(module: map) -> map
+  let builder: map = native_gen/context(module, "task_queue_init")
+  let capacity: map = native_gen/ref(builder, "capacity")
+  builder = native_gen/unless(builder, native_kernel/absent(native_tasks/queue_field(builder, "mutex")), fn(busy) => native_tasks/attempt_status(busy, "closed"))
+  builder = native_gen/when(builder, native_kernel/absent(capacity), fn(invalid) => native_tasks/attempt_status(invalid, "schema"))
+  let maximum: map = native_gen/divide(native_gen/ref(builder, "kernel_unlimited"), native_gen/sizeof(:U64))
+  builder = native_gen/when(builder, native_gen/less(maximum, capacity), fn(overflow) => native_tasks/attempt_status(overflow, "limit"))
+  let [mutex: map, created: map] = native_gen/bind(builder, "mutex", native_gen/call(builder, "memory_sync_create", []))
+  builder = native_gen/when(created, native_kernel/absent(mutex), fn(failed) => native_tasks/attempt_status(failed, "oom"))
+  let [storage: map, allocated: map] = native_gen/bind(builder, "storage", native_gen/call(builder, "memory_platform_allocate", [native_gen/multiply(capacity, native_gen/sizeof(:U64))]))
+  builder = native_gen/when(allocated, native_kernel/absent(storage), fn(failed)
+    return native_tasks/attempt_status(native_gen/do_call(failed, "memory_sync_destroy", [mutex]), "oom")
+  end)
+  builder = native_gen/root_write(builder, native_gen/field(builder, native_gen/ref(builder, "queue"), "mutex"), native_gen/manage(mutex))
+  builder = native_gen/root_write(builder, native_gen/field(builder, native_gen/ref(builder, "queue"), "slots"), native_gen/manage(native_gen/cast(native_memory/pointer(:U64), storage)))
+  builder = native_tasks/queue_store(builder, "capacity", capacity)
+  builder = native_tasks/attempt_status(builder, "ok")
+  let result: map = native_gen/finish(module, builder)
+  return result
+end
+
+verb native_tasks/queue_push_body(module: map) -> map
+  let builder: map = native_gen/context(module, "task_queue_push")
+  builder = native_gen/when(builder, native_kernel/absent(native_tasks/queue_field(builder, "mutex")), fn(closed) => native_tasks/attempt_status(closed, "closed"))
+  builder = native_gen/do_call(builder, "memory_lock", [native_tasks/queue_field(builder, "mutex")])
+  builder = native_gen/on_return(builder, fn(leaving, result) => native_tasks/queue_unlock(leaving))
+  builder = native_gen/when(builder, native_tasks/queue_field(builder, "closed"), fn(closed) => native_tasks/attempt_status(closed, "closed"))
+  let count: map = native_tasks/queue_field(builder, "count")
+  let capacity: map = native_tasks/queue_field(builder, "capacity")
+  builder = native_gen/unless(builder, native_gen/less(count, capacity), fn(full) => native_tasks/attempt_status(full, "limit"))
+  // capacity is bounded by the allocation-size check, so this sum cannot wrap.
+  let [position: map, ready: map] = native_gen/bind(builder, "position", native_gen/add(native_tasks/queue_field(builder, "head"), count))
+  builder = native_gen/unless(ready, native_gen/less(position, capacity), fn(wrapped) => native_gen/assign(wrapped, position, native_gen/subtract(position, capacity)))
+  builder = native_gen/store(builder, native_gen/offset(native_tasks/queue_field(builder, "slots"), position), native_gen/ref(builder, "id"))
+  builder = native_tasks/queue_store(builder, "count", native_gen/add(count, native_gen/ref(builder, "one")))
+  builder = native_gen/do_call(builder, "memory_wake", [native_tasks/queue_field(builder, "mutex")])
+  builder = native_tasks/attempt_status(builder, "ok")
+  let result: map = native_gen/finish(module, builder)
+  return result
+end
+
+verb native_tasks/queue_take_body(module: map) -> map
+  let builder: map = native_gen/context(module, "task_queue_take")
+  let worker: map = native_gen/ref(builder, "worker")
+  let zero: map = native_gen/ref(builder, "zero")
+  builder = native_gen/when(builder, native_kernel/absent(native_tasks/queue_field(builder, "mutex")), fn(closed) => native_tasks/queue_result(closed, native_gen/ref(closed, "kernel_closed"), zero))
+  builder = native_gen/unless(builder, native_gen/call(builder, "memory_leave", [worker]), fn(invalid) => native_tasks/queue_result(invalid, native_gen/ref(invalid, "kernel_closed"), zero))
+  builder = native_gen/do_call(builder, "memory_lock", [native_tasks/queue_field(builder, "mutex")])
+  builder = native_gen/on_return(builder, fn(leaving, result)
+    let ready: map = native_tasks/queue_unlock(leaving)
+    let [entered: map, active: map] = native_gen/bind(ready, "entered", native_gen/call(ready, "memory_enter", [worker]))
+    return native_gen/unless(active, entered, fn(failed) => native_gen/assign(failed, result,
+      native_gen/record(failed, [:Record, "TaskQueueResult"], {"status" -> native_gen/ref(failed, "kernel_closed"), "id" -> zero})))
+  end)
+  builder = native_gen/while_loop(builder, native_kernel/absent(native_tasks/queue_field(builder, "count")), fn(empty)
+    let ready: map = native_gen/when(empty, native_tasks/queue_field(empty, "closed"), fn(closed) => native_tasks/queue_result(closed, native_gen/ref(closed, "kernel_closed"), zero))
+    ready = native_gen/unless(ready, native_gen/ref(ready, "wait"), fn(idle) => native_tasks/queue_result(idle, native_gen/ref(idle, "task_queue_empty"), zero))
+    return native_gen/do_call(ready, "memory_wait", [native_tasks/queue_field(ready, "mutex")])
+  end)
+  let [head: map, with_head: map] = native_gen/bind(builder, "head", native_tasks/queue_field(builder, "head"))
+  let [id: map, with_id: map] = native_gen/bind(with_head, "id", native_gen/load(native_gen/offset(native_tasks/queue_field(with_head, "slots"), head)))
+  builder = native_gen/assign(with_id, head, native_gen/add(head, native_gen/ref(with_id, "one")))
+  builder = native_gen/when(builder, native_gen/equal(head, native_tasks/queue_field(builder, "capacity")), fn(wrapped) => native_gen/assign(wrapped, head, zero))
+  builder = native_tasks/queue_store(builder, "head", head)
+  builder = native_tasks/queue_store(builder, "count", native_gen/subtract(native_tasks/queue_field(builder, "count"), native_gen/ref(builder, "one")))
+  builder = native_tasks/queue_result(builder, native_gen/ref(builder, "kernel_ok"), id)
+  let result: map = native_gen/finish(module, builder)
+  return result
+end
+
+verb native_tasks/drain_result(builder: map, status: map, taken: map, completed: map) -> map
+  let result: map = native_gen/return_value(builder, native_gen/record(builder, [:Record, "TaskDrainResult"],
+    {"status" -> status, "taken" -> taken, "completed" -> completed}))
+  return result
+end
+
+// Admitted controls occupy stable storage until every worker joins. Errors
+// belong to their task; one failed task cannot stop unrelated runnable work.
+verb native_tasks/drain_body(module: map) -> map
+  let builder: map = native_gen/context(module, "task_drain")
+  builder = native_gen/when(builder, native_kernel/absent(native_gen/ref(builder, "services")), fn(missing)
+    return native_tasks/drain_result(missing, native_gen/ref(missing, "kernel_schema"), native_gen/ref(missing, "zero"), native_gen/ref(missing, "zero"))
+  end)
+  let [taken: map, with_taken: map] = native_gen/bind(builder, "taken", native_gen/ref(builder, "zero"))
+  let [completed: map, ready: map] = native_gen/bind(with_taken, "completed", native_gen/ref(with_taken, "zero"))
+  builder = native_gen/while_loop(ready, native_gen/ref(ready, "true"), fn(loop)
+    let [next: map, with_next: map] = native_gen/bind(loop, "next", native_gen/call(loop, "task_queue_take",
+      [native_gen/ref(loop, "queue"), native_gen/ref(loop, "worker"), native_gen/ref(loop, "true")]))
+    let status: map = native_gen/field(with_next, next, "status")
+    let step: map = native_gen/when(with_next, native_gen/equal(status, native_gen/ref(with_next, "kernel_closed")), fn(closed)
+      return native_tasks/drain_result(closed, native_gen/ref(closed, "kernel_ok"), taken, completed)
+    end)
+    step = native_gen/unless(step, native_kernel/absent(status), fn(failed) => native_tasks/drain_result(failed, status, taken, completed))
+    let id: map = native_gen/field(step, next, "id")
+    step = native_gen/unless(step, native_gen/less(id, native_gen/ref(step, "count")), fn(invalid)
+      return native_tasks/drain_result(invalid, native_gen/ref(invalid, "kernel_schema"), taken, completed)
+    end)
+    step = native_gen/assign(step, taken, native_gen/add(taken, native_gen/ref(step, "one")))
+    let [result: map, executed: map] = native_gen/bind(step, "status", native_gen/call(step, "task_execute",
+      [native_gen/offset(native_gen/ref(step, "tasks"), id), native_gen/ref(step, "worker")]))
+    // Delivery claims the published boundary itself. A nonzero execution
+    // status cannot prove that publication failed or suppress committed effects.
+    let [delivered: map, with_delivery: map] = native_gen/bind(executed, "delivery_status", native_gen/call(executed, "task_dispatch",
+      [native_gen/offset(native_gen/ref(executed, "tasks"), id), native_gen/ref(executed, "worker"), native_gen/ref(executed, "services")]))
+    step = native_gen/when(with_delivery, native_kernel/absent(result), fn(committed) => native_gen/assign(committed, result, delivered))
+    return native_gen/when(step, native_kernel/absent(result), fn(committed)
+      return native_gen/assign(committed, completed, native_gen/add(completed, native_gen/ref(committed, "one")))
+    end)
+  end)
+  builder = native_tasks/drain_result(builder, native_gen/ref(builder, "kernel_closed"), taken, completed)
+  let result: map = native_gen/finish(module, builder)
+  return result
+end
+
+verb native_tasks/queue(input: map) -> map
+  let module: map = input
+  module[:state] = native/record_type(module[:state], "TaskQueue", [
+    ["mutex", native_memory/pointer(:U8)], ["slots", native_memory/pointer(:U64)],
+    ["capacity", :U64], ["head", :U64], ["count", :U64], ["closed", :Bool]])[1]
+  module[:state] = native/record_type(module[:state], "TaskQueueResult", [["status", :U64], ["id", :U64]])[1]
+  module[:state] = native/record_type(module[:state], "TaskDrainResult", [["status", :U64], ["taken", :U64], ["completed", :U64]])[1]
+  let [bindings: map, state: map] = native/constants(module[:state], [["task_queue_empty", :U64, native_value/hex(13)]])
+  module[:state] = state
+  let constants: map = module[:constants]
+  constants["task_queue_empty"] = bindings["task_queue_empty"]
+  module[:constants] = constants
+  let queue: list = ["queue", native_tasks/pointer("Queue"), :Borrow]
+  module = native_tasks/declare(module, "queue_init", :U64, [queue, ["capacity", :U64, :Value]])
+  module = native_tasks/declare(module, "queue_push", :U64, [queue, ["id", :U64, :Value]])
+  module = native_tasks/declare(module, "queue_take", [:Record, "TaskQueueResult"], [queue, ["worker", native_memory/record_pointer("MemoryWorker"), :Borrow], ["wait", :Bool, :Value]])
+  module = native_tasks/declare(module, "queue_close", :Void, [queue])
+  module = native_tasks/declare(module, "queue_release", :Bool, [queue])
+  module = native_tasks/declare(module, "drain", [:Record, "TaskDrainResult"], [queue,
+    ["worker", native_memory/record_pointer("MemoryWorker"), :Borrow],
+    ["tasks", native_tasks/pointer("Control"), :Borrow], ["count", :U64, :Value], ["services", native_tasks/pointer("Services"), :Borrow]])
+  module = native_tasks/queue_init_body(module)
+  module = native_tasks/queue_push_body(module)
+  module = native_tasks/queue_take_body(module)
+  let builder: map = native_gen/context(module, "task_queue_close")
+  builder = native_gen/when(builder, native_kernel/absent(native_tasks/queue_field(builder, "mutex")), fn(closed) => native_gen/return_void(closed))
+  builder = native_gen/do_call(builder, "memory_lock", [native_tasks/queue_field(builder, "mutex")])
+  builder = native_tasks/queue_store(builder, "closed", native_gen/ref(builder, "true"))
+  builder = native_gen/do_call(builder, "memory_wake", [native_tasks/queue_field(builder, "mutex")])
+  builder = native_gen/return_void(native_tasks/queue_unlock(builder))
+  module = native_gen/finish(module, builder)
+  builder = native_gen/context(module, "task_queue_release")
+  builder = native_gen/when(builder, native_kernel/absent(native_tasks/queue_field(builder, "mutex")), fn(closed) => native_gen/return_value(closed, native_gen/ref(closed, "false")))
+  builder = native_gen/unless(builder, native_tasks/queue_field(builder, "closed"), fn(open) => native_gen/return_value(open, native_gen/ref(open, "false")))
+  builder = native_gen/unless(builder, native_kernel/absent(native_tasks/queue_field(builder, "count")), fn(queued) => native_gen/return_value(queued, native_gen/ref(queued, "false")))
+  builder = native_gen/do_call(builder, "memory_platform_release", [native_gen/manage(native_gen/cast(native_memory/pointer(:U8), native_tasks/queue_field(builder, "slots")))])
+  builder = native_gen/do_call(builder, "memory_sync_destroy", [native_tasks/queue_field(builder, "mutex")])
+  builder = native_gen/store(builder, native_gen/ref(builder, "queue"), native_gen/zero([:Record, "TaskQueue"]))
+  builder = native_gen/return_value(builder, native_gen/ref(builder, "true"))
+  module = native_gen/finish(module, builder)
+  let result: map = native_tasks/drain_body(module)
+  return result
+end

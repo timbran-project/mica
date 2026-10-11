@@ -63,31 +63,47 @@ verb native_execution/budget_scope(builder: map, worker: map, fields: map) -> ma
   end
   bindings["budget"] = native_gen/address(budget)
   ready[:scope_bindings] = bindings
-  let [control: map, attached: map] = native_gen/bind(ready, "memory_control", native_gen/record(ready, [:Record, "MemoryControl"],
-    {"parent" -> native_gen/zero(native_memory/record_pointer("MemoryControl")), "context" -> native_gen/cast(native_memory/pointer(:U8), native_gen/address(budget)),
-      "check" -> native_gen/expression([:FunctionPointer, "MemoryCheck"], :FunctionAddress, ["kernel_memory_check"]), "denied" -> native_gen/ref(ready, "false")}))
-  ready = native_gen/do_call(attached, "memory_control_push", [worker, native_gen/address(control)])
-  ready = native_gen/on_return(ready, fn(leaving, result) => native_execution/leave(leaving, result, worker, native_gen/address(budget), native_gen/address(control)))
-  let result: map = native_execution/charge(ready, native_gen/zero(:U64), native_gen/zero(:U64), native_gen/zero(:U64), fn(failed, status)
-    if failed[:result] == :U64
-      return native_roots/return_value(failed, status)
-    end
-    let [failure: map, with_failure: map] = native_gen/bind(failed, "failure", native_gen/zero(failed[:result]))
-    let body: map = native_gen/write(with_failure, native_gen/field(with_failure, native_gen/address(failure), "status"), status)
-    return native_roots/return_value(body, failure)
+  ready = native_execution/control_scope(ready, worker, native_gen/address(budget))
+  let result: map = native_execution/charge(ready, native_gen/zero(:U64), native_gen/zero(:U64), native_gen/zero(:U64), fn(failed, status) => native_execution/fail(failed, status))
+  return result
+end
+// Borrow an existing operation budget. All nested allocators charge the same
+// allowance, and every return restores the enclosing allocation control.
+verb native_execution/control_scope(builder: map, worker: map, budget: map) -> map
+  let check: map = native_gen/expression([:FunctionPointer, "MemoryCheck"], :FunctionAddress, ["kernel_memory_check"])
+  let [control: map, attached: map] = native_gen/bind(builder, "memory_control", native_gen/record(builder, [:Record, "MemoryControl"],
+    {"parent" -> native_gen/zero(native_memory/record_pointer("MemoryControl")), "context" -> native_gen/cast(native_memory/pointer(:U8), budget),
+      "check" -> check, "denied" -> native_gen/ref(builder, "false")}))
+  let [owned: map, with_owned: map] = native_gen/bind(attached, "control_owned", native_gen/ref(attached, "true"))
+  let [cursor: map, with_cursor: map] = native_gen/bind(with_owned, "parent_control", native_kernel/load_field(with_owned, worker, "control"))
+  // A nested operation can borrow the same budget. Charge each allocation once,
+  // even when other controls sit between this call and the original attachment.
+  let ready: map = native_gen/while_loop(with_cursor, native_gen/negate(native_kernel/absent(cursor)), fn(scan)
+    let inspected: map = native_gen/when(scan, native_gen/equal(native_kernel/load_field(scan, cursor, "check"), check), fn(kernel)
+      return native_gen/when(kernel, native_gen/equal(native_kernel/load_field(kernel, cursor, "context"), native_gen/cast(native_memory/pointer(:U8), budget)), fn(shared)
+        return native_gen/break_loop(native_gen/assign(shared, owned, native_gen/ref(shared, "false")))
+      end)
+    end)
+    return native_gen/assign(inspected, cursor, native_kernel/load_field(inspected, cursor, "parent"))
   end)
+  let [active: map, selected: map] = native_gen/bind(ready, "active_control", native_kernel/load_field(ready, worker, "control"))
+  ready = native_gen/when(selected, owned, fn(attach)
+    let pushed: map = native_gen/do_call(attach, "memory_control_push", [worker, native_gen/address(control)])
+    return native_gen/assign(pushed, active, native_gen/address(control))
+  end)
+  let result: map = native_gen/on_return(ready, fn(leaving, result) => native_execution/leave(leaving, result, worker, budget, active, owned))
   return result
 end
 // The memory callback may report a limit through a value allocator's null
 // result. Restore the enclosing control and preserve the precise status.
-verb native_execution/leave(builder: map, result: map, worker: map, budget: map, control: map) -> map
+verb native_execution/leave(builder: map, result: map, worker: map, budget: map, control: map, owned: map) -> map
   // A parent can refuse after this budget allowed the allocation. Preserve
   // that refusal as LIMIT, with cancellation taking precedence for this task.
   let ready: map = native_gen/when(builder, native_kernel/load_field(builder, control, "denied"), fn(denied)
     let [checked: map, polled: map] = native_gen/bind(denied, "failure_status", native_gen/call(denied, "kernel_budget_check", [budget, native_gen/zero(:U64), native_gen/zero(:U64), native_gen/zero(:U64)]))
     return native_gen/when(polled, native_kernel/absent(checked), fn(limited) => native_kernel/store_field(limited, budget, "status", native_gen/ref(limited, "kernel_limit")))
   end)
-  ready = native_gen/do_call(ready, "memory_control_pop", [worker])
+  ready = native_gen/when(ready, owned, fn(attached) => native_gen/do_call(attached, "memory_control_pop", [worker]))
   let status: map = native_kernel/load_field(ready, budget, "status")
   let completed: map = native_gen/unless(ready, native_kernel/absent(status), fn(failed)
     let body: map = failed

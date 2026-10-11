@@ -1,0 +1,162 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+verb native_scheduler/member_body(module: map) -> map
+  let builder: map = native_scheduler/lock(native_scheduler/context(module, "member"))
+  builder = native_gen/branch(builder, native_gen/ref(builder, "joining"), fn(join)
+    let ready: map = native_scheduler/check(join, native_gen/negate(native_scheduler/field(join, "closed")), "closed")
+    return native_gen/branch(ready, native_gen/ref(ready, "events"), fn(events)
+      let exclusive: map = native_scheduler/check(events, native_gen/negate(native_scheduler/field(events, "events")), "closed")
+      return native_scheduler/store(exclusive, "events", native_gen/ref(exclusive, "true"))
+    end, fn(worker)
+      let bounded: map = native_scheduler/check(worker, native_gen/less(native_scheduler/field(worker, "workers"), native_gen/ref(worker, "kernel_unlimited")), "limit")
+      return native_scheduler/store(bounded, "workers", native_gen/add(native_scheduler/field(bounded, "workers"), native_gen/ref(bounded, "one")))
+    end)
+  end, fn(leave)
+    return native_gen/branch(leave, native_gen/ref(leave, "events"),
+      fn(events) => native_scheduler/store(events, "events", native_gen/ref(events, "false")),
+      fn(worker)
+        let checked: map = native_scheduler/check(worker, native_gen/negate(native_kernel/absent(native_scheduler/field(worker, "workers"))), "closed")
+        return native_scheduler/store(checked, "workers", native_gen/subtract(native_scheduler/field(checked, "workers"), native_gen/ref(checked, "one")))
+      end)
+  end)
+  let result: map = native_gen/finish(module, native_scheduler/status(builder, "ok"))
+  return result
+end
+
+verb native_scheduler/join(builder: map, events: bool) -> map
+  let member: map = native_gen/ref(builder, "false")
+  if events
+    member = native_gen/ref(builder, "true")
+  end
+  let [status: map, joined: map] = native_gen/bind(builder, "joined", native_gen/call(builder, "task_scheduler_member", [
+    native_gen/ref(builder, "scheduler"), native_gen/ref(builder, "worker"), member, native_gen/ref(builder, "true")]))
+  let ready: map = native_gen/unless(joined, native_kernel/absent(status), fn(failed) => native_execution/fail(failed, status))
+  let result: map = native_gen/on_return(ready, fn(leaving, result)
+    let outcome: map = result
+    if result[:type] != :U64
+      outcome = native_gen/field(leaving, result, "status")
+    end
+    let ready: map = native_gen/unless(leaving, native_kernel/absent(outcome), fn(failed)
+      let [left: map, outside: map] = native_gen/bind(failed, "left", native_gen/call(failed, "memory_leave", [native_gen/ref(failed, "worker")]))
+      let stopped: map = native_gen/do_call(outside, "task_scheduler_stop", [native_gen/ref(outside, "scheduler")])
+      let [entered: map, restored: map] = native_gen/bind(stopped, "entered", native_gen/call(stopped, "memory_enter", [native_gen/ref(stopped, "worker")]))
+      return restored
+    end)
+    let [left: map, released: map] = native_gen/bind(ready, "left", native_gen/call(ready, "task_scheduler_member", [
+      native_gen/ref(ready, "scheduler"), native_gen/ref(ready, "worker"), member, native_gen/ref(ready, "false")]))
+    return released
+  end)
+  return result
+end
+
+verb native_scheduler/take_body(module: map) -> map
+  let builder: map = native_scheduler/context(module, "take")
+  let [next: map, taken: map] = native_gen/bind(builder, "next", native_gen/call(builder, "task_queue_take", [
+    native_scheduler/queue(builder), native_gen/ref(builder, "worker"), native_gen/ref(builder, "true")]))
+  builder = native_gen/unless(taken, native_kernel/absent(native_gen/field(taken, next, "status")), fn(finished) => native_roots/return_value(finished, next))
+  builder = native_scheduler/lock(builder)
+  let id: map = native_gen/field(builder, next, "id")
+  builder = native_scheduler/check(builder, native_gen/less(id, native_scheduler/field(builder, "capacity")), "schema")
+  let slot: map = native_scheduler/slot(builder, id)
+  builder = native_scheduler/check(builder, native_gen/equal(native_kernel/load_field(builder, slot, "state"), native_gen/ref(builder, "task_slot_queued")), "schema")
+  builder = native_kernel/store_field(builder, slot, "state", native_gen/ref(builder, "task_slot_running"))
+  let result: map = native_gen/finish(module, native_roots/return_value(builder, next))
+  return result
+end
+
+verb native_scheduler/observe(builder: map, id: map) -> list
+  let [observed: map, ready: map] = native_gen/bind(builder, "observed", native_gen/call(builder, "task_observe", [native_scheduler/task(builder, id), native_gen/ref(builder, "worker")]))
+  ready = native_scheduler/check(ready, native_kernel/absent(native_gen/field(ready, observed, "status")), "closed")
+  return [observed, ready]
+end
+verb native_scheduler/fail_registration(builder: map, id: map, slot: map, status: map) -> map
+  let [failed: map, with_failure: map] = native_gen/bind(builder, "failed", native_gen/call(builder, "task_fail_wait", [
+    native_scheduler/task(builder, id), native_gen/ref(builder, "worker"), native_kernel/load_field(builder, slot, "generation"), status]))
+  let [observed: map, ready: map] = native_scheduler/observe(with_failure, id)
+  ready = native_scheduler/retire(ready, slot)
+  let result: map = native_gen/branch(ready, native_gen/equal(native_gen/field(ready, observed, "state"), native_gen/ref(ready, "task_state_runnable")),
+    fn(woken) => native_scheduler/enqueue(woken, id, slot), fn(terminal) => native_scheduler/done(terminal, slot))
+  return result
+end
+
+verb native_scheduler/settle_body(module: map) -> map
+  let builder: map = native_scheduler/lock(native_scheduler/context(module, "settle"))
+  let id: map = native_gen/ref(builder, "id")
+  builder = native_scheduler/check(builder, native_gen/less(id, native_scheduler/field(builder, "capacity")), "schema")
+  let slot: map = native_scheduler/slot(builder, id)
+  builder = native_scheduler/check(builder, native_gen/equal(native_kernel/load_field(builder, slot, "state"), native_gen/ref(builder, "task_slot_running")), "schema")
+  // Shutdown may lose the transaction's publication race. Delivery still runs,
+  // then cancellation is renewed against the finished attempt before any wait
+  // registration or continuation can outlive the stopped scheduler.
+  builder = native_gen/when(builder, native_scheduler/field(builder, "closed"), fn(stopped)
+    let ready: map = native_scheduler/check(stopped, native_gen/call(stopped, "memory_leave", [native_gen/ref(stopped, "worker")]), "closed")
+    let [cancelled: map, requested: map] = native_gen/bind(ready, "cancelled", native_gen/call(ready, "task_cancel", [native_scheduler/task(ready, id)]))
+    return native_scheduler/check(requested, native_gen/call(requested, "memory_enter", [native_gen/ref(requested, "worker")]), "closed")
+  end)
+  let [observed: map, ready: map] = native_scheduler/observe(builder, id)
+  let state: map = native_gen/field(ready, observed, "state")
+  builder = native_gen/when(ready, native_gen/equal(state, native_gen/ref(ready, "task_state_runnable")), fn(runnable)
+    return native_scheduler/status(native_scheduler/enqueue(runnable, id, slot), "ok")
+  end)
+  builder = native_gen/unless(builder, native_gen/equal(state, native_gen/ref(builder, "task_state_waiting")), fn(terminal)
+    return native_scheduler/status(native_scheduler/done(terminal, slot), "ok")
+  end)
+  builder = native_kernel/store_field(builder, slot, "state", native_gen/ref(builder, "task_slot_waiting"))
+  builder = native_kernel/store_field(builder, slot, "generation", native_gen/field(builder, observed, "generation"))
+  builder = native_kernel/store_field(builder, slot, "deadline", native_gen/ref(builder, "kernel_unlimited"))
+  let boundary: map = native_roots/ref(builder, "boundary")
+  builder = native_gen/when(builder, native_kernel/absent(boundary), fn(external) => native_scheduler/status(native_scheduler/notify(external), "ok"))
+  let [request: map, retained: map] = native_roots/retain(builder, "request", native_kernel/load_field(builder, boundary, "request"))
+  builder = native_gen/when(retained, native_kernel/absent(request), fn(external) => native_scheduler/status(native_scheduler/notify(external), "ok"))
+  let timeout: map = native_kernel/load_field(builder, request, "timeout")
+  builder = native_gen/unless(builder, native_gen/equal(timeout, native_gen/ref(builder, "kernel_unlimited")), fn(timed)
+    let [now: map, measured: map] = native_gen/bind(timed, "now", native_gen/call(timed, "task_clock_now", []))
+    let bounded: map = native_gen/unless(measured, native_gen/less(timeout, native_gen/subtract(native_gen/ref(measured, "kernel_unlimited"), now)), fn(overflow)
+      return native_scheduler/status(native_scheduler/fail_registration(overflow, id, slot, native_gen/ref(overflow, "kernel_limit")), "ok")
+    end)
+    return native_kernel/store_field(bounded, slot, "deadline", native_gen/add(now, timeout))
+  end)
+  builder = native_gen/unless(builder, native_gen/call(builder, "memory_publish", [native_gen/ref(builder, "worker"), request[:scope_root], native_gen/field(builder, slot, "request")[:pointer]]), fn(failed)
+    return native_scheduler/status(native_scheduler/fail_registration(failed, id, slot, native_gen/ref(failed, "kernel_oom")), "ok")
+  end)
+  let result: map = native_gen/finish(module, native_scheduler/status(native_scheduler/notify(builder), "ok"))
+  return result
+end
+
+verb native_scheduler/worker_body(module: map) -> map
+  let builder: map = native_scheduler/context(module, "worker")
+  builder = native_scheduler/check(builder, native_gen/negate(native_kernel/absent(native_gen/ref(builder, "services"))), "schema")
+  builder = native_scheduler/join(builder, false)
+  let [taken: map, with_taken: map] = native_gen/bind(builder, "taken", native_gen/ref(builder, "zero"))
+  let [completed: map, ready: map] = native_gen/bind(with_taken, "completed", native_gen/ref(with_taken, "zero"))
+  builder = native_gen/while_loop(ready, native_gen/ref(ready, "true"), fn(loop)
+    let [next: map, with_next: map] = native_gen/bind(loop, "next", native_gen/call(loop, "task_scheduler_take", [native_gen/ref(loop, "scheduler"), native_gen/ref(loop, "worker")]))
+    let status: map = native_gen/field(with_next, next, "status")
+    let step: map = native_gen/when(with_next, native_gen/equal(status, native_gen/ref(with_next, "kernel_closed")), fn(finished)
+      return native_roots/return_value(finished, native_gen/record(finished, [:Record, "TaskDrainResult"], {
+        "status" -> native_gen/ref(finished, "kernel_ok"), "taken" -> taken, "completed" -> completed}))
+    end)
+    step = native_gen/unless(step, native_kernel/absent(status), fn(failed) => native_execution/fail(failed, status))
+    let id: map = native_gen/field(step, next, "id")
+    step = native_gen/assign(step, taken, native_gen/add(taken, native_gen/ref(step, "one")))
+    return native_roots/temporary(step, fn(segment)
+      let task: map = native_scheduler/task(segment, id)
+      let [executed: map, after_run: map] = native_gen/bind(segment, "executed", native_gen/call(segment, "task_execute", [task, native_gen/ref(segment, "worker")]))
+      // The slot remains Running through delivery. No scheduler event can
+      // enqueue another segment or release this control while we retain it.
+      let [boundary: map, retained: map] = native_roots/retain(after_run, "boundary", native_roots/root_value(after_run,
+        native_gen/field(after_run, task, "prepared")[:pointer], native_tasks/pointer("Boundary")))
+      let [delivered: map, dispatched: map] = native_gen/bind(retained, "delivered", native_gen/call(retained, "task_dispatch", [task, native_gen/ref(retained, "worker"), native_gen/ref(retained, "services")]))
+      let [settled: map, advanced: map] = native_gen/bind(dispatched, "settled", native_gen/call(dispatched, "task_scheduler_settle", [
+        native_gen/ref(dispatched, "scheduler"), native_gen/ref(dispatched, "worker"), id, boundary]))
+      let ready: map = native_gen/unless(advanced, native_kernel/absent(settled), fn(failed) => native_execution/fail(failed, settled))
+      ready = native_gen/when(ready, native_kernel/absent(executed), fn(executed_ok)
+        return native_gen/when(executed_ok, native_kernel/absent(delivered), fn(delivered_ok) => native_gen/assign(delivered_ok, completed, native_gen/add(completed, native_gen/ref(delivered_ok, "one"))))
+      end)
+      return ready
+    end)
+  end)
+  let result: map = native_gen/finish(module, native_scheduler/status(builder, "closed"))
+  return result
+end

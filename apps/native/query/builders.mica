@@ -90,6 +90,25 @@ verb native_query/project_row(builder: map, row: map, positions: map) -> list
   end)
   return generated_result
 end
+
+// Construct a fixed-width row from generated expressions. Allocate once, then
+// fill its cells without a relocation boundary between allocation and stores.
+verb native_query/tuple(builder: map, cells: list) -> list
+  let width: map = native_gen/zero(:U64)
+  if len(cells) > 0
+    width = native_gen/divide(native_gen/sizeof([:Array, native_value/word(), len(cells)]), native_gen/sizeof(native_value/word()))
+  end
+  let [row: map, ready: map] = native_query/build_row(builder, width, fn(body, position) => native_gen/zero(native_value/word()))
+  let header: map = native_gen/expression(native_memory/record_pointer("HeapList"), :UnpackPointer, [row])
+  let [cursor: map, with_cursor: map] = native_gen/bind(ready, "cell", native_kernel/load_field(ready, header, "data"))
+  ready = with_cursor
+  for cell in cells
+    native/ensure(native_gen/type(cell) == native_value/word(), "tuple cells require value words")
+    ready = native_gen/store(ready, cursor, cell)
+    ready = native_gen/assign(ready, cursor, native_gen/offset(cursor, native_gen/ref(ready, "one")))
+  end
+  return [row, ready]
+end
 verb native_query/check_positions(builder: map, positions: map, arity: map) -> map
   let ready: map = native_query/check(builder,
     native_gen/equal(native_gen/expression(:U8, :Tag, [positions]), native_roots/ref(builder, "tag_list")), "schema")

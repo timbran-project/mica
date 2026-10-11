@@ -61,7 +61,7 @@ verb native_authority/views_result(builder: map, views: map) -> map
   return result
 end
 
-// Return the previous view object when all six effective row trees are shared.
+// Return the previous view object when all effective row trees are shared.
 // Policy generations then stay stable across unrelated fact commits.
 verb native_authority/views_body(module: map) -> map
   let builder: map = native_rules/context(module, "authority_views")
@@ -112,7 +112,8 @@ verb native_authority/for_body(module: map) -> map
     let [equal: map, compared: map] = native_gen/checked_bind(bootstrap, "owner_equal", native_gen/call(bootstrap, "value_equal", [native_roots/ref(bootstrap, "owner"), native_roots/ref(bootstrap, "tenant")]), "ok", fn(invalid) => native_rules/error(invalid, "schema"))
     let owner: map = native_gen/field(compared, equal, "value")
     let [authority: map, allocated: map] = native_rules/allocate(compared, "Authority", {"tenant" -> native_roots/ref(bootstrap, "tenant"),
-      "permissions" -> native_gen/zero(native_kernel/pointer("AuthorityIndex")), "root" -> owner, "catalogue" -> owner, "grant" -> owner})
+      "permissions" -> native_gen/zero(native_kernel/pointer("AuthorityIndex")),
+      "invocations" -> native_gen/zero(native_kernel/pointer("AuthorityIndex")), "root" -> owner, "catalogue" -> owner, "grant" -> owner})
     return native_roots/return_value(allocated, native_gen/record(allocated, [:Record, "KernelAuthorityResult"], {"status" -> native_gen/ref(allocated, "kernel_ok"), "authority" -> authority}))
   end)
   let arguments: list = [native_roots/worker(builder), native_roots/ref(builder, "tenant")]

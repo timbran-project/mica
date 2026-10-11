@@ -78,7 +78,8 @@ fn run() -> Result<()> {
         .with_interpreter_only(true)
         .with_task_limits(TaskLimits {
             // Kernel generation includes rule maintenance and backend IR export.
-            instruction_budget: 12_000_000_000,
+            // The task fixture emits C and checked backend IR in one bootstrap task.
+            instruction_budget: 20_000_000_000,
             max_call_depth: 256,
             ..TaskLimits::default()
         });
@@ -139,6 +140,7 @@ fn run() -> Result<()> {
         "rules/stratify",
         "rules/catalog",
         "rules/program",
+        "kernel/code_catalog",
         "kernel/program",
         "kernel/execution",
         "kernel/authority",
@@ -148,6 +150,7 @@ fn run() -> Result<()> {
         "kernel/transactions",
         "kernel/rule_indexes",
         "kernel/rules",
+        "kernel/history",
         "kernel/lifecycle",
         "query/builders",
         "query/roots",
@@ -168,6 +171,51 @@ fn run() -> Result<()> {
         "rules/source",
         "rules/install",
         "tests/rule_sources",
+        "tasks/program",
+        "tasks/platform",
+        "tasks/code",
+        "tasks/code_lifecycle",
+        "tasks/code_tests",
+        "tasks/images",
+        "tasks/dispatch",
+        "tasks/dispatch_bindings",
+        "tasks/dispatch_restrictions",
+        "tasks/dispatch_signatures",
+        "tasks/dispatch_selection",
+        "tasks/attempts",
+        "tasks/invocation",
+        "tasks/handlers",
+        "tasks/control",
+        "tasks/boundaries",
+        "tasks/execution",
+        "tasks/calls",
+        "tasks/queue",
+        "tasks/services",
+        "tasks/resources",
+        "tasks/mailboxes",
+        "tasks/mailbox_streams",
+        "tasks/mailbox_lifecycle",
+        "tasks/mailbox_delivery",
+        "tasks/requests",
+        "tasks/subscription_requests",
+        "tasks/subscription_messages",
+        "tasks/subscription_rows",
+        "tasks/subscription_delivery",
+        "tasks/subscription_catalogue",
+        "tasks/subscription_pump",
+        "tasks/subscription_events",
+        "tasks/subscriptions",
+        "tasks/subscription_lifecycle",
+        "tasks/scheduler",
+        "tasks/scheduler_lifecycle",
+        "tasks/scheduler_admission",
+        "tasks/scheduler_workers",
+        "tasks/scheduler_events",
+        "tasks/services_tests",
+        "tasks/scheduler_tests",
+        "tasks/handlers_tests",
+        "tasks/calls_tests",
+        "tasks/tests",
         "gccjit/data",
         "gccjit/bindings",
         "gccjit/program",
@@ -252,10 +300,11 @@ fn bootstrap(runner: &mut SourceRunner, options: &Options, root: &Path) -> Resul
     let bindings = text(&eval(runner, "return native_jit/bindings_c()")?)?;
     let driver = text(&eval(runner, "return native_jit/driver_c()")?)?;
     let memory = text(&eval(runner, "return native_memory/platform()")?)?;
+    let tasks = text(&eval(runner, "return native_tasks/platform()")?)?;
     fs::write(
         options.output.join("support.c"),
         format!(
-            "#define _POSIX_C_SOURCE 200809L\n#include \"backend.h\"\n{bindings}\n{driver}\n{memory}"
+            "#define _POSIX_C_SOURCE 200809L\n#include \"backend.h\"\n{bindings}\n{driver}\n{memory}\n{tasks}"
         ),
     )?;
     for (name, source) in [
@@ -306,10 +355,15 @@ fn generate_module(
     stem: &str,
 ) -> Result<()> {
     let begin = Instant::now();
+    let companions = if expression == "native_tasks/test_program()" {
+        ", native/emit_c(native_code/test_library(state, false)), native/emit_c(native_code/test_library(state, true))"
+    } else {
+        ""
+    };
     let module = eval(
         runner,
         &format!(
-            "let state = {}\nlet output = native/emit_module(state, \"{stem}\")\nreturn [native_jit/data(state), output[:source], output[:header]]",
+            "let state = {}\nlet output = native/emit_module(state, \"{stem}\")\nreturn [native_jit/data(state), output[:source], output[:header]{companions}]",
             expression
         ),
     )?;
@@ -340,6 +394,14 @@ fn generate_module(
         directory.join(format!("{stem}.h")),
         text(&module.list_get(2).ok_or("missing header")?)?,
     )?;
+    if !companions.is_empty() {
+        for (index, name) in [(3, "code-library"), (4, "code-replacement")] {
+            fs::write(
+                directory.join(format!("{name}.c")),
+                text(&module.list_get(index).ok_or("missing code fixture")?)?,
+            )?;
+        }
+    }
     eprintln!("{stem} generation: {:.3}s", begin.elapsed().as_secs_f64());
     Ok(())
 }
@@ -470,6 +532,12 @@ fn check_fixtures(
             "mica_kernel_commit",
             "",
         ),
+        (
+            "tasks",
+            "native_tasks/test_program()",
+            "mica_task_heap_init",
+            "",
+        ),
     ] {
         if options
             .fixture
@@ -481,9 +549,8 @@ fn check_fixtures(
         checked = true;
         let directory = options.output.join(name);
         fs::create_dir_all(&directory)?;
-        generate_module(runner, expression, &directory, "module")?;
-        compile_module(backend, &directory, options.sanitize, None)?;
-        compile_module(backend, &directory, options.sanitize, Some(symbol))?;
+        // Freeze fixture sources before generation, which can take several minutes.
+        // A concurrent edit must not pair a later fixture with an earlier module.
         let oracle = match name {
             "scalar" => String::from(
                 "#include <assert.h>\nint main(void) {\n\
@@ -526,6 +593,14 @@ fn check_fixtures(
                 fs::read_to_string(root.join("native/platform/mutex.c"))?,
                 fs::read_to_string(root.join("apps/native/kernel/tests.c"))?,
             ),
+            "tasks" => format!(
+                "#define MICA_MEMORY_TEST_ALLOCATOR\n{}\n{}\n{}\n{}\n{}",
+                text(&eval(runner, "return native_memory/platform()")?)?,
+                text(&eval(runner, "return native_tasks/platform()")?)?,
+                fs::read_to_string(root.join("native/platform/allocation.c"))?,
+                fs::read_to_string(root.join("native/platform/mutex.c"))?,
+                fs::read_to_string(root.join("apps/native/tasks/tests.c"))?,
+            ),
             _ => unreachable!(),
         };
         if name == "kernel" {
@@ -534,12 +609,107 @@ fn check_fixtures(
                 directory.join("measurements.c"),
             )?;
         }
+        if name == "tasks" {
+            fs::copy(
+                root.join("apps/native/tasks/code_tests.c"),
+                directory.join("code_tests.c"),
+            )?;
+            fs::copy(
+                root.join("apps/native/tasks/services_tests.c"),
+                directory.join("services_tests.c"),
+            )?;
+            fs::copy(
+                root.join("apps/native/tasks/mailboxes_tests.c"),
+                directory.join("mailboxes_tests.c"),
+            )?;
+            fs::copy(
+                root.join("apps/native/tasks/mailbox_streams_tests.c"),
+                directory.join("mailbox_streams_tests.c"),
+            )?;
+            fs::copy(
+                root.join("apps/native/tasks/dispatch_tests.c"),
+                directory.join("dispatch_tests.c"),
+            )?;
+            fs::copy(
+                root.join("apps/native/tasks/invocation_tests.c"),
+                directory.join("invocation_tests.c"),
+            )?;
+            fs::copy(
+                root.join("apps/native/tasks/calls_tests.c"),
+                directory.join("calls_tests.c"),
+            )?;
+            fs::copy(
+                root.join("apps/native/tasks/requests_tests.c"),
+                directory.join("requests_tests.c"),
+            )?;
+            fs::copy(
+                root.join("apps/native/tasks/subscription_requests_tests.c"),
+                directory.join("subscription_requests_tests.c"),
+            )?;
+            fs::copy(
+                root.join("apps/native/tasks/subscriptions_tests.c"),
+                directory.join("subscriptions_tests.c"),
+            )?;
+            fs::copy(
+                root.join("apps/native/tasks/subscription_messages_tests.c"),
+                directory.join("subscription_messages_tests.c"),
+            )?;
+            fs::copy(
+                root.join("apps/native/tasks/subscription_rows_tests.c"),
+                directory.join("subscription_rows_tests.c"),
+            )?;
+            fs::copy(
+                root.join("apps/native/tasks/subscription_delivery_tests.c"),
+                directory.join("subscription_delivery_tests.c"),
+            )?;
+            fs::copy(
+                root.join("apps/native/tasks/subscription_catalogue_tests.c"),
+                directory.join("subscription_catalogue_tests.c"),
+            )?;
+            fs::copy(
+                root.join("apps/native/tasks/subscription_pump_tests.c"),
+                directory.join("subscription_pump_tests.c"),
+            )?;
+            fs::copy(
+                root.join("apps/native/tasks/scheduler_tests.c"),
+                directory.join("scheduler_tests.c"),
+            )?;
+            fs::copy(
+                root.join("apps/native/tasks/handlers_tests.c"),
+                directory.join("handlers_tests.c"),
+            )?;
+        }
+        generate_module(runner, expression, &directory, "module")?;
+        compile_module(backend, &directory, options.sanitize, None)?;
+        compile_module(backend, &directory, options.sanitize, Some(symbol))?;
+        if name == "tasks" {
+            for name in ["code-library", "code-replacement"] {
+                let mut command = Command::new("clang");
+                command.current_dir(&directory).args([
+                    "-std=c11", "-shared", "-fPIC", "-Wall", "-Wextra", "-Werror",
+                ]);
+                if options.sanitize {
+                    command.args([
+                        "-fsanitize=address,undefined,float-cast-overflow",
+                        "-fno-sanitize-recover=all",
+                    ]);
+                }
+                let library = command
+                    .arg(format!("{name}.c"))
+                    .arg("-o")
+                    .arg(format!("{name}.so"))
+                    .output()?;
+                if !library.status.success() {
+                    return Err(format!("task code library: {library:?}").into());
+                }
+            }
+        }
         fs::write(
             directory.join("check.c"),
             format!("#include \"module.h\"\n{oracle}"),
         )?;
         for input in ["module.c", "module.o", "module.so"] {
-            let cc = if name == "execution" && input == "module.c" {
+            let cc = if matches!(name, "execution" | "tasks") && input == "module.c" {
                 std::env::var_os("CLANG").unwrap_or_else(|| "clang".into())
             } else {
                 std::env::var_os("CC").unwrap_or_else(|| "cc".into())
@@ -566,7 +736,7 @@ fn check_fixtures(
                 ]);
             }
             let compiled = command
-                .args(["check.c", input, "-lm", "-o", "check"])
+                .args(["check.c", input, "-lm", "-ldl", "-o", "check"])
                 .output()?;
             if !compiled.status.success() {
                 return Err(format!(

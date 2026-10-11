@@ -1,0 +1,198 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+verb native_mailboxes/send_body(module: map) -> map
+  let locked: map = native_mailboxes/locked(module, "send")
+  let [mailbox: map, builder: map] = native_mailboxes/find(locked, native_roots/ref(locked, "sender"), true)
+  builder = native_mailboxes/check(builder, native_mailboxes/room(builder, mailbox), "limit")
+  builder = native_mailboxes/check(builder, native_gen/less(native_mailboxes/field(builder, "revision"), native_gen/ref(builder, "kernel_unlimited")), "limit")
+  let [message: map, prepared: map] = native_mailboxes/prepare_message(builder, native_roots/ref(builder, "payload"), native_gen/ref(builder, "zero"))
+  builder = native_mailboxes/append_message(prepared, mailbox, message)
+  builder = native_mailboxes/status(native_mailboxes/notify(builder), "ok")
+  let result: map = native_gen/finish(module, builder)
+  return result
+end
+
+verb native_mailboxes/receive_result(builder: map, count: map) -> map
+  let result: map = native_roots/return_value(builder, native_gen/record(builder, [:Record, "TaskMailboxRead"],
+    {"status" -> native_gen/ref(builder, "kernel_ok"), "count" -> count, "revision" -> native_mailboxes/field(builder, "revision")}))
+  return result
+end
+verb native_mailboxes/receiver(builder: map, position: map) -> map
+  let result: map = native_gen/field(builder, native_gen/call(builder, "value_list_get", [native_roots/ref(builder, "receivers"), position]), "value")
+  return result
+end
+verb native_mailboxes/list_value(builder: map, header: map) -> map
+  let result: map = native_gen/expression(native_value/word(), :PackPointer, [header, native_gen/ref(builder, "tag_list")])
+  return result
+end
+verb native_mailboxes/list_length(builder: map, list: map, length: map) -> map
+  let ready: map = native_kernel/store_field(builder, list, "length", length)
+  let result: map = native_kernel/store_field(ready, native_kernel/load_field(ready, list, "storage"), "used", length)
+  return result
+end
+verb native_mailboxes/list_element(builder: map, list: map, position: map, value: map) -> map
+  let result: map = native_gen/store(builder, native_gen/offset(native_kernel/load_field(builder, list, "data"), position), value)
+  return result
+end
+
+// A private list exposes only initialized elements to its descriptor. Updating
+// used/length before each poll permits collection while a large drain is built.
+verb native_mailboxes/messages(builder: map, mailbox: map) -> list
+  let count: map = native_kernel/load_field(builder, mailbox, "count")
+  let [list: map, allocated: map] = native_roots/retain(builder, "messages", native_gen/call(builder, "list_allocate",
+    [native_gen/ref(builder, "worker"), native_gen/ref(builder, "zero"), count]))
+  let ready: map = native_mailboxes/check(allocated, native_gen/negate(native_kernel/absent(list)), "oom")
+  let [cursor: map, with_cursor: map] = native_roots/retain(ready, "message", native_mailboxes/root(ready, mailbox, "head"))
+  ready = native_gen/for_range(with_cursor, "message_index", native_gen/ref(with_cursor, "zero"), count, fn(copy, position)
+    let filled: map = native_mailboxes/list_element(copy, list, position, native_kernel/load_field(copy, cursor, "payload"))
+    filled = native_mailboxes/list_length(filled, list, native_gen/add(position, native_gen/ref(filled, "one")))
+    filled = native_roots/store(filled, cursor, native_kernel/load_field(filled, cursor, "next"))
+    return native_roots/poll(filled)
+  end)
+  return [native_mailboxes/list_value(ready, list), ready]
+end
+
+// Epochs suppress duplicate receivers in linear time. Scratch epoch updates
+// do not consume messages; a failed preparation simply uses another epoch.
+verb native_mailboxes/receive_epoch(builder: map) -> list
+  let ready: map = native_gen/when(builder, native_gen/equal(native_mailboxes/field(builder, "read_epoch"), native_gen/ref(builder, "kernel_unlimited")), fn(wrapped)
+    let count: map = native_gen/add(native_mailboxes/field(wrapped, "mask"), native_gen/ref(wrapped, "one"))
+    let cleared: map = native_gen/for_range(wrapped, "bucket", native_gen/ref(wrapped, "zero"), count, fn(scan, slot)
+      let [mailbox: map, found: map] = native_gen/bind(scan, "mailbox", native_gen/load(native_gen/offset(native_mailboxes/field(scan, "buckets"), slot)))
+      return native_gen/while_loop(found, native_gen/negate(native_kernel/absent(mailbox)), fn(reset)
+        let next: map = native_kernel/store_field(reset, mailbox, "read_epoch", native_gen/ref(reset, "zero"))
+        next = native_kernel/store_field(next, mailbox, "selected_epoch", native_gen/ref(next, "zero"))
+        next = native_gen/assign(next, mailbox, native_kernel/load_field(next, mailbox, "next"))
+        return native_roots/poll(next)
+      end)
+    end)
+    return native_mailboxes/store(cleared, "read_epoch", native_gen/ref(cleared, "zero"))
+  end)
+  let [epoch: map, with_epoch: map] = native_gen/bind(ready, "epoch", native_gen/add(native_mailboxes/field(ready, "read_epoch"), native_gen/ref(ready, "one")))
+  ready = native_mailboxes/store(with_epoch, "read_epoch", epoch)
+  return [epoch, ready]
+end
+verb native_mailboxes/count_ready(builder: map, length: map, epoch: map) -> list
+  let [groups: map, ready: map] = native_gen/bind(builder, "groups", native_gen/ref(builder, "zero"))
+  let [messages: map, with_messages: map] = native_gen/bind(ready, "messages", native_gen/ref(ready, "zero"))
+  ready = native_gen/for_range(with_messages, "receiver_index", native_gen/ref(with_messages, "zero"), length, fn(scan, position)
+    let [mailbox: map, found: map] = native_mailboxes/find(scan, native_mailboxes/receiver(scan, position), false)
+    let counted: map = native_gen/unless(found, native_gen/equal(native_kernel/load_field(found, mailbox, "read_epoch"), epoch), fn(first)
+      let current: map = native_kernel/store_field(first, mailbox, "read_epoch", epoch)
+      let count: map = native_kernel/load_field(current, mailbox, "count")
+      return native_gen/unless(current, native_kernel/absent(count), fn(nonempty)
+        let bounded: map = native_gen/when(nonempty, native_gen/less(native_gen/subtract(native_gen/ref(nonempty, "kernel_unlimited"), messages), count), fn(overflow) => native_mailboxes/status(overflow, "limit"))
+        bounded = native_gen/assign(bounded, groups, native_gen/add(groups, native_gen/ref(bounded, "one")))
+        return native_gen/assign(bounded, messages, native_gen/add(messages, count))
+      end)
+    end)
+    return native_roots/poll(counted)
+  end)
+  return [groups, messages, ready]
+end
+
+verb native_mailboxes/append_group(builder: map, mailbox: map, receiver: map, outer: map, position: map) -> map
+  let [messages: map, with_messages: map] = native_mailboxes/messages(builder, mailbox)
+  let [group: map, allocated: map] = native_roots/retain(with_messages, "group", native_gen/call(with_messages, "list_allocate",
+    [native_gen/ref(with_messages, "worker"), native_gen/ref(with_messages, "zero"), native_gen/ref(with_messages, "two")]))
+  let ready: map = native_mailboxes/check(allocated, native_gen/negate(native_kernel/absent(group)), "oom")
+  ready = native_mailboxes/list_element(ready, group, native_gen/ref(ready, "zero"), receiver)
+  ready = native_mailboxes/list_element(ready, group, native_gen/ref(ready, "one"), messages)
+  ready = native_mailboxes/list_length(ready, group, native_gen/ref(ready, "two"))
+  ready = native_mailboxes/list_element(ready, outer, position, native_mailboxes/list_value(ready, group))
+  let result: map = native_mailboxes/list_length(ready, outer, native_gen/add(position, native_gen/ref(ready, "one")))
+  return result
+end
+
+verb native_mailboxes/receive_body(module: map) -> map
+  let builder: map = native_mailboxes/locked(module, "receive")
+  let [decoded: map, with_list: map] = native_gen/bind(builder, "receiver_list", native_gen/call(builder, "value_as_list", [native_roots/ref(builder, "receivers")]))
+  builder = native_mailboxes/check(with_list, native_gen/field(with_list, decoded, "ok"), "schema")
+  let [length: map, with_length: map] = native_gen/bind(builder, "receiver_count", native_kernel/load_field(builder, native_gen/field(builder, decoded, "header"), "length"))
+  let [epoch: map, with_epoch: map] = native_mailboxes/receive_epoch(with_length)
+  let [groups: map, count: map, counted: map] = native_mailboxes/count_ready(with_epoch, length, epoch)
+  builder = native_gen/when(counted, native_kernel/absent(groups), fn(empty) => native_mailboxes/receive_result(empty, native_gen/ref(empty, "zero")))
+  let [output: map, allocated: map] = native_roots/retain(builder, "output", native_gen/call(builder, "list_allocate", [native_gen/ref(builder, "worker"), native_gen/ref(builder, "zero"), groups]))
+  builder = native_mailboxes/check(allocated, native_gen/negate(native_kernel/absent(output)), "oom")
+  let [position: map, ready: map] = native_gen/bind(builder, "group_index", native_gen/ref(builder, "zero"))
+  builder = native_gen/for_range(ready, "receiver_index", native_gen/ref(ready, "zero"), length, fn(scan, index)
+    let [mailbox: map, found: map] = native_mailboxes/find(scan, native_mailboxes/receiver(scan, index), false)
+    return native_gen/unless(found, native_kernel/absent(native_kernel/load_field(found, mailbox, "count")), fn(nonempty)
+      return native_gen/unless(nonempty, native_gen/equal(native_kernel/load_field(nonempty, mailbox, "selected_epoch"), epoch), fn(first)
+        let filled: map = native_roots/temporary(first, fn(temporary) => native_mailboxes/append_group(temporary, mailbox, native_mailboxes/receiver(temporary, index), output, position))
+        filled = native_kernel/store_field(filled, mailbox, "selected_epoch", epoch)
+        return native_gen/assign(filled, position, native_gen/add(position, native_gen/ref(filled, "one")))
+      end)
+    end)
+  end)
+  let [status: map, delivered: map] = native_gen/bind(builder, "status", native_gen/call(builder, "task_wake",
+    [native_gen/ref(builder, "task"), native_gen/ref(builder, "worker"), native_gen/ref(builder, "generation"), native_mailboxes/list_value(builder, output)]))
+  builder = native_gen/unless(delivered, native_kernel/absent(status), fn(rejected) => native_execution/fail(rejected, status))
+  // The accepted wake owns the complete reply. Retirement cannot fail halfway
+  // and expose those messages again. Failed GC preserves the current graph;
+  // continue removing roots and allow a later collection to reclaim it.
+  builder = native_gen/for_range(builder, "receiver_index", native_gen/ref(builder, "zero"), length, fn(retire, index)
+    let [mailbox: map, found: map] = native_mailboxes/find(retire, native_mailboxes/receiver(retire, index), false)
+    let consumed: map = native_gen/when(found, native_gen/equal(native_kernel/load_field(found, mailbox, "selected_epoch"), epoch), fn(selected)
+      let next: map = native_kernel/store_field(selected, mailbox, "selected_epoch", native_gen/ref(selected, "zero"))
+      for root in ["head", "tail"]
+        next = native_roots/store(next, native_mailboxes/root(next, mailbox, root), native_gen/zero(native_tasks/pointer("Message")))
+      end
+      next = native_kernel/store_field(next, mailbox, "count", native_gen/ref(next, "zero"))
+      return native_streams/drained(next, mailbox)
+    end)
+    let [collected: map, polled: map] = native_gen/bind(consumed, "collected", native_gen/call(consumed, "memory_safepoint", [native_gen/ref(consumed, "worker"), native_gen/ref(consumed, "false")]))
+    return polled
+  end)
+  builder = native_mailboxes/receive_result(native_mailboxes/notify(builder), count)
+  let result: map = native_gen/finish(module, builder)
+  return result
+end
+
+verb native_mailboxes/changed_body(module: map) -> map
+  let builder: map = native_gen/context(module, "task_mailbox_changed")
+  let worker: map = native_gen/ref(builder, "worker")
+  builder = native_mailboxes/check(builder, native_gen/negate(native_kernel/absent(native_mailboxes/field(builder, "mutex"))), "closed")
+  builder = native_mailboxes/check(builder, native_gen/equal(native_kernel/load_field(builder, worker, "heap"), native_mailboxes/field(builder, "heap")), "closed")
+  builder = native_mailboxes/check(builder, native_gen/call(builder, "memory_leave", [worker]), "closed")
+  builder = native_gen/do_call(builder, "memory_lock", [native_mailboxes/field(builder, "mutex")])
+  builder = native_gen/on_return(builder, fn(leaving, result)
+    let ready: map = native_gen/do_call(leaving, "memory_unlock", [native_mailboxes/field(leaving, "mutex")])
+    return native_gen/unless(ready, native_gen/call(ready, "memory_enter", [worker]), fn(failed)
+      return native_gen/assign(failed, result, native_gen/record(failed, [:Record, "TaskMailboxChange"],
+        {"status" -> native_gen/ref(failed, "kernel_closed"), "revision" -> native_gen/ref(failed, "zero")}))
+    end)
+  end)
+  // One event dispatcher can watch all mailboxes in this hub. Suspended tasks
+  // retain images, not native threads. Rechecking under the lock prevents a
+  // notification between an empty read and watch registration from being lost.
+  builder = native_gen/while_loop(builder, native_gen/equal(native_mailboxes/field(builder, "revision"), native_gen/ref(builder, "revision")), fn(waiting)
+    let ready: map = native_mailboxes/check(waiting, native_gen/negate(native_mailboxes/field(waiting, "closed")), "closed")
+    ready = native_mailboxes/check(ready, native_gen/less(native_gen/ref(ready, "revision"), native_gen/ref(ready, "kernel_unlimited")), "limit")
+    return native_gen/do_call(ready, "memory_wait", [native_mailboxes/field(ready, "mutex")])
+  end)
+  builder = native_mailboxes/check(builder, native_gen/negate(native_mailboxes/field(builder, "closed")), "closed")
+  builder = native_gen/return_value(builder, native_gen/record(builder, [:Record, "TaskMailboxChange"],
+    {"status" -> native_gen/ref(builder, "kernel_ok"), "revision" -> native_mailboxes/field(builder, "revision")}))
+  let result: map = native_gen/finish(module, builder)
+  return result
+end
+
+verb native_mailboxes/program(input: map) -> map
+  let module: map = native_mailboxes/declarations(input)
+  module = native_streams/program(module)
+  module = native_mailboxes/lifecycle(module)
+  module = native_mailboxes/send_body(module)
+  module = native_mailboxes/receive_body(module)
+  module = native_mailboxes/changed_body(module)
+  let locked: map = native_mailboxes/locked(module, "validate_sender")
+  let [mailbox: map, validated: map] = native_mailboxes/find(locked, native_roots/ref(locked, "sender"), true)
+  module = native_gen/finish(module, native_mailboxes/status(validated, "ok"))
+  let builder: map = native_gen/context(module, "task_mailbox_service")
+  builder = native_gen/return_value(builder, native_gen/call(builder, "task_mailbox_send", [
+    native_gen/cast(native_tasks/pointer("MailboxHub"), native_gen/ref(builder, "context")), native_gen/ref(builder, "worker"),
+    native_tasks/effect_field(builder, "target"), native_tasks/effect_field(builder, "payload")]))
+  let result: map = native_gen/finish(module, builder)
+  return result
+end

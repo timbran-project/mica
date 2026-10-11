@@ -204,6 +204,20 @@ verb native/relocates(index: map, row: list) -> bool
   return false
 end
 
+// Each map has the same managed-local keys. False entries keep equality
+// independent of traversal order; joins set only references stale on a path.
+verb native/relocation_inputs(predecessors: list, invalid: map, empty: map) -> map
+  let dead: map = empty
+  for previous in predecessors
+    for id, stale in invalid[previous]
+      if stale && !dead[id]
+        dead[id] = true
+      end
+    end
+  end
+  return dead
+end
+
 // A forward may-analysis tracks managed locals invalidated on any incoming path.
 // A fresh assignment (normally RootLoad) re-establishes its current address.
 verb native/check_relocation_liveness(state: map, index: map, origins: map)
@@ -217,7 +231,14 @@ verb native/check_relocation_liveness(state: map, index: map, origins: map)
     if len(blocks) == 0
       continue
     end
-    let universe: list = [id for id in managed if map_contains_key(index[:variables], id) && index[:variables][id][0] == function[0]]
+    let universe: map = {}
+    let empty: map = {}
+    for id in managed
+      if map_contains_key(index[:variables], id) && index[:variables][id][0] == function[0]
+        universe[id] = true
+        empty[id] = false
+      end
+    end
     if len(universe) == 0
       continue
     end
@@ -225,44 +246,42 @@ verb native/check_relocation_liveness(state: map, index: map, origins: map)
     let predecessors: map = graph[:predecessors]
     let instructions: map = graph[:instructions]
     for block in blocks
-      invalid[block[0]] = []
+      invalid[block[0]] = empty
     end
     let changed: bool = true
     while changed
       changed = false
       for block in blocks
-        let dead: list = []
-        for previous in predecessors[block[0]]
-          dead = native/union(dead, invalid[previous])
-        end
+        let dead: map = native/relocation_inputs(predecessors[block[0]], invalid, empty)
         for row in instructions[block[0]]
           if native/relocates(index, row)
             dead = universe
           end
-          dead = [id for id in dead if id != row[4]]
+          if map_contains_key(dead, row[4])
+            dead[row[4]] = false
+          end
         end
-        if sort(dead) != sort(invalid[block[0]])
+        if dead != invalid[block[0]]
           invalid[block[0]] = dead
           changed = true
         end
       end
     end
     for block in blocks
-      let dead: list = []
-      for previous in predecessors[block[0]]
-        dead = native/union(dead, invalid[previous])
-      end
+      let dead: map = native/relocation_inputs(predecessors[block[0]], invalid, empty)
       for row in instructions[block[0]]
         for operand in native/reads(row)
-          native/ensure(!native/contains(dead, operand), string_concat("managed reference used after relocation at ", native/instruction_location(index, row)))
+          native/ensure((!map_contains_key(dead, operand) || !dead[operand]), string_concat("managed reference used after relocation at ", native/instruction_location(index, row)))
         end
         if native/relocates(index, row)
           dead = universe
         end
-        dead = [id for id in dead if id != row[4]]
+        if map_contains_key(dead, row[4])
+          dead[row[4]] = false
+        end
       end
       for operand in native/term_reads(index[:terms][block[0]])
-        native/ensure(!native/contains(dead, operand), "transfer or return uses stale managed reference")
+        native/ensure((!map_contains_key(dead, operand) || !dead[operand]), "transfer or return uses stale managed reference")
       end
     end
   end

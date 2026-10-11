@@ -1,0 +1,159 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+verb native_tasks/attempt(builder: map) -> map
+  let result: map = native_gen/ref(builder, "attempt")
+  return result
+end
+
+verb native_tasks/slot(builder: map, field: string) -> map
+  let result: map = native_gen/field(builder, native_tasks/attempt(builder), field)[:pointer]
+  return result
+end
+
+verb native_tasks/saved(builder: map, field: string, kind) -> map
+  let result: map = native_roots/root_value(builder, native_tasks/slot(builder, field), kind)
+  return result
+end
+
+verb native_tasks/attempt_field(builder: map, field: string) -> map
+  let result: map = native_kernel/load_field(builder, native_tasks/attempt(builder), field)
+  return result
+end
+
+verb native_tasks/attempt_status(builder: map, status: string) -> map
+  let result: map = native_roots/return_value(builder, native_gen/ref(builder, string_concat("kernel_", status)))
+  return result
+end
+
+verb native_tasks/close_body(module: map) -> map
+  let builder: map = native_gen/context(module, "task_attempt_close")
+  let worker: map = native_tasks/attempt_field(builder, "worker")
+  builder = native_gen/when(builder, native_kernel/absent(worker), fn(closed) => native_gen/return_value(closed, native_gen/ref(closed, "false")))
+  let tx: map = native_tasks/slot(builder, "transaction")
+  builder = native_gen/unless(builder, native_kernel/absent(native_kernel/load_field(builder, tx, "signal")), fn(open)
+    return native_gen/unless(open, native_gen/call(open, "kernel_end", [tx]), fn(failed) => native_gen/return_value(failed, native_gen/ref(failed, "false")))
+  end)
+  for name in ["executing", "invocations", "authority", "error", "request", "effects", "current", "retry"]
+    let root: map = native_tasks/slot(builder, name)
+    builder = native_gen/unless(builder, native_kernel/absent(native_kernel/load_field(builder, root, "registration")), fn(registered)
+      return native_gen/unless(registered, native_gen/call(registered, "memory_root_pop", [worker, root]), fn(failed) => native_gen/return_value(failed, native_gen/ref(failed, "false")))
+    end)
+  end
+  builder = native_gen/when(builder, native_tasks/attempt_field(builder, "resources"), fn(registered)
+    return native_gen/unless(registered, native_gen/call(registered, "task_resource_user", [worker, native_gen/ref(registered, "false")]), fn(failed) => native_gen/return_value(failed, native_gen/ref(failed, "false")))
+  end)
+  builder = native_gen/store(builder, native_tasks/attempt(builder), native_gen/zero([:Record, "TaskAttempt"]))
+  builder = native_gen/return_value(builder, native_gen/ref(builder, "true"))
+  let result: map = native_gen/finish(module, builder)
+  return result
+end
+
+verb native_tasks/open_body(module: map) -> map
+  let builder: map = native_gen/context(module, "task_attempt_open")
+  let attempt: map = native_tasks/attempt(builder)
+  let worker: map = native_gen/ref(builder, "worker")
+  builder = native_gen/unless(builder, native_kernel/absent(native_tasks/attempt_field(builder, "worker")), fn(busy) => native_tasks/attempt_status(busy, "closed"))
+  builder = native_gen/unless(builder, native_gen/equal(native_kernel/load_field(builder, worker, "heap"), native_kernel/load_field(builder, native_gen/ref(builder, "kernel"), "heap")), fn(wrong) => native_tasks/attempt_status(wrong, "schema"))
+  for name in ["worker", "kernel"]
+    builder = native_gen/root_write(builder, native_gen/field(builder, attempt, name), native_gen/manage(native_gen/ref(builder, name)))
+  end
+  for name in ["remaining", "retries", "depth_limit"]
+    builder = native_kernel/store_field(builder, attempt, name, native_gen/ref(builder, name))
+  end
+  builder = native_gen/on_return(builder, fn(leaving, result)
+    return native_gen/unless(leaving, native_kernel/absent(result), fn(failed)
+      let [closed: map, ready: map] = native_gen/bind(failed, "closed", native_gen/call(failed, "task_attempt_close", [attempt]))
+      return ready
+    end)
+  end)
+  builder = native_gen/unless(builder, native_gen/call(builder, "task_resource_user", [worker, native_gen/ref(builder, "true")]), fn(closed) => native_tasks/attempt_status(closed, "closed"))
+  builder = native_kernel/store_field(builder, attempt, "resources", native_gen/ref(builder, "true"))
+  builder = native_gen/unless(builder, native_gen/call(builder, "memory_acquire", [worker, native_gen/ref(builder, "image"), native_tasks/slot(builder, "retry")]), fn(failed) => native_tasks/attempt_status(failed, "closed"))
+  let image: map = native_tasks/saved(builder, "retry", native_tasks/pointer("Image"))
+  builder = native_gen/when(builder, native_kernel/absent(image), fn(empty) => native_tasks/attempt_status(empty, "schema"))
+  builder = native_gen/when(builder, native_kernel/absent(native_kernel/load_field(builder, image, "entry")), fn(empty) => native_tasks/attempt_status(empty, "schema"))
+  for name in ["current", "effects", "request", "error", "authority", "invocations", "executing"]
+    builder = native_gen/unless(builder, native_gen/call(builder, "memory_root_push", [worker, native_tasks/slot(builder, name)]), fn(failed) => native_tasks/attempt_status(failed, "closed"))
+  end
+  builder = native_roots/store(builder, native_tasks/saved(builder, "current", native_tasks/pointer("Image")), image)
+  // A scheduled segment gets a unique authority epoch. Retry keeps this epoch
+  // and its minted invocation tokens along with the segment authority.
+  let [epoch: map, claimed: map] = native_gen/bind(builder, "epoch", native_gen/call(builder, "task_resource_id", [worker]))
+  builder = native_gen/unless(claimed, native_gen/field(claimed, epoch, "ok"), fn(exhausted) => native_tasks/attempt_status(exhausted, "limit"))
+  builder = native_kernel/store_field(builder, attempt, "epoch", native_gen/field(builder, epoch, "number"))
+  let tx: map = native_tasks/slot(builder, "transaction")
+  let [status: map, begun: map] = native_gen/bind(builder, "status", native_gen/call(builder, "kernel_begin",
+    [native_gen/ref(builder, "kernel"), worker, tx, native_kernel/load_field(builder, image, "tenant")]))
+  builder = native_gen/unless(begun, native_kernel/absent(status), fn(failed) => native_gen/return_value(failed, status))
+  let work: map = native_gen/call(builder, "kernel_work", [tx])
+  builder = native_roots/store(builder, native_tasks/saved(builder, "authority", native_kernel/pointer("Authority")), native_kernel/load_field(builder, work, "authority"))
+  builder = native_tasks/attempt_status(builder, "ok")
+  let result: map = native_gen/finish(module, builder)
+  return result
+end
+
+verb native_tasks/retry_body(module: map) -> map
+  let builder: map = native_gen/context(module, "task_attempt_retry")
+  let tx: map = native_tasks/slot(builder, "transaction")
+  builder = native_gen/when(builder, native_kernel/absent(native_kernel/load_field(builder, tx, "signal")), fn(closed) => native_tasks/attempt_status(closed, "closed"))
+  let [work: map, ready: map] = native_gen/bind(builder, "work", native_gen/call(builder, "kernel_work", [tx]))
+  builder = native_gen/when(ready, native_kernel/load_field(ready, work, "done"), fn(committed) => native_tasks/attempt_status(committed, "closed"))
+  builder = native_gen/unless(builder, native_gen/equal(native_kernel/load_field(builder, work, "status"), native_gen/ref(builder, "kernel_conflict")), fn(terminal) => native_tasks/attempt_status(terminal, "closed"))
+  builder = native_gen/when(builder, native_kernel/absent(native_tasks/attempt_field(builder, "retries")), fn(exhausted) => native_tasks/attempt_status(exhausted, "limit"))
+  builder = native_gen/unless(builder, native_gen/call(builder, "kernel_end", [tx]), fn(failed) => native_tasks/attempt_status(failed, "closed"))
+  builder = native_kernel/store_field(builder, native_tasks/attempt(builder), "retries", native_gen/subtract(native_tasks/attempt_field(builder, "retries"), native_gen/ref(builder, "one")))
+  builder = native_kernel/store_field(builder, native_tasks/attempt(builder), "boundary", native_gen/ref(builder, "zero"))
+  let image: map = native_tasks/saved(builder, "retry", native_tasks/pointer("Image"))
+  builder = native_roots/store(builder, native_tasks/saved(builder, "current", native_tasks/pointer("Image")), image)
+  builder = native_roots/store(builder, native_tasks/saved(builder, "effects", native_tasks/pointer("Effect")), native_gen/zero(native_tasks/pointer("Effect")))
+  builder = native_roots/store(builder, native_tasks/saved(builder, "request", native_tasks/pointer("WaitRequest")), native_gen/zero(native_tasks/pointer("WaitRequest")))
+  builder = native_roots/store(builder, native_tasks/saved(builder, "error", native_value/word()), native_gen/zero(native_value/word()))
+  builder = native_roots/store(builder, native_tasks/saved(builder, "executing", native_tasks/pointer("CodeRef")), native_gen/zero(native_tasks/pointer("CodeRef")))
+  let [status: map, begun: map] = native_gen/bind(builder, "status", native_gen/call(builder, "kernel_begin",
+    [native_tasks/attempt_field(builder, "kernel"), native_tasks/attempt_field(builder, "worker"), tx, native_kernel/load_field(builder, image, "tenant")]))
+  builder = native_gen/unless(begun, native_kernel/absent(status), fn(failed) => native_gen/return_value(failed, status))
+  // Retry retains the segment's authority. A scheduled resumption instead uses
+  // attempt_open, which compiles authority against its fresh snapshot.
+  builder = native_kernel/store_field(builder, native_gen/call(builder, "kernel_work", [tx]), "authority", native_tasks/saved(builder, "authority", native_kernel/pointer("Authority")))
+  builder = native_tasks/attempt_status(builder, "ok")
+  let result: map = native_gen/finish(module, builder)
+  return result
+end
+
+verb native_tasks/poll_body(module: map) -> map
+  let builder: map = native_gen/context(module, "task_poll")
+  let tx: map = native_tasks/slot(builder, "transaction")
+  let signal: map = native_kernel/load_field(builder, tx, "signal")
+  builder = native_gen/when(builder, native_kernel/absent(signal), fn(closed) => native_tasks/attempt_status(closed, "closed"))
+  builder = native_gen/when(builder, native_gen/equal(native_gen/call(builder, "memory_atomic_load", [signal]), native_gen/ref(builder, "one")), fn(cancelled) => native_tasks/attempt_status(cancelled, "cancelled"))
+  let remaining: map = native_tasks/attempt_field(builder, "remaining")
+  let cost: map = native_gen/ref(builder, "cost")
+  builder = native_gen/when(builder, native_gen/less(remaining, cost), fn(exhausted)
+    return native_tasks/attempt_status(native_kernel/store_field(exhausted, native_tasks/attempt(exhausted), "remaining", native_gen/ref(exhausted, "zero")), "limit")
+  end)
+  builder = native_kernel/store_field(builder, native_tasks/attempt(builder), "remaining", native_gen/subtract(remaining, cost))
+  let image: map = native_tasks/saved(builder, "current", native_tasks/pointer("Image"))
+  builder = native_gen/when(builder, native_gen/less(native_tasks/attempt_field(builder, "depth_limit"), native_kernel/load_field(builder, image, "depth")), fn(deep) => native_tasks/attempt_status(deep, "limit"))
+  builder = native_gen/unless(builder, native_gen/call(builder, "memory_safepoint", [native_tasks/attempt_field(builder, "worker"), native_gen/ref(builder, "false")]), fn(failed) => native_tasks/attempt_status(failed, "oom"))
+  builder = native_tasks/attempt_status(builder, "ok")
+  let result: map = native_gen/finish(module, builder)
+  return result
+end
+
+verb native_tasks/attempts(input: map) -> map
+  let module: map = input
+  let attempt: list = ["attempt", native_tasks/pointer("Attempt"), :Borrow]
+  module = native_tasks/declare(module, "attempt_open", :U64,
+    [attempt, ["worker", native_memory/record_pointer("MemoryWorker"), :Borrow],
+      ["kernel", native_memory/record_pointer("Kernel"), :Borrow], ["image", native_memory/record_pointer("MemoryRoot"), :Borrow],
+      ["remaining", :U64, :Value], ["retries", :U64, :Value], ["depth_limit", :U64, :Value]])
+  module = native_tasks/declare(module, "attempt_close", :Bool, [attempt])
+  module = native_tasks/declare(module, "attempt_retry", :U64, [attempt])
+  module = native_tasks/declare(module, "poll", :U64, [attempt, ["cost", :U64, :Value]])
+  module = native_tasks/close_body(module)
+  module = native_tasks/open_body(module)
+  module = native_tasks/retry_body(module)
+  module = native_tasks/poll_body(module)
+  return module
+end

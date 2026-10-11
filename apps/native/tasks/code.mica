@@ -1,0 +1,165 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+// A managed CodeRef retains dependencies and constants. Its native owner keeps
+// the library handle stable through copying and compaction. The registry holds
+// owners, but never roots CodeRefs: unreachable dependency cycles can die.
+verb native_code/types(input: map) -> map
+  let module: map = input
+  module[:state] = native/record_type(module[:state], "TaskCodeOwner", [
+    ["next", native_tasks/pointer("CodeOwner")], ["registry", native_tasks/pointer("CodeRegistry")],
+    ["library", native_memory/pointer(:U8)], ["seen", :U64], ["sealed", :Bool]])[1]
+  module[:state] = native/record_type(module[:state], "TaskCodeRegistry", [
+    ["heap", native_memory/record_pointer("MemoryHeap")], ["owners", native_tasks/pointer("CodeOwner")],
+    ["anchor", [:Record, "MemoryRoot"]], ["retiring", :U64], ["closed", :Bool]])[1]
+  module[:state] = native/record_type(module[:state], "TaskCodeReap", [["status", :U64], ["released", :U64]])[1]
+  return module
+end
+verb native_code/trace_owner(builder: map, code: map, collection: map) -> map
+  // Only successful major collection rewrites count. Publication copying and
+  // failed preparation cannot make a library eligible for retirement.
+  let checked: map = native_gen/when(builder, native_gen/equal(native_kernel/load_field(builder, collection, "phase"), native_gen/ref(builder, "memory_share_prepare")), fn(sharing)
+    let owner: map = native_kernel/load_field(sharing, code, "owner")
+    let ready: map = native_gen/when(sharing, native_kernel/absent(owner), fn(invalid)
+      return native_gen/return_void(native_kernel/store_field(invalid, collection, "failed", native_gen/ref(invalid, "true")))
+    end)
+    return native_gen/unless(ready, native_kernel/load_field(ready, owner, "sealed"), fn(unsealed)
+      return native_gen/return_void(native_kernel/store_field(unsealed, collection, "failed", native_gen/ref(unsealed, "true")))
+    end)
+  end)
+  let result: map = native_gen/when(checked, native_gen/equal(native_kernel/load_field(checked, collection, "phase"), native_gen/ref(checked, "memory_trace_rewrite")), fn(rewrite)
+    let owner: map = native_kernel/load_field(rewrite, code, "owner")
+    return native_gen/unless(rewrite, native_kernel/absent(owner), fn(owned)
+      let heap: map = native_kernel/load_field(owned, collection, "heap")
+      return native_kernel/store_field(owned, owner, "seen", native_gen/add(native_kernel/load_field(owned, heap, "collections"), native_gen/ref(owned, "one")))
+    end)
+  end)
+  return result
+end
+verb native_code/field(builder: map, name: string) -> map
+  let result: map = native_kernel/load_field(builder, native_gen/ref(builder, "registry"), name)
+  return result
+end
+verb native_code/status(builder: map, name: string) -> map
+  let result: map = native_execution/fail(builder, native_gen/ref(builder, string_concat("kernel_", name)))
+  return result
+end
+verb native_code/check(builder: map, condition: map, name: string) -> map
+  let result: map = native_gen/unless(builder, condition, fn(failed) => native_code/status(failed, name))
+  return result
+end
+verb native_code/context(module: map, name: string) -> map
+  let builder: map = native_roots/context(module, string_concat("task_code_", name), fn(failed, reason) => native_code/status(failed, reason))
+  builder = native_code/check(builder, native_gen/negate(native_kernel/absent(native_code/field(builder, "heap"))), "closed")
+  builder = native_code/check(builder, native_gen/equal(native_code/field(builder, "heap"), native_kernel/load_field(builder, native_gen/ref(builder, "worker"), "heap")), "closed")
+  let result: map = native_code/check(builder, native_kernel/load_field(builder, native_gen/ref(builder, "worker"), "active"), "closed")
+  return result
+end
+verb native_code/lock(builder: map) -> map
+  // Collection waits release the heap mutex until every active worker parks.
+  // No operation in this critical section can collect or enter managed code.
+  let mutex: map = native_kernel/load_field(builder, native_code/field(builder, "heap"), "mutex")
+  let result: map = native_gen/do_call(builder, "memory_lock", [mutex])
+  return result
+end
+verb native_code/unlock(builder: map) -> map
+  let result: map = native_gen/do_call(builder, "memory_unlock", [native_kernel/load_field(builder, native_code/field(builder, "heap"), "mutex")])
+  return result
+end
+verb native_code/owned(builder: map) -> list
+  let code: map = native_roots/ref(builder, "code")
+  let ready: map = native_code/check(builder, native_gen/negate(native_kernel/absent(code)), "schema")
+  let owner: map = native_kernel/load_field(ready, code, "owner")
+  ready = native_code/check(ready, native_gen/negate(native_kernel/absent(owner)), "schema")
+  ready = native_code/check(ready, native_gen/equal(native_kernel/load_field(ready, owner, "registry"), native_gen/ref(ready, "registry")), "schema")
+  return [owner, ready]
+end
+
+verb native_code/register_body(module: map) -> map
+  let builder: map = native_code/context(module, "register")
+  builder = native_code/check(builder, native_gen/negate(native_kernel/absent(native_gen/ref(builder, "library"))), "schema")
+  // A registration value alone does not prove that this worker owns the root.
+  let [candidate: map, searching: map] = native_gen/bind(builder, "candidate", native_kernel/load_field(builder, native_gen/ref(builder, "worker"), "roots"))
+  builder = native_gen/while_loop(searching, native_gen/negate(native_gen/equal(candidate, native_gen/ref(searching, "output"))), fn(step)
+    let ready: map = native_code/check(step, native_gen/negate(native_kernel/absent(candidate)), "schema")
+    return native_gen/assign(ready, candidate, native_kernel/load_field(ready, candidate, "next"))
+  end)
+  builder = native_code/check(builder, native_gen/negate(native_kernel/absent(candidate)), "schema")
+  let [reference: map, retained: map] = native_roots/retain(builder, "reference", native_gen/call(builder, "task_new_CodeRef", [
+    native_gen/ref(builder, "worker"), native_gen/zero(native_tasks/pointer("CodeOwner")), native_gen/zero(native_tasks/pointer("CodeLink")), native_gen/zero(native_value/word())]))
+  builder = native_code/check(retained, native_gen/negate(native_kernel/absent(reference)), "oom")
+  let [storage: map, allocated: map] = native_gen/bind(builder, "storage", native_gen/call(builder, "memory_platform_allocate", [native_gen/sizeof([:Record, "TaskCodeOwner"])]))
+  builder = native_code/check(allocated, native_gen/negate(native_kernel/absent(storage)), "oom")
+  let [owner: map, ready: map] = native_gen/bind(builder, "owner", native_gen/cast(native_tasks/pointer("CodeOwner"), storage))
+  builder = native_gen/store(ready, owner, native_gen/zero([:Record, "TaskCodeOwner"]))
+  builder = native_gen/on_return(builder, fn(leaving, result)
+    return native_gen/unless(leaving, native_kernel/absent(result), fn(failed) => native_mailboxes/free(failed, owner))
+  end)
+  builder = native_code/lock(builder)
+  builder = native_gen/on_return(builder, fn(leaving, result) => native_code/unlock(leaving))
+  builder = native_code/check(builder, native_gen/negate(native_code/field(builder, "closed")), "closed")
+  builder = native_mailboxes/native_store(builder, owner, "registry", native_gen/ref(builder, "registry"))
+  builder = native_mailboxes/native_store(builder, owner, "library", native_gen/ref(builder, "library"))
+  builder = native_kernel/store_field(builder, owner, "seen", native_kernel/load_field(builder, native_code/field(builder, "heap"), "collections"))
+  builder = native_mailboxes/native_store(builder, owner, "next", native_code/field(builder, "owners"))
+  builder = native_mailboxes/native_store(builder, native_gen/ref(builder, "registry"), "owners", owner)
+  builder = native_mailboxes/native_store(builder, reference, "owner", owner)
+  builder = native_roots/store(builder, native_tasks/root(builder, "output", native_tasks/pointer("CodeRef")), reference)
+  let result: map = native_gen/finish(module, native_code/status(builder, "ok"))
+  return result
+end
+
+verb native_code/mutate_body(module: map, name: string) -> map
+  let builder: map = native_code/context(module, name)
+  let [owner: map, checked: map] = native_code/owned(builder)
+  builder = checked
+  let link: map = native_gen/zero(native_tasks/pointer("CodeLink"))
+  if name == "depend"
+    let dependency: map = native_roots/ref(builder, "dependency")
+    builder = native_code/check(builder, native_gen/negate(native_kernel/absent(dependency)), "schema")
+    let dependency_owner: map = native_kernel/load_field(builder, dependency, "owner")
+    builder = native_code/check(builder, native_gen/negate(native_kernel/absent(dependency_owner)), "schema")
+    builder = native_code/check(builder, native_gen/equal(native_kernel/load_field(builder, native_kernel/load_field(builder, dependency_owner, "registry"), "heap"), native_code/field(builder, "heap")), "schema")
+    let [edge: map, allocated: map] = native_gen/bind(builder, "edge", native_gen/call(builder, "task_new_CodeLink", [native_gen/ref(builder, "worker"),
+      native_kernel/load_field(builder, native_roots/ref(builder, "code"), "dependencies"), dependency]))
+    builder = native_code/check(allocated, native_gen/negate(native_kernel/absent(edge)), "oom")
+    link = edge
+  end
+  builder = native_code/lock(builder)
+  builder = native_gen/on_return(builder, fn(leaving, result) => native_code/unlock(leaving))
+  builder = native_code/check(builder, native_gen/negate(native_code/field(builder, "closed")), "closed")
+  builder = native_code/check(builder, native_gen/negate(native_kernel/load_field(builder, owner, "sealed")), "closed")
+  let object: map = native_gen/call(builder, "memory_object", [native_gen/cast(native_memory/pointer(:U8), native_roots/ref(builder, "code"))])
+  builder = native_code/check(builder, native_gen/negate(native_gen/equal(native_kernel/load_field(builder, object, "state"), native_gen/ref(builder, "memory_object_frozen"))), "closed")
+  if name == "seal"
+    builder = native_kernel/store_field(builder, owner, "sealed", native_gen/ref(builder, "true"))
+  elseif name == "depend"
+    builder = native_kernel/store_field(builder, native_roots/ref(builder, "code"), "dependencies", link)
+  else
+    builder = native_kernel/store_field(builder, native_roots/ref(builder, "code"), "constants", native_roots/ref(builder, "value"))
+  end
+  let result: map = native_gen/finish(module, native_code/status(builder, "ok"))
+  return result
+end
+
+verb native_code/program(input: map) -> map
+  let module: map = input
+  let registry: list = ["registry", native_tasks/pointer("CodeRegistry"), :Borrow]
+  let worker: list = ["worker", native_memory/record_pointer("MemoryWorker"), :Borrow]
+  let code: list = ["code", native_tasks/pointer("CodeRef"), :Gc]
+  for name in ["init", "close", "release"]
+    module = native_tasks/declare(module, string_concat("code_", name), :U64, [registry, worker])
+  end
+  module = native_tasks/declare(module, "code_register", :U64, [registry, worker, ["library", native_memory/pointer(:U8), :Borrow], ["output", native_memory/record_pointer("MemoryRoot"), :Borrow]])
+  module = native_tasks/declare(module, "code_depend", :U64, [registry, worker, code, ["dependency", native_tasks/pointer("CodeRef"), :Gc]])
+  module = native_tasks/declare(module, "code_constants", :U64, [registry, worker, code, ["value", native_value/word(), :Gc]])
+  module = native_tasks/declare(module, "code_seal", :U64, [registry, worker, code])
+  module = native_tasks/declare(module, "code_reap", [:Record, "TaskCodeReap"], [registry, worker])
+  module = native_code/lifecycle(module)
+  module = native_code/register_body(module)
+  for name in ["depend", "constants", "seal"]
+    module = native_code/mutate_body(module, name)
+  end
+  let result: map = native_code/reap_body(module)
+  return result
+end

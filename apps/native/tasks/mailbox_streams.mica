@@ -1,0 +1,180 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+// Each empty stream reserves one queue slot. A full mailbox can therefore
+// replace any stream's pending rows with a recovery or revocation marker.
+verb native_mailboxes/room(builder: map, mailbox: map) -> map
+  let occupied: map = native_gen/add(native_kernel/load_field(builder, mailbox, "count"), native_kernel/load_field(builder, mailbox, "empty_streams"))
+  let result: map = native_gen/less(occupied, native_kernel/load_field(builder, mailbox, "capacity"))
+  return result
+end
+verb native_mailboxes/prepare_message(builder: map, payload: map, stream: map) -> list
+  let ready: map = native_roots/poll(builder)
+  let [message: map, allocated: map] = native_roots/retain(ready, "message", native_gen/call(ready, "task_new_Message",
+    [native_gen/ref(ready, "worker"), native_gen/zero(native_tasks/pointer("Message")), payload, stream]))
+  ready = native_mailboxes/check(allocated, native_gen/negate(native_kernel/absent(message)), "oom")
+  let [shared: map, frozen: map] = native_gen/bind(ready, "shared", native_gen/call(ready, "memory_share",
+    [native_gen/ref(ready, "worker"), native_gen/cast(native_memory/pointer(:U8), message)]))
+  ready = native_mailboxes/check(frozen, native_gen/negate(native_kernel/absent(shared)), "oom")
+  ready = native_roots/store(ready, message, native_gen/cast(native_tasks/pointer("Message"), shared))
+  return [message, ready]
+end
+verb native_mailboxes/append_message(builder: map, mailbox: map, message: map) -> map
+  // Nodes and payloads are frozen before any shared links change. The hub
+  // mutex protects these runtime links and their queue accounting.
+  let tail: map = native_mailboxes/root(builder, mailbox, "tail")
+  let ready: map = native_gen/branch(builder, native_kernel/absent(tail),
+    fn(empty) => native_roots/store(empty, native_mailboxes/root(empty, mailbox, "head"), message),
+    fn(queued) => native_kernel/store_field(queued, tail, "next", message))
+  ready = native_roots/store(ready, tail, message)
+  let result: map = native_kernel/store_field(ready, mailbox, "count", native_gen/add(native_kernel/load_field(ready, mailbox, "count"), native_gen/ref(ready, "one")))
+  return result
+end
+
+verb native_streams/lookup(builder: map, mailbox: map) -> list
+  let [stream: map, ready: map] = native_gen/bind(builder, "stream", native_kernel/load_field(builder, mailbox, "streams"))
+  ready = native_gen/while_loop(ready, native_gen/negate(native_kernel/absent(stream)), fn(scan)
+    let checked: map = native_gen/when(scan, native_gen/equal(native_kernel/load_field(scan, stream, "id"), native_gen/ref(scan, "stream_id")), fn(found) => native_gen/break_loop(found))
+    return native_gen/assign(checked, stream, native_kernel/load_field(checked, stream, "next"))
+  end)
+  return [stream, ready]
+end
+verb native_streams/release(builder: map, mailbox: map) -> map
+  let [stream: map, ready: map] = native_gen/bind(builder, "stream", native_kernel/load_field(builder, mailbox, "streams"))
+  ready = native_gen/while_loop(ready, native_gen/negate(native_kernel/absent(stream)), fn(retire)
+    let [next: map, captured: map] = native_gen/bind(retire, "next", native_kernel/load_field(retire, stream, "next"))
+    return native_gen/assign(native_mailboxes/free(captured, stream), stream, next)
+  end)
+  ready = native_mailboxes/native_store(ready, mailbox, "streams", native_gen/zero(native_tasks/pointer("MailboxStream")))
+  let result: map = native_kernel/store_field(ready, mailbox, "empty_streams", native_gen/ref(ready, "zero"))
+  return result
+end
+verb native_streams/drained(builder: map, mailbox: map) -> map
+  let ready: map = native_kernel/store_field(builder, mailbox, "empty_streams", native_gen/ref(builder, "zero"))
+  let [stream: map, captured: map] = native_gen/bind(ready, "stream", native_kernel/load_field(ready, mailbox, "streams"))
+  let result: map = native_gen/while_loop(captured, native_gen/negate(native_kernel/absent(stream)), fn(clear)
+    let next: map = native_kernel/store_field(clear, stream, "count", native_gen/ref(clear, "zero"))
+    next = native_kernel/store_field(next, mailbox, "empty_streams", native_gen/add(native_kernel/load_field(next, mailbox, "empty_streams"), native_gen/ref(next, "one")))
+    return native_gen/assign(next, stream, native_kernel/load_field(next, stream, "next"))
+  end)
+  return result
+end
+
+// Failure is allowed only before replacement starts. Polls during retirement
+// preserve roots even if collection fails; the accepted replacement completes.
+verb native_streams/purge(builder: map, mailbox: map, stream: map) -> map
+  let result: map = native_gen/unless(builder, native_kernel/absent(native_kernel/load_field(builder, stream, "count")), fn(occupied) => native_roots/temporary(occupied, fn(scoped)
+    let [previous: map, with_previous: map] = native_roots/retain(scoped, "previous", native_gen/zero(native_tasks/pointer("Message")))
+    let [cursor: map, with_cursor: map] = native_roots/retain(with_previous, "cursor", native_mailboxes/root(with_previous, mailbox, "head"))
+    let ready: map = native_gen/while_loop(with_cursor, native_gen/negate(native_kernel/absent(cursor)), fn(scan)
+      let step: map = native_gen/branch(scan, native_gen/equal(native_kernel/load_field(scan, cursor, "stream"), native_gen/ref(scan, "stream_id")), fn(remove)
+        let unlinked: map = native_gen/branch(remove, native_kernel/absent(previous),
+          fn(first) => native_roots/store(first, native_mailboxes/root(first, mailbox, "head"), native_kernel/load_field(first, cursor, "next")),
+          fn(later) => native_kernel/store_field(later, previous, "next", native_kernel/load_field(later, cursor, "next")))
+        unlinked = native_gen/when(unlinked, native_gen/equal(cursor, native_mailboxes/root(unlinked, mailbox, "tail")),
+          fn(last) => native_roots/store(last, native_mailboxes/root(last, mailbox, "tail"), previous))
+        return native_kernel/store_field(unlinked, mailbox, "count", native_gen/subtract(native_kernel/load_field(unlinked, mailbox, "count"), native_gen/ref(unlinked, "one")))
+      end, fn(keep) => native_roots/store(keep, previous, cursor))
+      step = native_roots/store(step, cursor, native_kernel/load_field(step, cursor, "next"))
+      let [polled: map, collected: map] = native_gen/bind(step, "collected", native_gen/call(step, "memory_safepoint", [native_gen/ref(step, "worker"), native_gen/ref(step, "false")]))
+      return collected
+    end)
+    ready = native_kernel/store_field(ready, stream, "count", native_gen/ref(ready, "zero"))
+    return native_kernel/store_field(ready, mailbox, "empty_streams", native_gen/add(native_kernel/load_field(ready, mailbox, "empty_streams"), native_gen/ref(ready, "one")))
+  end))
+  return result
+end
+
+verb native_streams/open_body(module: map) -> map
+  let locked: map = native_mailboxes/locked(module, "stream_open")
+  let [mailbox: map, builder: map] = native_mailboxes/find(locked, native_roots/ref(locked, "sender"), true)
+  for field in ["stream_id", "capacity"]
+    builder = native_mailboxes/check(builder, native_gen/negate(native_kernel/absent(native_gen/ref(builder, field))), "schema")
+  end
+  let [existing: map, found: map] = native_streams/lookup(builder, mailbox)
+  builder = native_mailboxes/check(found, native_kernel/absent(existing), "schema")
+  builder = native_mailboxes/check(builder, native_mailboxes/room(builder, mailbox), "limit")
+  let [raw: map, allocated: map] = native_gen/bind(builder, "storage", native_gen/call(builder, "memory_platform_allocate", [native_gen/sizeof([:Record, "TaskMailboxStream"])]))
+  builder = native_mailboxes/check(allocated, native_gen/negate(native_kernel/absent(raw)), "oom")
+  let stream: map = native_gen/cast(native_tasks/pointer("MailboxStream"), raw)
+  builder = native_gen/store(builder, stream, native_gen/zero([:Record, "TaskMailboxStream"]))
+  for field in ["id", "capacity"]
+    let parameter: string = field
+    if field == "id"
+      parameter = "stream_id"
+    end
+    builder = native_kernel/store_field(builder, stream, field, native_gen/ref(builder, parameter))
+  end
+  builder = native_mailboxes/native_store(builder, stream, "next", native_kernel/load_field(builder, mailbox, "streams"))
+  builder = native_mailboxes/native_store(builder, mailbox, "streams", stream)
+  builder = native_kernel/store_field(builder, mailbox, "empty_streams", native_gen/add(native_kernel/load_field(builder, mailbox, "empty_streams"), native_gen/ref(builder, "one")))
+  let result: map = native_gen/finish(module, native_mailboxes/status(builder, "ok"))
+  return result
+end
+verb native_streams/close_body(module: map) -> map
+  let locked: map = native_mailboxes/locked(module, "stream_close")
+  let [mailbox: map, builder: map] = native_mailboxes/find(locked, native_roots/ref(locked, "sender"), true)
+  let [stream: map, found: map] = native_streams/lookup(builder, mailbox)
+  builder = native_mailboxes/check(found, native_gen/negate(native_kernel/absent(stream)), "permission")
+  // Cancellation stops future delivery. Messages already queued stay valid.
+  builder = native_gen/when(builder, native_kernel/absent(native_kernel/load_field(builder, stream, "count")), fn(empty)
+    return native_kernel/store_field(empty, mailbox, "empty_streams", native_gen/subtract(native_kernel/load_field(empty, mailbox, "empty_streams"), native_gen/ref(empty, "one")))
+  end)
+  let [link: map, with_link: map] = native_gen/bind(builder, "link", native_gen/field(builder, mailbox, "streams")[:pointer])
+  builder = native_gen/while_loop(with_link, native_gen/negate(native_gen/equal(native_gen/load(link), stream)), fn(scan)
+    return native_gen/assign(scan, link, native_gen/field(scan, native_gen/load(link), "next")[:pointer])
+  end)
+  builder = native_gen/root_write(builder, native_gen/location(link), native_gen/manage(native_kernel/load_field(builder, stream, "next")))
+  let result: map = native_gen/finish(module, native_mailboxes/status(native_mailboxes/free(builder, stream), "ok"))
+  return result
+end
+verb native_streams/send_body(module: map) -> map
+  let locked: map = native_mailboxes/locked(module, "stream_send")
+  let [mailbox: map, builder: map] = native_mailboxes/find(locked, native_roots/ref(locked, "sender"), true)
+  let [stream: map, found: map] = native_streams/lookup(builder, mailbox)
+  builder = native_mailboxes/check(found, native_gen/negate(native_kernel/absent(stream)), "permission")
+  builder = native_mailboxes/check(builder, native_gen/negate(native_kernel/load_field(builder, stream, "stopped")), "closed")
+  builder = native_mailboxes/check(builder, native_gen/less(native_mailboxes/field(builder, "revision"), native_gen/ref(builder, "kernel_unlimited")), "limit")
+  let [replace: map, selected: map] = native_gen/bind(builder, "replace", native_gen/ref(builder, "terminal"))
+  builder = native_gen/unless(selected, native_gen/less(native_kernel/load_field(selected, stream, "count"), native_kernel/load_field(selected, stream, "capacity")),
+    fn(full) => native_gen/assign(full, replace, native_gen/ref(full, "true")))
+  builder = native_gen/unless(builder, native_kernel/absent(native_kernel/load_field(builder, stream, "count")), fn(occupied)
+    return native_gen/unless(occupied, native_mailboxes/room(occupied, mailbox), fn(full) => native_gen/assign(full, replace, native_gen/ref(full, "true")))
+  end)
+  let [payload: map, with_payload: map] = native_roots/retain(builder, "selected_payload", native_roots/ref(builder, "payload"))
+  builder = native_gen/when(with_payload, replace, fn(replacing)
+    return native_gen/unless(replacing, native_gen/ref(replacing, "terminal"), fn(overflow)
+      return native_roots/store(overflow, payload, native_roots/ref(overflow, "overflow"))
+    end)
+  end)
+  // All allocation precedes queue mutation. Failure leaves both messages and
+  // stream accounting intact, so the caller can retry the delivery.
+  let [message: map, prepared: map] = native_mailboxes/prepare_message(builder, payload, native_gen/ref(builder, "stream_id"))
+  builder = native_gen/when(prepared, replace, fn(replacing) => native_streams/purge(replacing, mailbox, stream))
+  builder = native_gen/when(builder, native_kernel/absent(native_kernel/load_field(builder, stream, "count")), fn(first)
+    return native_kernel/store_field(first, mailbox, "empty_streams", native_gen/subtract(native_kernel/load_field(first, mailbox, "empty_streams"), native_gen/ref(first, "one")))
+  end)
+  builder = native_mailboxes/append_message(builder, mailbox, message)
+  builder = native_kernel/store_field(builder, stream, "count", native_gen/add(native_kernel/load_field(builder, stream, "count"), native_gen/ref(builder, "one")))
+  builder = native_kernel/store_field(builder, stream, "stopped", replace)
+  builder = native_mailboxes/notify(builder)
+  builder = native_roots/return_value(builder, native_gen/record(builder, [:Record, "TaskMailboxDelivery"], {
+    "status" -> native_gen/ref(builder, "kernel_ok"), "replaced" -> replace}))
+  let result: map = native_gen/finish(module, builder)
+  return result
+end
+
+verb native_streams/program(input: map) -> map
+  let module: map = input
+  module[:state] = native/record_type(module[:state], "TaskMailboxDelivery", [["status", :U64], ["replaced", :Bool]])[1]
+  let parameters: list = [["hub", native_tasks/pointer("MailboxHub"), :Borrow], ["worker", native_memory/record_pointer("MemoryWorker"), :Borrow],
+    ["sender", native_value/word(), :Gc], ["stream_id", :U64, :Value]]
+  module = native_tasks/declare(module, "mailbox_stream_open", :U64, [@parameters, ["capacity", :U64, :Value]])
+  module = native_tasks/declare(module, "mailbox_stream_close", :U64, parameters)
+  module = native_tasks/declare(module, "mailbox_stream_send", [:Record, "TaskMailboxDelivery"], [@parameters,
+    ["payload", native_value/word(), :Gc], ["overflow", native_value/word(), :Gc], ["terminal", :Bool, :Value]])
+  module = native_streams/open_body(module)
+  module = native_streams/close_body(module)
+  module = native_streams/send_body(module)
+  return module
+end

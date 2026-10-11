@@ -357,6 +357,14 @@ body = [@prefix, native/return_value("zero")]"#,
             "managed reference used after relocation",
         ),
         (
+            r#"body = [native/root_store_statement("root", "value"),
+  native/while_statement("condition", [
+    native/let_statement("loaded", :U64, native/load_expression("value")),
+    native/do_statement(native/call_expression("collect", ["root"]))]),
+  native/return_value("zero")]"#,
+            "managed reference used after relocation",
+        ),
+        (
             r#"body = [@prefix, native/do_statement(native/call_expression("collect", ["root"])), transfer]"#,
             "transfer or return uses stale managed reference",
         ),
@@ -392,6 +400,22 @@ body = [native/let_statement("local", :U64, "zero"),
                 report.render()
             );
         }
+        let source = format!(
+            r#"{EXECUTION_PROGRAM}
+body = [native/root_store_statement("root", "value"),
+  native/while_statement("condition", [
+    native/let_statement("fresh", pointer, native/root_load_expression("root")),
+    native/let_statement("loaded", :U64, native/load_expression("fresh")),
+    native/do_statement(native/call_expression("collect", ["root"]))]),
+  native/return_value("zero")]
+context = native/define_function(context, "entry", body)
+return native/emit_c(context[:state])"#
+        );
+        assert!(
+            eval(&mut runner, &source)
+                .with_str(|c| !c.is_empty())
+                .unwrap()
+        );
     }
 }
 
@@ -2026,11 +2050,25 @@ state = declared
 
 #[test]
 fn native_relation_kernel_executes_on_both_mica_tiers() {
+    check_native_kernel_fixture(false);
+}
+
+#[test]
+fn native_tasks_execute_on_both_mica_tiers() {
+    check_native_kernel_fixture(true);
+}
+
+fn check_native_kernel_fixture(tasks: bool) {
     let mut previous = None;
+    let sanitizer = if std::env::var_os("MICA_NATIVE_THREAD_SANITIZER").is_some() {
+        "-fsanitize=thread"
+    } else {
+        "-fsanitize=address,undefined,float-cast-overflow"
+    };
     for interpreter_only in [true, false] {
         let mut runner = runner(interpreter_only).with_task_limits(TaskLimits {
-            // Includes the kernel, source installers, dependency planning, and C emission.
-            instruction_budget: 8_000_000_000,
+            // The task fixture also emits services and native event dispatchers.
+            instruction_budget: if tasks { 12_000_000_000 } else { 8_000_000_000 },
             max_call_depth: 256,
             ..TaskLimits::default()
         });
@@ -2043,6 +2081,7 @@ fn native_relation_kernel_executes_on_both_mica_tiers() {
             include_str!("../../../apps/native/rules/stratify.mica"),
             include_str!("../../../apps/native/rules/catalog.mica"),
             include_str!("../../../apps/native/rules/program.mica"),
+            include_str!("../../../apps/native/kernel/code_catalog.mica"),
             include_str!("../../../apps/native/kernel/program.mica"),
             include_str!("../../../apps/native/kernel/execution.mica"),
             include_str!("../../../apps/native/kernel/authority.mica"),
@@ -2052,6 +2091,7 @@ fn native_relation_kernel_executes_on_both_mica_tiers() {
             include_str!("../../../apps/native/kernel/transactions.mica"),
             include_str!("../../../apps/native/kernel/rule_indexes.mica"),
             include_str!("../../../apps/native/kernel/rules.mica"),
+            include_str!("../../../apps/native/kernel/history.mica"),
             include_str!("../../../apps/native/kernel/lifecycle.mica"),
             include_str!("../../../apps/native/query/builders.mica"),
             include_str!("../../../apps/native/query/roots.mica"),
@@ -2077,10 +2117,70 @@ fn native_relation_kernel_executes_on_both_mica_tiers() {
                 panic!("{}", runner.render_source_task_error(&error));
             });
         }
-        let generated = eval(
-            &mut runner,
-            "return native/emit_c(native_rules/test_program())",
-        )
+        if tasks {
+            for source in [
+                include_str!("../../../apps/native/tasks/program.mica"),
+                include_str!("../../../apps/native/tasks/platform.mica"),
+                include_str!("../../../apps/native/tasks/code.mica"),
+                include_str!("../../../apps/native/tasks/code_lifecycle.mica"),
+                include_str!("../../../apps/native/tasks/code_tests.mica"),
+                include_str!("../../../apps/native/tasks/images.mica"),
+                include_str!("../../../apps/native/tasks/dispatch.mica"),
+                include_str!("../../../apps/native/tasks/dispatch_bindings.mica"),
+                include_str!("../../../apps/native/tasks/dispatch_restrictions.mica"),
+                include_str!("../../../apps/native/tasks/dispatch_signatures.mica"),
+                include_str!("../../../apps/native/tasks/dispatch_selection.mica"),
+                include_str!("../../../apps/native/tasks/attempts.mica"),
+                include_str!("../../../apps/native/tasks/invocation.mica"),
+                include_str!("../../../apps/native/tasks/handlers.mica"),
+                include_str!("../../../apps/native/tasks/control.mica"),
+                include_str!("../../../apps/native/tasks/boundaries.mica"),
+                include_str!("../../../apps/native/tasks/execution.mica"),
+                include_str!("../../../apps/native/tasks/calls.mica"),
+                include_str!("../../../apps/native/tasks/queue.mica"),
+                include_str!("../../../apps/native/tasks/services.mica"),
+                include_str!("../../../apps/native/tasks/resources.mica"),
+                include_str!("../../../apps/native/tasks/mailboxes.mica"),
+                include_str!("../../../apps/native/tasks/mailbox_streams.mica"),
+                include_str!("../../../apps/native/tasks/mailbox_lifecycle.mica"),
+                include_str!("../../../apps/native/tasks/mailbox_delivery.mica"),
+                include_str!("../../../apps/native/tasks/requests.mica"),
+                include_str!("../../../apps/native/tasks/subscription_requests.mica"),
+                include_str!("../../../apps/native/tasks/subscription_messages.mica"),
+                include_str!("../../../apps/native/tasks/subscription_rows.mica"),
+                include_str!("../../../apps/native/tasks/subscription_delivery.mica"),
+                include_str!("../../../apps/native/tasks/subscription_catalogue.mica"),
+                include_str!("../../../apps/native/tasks/subscription_pump.mica"),
+                include_str!("../../../apps/native/tasks/subscription_events.mica"),
+                include_str!("../../../apps/native/tasks/subscriptions.mica"),
+                include_str!("../../../apps/native/tasks/subscription_lifecycle.mica"),
+                include_str!("../../../apps/native/tasks/scheduler.mica"),
+                include_str!("../../../apps/native/tasks/scheduler_lifecycle.mica"),
+                include_str!("../../../apps/native/tasks/scheduler_admission.mica"),
+                include_str!("../../../apps/native/tasks/scheduler_workers.mica"),
+                include_str!("../../../apps/native/tasks/scheduler_events.mica"),
+                include_str!("../../../apps/native/tasks/services_tests.mica"),
+                include_str!("../../../apps/native/tasks/scheduler_tests.mica"),
+                include_str!("../../../apps/native/tasks/handlers_tests.mica"),
+                include_str!("../../../apps/native/tasks/calls_tests.mica"),
+                include_str!("../../../apps/native/tasks/tests.mica"),
+            ] {
+                runner.run_filein(source).unwrap_or_else(|error| {
+                    panic!("{}", runner.render_source_task_error(&error));
+                });
+            }
+        }
+        let expression = if tasks {
+            "let state = native_tasks/test_program()\nreturn [native/emit_c(state), native/emit_c(native_code/test_library(state, false)), native/emit_c(native_code/test_library(state, true))]"
+        } else {
+            "return native/emit_c(native_rules/test_program())"
+        };
+        let output = eval(&mut runner, expression);
+        let generated = if tasks {
+            output.list_get(0).unwrap()
+        } else {
+            output.clone()
+        }
         .with_str(str::to_owned)
         .unwrap();
         if let Some(previous) = &previous {
@@ -2090,6 +2190,16 @@ fn native_relation_kernel_executes_on_both_mica_tiers() {
         let platform = eval(&mut runner, "return native_memory/platform()")
             .with_str(str::to_owned)
             .unwrap();
+        let platform = if tasks {
+            format!(
+                "{platform}\n{}",
+                eval(&mut runner, "return native_tasks/platform()")
+                    .with_str(str::to_owned)
+                    .unwrap()
+            )
+        } else {
+            platform
+        };
         let scratch = Scratch::new();
         fs::write(
             scratch.0.join("measurements.c"),
@@ -2098,21 +2208,129 @@ fn native_relation_kernel_executes_on_both_mica_tiers() {
         .unwrap();
         let source = scratch.0.join("kernel.c");
         let binary = scratch.0.join("kernel");
+        if tasks {
+            for (index, name) in [(1, "code-library"), (2, "code-replacement")] {
+                fs::write(
+                    scratch.0.join(format!("{name}.c")),
+                    output
+                        .list_get(index)
+                        .unwrap()
+                        .with_str(str::to_owned)
+                        .unwrap(),
+                )
+                .unwrap();
+                let library = Command::new("clang")
+                    .args([
+                        "-std=c11", "-shared", "-fPIC", "-Wall", "-Wextra", "-Werror",
+                    ])
+                    .args([sanitizer, "-fno-sanitize-recover=all"])
+                    .arg(scratch.0.join(format!("{name}.c")))
+                    .arg("-o")
+                    .arg(scratch.0.join(format!("{name}.so")))
+                    .output()
+                    .unwrap();
+                assert!(library.status.success(), "{library:?}");
+            }
+            fs::write(
+                scratch.0.join("code_tests.c"),
+                include_str!("../../../apps/native/tasks/code_tests.c"),
+            )
+            .unwrap();
+            fs::write(
+                scratch.0.join("services_tests.c"),
+                include_str!("../../../apps/native/tasks/services_tests.c"),
+            )
+            .unwrap();
+            fs::write(
+                scratch.0.join("mailboxes_tests.c"),
+                include_str!("../../../apps/native/tasks/mailboxes_tests.c"),
+            )
+            .unwrap();
+            fs::write(
+                scratch.0.join("mailbox_streams_tests.c"),
+                include_str!("../../../apps/native/tasks/mailbox_streams_tests.c"),
+            )
+            .unwrap();
+            fs::write(
+                scratch.0.join("dispatch_tests.c"),
+                include_str!("../../../apps/native/tasks/dispatch_tests.c"),
+            )
+            .unwrap();
+            fs::write(
+                scratch.0.join("invocation_tests.c"),
+                include_str!("../../../apps/native/tasks/invocation_tests.c"),
+            )
+            .unwrap();
+            fs::write(
+                scratch.0.join("calls_tests.c"),
+                include_str!("../../../apps/native/tasks/calls_tests.c"),
+            )
+            .unwrap();
+            fs::write(
+                scratch.0.join("requests_tests.c"),
+                include_str!("../../../apps/native/tasks/requests_tests.c"),
+            )
+            .unwrap();
+            fs::write(
+                scratch.0.join("subscription_requests_tests.c"),
+                include_str!("../../../apps/native/tasks/subscription_requests_tests.c"),
+            )
+            .unwrap();
+            fs::write(
+                scratch.0.join("subscriptions_tests.c"),
+                include_str!("../../../apps/native/tasks/subscriptions_tests.c"),
+            )
+            .unwrap();
+            fs::write(
+                scratch.0.join("subscription_messages_tests.c"),
+                include_str!("../../../apps/native/tasks/subscription_messages_tests.c"),
+            )
+            .unwrap();
+            fs::write(
+                scratch.0.join("subscription_rows_tests.c"),
+                include_str!("../../../apps/native/tasks/subscription_rows_tests.c"),
+            )
+            .unwrap();
+            fs::write(
+                scratch.0.join("subscription_delivery_tests.c"),
+                include_str!("../../../apps/native/tasks/subscription_delivery_tests.c"),
+            )
+            .unwrap();
+            fs::write(
+                scratch.0.join("subscription_catalogue_tests.c"),
+                include_str!("../../../apps/native/tasks/subscription_catalogue_tests.c"),
+            )
+            .unwrap();
+            fs::write(
+                scratch.0.join("subscription_pump_tests.c"),
+                include_str!("../../../apps/native/tasks/subscription_pump_tests.c"),
+            )
+            .unwrap();
+            fs::write(
+                scratch.0.join("scheduler_tests.c"),
+                include_str!("../../../apps/native/tasks/scheduler_tests.c"),
+            )
+            .unwrap();
+            fs::write(
+                scratch.0.join("handlers_tests.c"),
+                include_str!("../../../apps/native/tasks/handlers_tests.c"),
+            )
+            .unwrap();
+        }
         fs::write(
             &source,
             format!(
                 "{generated}\n#define MICA_MEMORY_TEST_ALLOCATOR\n{platform}\n{}\n{}\n{}",
                 include_str!("../../../native/platform/allocation.c"),
                 include_str!("../../../native/platform/mutex.c"),
-                include_str!("../../../apps/native/kernel/tests.c")
+                if tasks {
+                    include_str!("../../../apps/native/tasks/tests.c")
+                } else {
+                    include_str!("../../../apps/native/kernel/tests.c")
+                }
             ),
         )
         .unwrap();
-        let sanitizer = if std::env::var_os("MICA_NATIVE_THREAD_SANITIZER").is_some() {
-            "-fsanitize=thread"
-        } else {
-            "-fsanitize=address,undefined,float-cast-overflow"
-        };
         let compiled = Command::new(std::env::var_os("CC").unwrap_or_else(|| "cc".into()))
             .args([
                 "-std=c11",
@@ -2130,7 +2348,7 @@ fn native_relation_kernel_executes_on_both_mica_tiers() {
                 "-fno-omit-frame-pointer",
             ])
             .arg(&source)
-            .args(["-lm", "-o"])
+            .args(["-lm", "-ldl", "-o"])
             .arg(&binary)
             .output()
             .unwrap();
@@ -2140,6 +2358,7 @@ fn native_relation_kernel_executes_on_both_mica_tiers() {
             String::from_utf8_lossy(&compiled.stderr)
         );
         let executed = Command::new(binary)
+            .current_dir(&scratch.0)
             .env("ASAN_OPTIONS", "detect_leaks=1:halt_on_error=1")
             .env("TSAN_OPTIONS", "halt_on_error=1")
             .output()

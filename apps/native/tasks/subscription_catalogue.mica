@@ -1,0 +1,142 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+verb native_subscriptions/catalogue_specs() -> list
+  return [["relations", "RuleSchemaIndex"], ["rules", "RuleIndex"]]
+end
+verb native_subscriptions/identity(builder: map, number: map) -> list
+  let [identity: map, ready: map] = native_gen/checked_bind(builder, "identity", native_gen/call(builder, "value_identity", [number]), "ok",
+    fn(failed) => native_rules/error(failed, "limit"))
+  return [native_gen/field(ready, identity, "value"), ready]
+end
+verb native_subscriptions/catalogue_entry(builder: map, spec: list, entry: map) -> map
+  let [identity: map, ready: map] = native_subscriptions/identity(builder, native_kernel/load_field(builder, entry, "id"))
+  let [kind: map, with_kind: map] = native_gen/bind(ready, "kind", native_subscriptions/symbol(ready, "relation_created"))
+  ready = with_kind
+  let fields: list = []
+  if spec[0] == "relations"
+    let evaluation: map = native_kernel/load_field(ready, native_roots/ref(ready, "view"), "evaluation")
+    ready = native_rules/check(ready, native_gen/negate(native_kernel/absent(evaluation)), "schema")
+    let [rows: map, found: map] = native_gen/bind(ready, "metadata", native_rules/rows_lookup(ready, evaluation, native_kernel/load_field(ready, entry, "id")))
+    ready = native_rules/check(found, native_gen/negate(native_kernel/absent(rows)), "schema")
+    let name: map = native_kernel/load_field(ready, native_kernel/load_field(ready, rows, "relation"), "name")
+    ready = native_rules/check(ready, native_gen/less(name, native_gen/ref(ready, "symbol_id_limit")), "limit")
+    let symbol: map = native_gen/field(ready, native_gen/call(ready, "value_symbol", [native_gen/convert(:U32, name)]), "value")
+    fields = [[native_subscriptions/symbol(ready, "relation"), identity], [native_subscriptions/symbol(ready, "name"), symbol]]
+    ready = native_gen/when(ready, native_gen/ref(ready, "removed"), fn(removed)
+      return native_gen/assign(removed, kind, native_subscriptions/symbol(removed, "relation_removed"))
+    end)
+  else
+    let [head: map, with_head: map] = native_subscriptions/identity(ready, native_kernel/load_field(ready, entry, "head"))
+    ready = native_gen/assign(with_head, kind, native_subscriptions/symbol(with_head, "rule_installed"))
+    ready = native_gen/unless(ready, native_kernel/load_field(ready, entry, "active"), fn(inactive)
+      return native_gen/assign(inactive, kind, native_subscriptions/symbol(inactive, "rule_disabled"))
+    end)
+    ready = native_gen/when(ready, native_gen/ref(ready, "removed"), fn(removed)
+      return native_gen/assign(removed, kind, native_subscriptions/symbol(removed, "rule_removed"))
+    end)
+    fields = [[native_subscriptions/symbol(ready, "rule"), identity], [native_subscriptions/symbol(ready, "relation"), head]]
+  end
+  let [value: map, built: map] = native_literal/map(ready, [[native_subscriptions/symbol(ready, "kind"), kind], @fields], fn(failed) => native_rules/error(failed, "oom"))
+  let output: map = native_roots/root_value(built, native_gen/ref(built, "output"), native_value/word())
+  let [appended: map, with_append: map] = native_query/value(built, "kernel_query_append", [native_roots/worker(built), output, value])
+  let result: map = native_roots/store(with_append, output, appended)
+  return result
+end
+
+// Compare immutable catalogue indexes by identity. A shared node proves the
+// entire subtree unchanged, including when rotations moved it in the other tree.
+verb native_subscriptions/catalogue_tree(module: map, spec: list) -> map
+  let function: string = string_concat("task_subscription_catalogue_", spec[0])
+  let builder: map = native_query/context(module, function)
+  let node: map = native_roots/ref(builder, "node")
+  let other: map = native_roots/ref(builder, "other")
+  let done = fn(empty) => native_execution/fail(empty, native_gen/ref(empty, "kernel_ok"))
+  builder = native_gen/when(builder, native_kernel/absent(node), done)
+  builder = native_gen/when(builder, native_gen/equal(node, other), done)
+  builder = native_rules/tick(builder)
+  let [matching: map, with_matching: map] = native_gen/bind(builder, "matching", other)
+  let entry: map = native_kernel/load_field(with_matching, node, "entry")
+  let key: map = native_kernel/load_field(with_matching, entry, "id")
+  builder = native_gen/while_loop(with_matching, native_gen/negate(native_kernel/absent(matching)), fn(search)
+    let candidate: map = native_kernel/load_field(search, native_kernel/load_field(search, matching, "entry"), "id")
+    let checked: map = native_gen/when(search, native_gen/equal(key, candidate), fn(found) => native_gen/break_loop(found))
+    return native_gen/branch(checked, native_gen/less(key, candidate),
+      fn(left) => native_gen/assign(left, matching, native_kernel/load_field(left, matching, "left")),
+      fn(right) => native_gen/assign(right, matching, native_kernel/load_field(right, matching, "right")))
+  end)
+  builder = native_gen/when(builder, native_gen/equal(node, matching), done)
+  let [changed: map, compared: map] = native_gen/bind(builder, "changed", native_kernel/absent(matching))
+  builder = compared
+  if spec[0] == "rules"
+    builder = native_gen/unless(builder, native_gen/ref(builder, "removed"), fn(installed)
+      return native_gen/unless(installed, native_kernel/absent(matching), fn(present)
+        return native_gen/assign(present, changed, native_gen/not_equal(entry, native_kernel/load_field(present, matching, "entry")))
+      end)
+    end)
+  end
+  for side in ["left", "right"]
+    builder = native_subscriptions/call(builder, function, [native_roots/worker(builder),
+      native_kernel/load_field(builder, node, side), other, native_gen/ref(builder, "removed"),
+      native_roots/ref(builder, "view"), native_gen/ref(builder, "vocabulary"), native_gen/ref(builder, "output"), native_roots/ref(builder, "budget")])
+    if side == "left"
+      builder = native_gen/when(builder, changed, fn(emit)
+        return native_subscriptions/catalogue_entry(emit, spec, native_kernel/load_field(emit, node, "entry"))
+      end)
+    end
+  end
+  let result: map = native_gen/finish(module, done(builder))
+  return result
+end
+verb native_subscriptions/catalogue_body(module: map) -> map
+  let builder: map = native_query/context(module, "task_subscription_catalogue_entries")
+  builder = native_execution/control_scope(builder, native_roots/worker(builder), native_roots/ref(builder, "budget"))
+  builder = native_rules/check(builder, native_gen/negate(native_kernel/absent(native_gen/ref(builder, "vocabulary"))), "schema")
+  let [empty: map, allocated: map] = native_query/build_row(builder, native_gen/zero(:U64), fn(body, position) => native_gen/zero(native_value/word()))
+  let [entries: map, retained: map] = native_roots/retain(allocated, "entries", empty)
+  builder = retained
+  for spec in native_subscriptions/catalogue_specs()
+    let trees: map = {}
+    let field: string = "schemas"
+    if spec[0] == "rules"
+      field = "rules"
+    end
+    for name in ["before", "after"]
+      let [tree: map, rooted: map] = native_roots/retain(builder, name, native_gen/zero(native_kernel/pointer(spec[1])))
+      let snapshot: map = native_roots/ref(rooted, name)
+      builder = native_gen/unless(rooted, native_kernel/absent(snapshot), fn(present)
+        return native_roots/store(present, tree, native_kernel/load_field(present, snapshot, field))
+      end)
+      trees[name] = tree
+    end
+    for selection in [["after", "before", "false"], ["before", "after", "true"]]
+      builder = native_subscriptions/call(builder, string_concat("task_subscription_catalogue_", spec[0]), [
+        native_roots/worker(builder), trees[selection[0]], trees[selection[1]], native_gen/ref(builder, selection[2]),
+        native_roots/ref(builder, selection[0]), native_gen/ref(builder, "vocabulary"), entries[:scope_root], native_roots/ref(builder, "budget")])
+    end
+  end
+  builder = native_roots/return_value(builder, native_gen/record(builder, [:Record, "TaskSubscriptionEntries"], {
+    "status" -> native_gen/ref(builder, "kernel_ok"), "entries" -> entries}))
+  let result: map = native_gen/finish(module, builder)
+  return result
+end
+verb native_subscriptions/catalogue(input: map) -> map
+  let module: map = input
+  module[:state] = native/record_type(module[:state], "TaskSubscriptionEntries", [["status", :U64], ["entries", native_value/word()]])[1]
+  let worker: list = ["worker", native_memory/record_pointer("MemoryWorker"), :Borrow]
+  let vocabulary: list = ["vocabulary", native_tasks/pointer("SubscriptionVocabulary"), :Borrow]
+  let budget: list = ["budget", native_kernel/pointer("Budget"), :Borrow]
+  for spec in native_subscriptions/catalogue_specs()
+    let pointer: list = native_kernel/pointer(spec[1])
+    module = native_tasks/declare(module, string_concat("subscription_catalogue_", spec[0]), :U64, [worker,
+      ["node", pointer, :Gc], ["other", pointer, :Gc], ["removed", :Bool, :Value], ["view", native_kernel/pointer("Snapshot"), :Gc], vocabulary,
+      ["output", native_memory/record_pointer("MemoryRoot"), :Borrow], budget])
+  end
+  module = native_tasks/declare(module, "subscription_catalogue_entries", [:Record, "TaskSubscriptionEntries"], [worker,
+    ["before", native_kernel/pointer("Snapshot"), :Gc], ["after", native_kernel/pointer("Snapshot"), :Gc], vocabulary, budget], :Gc)
+  for spec in native_subscriptions/catalogue_specs()
+    module = native_subscriptions/catalogue_tree(module, spec)
+  end
+  let result: map = native_subscriptions/catalogue_body(module)
+  return result
+end

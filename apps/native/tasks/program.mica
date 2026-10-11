@@ -1,0 +1,205 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+verb native_tasks/pointer(name: string) -> list
+  let result: list = native_memory/record_pointer(string_concat("Task", name))
+  return result
+end
+
+// Images and effects are immutable once constructed. Mutable attempt storage
+// belongs to its running worker and never becomes part of an image.
+verb native_tasks/schemas() -> list
+  let word: list = native_value/word()
+  return [
+    ["Image", [["entry", [:FunctionPointer, "TaskEntry"]], ["code", native_tasks/pointer("CodeRef")], ["tenant", word],
+      ["environment", word], ["input", word], ["handlers", native_tasks/pointer("Handler")],
+      ["unwind", native_tasks/pointer("Unwind")], ["depth", :U64], ["caller", native_tasks/pointer("Image")]]],
+    ["Effect", [["next", native_tasks/pointer("Effect")], ["kind", :U64], ["target", word], ["payload", word],
+      ["subscription", native_tasks/pointer("SubscriptionRequest")]]],
+    ["Boundary", [["image", native_tasks/pointer("Image")], ["effects", native_tasks/pointer("Effect")], ["kind", :U64], ["generation", :U64], ["request", native_tasks/pointer("WaitRequest")]]],
+    ["Message", [["next", native_tasks/pointer("Message")], ["payload", word], ["stream", :U64]]],
+    ["WaitRequest", [["mailbox", :Bool], ["receivers", word], ["timeout", :U64], ["reply", word]]],
+    ["Handler", [["next", native_tasks/pointer("Handler")], ["image", native_tasks/pointer("Image")], ["kind", :U64]]],
+    ["Unwind", [["handlers", native_tasks/pointer("Handler")], ["target", native_tasks/pointer("Image")], ["value", word]]],
+    ["CompiledProgram", [["entry", [:FunctionPointer, "TaskEntry"]], ["code", native_tasks/pointer("CodeRef")]]],
+    ["CodeRef", [["owner", native_tasks/pointer("CodeOwner")], ["dependencies", native_tasks/pointer("CodeLink")], ["constants", word]]],
+    ["CodeLink", [["next", native_tasks/pointer("CodeLink")], ["code", native_tasks/pointer("CodeRef")]]],
+    ["SubscriptionRequest", [["capability", word], ["tenant", word], ["sender", word], ["subject", :U64], ["relation", :U64],
+      ["pattern", word], ["mask", :U64], ["initial", :Bool], ["resume", :Bool], ["cursor", :U64],
+      ["capacity", :U64], ["cancel", :Bool]]],
+    ["DispatchReach", [["next", native_tasks/pointer("DispatchReach")], ["view", native_kernel/pointer("Relation")],
+      ["source", word], ["vertices", native_kernel/pointer("Node")]]],
+    ["DispatchSignature", [["parameters", word], ["roles", native_kernel/pointer("Node")]]],
+    ["DispatchCandidate", [["next", native_tasks/pointer("DispatchCandidate")], ["method", word],
+      ["signature", native_tasks/pointer("DispatchSignature")], ["arguments", word]]]]
+end
+
+verb native_tasks/allocate_record(builder: map, name: string, fields: map) -> map
+  for schema in native_tasks/schemas()
+    if schema[0] == name
+      let arguments: list = [native_roots/worker(builder)]
+      for field in schema[1]
+        arguments = [@arguments, fields[field[0]]]
+      end
+      let result: map = native_gen/call(builder, string_concat("task_new_", name), arguments)
+      return result
+    end
+  end
+  native/ensure(false, string_concat("unknown task record ", name))
+  return {}
+end
+
+verb native_tasks/effects() -> list
+  return [:ReadMemory, :WriteMemory, :Allocate, :Release, :Relocate]
+end
+
+verb native_tasks/declare(module: map, name: string, result, parameters: list, ?mode: symbol = :Value) -> map
+  let output: map = native_memory/declare(module, string_concat("task_", name), result, parameters,
+    native_tasks/effects(), mode, "")
+  return output
+end
+
+verb native_tasks/types(input: map) -> map
+  let module: map = input
+  let worker: list = native_memory/record_pointer("MemoryWorker")
+  let root: list = [:Record, "MemoryRoot"]
+  let [entry: list, state: map] = native/execution_pointer_type(module[:state], "TaskEntry", :U64,
+    [["attempt", native_tasks/pointer("Attempt"), :Borrow]], native_tasks/effects(), :Tail)
+  module[:state] = state
+  module[:state] = native/record_type(module[:state], "TaskAttempt", [
+    ["worker", worker], ["kernel", native_memory/record_pointer("Kernel")],
+    ["transaction", [:Record, "KernelTransaction"]],
+    ["retry", root], ["current", root], ["effects", root], ["request", root], ["error", root], ["authority", root], ["invocations", root], ["executing", root],
+    ["remaining", :U64], ["retries", :U64], ["depth_limit", :U64], ["boundary", :U64], ["epoch", :U64], ["resources", :Bool]])[1]
+  module[:state] = native/record_type(module[:state], "TaskControl", [
+    ["mutex", native_memory/pointer(:U8)], ["kernel", native_memory/record_pointer("Kernel")],
+    ["scheduler", native_memory/pointer(:U8)], ["id", :U64],
+    ["image", root], ["prepared", root], ["committed_view", root], ["event", root], ["error", root],
+    ["active", native_kernel/pointer("Transaction")], ["state", :U64], ["generation", :U64],
+    ["remaining", :U64], ["retries", :U64], ["depth_limit", :U64], ["status", :U64],
+    ["cancel_requested", :Bool], ["committed", :Bool], ["delivery_claimed", :Bool]])[1]
+  module = native_code/types(module)
+  let constants: list = [["task_language_error", :U64, native_value/hex(14)],
+    ["task_subscription_facts", :U64, native_value/hex(1)],
+    ["task_subscription_relation", :U64, native_value/hex(2)],
+    ["task_subscription_catalogue", :U64, native_value/hex(3)],
+    ["task_handler_catch", :U64, native_value/hex(1)], ["task_handler_cleanup", :U64, native_value/hex(2)]]
+  let layout: int = 1000
+  for schema in native_tasks/schemas()
+    module[:state] = native/record_type(module[:state], string_concat("Task", schema[0]), schema[1])[1]
+    constants = [@constants, [string_concat("task_layout_", schema[0]), :U64, native_value/hex(layout)]]
+    layout = layout + 1
+  end
+  let kinds: list = ["emit", "send", "subscribe", "spawn"]
+  let ordinal: int = 1
+  for kind in kinds
+    constants = [@constants, [string_concat("task_effect_", kind), :U64, native_value/hex(ordinal)]]
+    ordinal = ordinal + 1
+  end
+  ordinal = 1
+  for boundary in ["complete", "wait", "continue"]
+    constants = [@constants, [string_concat("task_boundary_", boundary), :U64, native_value/hex(ordinal)]]
+    ordinal = ordinal + 1
+  end
+  ordinal = 1
+  for state_name in ["runnable", "running", "delivering", "waiting", "completed", "cancelled", "failed"]
+    constants = [@constants, [string_concat("task_state_", state_name), :U64, native_value/hex(ordinal)]]
+    ordinal = ordinal + 1
+  end
+  let [bindings: map, declared: map] = native/constants(module[:state], constants)
+  module[:state] = declared
+  let merged: map = module[:constants]
+  for name, id in bindings
+    merged[name] = id
+  end
+  module[:constants] = merged
+  for schema in native_tasks/schemas()
+    let fields: list = []
+    for field in schema[1]
+      let mode: symbol = :Value
+      if native/is_pointer(field[1]) || field[1] == native_value/word()
+        mode = :Gc
+      end
+      fields = [@fields, [field[0], field[1], mode]]
+    end
+    module = native_memory/record_constructor(module, string_concat("task_new_", schema[0]),
+      [string_concat("Task", schema[0]), fields], string_concat("task_layout_", schema[0]), "null_bytes")
+  end
+  return module
+end
+
+verb native_tasks/trace_schema(builder: map, schema: list, collection: map, payload: map) -> map
+  let [object: map, ready: map] = native_gen/bind(builder, "record", native_gen/cast(native_tasks/pointer(schema[0]), payload))
+  if schema[0] == "CodeRef"
+    ready = native_code/trace_owner(ready, object, collection)
+  end
+  for field in schema[1]
+    if schema[0] == "CodeRef" && field[0] == "owner"
+      // The registry owns this stable native pointer. It is not a heap edge.
+    elseif native/is_pointer(field[1])
+      ready = native_value/trace_external(ready, object, field[0], collection)
+    elseif field[1] == native_value/word()
+      ready = native_value/trace_word_field(ready, object, field[0], collection)
+    end
+  end
+  let result: map = native_gen/return_void(ready)
+  return result
+end
+
+verb native_tasks/tracing(input: map) -> map
+  let module: map = native_memory/declare(input, "task_trace", :Void,
+    [["collection", native_memory/record_pointer("MemoryCollection"), :Borrow],
+      ["object", native_memory/record_pointer("MemoryObject"), :Gc]],
+    [:ReadMemory, :WriteMemory, :Allocate, :Release], :Value, "")
+  let builder: map = native_gen/context(module, "task_trace")
+  let collection: map = native_gen/ref(builder, "collection")
+  let object: map = native_gen/ref(builder, "object")
+  let [layout: map, ready: map] = native_gen/bind(builder, "layout", native_kernel/load_field(builder, object, "layout"))
+  let [payload: map, with_payload: map] = native_gen/bind(ready, "payload", native_gen/call(ready, "memory_payload", [object]))
+  let cases: list = []
+  for schema in native_tasks/schemas()
+    cases = [@cases, [native_gen/ref(with_payload, string_concat("task_layout_", schema[0])),
+      fn(arm) => native_tasks/trace_schema(arm, schema, collection, payload)]]
+  end
+  builder = native_gen/switch(with_payload, layout, cases, fn(other)
+    return native_gen/return_void(native_gen/do_call(other, "kernel_trace", [collection, object]))
+  end)
+  module = native_gen/finish(module, builder)
+  module = native_tasks/declare(module, "heap_init", :Bool, [["heap", native_memory/record_pointer("MemoryHeap"), :Borrow]])
+  builder = native_gen/context(module, "task_heap_init")
+  builder = native_gen/return_value(builder, native_gen/call(builder, "memory_heap_init", [native_gen/ref(builder, "heap"),
+    native_gen/expression([:FunctionPointer, "MemoryTrace"], :FunctionAddress, ["task_trace"])]))
+  let result: map = native_gen/finish(module, builder)
+  return result
+end
+
+verb native_tasks/definitions() -> map
+  let module: map = native_tasks/types(native_kernel/definitions())
+  module = native_tasks/tracing(module)
+  module = native_tasks/event_primitives(module)
+  module = native_tasks/resources(module)
+  module = native_code/program(module)
+  module = native_tasks/images(module)
+  module = native_dispatch/program(module)
+  module = native_tasks/attempts(module)
+  module = native_invocation/program(module)
+  module = native_handlers/program(module)
+  module = native_tasks/control(module)
+  module = native_tasks/boundaries(module)
+  module = native_tasks/execution(module)
+  module = native_calls/program(module)
+  module = native_tasks/services(module)
+  module = native_mailboxes/program(module)
+  module = native_tasks/wait_requests(module)
+  module = native_subscriptions/requests(module)
+  module = native_subscriptions/program(module)
+  module = native_tasks/queue(module)
+  module = native_scheduler/program(module)
+  return module
+end
+
+verb native_tasks/program() -> map
+  let module: map = native_tasks/definitions()
+  let state: map = module[:state]
+  return state
+end

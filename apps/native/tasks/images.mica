@@ -1,0 +1,87 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+verb native_tasks/context(module: map, name: string) -> map
+  let result: map = native_roots/context(module, string_concat("task_", name), fn(failed, reason)
+    return native_roots/return_value(failed, native_gen/ref(failed, string_concat("kernel_", reason)))
+  end)
+  return result
+end
+
+verb native_tasks/check(builder: map, condition: map, status: string) -> map
+  let result: map = native_gen/unless(builder, condition, fn(failed)
+    return native_roots/return_value(failed, native_gen/ref(failed, string_concat("kernel_", status)))
+  end)
+  return result
+end
+
+verb native_tasks/root(builder: map, name: string, kind) -> map
+  let result: map = native_roots/root_value(builder, native_gen/ref(builder, name), kind)
+  return result
+end
+
+verb native_tasks/images(input: map) -> map
+  let module: map = input
+  let worker: list = ["worker", native_memory/record_pointer("MemoryWorker"), :Borrow]
+  let root: list = native_memory/record_pointer("MemoryRoot")
+  let word: list = native_value/word()
+  module = native_tasks/declare(module, "stage", :U64, [worker, ["effects", root, :Borrow],
+    ["kind", :U64, :Value], ["target", word, :Gc], ["payload", word, :Gc]])
+  module = native_tasks/declare(module, "order_effects", :U64, [worker, ["effects", root, :Borrow], ["ordered", root, :Borrow]])
+  module = native_tasks/declare(module, "deliver_image", :U64, [worker, ["image", root, :Borrow], ["input", word, :Gc]])
+
+  let builder: map = native_tasks/context(module, "stage")
+  let kind: map = native_gen/ref(builder, "kind")
+  builder = native_tasks/check(builder, native_gen/negate(native_gen/less(kind, native_gen/ref(builder, "task_effect_emit"))), "schema")
+  builder = native_tasks/check(builder, native_gen/negate(native_gen/less(native_gen/ref(builder, "task_effect_spawn"), kind)), "schema")
+  builder = native_roots/poll(builder)
+  let effects: map = native_tasks/root(builder, "effects", native_tasks/pointer("Effect"))
+  let [effect: map, with_effect: map] = native_gen/bind(builder, "effect", native_gen/call(builder, "task_new_Effect",
+    [native_roots/worker(builder), effects, kind, native_roots/ref(builder, "target"), native_roots/ref(builder, "payload"),
+      native_gen/zero(native_tasks/pointer("SubscriptionRequest"))]))
+  builder = native_tasks/check(with_effect, native_gen/negate(native_kernel/absent(effect)), "oom")
+  builder = native_roots/store(builder, effects, effect)
+  builder = native_roots/return_value(builder, native_gen/ref(builder, "kernel_ok"))
+  module = native_gen/finish(module, builder)
+
+  // Staging prepends in constant time. Preparation copies into delivery order;
+  // failure leaves both the original chain and destination untouched.
+  builder = native_tasks/context(module, "order_effects")
+  let [cursor: map, with_cursor: map] = native_roots/retain(builder, "cursor", native_tasks/root(builder, "effects", native_tasks/pointer("Effect")))
+  let [ordered: map, with_ordered: map] = native_roots/retain(with_cursor, "ordered", native_gen/zero(native_tasks/pointer("Effect")))
+  builder = native_gen/while_loop(with_ordered, native_gen/negate(native_kernel/absent(cursor)), fn(step)
+    let ready: map = native_roots/poll(step)
+    let arguments: list = [native_roots/worker(ready), ordered]
+    for field in ["kind", "target", "payload", "subscription"]
+      arguments = [@arguments, native_kernel/load_field(ready, cursor, field)]
+    end
+    let [copy: map, copied: map] = native_gen/bind(ready, "effect", native_gen/call(ready, "task_new_Effect", arguments))
+    ready = native_tasks/check(copied, native_gen/negate(native_kernel/absent(copy)), "oom")
+    ready = native_roots/store(ready, ordered, copy)
+    return native_roots/store(ready, cursor, native_kernel/load_field(ready, cursor, "next"))
+  end)
+  builder = native_roots/store(builder, native_tasks/root(builder, "ordered", native_tasks/pointer("Effect")), ordered)
+  builder = native_roots/return_value(builder, native_gen/ref(builder, "kernel_ok"))
+  module = native_gen/finish(module, builder)
+
+  // Delivery creates a fresh immutable segment image. Replays reuse this input
+  // without consuming the event a second time or modifying the waiting image.
+  builder = native_tasks/context(module, "deliver_image")
+  let image: map = native_tasks/root(builder, "image", native_tasks/pointer("Image"))
+  builder = native_tasks/check(builder, native_gen/negate(native_kernel/absent(image)), "closed")
+  builder = native_roots/poll(builder)
+  let arguments: list = [native_roots/worker(builder)]
+  for field in native_tasks/schemas()[0][1]
+    let value: map = native_kernel/load_field(builder, image, field[0])
+    if field[0] == "input"
+      value = native_roots/ref(builder, "input")
+    end
+    arguments = [@arguments, value]
+  end
+  let [delivered: map, with_delivered: map] = native_gen/bind(builder, "delivered", native_gen/call(builder, "task_new_Image", arguments))
+  builder = native_tasks/check(with_delivered, native_gen/negate(native_kernel/absent(delivered)), "oom")
+  builder = native_roots/store(builder, image, delivered)
+  builder = native_roots/return_value(builder, native_gen/ref(builder, "kernel_ok"))
+  let result: map = native_gen/finish(module, builder)
+  return result
+end

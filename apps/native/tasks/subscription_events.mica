@@ -1,0 +1,122 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+verb native_subscriptions/notify(builder: map) -> map
+  let result: map = native_gen/do_call(builder, "task_event_notify", [native_subscriptions/field(builder, "event")])
+  return result
+end
+verb native_subscriptions/event_types(input: map) -> map
+  let module: map = input
+  let common: list = [["hub", native_tasks/pointer("SubscriptionHub"), :Borrow], ["worker", native_memory/record_pointer("MemoryWorker"), :Borrow]]
+  module[:state] = native/record_type(module[:state], "TaskSubscriptionIds", [["status", :U64], ["count", :U64]])[1]
+  module = native/declare_function(module, "task_subscription_signal", :Void,
+    [["context", native_memory/pointer(:U8), :Borrow]], [], [:WriteMemory], :Value, "")
+  module = native_tasks/declare(module, "subscription_member", :U64, [@common, ["joining", :Bool, :Value]])
+  module = native_tasks/declare(module, "subscription_ids", [:Record, "TaskSubscriptionIds"], [@common,
+    ["ids", native_memory/pointer(:U64), :Borrow], ["capacity", :U64, :Value]])
+  module = native_tasks/declare(module, "subscription_events", :U64, [@common, ["limits", native_kernel/pointer("Budget"), :Borrow]])
+  return module
+end
+
+verb native_subscriptions/member_body(module: map) -> map
+  let builder: map = native_subscriptions/locked(module, "member", false)
+  let event: map = native_subscriptions/field(builder, "event")
+  builder = native_gen/branch(builder, native_gen/ref(builder, "joining"), fn(join)
+    let ready: map = native_rules/check(join, native_gen/negate(native_subscriptions/field(join, "closed")), "closed")
+    ready = native_rules/check(ready, native_gen/negate(native_subscriptions/field(ready, "events")), "closed")
+    ready = native_subscriptions/call(ready, "kernel_set_notify", [native_subscriptions/field(ready, "kernel"), native_roots/worker(ready),
+      native_gen/zero(native_memory/pointer(:U8)), event, native_gen/expression([:FunctionPointer, "KernelNotify"], :FunctionAddress, ["task_subscription_signal"])])
+    return native_subscriptions/store(ready, "events", native_gen/ref(ready, "true"))
+  end, fn(leave)
+    let ready: map = native_rules/check(leave, native_subscriptions/field(leave, "events"), "closed")
+    ready = native_subscriptions/call(ready, "kernel_set_notify", [native_subscriptions/field(ready, "kernel"), native_roots/worker(ready),
+      event, native_gen/zero(native_memory/pointer(:U8)), native_gen/zero([:FunctionPointer, "KernelNotify"])])
+    return native_subscriptions/store(ready, "events", native_gen/ref(ready, "false"))
+  end)
+  let result: map = native_gen/finish(module, native_execution/fail(builder, native_gen/ref(builder, "kernel_ok")))
+  return result
+end
+
+// Copy only scalar identities under the registry lock. Cancellation can free
+// entries as soon as this call returns; the pump looks each identity up again.
+verb native_subscriptions/ids_body(module: map) -> map
+  let builder: map = native_subscriptions/locked(module, "ids")
+  builder = native_rules/check(builder, native_gen/negate(native_gen/less(native_gen/ref(builder, "capacity"), native_subscriptions/field(builder, "count"))), "limit")
+  let [count: map, counted: map] = native_gen/bind(builder, "count", native_gen/ref(builder, "zero"))
+  builder = native_gen/for_range(counted, "bucket", native_gen/ref(counted, "zero"), native_gen/add(native_subscriptions/field(counted, "mask"), native_gen/ref(counted, "one")), fn(scan, index)
+    let [entry: map, loaded: map] = native_gen/bind(scan, "entry", native_gen/load(native_gen/offset(native_subscriptions/field(scan, "buckets"), index)))
+    let ready: map = native_gen/while_loop(loaded, native_gen/negate(native_kernel/absent(entry)), fn(copy)
+      let copied: map = native_gen/store(copy, native_gen/offset(native_gen/ref(copy, "ids"), count), native_kernel/load_field(copy, entry, "id"))
+      copied = native_gen/assign(copied, count, native_gen/add(count, native_gen/ref(copied, "one")))
+      copied = native_gen/assign(copied, entry, native_kernel/load_field(copied, entry, "next"))
+      return native_roots/poll(copied)
+    end)
+    return native_roots/poll(ready)
+  end)
+  builder = native_roots/return_value(builder, native_gen/record(builder, [:Record, "TaskSubscriptionIds"], {
+    "status" -> native_gen/ref(builder, "kernel_ok"), "count" -> count}))
+  let result: map = native_gen/finish(module, builder)
+  return result
+end
+
+verb native_subscriptions/events_body(module: map) -> map
+  let builder: map = native_subscriptions/context(module, "events")
+  let worker: map = native_roots/worker(builder)
+  let hub: map = native_gen/ref(builder, "hub")
+  let limits: map = native_gen/ref(builder, "limits")
+  builder = native_rules/check(builder, native_gen/negate(native_kernel/absent(limits)), "schema")
+  // The owner cancels this dispatcher by closing the hub. Per-batch limits are
+  // copied, while the cancellation cell remains shared with hub shutdown.
+  builder = native_rules/check(builder, native_kernel/absent(native_kernel/load_field(builder, limits, "signal")), "schema")
+  builder = native_rules/check(builder, native_kernel/absent(native_kernel/load_field(builder, limits, "status")), "schema")
+  builder = native_subscriptions/call(builder, "task_subscription_member", [hub, worker, native_gen/ref(builder, "true")])
+  builder = native_gen/on_return(builder, fn(leaving, result)
+    let [status: map, detached: map] = native_gen/bind(leaving, "detached", native_gen/call(leaving, "task_subscription_member", [hub, worker, native_gen/ref(leaving, "false")]))
+    return native_gen/when(detached, native_kernel/absent(result), fn(success) => native_gen/assign(success, result, status))
+  end)
+  let [storage: map, allocated: map] = native_gen/bind(builder, "ids", native_gen/call(builder, "memory_platform_allocate", [
+    native_gen/multiply(native_subscriptions/field(builder, "limit"), native_gen/sizeof(:U64))]))
+  builder = native_rules/check(allocated, native_gen/negate(native_kernel/absent(storage)), "oom")
+  builder = native_gen/on_return(builder, fn(leaving, result) => native_mailboxes/free(leaving, storage))
+  let ids: map = native_gen/cast(native_memory/pointer(:U64), storage)
+  builder = native_gen/while_loop(builder, native_gen/ref(builder, "true"), fn(pass)
+    // Drain first. Commits or admission during this pass leave a pending signal
+    // that prevents the subsequent wait from losing a wakeup.
+    let ready: map = native_gen/do_call(pass, "task_event_take", [native_subscriptions/field(pass, "event")])
+    let [selected: map, captured: map] = native_gen/bind(ready, "selected", native_gen/call(ready, "task_subscription_ids", [
+      hub, worker, ids, native_subscriptions/field(ready, "limit")]))
+    let status: map = native_gen/field(captured, selected, "status")
+    ready = native_gen/when(captured, native_gen/equal(status, native_gen/ref(captured, "kernel_closed")), fn(closed) => native_execution/fail(closed, native_gen/ref(closed, "kernel_ok")))
+    ready = native_gen/unless(ready, native_kernel/absent(status), fn(failed) => native_execution/fail(failed, status))
+    let [progress: map, with_progress: map] = native_gen/bind(ready, "progress", native_gen/ref(ready, "false"))
+    ready = native_gen/for_range(with_progress, "index", native_gen/ref(with_progress, "zero"), native_gen/field(with_progress, selected, "count"), fn(deliver, index)
+      let [budget: map, bounded: map] = native_gen/bind(deliver, "budget", native_gen/load(limits))
+      let prepared: map = native_gen/root_write(bounded, native_gen/field(bounded, native_gen/address(budget), "signal"), native_gen/manage(native_subscriptions/field(bounded, "signal")))
+      let [result: map, pumped: map] = native_gen/bind(prepared, "pumped", native_gen/call(prepared, "task_subscription_pump", [hub, worker,
+        native_gen/load(native_gen/offset(ids, index)), native_gen/address(budget)]))
+      let outcome: map = native_gen/field(pumped, result, "status")
+      let checked: map = native_gen/when(pumped, native_gen/equal(outcome, native_gen/ref(pumped, "kernel_cancelled")), fn(stopped) => native_execution/fail(stopped, native_gen/ref(stopped, "kernel_ok")))
+      checked = native_gen/when(checked, native_gen/equal(outcome, native_gen/ref(checked, "kernel_closed")), fn(retired) => native_gen/continue_loop(retired))
+      checked = native_gen/when(checked, native_gen/equal(outcome, native_gen/ref(checked, "kernel_permission")), fn(retired) => native_gen/continue_loop(retired))
+      checked = native_gen/unless(checked, native_kernel/absent(outcome), fn(failed) => native_execution/fail(failed, outcome))
+      checked = native_gen/when(checked, native_gen/field(checked, result, "progress"), fn(advanced) => native_gen/assign(advanced, progress, native_gen/ref(advanced, "true")))
+      return native_roots/poll(checked)
+    end)
+    ready = native_gen/when(ready, progress, fn(pending) => native_gen/continue_loop(pending))
+    ready = native_rules/check(ready, native_gen/call(ready, "memory_leave", [worker]), "closed")
+    ready = native_gen/do_call(ready, "task_event_wait", [native_subscriptions/field(ready, "event"), native_gen/ref(ready, "int_minus_one")])
+    return native_rules/check(ready, native_gen/call(ready, "memory_enter", [worker]), "closed")
+  end)
+  let result: map = native_gen/finish(module, native_execution/fail(builder, native_gen/ref(builder, "kernel_ok")))
+  return result
+end
+verb native_subscriptions/events(input: map) -> map
+  let module: map = input
+  let builder: map = native_gen/context(module, "task_subscription_signal")
+  builder = native_gen/do_call(builder, "task_event_notify", [native_gen/ref(builder, "context")])
+  module = native_gen/finish(module, native_gen/return_void(builder))
+  module = native_subscriptions/member_body(module)
+  module = native_subscriptions/ids_body(module)
+  let result: map = native_subscriptions/events_body(module)
+  return result
+end

@@ -1,0 +1,117 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+// Requests retain typed cursors and patterns in the speculative effect chain.
+// Only a committed service may change the subscription registry or mailbox.
+verb native_subscriptions/call(builder: map, name: string, arguments: list) -> map
+  let [status: map, called: map] = native_gen/bind(builder, "status", native_gen/call(builder, name, arguments))
+  let result: map = native_gen/unless(called, native_kernel/absent(status), fn(failed) => native_execution/fail(failed, status))
+  return result
+end
+verb native_subscriptions/request_context(module: map, name: string) -> list
+  let builder: map = native_roots/context(module, string_concat("task_subscription_", name),
+    fn(failed, reason) => native_rules/error(failed, reason))
+  builder = native_rules/check(builder, native_gen/equal(native_tasks/attempt_field(builder, "worker"), native_roots/worker(builder)), "closed")
+  builder = native_subscriptions/call(builder, "task_poll", [native_tasks/attempt(builder), native_gen/ref(builder, "one")])
+  let [work: map, ready: map] = native_roots/retain(builder, "work", native_gen/call(builder, "kernel_work", [native_tasks/slot(builder, "transaction")]))
+  ready = native_rules/check(ready, native_gen/negate(native_kernel/absent(work)), "closed")
+  ready = native_rules/check(ready, native_gen/negate(native_kernel/load_field(ready, work, "done")), "closed")
+  return [work, ready]
+end
+verb native_subscriptions/stage(builder: map, fields: map) -> map
+  let populated: map = fields
+  populated["tenant"] = native_kernel/load_field(builder, native_tasks/saved(builder, "current", native_tasks/pointer("Image")), "tenant")
+  let [request: map, allocated: map] = native_roots/retain(builder, "request", native_tasks/allocate_record(builder, "SubscriptionRequest", populated))
+  let ready: map = native_rules/check(allocated, native_gen/negate(native_kernel/absent(request)), "oom")
+  let effects: map = native_tasks/saved(ready, "effects", native_tasks/pointer("Effect"))
+  let [effect: map, appended: map] = native_gen/bind(ready, "effect", native_tasks/allocate_record(ready, "Effect", {
+    "next" -> effects, "kind" -> native_gen/ref(ready, "task_effect_subscribe"),
+    "target" -> native_kernel/load_field(ready, request, "capability"),
+    "payload" -> native_gen/zero(native_value/word()), "subscription" -> request}))
+  ready = native_rules/check(appended, native_gen/negate(native_kernel/absent(effect)), "oom")
+  let result: map = native_roots/store(ready, effects, effect)
+  return result
+end
+verb native_subscriptions/validate_relation(builder: map, work: map) -> map
+  let id: map = native_gen/ref(builder, "relation")
+  let ready: map = native_authority/check_permission(builder, work, "read", id)
+  let [relation: map, found: map] = native_gen/bind(ready, "relation_view", native_gen/call(ready, "kernel_view", [native_tasks/slot(ready, "transaction"), id]))
+  ready = native_rules/check(found, native_gen/negate(native_kernel/absent(relation)), "unknown")
+  ready = native_kernel/check_tuple(ready, native_roots/ref(ready, "pattern"), relation, fn(failed) => native_rules/error(failed, "arity"))
+  ready = native_kernel/check_column_mask(ready, native_kernel/load_field(ready, relation, "arity"), native_gen/ref(ready, "mask"), fn(failed) => native_rules/error(failed, "schema"))
+  // Observe the base schema even when the relation was declared in this draft.
+  // A concurrent creation or schema change must invalidate this validation.
+  let base: map = native_kernel/load_field(ready, work, "base")
+  let [original: map, captured: map] = native_gen/bind(ready, "base_relation", native_gen/call(ready, "kernel_rule_schema_index_lookup", [native_kernel/load_field(ready, base, "schemas"), id]))
+  let [revision: map, with_revision: map] = native_gen/bind(captured, "schema_revision", native_gen/ref(captured, "zero"))
+  ready = native_gen/unless(with_revision, native_kernel/absent(original), fn(present)
+    return native_gen/assign(present, revision, native_kernel/load_field(present, original, "schema_revision"))
+  end)
+  let result: map = native_subscriptions/call(ready, "kernel_rule_head_observe", [native_roots/worker(ready), work, id, revision, native_gen/ref(ready, "false")])
+  return result
+end
+verb native_subscriptions/register_request(module: map) -> map
+  let [work: map, opened: map] = native_subscriptions/request_context(module, "request")
+  let builder: map = native_subscriptions/call(opened, "task_mailbox_validate_sender", [native_gen/ref(opened, "hub"), native_roots/worker(opened), native_roots/ref(opened, "sender")])
+  builder = native_rules/check(builder, native_gen/negate(native_kernel/absent(native_gen/ref(builder, "capacity"))), "schema")
+  builder = native_gen/when(builder, native_gen/ref(builder, "initial"), fn(snapshot)
+    return native_rules/check(snapshot, native_gen/negate(native_gen/ref(snapshot, "resume")), "schema")
+  end)
+  // Subject ordinals: stored facts, complete relation, root-only catalogue.
+  builder = native_gen/switch(builder, native_gen/ref(builder, "subject"), [
+    [native_gen/ref(builder, "task_subscription_facts"), fn(facts) => native_subscriptions/validate_relation(facts, work)],
+    [native_gen/ref(builder, "task_subscription_relation"), fn(relation) => native_subscriptions/validate_relation(relation, work)],
+    [native_gen/ref(builder, "task_subscription_catalogue"), fn(catalogue)
+      let checked: map = native_authority/check_permission(catalogue, work, "root")
+      for name in ["relation", "mask"]
+        checked = native_rules/check(checked, native_kernel/absent(native_gen/ref(checked, name)), "schema")
+      end
+      let [list: map, decoded: map] = native_gen/bind(checked, "bindings", native_gen/call(checked, "value_as_list", [native_roots/ref(checked, "pattern")]))
+      checked = native_rules/check(decoded, native_gen/field(decoded, list, "ok"), "schema")
+      return native_rules/check(checked, native_kernel/absent(native_kernel/load_field(checked, native_gen/field(checked, list, "header"), "length")), "schema")
+    end]], fn(invalid) => native_rules/error(invalid, "schema"))
+  let [id: map, reserved: map] = native_gen/bind(builder, "identity", native_gen/call(builder, "task_resource_id", [native_roots/worker(builder)]))
+  builder = native_rules/check(reserved, native_gen/field(reserved, id, "ok"), "limit")
+  // The process-wide namespace allocates the entire pair. No mailbox can
+  // acquire either half of this subscription's identity, including after retry.
+  let [capability: map, encoded: map] = native_gen/bind(builder, "capability", native_gen/call(builder, "value_capability", [
+    native_gen/multiply(native_gen/field(builder, id, "number"), native_gen/ref(builder, "two"))]))
+  builder = native_rules/check(encoded, native_gen/field(encoded, capability, "ok"), "limit")
+  let fields: map = {"capability" -> native_gen/field(builder, capability, "value"), "cancel" -> native_gen/ref(builder, "false")}
+  for name in ["sender", "subject", "relation", "pattern", "mask", "initial", "resume", "cursor", "capacity"]
+    fields[name] = native_roots/ref(builder, name)
+  end
+  builder = native_subscriptions/stage(builder, fields)
+  builder = native_roots/return_value(builder, native_gen/record(builder, [:Record, "TaskSubscriptionResult"], {
+    "status" -> native_gen/ref(builder, "kernel_ok"), "capability" -> native_gen/field(builder, capability, "value")}))
+  let result: map = native_gen/finish(module, builder)
+  return result
+end
+verb native_subscriptions/cancel_request(module: map) -> map
+  let [work: map, builder: map] = native_subscriptions/request_context(module, "cancel")
+  let [capability: map, decoded: map] = native_gen/bind(builder, "decoded_capability", native_gen/call(builder, "value_as_capability", [native_roots/ref(builder, "capability")]))
+  builder = native_rules/check(decoded, native_gen/field(decoded, capability, "ok"), "permission")
+  let fields: map = {"capability" -> native_roots/ref(builder, "capability"), "cancel" -> native_gen/ref(builder, "true"),
+    "sender" -> native_gen/zero(native_value/word()), "pattern" -> native_gen/zero(native_value/word()),
+    "initial" -> native_gen/ref(builder, "false"), "resume" -> native_gen/ref(builder, "false")}
+  for name in ["subject", "relation", "mask", "cursor", "capacity"]
+    fields[name] = native_gen/ref(builder, "zero")
+  end
+  builder = native_subscriptions/stage(builder, fields)
+  let result: map = native_gen/finish(module, native_execution/fail(builder, native_gen/ref(builder, "kernel_ok")))
+  return result
+end
+verb native_subscriptions/requests(input: map) -> map
+  let module: map = input
+  module[:state] = native/record_type(module[:state], "TaskSubscriptionResult", [["status", :U64], ["capability", native_value/word()]])[1]
+  let common: list = [["worker", native_memory/record_pointer("MemoryWorker"), :Borrow], ["attempt", native_tasks/pointer("Attempt"), :Borrow]]
+  module = native_tasks/declare(module, "subscription_request", [:Record, "TaskSubscriptionResult"], [@common,
+    ["hub", native_tasks/pointer("MailboxHub"), :Borrow], ["sender", native_value/word(), :Gc],
+    ["subject", :U64, :Value], ["relation", :U64, :Value], ["pattern", native_value/word(), :Gc],
+    ["mask", :U64, :Value], ["initial", :Bool, :Value], ["resume", :Bool, :Value],
+    ["cursor", :U64, :Value], ["capacity", :U64, :Value]], :Gc)
+  module = native_tasks/declare(module, "subscription_cancel", :U64, [@common, ["capability", native_value/word(), :Gc]])
+  module = native_subscriptions/register_request(module)
+  module = native_subscriptions/cancel_request(module)
+  return module
+end

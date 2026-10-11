@@ -1,0 +1,84 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+// One base runtime owns this namespace. Guest code modules import its resource
+// operations. IDs survive registry shutdown and are never reused by restart.
+// Startup and shutdown require exclusive ownership, before/after all workers.
+verb native_tasks/resource_field(builder: map, field: string) -> map
+  let result: map = native_kernel/load_field(builder, native_gen/call(builder, "task_resources_state", []), field)
+  return result
+end
+verb native_tasks/resource_store(builder: map, field: string, value: map) -> map
+  let result: map = native_kernel/store_field(builder, native_gen/call(builder, "task_resources_state", []), field, value)
+  return result
+end
+verb native_tasks/resource_lock(builder: map, failure) -> map
+  let mutex: map = native_tasks/resource_field(builder, "mutex")
+  let ready: map = native_gen/when(builder, native_kernel/absent(mutex), failure)
+  ready = native_gen/unless(ready, native_gen/call(ready, "memory_leave", [native_gen/ref(ready, "worker")]), failure)
+  ready = native_gen/do_call(ready, "memory_lock", [mutex])
+  ready = native_gen/unless(ready, native_gen/call(ready, "memory_enter", [native_gen/ref(ready, "worker")]), fn(failed)
+    return failure(native_gen/do_call(failed, "memory_unlock", [mutex]))
+  end)
+  let result: map = native_gen/on_return(ready, fn(leaving, value) => native_gen/do_call(leaving, "memory_unlock", [mutex]))
+  return result
+end
+
+verb native_tasks/resources(input: map) -> map
+  let module: map = input
+  module[:state] = native/record_type(module[:state], "TaskResources", [
+    ["mutex", native_memory/pointer(:U8)], ["next", :U64], ["users", :U64]])[1]
+  let [global: int, state: map] = native/add_global(module[:state], "task_resource_namespace", [:Record, "TaskResources"], :Mutable, :Zero)
+  module[:state] = state
+  let constants: map = module[:constants]
+  constants["task_resource_storage"] = global
+  module[:constants] = constants
+  module = native/declare_function(module, "task_resources_state", native_tasks/pointer("Resources"), [], [], [], :Static, "")
+  let builder: map = native_gen/context(module, "task_resources_state")
+  builder = native_gen/return_value(builder, native_gen/expression(native_tasks/pointer("Resources"), :GlobalAddress, ["task_resource_storage"]))
+  module = native_gen/finish(module, builder)
+  module = native_tasks/declare(module, "resources_start", :Bool, [])
+  module = native_tasks/declare(module, "resources_stop", :Bool, [])
+  let worker: list = ["worker", native_memory/record_pointer("MemoryWorker"), :Borrow]
+  module = native_tasks/declare(module, "resource_user", :Bool, [worker, ["add", :Bool, :Value]])
+  module = native_tasks/declare(module, "resource_id", [:Record, "IdResult"], [worker])
+
+  builder = native_gen/context(module, "task_resources_start")
+  builder = native_gen/unless(builder, native_kernel/absent(native_tasks/resource_field(builder, "mutex")), fn(open) => native_gen/return_zero(open))
+  let [mutex: map, created: map] = native_gen/bind(builder, "mutex", native_gen/call(builder, "memory_sync_create", []))
+  builder = native_gen/when(created, native_kernel/absent(mutex), fn(failed) => native_gen/return_zero(failed))
+  builder = native_gen/root_write(builder, native_gen/field(builder, native_gen/call(builder, "task_resources_state", []), "mutex"), native_gen/manage(mutex))
+  builder = native_gen/when(builder, native_kernel/absent(native_tasks/resource_field(builder, "next")), fn(first) => native_tasks/resource_store(first, "next", native_gen/ref(first, "one")))
+  builder = native_gen/return_value(builder, native_gen/ref(builder, "true"))
+  module = native_gen/finish(module, builder)
+
+  builder = native_gen/context(module, "task_resources_stop")
+  builder = native_gen/when(builder, native_kernel/absent(native_tasks/resource_field(builder, "mutex")), fn(closed) => native_gen/return_zero(closed))
+  builder = native_gen/unless(builder, native_kernel/absent(native_tasks/resource_field(builder, "users")), fn(busy) => native_gen/return_zero(busy))
+  builder = native_gen/do_call(builder, "memory_sync_destroy", [native_tasks/resource_field(builder, "mutex")])
+  builder = native_gen/root_write(builder, native_gen/field(builder, native_gen/call(builder, "task_resources_state", []), "mutex"), native_gen/zero(native_memory/pointer(:U8)))
+  builder = native_gen/return_value(builder, native_gen/ref(builder, "true"))
+  module = native_gen/finish(module, builder)
+
+  builder = native_tasks/resource_lock(native_gen/context(module, "task_resource_user"), fn(failed) => native_gen/return_zero(failed))
+  builder = native_gen/branch(builder, native_gen/ref(builder, "add"), fn(add)
+    let ready: map = native_gen/when(add, native_gen/equal(native_tasks/resource_field(add, "users"), native_gen/ref(add, "kernel_unlimited")), fn(full) => native_gen/return_zero(full))
+    return native_tasks/resource_store(ready, "users", native_gen/add(native_tasks/resource_field(ready, "users"), native_gen/ref(ready, "one")))
+  end, fn(remove)
+    let ready: map = native_gen/when(remove, native_kernel/absent(native_tasks/resource_field(remove, "users")), fn(empty) => native_gen/return_zero(empty))
+    return native_tasks/resource_store(ready, "users", native_gen/subtract(native_tasks/resource_field(ready, "users"), native_gen/ref(ready, "one")))
+  end)
+  builder = native_gen/return_value(builder, native_gen/ref(builder, "true"))
+  module = native_gen/finish(module, builder)
+
+  builder = native_tasks/resource_lock(native_gen/context(module, "task_resource_id"), fn(failed) => native_gen/return_zero(failed))
+  let [id: map, with_id: map] = native_gen/bind(builder, "id", native_tasks/resource_field(builder, "next"))
+  // One payload bit distinguishes send from receive. Each allocation reserves
+  // both capabilities, including when a later mailbox allocation fails.
+  let maximum: map = native_gen/shift_right(native_gen/ref(with_id, "payload_mask"), native_gen/ref(with_id, "one"))
+  builder = native_gen/when(with_id, native_gen/less(maximum, id), fn(exhausted) => native_gen/return_zero(exhausted))
+  builder = native_tasks/resource_store(builder, "next", native_gen/add(id, native_gen/ref(builder, "one")))
+  builder = native_gen/return_value(builder, native_gen/record(builder, [:Record, "IdResult"], {"ok" -> native_gen/ref(builder, "true"), "number" -> id}))
+  let result: map = native_gen/finish(module, builder)
+  return result
+end

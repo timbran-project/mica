@@ -1,0 +1,84 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+// OS primitives only. Admission, deadlines, wake arbitration, and scheduling
+// remain generated Mica code. A nonblocking pipe coalesces readiness signals.
+verb native_tasks/platform() -> string
+  return string_join([
+    "#include <errno.h>",
+    "#include <dlfcn.h>",
+    "#include <fcntl.h>",
+    "#include <limits.h>",
+    "#include <poll.h>",
+    "#include <time.h>",
+    "#include <unistd.h>",
+    "",
+    "bool mica_foreign_task_library_close(uint8_t *library) { return dlclose(library) == 0; }",
+    "uint8_t *mica_foreign_task_event_create(void) {",
+    "    int *descriptors = malloc(2 * sizeof(int));",
+    "    if (!descriptors) return NULL;",
+    "    if (pipe(descriptors)) { free(descriptors); return NULL; }",
+    "    for (unsigned i = 0; i < 2; ++i) {",
+    "        int flags = fcntl(descriptors[i], F_GETFL);",
+    "        if (flags < 0 || fcntl(descriptors[i], F_SETFL, flags | O_NONBLOCK) < 0 ||",
+    "            fcntl(descriptors[i], F_SETFD, FD_CLOEXEC) < 0) {",
+    "            close(descriptors[0]); close(descriptors[1]); free(descriptors); return NULL;",
+    "        }",
+    "    }",
+    "    return (uint8_t *)descriptors;",
+    "}",
+    "void mica_foreign_task_event_destroy(uint8_t *event) {",
+    "    int *descriptors = (void *)event;",
+    "    close(descriptors[0]); close(descriptors[1]); free(descriptors);",
+    "}",
+    "void mica_foreign_task_event_notify(uint8_t *event) {",
+    "    int *descriptors = (void *)event;",
+    "    uint8_t byte = 1;",
+    "    ssize_t result;",
+    "    do { result = write(descriptors[1], &byte, 1); } while (result < 0 && errno == EINTR);",
+    "    if (result != 1 && !(result < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))) abort();",
+    "}",
+    "void mica_foreign_task_event_take(uint8_t *event) {",
+    "    int *descriptors = (void *)event;",
+    "    uint8_t bytes[256];",
+    "    for (;;) {",
+    "        ssize_t result = read(descriptors[0], bytes, sizeof(bytes));",
+    "        if (result > 0) return;",
+    "        if (result < 0 && errno == EINTR) continue;",
+    "        if (result < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) return;",
+    "        abort();",
+    "    }",
+    "}",
+    "void mica_foreign_task_event_wait(uint8_t *event, int64_t milliseconds) {",
+    "    int *descriptors = (void *)event;",
+    "    struct pollfd watched = {.fd = descriptors[0], .events = POLLIN};",
+    "    if (milliseconds < -1 || milliseconds > INT_MAX) abort();",
+    "    int result = poll(&watched, 1, (int)milliseconds);",
+    "    if (result < 0 && errno != EINTR) abort();",
+    "    if (result > 0 && (watched.revents & (POLLERR | POLLHUP | POLLNVAL))) abort();",
+    "}",
+    "uint64_t mica_foreign_task_clock_now(void) {",
+    "    struct timespec instant;",
+    "    if (clock_gettime(CLOCK_MONOTONIC, &instant)) abort();",
+    "    return (uint64_t)instant.tv_sec * UINT64_C(1000000000) + (uint64_t)instant.tv_nsec;",
+    "}",
+    ""], "\n")
+end
+
+verb native_tasks/event_primitives(input: map) -> map
+  let module: map = input
+  let bytes: list = native_memory/pointer(:U8)
+  let event: list = ["event", bytes, :Borrow]
+  for spec in [
+    ["task_library_close", :Bool, [["library", bytes, :Borrow]], [:ReadMemory, :WriteMemory, :Release], :Value],
+    ["task_event_create", bytes, [], [:Allocate], :Owned],
+    ["task_event_destroy", :Void, [event], [:Release], :Value],
+    ["task_event_notify", :Void, [event], [:WriteMemory], :Value],
+    ["task_event_take", :Void, [event], [:ReadMemory, :WriteMemory], :Value],
+    ["task_event_wait", :Void, [event, ["milliseconds", :I64, :Value]], [:ReadMemory], :Value],
+    ["task_clock_now", :U64, [], [:ReadMemory], :Value]]
+    module = native/declare_function(module, spec[0], spec[1], spec[2], [], spec[3], spec[4], "")
+    module[:state] = native/foreign(module[:state], module[:functions][spec[0]])
+  end
+  return module
+end

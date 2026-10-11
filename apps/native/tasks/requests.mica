@@ -1,0 +1,59 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+// Wait registration belongs to the committed boundary. Validation and
+// allocation happen in the attempt; retry discards the request with its writes.
+// timeout is a duration in nanoseconds. UINT64_MAX means no deadline. The
+// scheduler starts that duration after publication, when it registers the wait.
+verb native_tasks/stage_wait(builder: map, mailbox: bool) -> map
+  let [status: map, polled: map] = native_gen/bind(builder, "poll_status", native_gen/call(builder, "task_poll", [native_tasks/attempt(builder), native_gen/ref(builder, "zero")]))
+  let ready: map = native_gen/unless(polled, native_kernel/absent(status), fn(failed) => native_roots/return_value(failed, status))
+  let reply: map = {}
+  let receivers: map = native_gen/zero(native_value/word())
+  let kind: map = native_gen/ref(ready, "false")
+  if mailbox
+    reply = native_gen/call(ready, "value_list", [native_gen/ref(ready, "worker"), native_gen/zero([:Pointer, native_value/word(), :Const]), native_gen/ref(ready, "zero")])
+    receivers = native_roots/ref(ready, "receivers")
+    kind = native_gen/ref(ready, "true")
+  else
+    // A timer resumes with unit: one zero-column row, not an empty relation.
+    let [tuple: map, with_tuple: map] = native_memory/array_storage(ready, native_gen/ref(ready, "worker"), [:Record, "ValueTuple"], native_gen/ref(ready, "one"), "layout_opaque", fn(failed) => native_tasks/attempt_status(failed, "oom"))
+    ready = native_gen/store(with_tuple, tuple, native_gen/zero([:Record, "ValueTuple"]))
+    reply = native_gen/call(ready, "value_relation", [native_gen/ref(ready, "worker"), native_gen/ref(ready, "null_heading"), native_gen/ref(ready, "zero"), native_gen/freeze(tuple), native_gen/ref(ready, "one")])
+  end
+  let [response: map, with_response: map] = native_gen/checked_bind(ready, "timeout_reply", reply, "ok", fn(failed) => native_tasks/attempt_status(failed, "oom"))
+  let [request: map, allocated: map] = native_roots/retain(with_response, "request", native_gen/call(with_response, "task_new_WaitRequest", [
+    native_gen/ref(with_response, "worker"), kind, receivers, native_gen/ref(with_response, "timeout"), native_gen/field(with_response, response, "value")]))
+  ready = native_tasks/check(allocated, native_gen/negate(native_kernel/absent(request)), "oom")
+  ready = native_gen/assign(ready, status, native_gen/call(ready, "task_request", [native_tasks/attempt(ready), native_gen/ref(ready, "task_boundary_wait")]))
+  ready = native_gen/unless(ready, native_kernel/absent(status), fn(failed) => native_roots/return_value(failed, status))
+  ready = native_roots/store(ready, native_tasks/saved(ready, "request", native_tasks/pointer("WaitRequest")), request)
+  let result: map = native_tasks/attempt_status(ready, "ok")
+  return result
+end
+
+verb native_tasks/wait_requests(input: map) -> map
+  let module: map = native_tasks/declare(input, "mailbox_request", :U64, [
+    ["hub", native_tasks/pointer("MailboxHub"), :Borrow],
+    ["worker", native_memory/record_pointer("MemoryWorker"), :Borrow],
+    ["attempt", native_tasks/pointer("Attempt"), :Borrow],
+    ["receivers", native_value/word(), :Gc], ["timeout", :U64, :Value]])
+  let builder: map = native_mailboxes/locked(module, "request")
+  builder = native_mailboxes/check(builder, native_gen/equal(native_tasks/attempt_field(builder, "worker"), native_gen/ref(builder, "worker")), "closed")
+  let [decoded: map, with_list: map] = native_gen/bind(builder, "receivers_list", native_gen/call(builder, "value_as_list", [native_roots/ref(builder, "receivers")]))
+  builder = native_mailboxes/check(with_list, native_gen/field(with_list, decoded, "ok"), "schema")
+  let [length: map, with_length: map] = native_gen/bind(builder, "receiver_count", native_kernel/load_field(builder, native_gen/field(builder, decoded, "header"), "length"))
+  builder = native_gen/for_range(with_length, "receiver_index", native_gen/ref(with_length, "zero"), length, fn(scan, position)
+    let [mailbox: map, found: map] = native_mailboxes/find(scan, native_mailboxes/receiver(scan, position), false)
+    let [status: map, polled: map] = native_gen/bind(found, "poll_status", native_gen/call(found, "task_poll", [native_tasks/attempt(found), native_gen/ref(found, "one")]))
+    return native_gen/unless(polled, native_kernel/absent(status), fn(failed) => native_roots/return_value(failed, status))
+  end)
+  module = native_gen/finish(module, native_tasks/stage_wait(builder, true))
+  module = native_tasks/declare(module, "suspend_request", :U64, [
+    ["worker", native_memory/record_pointer("MemoryWorker"), :Borrow],
+    ["attempt", native_tasks/pointer("Attempt"), :Borrow], ["timeout", :U64, :Value]])
+  builder = native_tasks/context(module, "suspend_request")
+  builder = native_tasks/check(builder, native_gen/equal(native_tasks/attempt_field(builder, "worker"), native_gen/ref(builder, "worker")), "closed")
+  let result: map = native_gen/finish(module, native_tasks/stage_wait(builder, false))
+  return result
+end

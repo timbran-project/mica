@@ -1,0 +1,77 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+verb native_code/lifecycle(input: map) -> map
+  let module: map = input
+  // Initialization and release require exclusive ownership of the registry.
+  // Its empty published root keeps the heap alive without retaining any code.
+  let builder: map = native_roots/context(module, "task_code_init", fn(failed, reason) => native_code/status(failed, reason))
+  builder = native_code/check(builder, native_kernel/absent(native_code/field(builder, "heap")), "closed")
+  builder = native_code/check(builder, native_kernel/load_field(builder, native_gen/ref(builder, "worker"), "active"), "closed")
+  let [empty: map, retained: map] = native_roots/retain(builder, "empty", native_gen/zero(native_tasks/pointer("CodeRef")))
+  builder = native_code/check(retained, native_gen/call(retained, "memory_publish", [native_gen/ref(retained, "worker"), empty[:scope_root],
+    native_gen/field(retained, native_gen/ref(retained, "registry"), "anchor")[:pointer]]), "oom")
+  builder = native_mailboxes/native_store(builder, native_gen/ref(builder, "registry"), "heap", native_kernel/load_field(builder, native_gen/ref(builder, "worker"), "heap"))
+  module = native_gen/finish(module, native_code/status(builder, "ok"))
+
+  builder = native_code/lock(native_code/context(module, "close"))
+  builder = native_kernel/store_field(builder, native_gen/ref(builder, "registry"), "closed", native_gen/ref(builder, "true"))
+  module = native_gen/finish(module, native_code/status(native_code/unlock(builder), "ok"))
+
+  builder = native_code/context(module, "release")
+  builder = native_code/check(builder, native_code/field(builder, "closed"), "closed")
+  builder = native_code/check(builder, native_kernel/absent(native_code/field(builder, "owners")), "closed")
+  builder = native_code/check(builder, native_kernel/absent(native_code/field(builder, "retiring")), "closed")
+  builder = native_code/check(builder, native_gen/call(builder, "memory_unpublish", [native_gen/ref(builder, "worker"),
+    native_gen/field(builder, native_gen/ref(builder, "registry"), "anchor")[:pointer]]), "closed")
+  builder = native_gen/store(builder, native_gen/ref(builder, "registry"), native_gen/zero([:Record, "TaskCodeRegistry"]))
+  let result: map = native_gen/finish(module, native_code/status(builder, "ok"))
+  return result
+end
+
+verb native_code/reap_body(module: map) -> map
+  let builder: map = native_code/context(module, "reap")
+  let worker: map = native_gen/ref(builder, "worker")
+  builder = native_code/check(builder, native_gen/call(builder, "memory_safepoint", [worker, native_gen/ref(builder, "true")]), "oom")
+  // Library destructors run outside managed execution and without runtime locks.
+  // The retiring count prevents registry destruction while this list is detached.
+  builder = native_code/check(builder, native_gen/call(builder, "memory_leave", [worker]), "closed")
+  let [retired: map, with_retired: map] = native_gen/bind(builder, "retired", native_gen/zero(native_tasks/pointer("CodeOwner")))
+  builder = native_code/lock(with_retired)
+  let [link: map, with_link: map] = native_gen/bind(builder, "link", native_gen/field(builder, native_gen/ref(builder, "registry"), "owners")[:pointer])
+  builder = native_gen/while_loop(with_link, native_gen/negate(native_kernel/absent(native_gen/load(link))), fn(scan)
+    let [owner: map, ready: map] = native_gen/bind(scan, "owner", native_gen/load(link))
+    let live: map = native_gen/equal(native_kernel/load_field(ready, owner, "seen"), native_kernel/load_field(ready, native_code/field(ready, "heap"), "collections"))
+    return native_gen/branch(ready, live, fn(keep)
+      return native_gen/assign(keep, link, native_gen/field(keep, owner, "next")[:pointer])
+    end, fn(detach)
+      let updated: map = native_gen/root_write(detach, native_gen/location(link), native_gen/manage(native_kernel/load_field(detach, owner, "next")))
+      updated = native_mailboxes/native_store(updated, owner, "next", retired)
+      updated = native_gen/assign(updated, retired, owner)
+      return native_kernel/store_field(updated, native_gen/ref(updated, "registry"), "retiring", native_gen/add(native_code/field(updated, "retiring"), native_gen/ref(updated, "one")))
+    end)
+  end)
+  builder = native_code/unlock(builder)
+  let [released: map, with_count: map] = native_gen/bind(builder, "released", native_gen/ref(builder, "zero"))
+  let [status: map, with_status: map] = native_gen/bind(with_count, "status", native_gen/ref(with_count, "kernel_ok"))
+  builder = native_gen/while_loop(with_status, native_gen/negate(native_kernel/absent(retired)), fn(release)
+    let [owner: map, ready: map] = native_gen/bind(release, "owner", retired)
+    ready = native_gen/assign(ready, retired, native_kernel/load_field(ready, owner, "next"))
+    let [closed: map, with_close: map] = native_gen/bind(ready, "closed", native_gen/call(ready, "task_library_close", [native_kernel/load_field(ready, owner, "library")]))
+    ready = native_code/lock(with_close)
+    ready = native_kernel/store_field(ready, native_gen/ref(ready, "registry"), "retiring", native_gen/subtract(native_code/field(ready, "retiring"), native_gen/ref(ready, "one")))
+    ready = native_gen/unless(ready, closed, fn(failed)
+      let restored: map = native_mailboxes/native_store(failed, owner, "next", native_code/field(failed, "owners"))
+      restored = native_mailboxes/native_store(restored, native_gen/ref(restored, "registry"), "owners", owner)
+      return native_gen/assign(restored, status, native_gen/ref(restored, "kernel_closed"))
+    end)
+    ready = native_code/unlock(ready)
+    return native_gen/when(ready, closed, fn(freed)
+      return native_gen/assign(native_mailboxes/free(freed, owner), released, native_gen/add(released, native_gen/ref(freed, "one")))
+    end)
+  end)
+  builder = native_gen/unless(builder, native_gen/call(builder, "memory_enter", [worker]), fn(failed) => native_gen/assign(failed, status, native_gen/ref(failed, "kernel_closed")))
+  builder = native_roots/return_value(builder, native_gen/record(builder, [:Record, "TaskCodeReap"], {"status" -> status, "released" -> released}))
+  let result: map = native_gen/finish(module, builder)
+  return result
+end

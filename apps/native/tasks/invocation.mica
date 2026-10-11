@@ -1,0 +1,92 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+// Invocation tokens belong to a segment authority epoch. Images can retain the
+// opaque value, but cannot retain the permission cache or token index. A fresh
+// scheduled segment therefore cannot use a token from an earlier epoch.
+verb native_invocation/context(module: map, name: string) -> map
+  let builder: map = native_query/begin_roots(native_gen/context(module, string_concat("task_", name)))
+  builder = native_query/check(builder, native_gen/equal(native_gen/ref(builder, "worker"), native_tasks/attempt_field(builder, "worker")), "closed")
+  builder = native_query/check(builder, native_kernel/absent(native_tasks/attempt_field(builder, "boundary")), "closed")
+  let ready: map = native_query/status_call(builder, "task_poll", [native_tasks/attempt(builder), native_gen/ref(builder, "one")])
+  return ready
+end
+
+verb native_invocation/rights(input: map) -> map
+  let builder: map = input
+  let tx: map = native_tasks/slot(builder, "transaction")
+  let work: map = native_gen/call(builder, "kernel_work", [tx])
+  builder = native_kernel/store_field(builder, work, "policy_used", native_gen/ref(builder, "true"))
+  let allowed: map = native_gen/call(builder, "kernel_authority_can_invoke", [
+    native_tasks/saved(builder, "authority", native_kernel/pointer("Authority")), native_roots/ref(builder, "selector")])
+  let result: map = native_query/check(builder, allowed, "permission")
+  return result
+end
+
+verb native_invocation/authorize_body(module: map) -> map
+  let builder: map = native_invocation/rights(native_invocation/context(module, "invoke_authorize"))
+  let result: map = native_gen/finish(module, native_roots/return_value(builder, native_gen/ref(builder, "kernel_ok")))
+  return result
+end
+
+verb native_invocation/mint_body(module: map) -> map
+  let builder: map = native_invocation/context(module, "invoke_mint")
+  builder = native_execution/control_scope(builder, native_roots/worker(builder), native_roots/ref(builder, "budget"))
+  builder = native_invocation/rights(builder)
+  let [id: map, claimed: map] = native_gen/checked_bind(builder, "token_id", native_gen/call(builder, "task_resource_id", [native_roots/worker(builder)]), "ok",
+    fn(exhausted) => native_query/error(exhausted, "limit"))
+  // Resource allocation reserves the same pair used by mailboxes. A token's
+  // resource ID cannot name a mailbox, including after a hub is restarted.
+  let [token: map, encoded: map] = native_gen/checked_bind(claimed, "token", native_gen/call(claimed, "value_capability", [
+    native_gen/multiply(native_gen/field(claimed, id, "number"), native_gen/ref(claimed, "two"))]), "ok", fn(invalid) => native_query/error(invalid, "limit"))
+  let capability: map = native_gen/field(encoded, token, "value")
+  let epoch: map = native_gen/field(encoded, native_gen/call(encoded, "value_int", [native_gen/bitcast(:I64, native_tasks/attempt_field(encoded, "epoch"))]), "value")
+  let [row: map, built: map] = native_query/tuple(encoded, [capability, native_roots/ref(encoded, "selector"), epoch])
+  let tree: map = native_tasks/saved(built, "invocations", native_kernel/pointer("Node"))
+  builder = native_query/offer(built, tree, row)
+  let result: map = native_gen/finish(module, native_roots/return_value(builder, native_gen/record(builder, [:Record, "TaskInvocationCapability"], {
+    "status" -> native_gen/ref(builder, "kernel_ok"), "capability" -> capability})))
+  return result
+end
+
+// The index is ordered by capability payload, its first tuple column. Search
+// without allocating a query tuple or consulting a policy relation.
+verb native_invocation/check_body(module: map) -> map
+  let builder: map = native_invocation/context(module, "invoke_check")
+  let [decoded: map, valid: map] = native_gen/checked_bind(builder, "capability", native_gen/call(builder, "value_as_capability", [native_roots/ref(builder, "capability")]), "ok",
+    fn(invalid) => native_query/error(invalid, "permission"))
+  let key: map = native_gen/field(valid, decoded, "number")
+  let [node: map, ready: map] = native_gen/bind(valid, "grant", native_tasks/saved(valid, "invocations", native_kernel/pointer("Node")))
+  builder = native_gen/while_loop(ready, native_gen/negate(native_kernel/absent(node)), fn(step)
+    let row: map = native_kernel/load_field(step, node, "row")
+    let id: map = native_gen/expression(:U64, :Payload, [native_query/cell(step, row, native_gen/ref(step, "zero"))])
+    let checked: map = native_gen/when(step, native_gen/equal(key, id), fn(found)
+      let selector: map = native_query/cell(found, row, native_gen/ref(found, "one"))
+      let authorized: map = native_query/check(found, native_gen/equal(selector, native_roots/ref(found, "selector")), "permission")
+      let epoch: map = native_gen/expression(:U64, :Payload, [native_query/cell(authorized, row, native_gen/ref(authorized, "two"))])
+      authorized = native_query/check(authorized, native_gen/equal(epoch, native_tasks/attempt_field(authorized, "epoch")), "permission")
+      authorized = native_invocation/rights(authorized)
+      return native_roots/return_value(authorized, native_gen/ref(authorized, "kernel_ok"))
+    end)
+    return native_gen/branch(checked, native_gen/less(key, id),
+      fn(left) => native_gen/assign(left, node, native_kernel/load_field(left, node, "left")),
+      fn(right) => native_gen/assign(right, node, native_kernel/load_field(right, node, "right")))
+  end)
+  let result: map = native_gen/finish(module, native_query/error(builder, "permission"))
+  return result
+end
+
+verb native_invocation/program(input: map) -> map
+  let module: map = input
+  module[:state] = native/record_type(module[:state], "TaskInvocationCapability", [["status", :U64], ["capability", native_value/word()]])[1]
+  let worker: list = ["worker", native_memory/record_pointer("MemoryWorker"), :Borrow]
+  let attempt: list = ["attempt", native_tasks/pointer("Attempt"), :Borrow]
+  let selector: list = ["selector", native_value/word(), :Gc]
+  module = native_tasks/declare(module, "invoke_authorize", :U64, [worker, attempt, selector])
+  module = native_tasks/declare(module, "invoke_mint", [:Record, "TaskInvocationCapability"], [worker, attempt, selector, ["budget", native_kernel/pointer("Budget"), :Borrow]], :Gc)
+  module = native_tasks/declare(module, "invoke_check", :U64, [worker, attempt, selector, ["capability", native_value/word(), :Gc]])
+  module = native_invocation/authorize_body(module)
+  module = native_invocation/mint_body(module)
+  let result: map = native_invocation/check_body(module)
+  return result
+end

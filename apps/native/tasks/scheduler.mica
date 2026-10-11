@@ -1,0 +1,181 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+// Each admitted control has one bounded slot and a non-reused public ID. The
+// ready queue contains slot indexes; external wakeups resolve public IDs.
+// Slot reuse cannot redirect an old event to a different task.
+verb native_scheduler/field(builder: map, name: string) -> map
+  let result: map = native_kernel/load_field(builder, native_gen/ref(builder, "scheduler"), name)
+  return result
+end
+verb native_scheduler/store(builder: map, name: string, value: map) -> map
+  let result: map = native_kernel/store_field(builder, native_gen/ref(builder, "scheduler"), name, value)
+  return result
+end
+verb native_scheduler/queue(builder: map) -> map
+  let result: map = native_gen/field(builder, native_gen/ref(builder, "scheduler"), "queue")[:pointer]
+  return result
+end
+verb native_scheduler/slot(builder: map, id: map) -> map
+  let result: map = native_gen/offset(native_scheduler/field(builder, "slots"), id)
+  return result
+end
+verb native_scheduler/task(builder: map, id: map) -> map
+  let result: map = native_kernel/load_field(builder, native_scheduler/slot(builder, id), "task")
+  return result
+end
+verb native_scheduler/status(builder: map, name: string) -> map
+  let result: map = native_execution/fail(builder, native_gen/ref(builder, string_concat("kernel_", name)))
+  return result
+end
+verb native_scheduler/check(builder: map, condition: map, name: string) -> map
+  let result: map = native_gen/unless(builder, condition, fn(failed) => native_scheduler/status(failed, name))
+  return result
+end
+verb native_scheduler/context(module: map, name: string) -> map
+  let result: map = native_roots/context(module, string_concat("task_scheduler_", name), fn(failed, reason) => native_scheduler/status(failed, reason))
+  return result
+end
+verb native_scheduler/lock(builder: map) -> map
+  let worker: map = native_gen/ref(builder, "worker")
+  let ready: map = native_scheduler/check(builder, native_gen/negate(native_kernel/absent(native_scheduler/field(builder, "mutex"))), "closed")
+  ready = native_scheduler/check(ready, native_gen/equal(native_scheduler/field(ready, "heap"), native_kernel/load_field(ready, worker, "heap")), "closed")
+  ready = native_scheduler/check(ready, native_gen/call(ready, "memory_leave", [worker]), "closed")
+  ready = native_gen/do_call(ready, "memory_lock", [native_scheduler/field(ready, "mutex")])
+  ready = native_gen/unless(ready, native_gen/call(ready, "memory_enter", [worker]), fn(failed)
+    return native_scheduler/status(native_gen/do_call(failed, "memory_unlock", [native_scheduler/field(failed, "mutex")]), "closed")
+  end)
+  let result: map = native_gen/on_return(ready, fn(leaving, value) => native_gen/do_call(leaving, "memory_unlock", [native_scheduler/field(leaving, "mutex")]))
+  return result
+end
+verb native_scheduler/notify(builder: map) -> map
+  let result: map = native_gen/do_call(builder, "task_event_notify", [native_scheduler/field(builder, "event")])
+  return result
+end
+verb native_scheduler/request(builder: map, slot: map) -> map
+  let result: map = native_roots/root_value(builder, native_gen/field(builder, slot, "request")[:pointer], native_tasks/pointer("WaitRequest"))
+  return result
+end
+verb native_scheduler/retire(builder: map, slot: map) -> map
+  let root: map = native_gen/field(builder, slot, "request")[:pointer]
+  let result: map = native_gen/unless(builder, native_kernel/absent(native_kernel/load_field(builder, root, "registration")), fn(registered)
+    return native_scheduler/check(registered, native_gen/call(registered, "memory_unpublish", [native_gen/ref(registered, "worker"), root]), "closed")
+  end)
+  return result
+end
+verb native_scheduler/done(builder: map, slot: map) -> map
+  let ready: map = native_scheduler/retire(builder, slot)
+  ready = native_gen/unless(ready, native_gen/equal(native_kernel/load_field(ready, slot, "state"), native_gen/ref(ready, "task_slot_done")), fn(first)
+    let marked: map = native_kernel/store_field(first, slot, "state", native_gen/ref(first, "task_slot_done"))
+    return native_scheduler/store(marked, "remaining", native_gen/subtract(native_scheduler/field(marked, "remaining"), native_gen/ref(marked, "one")))
+  end)
+  ready = native_gen/when(ready, native_kernel/load_field(ready, slot, "owned"), fn(owned) => native_scheduler/remove_slot(owned, slot))
+  let result: map = native_scheduler/notify(ready)
+  return result
+end
+verb native_scheduler/enqueue(builder: map, id: map, slot: map) -> map
+  let [status: map, queued: map] = native_gen/bind(builder, "queued", native_gen/call(builder, "task_queue_push", [native_scheduler/queue(builder), id]))
+  let ready: map = native_gen/unless(queued, native_kernel/absent(status), fn(failed) => native_execution/fail(failed, status))
+  let result: map = native_kernel/store_field(ready, slot, "state", native_gen/ref(ready, "task_slot_queued"))
+  return result
+end
+
+verb native_scheduler/declarations(input: map) -> map
+  let module: map = input
+  module[:state] = native/record_type(module[:state], "TaskSlot", [
+    ["next", native_tasks/pointer("Slot")], ["index", :U64], ["id", :U64],
+    ["task", native_tasks/pointer("Control")], ["owned", :Bool],
+    ["state", :U64], ["generation", :U64], ["deadline", :U64], ["request", [:Record, "MemoryRoot"]]])[1]
+  module[:state] = native/record_type(module[:state], "TaskScheduler", [
+    ["heap", native_memory/record_pointer("MemoryHeap")], ["hub", native_tasks/pointer("MailboxHub")],
+    ["mutex", native_memory/pointer(:U8)], ["event", native_memory/pointer(:U8)],
+    ["slots", native_tasks/pointer("Slot")], ["free", native_tasks/pointer("Slot")],
+    ["buckets", native_memory/pointer(native_tasks/pointer("Slot"))], ["mask", :U64], ["capacity", :U64],
+    ["queue", [:Record, "TaskQueue"]],
+    ["count", :U64], ["remaining", :U64], ["workers", :U64], ["events", :Bool], ["closed", :Bool], ["attached", :Bool], ["registered", :Bool]])[1]
+  module[:state] = native/record_type(module[:state], "TaskAdmission", [["status", :U64], ["id", :U64]])[1]
+  module[:state] = native/record_type(module[:state], "TaskSchedulerObservation", [["status", :U64], ["count", :U64], ["remaining", :U64], ["workers", :U64], ["events", :Bool], ["closed", :Bool]])[1]
+  module[:state] = native/record_type(module[:state], "TaskDeadline", [["status", :U64], ["deadline", :U64]])[1]
+  let constants: list = []
+  for [name, value] in [["queued", 1], ["running", 2], ["waiting", 3], ["done", 4], ["delayed", 5]]
+    constants = [@constants, [string_concat("task_slot_", name), :U64, native_value/hex(value)]]
+  end
+  constants = [@constants, ["task_millisecond", :U64, native_value/hex(1000000)], ["task_max_poll", :U64, native_value/hex(2147483647)]]
+  let [bindings: map, state: map] = native/constants(module[:state], constants)
+  module[:state] = state
+  let all: map = module[:constants]
+  for item in constants
+    all[item[0]] = bindings[item[0]]
+  end
+  module[:constants] = all
+  let scheduler: list = ["scheduler", native_tasks/pointer("Scheduler"), :Borrow]
+  let worker: list = ["worker", native_memory/record_pointer("MemoryWorker"), :Borrow]
+  let id: list = ["id", :U64, :Value]
+  for spec in [
+    ["scheduler_init", :U64, [scheduler, worker, ["hub", native_tasks/pointer("MailboxHub"), :Borrow],
+      ["capacity", :U64, :Value]]],
+    ["scheduler_release", :U64, [scheduler, worker]],
+    ["scheduler_submit", [:Record, "TaskAdmission"], [scheduler, worker, ["task", native_tasks/pointer("Control"), :Borrow], ["owned", :Bool, :Value], ["delay", :U64, :Value]]],
+    ["scheduler_withdraw", :U64, [scheduler, worker, id]],
+    ["scheduler_inspect", [:Record, "TaskSchedulerObservation"], [scheduler, worker]],
+    ["scheduler_bind", :U64, [scheduler, worker, ["task", native_tasks/pointer("Control"), :Borrow], id, ["joining", :Bool, :Value]]],
+    ["scheduler_stop", :Void, [scheduler]],
+    ["scheduler_cancel", :Bool, [scheduler, id]],
+    ["scheduler_wake", :U64, [scheduler, worker, id, ["generation", :U64, :Value], ["input", native_value/word(), :Gc]]],
+    ["scheduler_member", :U64, [scheduler, worker, ["events", :Bool, :Value], ["joining", :Bool, :Value]]],
+    ["scheduler_poll_slot", [:Record, "TaskDeadline"], [scheduler, worker, id]],
+    ["scheduler_take", [:Record, "TaskQueueResult"], [scheduler, worker]],
+    ["scheduler_settle", :U64, [scheduler, worker, id, ["boundary", native_tasks/pointer("Boundary"), :Gc]]],
+    ["scheduler_worker", [:Record, "TaskDrainResult"], [scheduler, worker, ["services", native_tasks/pointer("Services"), :Borrow]]],
+    ["scheduler_poll", [:Record, "TaskDeadline"], [scheduler, worker]],
+    ["scheduler_events", :U64, [scheduler, worker]]]
+    module = native_tasks/declare(module, spec[0], spec[1], spec[2])
+  end
+  module = native/declare_function(module, "task_scheduler_find", native_tasks/pointer("Slot"),
+    [scheduler, id], [], [:ReadMemory], :Borrow, "scheduler")
+  return module
+end
+
+verb native_scheduler/cancel_body(module: map) -> map
+  let builder: map = native_gen/context(module, "task_scheduler_cancel")
+  builder = native_gen/when(builder, native_kernel/absent(native_scheduler/field(builder, "mutex")), fn(closed) => native_gen/return_zero(closed))
+  builder = native_gen/do_call(builder, "memory_lock", [native_scheduler/field(builder, "mutex")])
+  builder = native_gen/on_return(builder, fn(leaving, result) => native_gen/do_call(leaving, "memory_unlock", [native_scheduler/field(leaving, "mutex")]))
+  let [slot: map, found: map] = native_gen/bind(builder, "slot", native_gen/call(builder, "task_scheduler_find", [native_gen/ref(builder, "scheduler"), native_gen/ref(builder, "id")]))
+  builder = native_gen/when(found, native_kernel/absent(slot), fn(invalid) => native_gen/return_zero(invalid))
+  let [accepted: map, cancelled: map] = native_gen/bind(builder, "cancelled", native_gen/call(builder, "task_cancel", [native_kernel/load_field(builder, slot, "task")]))
+  let result: map = native_gen/finish(module, native_gen/return_value(native_scheduler/notify(cancelled), accepted))
+  return result
+end
+verb native_scheduler/wake_body(module: map) -> map
+  let builder: map = native_scheduler/lock(native_scheduler/context(module, "wake"))
+  builder = native_scheduler/check(builder, native_gen/negate(native_scheduler/field(builder, "closed")), "closed")
+  let [slot: map, found: map] = native_gen/bind(builder, "slot", native_gen/call(builder, "task_scheduler_find", [native_gen/ref(builder, "scheduler"), native_gen/ref(builder, "id")]))
+  builder = native_scheduler/check(found, native_gen/negate(native_kernel/absent(slot)), "closed")
+  let id: map = native_kernel/load_field(builder, slot, "index")
+  let [status: map, woken: map] = native_gen/bind(builder, "woken", native_gen/call(builder, "task_wake", [
+    native_scheduler/task(builder, id), native_gen/ref(builder, "worker"), native_gen/ref(builder, "generation"), native_roots/ref(builder, "input")]))
+  builder = native_gen/unless(woken, native_kernel/absent(status), fn(failed) => native_execution/fail(failed, status))
+  builder = native_gen/when(builder, native_gen/equal(native_kernel/load_field(builder, slot, "state"), native_gen/ref(builder, "task_slot_waiting")), fn(waiting)
+    return native_scheduler/enqueue(native_scheduler/retire(waiting, slot), id, slot)
+  end)
+  let result: map = native_gen/finish(module, native_scheduler/status(native_scheduler/notify(builder), "ok"))
+  return result
+end
+verb native_scheduler/program(input: map) -> map
+  let module: map = native_scheduler/declarations(input)
+  module = native_scheduler/release_body(module)
+  module = native_scheduler/init_body(module)
+  module = native_scheduler/stop_body(module)
+  module = native_scheduler/admission(module)
+  module = native_scheduler/member_body(module)
+  module = native_scheduler/take_body(module)
+  module = native_scheduler/settle_body(module)
+  module = native_scheduler/worker_body(module)
+  module = native_scheduler/poll_slot_body(module)
+  module = native_scheduler/poll_body(module)
+  module = native_scheduler/events_body(module)
+  module = native_scheduler/cancel_body(module)
+  let result: map = native_scheduler/wake_body(module)
+  return result
+end

@@ -1,0 +1,77 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+verb native_tasks/test_gate(input: map) -> map
+  let module: map = input
+  module[:state] = native/record_type(module[:state], "TaskTestGate", [["mutex", native_memory/pointer(:U8)], ["arrived", :U64]])[1]
+  let [global: int, state: map] = native/add_global(module[:state], "task_test_gate_state", [:Record, "TaskTestGate"], :Mutable, :Zero)
+  module[:state] = state
+  let constants: map = module[:constants]
+  constants["task_test_gate_storage"] = global
+  module[:constants] = constants
+  module = native/declare_function(module, "task_test_gate", native_tasks/pointer("TestGate"), [], [], [], :Static, "")
+  let builder: map = native_gen/context(module, "task_test_gate")
+  builder = native_gen/return_value(builder, native_gen/expression(native_tasks/pointer("TestGate"), :GlobalAddress, ["task_test_gate_storage"]))
+  module = native_gen/finish(module, builder)
+  module = native_tasks/declare(module, "test_barrier", :Void, [])
+  builder = native_gen/context(module, "task_test_barrier")
+  let gate: map = native_gen/call(builder, "task_test_gate", [])
+  let mutex: map = native_kernel/load_field(builder, gate, "mutex")
+  builder = native_gen/do_call(builder, "memory_lock", [mutex])
+  builder = native_kernel/store_field(builder, gate, "arrived", native_gen/add(native_kernel/load_field(builder, gate, "arrived"), native_gen/ref(builder, "one")))
+  builder = native_gen/do_call(builder, "memory_wake", [mutex])
+  builder = native_gen/while_loop(builder, native_gen/less(native_kernel/load_field(builder, gate, "arrived"), native_gen/ref(builder, "two")), fn(waiting)
+    return native_gen/do_call(waiting, "memory_wait", [mutex])
+  end)
+  builder = native_gen/return_void(native_gen/do_call(builder, "memory_unlock", [mutex]))
+  let result: map = native_gen/finish(module, builder)
+  return result
+end
+
+verb native_tasks/test_program() -> map
+  let module: map = native_handler_tests/program(native_tasks/test_scheduler(native_tasks/test_services(native_tasks/test_gate(native_tasks/definitions()))))
+  module = native_call_tests/program(module)
+  module = native/declare_function(module, "task_test_entry", :U64, [["attempt", native_tasks/pointer("Attempt"), :Borrow]], [], native_tasks/effects(), :Value, "")
+  module = native/execution_function(module, "task_test_entry", :Tail)
+  let builder: map = native_tasks/entry_context(module, "task_test_entry")
+  let image: map = native_tasks/saved(builder, "current", native_tasks/pointer("Image"))
+  let [status: map, staged: map] = native_gen/bind(builder, "status", native_gen/call(builder, "task_stage", [
+    native_tasks/attempt_field(builder, "worker"), native_tasks/slot(builder, "effects"), native_gen/ref(builder, "task_effect_emit"),
+    native_kernel/load_field(builder, image, "tenant"), native_kernel/load_field(builder, image, "input")]))
+  builder = native_gen/unless(staged, native_kernel/absent(status), fn(failed) => native_gen/return_value(failed, status))
+  let [input: map, decoded: map] = native_gen/bind(builder, "input", native_gen/call(builder, "value_as_int", [native_kernel/load_field(builder, image, "input")]))
+  builder = native_gen/when(decoded, native_kernel/absent(native_gen/field(decoded, input, "number")), fn(waiting)
+    return native_gen/return_value(waiting, native_gen/call(waiting, "task_request", [native_tasks/attempt(waiting), native_gen/ref(waiting, "task_boundary_wait")]))
+  end)
+  builder = native_gen/return_value(builder, native_gen/call(builder, "task_request", [native_tasks/attempt(builder), native_gen/ref(builder, "task_boundary_complete")]))
+  module = native_gen/finish(module, builder)
+  module = native/declare_function(module, "task_test_write", :U64, [["attempt", native_tasks/pointer("Attempt"), :Borrow]], [], native_tasks/effects(), :Value, "")
+  module = native/execution_function(module, "task_test_write", :Tail)
+  builder = native_tasks/entry_context(module, "task_test_write")
+  image = native_tasks/saved(builder, "current", native_tasks/pointer("Image"))
+  let [relation: map, viewed: map] = native_gen/bind(builder, "relation", native_gen/call(builder, "kernel_view", [native_tasks/slot(builder, "transaction"), native_gen/ref(builder, "one")]))
+  let [found: map, looked_up: map] = native_gen/bind(viewed, "found", native_kernel/find_row(viewed, relation,
+    native_kernel/load_field(viewed, image, "environment"), native_kernel/tuple_projection(native_gen/ref(viewed, "one"))))
+  builder = native_gen/unless(looked_up, native_kernel/absent(found), fn(occupied)
+    let [status: map, retracted: map] = native_gen/bind(occupied, "status", native_gen/call(occupied, "kernel_write", [
+      native_tasks/slot(occupied, "transaction"), native_gen/ref(occupied, "one"), native_kernel/load_field(occupied, found, "row"), native_gen/ref(occupied, "false")]))
+    return native_gen/unless(retracted, native_kernel/absent(status), fn(failed) => native_gen/return_value(failed, status))
+  end)
+  let [write_status: map, written: map] = native_gen/bind(builder, "status", native_gen/call(builder, "kernel_write", [
+    native_tasks/slot(builder, "transaction"), native_gen/ref(builder, "one"), native_kernel/load_field(builder, image, "environment"), native_gen/ref(builder, "true")]))
+  builder = native_gen/unless(written, native_kernel/absent(write_status), fn(failed) => native_gen/return_value(failed, write_status))
+  builder = native_gen/assign(builder, write_status, native_gen/call(builder, "task_stage", [
+    native_tasks/attempt_field(builder, "worker"), native_tasks/slot(builder, "effects"), native_gen/ref(builder, "task_effect_emit"),
+    native_kernel/load_field(builder, image, "tenant"), native_kernel/load_field(builder, image, "input")]))
+  builder = native_gen/unless(builder, native_kernel/absent(write_status), fn(failed) => native_gen/return_value(failed, write_status))
+  builder = native_gen/when(builder, native_gen/equal(native_tasks/attempt_field(builder, "retries"), native_gen/ref(builder, "one")), fn(first)
+    let worker: map = native_tasks/attempt_field(first, "worker")
+    let ready: map = native_gen/unless(first, native_gen/call(first, "memory_leave", [worker]), fn(failed) => native_gen/return_value(failed, native_gen/ref(failed, "kernel_closed")))
+    ready = native_gen/do_call(ready, "task_test_barrier", [])
+    return native_gen/unless(ready, native_gen/call(ready, "memory_enter", [worker]), fn(failed) => native_gen/return_value(failed, native_gen/ref(failed, "kernel_closed")))
+  end)
+  builder = native_gen/return_value(builder, native_gen/call(builder, "task_request", [native_tasks/attempt(builder), native_gen/ref(builder, "task_boundary_complete")]))
+  module = native_gen/finish(module, builder)
+  let state: map = module[:state]
+  return state
+end

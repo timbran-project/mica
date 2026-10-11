@@ -52,13 +52,14 @@ static int64_t cell(mica_type_Value row, uint64_t i) {
     assert(value.f_ok);
     return value.f_number;
 }
-static void init(struct fixture *f) {
+static void init_with_history(struct fixture *f, uint64_t capacity) {
     memset(f, 0, sizeof(*f));
     assert(mica_kernel_heap_init(&f->heap));
     assert(mica_memory_worker_init(&f->worker, &f->heap, 32768));
     assert(mica_memory_enter(&f->worker));
-    assert(mica_kernel_init(&f->kernel, &f->worker, integer(7)));
+    assert(mica_kernel_init(&f->kernel, &f->worker, integer(7), capacity));
 }
+static void init(struct fixture *f) { init_with_history(f, 64); }
 static void destroy(struct fixture *f) {
     assert(mica_kernel_release(&f->kernel, &f->worker));
     assert(mica_memory_safepoint(&f->worker, true));
@@ -107,6 +108,156 @@ static uint64_t count(struct mica_KernelTransaction *tx, uint64_t id) {
     assert(result.f_status == OK && !result.f_more);
     return result.f_count;
 }
+// A cursor names the last observed snapshot. Each retained record advances it once.
+static struct mica_KernelCommit *history_next(struct fixture *f, uint64_t cursor, uint64_t latest) {
+    struct mica_KernelHistoryResult result = mica_kernel_history_next(&f->kernel, &f->worker, cursor);
+    assert(result.f_status == OK && result.f_latest == latest && !result.f_gap);
+    if (cursor == latest) {
+        assert(!result.f_commit);
+        return NULL;
+    }
+    assert(result.f_commit && result.f_commit->f_before->f_version == cursor);
+    assert(result.f_commit->f_after->f_version == cursor + 1);
+    return result.f_commit;
+}
+static void history_delta(struct mica_KernelCommit *commit, int64_t a, bool asserted) {
+    struct mica_KernelDelta *delta = commit->f_deltas;
+    assert(delta && !delta->f_next && delta->f_relation == 1 && delta->f_asserted == asserted);
+    assert(cell(delta->f_row, 0) == a && cell(delta->f_row, 1) == a + 1);
+}
+static void history_notified(uint8_t *context) { ++*(uint64_t *)context; }
+static void commit_history(void) {
+    struct fixture f;
+    init_with_history(&f, 3);
+    uint64_t notifications = 0, stranger = 0;
+    assert(mica_kernel_set_notify(&f.kernel, &f.worker, NULL, NULL, history_notified) == SCHEMA);
+    assert(mica_kernel_set_notify(&f.kernel, &f.worker, NULL, (void *)&notifications, history_notified) == OK);
+    assert(mica_kernel_set_notify(&f.kernel, &f.worker, NULL, (void *)&stranger, history_notified) == CONFLICT);
+    assert(!mica_kernel_release(&f.kernel, &f.worker));
+    assert(!history_next(&f, 0, 0));
+    struct mica_KernelHistoryResult result = mica_kernel_history_next(&f.kernel, &f.worker, 1);
+    assert(result.f_status == OK && result.f_gap && !result.f_commit && !result.f_latest);
+    declare(&f, 1, SET);
+    assert(!history_next(&f, 0, 1)->f_deltas);
+    struct mica_KernelTransaction tx, other;
+    begin(&f, &tx);
+    assert(write_pair(&tx, 1, 1, 2, true) == OK);
+    assert(mica_kernel_commit(&tx) == OK && mica_kernel_end(&tx));
+    history_delta(history_next(&f, 1, 2), 1, true);
+    assert(notifications == 2);
+    begin(&f, &tx);
+    assert(count(&tx, 1) == 1);
+    assert(mica_kernel_commit(&tx) == OK && mica_kernel_end(&tx));
+    assert(!history_next(&f, 2, 2));
+    begin(&f, &tx);
+    assert(write_pair(&tx, 1, 2, 3, true) == OK);
+    assert(mica_kernel_end(&tx)); // Discarded writes leave no record.
+    begin(&f, &tx);
+    assert(write_pair(&tx, 1, 2, 3, true) == OK);
+    assert(mica_kernel_cancel(&tx));
+    assert(mica_kernel_commit(&tx) == CANCELLED && mica_kernel_end(&tx));
+    assert(!history_next(&f, 2, 2));
+    assert(notifications == 2); // Read-only, aborted, and cancelled commits do not signal.
+
+    begin(&f, &tx);
+    begin(&f, &other);
+    assert(write_pair(&tx, 1, 2, 3, true) == OK);
+    assert(write_pair(&other, 1, 3, 4, true) == OK);
+    assert(mica_kernel_commit(&tx) == OK);
+    assert(mica_kernel_commit(&other) == OK && mica_kernel_end(&other));
+    assert(mica_kernel_end(&tx));
+    history_delta(history_next(&f, 2, 4), 2, true);
+    history_delta(history_next(&f, 3, 4), 3, true);
+    result = mica_kernel_history_next(&f.kernel, &f.worker, 0);
+    assert(result.f_status == OK && result.f_gap && !result.f_commit && result.f_latest == 4);
+    struct mica_MemoryRoot held = {.f_pointer = (uint8_t *)history_next(&f, 1, 4)};
+    assert(mica_memory_root_push(&f.worker, &held));
+
+    // A conflicting reader and a successful retraction produce only one new record.
+    begin(&f, &tx);
+    assert(count(&tx, 1) == 3);
+    begin(&f, &other);
+    assert(write_pair(&other, 1, 1, 2, false) == OK);
+    assert(mica_kernel_commit(&other) == OK && mica_kernel_end(&other));
+    assert(mica_kernel_commit(&tx) == CONFLICT && mica_kernel_end(&tx));
+    history_delta(history_next(&f, 4, 5), 1, false);
+    result = mica_kernel_history_next(&f.kernel, &f.worker, 1);
+    assert(result.f_status == OK && result.f_gap && !result.f_commit && result.f_latest == 5);
+    assert(mica_memory_safepoint(&f.worker, true));
+    history_delta((struct mica_KernelCommit *)held.f_pointer, 1, true);
+    assert(((struct mica_KernelCommit *)held.f_pointer)->f_after->f_version == 2);
+    assert(notifications == 5 && !stranger);
+    assert(mica_kernel_set_notify(&f.kernel, &f.worker, (void *)&stranger, NULL, NULL) == CONFLICT);
+    assert(mica_kernel_set_notify(&f.kernel, &f.worker, (void *)&notifications, NULL, NULL) == OK);
+    declare(&f, 2, SET);
+    assert(notifications == 5);
+    assert(mica_kernel_release(&f.kernel, &f.worker));
+    assert(mica_memory_safepoint(&f.worker, true));
+    history_delta((struct mica_KernelCommit *)held.f_pointer, 1, true);
+    assert(mica_kernel_history_next(&f.kernel, &f.worker, 5).f_status == CLOSED);
+    assert(mica_memory_root_pop(&f.worker, &held));
+    assert(mica_memory_safepoint(&f.worker, true) && !f.heap.f_retained);
+    assert(mica_memory_leave(&f.worker));
+    assert(mica_memory_worker_release(&f.worker));
+    assert(mica_memory_heap_release(&f.heap));
+}
+
+static void history_initialization(void) {
+#ifdef MICA_MEMORY_TEST_ALLOCATOR
+    unsigned failures = 0;
+    bool succeeded = false;
+    for (long budget = 0; budget < 32; ++budget) {
+        struct fixture f = {0};
+        assert(mica_kernel_heap_init(&f.heap));
+        assert(mica_memory_worker_init(&f.worker, &f.heap, 32768));
+        assert(mica_memory_enter(&f.worker));
+        assert(!mica_kernel_init(&f.kernel, &f.worker, integer(7), 0));
+        assert(!mica_kernel_init(&f.kernel, &f.worker, integer(7), UINT64_MAX));
+        atomic_store(&allocation_budget, budget);
+        bool ready = mica_kernel_init(&f.kernel, &f.worker, integer(7), 3);
+        atomic_store(&allocation_budget, -1);
+        assert(!f.worker.f_roots);
+        if (ready) {
+            assert(f.kernel.f_history_capacity == 3 && !f.kernel.f_history_count);
+            destroy(&f);
+            succeeded = true;
+            break;
+        }
+        ++failures;
+        assert(!f.kernel.f_mutex && !f.kernel.f_history && !f.kernel.f_history_capacity);
+        assert(!f.kernel.f_current.f_registration);
+        assert(mica_memory_safepoint(&f.worker, true) && !f.heap.f_retained);
+        assert(mica_memory_leave(&f.worker));
+        assert(mica_memory_worker_release(&f.worker));
+        assert(mica_memory_heap_release(&f.heap));
+    }
+    assert(succeeded && failures);
+#endif
+}
+
+static void history_version_limit(void) {
+    struct fixture f;
+    init_with_history(&f, 1);
+    const uint64_t maximum = UINT64_C(0x007fffffffffffff);
+    // Inject the boundary under exclusive ownership before any retained history.
+    ((struct mica_KernelSnapshot *)f.kernel.f_current.f_pointer)->f_version = maximum - 1;
+    struct mica_KernelTransaction tx;
+    begin(&f, &tx);
+    assert(mica_kernel_declare(&tx, 1, 1, 2, SET, 0, 2) == OK);
+    assert(mica_kernel_commit(&tx) == OK && mica_kernel_version(&tx) == maximum);
+    assert(mica_kernel_end(&tx));
+    assert(history_next(&f, maximum - 1, maximum));
+    begin(&f, &tx);
+    assert(mica_kernel_declare(&tx, 2, 2, 2, SET, 0, 2) == OK);
+    assert(mica_kernel_commit(&tx) == LIMIT);
+    assert(f.kernel.f_history_count == 1 && !mica_kernel_work(&tx)->f_commit);
+    assert(mica_kernel_end(&tx));
+    begin(&f, &tx);
+    assert(mica_kernel_commit(&tx) == OK && mica_kernel_end(&tx));
+    assert(!history_next(&f, maximum, maximum));
+    destroy(&f);
+}
+
 static unsigned height(struct mica_KernelNode *node) {
     if (!node) return 0;
     unsigned left = height(node->f_left), right = height(node->f_right);
@@ -377,6 +528,51 @@ static void *parallel_worker(void *opaque) {
     assert(mica_memory_worker_release(&worker));
     return NULL;
 }
+struct history_reader {
+    struct fixture *fixture;
+    _Atomic bool finished;
+    uint64_t cursor, observed;
+};
+static void *read_history(void *opaque) {
+    struct history_reader *job = opaque;
+    struct mica_MemoryWorker worker = {0};
+    assert(mica_memory_worker_init(&worker, &job->fixture->heap, 32768));
+    assert(mica_memory_enter(&worker));
+    struct mica_MemoryRoot held = {0};
+    assert(mica_memory_root_push(&worker, &held));
+    for (;;) {
+        bool finished = atomic_load(&job->finished);
+        struct mica_KernelHistoryResult result = mica_kernel_history_next(&job->fixture->kernel, &worker, job->cursor);
+        assert(result.f_status == OK);
+        held.f_pointer = (uint8_t *)result.f_commit;
+        if (result.f_gap) {
+            assert(!result.f_commit);
+            job->cursor = result.f_latest; // The consumer must resynchronize its result here.
+        } else if (result.f_commit) {
+            // Collection can race with writers replacing this record's ring slot.
+            assert(mica_memory_safepoint(&worker, (++job->observed % 11) == 0));
+            struct mica_KernelCommit *commit = (struct mica_KernelCommit *)held.f_pointer;
+            assert(commit->f_before->f_version == job->cursor);
+            assert(commit->f_after->f_version == ++job->cursor);
+            unsigned additions = 0, removals = 0;
+            for (struct mica_KernelDelta *delta = commit->f_deltas; delta; delta = delta->f_next) {
+                assert(delta->f_relation == 1 || delta->f_relation == 2);
+                assert(mica_value_as_int(mica_kernel_cell(delta->f_row, 1)).f_ok);
+                if (delta->f_asserted) ++additions;
+                else ++removals;
+            }
+            assert(additions == 1 && removals <= 1);
+        } else if (finished) {
+            break;
+        }
+        held.f_pointer = NULL;
+        assert(mica_memory_safepoint(&worker, false));
+    }
+    assert(mica_memory_root_pop(&worker, &held));
+    assert(mica_memory_leave(&worker));
+    assert(mica_memory_worker_release(&worker));
+    return NULL;
+}
 static void concurrency(void) {
     struct fixture f;
     init(&f);
@@ -390,13 +586,23 @@ static void concurrency(void) {
     for (unsigned mode = 0; mode < 2; ++mode) {
         pthread_t threads[THREADS];
         struct parallel jobs[THREADS];
+        pthread_t reader;
+        struct history_reader journal = {.fixture = &f,
+            .cursor = mica_kernel_history_next(&f.kernel, &f.worker, 0).f_latest};
         assert(mica_memory_leave(&f.worker));
+        assert(!pthread_create(&reader, NULL, read_history, &journal));
         for (unsigned i = 0; i < THREADS; ++i) {
             jobs[i] = (struct parallel){.fixture = &f, .id = i, .rounds = ROUNDS, .contended = mode == 1};
             assert(!pthread_create(&threads[i], NULL, parallel_worker, &jobs[i]));
         }
         for (unsigned i = 0; i < THREADS; ++i) assert(!pthread_join(threads[i], NULL));
+        atomic_store(&journal.finished, true);
+        assert(!pthread_join(reader, NULL));
         assert(mica_memory_enter(&f.worker));
+        assert(journal.cursor == 3 + (mode + 1) * THREADS * ROUNDS);
+        // The final bounded window contains every consecutive publication once.
+        for (uint64_t cursor = journal.cursor - f.kernel.f_history_capacity; cursor < journal.cursor; ++cursor)
+            assert(history_next(&f, cursor, journal.cursor));
     }
     begin(&f, &tx);
     assert(count(&tx, 2) == THREADS * ROUNDS);
@@ -425,6 +631,8 @@ static void allocation_failures(void) {
         assert(status == OK || status == OOM);
         if (status == OOM) {
             ++failures;
+            assert(f.kernel.f_history_count == 1 && !history_next(&f, 1, 1));
+            assert(!mica_kernel_work(&tx)->f_commit);
             assert(mica_kernel_deltas(&tx) == NULL);
             assert(mica_memory_safepoint(&f.worker, true));
             assert(count(&tx, 1) == 300);
@@ -435,6 +643,7 @@ static void allocation_failures(void) {
             // The same transaction remains usable after allocation recovers.
             assert(mica_kernel_commit(&tx) == OK);
         } else succeeded = true;
+        assert(f.kernel.f_history_count == 2 && history_next(&f, 1, 2));
         assert(mica_kernel_end(&tx));
         begin(&f, &tx);
         assert(count(&tx, 1) == 300 && mica_kernel_view(&tx, 2) != NULL);
@@ -2811,7 +3020,7 @@ static void heap_admission(void) {
 
 static void retained_snapshot_reclamation(void) {
     struct fixture f;
-    init(&f);
+    init_with_history(&f, 1);
     declare(&f, 1, SET);
     assert(mica_kernel_set_retention_limit(&f.kernel, &f.worker, 4) == OK);
     struct mica_KernelTransaction history[3], writer;
@@ -2897,7 +3106,7 @@ static struct mica_KernelAuthorityResult compile_authority(struct mica_KernelTra
     mica_memory_control_push(tx->f_worker, &control);
     struct mica_KernelAuthorityResult result = mica_kernel_authority_compile(tx->f_worker, integer(tenant),
         mica_kernel_view(tx, 6), mica_kernel_view(tx, 4), mica_kernel_view(tx, 5),
-        mica_kernel_view(tx, 1), mica_kernel_view(tx, 2), mica_kernel_view(tx, 3), &budget);
+        mica_kernel_view(tx, 1), mica_kernel_view(tx, 2), mica_kernel_view(tx, 3), NULL, &budget);
     mica_memory_control_pop(tx->f_worker);
     return result;
 }
@@ -2982,11 +3191,11 @@ static void authority_projection(void) {
     struct mica_KernelRelation *effective = mica_kernel_rule_rows_index_lookup(mica_kernel_work(&tx)->f_evaluation->f_rows, 1)->f_view;
     struct mica_KernelBudget budget = operation_budget(&tx);
     budget.f_steps = 128;
-    result = mica_kernel_authority_compile(&f.worker, integer(11), NULL, NULL, NULL, effective, NULL, NULL, &budget);
+    result = mica_kernel_authority_compile(&f.worker, integer(11), NULL, NULL, NULL, effective, NULL, NULL, NULL, &budget);
     assert(result.f_status == OK && mica_kernel_authority_allows(result.f_authority, 42, 1));
     assert(!mica_kernel_authority_allows(result.f_authority, 42, 4));
     budget = operation_budget(&tx);
-    result = mica_kernel_authority_compile(&f.worker, integer(7), NULL, NULL, NULL, mica_kernel_view(&tx, 4), NULL, NULL, &budget);
+    result = mica_kernel_authority_compile(&f.worker, integer(7), NULL, NULL, NULL, mica_kernel_view(&tx, 4), NULL, NULL, NULL, &budget);
     assert(result.f_status == ARITY && !result.f_authority && f.worker.f_roots == &cached);
     // Matching malformed rows fail closed, with no partially built context.
     assert(write_pair(&tx, 1, 7, 50, true) == OK);
@@ -3053,7 +3262,7 @@ static void configure_policy(struct fixture *f) {
     assert(write_pair(&tx, 13, 1, 2, true) == OK);
     assert(write_pair(&tx, 14, 1, 2, true) == OK);
     assert(write_pair(&tx, 14, 3, 4, true) == OK);
-    assert(mica_kernel_set_authority_policy(&tx, 6, 4, 5, 1, 2, 3) == OK);
+    assert(mica_kernel_set_authority_policy(&tx, 6, 4, 5, 1, 2, 3, 0) == OK);
     assert(mica_kernel_commit(&tx) == OK && mica_kernel_end(&tx));
 }
 static void inactive_authority(void) {
@@ -3104,7 +3313,7 @@ static void transactional_authority(void) {
     // An all-zero configuration revokes implicit bootstrap ownership. Rollback
     // restores the unconfigured world; the draft task's boundary cache is fixed.
     begin(&f, &tx);
-    assert(mica_kernel_set_authority_policy(&tx, 0, 0, 0, 0, 0, 0) == OK);
+    assert(mica_kernel_set_authority_policy(&tx, 0, 0, 0, 0, 0, 0, 0) == OK);
     assert(refresh(&tx) == OK && mica_kernel_work(&tx)->f_authority->f_root);
     assert(mica_kernel_end(&tx));
     configure_policy(&f);
@@ -3112,7 +3321,7 @@ static void transactional_authority(void) {
     assert(count(&tx, 10) == 1);
     assert(read_status(&tx, 12) == PERMISSION);
     assert(write_pair(&tx, 11, 1, 2, true) == PERMISSION);
-    assert(mica_kernel_set_authority_policy(&tx, 0, 0, 0, 0, 0, 0) == PERMISSION);
+    assert(mica_kernel_set_authority_policy(&tx, 0, 0, 0, 0, 0, 0, 0) == PERMISSION);
     assert(mica_kernel_declare(&tx, 18, 18, 2, SET, 0, 0) == PERMISSION);
     assert(mica_kernel_rule_evaluate(&tx).f_status == PERMISSION);
     assert(tenant_edge(&tx, 1, 7, 12, 10, false) == PERMISSION);
@@ -3221,7 +3430,7 @@ static void transactional_authority(void) {
     assert(count(&reader, 12) == 0 && mica_kernel_end(&reader));
     // Configuration is transactional even without any extensional writes.
     begin(&f, &tx);
-    assert(mica_kernel_set_authority_policy(&tx, 0, 0, 0, 0, 0, 0) == OK);
+    assert(mica_kernel_set_authority_policy(&tx, 0, 0, 0, 0, 0, 0, 0) == OK);
     assert(mica_kernel_rule_remove(&tx, 2) == OK);
     assert(mica_kernel_commit(&tx) == OK && mica_kernel_end(&tx));
     begin(&f, &tx);
@@ -3282,7 +3491,7 @@ static void authority_tenant_collection(void) {
     assert(mica_memory_enter(&f.worker));
     const char *name = "tenant-with-managed-storage";
     struct mica_ValueResult owner = mica_value_string(&f.worker, (const uint8_t *)name, strlen(name));
-    assert(owner.f_ok && mica_kernel_init(&f.kernel, &f.worker, owner.f_value));
+    assert(owner.f_ok && mica_kernel_init(&f.kernel, &f.worker, owner.f_value, 64));
     struct mica_ValueResult tenant = mica_value_string(&f.worker, (const uint8_t *)name, strlen(name));
     assert(tenant.f_ok);
     // Admission's first safepoint must root the incoming tenant before moving
@@ -3309,7 +3518,7 @@ static void authority_controls(void) {
     // Cancellation and budget failures publish neither grants nor configuration.
     begin(&f, &tx);
     policy_fact(&tx, 1, 9, 10, true);
-    assert(mica_kernel_set_authority_policy(&tx, 6, 4, 5, 1, 2, 3) == OK);
+    assert(mica_kernel_set_authority_policy(&tx, 6, 4, 5, 1, 2, 3, 0) == OK);
     assert(mica_kernel_cancel(&tx));
     assert(mica_kernel_commit(&tx) == CANCELLED && mica_kernel_end(&tx));
     unsigned limited = 0;
@@ -3336,7 +3545,7 @@ static void authority_controls(void) {
     }
     assert(limited > 0);
     begin(&f, &tx);
-    assert(mica_kernel_set_authority_policy(&tx, 0, 0, 0, 0, 0, 0) == OK);
+    assert(mica_kernel_set_authority_policy(&tx, 0, 0, 0, 0, 0, 0, 0) == OK);
     assert(!mica_kernel_work(&tx)->f_changes && !mica_kernel_work(&tx)->f_rule_changes);
     assert(mica_kernel_commit(&tx) == OK && mica_kernel_end(&tx));
     begin(&f, &tx);
@@ -3456,12 +3665,154 @@ static void source_rules(void) {
 
 #include "measurements.c"
 
+// A managed graph stands in for an opaque compiled body at the kernel boundary.
+// Task fixtures separately exercise real entry pointers and code-version owners.
+static uint64_t put_program(struct mica_KernelTransaction *tx, uint64_t id,
+                            int64_t tenant, uint64_t marker) {
+    struct mica_MemoryRoot body = {0};
+    assert(mica_memory_root_push(tx->f_worker, &body));
+    body.f_pointer = (void *)mica_kernel_new_Program(tx->f_worker, marker, integer(tenant), NULL);
+    assert(body.f_pointer);
+    uint64_t status = mica_kernel_program_put(tx, id, integer(tenant), body.f_pointer);
+    assert(mica_memory_root_pop(tx->f_worker, &body));
+    return status;
+}
+static uint64_t program_marker(struct mica_KernelTransaction *tx, uint64_t id) {
+    struct mica_KernelProgramResult result = mica_kernel_program_get(tx, id);
+    assert(result.f_status == OK && result.f_program && result.f_program->f_body);
+    return ((struct mica_KernelProgram *)result.f_program->f_body)->f_id;
+}
+static void program_catalogue(void) {
+    struct fixture f;
+    init_with_history(&f, 1);
+    declare(&f, 1, SET);
+    struct mica_KernelTransaction left, right;
+    begin(&f, &left);
+    assert(put_program(&left, 1, 7, 111) == OK);
+    assert(write_pair(&left, 1, 1, 111, true) == OK);
+    assert(program_marker(&left, 1) == 111);
+    begin(&f, &right);
+    assert(mica_kernel_program_get(&right, 1).f_status == UNKNOWN);
+    assert(count(&right, 1) == 0);
+    assert(mica_kernel_end(&right));
+    assert(mica_kernel_end(&left));
+    begin(&f, &left);
+    assert(mica_kernel_program_get(&left, 1).f_status == UNKNOWN);
+    assert(count(&left, 1) == 0);
+    assert(put_program(&left, 1, 7, 111) == OK);
+    assert(write_pair(&left, 1, 1, 111, true) == OK);
+    assert(mica_kernel_commit(&left) == OK && mica_kernel_end(&left));
+
+    // A held snapshot retains its compiled body across replacement and GC.
+    begin(&f, &left);
+    begin(&f, &right);
+    assert(put_program(&right, 1, 7, 222) == OK);
+    assert(write_pair(&right, 1, 2, 222, true) == OK);
+    assert(mica_kernel_commit(&right) == OK && mica_kernel_end(&right));
+    assert(mica_memory_safepoint(&f.worker, true));
+    assert(program_marker(&left, 1) == 111 && count(&left, 1) == 1);
+    assert(mica_kernel_end(&left));
+    begin(&f, &left);
+    assert(program_marker(&left, 1) == 222 && count(&left, 1) == 2);
+    assert(put_program(&left, 1, 7, 333) == OK);
+    assert(write_pair(&left, 1, 3, 333, true) == OK);
+    begin(&f, &right);
+    assert(put_program(&right, 1, 7, 444) == OK);
+    assert(write_pair(&right, 1, 4, 444, true) == OK);
+    assert(mica_kernel_commit(&right) == OK && mica_kernel_end(&right));
+    assert(mica_kernel_commit(&left) == CONFLICT);
+    assert(mica_kernel_work(&left)->f_conflict_program == 1);
+    assert(mica_kernel_end(&left));
+    begin(&f, &left);
+    assert(program_marker(&left, 1) == 444 && count(&left, 1) == 3);
+    assert(mica_kernel_end(&left));
+
+    // Independent program installations rebase, including the absent-base case.
+    begin(&f, &left);
+    assert(put_program(&left, 2, 7, 2222) == OK);
+    begin(&f, &right);
+    assert(put_program(&right, 3, 7, 3333) == OK);
+    assert(mica_kernel_commit(&right) == OK && mica_kernel_end(&right));
+    assert(mica_kernel_commit(&left) == OK && mica_kernel_end(&left));
+    begin(&f, &left);
+    assert(program_marker(&left, 2) == 2222 && program_marker(&left, 3) == 3333);
+    uint64_t version = mica_kernel_version(&left);
+    assert(put_program(&left, 4, 7, 4) == OK);
+    assert(mica_kernel_program_remove(&left, 4) == OK);
+    assert(mica_kernel_program_get(&left, 4).f_status == UNKNOWN);
+    assert(mica_kernel_commit(&left) == OK && mica_kernel_version(&left) == version);
+    assert(mica_kernel_end(&left));
+    begin(&f, &left);
+    assert(put_program(&left, 4, 7, 41) == OK);
+    begin(&f, &right);
+    assert(put_program(&right, 4, 7, 42) == OK);
+    assert(mica_kernel_commit(&right) == OK && mica_kernel_end(&right));
+    assert(mica_kernel_commit(&left) == CONFLICT);
+    assert(mica_kernel_work(&left)->f_conflict_program == 4 && mica_kernel_end(&left));
+
+    begin(&f, &left);
+    assert(put_program(&left, 2, 7, 555) == OK);
+    uint64_t limit = mica_kernel_work(&left)->f_bytes_limit;
+    mica_kernel_work(&left)->f_bytes_limit = 0;
+    assert(put_program(&left, 2, 7, 666) == LIMIT);
+    mica_kernel_work(&left)->f_bytes_limit = limit;
+    assert(program_marker(&left, 2) == 555);
+    assert(mica_kernel_commit(&left) == OK && mica_kernel_end(&left));
+    begin(&f, &left);
+    assert(mica_kernel_program_remove(&left, 3) == OK);
+    assert(mica_kernel_program_remove(&left, 3) == UNKNOWN);
+    assert(mica_kernel_commit(&left) == OK && mica_kernel_end(&left));
+    begin(&f, &left);
+    assert(mica_kernel_program_get(&left, 3).f_status == UNKNOWN);
+    assert(put_program(&left, 5, 7, 5) == OK);
+    assert(mica_kernel_cancel(&left));
+    assert(mica_kernel_commit(&left) == CANCELLED && mica_kernel_end(&left));
+    begin(&f, &left);
+    assert(mica_kernel_program_get(&left, 5).f_status == UNKNOWN);
+    assert(mica_kernel_end(&left));
+    assert(mica_kernel_program_get(&left, 1).f_status == CLOSED);
+    destroy(&f);
+}
+static void program_catalogue_authority(void) {
+    struct fixture f;
+    init(&f);
+    configure_policy(&f);
+    struct mica_KernelTransaction tx, policy;
+    begin_tenant(&f, &tx, 9);
+    assert(put_program(&tx, 1, 9, 1) == PERMISSION);
+    assert(mica_kernel_end(&tx));
+    begin_tenant(&f, &tx, 8);
+    assert(put_program(&tx, 1, 7, 1) == PERMISSION);
+    assert(put_program(&tx, 1, 8, 1) == OK);
+    assert(mica_kernel_commit(&tx) == OK && mica_kernel_end(&tx));
+    begin_tenant(&f, &tx, 10);
+    assert(put_program(&tx, 1, 10, 2) == PERMISSION);
+    assert(mica_kernel_program_remove(&tx, 1) == PERMISSION);
+    assert(mica_kernel_end(&tx));
+    begin_tenant(&f, &tx, 8);
+    assert(put_program(&tx, 2, 8, 2) == OK);
+    begin(&f, &policy);
+    policy_fact(&policy, 4, 8, 0, false);
+    assert(mica_kernel_commit(&policy) == OK && mica_kernel_end(&policy));
+    assert(mica_kernel_commit(&tx) == CONFLICT && mica_kernel_end(&tx));
+    begin(&f, &tx);
+    assert(program_marker(&tx, 1) == 1);
+    assert(mica_kernel_program_get(&tx, 2).f_status == UNKNOWN);
+    assert(mica_kernel_end(&tx));
+    destroy(&f);
+}
+
 int main(int argc, char **argv) {
     if (argc == 2 && !strcmp(argv[1], "trace")) return trace(false);
     if (argc == 3 && !strcmp(argv[1], "rule-bench")) return rule_measurements((unsigned)strtoul(argv[2], NULL, 10));
     if (argc == 2 && !strcmp(argv[1], "rules")) return trace(true);
     if (argc == 5 && !strcmp(argv[1], "bench")) return benchmark(argv[2], (unsigned)strtoul(argv[3], NULL, 10), (unsigned)strtoul(argv[4], NULL, 10));
     assert(argc == 1);
+    program_catalogue();
+    program_catalogue_authority();
+    commit_history();
+    history_initialization();
+    history_version_limit();
     source_rules();
     inactive_authority();
     transactional_authority();

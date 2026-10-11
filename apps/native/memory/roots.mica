@@ -24,8 +24,10 @@ verb native_roots/ref(builder: map, name: string) -> map
   return value
 end
 verb native_roots/root_value(builder: map, root: map, kind) -> map
-  let value: map = native_gen/call(builder, "value_root_get", [root])
-  if kind != native_value/word()
+  let value: map = {}
+  if kind == native_value/word()
+    value = native_gen/call(builder, "value_root_get", [root])
+  else
     value = native_gen/cast(kind, native_gen/root_read(native_gen/field(builder, root, "pointer")))
   end
   value[:scope_root] = root

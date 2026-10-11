@@ -1,0 +1,32 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+// A generated sink records completed deliveries in a caller-owned rooted
+// record. Forced collection inside each service checks the dispatch cursor
+// and the managed arguments through the service call.
+verb native_tasks/test_services(input: map) -> map
+  let module: map = input
+  module[:state] = native/record_type(module[:state], "TaskServiceProbe", [
+    ["calls", :U64], ["delivered", :U64], ["order", :U64], ["fail_at", :U64], ["snapshot_version", :U64],
+    ["last", [:Record, "MemoryRoot"]]])[1]
+  for kind in ["emit", "send", "subscribe", "spawn"]
+    let name: string = string_concat("test_service_", kind)
+    module = native_tasks/declare(module, name, :U64, native_tasks/service_parameters())
+    let builder: map = native_tasks/context(module, name)
+    let probe: map = native_gen/cast(native_tasks/pointer("ServiceProbe"), native_gen/ref(builder, "context"))
+    builder = native_kernel/store_field(builder, probe, "calls", native_gen/add(native_kernel/load_field(builder, probe, "calls"), native_gen/ref(builder, "one")))
+    builder = native_tasks/check(builder, native_gen/call(builder, "memory_safepoint", [native_gen/ref(builder, "worker"), native_gen/ref(builder, "true")]), "oom")
+    builder = native_tasks/check(builder, native_gen/negate(native_kernel/absent(native_roots/ref(builder, "snapshot"))), "schema")
+    builder = native_kernel/store_field(builder, probe, "snapshot_version", native_kernel/load_field(builder, native_roots/ref(builder, "snapshot"), "version"))
+    builder = native_gen/when(builder, native_gen/equal(native_kernel/load_field(builder, probe, "calls"), native_kernel/load_field(builder, probe, "fail_at")),
+      fn(failed) => native_tasks/attempt_status(failed, "permission"))
+    builder = native_kernel/store_field(builder, probe, "delivered", native_gen/add(native_kernel/load_field(builder, probe, "delivered"), native_gen/ref(builder, "one")))
+    let order: map = native_gen/add(native_gen/multiply(native_kernel/load_field(builder, probe, "order"), native_gen/ref(builder, "kernel_64")),
+      native_gen/ref(builder, string_concat("task_effect_", kind)))
+    builder = native_kernel/store_field(builder, probe, "order", order)
+    builder = native_gen/do_call(builder, "value_root_set", [native_gen/field(builder, probe, "last")[:pointer], native_tasks/effect_field(builder, "payload")])
+    builder = native_tasks/attempt_status(builder, "ok")
+    module = native_gen/finish(module, builder)
+  end
+  return module
+end

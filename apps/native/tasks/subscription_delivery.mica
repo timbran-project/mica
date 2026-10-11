@@ -1,0 +1,120 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+// A claim copies managed references while holding the registry lock. The pump
+// roots that result before scanning and never retains the native entry pointer.
+// Cancellation may then retire the entry without waiting for the scan.
+verb native_subscriptions/claim_body(module: map) -> map
+  let builder: map = native_subscriptions/locked(module, "claim")
+  let [link: map, found: map] = native_subscriptions/find(builder, native_gen/ref(builder, "id"))
+  let [entry: map, loaded: map] = native_gen/bind(found, "entry", native_gen/load(link))
+  builder = native_rules/check(loaded, native_gen/negate(native_kernel/absent(entry)), "closed")
+  builder = native_gen/when(builder, native_kernel/load_field(builder, entry, "busy"),
+    fn(busy) => native_execution/fail(native_kernel/store_field(busy, entry, "wake", native_gen/ref(busy, "true")), native_gen/ref(busy, "kernel_ok")))
+  builder = native_rules/check(builder, native_gen/less(native_kernel/load_field(builder, entry, "claim"), native_gen/ref(builder, "kernel_unlimited")), "limit")
+  builder = native_kernel/store_field(builder, entry, "claim", native_gen/add(native_kernel/load_field(builder, entry, "claim"), native_gen/ref(builder, "one")))
+  builder = native_kernel/store_field(builder, entry, "busy", native_gen/ref(builder, "true"))
+  builder = native_roots/return_value(builder, native_gen/record(builder, [:Record, "TaskSubscriptionClaim"], {
+    "status" -> native_gen/ref(builder, "kernel_ok"), "ready" -> native_gen/ref(builder, "true"),
+    "claim" -> native_kernel/load_field(builder, entry, "claim"),
+    "cursor" -> native_kernel/load_field(builder, entry, "cursor"),
+    "initial" -> native_kernel/load_field(builder, entry, "initial"),
+    "request" -> native_subscriptions/root(builder, entry, "request"),
+    "view" -> native_subscriptions/root(builder, entry, "view")}))
+  let result: map = native_gen/finish(module, builder)
+  return result
+end
+
+// Called after an unsuccessful scan, including allocation failure or a budget
+// refusal. Unique resource IDs make a retired registration distinguishable from
+// every later registration, even if the allocator reuses its native address.
+// A claim generation also prevents delayed cleanup from clearing a later claim.
+verb native_subscriptions/unclaim_body(module: map) -> map
+  let builder: map = native_subscriptions/locked(module, "unclaim", false)
+  let [link: map, found: map] = native_subscriptions/find(builder, native_gen/ref(builder, "id"))
+  builder = native_gen/unless(found, native_kernel/absent(native_gen/load(link)), fn(present)
+    return native_gen/when(present, native_gen/equal(native_kernel/load_field(present, native_gen/load(link), "claim"), native_gen/ref(present, "claim")), fn(owner)
+      return native_subscriptions/release_claim(owner, native_gen/load(link))
+    end)
+  end)
+  let result: map = native_gen/finish(module, native_execution/fail(builder, native_gen/ref(builder, "kernel_ok")))
+  return result
+end
+
+// Queue acceptance and cursor advancement share the registry lock. The mailbox
+// operation allocates before mutation. A refusal therefore leaves this batch
+// retryable; successful terminal or overflow delivery retires the registration.
+verb native_subscriptions/accept_body(module: map) -> map
+  let builder: map = native_subscriptions/locked(module, "accept")
+  let id: map = native_gen/ref(builder, "id")
+  let [link: map, found: map] = native_subscriptions/find(builder, id)
+  let [entry: map, loaded: map] = native_gen/bind(found, "entry", native_gen/load(link))
+  builder = native_rules/check(loaded, native_gen/negate(native_kernel/absent(entry)), "closed")
+  builder = native_rules/check(builder, native_kernel/load_field(builder, entry, "busy"), "closed")
+  builder = native_rules/check(builder, native_gen/equal(native_gen/ref(builder, "claim"), native_kernel/load_field(builder, entry, "claim")), "closed")
+  builder = native_rules/check(builder, native_gen/equal(native_gen/ref(builder, "previous"), native_kernel/load_field(builder, entry, "cursor")), "schema")
+  builder = native_rules/check(builder, native_gen/equal(native_gen/ref(builder, "initial"), native_kernel/load_field(builder, entry, "initial")), "schema")
+  // Cleanup runs before unlock. Look up by ID again because retirement below
+  // can free the entry. It cannot clear a different pump's claim under this lock.
+  builder = native_gen/on_return(builder, fn(leaving, result)
+    let [current: map, located: map] = native_subscriptions/find(leaving, id)
+    return native_gen/unless(located, native_kernel/absent(native_gen/load(current)), fn(present)
+      return native_subscriptions/release_claim(present, native_gen/load(current))
+    end)
+  end)
+  builder = native_gen/when(builder, native_gen/ref(builder, "send"), fn(deliver)
+    let request: map = native_subscriptions/root(deliver, entry, "request")
+    let [result: map, sent: map] = native_gen/bind(deliver, "delivery", native_gen/call(deliver, "task_mailbox_stream_send", [
+      native_subscriptions/field(deliver, "mailboxes"), native_roots/worker(deliver),
+      native_kernel/load_field(deliver, request, "sender"), id, native_roots/ref(deliver, "payload"),
+      native_roots/ref(deliver, "overflow"), native_gen/ref(deliver, "terminal")]))
+    let status: map = native_gen/field(sent, result, "status")
+    let ready: map = native_gen/unless(sent, native_kernel/absent(status), fn(failed)
+      // A closed mailbox or already retired stream cannot recover on retry.
+      let retired: map = native_gen/when(failed, native_gen/equal(status, native_gen/ref(failed, "kernel_closed")),
+        fn(closed) => native_subscriptions/retire(closed, link))
+      retired = native_gen/when(retired, native_gen/equal(status, native_gen/ref(retired, "kernel_permission")),
+        fn(closed) => native_subscriptions/retire(closed, link))
+      return native_execution/fail(retired, status)
+    end)
+    return native_gen/when(ready, native_gen/field(ready, result, "replaced"), fn(terminal)
+      return native_execution/fail(native_subscriptions/retire(terminal, link), native_gen/ref(terminal, "kernel_ok"))
+    end)
+  end)
+  builder = native_kernel/store_field(builder, entry, "cursor", native_gen/ref(builder, "cursor"))
+  builder = native_kernel/store_field(builder, entry, "initial", native_gen/ref(builder, "false"))
+  // Active managed workers exclude collection; the registry lock excludes
+  // readers of this shared root. Clearing its pointer requires no allocation.
+  builder = native_roots/store(builder, native_subscriptions/root(builder, entry, "view"), native_gen/zero(native_kernel/pointer("Snapshot")))
+  let result: map = native_gen/finish(module, native_execution/fail(builder, native_gen/ref(builder, "kernel_ok")))
+  return result
+end
+
+verb native_subscriptions/delivery(input: map) -> map
+  let module: map = input
+  module[:state] = native/record_type(module[:state], "TaskSubscriptionClaim", [
+    ["status", :U64], ["ready", :Bool], ["claim", :U64], ["cursor", :U64], ["initial", :Bool],
+    ["request", native_tasks/pointer("SubscriptionRequest")], ["view", native_kernel/pointer("Snapshot")]])[1]
+  let common: list = [["hub", native_tasks/pointer("SubscriptionHub"), :Borrow],
+    ["worker", native_memory/record_pointer("MemoryWorker"), :Borrow], ["id", :U64, :Value]]
+  module = native_tasks/declare(module, "subscription_claim", [:Record, "TaskSubscriptionClaim"], common, :Gc)
+  module = native_tasks/declare(module, "subscription_unclaim", :U64, [@common, ["claim", :U64, :Value]])
+  module = native_tasks/declare(module, "subscription_accept", :U64, [@common, ["claim", :U64, :Value],
+    ["previous", :U64, :Value], ["initial", :Bool, :Value], ["cursor", :U64, :Value],
+    ["send", :Bool, :Value], ["payload", native_value/word(), :Gc], ["overflow", native_value/word(), :Gc], ["terminal", :Bool, :Value]])
+  module = native_subscriptions/claim_body(module)
+  module = native_subscriptions/unclaim_body(module)
+  module = native_subscriptions/accept_body(module)
+  return module
+end
+
+// A competing dispatcher asks for a wake while the current claim is busy.
+// Normal completion does not signal itself, so caught-up event loops can park.
+verb native_subscriptions/release_claim(builder: map, entry: map) -> map
+  let ready: map = native_kernel/store_field(builder, entry, "busy", native_gen/ref(builder, "false"))
+  let result: map = native_gen/when(ready, native_kernel/load_field(ready, entry, "wake"), fn(waiting)
+    let cleared: map = native_kernel/store_field(waiting, entry, "wake", native_gen/ref(waiting, "false"))
+    return native_subscriptions/notify(cleared)
+  end)
+  return result
+end

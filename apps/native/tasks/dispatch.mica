@@ -1,0 +1,88 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+// Selection operates on an already acquired transaction view. These helpers
+// neither authorize invocation nor transfer control to a method entry.
+verb native_dispatch/match_result(builder: map, matched: map) -> map
+  let result: map = native_roots/return_value(builder, native_gen/record(builder, [:Record, "TaskDispatchMatch"], {
+    "status" -> native_gen/ref(builder, "kernel_ok"), "matched" -> matched}))
+  return result
+end
+
+// The private queue and visited index share immutable singleton rows. A vertex
+// enters the queue once; cycles and diamonds do not multiply the traversal.
+verb native_dispatch/enqueue(builder: map, visited: map, pending: map, vertex: map) -> map
+  let [row: map, built: map] = native_query/tuple(builder, [vertex])
+  let [found: map, searched: map] = native_gen/bind(built, "visited", native_gen/call(built, "kernel_find", [
+    visited, row, native_gen/ref(built, "zero"), native_gen/ref(built, "false")]))
+  let result: map = native_gen/when(searched, native_kernel/absent(found), fn(unseen)
+    let indexed: map = native_query/offer(unseen, visited, row)
+    let [queue: map, appended: map] = native_query/value(indexed, "kernel_query_append", [native_roots/worker(indexed), pending, row])
+    return native_roots/store(appended, pending, queue)
+  end)
+  return result
+end
+
+verb native_dispatch/context(module: map, name: string) -> map
+  let builder: map = native_query/context(module, string_concat("task_", name))
+  builder = native_execution/control_scope(builder, native_roots/worker(builder), native_roots/ref(builder, "budget"))
+  let relation: map = native_roots/ref(builder, "delegates")
+  builder = native_query/check(builder, native_gen/negate(native_kernel/absent(relation)), "unknown")
+  let width: map = native_gen/add(native_gen/ref(builder, "two"), native_gen/ref(builder, "one"))
+  let result: map = native_query/check(builder, native_gen/equal(native_kernel/load_field(builder, relation, "arity"), width), "arity")
+  return result
+end
+
+// Visit singleton vertex rows between safepoints. The visitor can return early;
+// otherwise this builds the complete reachable set for selection-local reuse.
+verb native_dispatch/walk(builder: map, relation: map, source: map, visit) -> list
+  let [empty: map, with_empty: map] = native_query/tuple(builder, [])
+  let [pending: map, queue_rooted: map] = native_roots/retain(with_empty, "pending", empty)
+  let [visited: map, index_rooted: map] = native_query/row_set(queue_rooted)
+  let ready: map = native_dispatch/enqueue(index_rooted, visited, pending, source)
+  let [position: map, with_position: map] = native_gen/bind(ready, "position", native_gen/ref(ready, "zero"))
+  let [ticks: map, with_ticks: map] = native_gen/bind(with_position, "visited_edges", native_gen/ref(with_position, "zero"))
+  ready = native_gen/while_loop(with_ticks, native_gen/less(position, native_query/width(with_ticks, pending)), fn(iteration)
+    return native_roots/temporary(iteration, fn(step)
+      let polled: map = native_query/poll_interval(step, position)
+      let [current: map, with_current: map] = native_gen/bind(polled, "vertex", native_query/cell(polled, pending, position))
+      let checked: map = visit(with_current, current)
+      let [pattern: map, built: map] = native_query/tuple(checked, [native_query/cell(checked, current, native_gen/ref(checked, "zero")),
+        native_gen/zero(native_value/word()), native_gen/zero(native_value/word())])
+      let [rooted: map, retained: map] = native_roots/retain(built, "pattern", pattern)
+      checked = native_query/scan_rows(retained, relation, rooted, native_gen/ref(retained, "one"), native_gen/address(ticks), fn(edge, row)
+        return native_dispatch/enqueue(edge, visited, pending, native_query/cell(edge, row, native_gen/ref(edge, "one")))
+      end)
+      return native_gen/assign(checked, position, native_gen/add(position, native_gen/ref(checked, "one")))
+    end)
+  end)
+  return [visited, ready]
+end
+
+verb native_dispatch/reaches_body(module: map) -> map
+  let builder: map = native_dispatch/context(module, "dispatch_reaches")
+  let [target: map, with_target: map] = native_query/tuple(builder, [native_roots/ref(builder, "target")])
+  let [required: map, rooted: map] = native_roots/retain(with_target, "required", target)
+  let [visited: map, completed: map] = native_dispatch/walk(rooted, native_roots/ref(rooted, "delegates"), native_roots/ref(rooted, "source"), fn(step, current)
+    let equal: map = native_kernel/absent(native_kernel/compare_rows(step, current, required, native_kernel/tuple_order(native_gen/ref(step, "zero"))))
+    return native_gen/when(step, equal, fn(found) => native_dispatch/match_result(found, native_gen/ref(found, "true")))
+  end)
+  let result: map = native_gen/finish(module, native_dispatch/match_result(completed, native_gen/ref(completed, "false")))
+  return result
+end
+
+verb native_dispatch/program(input: map) -> map
+  let module: map = input
+  module[:state] = native/record_type(module[:state], "TaskDispatchMatch", [["status", :U64], ["matched", :Bool]])[1]
+  module = native_tasks/declare(module, "dispatch_reaches", [:Record, "TaskDispatchMatch"], [
+    ["worker", native_memory/record_pointer("MemoryWorker"), :Borrow],
+    ["delegates", native_kernel/pointer("Relation"), :Gc],
+    ["source", native_value/word(), :Gc], ["target", native_value/word(), :Gc],
+    ["budget", native_kernel/pointer("Budget"), :Borrow]])
+  module = native_dispatch/reaches_body(module)
+  module = native_dispatch/bindings(module)
+  module = native_dispatch/restrictions(module)
+  module = native_dispatch/signatures(module)
+  let result: map = native_dispatch/selection(module)
+  return result
+end

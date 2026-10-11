@@ -1,0 +1,215 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+// Task controls have stable native storage. Their roots are registered in the
+// heap; all other fields are protected by their mutex. Release needs exclusive
+// ownership, after workers and event producers have relinquished the control.
+verb native_tasks/control_field(builder: map, field: string) -> map
+  let result: map = native_kernel/load_field(builder, native_gen/ref(builder, "task"), field)
+  return result
+end
+verb native_tasks/control_slot(builder: map, field: string) -> map
+  let result: map = native_gen/field(builder, native_gen/ref(builder, "task"), field)[:pointer]
+  return result
+end
+verb native_tasks/control_store(builder: map, field: string, value: map) -> map
+  let result: map = native_kernel/store_field(builder, native_gen/ref(builder, "task"), field, value)
+  return result
+end
+verb native_tasks/unlock(builder: map) -> map
+  let result: map = native_gen/do_call(builder, "memory_unlock", [native_tasks/control_field(builder, "mutex")])
+  return result
+end
+verb native_tasks/locked_status(builder: map, status: string) -> map
+  let result: map = native_tasks/attempt_status(native_tasks/unlock(builder), status)
+  return result
+end
+verb native_tasks/lock(builder: map) -> map
+  let result: map = native_gen/unless(builder, native_gen/call(builder, "task_lock", [native_gen/ref(builder, "task"), native_gen/ref(builder, "worker")]),
+    fn(failed) => native_tasks/attempt_status(failed, "closed"))
+  return result
+end
+verb native_tasks/state(builder: map, name: string) -> map
+  let result: map = native_tasks/control_store(builder, "state", native_gen/ref(builder, string_concat("task_state_", name)))
+  return result
+end
+
+verb native_tasks/control_declarations(input: map) -> map
+  let module: map = input
+  module[:state] = native/record_type(module[:state], "TaskObservation", [
+    ["status", :U64], ["state", :U64], ["generation", :U64], ["outcome", :U64], ["committed", :Bool]])[1]
+  let task: list = ["task", native_tasks/pointer("Control"), :Borrow]
+  let worker: list = ["worker", native_memory/record_pointer("MemoryWorker"), :Borrow]
+  let attempt: list = ["attempt", native_tasks/pointer("Attempt"), :Borrow]
+  module = native_tasks/declare(module, "lock", :Bool, [task, worker])
+  module = native_tasks/declare(module, "init", :U64, [task, worker,
+    ["kernel", native_memory/record_pointer("Kernel"), :Borrow], ["image", native_memory/record_pointer("MemoryRoot"), :Borrow],
+    ["remaining", :U64, :Value], ["retries", :U64, :Value], ["depth_limit", :U64, :Value]])
+  module = native_tasks/declare(module, "release", :Bool, [task, worker])
+  module = native_tasks/declare(module, "cancel", :Bool, [task])
+  module = native_tasks/declare(module, "observe", [:Record, "TaskObservation"], [task, worker])
+  module = native_tasks/declare(module, "error", :U64, [task, worker, ["error", native_memory/record_pointer("MemoryRoot"), :Borrow]])
+  module = native_tasks/declare(module, "fail_wait", :U64, [task, worker, ["generation", :U64, :Value], ["status", :U64, :Value]])
+  module = native_tasks/declare(module, "claim", :U64, [task, worker, attempt])
+  module = native_tasks/declare(module, "detach", :U64, [task, worker])
+  module = native_tasks/declare(module, "attach", :U64, [task, worker, attempt])
+  return module
+end
+
+verb native_tasks/control_lifecycle(input: map) -> map
+  let module: map = input
+  let builder: map = native_gen/context(module, "task_lock")
+  let worker: map = native_gen/ref(builder, "worker")
+  builder = native_gen/when(builder, native_kernel/absent(native_tasks/control_field(builder, "mutex")), fn(closed) => native_gen/return_value(closed, native_gen/ref(closed, "false")))
+  builder = native_gen/unless(builder, native_gen/equal(native_kernel/load_field(builder, worker, "heap"),
+    native_kernel/load_field(builder, native_tasks/control_field(builder, "kernel"), "heap")),
+    fn(wrong_heap) => native_gen/return_value(wrong_heap, native_gen/ref(wrong_heap, "false")))
+  // A task-lock waiter must not prevent the lock owner from collecting.
+  builder = native_gen/unless(builder, native_gen/call(builder, "memory_leave", [worker]), fn(failed) => native_gen/return_value(failed, native_gen/ref(failed, "false")))
+  builder = native_gen/do_call(builder, "memory_lock", [native_tasks/control_field(builder, "mutex")])
+  builder = native_gen/unless(builder, native_gen/call(builder, "memory_enter", [worker]), fn(failed)
+    return native_gen/return_value(native_tasks/unlock(failed), native_gen/ref(failed, "false"))
+  end)
+  builder = native_gen/return_value(builder, native_gen/ref(builder, "true"))
+  module = native_gen/finish(module, builder)
+
+  builder = native_gen/context(module, "task_init")
+  builder = native_gen/unless(builder, native_kernel/absent(native_tasks/control_field(builder, "mutex")), fn(busy) => native_tasks/attempt_status(busy, "closed"))
+  builder = native_gen/unless(builder, native_gen/equal(native_kernel/load_field(builder, native_gen/ref(builder, "worker"), "heap"), native_kernel/load_field(builder, native_gen/ref(builder, "kernel"), "heap")), fn(wrong) => native_tasks/attempt_status(wrong, "schema"))
+  let [mutex: map, allocated: map] = native_gen/bind(builder, "mutex", native_gen/call(builder, "memory_sync_create", []))
+  builder = native_gen/when(allocated, native_kernel/absent(mutex), fn(failed) => native_tasks/attempt_status(failed, "oom"))
+  builder = native_gen/root_write(builder, native_gen/field(builder, native_gen/ref(builder, "task"), "mutex"), native_gen/manage(mutex))
+  builder = native_gen/root_write(builder, native_gen/field(builder, native_gen/ref(builder, "task"), "kernel"), native_gen/manage(native_gen/ref(builder, "kernel")))
+  builder = native_gen/unless(builder, native_gen/call(builder, "memory_publish", [native_gen/ref(builder, "worker"), native_gen/ref(builder, "image"), native_tasks/control_slot(builder, "image")]), fn(failed)
+    let ready: map = native_gen/do_call(failed, "memory_sync_destroy", [mutex])
+    ready = native_gen/store(ready, native_gen/ref(ready, "task"), native_gen/zero([:Record, "TaskControl"]))
+    return native_tasks/attempt_status(ready, "oom")
+  end)
+  for name in ["remaining", "retries", "depth_limit"]
+    builder = native_tasks/control_store(builder, name, native_gen/ref(builder, name))
+  end
+  builder = native_tasks/state(builder, "runnable")
+  builder = native_tasks/attempt_status(builder, "ok")
+  module = native_gen/finish(module, builder)
+
+  builder = native_gen/context(module, "task_release")
+  builder = native_gen/unless(builder, native_kernel/absent(native_tasks/control_field(builder, "scheduler")), fn(admitted) => native_gen/return_value(admitted, native_gen/ref(admitted, "false")))
+  // No event producer may race release. Terminal controls can retain results
+  // until their owner explicitly releases them.
+  builder = native_gen/when(builder, native_kernel/absent(native_tasks/control_field(builder, "mutex")), fn(closed) => native_gen/return_value(closed, native_gen/ref(closed, "false")))
+  for state_name in ["running", "delivering"]
+    builder = native_gen/when(builder, native_gen/equal(native_tasks/control_field(builder, "state"), native_gen/ref(builder, string_concat("task_state_", state_name))), fn(busy) => native_gen/return_value(busy, native_gen/ref(busy, "false")))
+  end
+  builder = native_gen/unless(builder, native_kernel/absent(native_tasks/control_field(builder, "active")), fn(busy) => native_gen/return_value(busy, native_gen/ref(busy, "false")))
+  for name in ["error", "event", "committed_view", "prepared", "image"]
+    let root: map = native_tasks/control_slot(builder, name)
+    builder = native_gen/unless(builder, native_kernel/absent(native_kernel/load_field(builder, root, "registration")), fn(registered)
+      return native_gen/unless(registered, native_gen/call(registered, "memory_unpublish", [native_gen/ref(registered, "worker"), root]), fn(failed) => native_gen/return_value(failed, native_gen/ref(failed, "false")))
+    end)
+  end
+  builder = native_gen/do_call(builder, "memory_sync_destroy", [native_tasks/control_field(builder, "mutex")])
+  builder = native_gen/store(builder, native_gen/ref(builder, "task"), native_gen/zero([:Record, "TaskControl"]))
+  builder = native_gen/return_value(builder, native_gen/ref(builder, "true"))
+  module = native_gen/finish(module, builder)
+
+  builder = native_tasks/lock(native_gen/context(module, "task_error"))
+  builder = native_gen/unless(builder, native_gen/equal(native_tasks/control_field(builder, "state"), native_gen/ref(builder, "task_state_failed")), fn(closed) => native_tasks/locked_status(closed, "closed"))
+  builder = native_gen/unless(builder, native_gen/equal(native_tasks/control_field(builder, "status"), native_gen/ref(builder, "task_language_error")), fn(closed) => native_tasks/locked_status(closed, "closed"))
+  builder = native_gen/unless(builder, native_gen/call(builder, "memory_acquire", [native_gen/ref(builder, "worker"), native_tasks/control_slot(builder, "error"), native_gen/ref(builder, "error")]), fn(failed) => native_tasks/locked_status(failed, "closed"))
+  module = native_gen/finish(module, native_tasks/locked_status(builder, "ok"))
+
+  builder = native_gen/context(module, "task_observe")
+  builder = native_gen/unless(builder, native_gen/call(builder, "task_lock", [native_gen/ref(builder, "task"), native_gen/ref(builder, "worker")]),
+    fn(failed) => native_execution/fail(failed, native_gen/ref(failed, "kernel_closed")))
+  builder = native_gen/on_return(builder, fn(leaving, result) => native_tasks/unlock(leaving))
+  builder = native_gen/return_value(builder, native_gen/record(builder, [:Record, "TaskObservation"], {
+    "status" -> native_gen/ref(builder, "kernel_ok"), "state" -> native_tasks/control_field(builder, "state"),
+    "generation" -> native_tasks/control_field(builder, "generation"), "outcome" -> native_tasks/control_field(builder, "status"),
+    "committed" -> native_tasks/control_field(builder, "committed")}))
+  module = native_gen/finish(module, builder)
+
+  // A failed registration competes with cancellation and readiness through the
+  // same task lock. It cannot overwrite an accepted wake or a later generation.
+  builder = native_tasks/lock(native_gen/context(module, "task_fail_wait"))
+  builder = native_gen/when(builder, native_kernel/absent(native_gen/ref(builder, "status")), fn(invalid) => native_tasks/locked_status(invalid, "schema"))
+  builder = native_gen/unless(builder, native_gen/equal(native_tasks/control_field(builder, "state"), native_gen/ref(builder, "task_state_waiting")),
+    fn(closed) => native_tasks/locked_status(closed, "closed"))
+  builder = native_gen/unless(builder, native_gen/equal(native_tasks/control_field(builder, "generation"), native_gen/ref(builder, "generation")),
+    fn(stale) => native_tasks/locked_status(stale, "closed"))
+  builder = native_tasks/control_store(builder, "status", native_gen/ref(builder, "status"))
+  builder = native_tasks/state(builder, "failed")
+  builder = native_tasks/locked_status(builder, "ok")
+  module = native_gen/finish(module, builder)
+  return module
+end
+
+verb native_tasks/cancel_body(module: map) -> map
+  let builder: map = native_gen/context(module, "task_cancel")
+  builder = native_gen/when(builder, native_kernel/absent(native_tasks/control_field(builder, "mutex")), fn(closed) => native_gen/return_value(closed, native_gen/ref(closed, "false")))
+  // This entry is for event threads outside managed execution. The caller
+  // retains the control until this call returns; it never reads managed data.
+  builder = native_gen/do_call(builder, "memory_lock", [native_tasks/control_field(builder, "mutex")])
+  for state_name in ["completed", "cancelled", "failed"]
+    builder = native_gen/when(builder, native_gen/equal(native_tasks/control_field(builder, "state"), native_gen/ref(builder, string_concat("task_state_", state_name))), fn(terminal) => native_gen/return_value(native_tasks/unlock(terminal), native_gen/ref(terminal, "false")))
+  end
+  let [accepted: map, ready: map] = native_gen/bind(builder, "accepted", native_gen/ref(builder, "true"))
+  builder = native_gen/unless(ready, native_kernel/absent(native_tasks/control_field(ready, "active")), fn(running)
+    return native_gen/assign(running, accepted, native_gen/call(running, "kernel_cancel", [native_tasks/control_field(running, "active")]))
+  end)
+  builder = native_gen/when(builder, accepted, fn(cancelled)
+    let body: map = native_tasks/control_store(cancelled, "cancel_requested", native_gen/ref(cancelled, "true"))
+    for state_name in ["runnable", "waiting"]
+      body = native_gen/when(body, native_gen/equal(native_tasks/control_field(body, "state"), native_gen/ref(body, string_concat("task_state_", state_name))), fn(idle) => native_tasks/state(idle, "cancelled"))
+    end
+    return body
+  end)
+  builder = native_gen/return_value(native_tasks/unlock(builder), accepted)
+  let result: map = native_gen/finish(module, builder)
+  return result
+end
+
+verb native_tasks/attach_body(module: map) -> map
+  let builder: map = native_tasks/lock(native_gen/context(module, "task_attach"))
+  builder = native_gen/root_write(builder, native_gen/field(builder, native_gen/ref(builder, "task"), "active"), native_gen/manage(native_tasks/slot(builder, "transaction")))
+  builder = native_gen/when(builder, native_tasks/control_field(builder, "cancel_requested"), fn(cancelled)
+    let [accepted: map, ready: map] = native_gen/bind(cancelled, "accepted", native_gen/call(cancelled, "kernel_cancel", [native_tasks/slot(cancelled, "transaction")]))
+    return native_tasks/locked_status(ready, "cancelled")
+  end)
+  builder = native_tasks/locked_status(builder, "ok")
+  let result: map = native_gen/finish(module, builder)
+  return result
+end
+
+verb native_tasks/claim_body(module: map) -> map
+  let builder: map = native_tasks/lock(native_gen/context(module, "task_claim"))
+  builder = native_gen/unless(builder, native_gen/equal(native_tasks/control_field(builder, "state"), native_gen/ref(builder, "task_state_runnable")), fn(busy) => native_tasks/locked_status(busy, "closed"))
+  builder = native_tasks/state(builder, "running")
+  builder = native_tasks/control_store(builder, "committed", native_gen/ref(builder, "false"))
+  builder = native_tasks/control_store(builder, "delivery_claimed", native_gen/ref(builder, "false"))
+  builder = native_tasks/unlock(builder)
+  let [status: map, opened: map] = native_gen/bind(builder, "status", native_gen/call(builder, "task_attempt_open",
+    [native_tasks/attempt(builder), native_gen/ref(builder, "worker"), native_tasks/control_field(builder, "kernel"), native_tasks/control_slot(builder, "image"),
+      native_tasks/control_field(builder, "remaining"), native_tasks/control_field(builder, "retries"), native_tasks/control_field(builder, "depth_limit")]))
+  builder = native_gen/unless(opened, native_kernel/absent(status), fn(failed)
+    let ready: map = native_tasks/lock(failed)
+    ready = native_tasks/control_store(ready, "status", status)
+    ready = native_gen/branch(ready, native_tasks/control_field(ready, "cancel_requested"), fn(cancelled) => native_tasks/state(cancelled, "cancelled"), fn(aborted) => native_tasks/state(aborted, "failed"))
+    return native_gen/return_value(native_tasks/unlock(ready), status)
+  end)
+  builder = native_gen/return_value(builder, native_gen/call(builder, "task_attach", [native_gen/ref(builder, "task"), native_gen/ref(builder, "worker"), native_tasks/attempt(builder)]))
+  let result: map = native_gen/finish(module, builder)
+  return result
+end
+
+verb native_tasks/control(input: map) -> map
+  let module: map = native_tasks/control_declarations(input)
+  module = native_tasks/control_lifecycle(module)
+  module = native_tasks/cancel_body(module)
+  module = native_tasks/attach_body(module)
+  module = native_tasks/claim_body(module)
+  let builder: map = native_tasks/lock(native_gen/context(module, "task_detach"))
+  builder = native_gen/root_write(builder, native_gen/field(builder, native_gen/ref(builder, "task"), "active"), native_gen/zero(native_kernel/pointer("Transaction")))
+  builder = native_tasks/locked_status(builder, "ok")
+  let result: map = native_gen/finish(module, builder)
+  return result
+end

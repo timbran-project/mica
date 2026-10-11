@@ -80,6 +80,13 @@ Failed commits leave the published snapshot unchanged and retain the transaction
 After an allocation failure, the caller can retry the same transaction.
 After a conflict, the caller must begin a fresh transaction and repeat its work.
 
+`kernel_program_put` and `kernel_program_remove` stage process-local compiled bodies in the same transaction as facts.
+Persistent AVL indexes retain each body graph through its snapshot; replacement does not mutate an earlier view.
+Conflicting program writes identify the program ID in `Work.conflict_program`.
+Writes require catalogue authority and matching tenant ownership, unless the caller has root authority.
+`kernel_program_get` is a trusted resolver primitive. Reading a body does not authorize its invocation.
+The task runtime resolves method metadata, checks selector-specific rights, and invokes the body retained by its transaction view.
+
 Commit preparation runs outside the publication mutex against a retained snapshot.
 It validates the transaction, builds persistent index paths, and calculates net deltas.
 Fact validation, write replay, catalogue lookup, and prefix copying share the commit budget.
@@ -111,7 +118,7 @@ The heap uses `kernel_heap_init`, which installs both kernel and value descripto
 
 | Function | Contract |
 | --- | --- |
-| `kernel_init(kernel, worker, owner)` | Create the empty published snapshot with a bootstrap owner |
+| `kernel_init(kernel, worker, owner, history_capacity)` | Create the empty published snapshot and a bounded commit-history ring |
 | `kernel_begin(kernel, worker, transaction, tenant)` | Capture the snapshot and compile permissions for the authenticated tenant |
 | `kernel_set_retention_limit(kernel, worker, limit)` | Set the maximum number of transactions that retain snapshot roots |
 | `kernel_declare(transaction, id, name, arity, policy, keys, indexes)` | Stage a relation declaration with caller-assigned identity and symbol IDs |
@@ -121,8 +128,28 @@ The heap uses `kernel_heap_init`, which installs both kernel and value descripto
 | `kernel_commit(transaction)` | Validate, publish, and retain net stored-fact deltas on success |
 | `kernel_version(transaction)` | Read the base version, or the published version after commit |
 | `kernel_deltas(transaction)` | Read committed stored-fact additions and removals until the transaction ends |
+| `kernel_history_next(kernel, worker, cursor)` | Read the next retained commit, or report that the cursor requires resynchronization |
 | `kernel_end(transaction)` | Release transaction roots and discard any uncommitted changes |
-| `kernel_release(kernel, worker)` | Remove the shared snapshot root under exclusive ownership of the kernel control |
+| `kernel_release(kernel, worker)` | Remove the snapshot and history roots under exclusive ownership of the kernel control |
+
+The history capacity must be positive. Each changing commit retains its before/after snapshots and net stored-fact deltas.
+Preparation freezes this record outside the publication mutex. Publication updates one ring slot and the current snapshot together.
+Read-only commits and failed attempts create no history entry.
+The fixed capacity bounds the number of retained records, not their total bytes.
+Heap capacity still bounds managed storage; history can retain large snapshots until later commits overwrite its slots.
+
+A history cursor is the last observed snapshot version.
+`kernel_history_next` returns `status`, `latest`, `gap`, and a managed `commit` pointer.
+If the cursor equals `latest`, the result has no commit and no gap.
+If the cursor predates retained history or exceeds `latest`, `gap` is true and the consumer must resynchronize.
+Otherwise, the returned commit advances the cursor by one version.
+The caller must root the returned pointer before any safepoint; that root can outlive the ring slot or kernel control.
+
+History access is an internal runtime operation over world-global snapshots.
+Subscription delivery must apply fresh authority before exposing rows or catalogue changes to a tenant.
+The history API does not perform that filtering.
+A changing commit at Mica's maximum integer (`2^55 - 1`) returns `kernel_limit`.
+Every published version therefore fits a subscription cursor without truncation. Read-only commits remain valid at that limit.
 
 The default retention limit is 1,024 open transactions per kernel.
 Committed and cancelled transactions retain their slot until `kernel_end` releases their roots.

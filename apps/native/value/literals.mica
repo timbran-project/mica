@@ -180,3 +180,29 @@ verb native_literal/emit(builder: map, literal: map, table: map, failure) -> lis
   let [result: map, checked: map] = native_gen/checked_bind(ready, "literal", call, "ok", failure)
   return [native_gen/field(checked, result, "value"), checked]
 end
+
+// Materialize a small map with one constructor call. Stack entries borrow the
+// caller's rooted values; construction contains no relocation boundary.
+verb native_literal/map(builder: map, fields: list, failure) -> list
+  let entry_type: list = [:Record, "ValueMapEntry"]
+  let source_type: list = [:Pointer, entry_type, :Const]
+  let source: map = native_gen/zero(source_type)
+  let count: map = native_gen/zero(:U64)
+  let ready: map = builder
+  if len(fields) > 0
+    let array_type: list = [:Array, entry_type, len(fields)]
+    let [storage: map, allocated: map] = native_gen/bind(ready, "map_entries", native_gen/zero(array_type))
+    let first: map = native_gen/element(native_gen/address(storage), native_gen/ref(allocated, "zero"))
+    source = native_gen/freeze(first)
+    count = native_gen/divide(native_gen/sizeof(array_type), native_gen/sizeof(entry_type))
+    let [cursor: map, with_cursor: map] = native_gen/bind(allocated, "entry", first)
+    ready = with_cursor
+    for field in fields
+      native/ensure(native_gen/type(field[0]) == native_value/word() && native_gen/type(field[1]) == native_value/word(), "map fields require value words")
+      ready = native_gen/root_write(ready, native_gen/location(cursor), native_gen/record(ready, entry_type, {"key" -> field[0], "value" -> field[1]}))
+      ready = native_gen/assign(ready, cursor, native_gen/offset(cursor, native_gen/ref(ready, "one")))
+    end
+  end
+  let [result: map, checked: map] = native_gen/checked_bind(ready, "map", native_gen/call(ready, "value_map", [native_roots/worker(ready), source, count]), "ok", failure)
+  return [native_gen/field(checked, result, "value"), checked]
+end

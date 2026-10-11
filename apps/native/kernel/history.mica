@@ -1,0 +1,166 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+// The ring has stable native storage and registered roots. Commit records are
+// immutable managed graphs. The kernel mutex protects cursor and slot access.
+verb native_history/field(builder: map, kernel: map, name: string) -> map
+  let result: map = native_kernel/load_field(builder, kernel, string_concat("history_", name))
+  return result
+end
+verb native_history/store(builder: map, kernel: map, name: string, value: map) -> map
+  let result: map = native_kernel/store_field(builder, kernel, string_concat("history_", name), value)
+  return result
+end
+verb native_history/slot(builder: map, kernel: map, index: map) -> map
+  let result: map = native_gen/offset(native_kernel/load_field(builder, kernel, "history"), index)
+  return result
+end
+verb native_history/record(builder: map, kernel: map, index: map) -> map
+  let result: map = native_roots/root_value(builder, native_history/slot(builder, kernel, index), native_kernel/pointer("Commit"))
+  return result
+end
+verb native_history/position(builder: map, kernel: map, offset: map) -> map
+  // The capacity is bounded by the allocation extent, so this sum cannot wrap.
+  let result: map = native_gen/remainder(native_gen/add(native_history/field(builder, kernel, "start"), offset), native_history/field(builder, kernel, "capacity"))
+  return result
+end
+
+verb native_history/init_body(module: map) -> map
+  let builder: map = native_roots/context(module, "kernel_history_init", fn(failed, reason) => native_roots/return_value(failed, native_gen/ref(failed, "false")))
+  let kernel: map = native_gen/ref(builder, "kernel")
+  let worker: map = native_gen/ref(builder, "worker")
+  let capacity: map = native_gen/ref(builder, "capacity")
+  let fail = fn(failed) => native_roots/return_value(failed, native_gen/ref(failed, "false"))
+  builder = native_gen/when(builder, native_kernel/absent(capacity), fail)
+  let maximum: map = native_gen/divide(native_gen/ref(builder, "kernel_unlimited"), native_gen/sizeof([:Record, "MemoryRoot"]))
+  builder = native_gen/when(builder, native_gen/less(maximum, capacity), fail)
+  let [storage: map, allocated: map] = native_gen/bind(builder, "storage", native_gen/call(builder, "memory_platform_allocate", [native_gen/multiply(capacity, native_gen/sizeof([:Record, "MemoryRoot"]))]))
+  builder = native_gen/when(allocated, native_kernel/absent(storage), fail)
+  builder = native_gen/root_write(builder, native_gen/field(builder, kernel, "history"), native_gen/manage(native_gen/cast(native_memory/record_pointer("MemoryRoot"), storage)))
+  let [empty: map, retained: map] = native_roots/retain(builder, "empty", native_gen/zero(native_kernel/pointer("Commit")))
+  builder = native_gen/for_range(retained, "index", native_gen/ref(retained, "zero"), capacity, fn(initialize, index)
+    let slot: map = native_history/slot(initialize, kernel, index)
+    let ready: map = native_gen/store(initialize, slot, native_gen/zero([:Record, "MemoryRoot"]))
+    ready = native_gen/unless(ready, native_gen/call(ready, "memory_publish", [worker, empty[:scope_root], slot]), fail)
+    return native_history/store(ready, kernel, "capacity", native_gen/add(index, native_gen/ref(ready, "one")))
+  end)
+  let result: map = native_gen/finish(module, native_roots/return_value(builder, native_gen/ref(builder, "true")))
+  return result
+end
+
+verb native_history/release_body(module: map) -> map
+  let builder: map = native_gen/context(module, "kernel_history_release")
+  let kernel: map = native_gen/ref(builder, "kernel")
+  let worker: map = native_gen/ref(builder, "worker")
+  builder = native_gen/while_loop(builder, native_gen/negate(native_kernel/absent(native_history/field(builder, kernel, "capacity"))), fn(retire)
+    let index: map = native_gen/subtract(native_history/field(retire, kernel, "capacity"), native_gen/ref(retire, "one"))
+    let ready: map = native_gen/unless(retire, native_gen/call(retire, "memory_unpublish", [worker, native_history/slot(retire, kernel, index)]),
+      fn(failed) => native_gen/return_value(failed, native_gen/ref(failed, "false")))
+    return native_history/store(ready, kernel, "capacity", index)
+  end)
+  builder = native_gen/unless(builder, native_kernel/absent(native_kernel/load_field(builder, kernel, "history")), fn(allocated)
+    return native_gen/do_call(allocated, "memory_platform_release", [native_gen/manage(native_gen/cast(native_memory/pointer(:U8), native_kernel/load_field(allocated, kernel, "history")))])
+  end)
+  builder = native_gen/root_write(builder, native_gen/field(builder, kernel, "history"), native_gen/zero(native_memory/record_pointer("MemoryRoot")))
+  for field in ["start", "count"]
+    builder = native_history/store(builder, kernel, field, native_gen/ref(builder, "zero"))
+  end
+  let result: map = native_gen/finish(module, native_gen/return_value(builder, native_gen/ref(builder, "true")))
+  return result
+end
+
+// Publication holds the kernel and heap mutexes. The complete record is frozen;
+// this builder performs only fixed-size root and counter updates.
+verb native_history/publish(builder: map, kernel: map, commit: map) -> map
+  let result: map = native_gen/unless(builder, native_kernel/absent(commit), fn(changed)
+    let [index: map, located: map] = native_gen/bind(changed, "history_index", native_history/position(changed, kernel, native_history/field(changed, kernel, "count")))
+    let ready: map = native_roots/store(located, native_history/record(located, kernel, index), commit)
+    return native_gen/branch(ready, native_gen/equal(native_history/field(ready, kernel, "count"), native_history/field(ready, kernel, "capacity")),
+      fn(full) => native_history/store(full, kernel, "start", native_history/position(full, kernel, native_gen/ref(full, "one"))),
+      fn(growing) => native_history/store(growing, kernel, "count", native_gen/add(native_history/field(growing, kernel, "count"), native_gen/ref(growing, "one"))))
+  end)
+  return result
+end
+
+verb native_history/result(builder: map, latest: map, gap: bool, commit: map) -> map
+  let flag: map = native_gen/ref(builder, "false")
+  if gap
+    flag = native_gen/ref(builder, "true")
+  end
+  let result: map = native_roots/return_value(builder, native_gen/record(builder, [:Record, "KernelHistoryResult"], {
+    "status" -> native_gen/ref(builder, "kernel_ok"), "latest" -> latest, "gap" -> flag, "commit" -> commit}))
+  return result
+end
+
+verb native_history/next_body(module: map) -> map
+  let builder: map = native_roots/context(module, "kernel_history_next", fn(failed, reason) => native_execution/fail(failed, native_gen/ref(failed, string_concat("kernel_", reason))))
+  let kernel: map = native_gen/ref(builder, "kernel")
+  let worker: map = native_gen/ref(builder, "worker")
+  let cursor: map = native_gen/ref(builder, "cursor")
+  let closed = fn(failed) => native_execution/fail(failed, native_gen/ref(failed, "kernel_closed"))
+  builder = native_gen/when(builder, native_kernel/absent(native_kernel/load_field(builder, kernel, "mutex")), closed)
+  builder = native_gen/unless(builder, native_gen/equal(native_kernel/load_field(builder, worker, "heap"), native_kernel/load_field(builder, kernel, "heap")), closed)
+  builder = native_gen/unless(builder, native_gen/call(builder, "kernel_lock", [kernel, worker]), closed)
+  builder = native_gen/on_return(builder, fn(leaving, value) => native_kernel/unlock_kernel(leaving, kernel))
+  let current: map = native_gen/cast(native_kernel/pointer("Snapshot"), native_gen/root_read(native_kernel/snapshot_slot(builder, kernel)))
+  let [latest: map, captured: map] = native_gen/bind(builder, "latest", native_kernel/load_field(builder, current, "version"))
+  let empty: map = native_gen/zero(native_kernel/pointer("Commit"))
+  builder = native_gen/when(captured, native_gen/equal(cursor, latest), fn(caught_up) => native_history/result(caught_up, latest, false, empty))
+  builder = native_gen/when(builder, native_gen/less(latest, cursor), fn(future) => native_history/result(future, latest, true, empty))
+  builder = native_gen/when(builder, native_kernel/absent(native_history/field(builder, kernel, "count")), fn(missing) => native_history/result(missing, latest, true, empty))
+  let first: map = native_history/record(builder, kernel, native_history/field(builder, kernel, "start"))
+  let [oldest: map, with_oldest: map] = native_gen/bind(builder, "oldest", native_kernel/load_field(builder, native_kernel/load_field(builder, first, "before"), "version"))
+  builder = native_gen/when(with_oldest, native_gen/less(cursor, oldest), fn(expired) => native_history/result(expired, latest, true, empty))
+  let index: map = native_history/position(builder, kernel, native_gen/subtract(cursor, oldest))
+  builder = native_history/result(builder, latest, false, native_history/record(builder, kernel, index))
+  let result: map = native_gen/finish(module, builder)
+  return result
+end
+
+verb native_history/program(input: map) -> map
+  let module: map = input
+  let kernel: list = ["kernel", native_memory/record_pointer("Kernel"), :Borrow]
+  let worker: list = ["worker", native_memory/record_pointer("MemoryWorker"), :Borrow]
+  module = native_kernel/declare(module, "set_notify", :U64, [kernel, worker,
+    ["expected", native_memory/pointer(:U8), :Borrow], ["context", native_memory/pointer(:U8), :Borrow],
+    ["notify", [:FunctionPointer, "KernelNotify"], :Value]], true)
+  module = native_kernel/declare(module, "history_init", :Bool, [kernel, worker, ["capacity", :U64, :Value]], true)
+  module = native_kernel/declare(module, "history_release", :Bool, [kernel, worker], false)
+  module = native_kernel/declare(module, "history_next", [:Record, "KernelHistoryResult"], [kernel, worker, ["cursor", :U64, :Value]], true)
+  module = native_history/init_body(module)
+  module = native_history/release_body(module)
+  // kernel_lock is declared by lifecycle before this read operation is built.
+  return module
+end
+
+// The runtime owns one notification endpoint per world. Compare-and-replace
+// prevents a second dispatcher from stealing it. The owner detaches before
+// destroying its context; the kernel mutex excludes any in-flight callback.
+verb native_history/set_notify_body(module: map) -> map
+  let builder: map = native_roots/context(module, "kernel_set_notify", fn(failed, reason) => native_rules/error(failed, reason))
+  let kernel: map = native_gen/ref(builder, "kernel")
+  let worker: map = native_roots/worker(builder)
+  builder = native_rules/check(builder, native_gen/negate(native_kernel/absent(native_kernel/load_field(builder, kernel, "mutex"))), "closed")
+  builder = native_rules/check(builder, native_gen/equal(native_kernel/load_field(builder, worker, "heap"), native_kernel/load_field(builder, kernel, "heap")), "closed")
+  builder = native_rules/check(builder, native_gen/equal(native_kernel/absent(native_gen/ref(builder, "context")), native_kernel/absent(native_gen/ref(builder, "notify"))), "schema")
+  builder = native_rules/check(builder, native_gen/call(builder, "kernel_lock", [kernel, worker]), "closed")
+  builder = native_gen/on_return(builder, fn(leaving, result) => native_kernel/unlock_kernel(leaving, kernel))
+  builder = native_rules/check(builder, native_gen/equal(native_kernel/load_field(builder, kernel, "notify_context"), native_gen/ref(builder, "expected")), "conflict")
+  builder = native_gen/root_write(builder, native_gen/field(builder, kernel, "notify_context"), native_gen/manage(native_gen/ref(builder, "context")))
+  builder = native_kernel/store_field(builder, kernel, "notify", native_gen/ref(builder, "notify"))
+  let result: map = native_gen/finish(module, native_execution/fail(builder, native_gen/ref(builder, "kernel_ok")))
+  return result
+end
+
+// Publication calls only a nonblocking signal operation, after releasing the
+// heap mutex. No allocation, collection, or runtime re-entry is permitted here.
+// Snapshot construction and subscriber work remain outside the kernel lock.
+verb native_history/notify(builder: map, kernel: map, commit: map) -> map
+  let result: map = native_gen/unless(builder, native_kernel/absent(commit), fn(changed)
+    let callback: map = native_kernel/load_field(changed, kernel, "notify")
+    return native_gen/unless(changed, native_kernel/absent(callback), fn(attached)
+      return native_gen/do_indirect_call(attached, callback, [native_kernel/load_field(attached, kernel, "notify_context")])
+    end)
+  end)
+  return result
+end

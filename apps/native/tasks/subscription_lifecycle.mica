@@ -1,0 +1,108 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+verb native_subscriptions/init_body(module: map) -> map
+  let builder: map = native_subscriptions/context(module, "hub_init")
+  let hub: map = native_gen/ref(builder, "hub")
+  let worker: map = native_roots/worker(builder)
+  let heap: map = native_kernel/load_field(builder, worker, "heap")
+  let limit: map = native_gen/ref(builder, "limit")
+  builder = native_rules/check(builder, native_kernel/absent(native_subscriptions/field(builder, "mutex")), "closed")
+  builder = native_rules/check(builder, native_kernel/load_field(builder, worker, "active"), "closed")
+  builder = native_rules/check(builder, native_gen/negate(native_kernel/absent(native_gen/ref(builder, "vocabulary"))), "schema")
+  for name in ["kernel", "mailboxes"]
+    let object: map = native_gen/ref(builder, name)
+    builder = native_rules/check(builder, native_gen/negate(native_kernel/absent(object)), "schema")
+    builder = native_rules/check(builder, native_gen/equal(heap, native_kernel/load_field(builder, object, "heap")), "closed")
+  end
+  builder = native_rules/check(builder, native_gen/negate(native_kernel/absent(limit)), "schema")
+  let maximum: map = native_gen/divide(native_gen/divide(native_gen/divide(native_gen/ref(builder, "kernel_unlimited"),
+    native_gen/sizeof(native_tasks/pointer("Subscription"))), native_gen/ref(builder, "two")), native_gen/ref(builder, "two"))
+  builder = native_rules/check(builder, native_gen/negate(native_gen/less(maximum, limit)), "limit")
+  let [count: map, with_count: map] = native_gen/bind(builder, "buckets", native_gen/ref(builder, "one"))
+  builder = native_gen/while_loop(with_count, native_gen/less(count, limit), fn(grow)
+    return native_gen/assign(grow, count, native_gen/multiply(count, native_gen/ref(grow, "two")))
+  end)
+  builder = native_gen/assign(builder, count, native_gen/multiply(count, native_gen/ref(builder, "two")))
+  let [mutex: map, created: map] = native_gen/bind(builder, "mutex", native_gen/call(builder, "memory_sync_create", []))
+  builder = native_rules/check(created, native_gen/negate(native_kernel/absent(mutex)), "oom")
+  let [storage: map, allocated: map] = native_gen/bind(builder, "storage", native_gen/call(builder, "memory_platform_allocate", [
+    native_gen/multiply(count, native_gen/sizeof(native_tasks/pointer("Subscription")))]))
+  builder = native_gen/when(allocated, native_kernel/absent(storage), fn(failed)
+    return native_rules/error(native_gen/do_call(failed, "memory_sync_destroy", [mutex]), "oom")
+  end)
+  builder = native_gen/on_return(builder, fn(leaving, status)
+    return native_gen/unless(leaving, native_kernel/absent(status), fn(failed)
+      return native_gen/do_call(native_mailboxes/free(failed, storage), "memory_sync_destroy", [mutex])
+    end)
+  end)
+  let resources: map = {}
+  for spec in [["event", "task_event_create", []], ["signal", "memory_atomic_create", [native_gen/ref(builder, "zero")]]]
+    let [resource: map, allocated: map] = native_gen/bind(builder, spec[0], native_gen/call(builder, spec[1], spec[2]))
+    builder = native_rules/check(allocated, native_gen/negate(native_kernel/absent(resource)), "oom")
+    resources[spec[0]] = resource
+    let destroy: string = "task_event_destroy"
+    if spec[0] == "signal"
+      destroy = "memory_atomic_destroy"
+    end
+    builder = native_gen/on_return(builder, fn(leaving, status)
+      return native_gen/unless(leaving, native_kernel/absent(status), fn(failed) => native_gen/do_call(failed, destroy, [resource]))
+    end)
+  end
+  let buckets: map = native_gen/cast(native_memory/pointer(native_tasks/pointer("Subscription")), storage)
+  builder = native_gen/for_range(builder, "slot", native_gen/ref(builder, "zero"), count, fn(clear, index)
+    let ready: map = native_gen/store(clear, native_gen/offset(buckets, index), native_gen/zero(native_tasks/pointer("Subscription")))
+    return native_roots/poll(ready)
+  end)
+  builder = native_rules/check(builder, native_gen/call(builder, "task_resource_user", [worker, native_gen/ref(builder, "true")]), "closed")
+  builder = native_gen/store(builder, hub, native_gen/zero([:Record, "TaskSubscriptionHub"]))
+  for spec in [["heap", heap], ["kernel", native_gen/ref(builder, "kernel")], ["mailboxes", native_gen/ref(builder, "mailboxes")], ["mutex", mutex], ["buckets", buckets]]
+    builder = native_mailboxes/native_store(builder, hub, spec[0], spec[1])
+  end
+  for name, resource in resources
+    builder = native_mailboxes/native_store(builder, hub, name, resource)
+  end
+  builder = native_subscriptions/store(builder, "mask", native_gen/subtract(count, native_gen/ref(builder, "one")))
+  builder = native_subscriptions/store(builder, "limit", limit)
+  builder = native_subscriptions/store(builder, "vocabulary", native_gen/load(native_gen/ref(builder, "vocabulary")))
+  let result: map = native_gen/finish(module, native_execution/fail(builder, native_gen/ref(builder, "kernel_ok")))
+  return result
+end
+
+verb native_subscriptions/lifecycle(input: map) -> map
+  let module: map = native_subscriptions/init_body(input)
+  let builder: map = native_subscriptions/locked(module, "hub_close", false)
+  builder = native_subscriptions/store(builder, "closed", native_gen/ref(builder, "true"))
+  let [cancelled: map, signalled: map] = native_gen/bind(builder, "cancelled", native_gen/call(builder, "memory_atomic_compare_exchange", [
+    native_subscriptions/field(builder, "signal"), native_gen/ref(builder, "zero"), native_gen/ref(builder, "one")]))
+  builder = native_subscriptions/notify(signalled)
+  // Closing rejects new operations first. If collection fails while draining,
+  // a later close resumes from the remaining entries without reopening admission.
+  let count: map = native_gen/add(native_subscriptions/field(builder, "mask"), native_gen/ref(builder, "one"))
+  builder = native_gen/for_range(builder, "bucket", native_gen/ref(builder, "zero"), count, fn(scan, index)
+    let link: map = native_gen/offset(native_subscriptions/field(scan, "buckets"), index)
+    let drained: map = native_gen/while_loop(scan, native_gen/negate(native_kernel/absent(native_gen/load(link))), fn(retire)
+      return native_roots/poll(native_subscriptions/retire(retire, link))
+    end)
+    return native_roots/poll(drained)
+  end)
+  module = native_gen/finish(module, native_execution/fail(builder, native_gen/ref(builder, "kernel_ok")))
+
+  // Exclusive ownership is required after delivery and pump workers have exited.
+  // Kernel and mailbox hub storage remain alive until this release completes.
+  builder = native_subscriptions/context(module, "hub_release")
+  builder = native_rules/check(builder, native_gen/negate(native_kernel/absent(native_subscriptions/field(builder, "mutex"))), "closed")
+  builder = native_rules/check(builder, native_kernel/load_field(builder, native_roots/worker(builder), "active"), "closed")
+  builder = native_rules/check(builder, native_gen/equal(native_kernel/load_field(builder, native_roots/worker(builder), "heap"), native_subscriptions/field(builder, "heap")), "closed")
+  builder = native_rules/check(builder, native_subscriptions/field(builder, "closed"), "closed")
+  builder = native_rules/check(builder, native_kernel/absent(native_subscriptions/field(builder, "count")), "closed")
+  builder = native_rules/check(builder, native_gen/negate(native_subscriptions/field(builder, "events")), "closed")
+  builder = native_rules/check(builder, native_gen/call(builder, "task_resource_user", [native_roots/worker(builder), native_gen/ref(builder, "false")]), "closed")
+  builder = native_gen/do_call(builder, "task_event_destroy", [native_subscriptions/field(builder, "event")])
+  builder = native_gen/do_call(builder, "memory_atomic_destroy", [native_subscriptions/field(builder, "signal")])
+  builder = native_mailboxes/free(builder, native_subscriptions/field(builder, "buckets"))
+  builder = native_gen/do_call(builder, "memory_sync_destroy", [native_subscriptions/field(builder, "mutex")])
+  builder = native_gen/store(builder, native_gen/ref(builder, "hub"), native_gen/zero([:Record, "TaskSubscriptionHub"]))
+  let result: map = native_gen/finish(module, native_execution/fail(builder, native_gen/ref(builder, "kernel_ok")))
+  return result
+end

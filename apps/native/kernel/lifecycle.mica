@@ -28,6 +28,7 @@ end
 
 verb native_kernel/discard_candidate(builder: map, work: map) -> map
   let ready: map = native_kernel/store_field(builder, work, "candidate", native_gen/zero(native_kernel/pointer("Snapshot")))
+  ready = native_kernel/store_field(ready, work, "commit", native_gen/zero(native_kernel/pointer("Commit")))
   let result: map = native_kernel/store_field(ready, work, "deltas", native_gen/zero(native_kernel/pointer("Delta")))
   return result
 end
@@ -136,6 +137,7 @@ verb native_kernel/prepare_body(module: map) -> map
   builder = native_kernel/store_field(with_worker, work, "status", native_gen/ref(with_worker, "kernel_ok"))
   builder = native_kernel/store_field(builder, work, "conflict_rule", native_gen/ref(builder, "zero"))
   builder = native_kernel/store_field(builder, work, "conflict_relation", native_gen/ref(builder, "zero"))
+  builder = native_kernel/store_field(builder, work, "conflict_program", native_gen/ref(builder, "zero"))
   builder = native_kernel/store_field(builder, work, "conflict_tuple", native_gen/zero(native_value/word()))
   builder = native_kernel/discard_candidate(builder, work)
   builder = native_execution/charge(builder, native_gen/ref(builder, "zero"), native_gen/ref(builder, "zero"), native_gen/ref(builder, "zero"), fn(failed, status)
@@ -147,6 +149,10 @@ verb native_kernel/prepare_body(module: map) -> map
   builder = native_gen/unless(with_prepared, native_kernel/absent(native_gen/field(with_prepared, prepared, "status")), fn(failed) => native_kernel/prepare_failed(failed, work, native_gen/field(failed, prepared, "status")))
   let [catalog: map, with_catalog: map] = native_roots/retain(builder, "catalog", native_gen/field(builder, prepared, "relation"))
   builder = with_catalog
+  let [program_result: map, with_programs: map] = native_gen/bind(builder, "program_result", native_gen/call(builder, "kernel_program_rebase", [worker, work, native_roots/ref(builder, "budget")]))
+  builder = native_gen/unless(with_programs, native_kernel/absent(native_gen/field(with_programs, program_result, "status")), fn(failed) => native_kernel/prepare_failed(failed, work, native_gen/field(failed, program_result, "status")))
+  let [programs: map, retained_programs: map] = native_roots/retain(builder, "programs", native_gen/field(builder, program_result, "programs"))
+  builder = retained_programs
   let [rules_result: map, with_rules: map] = native_gen/bind(builder, "rules_result",
     native_gen/call(builder, "kernel_rules_rebase", [worker, work, catalog, native_gen/ref(builder, "budget")]))
   builder = native_gen/unless(with_rules, native_kernel/absent(native_gen/field(with_rules, rules_result, "status")), fn(failed)
@@ -161,9 +167,15 @@ verb native_kernel/prepare_body(module: map) -> map
     fn(unstaged) => native_roots/store(unstaged, policy, native_kernel/load_field(unstaged, current, "policy")))
   builder = native_gen/when(builder, native_gen/equal(catalog, native_kernel/load_field(builder, current, "relations")),
     fn(same_catalog) => native_gen/when(same_catalog, native_gen/equal(candidate_rules, native_kernel/load_field(same_catalog, current, "rules")), fn(same_rules) => native_gen/when(same_rules, native_gen/equal(policy, native_kernel/load_field(same_rules, current, "policy")), fn(unchanged)
-      let ready = native_kernel/store_field(unchanged, work, "candidate", current)
-      return native_kernel/status(ready, "kernel_ok")
+      return native_gen/when(unchanged, native_gen/equal(programs, native_kernel/load_field(unchanged, current, "programs")), fn(same_programs)
+        let ready: map = native_kernel/store_field(same_programs, work, "candidate", current)
+        return native_kernel/status(ready, "kernel_ok")
+      end)
     end)))
+  // Published versions appear as subscription cursors in ordinary Mica values.
+  // Stop before the next version would exceed the signed integer payload.
+  builder = native_gen/unless(builder, native_gen/less(native_kernel/load_field(builder, current, "version"), native_gen/convert(:U64, native_gen/ref(builder, "int_max"))),
+    fn(exhausted) => native_kernel/prepare_failed(exhausted, work, native_gen/ref(exhausted, "kernel_limit")))
   // Root every managed field returned by catalogue preparation before derivation polls.
   let [rooted_rules: map, rooted_catalogue: map] = native_roots/retain(builder, "rules", candidate_rules)
   let [schemas: map, with_schemas: map] = native_roots/retain(rooted_catalogue, "schemas", native_gen/field(rooted_catalogue, rules_result, "schemas"))
@@ -185,7 +197,7 @@ verb native_kernel/prepare_body(module: map) -> map
   builder = native_gen/unless(with_revision, native_gen/equal(views, native_kernel/load_field(with_revision, current, "policy_views")),
     fn(changed) => native_gen/assign(changed, policy_revision, native_gen/add(native_kernel/load_field(changed, current, "version"), native_gen/ref(changed, "one"))))
   let [candidate: map, with_candidate: map] = native_gen/bind(builder, "candidate", native_kernel/allocate_record(builder, worker, "Snapshot",
-    {"owner" -> native_kernel/load_field(builder, current, "owner"), "policy" -> policy, "policy_views" -> views, "policy_revision" -> policy_revision, "version" -> native_gen/add(native_kernel/load_field(builder, current, "version"), native_gen/ref(builder, "one")), "relations" -> catalog, "rules" -> rooted_rules, "schemas" -> schemas, "rule_heads" -> heads, "rule_plan" -> plan, "evaluation" -> evaluation}))
+    {"programs" -> programs, "owner" -> native_kernel/load_field(builder, current, "owner"), "policy" -> policy, "policy_views" -> views, "policy_revision" -> policy_revision, "version" -> native_gen/add(native_kernel/load_field(builder, current, "version"), native_gen/ref(builder, "one")), "relations" -> catalog, "rules" -> rooted_rules, "schemas" -> schemas, "rule_heads" -> heads, "rule_plan" -> plan, "evaluation" -> evaluation}))
   builder = native_gen/when(with_candidate, native_kernel/absent(candidate), fn(arm) => native_kernel/commit_oom(arm, work))
   builder = native_kernel/store_field(builder, work, "candidate", candidate)
   builder = native_kernel/status(builder, "kernel_ok")
@@ -221,7 +233,8 @@ verb native_kernel/capture_commit_snapshot(builder: map, transaction: map, worke
       fn(still_rule_free) => native_gen/unless(still_rule_free, native_kernel/load_field(still_rule_free, work, "rules_read"),
         fn(unread) => native_gen/when(unread, native_kernel/absent(native_kernel/load_field(unread, work, "rule_dependencies")),
           fn(independent) => native_gen/when(independent, native_gen/equal(native_kernel/load_field(independent, work, "policy"), native_kernel/load_field(independent, native_kernel/load_field(independent, work, "base"), "policy")),
-            fn(unchanged) => native_kernel/commit_unchanged(unchanged, kernel, work, current))))))
+            fn(unchanged) => native_gen/when(unchanged, native_kernel/absent(native_kernel/load_field(unchanged, work, "program_changes")),
+              fn(no_programs) => native_kernel/commit_unchanged(no_programs, kernel, work, current)))))))
   ready = native_kernel/unlock_kernel(ready, kernel)
   return ready
 end
@@ -231,10 +244,20 @@ verb native_kernel/prepare_commit_candidate(builder: map, transaction: map, work
   let reloaded: map = native_kernel/reload_work(with_status, transaction, work)
   let ready: map = native_gen/unless(reloaded, native_gen/equal(status, native_gen/ref(reloaded, "kernel_ok")),
     fn(failed) => native_kernel/prepare_failed(failed, work, status))
-  let [prepared: map, with_prepared: map] = native_gen/bind(ready, "prepared", native_gen/call(ready, "memory_share",
-    [worker, native_gen/cast(native_memory/pointer(:U8), native_kernel/load_field(ready, work, "candidate"))]))
-  ready = native_gen/when(with_prepared, native_kernel/absent(prepared), fn(arm) => native_kernel/commit_oom(arm, work))
-  ready = native_kernel/store_field(ready, work, "candidate", native_gen/cast(native_kernel/pointer("Snapshot"), prepared))
+  // The record roots the exact snapshots and deltas that will be published.
+  // One freeze prepares the whole graph before the publication lock is acquired.
+  ready = native_gen/unless(ready, native_gen/equal(native_kernel/load_field(ready, work, "candidate"), native_kernel/load_field(ready, work, "checked")), fn(changed)
+    let [commit: map, allocated: map] = native_gen/bind(changed, "commit", native_kernel/allocate_record(changed, worker, "Commit", {
+      "before" -> native_kernel/load_field(changed, work, "checked"), "after" -> native_kernel/load_field(changed, work, "candidate"), "deltas" -> native_kernel/load_field(changed, work, "deltas")}))
+    let checked: map = native_gen/when(allocated, native_kernel/absent(commit), fn(failed) => native_kernel/commit_oom(failed, work))
+    checked = native_kernel/store_field(checked, work, "commit", commit)
+    let [shared: map, frozen: map] = native_gen/bind(checked, "shared_commit", native_gen/call(checked, "memory_share", [worker, native_gen/cast(native_memory/pointer(:U8), commit)]))
+    checked = native_gen/when(frozen, native_kernel/absent(shared), fn(failed) => native_kernel/commit_oom(failed, work))
+    let prepared: map = native_gen/cast(native_kernel/pointer("Commit"), shared)
+    checked = native_kernel/store_field(checked, work, "commit", prepared)
+    checked = native_kernel/store_field(checked, work, "candidate", native_kernel/load_field(checked, prepared, "after"))
+    return native_kernel/store_field(checked, work, "deltas", native_kernel/load_field(checked, prepared, "deltas"))
+  end)
   return ready
 end
 
@@ -285,10 +308,12 @@ verb native_kernel/try_publish_body(module: map) -> map
     return native_gen/return_value(native_kernel/unlock_kernel(failed, kernel), native_gen/ref(failed, "false"))
   end)
   builder = native_gen/do_call(builder, "memory_lock", [mutex])
+  builder = native_history/publish(builder, kernel, native_kernel/load_field(builder, work, "commit"))
   builder = native_gen/root_write(builder, native_kernel/snapshot_slot(builder, kernel),
     native_gen/cast(native_memory/pointer(:U8), native_kernel/load_field(builder, work, "candidate")))
   builder = native_gen/do_call(builder, "memory_unlock", [mutex])
   builder = native_kernel/store_field(builder, work, "done", native_gen/ref(builder, "true"))
+  builder = native_history/notify(builder, kernel, native_kernel/load_field(builder, work, "commit"))
   builder = native_kernel/unlock_kernel(builder, kernel)
   builder = native_gen/return_value(builder, native_gen/ref(builder, "true"))
   let result: map = native_gen/finish(module, builder)
@@ -382,7 +407,7 @@ verb native_kernel/begin_body(module: map) -> map
   for field in ["base", "checked"]
     builder = native_kernel/store_field(builder, current_work, field, base)
   end
-  for field, source in {"evaluation" -> "evaluation", "rule_index" -> "rules", "rule_plan" -> "rule_plan", "policy" -> "policy", "authorized_views" -> "policy_views", "authorized_plan" -> "rule_plan"}
+  for field, source in {"programs" -> "programs", "evaluation" -> "evaluation", "rule_index" -> "rules", "rule_plan" -> "rule_plan", "policy" -> "policy", "authorized_views" -> "policy_views", "authorized_plan" -> "rule_plan"}
     builder = native_kernel/store_field(builder, current_work, field, native_kernel/load_field(builder, base, source))
   end
   builder = native_kernel/store_field(builder, kernel, "retained_transactions", native_gen/add(retained, native_gen/ref(builder, "one")))
@@ -408,6 +433,62 @@ verb native_kernel/retention_body(module: map) -> map
   return result
 end
 
+verb native_kernel/init_body(module: map) -> map
+  let builder: map = native_roots/context(module, "kernel_init", fn(failed, reason) => native_roots/return_value(failed, native_gen/ref(failed, "false")))
+  let kernel: map = native_gen/ref(builder, "kernel")
+  let worker: map = native_gen/ref(builder, "worker")
+  let fail = fn(failed) => native_roots/return_value(failed, native_gen/ref(failed, "false"))
+  builder = native_gen/unless(builder, native_kernel/load_field(builder, worker, "active"), fail)
+  builder = native_gen/unless(builder, native_gen/call(builder, "value_is_persistable", [native_roots/ref(builder, "owner")]), fail)
+  builder = native_gen/unless(builder, native_kernel/absent(native_kernel/load_field(builder, kernel, "mutex")), fail)
+  builder = native_gen/when(builder, native_kernel/absent(native_gen/ref(builder, "history_capacity")), fail)
+  let [mutex: map, allocated: map] = native_gen/bind(builder, "mutex", native_gen/call(builder, "memory_sync_create", []))
+  builder = native_gen/when(allocated, native_kernel/absent(mutex), fail)
+  builder = native_gen/root_write(builder, native_gen/field(builder, kernel, "mutex"), native_gen/manage(mutex))
+  builder = native_gen/root_write(builder, native_gen/field(builder, kernel, "heap"), native_gen/manage(native_kernel/load_field(builder, worker, "heap")))
+  builder = native_kernel/store_field(builder, kernel, "retention_limit", native_gen/ref(builder, "kernel_default_retention"))
+  builder = native_gen/on_return(builder, fn(leaving, result)
+    return native_gen/unless(leaving, result, fn(failed)
+      let [released: map, cleaned: map] = native_gen/bind(failed, "released", native_gen/call(failed, "kernel_release", [kernel, worker]))
+      return cleaned
+    end)
+  end)
+  let fields: map = {}
+  for field in native_kernel/schema("Snapshot")[1]
+    fields[field[0]] = native_gen/zero(field[1])
+  end
+  fields["owner"] = native_roots/ref(builder, "owner")
+  let [snapshot: map, created: map] = native_roots/retain(builder, "snapshot", native_kernel/allocate_record(builder, worker, "Snapshot", fields))
+  builder = native_gen/when(created, native_kernel/absent(snapshot), fail)
+  builder = native_gen/unless(builder, native_gen/call(builder, "memory_publish", [worker, snapshot[:scope_root], native_gen/field(builder, kernel, "current")[:pointer]]), fail)
+  builder = native_gen/unless(builder, native_gen/call(builder, "kernel_history_init", [kernel, worker, native_gen/ref(builder, "history_capacity")]), fail)
+  let result: map = native_gen/finish(module, native_roots/return_value(builder, native_gen/ref(builder, "true")))
+  return result
+end
+
+// Release also cleans partial initialization. The owner excludes concurrent
+// control access; returned snapshots and history records keep their own roots.
+verb native_kernel/release_body(module: map) -> map
+  let builder: map = native_gen/context(module, "kernel_release")
+  let kernel: map = native_gen/ref(builder, "kernel")
+  let worker: map = native_gen/ref(builder, "worker")
+  let fail = fn(failed) => native_gen/return_value(failed, native_gen/ref(failed, "false"))
+  builder = native_gen/when(builder, native_kernel/absent(native_kernel/load_field(builder, kernel, "mutex")), fail)
+  builder = native_gen/unless(builder, native_kernel/load_field(builder, worker, "active"), fail)
+  builder = native_gen/unless(builder, native_gen/equal(native_kernel/load_field(builder, worker, "heap"), native_kernel/load_field(builder, kernel, "heap")), fail)
+  builder = native_gen/unless(builder, native_kernel/absent(native_kernel/load_field(builder, kernel, "retained_transactions")), fail)
+  builder = native_gen/unless(builder, native_kernel/absent(native_kernel/load_field(builder, kernel, "notify")), fail)
+  builder = native_gen/unless(builder, native_gen/call(builder, "kernel_history_release", [kernel, worker]), fail)
+  let current: map = native_gen/field(builder, kernel, "current")[:pointer]
+  builder = native_gen/unless(builder, native_kernel/absent(native_kernel/load_field(builder, current, "registration")), fn(published)
+    return native_gen/unless(published, native_gen/call(published, "memory_unpublish", [worker, current]), fail)
+  end)
+  builder = native_gen/do_call(builder, "memory_sync_destroy", [native_kernel/load_field(builder, kernel, "mutex")])
+  builder = native_gen/store(builder, kernel, native_gen/zero([:Record, "Kernel"]))
+  let result: map = native_gen/finish(module, native_gen/return_value(builder, native_gen/ref(builder, "true")))
+  return result
+end
+
 verb native_kernel/lifecycle(input: map) -> map
   let context: map = input
   let kernel: list = native_memory/record_pointer("Kernel")
@@ -425,7 +506,7 @@ verb native_kernel/lifecycle(input: map) -> map
   for spec in [
     ["heap_init", :Bool, [["heap", heap, :Borrow]], false],
     ["lock", :Bool, [["kernel", kernel, :Borrow], ["worker", worker, :Borrow]], true],
-    ["init", :Bool, [["kernel", kernel, :Borrow], ["worker", worker, :Borrow], ["owner", word, :Gc]], true],
+    ["init", :Bool, [["kernel", kernel, :Borrow], ["worker", worker, :Borrow], ["owner", word, :Gc], ["history_capacity", :U64, :Value]], true],
     ["release", :Bool, [["kernel", kernel, :Borrow], ["worker", worker, :Borrow]], false],
     ["begin", :U64, [["kernel", kernel, :Borrow], ["worker", worker, :Borrow], ["transaction", tx, :Borrow], ["tenant", word, :Gc]], true],
     ["end", :Bool, [["transaction", tx, :Borrow]], true],
@@ -444,34 +525,10 @@ verb native_kernel/lifecycle(input: map) -> map
     native_memory/call("memory_lock", [native_memory/field(bytes, "kernel", "mutex")]),
     native/return_value(native/call_expression("memory_enter", ["worker"]))])
   let unlock: list = [native_memory/call("memory_unlock", [native_memory/field(bytes, "kernel", "mutex")])]
-  context = native_kernel/define(context, "init", [
-    native/unless_statement(native/call_expression("value_is_persistable", ["owner"]), [native/return_value("false")]),
-    native/unless_statement(native_kernel/binary(:Equal, native_memory/field(bytes, "kernel", "mutex"), "null_bytes"), [native/return_value("false")]),
-    native/let_call("mutex", bytes, "memory_sync_create", []),
-    native/when_statement(native_kernel/binary(:Equal, "mutex", "null_bytes"), [native/return_value("false")]),
-    native/let_statement("slot", native_memory/pointer(bytes), native/field_pointer_expression("kernel", "mutex")),
-    native/let_statement("adopted", bytes, native/binary_expression(:Adopt, "slot", "mutex")),
-    native_memory/store_root(heap, "kernel", "heap", native/typed_expression(heap, native/manage_expression(native_memory/field(heap, "worker", "heap")))),
-    native_memory/store(:U64, "kernel", "retention_limit", "kernel_default_retention"),
-    native_memory/store(:U64, "kernel", "retained_transactions", "zero"),
-    native/let_statement("snapshot", snapshot, native_kernel/construct("Snapshot", {"owner" -> "owner", "policy" -> native_kernel/null("AuthorityPolicy"), "policy_views" -> native_kernel/null("AuthorityViews"), "policy_revision" -> "zero", "evaluation" -> native_kernel/null("RuleEvaluation"), "version" -> "zero", "relations" -> native_kernel/null("Relation"), "rules" -> native_kernel/null("RuleIndex"), "schemas" -> native_kernel/null("RuleSchemaIndex"), "rule_heads" -> native_kernel/null("RuleGenerationIndex"), "rule_plan" -> native_kernel/null("RulePlan")})),
-    native/when_statement(native_kernel/is_null("Snapshot", "snapshot"), [
-      native_memory/call("memory_sync_destroy", ["mutex"]), native_memory/store(bytes, "kernel", "mutex", "null_bytes"), native/return_value("false")]),
-    native/let_statement("storage", [:Record, "MemoryRoot"], native/zero_expression()),
-    native/let_statement("source", root, native/unary_expression(:Address, "storage")),
-    native_memory/store_root(bytes, "source", "pointer", native/typed_expression(bytes, native/unary_expression(:PointerCast, "snapshot"))),
-    native/let_call("pushed", :Bool, "memory_root_push", ["worker", "source"]),
-    native/let_call("ok", :Bool, "memory_publish", ["worker", "source", native_kernel/shared_root()]),
-    native/let_call("popped", :Bool, "memory_root_pop", ["worker", "source"]),
-    native/unless_statement("ok", [native_memory/call("memory_sync_destroy", ["mutex"]), native_memory/store(bytes, "kernel", "mutex", "null_bytes")]),
-    native/return_value("ok")])
-  // Release requires exclusive ownership of the control object. Transactions
-  // must be ended first; snapshots remain managed and are reclaimed by GC.
-  context = native_kernel/define(context, "release", [
-    native/unless_statement(native_kernel/binary(:Equal, native_memory/field(:U64, "kernel", "retained_transactions"), "zero"), [native/return_value("false")]),
-    native/unless_statement(native/call_expression("memory_unpublish", ["worker", native_kernel/shared_root()]), [native/return_value("false")]),
-    native_memory/call("memory_sync_destroy", [native_memory/field(bytes, "kernel", "mutex")]),
-    native/store_statement("kernel", native/typed_zero([:Record, "Kernel"])), native/return_value("true")])
+  context = native_kernel/init_body(context)
+  context = native_kernel/release_body(context)
+  context = native_history/next_body(context)
+  context = native_history/set_notify_body(context)
   context = native_kernel/begin_body(context)
   context = native_kernel/retention_body(context)
   context = native_kernel/define(context, "end", [

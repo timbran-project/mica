@@ -1,0 +1,175 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+// Name catalogue columns here, rather than repeating positional row access in
+// the binder, validator, and candidate comparison.
+verb native_dispatch/parameter(builder: map, row: map, name: string) -> map
+  let columns: list = ["method", "role", "restriction", "position", "mode", "default"]
+  let position: map = native_gen/ref(builder, "zero")
+  for column in columns
+    if column == name
+      let cell: map = native_query/cell(builder, row, position)
+      return cell
+    end
+    position = native_gen/add(position, native_gen/ref(builder, "one"))
+  end
+  native/ensure(false, string_concat("unknown parameter column ", name))
+  let generated_result: map = {}
+  return generated_result
+end
+
+verb native_dispatch/vocabulary_check(builder: map) -> map
+  let vocabulary: map = native_gen/ref(builder, "vocabulary")
+  let ready: map = native_query/check(builder, native_gen/negate(native_kernel/absent(vocabulary)), "schema")
+  let generated_result: map = native_query/check(ready, native_kernel/load_field(ready, vocabulary, "ready"), "schema")
+  return generated_result
+end
+
+// Entries are [role, parameter]. Prefix lookup avoids scanning every parameter
+// again for every pair of applicable methods.
+verb native_dispatch/lookup(builder: map, roles: map, role: map) -> list
+  let [key: map, built: map] = native_query/tuple(builder, [role, native_gen/zero(native_value/word())])
+  let [node: map, searched: map] = native_gen/bind(built, "parameter_node", native_gen/call(built, "kernel_find", [
+    roles, key, native_gen/ref(built, "one"), native_gen/ref(built, "true")]))
+  let [row: map, ready: map] = native_gen/bind(searched, "parameter", native_gen/zero(native_value/word()))
+  ready = native_gen/unless(ready, native_kernel/absent(node), fn(found)
+    return native_gen/assign(found, row, native_query/cell(found, native_kernel/load_field(found, node, "row"), native_gen/ref(found, "one")))
+  end)
+  let generated_result: list = [row, ready]
+  return generated_result
+end
+
+// Build a private ordered array and role index from arbitrary catalogue scan
+// order. Publish neither until every row and the complete layout are valid.
+verb native_dispatch/signature_body(module: map) -> map
+  let builder: map = native_query/context(module, "task_dispatch_signature")
+  builder = native_execution/control_scope(builder, native_roots/worker(builder), native_roots/ref(builder, "budget"))
+  builder = native_dispatch/vocabulary_check(builder)
+  let parameters: map = native_roots/ref(builder, "parameters")
+  builder = native_query/check(builder, native_gen/equal(native_gen/expression(:U8, :Tag, [parameters]), native_gen/ref(builder, "tag_list")), "schema")
+  let [array: map, allocated: map] = native_query/build_row(builder, native_query/width(builder, parameters), fn(body, index) => native_gen/zero(native_value/word()))
+  let [ordered: map, retained: map] = native_roots/retain(allocated, "ordered", array)
+  let [roles: map, indexed: map] = native_query/row_set(retained)
+  builder = native_query/each_row(indexed, parameters, fn(iteration, input)
+    return native_roots/temporary(iteration, fn(scope)
+      let [row: map, ready: map] = native_roots/retain(scope, "parameter", input)
+      ready = native_query/check(ready, native_gen/equal(native_gen/expression(:U8, :Tag, [row]), native_gen/ref(ready, "tag_list")), "schema")
+      let width: map = native_gen/divide(native_gen/sizeof([:Array, native_value/word(), 6]), native_gen/sizeof(native_value/word()))
+      ready = native_query/check(ready, native_gen/equal(native_query/width(ready, row), width), "schema")
+      let [same: map, compared: map] = native_dispatch/equal(ready, native_dispatch/parameter(ready, row, "method"), native_roots/ref(ready, "method"))
+      ready = native_query/check(compared, same, "schema")
+      let role: map = native_dispatch/parameter(ready, row, "role")
+      ready = native_query/check(ready, native_gen/equal(native_gen/expression(:U8, :Tag, [role]), native_gen/ref(ready, "tag_symbol")), "schema")
+      let [ordinal: map, decoded: map] = native_gen/checked_bind(ready, "ordinal", native_gen/call(ready, "value_as_int", [native_dispatch/parameter(ready, row, "position")]), "ok", fn(failed) => native_query/error(failed, "schema"))
+      let position: map = native_gen/bitcast(:U64, native_gen/field(decoded, ordinal, "number"))
+      ready = native_query/check(decoded, native_gen/less(position, native_query/width(decoded, ordered)), "schema")
+      ready = native_query/check(ready, native_kernel/absent(native_query/cell(ready, ordered, position)), "schema")
+      let [duplicate: map, searched: map] = native_dispatch/lookup(ready, roles, role)
+      ready = native_query/check(searched, native_kernel/absent(duplicate), "schema")
+      let [entry: map, built: map] = native_query/tuple(ready, [role, row])
+      ready = native_query/offer(built, roles, entry)
+      let header: map = native_gen/expression(native_memory/record_pointer("HeapList"), :UnpackPointer, [ordered])
+      return native_gen/store(ready, native_gen/offset(native_kernel/load_field(ready, header, "data"), position), row)
+    end)
+  end)
+  let [optional: map, with_optional: map] = native_gen/bind(builder, "optional_seen", native_gen/ref(builder, "false"))
+  let [rest: map, with_rest: map] = native_gen/bind(with_optional, "rest_seen", native_gen/ref(with_optional, "false"))
+  builder = native_query/each_row(with_rest, ordered, fn(step, row)
+    let ready: map = native_query/check(step, native_gen/negate(rest), "schema")
+    let mode: map = native_dispatch/parameter(ready, row, "mode")
+    return native_gen/branch(ready, native_gen/equal(mode, native_dispatch/symbol(ready, "required")),
+      fn(required) => native_query/check(required, native_gen/negate(optional), "schema"), fn(defaulted)
+        let checked: map = native_gen/assign(defaulted, optional, native_gen/ref(defaulted, "true"))
+        return native_gen/unless(checked, native_gen/equal(mode, native_dispatch/symbol(checked, "optional")), fn(last)
+          let validated: map = native_query/check(last, native_gen/equal(mode, native_dispatch/symbol(last, "rest")), "schema")
+          return native_gen/assign(validated, rest, native_gen/ref(validated, "true"))
+        end)
+      end)
+  end)
+  let [signature: map, constructed: map] = native_gen/bind(builder, "signature", native_tasks/allocate_record(builder, "DispatchSignature", {"parameters" -> ordered, "roles" -> roles}))
+  builder = native_query/check(constructed, native_gen/negate(native_kernel/absent(signature)), "oom")
+  let generated_result: map = native_gen/finish(module, native_roots/return_value(builder, native_gen/record(builder, [:Record, "TaskDispatchSignatureResult"], {
+    "status" -> native_gen/ref(builder, "kernel_ok"), "signature" -> signature})))
+  return generated_result
+end
+
+verb native_dispatch/unrestricted_optional(builder: map, row: map) -> list
+  let [result: map, ready: map] = native_gen/bind(builder, "unrestricted_optional", native_gen/ref(builder, "false"))
+  ready = native_gen/when(ready, native_gen/equal(native_dispatch/parameter(ready, row, "mode"), native_dispatch/symbol(ready, "optional")), fn(optional)
+    return native_gen/assign(optional, result, native_gen/equal(native_dispatch/parameter(optional, row, "restriction"), native_dispatch/symbol(optional, "unrestricted")))
+  end)
+  let generated_result: list = [result, ready]
+  return generated_result
+end
+verb native_dispatch/implication(builder: map, specific: map, general: map) -> list
+  let generated_result: list = native_dispatch/checked_match(builder, "task_dispatch_implies", [native_roots/worker(builder), native_gen/ref(builder, "vocabulary"),
+    native_roots/ref(builder, "delegates"), native_roots/ref(builder, "prototypes"), native_gen/ref(builder, "cache"), specific, general])
+  return generated_result
+end
+
+// Compare applicable signatures. Missing unrestricted optional roles impose no
+// constraint. A named rest role narrows an unrestricted optional role because
+// a supplied rest argument must be a list; omission remains accepted by both.
+verb native_dispatch/more_specific_body(module: map) -> map
+  let builder: map = native_dispatch/matching_context(module, "dispatch_more_specific")
+  let left: map = native_roots/ref(builder, "left")
+  let right: map = native_roots/ref(builder, "right")
+  for signature in [left, right]
+    builder = native_query/check(builder, native_gen/negate(native_kernel/absent(signature)), "schema")
+  end
+  let [stricter: map, bound: map] = native_gen/bind(builder, "stricter", native_gen/ref(builder, "false"))
+  builder = native_query/each_row(bound, native_kernel/load_field(bound, left, "parameters"), fn(step, row)
+    let [other: map, searched: map] = native_dispatch/lookup(step, native_kernel/load_field(step, right, "roles"), native_dispatch/parameter(step, row, "role"))
+    return native_gen/when(searched, native_kernel/absent(other), fn(extra)
+      let [unrestricted: map, checked: map] = native_dispatch/unrestricted_optional(extra, row)
+      return native_gen/unless(checked, unrestricted, fn(narrower) => native_gen/assign(narrower, stricter, native_gen/ref(narrower, "true")))
+    end)
+  end)
+  let no_match = fn(failed) => native_dispatch/match_result(failed, native_gen/ref(failed, "false"))
+  builder = native_query/each_row(builder, native_kernel/load_field(builder, right, "parameters"), fn(iteration, input)
+    return native_roots/temporary(iteration, fn(scope)
+      let [general: map, rooted: map] = native_roots/retain(scope, "general_parameter", input)
+      let [row: map, searched: map] = native_dispatch/lookup(rooted, native_kernel/load_field(rooted, left, "roles"), native_dispatch/parameter(rooted, general, "role"))
+      let [specific: map, retained: map] = native_roots/retain(searched, "specific_parameter", row)
+      return native_gen/branch(retained, native_kernel/absent(specific),
+        fn(missing)
+          let [unrestricted: map, checked: map] = native_dispatch/unrestricted_optional(missing, general)
+          return native_gen/unless(checked, unrestricted, no_match)
+        end, fn(present)
+          let left_mode: map = native_dispatch/parameter(present, specific, "mode")
+          let right_mode: map = native_dispatch/parameter(present, general, "mode")
+          let ready: map = native_gen/unless(present, native_gen/equal(left_mode, right_mode), fn(different)
+            let checked: map = native_gen/unless(different, native_gen/equal(right_mode, native_dispatch/symbol(different, "optional")), no_match)
+            checked = native_gen/unless(checked, native_gen/equal(left_mode, native_dispatch/symbol(checked, "required")), fn(rest)
+              let validated: map = native_gen/unless(rest, native_gen/equal(left_mode, native_dispatch/symbol(rest, "rest")), no_match)
+              return native_gen/unless(validated, native_gen/equal(native_dispatch/parameter(validated, general, "restriction"), native_dispatch/symbol(validated, "unrestricted")), no_match)
+            end)
+            return native_gen/assign(checked, stricter, native_gen/ref(checked, "true"))
+          end)
+          let [implies: map, compared: map] = native_dispatch/implication(ready, native_dispatch/parameter(ready, specific, "restriction"), native_dispatch/parameter(ready, general, "restriction"))
+          ready = native_gen/unless(compared, implies, no_match)
+          let [reverse: map, compared_reverse: map] = native_dispatch/implication(ready, native_dispatch/parameter(ready, general, "restriction"), native_dispatch/parameter(ready, specific, "restriction"))
+          return native_gen/unless(compared_reverse, reverse, fn(narrower) => native_gen/assign(narrower, stricter, native_gen/ref(narrower, "true")))
+        end)
+    end)
+  end)
+  let generated_result: map = native_gen/finish(module, native_dispatch/match_result(builder, stricter))
+  return generated_result
+end
+
+verb native_dispatch/signatures(input: map) -> map
+  let module: map = input
+  module[:state] = native/record_type(module[:state], "TaskDispatchSignatureResult", [["status", :U64], ["signature", native_tasks/pointer("DispatchSignature")]])[1]
+  let worker: list = ["worker", native_memory/record_pointer("MemoryWorker"), :Borrow]
+  let vocabulary: list = ["vocabulary", native_tasks/pointer("DispatchVocabulary"), :Borrow]
+  let budget: list = ["budget", native_kernel/pointer("Budget"), :Borrow]
+  module = native_tasks/declare(module, "dispatch_signature", [:Record, "TaskDispatchSignatureResult"], [worker, vocabulary,
+    ["method", native_value/word(), :Gc], ["parameters", native_value/word(), :Gc], budget], :Gc)
+  module = native_tasks/declare(module, "dispatch_more_specific", [:Record, "TaskDispatchMatch"], [worker, vocabulary,
+    ["delegates", native_kernel/pointer("Relation"), :Gc], ["prototypes", native_value/word(), :Gc],
+    ["cache", native_memory/record_pointer("MemoryRoot"), :Borrow],
+    ["left", native_tasks/pointer("DispatchSignature"), :Gc], ["right", native_tasks/pointer("DispatchSignature"), :Gc], budget])
+  module = native_dispatch/signature_body(module)
+  let generated_result: map = native_dispatch/more_specific_body(module)
+  return generated_result
+end

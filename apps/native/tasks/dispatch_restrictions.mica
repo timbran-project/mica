@@ -1,0 +1,155 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+verb native_dispatch/equal(builder: map, left: map, right: map) -> list
+  let [result: map, ready: map] = native_gen/checked_bind(builder, "equal", native_gen/call(builder, "value_equal", [left, right]), "ok",
+    fn(failed) => native_query/error(failed, "schema"))
+  return [native_gen/field(ready, result, "value"), ready]
+end
+verb native_dispatch/checked_match(builder: map, name: string, arguments: list) -> list
+  let [result: map, called: map] = native_gen/bind(builder, "match", native_query/call(builder, name, arguments))
+  let ready: map = native_gen/unless(called, native_kernel/absent(native_gen/field(called, result, "status")),
+    fn(failed) => native_query/fail(failed, native_gen/field(failed, result, "status")))
+  return [native_gen/field(ready, result, "matched"), ready]
+end
+verb native_dispatch/contains(builder: map, vertices: map, key: map) -> map
+  let found: map = native_gen/call(builder, "kernel_find", [vertices, key, native_gen/ref(builder, "zero"), native_gen/ref(builder, "false")])
+  let result: map = native_dispatch/match_result(builder, native_gen/negate(native_kernel/absent(found)))
+  return result
+end
+
+verb native_dispatch/closure_body(module: map) -> map
+  let builder: map = native_dispatch/context(module, "dispatch_closure")
+  let [visited: map, completed: map] = native_dispatch/walk(builder, native_roots/ref(builder, "delegates"), native_roots/ref(builder, "source"), fn(step, row) => step)
+  let result: map = native_gen/finish(module, native_roots/return_value(completed,
+    native_gen/record(completed, [:Record, "TaskDispatchClosure"], {"status" -> native_gen/ref(completed, "kernel_ok"), "vertices" -> visited})))
+  return result
+end
+
+// A selection owns this cache root. Keys include the immutable relation view,
+// so retaining a cache cannot reuse an answer across a same-attempt rewrite.
+// Retained views also prevent pointer reuse from producing a false cache hit.
+verb native_dispatch/cached_reaches_body(module: map) -> map
+  let builder: map = native_dispatch/context(module, "dispatch_cached_reaches")
+  builder = native_query/check(builder, native_gen/negate(native_kernel/absent(native_gen/ref(builder, "cache"))), "schema")
+  let [equal: map, compared: map] = native_dispatch/equal(builder, native_roots/ref(builder, "source"), native_roots/ref(builder, "target"))
+  builder = native_gen/when(compared, equal, fn(same) => native_dispatch/match_result(same, native_gen/ref(same, "true")))
+  let cache: map = native_tasks/root(builder, "cache", native_tasks/pointer("DispatchReach"))
+  let [target: map, built: map] = native_query/tuple(builder, [native_roots/ref(builder, "target")])
+  let [key: map, rooted: map] = native_roots/retain(built, "key", target)
+  let [cursor: map, with_cursor: map] = native_roots/retain(rooted, "cached", cache)
+  builder = native_gen/while_loop(with_cursor, native_gen/negate(native_kernel/absent(cursor)), fn(step)
+    let ready: map = native_query/poll_interval(step, native_gen/ref(step, "zero"))
+    ready = native_gen/when(ready, native_gen/equal(native_kernel/load_field(ready, cursor, "view"), native_roots/ref(ready, "delegates")), fn(same_view)
+      let [same: map, checked: map] = native_dispatch/equal(same_view, native_kernel/load_field(same_view, cursor, "source"), native_roots/ref(same_view, "source"))
+      return native_gen/when(checked, same, fn(found) => native_dispatch/contains(found, native_kernel/load_field(found, cursor, "vertices"), key))
+    end)
+    return native_roots/store(ready, cursor, native_kernel/load_field(ready, cursor, "next"))
+  end)
+  let [closure: map, searched: map] = native_gen/bind(builder, "closure", native_query/call(builder, "task_dispatch_closure", [
+    native_roots/worker(builder), native_roots/ref(builder, "delegates"), native_roots/ref(builder, "source")]))
+  builder = native_gen/unless(searched, native_kernel/absent(native_gen/field(searched, closure, "status")),
+    fn(failed) => native_query/fail(failed, native_gen/field(failed, closure, "status")))
+  let [vertices: map, retained: map] = native_roots/retain(builder, "vertices", native_gen/field(builder, closure, "vertices"))
+  let [entry: map, allocated: map] = native_gen/bind(retained, "cache_entry", native_tasks/allocate_record(retained, "DispatchReach", {
+    "next" -> cache, "view" -> native_roots/ref(retained, "delegates"), "source" -> native_roots/ref(retained, "source"), "vertices" -> vertices}))
+  builder = native_query/check(allocated, native_gen/negate(native_kernel/absent(entry)), "oom")
+  builder = native_roots/store(builder, cache, entry)
+  let result: map = native_gen/finish(module, native_dispatch/contains(builder, vertices, key))
+  return result
+end
+
+verb native_dispatch/reach_arguments(builder: map, source: map, target: map) -> list
+  return [native_roots/worker(builder), native_roots/ref(builder, "delegates"), native_gen/ref(builder, "cache"), source, target]
+end
+verb native_dispatch/try_reach(builder: map, source: map, target: map) -> map
+  let [matched: map, ready: map] = native_dispatch/checked_match(builder, "task_dispatch_cached_reaches", native_dispatch/reach_arguments(builder, source, target))
+  let result: map = native_gen/when(ready, matched, fn(found) => native_dispatch/match_result(found, native_gen/ref(found, "true")))
+  return result
+end
+verb native_dispatch/frob_delegate(builder: map, value: map) -> map
+  let header: map = native_gen/expression([:Pointer, [:Record, "HeapFrob"], :Const], :UnpackPointer, [value])
+  let result: map = native_gen/expression(native_value/word(), :PackImmediate, [native_kernel/load_field(builder, header, "delegate"), native_gen/ref(builder, "tag_identity")])
+  return result
+end
+
+verb native_dispatch/matching_context(module: map, name: string) -> map
+  let builder: map = native_dispatch/context(module, name)
+  let vocabulary: map = native_gen/ref(builder, "vocabulary")
+  builder = native_query/check(builder, native_gen/negate(native_kernel/absent(vocabulary)), "schema")
+  builder = native_query/check(builder, native_kernel/load_field(builder, vocabulary, "ready"), "schema")
+  let prototypes: map = native_roots/ref(builder, "prototypes")
+  let count: map = native_gen/divide(native_gen/sizeof([:Array, native_value/word(), len(native_value/kinds())]), native_gen/sizeof(native_value/word()))
+  builder = native_query/check(builder, native_gen/equal(native_gen/expression(:U8, :Tag, [prototypes]), native_gen/ref(builder, "tag_list")), "schema")
+  let result: map = native_query/check(builder, native_gen/equal(native_query/width(builder, prototypes), count), "schema")
+  return result
+end
+
+// Primitive identities are supplied by the native world's standard environment
+// in value-tag order. The matcher does not embed another runtime's identity IDs.
+verb native_dispatch/matches_body(module: map) -> map
+  let builder: map = native_dispatch/matching_context(module, "dispatch_matches")
+  let value: map = native_roots/ref(builder, "value")
+  let restriction: map = native_roots/ref(builder, "restriction")
+  builder = native_gen/when(builder, native_gen/equal(restriction, native_dispatch/symbol(builder, "unrestricted")),
+    fn(any) => native_dispatch/match_result(any, native_gen/ref(any, "true")))
+  let [equal: map, compared: map] = native_dispatch/equal(builder, value, restriction)
+  builder = native_gen/when(compared, equal, fn(same) => native_dispatch/match_result(same, native_gen/ref(same, "true")))
+  let tag: map = native_gen/expression(:U8, :Tag, [value])
+  builder = native_gen/when(builder, native_gen/equal(native_gen/expression(:U8, :Tag, [restriction]), native_gen/ref(builder, "tag_frob")), fn(frob_restriction)
+    let header: map = native_gen/expression([:Pointer, [:Record, "HeapFrob"], :Const], :UnpackPointer, [restriction])
+    let [marker: map, checked: map] = native_dispatch/equal(frob_restriction, native_kernel/load_field(frob_restriction, header, "value"), native_dispatch/symbol(frob_restriction, "frob_only"))
+    return native_gen/when(checked, marker, fn(frob_only)
+      let ready: map = native_gen/unless(frob_only, native_gen/equal(tag, native_gen/ref(frob_only, "tag_frob")),
+        fn(other) => native_dispatch/match_result(other, native_gen/ref(other, "false")))
+      return native_roots/return_value(ready, native_query/call(ready, "task_dispatch_cached_reaches", native_dispatch/reach_arguments(ready,
+        native_dispatch/frob_delegate(ready, value), native_dispatch/frob_delegate(ready, restriction))))
+    end)
+  end)
+  builder = native_gen/branch(builder, native_gen/equal(tag, native_gen/ref(builder, "tag_frob")),
+    fn(frob) => native_dispatch/try_reach(frob, native_dispatch/frob_delegate(frob, value), restriction),
+    fn(other) => native_dispatch/try_reach(other, value, restriction))
+  let index: map = native_gen/subtract(native_gen/convert(:U64, tag), native_gen/ref(builder, "one"))
+  builder = native_query/check(builder, native_gen/less(index, native_query/width(builder, native_roots/ref(builder, "prototypes"))), "schema")
+  let prototype: map = native_query/cell(builder, native_roots/ref(builder, "prototypes"), index)
+  builder = native_query/check(builder, native_gen/equal(native_gen/expression(:U8, :Tag, [prototype]), native_gen/ref(builder, "tag_identity")), "schema")
+  let result: map = native_gen/finish(module, native_roots/return_value(builder, native_query/call(builder, "task_dispatch_cached_reaches",
+    native_dispatch/reach_arguments(builder, prototype, restriction))))
+  return result
+end
+
+verb native_dispatch/implies_body(module: map) -> map
+  let builder: map = native_dispatch/matching_context(module, "dispatch_implies")
+  let specific: map = native_roots/ref(builder, "specific")
+  let general: map = native_roots/ref(builder, "general")
+  builder = native_gen/when(builder, native_gen/equal(general, native_dispatch/symbol(builder, "unrestricted")),
+    fn(any) => native_dispatch/match_result(any, native_gen/ref(any, "true")))
+  let [same: map, compared: map] = native_dispatch/equal(builder, specific, general)
+  builder = native_gen/when(compared, same, fn(equal) => native_dispatch/match_result(equal, native_gen/ref(equal, "true")))
+  builder = native_gen/when(builder, native_gen/equal(specific, native_dispatch/symbol(builder, "unrestricted")),
+    fn(any) => native_dispatch/match_result(any, native_gen/ref(any, "false")))
+  let result: map = native_gen/finish(module, native_roots/return_value(builder, native_query/call(builder, "task_dispatch_matches", [
+    native_roots/worker(builder), native_gen/ref(builder, "vocabulary"), native_roots/ref(builder, "delegates"),
+    native_roots/ref(builder, "prototypes"), native_gen/ref(builder, "cache"), specific, general])))
+  return result
+end
+
+verb native_dispatch/restrictions(input: map) -> map
+  let module: map = input
+  module[:state] = native/record_type(module[:state], "TaskDispatchClosure", [["status", :U64], ["vertices", native_kernel/pointer("Node")]])[1]
+  let worker: list = ["worker", native_memory/record_pointer("MemoryWorker"), :Borrow]
+  let delegates: list = ["delegates", native_kernel/pointer("Relation"), :Gc]
+  let cache: list = ["cache", native_memory/record_pointer("MemoryRoot"), :Borrow]
+  let budget: list = ["budget", native_kernel/pointer("Budget"), :Borrow]
+  let word: list = native_value/word()
+  module = native_tasks/declare(module, "dispatch_closure", [:Record, "TaskDispatchClosure"], [worker, delegates, ["source", word, :Gc], budget], :Gc)
+  module = native_tasks/declare(module, "dispatch_cached_reaches", [:Record, "TaskDispatchMatch"], [worker, delegates, cache, ["source", word, :Gc], ["target", word, :Gc], budget])
+  let common: list = [worker, ["vocabulary", native_tasks/pointer("DispatchVocabulary"), :Borrow], delegates, ["prototypes", word, :Gc], cache]
+  module = native_tasks/declare(module, "dispatch_matches", [:Record, "TaskDispatchMatch"], [@common, ["value", word, :Gc], ["restriction", word, :Gc], budget])
+  module = native_tasks/declare(module, "dispatch_implies", [:Record, "TaskDispatchMatch"], [@common, ["specific", word, :Gc], ["general", word, :Gc], budget])
+  module = native_dispatch/closure_body(module)
+  module = native_dispatch/cached_reaches_body(module)
+  module = native_dispatch/matches_body(module)
+  let result: map = native_dispatch/implies_body(module)
+  return result
+end

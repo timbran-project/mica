@@ -238,6 +238,12 @@ verb native_gen/cast(type_id, pointer: map) -> map
   let generated_result: map = native_gen/expression(type_id, :PointerCast, [pointer])
   return generated_result
 end
+verb native_gen/element(array: map, index: map) -> map
+  let source = native_gen/type(array)
+  native/ensure(native/is_pointer(source) && native/is_array(source[1]), "generated element requires an array pointer")
+  let result: map = native_gen/expression([:Pointer, source[1][1], source[2]], :ElementPointer, [array, index])
+  return result
+end
 verb native_gen/freeze(pointer: map) -> map
   native/ensure(native/is_pointer(pointer[:type]), "generated freeze requires a pointer")
   let generated_result: map = native_gen/expression([:Pointer, pointer[:type][1], :Const], :Freeze, [pointer])

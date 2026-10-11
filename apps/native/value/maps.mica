@@ -19,8 +19,9 @@ verb native_value/maps(input: map) -> map
   context[:constants] = constants
   context = native/declare_function(context, "value_map", [:Record, "ValueResult"], [
     ["worker", native_memory/record_pointer("MemoryWorker"), :Borrow],
-    ["source", source_type, :Gc], ["length", :U64, :Value]], [],
+    ["source", source_type, :Borrow], ["length", :U64, :Value]], [],
     [:Allocate, :ReadMemory, :WriteMemory], :Gc, "")
+  context = native/execution_function(context, "value_map", :Collector)
   let builder: map = native_gen/context(context, "value_map")
   let worker: map = native_gen/ref(builder, "worker")
   let source: map = native_gen/ref(builder, "source")
@@ -31,7 +32,12 @@ verb native_value/maps(input: map) -> map
   end)
   let [object: map, data: map, with_object: map] = native_memory/tail_storage(builder, worker, header, entry, length, "layout_map", failure)
   builder = with_object
-  builder = native_sequence/copy(builder, native_sequence/span(data, length), native_sequence/span(source, length))
+  // The caller owns the span and roots the values it contains. No safepoint
+  // occurs while these borrowed entries are copied into managed storage.
+  builder = native_gen/for_range(builder, "copy", native_gen/zero(:U64), length, fn(body, index)
+    let entry: map = native_gen/root_read(native_gen/location(native_gen/offset(source, index)))
+    return native_gen/store(body, native_gen/offset(data, index), entry)
+  end)
   let [sorted: map, with_sorted: map] = native_gen/bind(builder, "sorted", data)
   builder = with_sorted
   let [count: map, with_count: map] = native_gen/bind(builder, "count", length)

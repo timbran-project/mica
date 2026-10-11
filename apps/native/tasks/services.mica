@@ -1,0 +1,96 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+// Services are generated entries. Their context occupies stable native storage
+// and owns roots for any managed state. Dispatch borrows that context only for
+// the call; no context pointer enters a continuation or published effect.
+verb native_tasks/service_parameters() -> list
+  return [["worker", native_memory/record_pointer("MemoryWorker"), :Borrow],
+    ["context", native_memory/pointer(:U8), :Borrow], ["kernel", native_memory/record_pointer("Kernel"), :Borrow],
+    ["snapshot", native_kernel/pointer("Snapshot"), :Gc],
+    ["tenant", native_value/word(), :Gc], ["effect", native_tasks/pointer("Effect"), :Gc]]
+end
+
+verb native_tasks/effect_field(builder: map, field: string) -> map
+  let result: map = native_kernel/load_field(builder, native_roots/ref(builder, "effect"), field)
+  return result
+end
+
+verb native_tasks/service_types(input: map) -> map
+  let module: map = input
+  let [entry: list, state: map] = native/function_pointer_type(module[:state], "TaskService", :U64,
+    native_tasks/service_parameters(),
+    native_tasks/effects(), :Value, "")
+  module[:state] = state
+  let fields: list = [["context", native_memory/pointer(:U8)]]
+  for kind in ["emit", "send", "subscribe", "spawn"]
+    fields = [@fields, [kind, entry]]
+  end
+  module[:state] = native/record_type(module[:state], "TaskServices", fields)[1]
+  module = native_tasks/declare(module, "dispatch", :U64,
+    [["task", native_tasks/pointer("Control"), :Borrow],
+      ["worker", native_memory/record_pointer("MemoryWorker"), :Borrow],
+      ["services", native_tasks/pointer("Services"), :Borrow]])
+  return module
+end
+
+verb native_tasks/service_call(builder: map, effect: map, kind: string, outcome: map, tenant: map, snapshot: map) -> map
+  let services: map = native_gen/ref(builder, "services")
+  let entry: map = native_kernel/load_field(builder, services, kind)
+  let [status: map, ready: map] = native_gen/bind(builder, "service_status", native_gen/ref(builder, "kernel_unknown"))
+  ready = native_gen/unless(ready, native_kernel/absent(entry), fn(present)
+    return native_gen/assign(present, status, native_gen/call_indirect(present, entry,
+      [native_gen/ref(present, "worker"), native_kernel/load_field(present, services, "context"),
+        native_tasks/control_field(present, "kernel"), snapshot, tenant, effect]))
+  end)
+  // Publication already succeeded. A failed service cannot discard the other
+  // committed effects or cause completed services to run a second time.
+  let result: map = native_gen/when(ready, native_kernel/absent(outcome), fn(first) => native_gen/assign(first, outcome, status))
+  return result
+end
+
+verb native_tasks/services(input: map) -> map
+  let module: map = native_tasks/service_types(input)
+  let builder: map = native_tasks/context(module, "dispatch")
+  builder = native_tasks/check(builder, native_gen/negate(native_kernel/absent(native_gen/ref(builder, "services"))), "schema")
+  let [delivery: map, ready: map] = native_gen/bind(builder, "delivery", native_gen/zero([:Record, "MemoryRoot"]))
+  let root: map = native_gen/address(delivery)
+  let [status: map, claimed: map] = native_gen/bind(ready, "status", native_gen/call(ready, "task_delivery",
+    [native_gen/ref(ready, "task"), native_gen/ref(ready, "worker"), root]))
+  builder = native_gen/unless(claimed, native_kernel/absent(status), fn(unclaimed) => native_roots/return_value(unclaimed, status))
+  // Only a successful claimant acknowledges this boundary. The first error
+  // becomes the task outcome after every committed effect gets one attempt.
+  builder = native_gen/on_return(builder, fn(leaving, result)
+    let [acknowledged: map, advanced: map] = native_gen/bind(leaving, "acknowledged", native_gen/call(leaving, "task_acknowledge",
+      [native_gen/ref(leaving, "task"), native_gen/ref(leaving, "worker"), result]))
+    return native_gen/unless(advanced, native_kernel/absent(acknowledged), fn(failed) => native_gen/assign(failed, result, acknowledged))
+  end)
+  // A successful claim owns the delivery outcome. Cancellation can change its
+  // request flag, but cannot replace this published status or erase its effects.
+  let [outcome: map, with_outcome: map] = native_gen/bind(builder, "outcome", native_tasks/control_field(builder, "status"))
+  let [snapshot: map, with_snapshot: map] = native_roots/retain(with_outcome, "committed_view",
+    native_roots/root_value(with_outcome, native_tasks/control_slot(with_outcome, "committed_view"), native_kernel/pointer("Snapshot")))
+  builder = with_snapshot
+  let boundary: map = native_roots/root_value(builder, root, native_tasks/pointer("Boundary"))
+  let tenant: map = native_kernel/load_field(builder, native_kernel/load_field(builder, boundary, "image"), "tenant")
+  let [cursor: map, with_cursor: map] = native_roots/retain(builder, "effect", native_kernel/load_field(builder, boundary, "effects"))
+  builder = native_gen/while_loop(with_cursor, native_gen/negate(native_kernel/absent(cursor)), fn(loop)
+    // Even absent services must participate in collection during long batches.
+    // A failed collection preserves the graph. Record its error and continue
+    // attempting the already committed effects without authorizing replay.
+    let [polled: map, with_poll: map] = native_gen/bind(loop, "polled", native_gen/call(loop, "memory_safepoint", [native_gen/ref(loop, "worker"), native_gen/ref(loop, "false")]))
+    let checked: map = native_gen/unless(with_poll, polled, fn(failed)
+      return native_gen/when(failed, native_kernel/absent(outcome), fn(first) => native_gen/assign(first, outcome, native_gen/ref(first, "kernel_oom")))
+    end)
+    let cases: list = []
+    for kind in ["emit", "send", "subscribe", "spawn"]
+      cases = [@cases, [native_gen/ref(checked, string_concat("task_effect_", kind)), fn(arm) => native_tasks/service_call(arm, cursor, kind, outcome, tenant, snapshot)]]
+    end
+    let ready: map = native_gen/switch(checked, native_kernel/load_field(checked, cursor, "kind"), cases,
+      fn(invalid) => native_gen/when(invalid, native_kernel/absent(outcome), fn(first) => native_gen/assign(first, outcome, native_gen/ref(first, "kernel_schema"))))
+    return native_roots/store(ready, cursor, native_kernel/load_field(ready, cursor, "next"))
+  end)
+  builder = native_roots/return_value(builder, outcome)
+  let result: map = native_gen/finish(module, builder)
+  return result
+end

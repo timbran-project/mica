@@ -1,0 +1,84 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+verb native_call_tests/entry(name: string) -> map
+  let result: map = native_gen/expression([:FunctionPointer, "TaskEntry"], :FunctionAddress, [string_concat("task_test_call_", name)])
+  return result
+end
+verb native_call_tests/program(input: map) -> map
+  let module: map = input
+  let [storage: int, declared: map] = native/add_global(module[:state], "call_test_vocabulary", [:Record, "TaskDispatchVocabulary"], :Mutable, :Zero)
+  module[:state] = declared
+  let constants: map = module[:constants]
+  constants["call_test_vocabulary"] = storage
+  let [ids: map, with_ids: map] = native/constants(module[:state], [
+    ["call_test_delegates", :U64, native_value/hex(701)], ["call_test_selectors", :U64, native_value/hex(702)],
+    ["call_test_parameters", :U64, native_value/hex(703)], ["call_test_programs", :U64, native_value/hex(704)]])
+  module[:state] = with_ids
+  for name, id in ids
+    constants[name] = id
+  end
+  module[:constants] = constants
+  module = native/declare_function(module, "task_test_call_vocabulary", native_tasks/pointer("DispatchVocabulary"), [], [], [], :Static, "")
+  let builder: map = native_gen/context(module, "task_test_call_vocabulary")
+  module = native_gen/finish(module, native_gen/return_value(builder, native_gen/expression(native_tasks/pointer("DispatchVocabulary"), :GlobalAddress, ["call_test_vocabulary"])))
+  let attempt: list = ["attempt", native_tasks/pointer("Attempt"), :Borrow]
+  let worker: list = ["worker", native_memory/record_pointer("MemoryWorker"), :Borrow]
+  let names: list = ["invoke", "value", "finish", "wait", "cleanup"]
+  for name in names
+    let entry: string = string_concat("task_test_call_", name)
+    module = native/declare_function(module, entry, :U64, [attempt], [], native_tasks/effects(), :Value, "")
+    module = native/execution_function(module, entry, :Tail)
+    module = native_tasks/declare(module, string_concat("test_call_body_", name), :U64, [attempt, worker])
+  end
+  builder = native_tasks/context(module, "test_call_body_invoke")
+  let environment: map = native_kernel/load_field(builder, native_handlers/current(builder), "environment")
+  let [continuation: map, captured: map] = native_roots/retain(builder, "continuation", native_handlers/copy_image(builder, native_handlers/current(builder), {
+    "entry" -> native_call_tests/entry("finish")}))
+  builder = native_tasks/check(captured, native_gen/negate(native_kernel/absent(continuation)), "oom")
+  let [budget: map, budgeted: map] = native_gen/bind(builder, "budget", native_gen/record(builder, [:Record, "KernelBudget"], {
+    "steps" -> native_gen/ref(builder, "kernel_unlimited"), "rows" -> native_gen/ref(builder, "kernel_unlimited"),
+    "rounds" -> native_gen/ref(builder, "kernel_unlimited"), "bytes" -> native_gen/ref(builder, "kernel_unlimited"),
+    "status" -> native_gen/ref(builder, "zero"), "signal" -> native_kernel/load_field(builder, native_tasks/slot(builder, "transaction"), "signal")}))
+  let [selection: map, called: map] = native_gen/bind(budgeted, "selected", native_gen/call(budgeted, "task_invoke", [
+    native_gen/ref(budgeted, "worker"), native_tasks/attempt(budgeted), native_gen/call(budgeted, "task_test_call_vocabulary", []),
+    native_gen/ref(budgeted, "call_test_selectors"), native_gen/ref(budgeted, "call_test_parameters"), native_gen/ref(budgeted, "call_test_delegates"), native_gen/ref(budgeted, "call_test_programs"),
+    native_query/cell(budgeted, environment, native_gen/ref(budgeted, "two")), native_query/cell(budgeted, environment, native_gen/ref(budgeted, "zero")),
+    native_query/cell(budgeted, environment, native_gen/ref(budgeted, "one")), continuation, native_gen/address(budget)]))
+  builder = native_gen/unless(called, native_kernel/absent(native_gen/field(called, selection, "status")), fn(failed) => native_roots/return_value(failed, native_gen/field(failed, selection, "status")))
+  builder = native_tasks/check(builder, native_gen/equal(native_gen/field(builder, selection, "count"), native_gen/ref(builder, "one")), "unknown")
+  module = native_gen/finish(module, native_tasks/attempt_status(builder, "ok"))
+
+  for name in ["value", "finish"]
+    builder = native_tasks/context(module, string_concat("test_call_body_", name))
+    let value: map = native_kernel/load_field(builder, native_handlers/current(builder), "input")
+    if name == "value"
+      value = native_query/cell(builder, native_kernel/load_field(builder, native_handlers/current(builder), "environment"), native_gen/ref(builder, "zero"))
+    end
+    let [retained: map, rooted: map] = native_roots/retain(builder, "result", value)
+    builder = native_handler_tests/checked(rooted, "task_stage", [native_gen/ref(rooted, "worker"), native_tasks/slot(rooted, "effects"),
+      native_gen/ref(rooted, "task_effect_emit"), native_kernel/load_field(rooted, native_handlers/current(rooted), "tenant"), retained])
+    builder = native_roots/return_value(builder, native_gen/call(builder, "task_return", [native_gen/ref(builder, "worker"), native_tasks/attempt(builder), retained]))
+    module = native_gen/finish(module, builder)
+  end
+  builder = native_tasks/context(module, "test_call_body_wait")
+  builder = native_handlers/replace_current(builder, native_handlers/current(builder), {"entry" -> native_call_tests/entry("value")})
+  module = native_gen/finish(module, native_roots/return_value(builder, native_gen/call(builder, "task_request", [native_tasks/attempt(builder), native_gen/ref(builder, "task_boundary_wait")])))
+
+  builder = native_tasks/context(module, "test_call_body_cleanup")
+  builder = native_handler_tests/checked(builder, "task_stage", [native_gen/ref(builder, "worker"), native_tasks/slot(builder, "effects"),
+    native_gen/ref(builder, "task_effect_emit"), native_kernel/load_field(builder, native_handlers/current(builder), "tenant"), native_gen/zero(native_value/word())])
+  module = native_gen/finish(module, native_roots/return_value(builder, native_gen/call(builder, "task_cleanup_done", [native_tasks/attempt(builder), native_gen/ref(builder, "worker")])))
+
+  for name in names
+    builder = native_tasks/entry_context(module, string_concat("task_test_call_", name))
+    builder = native_handler_tests/checked(builder, string_concat("task_test_call_body_", name), [native_tasks/attempt(builder), native_tasks/attempt_field(builder, "worker")])
+    if name == "wait"
+      builder = native_gen/return_value(builder, native_gen/ref(builder, "kernel_ok"))
+    else
+      builder = native_handlers/transfer(builder)
+    end
+    module = native_gen/finish(module, builder)
+  end
+  return module
+end

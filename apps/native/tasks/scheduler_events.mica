@@ -1,0 +1,99 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+verb native_scheduler/deadline(builder: map, deadline: map) -> map
+  let result: map = native_roots/return_value(builder, native_gen/record(builder, [:Record, "TaskDeadline"], {
+    "status" -> native_gen/ref(builder, "kernel_ok"), "deadline" -> deadline}))
+  return result
+end
+verb native_scheduler/poll_slot_body(module: map) -> map
+  // The event loop holds the scheduler lock across each slot operation. Senders
+  // only take the hub lock and write a nonblocking signal; lock order is fixed.
+  let builder: map = native_scheduler/context(module, "poll_slot")
+  let id: map = native_gen/ref(builder, "id")
+  let slot: map = native_scheduler/slot(builder, id)
+  let idle = fn(done) => native_scheduler/deadline(done, native_gen/ref(done, "kernel_unlimited"))
+  builder = native_gen/when(builder, native_gen/equal(native_kernel/load_field(builder, slot, "state"), native_gen/ref(builder, "task_slot_delayed")), fn(delayed)
+    let [observed: map, ready: map] = native_scheduler/observe(delayed, id)
+    ready = native_gen/unless(ready, native_gen/equal(native_gen/field(ready, observed, "state"), native_gen/ref(ready, "task_state_runnable")), fn(cancelled) => idle(native_scheduler/done(cancelled, slot)))
+    let deadline: map = native_kernel/load_field(ready, slot, "deadline")
+    ready = native_gen/when(ready, native_gen/less(native_gen/call(ready, "task_clock_now", []), deadline), fn(pending) => native_scheduler/deadline(pending, deadline))
+    return idle(native_scheduler/enqueue(ready, id, slot))
+  end)
+  builder = native_gen/unless(builder, native_gen/equal(native_kernel/load_field(builder, slot, "state"), native_gen/ref(builder, "task_slot_waiting")), idle)
+  let [observed: map, ready: map] = native_scheduler/observe(builder, id)
+  builder = native_gen/unless(ready, native_gen/equal(native_gen/field(ready, observed, "state"), native_gen/ref(ready, "task_state_waiting")), fn(changed)
+    let retired: map = native_scheduler/retire(changed, slot)
+    retired = native_gen/branch(retired, native_gen/equal(native_gen/field(retired, observed, "state"), native_gen/ref(retired, "task_state_runnable")),
+      fn(woken) => native_scheduler/enqueue(woken, id, slot), fn(terminal) => native_scheduler/done(terminal, slot))
+    return idle(retired)
+  end)
+  let request: map = native_scheduler/request(builder, slot)
+  builder = native_gen/when(builder, native_kernel/absent(request), idle)
+  builder = native_gen/when(builder, native_kernel/load_field(builder, request, "mailbox"), fn(receive)
+    let [read: map, delivered: map] = native_gen/bind(receive, "received", native_gen/call(receive, "task_mailbox_receive", [
+      native_scheduler/field(receive, "hub"), native_gen/ref(receive, "worker"), native_kernel/load_field(receive, request, "receivers"),
+      native_scheduler/task(receive, id), native_kernel/load_field(receive, slot, "generation")]))
+    let checked: map = native_gen/unless(delivered, native_kernel/absent(native_gen/field(delivered, read, "status")), fn(failed)
+      return idle(native_scheduler/fail_registration(failed, id, slot, native_gen/field(failed, read, "status")))
+    end)
+    return native_gen/unless(checked, native_kernel/absent(native_gen/field(checked, read, "count")), fn(woken)
+      return idle(native_scheduler/enqueue(native_scheduler/retire(woken, slot), id, slot))
+    end)
+  end)
+  let deadline: map = native_kernel/load_field(builder, slot, "deadline")
+  builder = native_gen/when(builder, native_gen/equal(deadline, native_gen/ref(builder, "kernel_unlimited")), idle)
+  builder = native_gen/when(builder, native_gen/less(native_gen/call(builder, "task_clock_now", []), deadline), fn(pending) => native_scheduler/deadline(pending, deadline))
+  let [status: map, woken: map] = native_gen/bind(builder, "woken", native_gen/call(builder, "task_wake", [
+    native_scheduler/task(builder, id), native_gen/ref(builder, "worker"), native_kernel/load_field(builder, slot, "generation"), native_kernel/load_field(builder, request, "reply")]))
+  builder = native_gen/unless(woken, native_kernel/absent(status), fn(failed) => idle(native_scheduler/fail_registration(failed, id, slot, status)))
+  builder = native_scheduler/enqueue(native_scheduler/retire(builder, slot), id, slot)
+  let result: map = native_gen/finish(module, idle(builder))
+  return result
+end
+
+verb native_scheduler/poll_body(module: map) -> map
+  let builder: map = native_scheduler/lock(native_scheduler/context(module, "poll"))
+  builder = native_scheduler/check(builder, native_gen/negate(native_scheduler/field(builder, "closed")), "closed")
+  let [deadline: map, ready: map] = native_gen/bind(builder, "deadline", native_gen/ref(builder, "kernel_unlimited"))
+  builder = native_gen/for_range(ready, "task_index", native_gen/ref(ready, "zero"), native_scheduler/field(ready, "capacity"), fn(scan, id)
+    let [next: map, polled: map] = native_gen/bind(scan, "next", native_gen/call(scan, "task_scheduler_poll_slot", [native_gen/ref(scan, "scheduler"), native_gen/ref(scan, "worker"), id]))
+    let status: map = native_gen/field(polled, next, "status")
+    let ready: map = native_gen/unless(polled, native_kernel/absent(status), fn(failed) => native_execution/fail(failed, status))
+    ready = native_gen/when(ready, native_gen/less(native_gen/field(ready, next, "deadline"), deadline), fn(earlier) => native_gen/assign(earlier, deadline, native_gen/field(earlier, next, "deadline")))
+    return native_roots/poll(ready)
+  end)
+  let result: map = native_gen/finish(module, native_scheduler/deadline(builder, deadline))
+  return result
+end
+
+verb native_scheduler/events_body(module: map) -> map
+  let builder: map = native_scheduler/join(native_scheduler/context(module, "events"), true)
+  builder = native_gen/while_loop(builder, native_gen/ref(builder, "true"), fn(loop)
+    // Consume existing notifications before inspecting waits. Signals written
+    // during or after the scan remain readable when the event thread parks.
+    let ready: map = native_gen/do_call(loop, "task_event_take", [native_scheduler/field(loop, "event")])
+    let [result: map, polled: map] = native_gen/bind(ready, "polled", native_gen/call(ready, "task_scheduler_poll", [native_gen/ref(ready, "scheduler"), native_gen/ref(ready, "worker")]))
+    let status: map = native_gen/field(polled, result, "status")
+    ready = native_gen/when(polled, native_gen/equal(status, native_gen/ref(polled, "kernel_closed")), fn(finished) => native_scheduler/status(finished, "ok"))
+    ready = native_gen/unless(ready, native_kernel/absent(status), fn(failed) => native_execution/fail(failed, status))
+    let [milliseconds: map, with_delay: map] = native_gen/bind(ready, "milliseconds", native_gen/ref(ready, "int_minus_one"))
+    let deadline: map = native_gen/field(with_delay, result, "deadline")
+    ready = native_gen/unless(with_delay, native_gen/equal(deadline, native_gen/ref(with_delay, "kernel_unlimited")), fn(timed)
+      let [now: map, measured: map] = native_gen/bind(timed, "now", native_gen/call(timed, "task_clock_now", []))
+      let [delay: map, with_delay: map] = native_gen/bind(measured, "delay", native_gen/ref(measured, "zero"))
+      let calculated: map = native_gen/when(with_delay, native_gen/less(now, deadline), fn(future)
+        let [difference: map, with_difference: map] = native_gen/bind(future, "difference", native_gen/subtract(deadline, now))
+        // Ceiling division avoids an early busy loop; subtraction avoids overflow.
+        return native_gen/assign(with_difference, delay, native_gen/add(native_gen/divide(native_gen/subtract(difference, native_gen/ref(with_difference, "one")), native_gen/ref(with_difference, "task_millisecond")), native_gen/ref(with_difference, "one")))
+      end)
+      calculated = native_gen/when(calculated, native_gen/less(native_gen/ref(calculated, "task_max_poll"), delay), fn(bounded) => native_gen/assign(bounded, delay, native_gen/ref(bounded, "task_max_poll")))
+      return native_gen/assign(calculated, milliseconds, native_gen/bitcast(:I64, delay))
+    end)
+    ready = native_scheduler/check(ready, native_gen/call(ready, "memory_leave", [native_gen/ref(ready, "worker")]), "closed")
+    ready = native_gen/do_call(ready, "task_event_wait", [native_scheduler/field(ready, "event"), milliseconds])
+    return native_scheduler/check(ready, native_gen/call(ready, "memory_enter", [native_gen/ref(ready, "worker")]), "closed")
+  end)
+  let result: map = native_gen/finish(module, native_scheduler/status(builder, "closed"))
+  return result
+end
