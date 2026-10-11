@@ -207,6 +207,8 @@ fn run() -> Result<()> {
         "tasks/subscriptions",
         "tasks/subscription_lifecycle",
         "tasks/scheduler",
+        "tasks/scheduler_launch",
+        "tasks/spawn",
         "tasks/scheduler_lifecycle",
         "tasks/scheduler_admission",
         "tasks/scheduler_workers",
@@ -215,6 +217,7 @@ fn run() -> Result<()> {
         "tasks/scheduler_tests",
         "tasks/handlers_tests",
         "tasks/calls_tests",
+        "tasks/spawn_tests",
         "tasks/tests",
         "gccjit/data",
         "gccjit/bindings",
@@ -633,6 +636,10 @@ fn check_fixtures(
             fs::copy(
                 root.join("apps/native/tasks/invocation_tests.c"),
                 directory.join("invocation_tests.c"),
+            )?;
+            fs::copy(
+                root.join("apps/native/tasks/spawn_tests.c"),
+                directory.join("spawn_tests.c"),
             )?;
             fs::copy(
                 root.join("apps/native/tasks/calls_tests.c"),

@@ -8,7 +8,8 @@ verb native_tasks/service_parameters() -> list
   return [["worker", native_memory/record_pointer("MemoryWorker"), :Borrow],
     ["context", native_memory/pointer(:U8), :Borrow], ["kernel", native_memory/record_pointer("Kernel"), :Borrow],
     ["snapshot", native_kernel/pointer("Snapshot"), :Gc],
-    ["tenant", native_value/word(), :Gc], ["effect", native_tasks/pointer("Effect"), :Gc]]
+    ["tenant", native_value/word(), :Gc], ["effect", native_tasks/pointer("Effect"), :Gc],
+    ["parent", native_tasks/pointer("Control"), :Borrow]]
 end
 
 verb native_tasks/effect_field(builder: map, field: string) -> map
@@ -41,7 +42,7 @@ verb native_tasks/service_call(builder: map, effect: map, kind: string, outcome:
   ready = native_gen/unless(ready, native_kernel/absent(entry), fn(present)
     return native_gen/assign(present, status, native_gen/call_indirect(present, entry,
       [native_gen/ref(present, "worker"), native_kernel/load_field(present, services, "context"),
-        native_tasks/control_field(present, "kernel"), snapshot, tenant, effect]))
+        native_tasks/control_field(present, "kernel"), snapshot, tenant, effect, native_gen/ref(present, "task")]))
   end)
   // Publication already succeeded. A failed service cannot discard the other
   // committed effects or cause completed services to run a second time.

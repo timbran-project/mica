@@ -38,7 +38,7 @@ verb native_tasks/images(input: map) -> map
   let effects: map = native_tasks/root(builder, "effects", native_tasks/pointer("Effect"))
   let [effect: map, with_effect: map] = native_gen/bind(builder, "effect", native_gen/call(builder, "task_new_Effect",
     [native_roots/worker(builder), effects, kind, native_roots/ref(builder, "target"), native_roots/ref(builder, "payload"),
-      native_gen/zero(native_tasks/pointer("SubscriptionRequest"))]))
+      native_gen/zero(native_tasks/pointer("SubscriptionRequest")), native_gen/zero(native_tasks/pointer("SpawnRequest"))]))
   builder = native_tasks/check(with_effect, native_gen/negate(native_kernel/absent(effect)), "oom")
   builder = native_roots/store(builder, effects, effect)
   builder = native_roots/return_value(builder, native_gen/ref(builder, "kernel_ok"))
@@ -52,7 +52,7 @@ verb native_tasks/images(input: map) -> map
   builder = native_gen/while_loop(with_ordered, native_gen/negate(native_kernel/absent(cursor)), fn(step)
     let ready: map = native_roots/poll(step)
     let arguments: list = [native_roots/worker(ready), ordered]
-    for field in ["kind", "target", "payload", "subscription"]
+    for field in ["kind", "target", "payload", "subscription", "spawn"]
       arguments = [@arguments, native_kernel/load_field(ready, cursor, field)]
     end
     let [copy: map, copied: map] = native_gen/bind(ready, "effect", native_gen/call(ready, "task_new_Effect", arguments))

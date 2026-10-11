@@ -46,7 +46,7 @@ static void call_fixture_init(struct call_fixture *f, mica_function_type_TaskEnt
     mica_type_Value environment[] = {f->selector, mica_value_root_get(&f->roles), mica_value_root_get(&f->prototypes)};
     mica_type_Value captured = mailbox_receivers(&f->worker, environment, 3);
     f->image.f_pointer = (void *)mica_task_new_Image(&f->worker, mica_task_test_call_invoke,
-        NULL, integer(7), captured, integer(0), NULL, NULL, 0, NULL);
+        NULL, integer(7), captured, integer(0), NULL, NULL, 0, NULL, NULL);
     assert(f->image.f_pointer);
     struct mica_KernelTransaction tx = {0};
     assert(mica_kernel_begin(&f->kernel, &f->worker, &tx, integer(7)) == OK);
@@ -254,7 +254,7 @@ static void method_call_authority(void) {
             mica_value_root_get(&f.roles), mica_value_root_get(&f.prototypes)};
         mica_type_Value captured = mailbox_receivers(&f.worker, environment, 3);
         f.image.f_pointer = (void *)mica_task_new_Image(&f.worker, mica_task_test_call_invoke,
-            NULL, integer(8), captured, integer(0), NULL, NULL, 0, NULL);
+            NULL, integer(8), captured, integer(0), NULL, NULL, 0, NULL, NULL);
         assert(f.image.f_pointer);
         struct mica_TaskControl task = {0};
         call_task_init(&f, &task, 8);
@@ -397,7 +397,7 @@ static void method_return_cleanup(void) {
     call_task_init(&f, &task, 0);
     assert(mica_task_claim(&task, &f.worker, &attempt) == OK);
     cleanup.f_pointer = (void *)mica_task_new_Image(&f.worker, mica_task_test_call_cleanup,
-        NULL, integer(7), integer(0), integer(0), NULL, NULL, 0, NULL);
+        NULL, integer(7), integer(0), integer(0), NULL, NULL, 0, NULL, NULL);
     assert(cleanup.f_pointer);
     assert(mica_task_handler_push(&attempt, &f.worker, (void *)cleanup.f_pointer, 2) == OK);
     struct mica_KernelBudget budget = dispatch_budget(&attempt.f_transaction);

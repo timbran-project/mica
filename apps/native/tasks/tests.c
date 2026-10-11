@@ -54,7 +54,7 @@ static void *prepare(void *argument) {
     text = mica_value_string_slice(&worker, text.f_value, 19, 36);
     assert(text.f_ok);
     image.f_pointer = (void *)mica_task_new_Image(&worker, mica_task_test_entry, NULL,
-        integer(7), text.f_value, integer(0), NULL, NULL, 3, NULL);
+        integer(7), text.f_value, integer(0), NULL, NULL, 3, NULL, NULL);
     assert(image.f_pointer);
     assert(mica_memory_publish(&worker, &image, &fixture->image));
     for (uint64_t kind = 1; kind <= 4; ++kind) {
@@ -150,7 +150,7 @@ static void attempts(struct mica_MemoryHeap *heap) {
     assert(mica_kernel_end(&setup));
     assert(mica_memory_root_push(&worker, &source));
     source.f_pointer = (void *)mica_task_new_Image(&worker, mica_task_test_entry, NULL,
-        integer(7), integer(8), integer(42), NULL, NULL, 3, NULL);
+        integer(7), integer(8), integer(42), NULL, NULL, 3, NULL, NULL);
     assert(source.f_pointer);
     assert(mica_memory_publish(&worker, &source, &shared));
     assert(mica_task_attempt_open(&attempt, &worker, &kernel, &shared, 100, 2, 8) == OK);
@@ -218,7 +218,7 @@ static void *run_to_wait(void *argument) {
     assert(mica_kernel_init(&fixture->kernel, &worker, integer(7), 64));
     assert(mica_memory_root_push(&worker, &image));
     image.f_pointer = (void *)mica_task_new_Image(&worker, mica_task_test_entry, NULL,
-        integer(7), integer(8), integer(0), NULL, NULL, 3, NULL);
+        integer(7), integer(8), integer(0), NULL, NULL, 3, NULL, NULL);
     assert(image.f_pointer);
     assert(mica_task_init(&fixture->task, &worker, &fixture->kernel, &image, 100, 3, 8) == OK);
     assert(mica_memory_root_pop(&worker, &image));
@@ -321,7 +321,7 @@ static void concurrent_commits(void) {
         assert(mica_memory_root_push(&worker, &image));
         mica_type_Value row = pair(&worker, 1, i + 1);
         image.f_pointer = (void *)mica_task_new_Image(&worker, mica_task_test_write, NULL,
-            integer(7), row, integer(i + 1), NULL, NULL, 3, NULL);
+            integer(7), row, integer(i + 1), NULL, NULL, 3, NULL, NULL);
         assert(image.f_pointer);
         assert(mica_task_init(&tasks[i], &worker, &kernel, &image, 100, 1, 8) == OK);
         assert(mica_memory_root_pop(&worker, &image));
@@ -355,6 +355,99 @@ static void concurrent_commits(void) {
     assert(mica_memory_heap_release(&heap));
 }
 
+struct commit_waiter {
+    struct mica_MemoryWorker worker;
+    struct mica_TaskControl *task;
+    struct mica_MemoryHeap *heap;
+    _Atomic unsigned phase;
+};
+
+static void *wait_to_commit(void *argument) {
+    struct commit_waiter *waiter = argument;
+    struct mica_MemoryWorker *worker = &waiter->worker;
+    struct mica_TaskAttempt attempt = {0};
+    assert(mica_memory_worker_init(worker, waiter->heap, 4096));
+    assert(mica_memory_enter(worker));
+    assert(mica_task_claim(waiter->task, worker, &attempt) == OK);
+    assert(mica_task_test_write(&attempt) == OK);
+    assert(mica_task_prepare(waiter->task, worker, &attempt) == OK);
+    assert(mica_memory_leave(worker));
+    atomic_store(&waiter->phase, 1);
+    while (atomic_load(&waiter->phase) != 2) sched_yield();
+    assert(mica_memory_enter(worker));
+    atomic_store(&waiter->phase, 3);
+    assert(mica_task_commit(waiter->task, worker, &attempt) == OK);
+    assert(mica_task_finish(waiter->task, worker, &attempt, OK) == OK);
+    assert(mica_memory_leave(worker));
+    assert(mica_memory_worker_release(worker));
+    return NULL;
+}
+
+static void collection_with_commit_waiter(void) {
+    struct mica_MemoryHeap heap = {0};
+    struct mica_MemoryWorker worker = {0};
+    struct mica_Kernel kernel = {0};
+    struct mica_KernelTransaction tx = {0};
+    struct mica_TaskControl task = {0};
+    struct mica_MemoryRoot image = {0}, delivery = {0};
+    assert(mica_task_heap_init(&heap));
+    assert(mica_memory_worker_init(&worker, &heap, 4096));
+    assert(mica_memory_enter(&worker));
+    assert(mica_kernel_init(&kernel, &worker, integer(7), 64));
+    assert(mica_kernel_begin(&kernel, &worker, &tx, integer(7)) == OK);
+    assert(mica_kernel_declare(&tx, 1, 1, 2, 1, 1, 0) == OK);
+    assert(mica_kernel_commit(&tx) == OK && mica_kernel_end(&tx));
+    assert(mica_memory_root_push(&worker, &image));
+    image.f_pointer = (void *)mica_task_new_Image(&worker, mica_task_test_write, NULL,
+        integer(7), pair(&worker, 1, 2), integer(42), NULL, NULL, 3, NULL, NULL);
+    assert(image.f_pointer);
+    assert(mica_task_init(&task, &worker, &kernel, &image, 100, 0, 8) == OK);
+    assert(mica_memory_root_pop(&worker, &image));
+    assert(mica_memory_leave(&worker));
+    struct commit_waiter waiter = {.task = &task, .heap = &heap};
+    pthread_t thread;
+    assert(!pthread_create(&thread, NULL, wait_to_commit, &waiter));
+    while (atomic_load(&waiter.phase) != 1) sched_yield();
+    mica_foreign_memory_lock(kernel.f_mutex);
+    atomic_store(&waiter.phase, 2);
+    while (atomic_load(&waiter.phase) != 3) sched_yield();
+    // Observe parking under the heap mutex, which protects worker activity.
+    // The publication lock stays held throughout the forced collection.
+    for (;;) {
+        mica_foreign_memory_lock(heap.f_mutex);
+        bool parked = !waiter.worker.f_active;
+        mica_foreign_memory_unlock(heap.f_mutex);
+        if (parked) break;
+        sched_yield();
+    }
+    assert(mica_memory_enter(&worker));
+    uint64_t collections = heap.f_collections;
+    assert(mica_memory_safepoint(&worker, true));
+    assert(heap.f_collections == collections + 1);
+    assert(mica_memory_leave(&worker));
+    mica_foreign_memory_unlock(kernel.f_mutex);
+    assert(!pthread_join(thread, NULL));
+    assert(mica_memory_enter(&worker));
+    assert(task.f_committed && task.f_state == DELIVERING);
+    assert(mica_task_delivery(&task, &worker, &delivery) == OK);
+    struct mica_TaskBoundary *boundary = (void *)delivery.f_pointer;
+    assert(boundary->f_effects && !boundary->f_effects->f_next);
+    assert(boundary->f_effects->f_payload == integer(42));
+    assert(mica_memory_root_pop(&worker, &delivery));
+    assert(mica_task_acknowledge(&task, &worker, OK) == OK);
+    assert(mica_kernel_begin(&kernel, &worker, &tx, integer(7)) == OK);
+    mica_type_Value rows[2];
+    struct mica_KernelScanResult scan = mica_kernel_scan(&tx, 1, pair(&worker, 1, 2), 3, 0, rows, 2);
+    assert(scan.f_status == OK && scan.f_count == 1);
+    assert(mica_kernel_end(&tx));
+    assert(mica_task_release(&task, &worker));
+    assert(mica_kernel_release(&kernel, &worker));
+    assert(mica_memory_safepoint(&worker, true) && !heap.f_retained);
+    assert(mica_memory_leave(&worker));
+    assert(mica_memory_worker_release(&worker));
+    assert(mica_memory_heap_release(&heap));
+}
+
 static void authority_renewal(void) {
     struct mica_MemoryHeap heap = {0};
     struct mica_MemoryWorker worker = {0};
@@ -381,7 +474,7 @@ static void authority_renewal(void) {
     assert(mica_kernel_end(&owner));
     assert(mica_memory_root_push(&worker, &image));
     image.f_pointer = (void *)mica_task_new_Image(&worker, mica_task_test_entry, NULL,
-        integer(8), integer(8), integer(0), NULL, NULL, 3, NULL);
+        integer(8), integer(8), integer(0), NULL, NULL, 3, NULL, NULL);
     assert(image.f_pointer);
     assert(mica_task_init(&task, &worker, &kernel, &image, 100, 1, 8) == OK);
     assert(mica_task_claim(&task, &worker, &attempt) == OK);
@@ -447,7 +540,7 @@ static void cancellation_and_collection(void) {
     assert(mica_kernel_end(&tx));
     assert(mica_memory_root_push(&worker, &image));
     image.f_pointer = (void *)mica_task_new_Image(&worker, mica_task_test_write, NULL,
-        integer(7), pair(&worker, 1, 1), integer(42), NULL, NULL, 3, NULL);
+        integer(7), pair(&worker, 1, 1), integer(42), NULL, NULL, 3, NULL, NULL);
     assert(image.f_pointer);
     assert(mica_task_init(&task, &worker, &kernel, &image, 100, 1, 8) == OK);
     assert(mica_memory_leave(&worker));
@@ -552,7 +645,7 @@ static void competing_claims(void) {
     assert(mica_kernel_init(&kernel, &worker, integer(7), 64));
     assert(mica_memory_root_push(&worker, &image));
     image.f_pointer = (void *)mica_task_new_Image(&worker, mica_task_test_entry, NULL,
-        integer(7), integer(8), integer(42), NULL, NULL, 3, NULL);
+        integer(7), integer(8), integer(42), NULL, NULL, 3, NULL, NULL);
     assert(image.f_pointer);
     for (unsigned round = 0; round < 16; ++round) {
         struct mica_TaskControl task = {0};
@@ -628,7 +721,7 @@ static void boundary_races(void) {
     assert(mica_kernel_init(&kernel, &worker, integer(7), 64));
     assert(mica_memory_root_push(&worker, &image));
     image.f_pointer = (void *)mica_task_new_Image(&worker, mica_task_test_entry, NULL,
-        integer(7), integer(8), integer(0), NULL, NULL, 3, NULL);
+        integer(7), integer(8), integer(0), NULL, NULL, 3, NULL, NULL);
     assert(image.f_pointer);
     for (unsigned round = 0; round < 64; ++round) {
         struct mica_TaskControl task = {0};
@@ -794,7 +887,7 @@ static void publication_races(void) {
         struct mica_MemoryRoot image = {0};
         assert(mica_memory_root_push(&worker, &image));
         image.f_pointer = (void *)mica_task_new_Image(&worker, mica_task_test_write, NULL,
-            integer(7), pair(&worker, round, 1), integer(42), NULL, NULL, 3, NULL);
+            integer(7), pair(&worker, round, 1), integer(42), NULL, NULL, 3, NULL, NULL);
         assert(image.f_pointer);
         assert(mica_task_init(&task, &worker, &kernel, &image, 100, 0, 8) == OK);
         assert(mica_memory_root_pop(&worker, &image));
@@ -889,7 +982,7 @@ static void retry_after_delivery(void) {
     assert(mica_kernel_end(&tx));
     assert(mica_memory_root_push(&worker, &image));
     image.f_pointer = (void *)mica_task_new_Image(&worker, mica_task_test_entry, NULL,
-        integer(7), retry_capture_graph(&worker), integer(0), NULL, NULL, 3, NULL);
+        integer(7), retry_capture_graph(&worker), integer(0), NULL, NULL, 3, NULL, NULL);
     assert(image.f_pointer);
     assert(mica_task_init(&task, &worker, &kernel, &image, 100, 1, 8) == OK);
     assert(mica_memory_root_pop(&worker, &image));
@@ -1024,7 +1117,7 @@ static void queued_tasks(void) {
     for (unsigned i = 0; i < TASKS; ++i) {
         assert(mica_memory_root_push(&worker, &image));
         image.f_pointer = (void *)mica_task_new_Image(&worker, mica_task_test_entry, NULL,
-            integer(7), integer(8), integer(i + 1), NULL, NULL, 3, NULL);
+            integer(7), integer(8), integer(i + 1), NULL, NULL, 3, NULL, NULL);
         assert(image.f_pointer);
         assert(mica_task_init(&tasks[i], &worker, &kernel, &image, i == 0 ? 0 : 100, 1, 8) == OK);
         assert(mica_memory_root_pop(&worker, &image));
@@ -1095,6 +1188,7 @@ static void queued_tasks(void) {
 #include "dispatch_tests.c"
 #include "invocation_tests.c"
 #include "calls_tests.c"
+#include "spawn_tests.c"
 
 int main(void) {
     assert(mica_task_resources_start());
@@ -1117,6 +1211,7 @@ int main(void) {
     assert(!pthread_join(consumer, NULL));
     assert(mica_memory_heap_release(&task_fixture.heap));
     concurrent_commits();
+    collection_with_commit_waiter();
     authority_renewal();
     cancellation_and_collection();
     competing_claims();
@@ -1142,6 +1237,13 @@ int main(void) {
     method_code_lifetimes();
     method_call_retry();
     method_return_cleanup();
+    spawn_transactions();
+    spawn_failures();
+    spawn_concurrent();
+    spawn_late_resolution(false);
+    spawn_late_resolution(true);
+    spawn_admission_failures();
+    spawn_cancel_and_limits();
     assert(mica_task_resources_stop());
     receive_requests();
     subscription_requests();

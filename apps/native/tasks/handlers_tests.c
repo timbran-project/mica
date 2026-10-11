@@ -37,7 +37,7 @@ static void *handler_thread(void *argument) {
         struct mica_MemoryRoot image = {0};
         assert(mica_memory_root_push(&worker, &image));
         image.f_pointer = (void *)mica_task_new_Image(&worker, mica_task_test_handler_start, NULL,
-            integer(7), integer(run->scenario == 9 ? 2 : run->scenario), integer(0), NULL, NULL, 3, NULL);
+            integer(7), integer(run->scenario == 9 ? 2 : run->scenario), integer(0), NULL, NULL, 3, NULL, NULL);
         assert(image.f_pointer);
         assert(mica_task_init(run->task, &worker, run->kernel, &image, 100, 2, 8) == OK);
         assert(mica_memory_root_pop(&worker, &image));
@@ -60,7 +60,7 @@ static void *handler_thread(void *argument) {
             struct mica_MemoryRoot target = {0};
             assert(mica_memory_root_push(&worker, &target));
             target.f_pointer = (void *)mica_task_new_Image(&worker, mica_task_test_handler_return, NULL,
-                integer(7), integer(8), integer(0), NULL, NULL, 3, NULL);
+                integer(7), integer(8), integer(0), NULL, NULL, 3, NULL, NULL);
             assert(target.f_pointer);
             assert(mica_task_leave(&attempt, &worker, (void *)target.f_pointer, integer(77)) == OK);
             assert(mica_memory_root_pop(&worker, &target));

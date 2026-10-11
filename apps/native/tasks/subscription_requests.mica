@@ -27,7 +27,7 @@ verb native_subscriptions/stage(builder: map, fields: map) -> map
   let [effect: map, appended: map] = native_gen/bind(ready, "effect", native_tasks/allocate_record(ready, "Effect", {
     "next" -> effects, "kind" -> native_gen/ref(ready, "task_effect_subscribe"),
     "target" -> native_kernel/load_field(ready, request, "capability"),
-    "payload" -> native_gen/zero(native_value/word()), "subscription" -> request}))
+    "payload" -> native_gen/zero(native_value/word()), "subscription" -> request, "spawn" -> native_gen/zero(native_tasks/pointer("SpawnRequest"))}))
   ready = native_rules/check(appended, native_gen/negate(native_kernel/absent(effect)), "oom")
   let result: map = native_roots/store(ready, effects, effect)
   return result

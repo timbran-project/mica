@@ -63,7 +63,7 @@ static void invocation_authority(void) {
     assert(mica_kernel_commit(&owner) == OK && mica_kernel_end(&owner));
     assert(mica_memory_root_push(&worker, &image));
     image.f_pointer = (void *)mica_task_new_Image(&worker, mica_task_test_entry, NULL,
-        integer(8), integer(0), integer(0), NULL, NULL, 0, NULL);
+        integer(8), integer(0), integer(0), NULL, NULL, 0, NULL, NULL);
     assert(image.f_pointer);
     assert(mica_task_init(&task, &worker, &kernel, &image, 1000, 2, 8) == OK);
     assert(mica_task_claim(&task, &worker, &attempt) == OK);

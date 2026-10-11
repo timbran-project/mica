@@ -8,7 +8,7 @@ static void mailbox_task(struct mica_MemoryWorker *worker, struct mica_Kernel *k
     struct mica_MemoryRoot image = {0};
     assert(mica_memory_root_push(worker, &image));
     image.f_pointer = (void *)mica_task_new_Image(worker, mica_task_test_entry, NULL,
-        integer(7), integer(8), integer(0), NULL, NULL, 3, NULL);
+        integer(7), integer(8), integer(0), NULL, NULL, 3, NULL, NULL);
     assert(image.f_pointer);
     assert(mica_task_init(task, worker, kernel, &image, 10000, 2, 8) == OK);
     assert(mica_memory_root_pop(worker, &image));

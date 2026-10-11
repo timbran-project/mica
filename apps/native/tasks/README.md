@@ -346,6 +346,32 @@ Returning from the outermost method reaches a generated completion entry.
 Generated entries use required tail transfers after successful invocation and return helpers.
 General source lowering to these operations remains separate work.
 
+## Child admission
+
+`task_spawn_request` captures a selector, role map, and delay in nanoseconds in the current attempt.
+The generated entry first saves its continuation, then requests the spawn boundary and returns.
+Rollback and conflict retry discard the request with the other staged effects.
+
+After publication, `task_spawn_service` creates the child image and calls `task_scheduler_launch`.
+The scheduler owns an admitted child control and releases it after completion or cancellation.
+The service delivers the integer child ID to the parent before acknowledging the committed boundary.
+A failed reply cannot undo admission or replay the committed effect.
+Scheduler exhaustion and shutdown reject admission without retaining a child control.
+
+The child image holds the captured invocation, without a selected method or authority cache.
+When scheduled, the child opens a fresh transaction, obtains current authority, and resolves its selector.
+Method replacement and policy revocation during a delay therefore affect the child's invocation.
+The child inherits the parent's tenant; named arguments cannot change that authority.
+Selection consumes the child's logical execution budget.
+Missing and ambiguous selections produce distinct native outcomes, `task_no_method` and `task_ambiguous_dispatch`.
+Language error construction remains a source-lowering responsibility.
+
+`TaskSpawnContext` holds catalogue IDs, vocabulary, child limits, and a published prototype root.
+Initialize and release it exclusively; keep it and the scheduler alive until delivery workers stop.
+Services borrow the parent control during delivery. They never store that pointer in a managed image or effect.
+Lowering must capture ambient `principal`, `actor`, and `endpoint` roles before staging, where the language contract requires them.
+The native request API receives the completed role map.
+
 ## Validation
 
 Run the bootstrap-tier comparison and sanitizer fixtures:
@@ -367,6 +393,7 @@ cargo run --release -p mica-value-comparison --bin native-backend -- \
 
 Fixtures cover conflict replay, effect order, allocation failure, worker migration, authority renewal, wake races, publication races, and root retirement.
 Tests use small nurseries and forced collection at legal points.
+One fixture holds the publication lock while a commit worker parks, then forces collection before releasing the lock.
 The test functions contain assertions for world state, task state, and effect delivery.
 Mailbox fixtures cover allocation failure, capability lifetime, competing receives, cancellation, watcher shutdown, and collection after producer exit.
 Handler fixtures cover nested cleanup, suspension, worker replacement, caught and escaping errors, conflict replay, cancellation, and limits.
@@ -377,13 +404,14 @@ An active-entry fixture advances its image, then forces collection while the pre
 Service fixtures overwrite commit history before delivery and collect inside each service while checking the retained snapshot version.
 Catalogue fixtures replace loaded code on another worker, retain an older snapshot, resume a suspended entry on another worker, and reclaim aborted installations.
 Method-call fixtures cover staged bindings, rollback, conflict retry, selector rights, normal and tail returns, cleanup, and replacement during suspension.
+Spawn fixtures cover rollback, conflict retry, delayed resolution, policy revocation, admission and reply failures, cancellation, and concurrent parent/child execution.
 
 ## Remaining integration
 
 The broader integration gate is in `sketches/NATIVE_TASKS_AND_MEMORY_DESIGN.md`, section 16.1.
 `TaskServices` defines entry slots for emission, mailbox sends, subscriptions, and child requests.
 The service context has stable storage and owns roots for its managed state.
-The spawn service still needs to admit a child and deliver its ID to the parent.
+The generated spawn service admits children and delivers their IDs to waiting parents.
 General source lowering, language-level method installation, transactional buffers, and live compiler qualification remain unfinished.
 Method facts and compiled bodies can already be staged in one kernel transaction; `task_invoke` resolves and executes that view.
 Source lowering for catch patterns, guards, and structured exits still needs integration with the handler primitives.

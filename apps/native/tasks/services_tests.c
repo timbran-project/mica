@@ -28,7 +28,7 @@ static void service_delivery(void) {
     text = mica_value_string_slice(&worker, text.f_value, 16, 64);
     assert(text.f_ok);
     image.f_pointer = (void *)mica_task_new_Image(&worker, mica_task_test_entry, NULL,
-        integer(7), text.f_value, integer(42), NULL, NULL, 3, NULL);
+        integer(7), text.f_value, integer(42), NULL, NULL, 3, NULL, NULL);
     assert(image.f_pointer);
     for (unsigned scenario = 0; scenario < 4; ++scenario) {
         struct mica_TaskControl task = {0};

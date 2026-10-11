@@ -179,12 +179,12 @@ static void code_active_entry(void) {
     assert(mica_memory_root_push(&worker, &target));
     assert(mica_memory_root_push(&worker, &source));
     target.f_pointer = (void *)mica_task_new_Image(&worker, complete, code_reference(&codes[1]),
-        integer(7), integer(8), integer(0), NULL, NULL, 1, NULL);
+        integer(7), integer(8), integer(0), NULL, NULL, 1, NULL, NULL);
     assert(target.f_pointer);
     struct mica_TaskHandler *next = mica_task_new_Handler(&worker, NULL, (void *)target.f_pointer, 1);
     assert(next);
     source.f_pointer = (void *)mica_task_new_Image(&worker, advance, code_reference(&codes[0]),
-        integer(7), integer(8), integer(0), next, NULL, 1, NULL);
+        integer(7), integer(8), integer(0), next, NULL, 1, NULL, NULL);
     assert(source.f_pointer);
     // The retry image is permanently linked code. Neither it nor the control
     // retains the intermediate module entered later in this segment.
@@ -238,7 +238,7 @@ static void code_task_lifetimes(void) {
         assert(mica_task_code_register(&registry, &worker, library, &code) == OK);
         assert(mica_task_code_seal(&registry, &worker, code_reference(&code)) == OK);
         image.f_pointer = (void *)mica_task_new_Image(&worker, code_entry(library), code_reference(&code),
-            integer(7), integer(8), integer(0), NULL, NULL, 1, NULL);
+            integer(7), integer(8), integer(0), NULL, NULL, 1, NULL, NULL);
         assert(image.f_pointer);
         assert(mica_task_init(&tasks[i], &worker, &kernel, &image, 100, 3, 8) == OK);
         image.f_pointer = code.f_pointer = NULL;
@@ -311,7 +311,7 @@ static void code_program_task(struct mica_MemoryWorker *worker,
     assert(selected.f_status == OK && selected.f_program);
     struct mica_TaskCompiledProgram *body = (void *)selected.f_program->f_body;
     image.f_pointer = (void *)mica_task_new_Image(worker, body->f_entry, body->f_code,
-        integer(7), integer(0), integer(0), NULL, NULL, 1, NULL);
+        integer(7), integer(0), integer(0), NULL, NULL, 1, NULL, NULL);
     assert(image.f_pointer);
     assert(mica_task_init(task, worker, tx->f_kernel, &image, 1000, 2, 8) == OK);
     assert(mica_memory_root_pop(worker, &image));

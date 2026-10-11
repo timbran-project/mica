@@ -31,6 +31,7 @@ end
 verb native_tasks/test_program() -> map
   let module: map = native_handler_tests/program(native_tasks/test_scheduler(native_tasks/test_services(native_tasks/test_gate(native_tasks/definitions()))))
   module = native_call_tests/program(module)
+  module = native_spawn_tests/program(module)
   module = native/declare_function(module, "task_test_entry", :U64, [["attempt", native_tasks/pointer("Attempt"), :Borrow]], [], native_tasks/effects(), :Value, "")
   module = native/execution_function(module, "task_test_entry", :Tail)
   let builder: map = native_tasks/entry_context(module, "task_test_entry")

@@ -1,0 +1,178 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+// Context initialization and release require exclusive ownership. Delivery
+// workers borrow the immutable context; only its prototypes are heap roots.
+verb native_spawn/configuration(builder: map) -> map
+  if native_execution/has(builder, "configuration")
+    let result: map = native_gen/ref(builder, "configuration")
+    return result
+  end
+  let result: map = native_gen/cast(native_tasks/pointer("SpawnContext"), native_gen/ref(builder, "context"))
+  return result
+end
+verb native_spawn/field(builder: map, name: string) -> map
+  let result: map = native_kernel/load_field(builder, native_spawn/configuration(builder), name)
+  return result
+end
+verb native_spawn/prototypes(builder: map) -> map
+  let root: map = native_gen/field(builder, native_spawn/configuration(builder), "prototypes")[:pointer]
+  let result: map = native_roots/root_value(builder, root, native_value/word())
+  return result
+end
+verb native_spawn/context(module: map, name: string) -> map
+  let result: map = native_roots/context(module, string_concat("task_spawn_", name), fn(failed, reason) => native_query/error(failed, reason))
+  return result
+end
+verb native_spawn/context_bodies(input: map) -> map
+  let module: map = input
+  let builder: map = native_spawn/context(module, "context_init")
+  let configuration: map = native_spawn/configuration(builder)
+  let root: map = native_gen/field(builder, configuration, "prototypes")[:pointer]
+  builder = native_query/check(builder, native_kernel/absent(native_kernel/load_field(builder, root, "registration")), "closed")
+  builder = native_query/check(builder, native_kernel/load_field(builder, native_gen/ref(builder, "vocabulary"), "ready"), "schema")
+  builder = native_query/check(builder, native_gen/equal(native_kernel/load_field(builder, native_gen/ref(builder, "scheduler"), "heap"), native_kernel/load_field(builder, native_roots/worker(builder), "heap")), "schema")
+  let [prototypes: map, rooted: map] = native_roots/retain(builder, "prototypes", native_roots/ref(builder, "prototypes"))
+  builder = native_query/check(rooted, native_gen/call(rooted, "memory_publish", [native_roots/worker(rooted), prototypes[:scope_root], root]), "oom")
+  builder = native_mailboxes/native_store(builder, configuration, "scheduler", native_gen/ref(builder, "scheduler"))
+  builder = native_kernel/store_field(builder, configuration, "vocabulary", native_gen/load(native_gen/ref(builder, "vocabulary")))
+  for name in ["selectors", "parameters", "delegates", "programs", "remaining", "retries", "depth_limit"]
+    builder = native_kernel/store_field(builder, configuration, name, native_gen/ref(builder, name))
+  end
+  module = native_gen/finish(module, native_tasks/attempt_status(builder, "ok"))
+
+  builder = native_spawn/context(module, "context_release")
+  configuration = native_spawn/configuration(builder)
+  root = native_gen/field(builder, configuration, "prototypes")[:pointer]
+  builder = native_query/check(builder, native_gen/call(builder, "memory_unpublish", [native_roots/worker(builder), root]), "closed")
+  builder = native_gen/store(builder, configuration, native_gen/zero([:Record, "TaskSpawnContext"]))
+  let result: map = native_gen/finish(module, native_tasks/attempt_status(builder, "ok"))
+  return result
+end
+
+verb native_spawn/request_body(module: map) -> map
+  let builder: map = native_invocation/context(module, "spawn_request")
+  builder = native_query/check(builder, native_gen/field(builder, native_gen/call(builder, "value_as_symbol", [native_roots/ref(builder, "selector")]), "ok"), "schema")
+  builder = native_query/check(builder, native_gen/equal(native_gen/expression(:U8, :Tag, [native_roots/ref(builder, "roles")]), native_gen/ref(builder, "tag_map")), "schema")
+  let [request: map, captured: map] = native_roots/retain(builder, "spawn", native_tasks/allocate_record(builder, "SpawnRequest", {
+    "selector" -> native_roots/ref(builder, "selector"), "roles" -> native_roots/ref(builder, "roles"), "delay" -> native_gen/ref(builder, "delay")}))
+  builder = native_query/check(captured, native_gen/negate(native_kernel/absent(request)), "oom")
+  let effects: map = native_tasks/saved(builder, "effects", native_tasks/pointer("Effect"))
+  let [effect: map, staged: map] = native_gen/bind(builder, "effect", native_tasks/allocate_record(builder, "Effect", {
+    "next" -> effects, "kind" -> native_gen/ref(builder, "task_effect_spawn"), "target" -> native_gen/zero(native_value/word()),
+    "payload" -> native_gen/zero(native_value/word()), "subscription" -> native_gen/zero(native_tasks/pointer("SubscriptionRequest")), "spawn" -> request}))
+  builder = native_query/check(staged, native_gen/negate(native_kernel/absent(effect)), "oom")
+  builder = native_roots/store(builder, effects, effect)
+  builder = native_roots/store(builder, native_tasks/saved(builder, "request", native_tasks/pointer("WaitRequest")), native_gen/zero(native_tasks/pointer("WaitRequest")))
+  builder = native_kernel/store_field(builder, native_tasks/attempt(builder), "boundary", native_gen/ref(builder, "task_boundary_wait"))
+  let result: map = native_gen/finish(module, native_tasks/attempt_status(builder, "ok"))
+  return result
+end
+
+// The child starts with a fresh transaction and authority. Its image carries
+// values and catalogue IDs, never a selected method or an ephemeral authority.
+verb native_spawn/entry_body(module: map) -> map
+  let builder: map = native_spawn/context(module, "entry_body")
+  let [pending: map, rooted: map] = native_roots/retain(builder, "invocation", native_kernel/load_field(builder, native_handlers/current(builder), "pending"))
+  builder = native_query/check(rooted, native_gen/negate(native_kernel/absent(pending)), "schema")
+  // A borrowed vocabulary pointer must not point inside a moving heap object.
+  let [vocabulary: map, copied: map] = native_gen/bind(builder, "vocabulary", native_kernel/load_field(builder, pending, "vocabulary"))
+  let [allowance: map, bounded: map] = native_gen/bind(copied, "allowance", native_tasks/attempt_field(copied, "remaining"))
+  let [budget: map, budgeted: map] = native_gen/bind(bounded, "budget", native_gen/record(bounded, [:Record, "KernelBudget"], {
+    "steps" -> allowance, "rows" -> native_gen/ref(copied, "kernel_unlimited"),
+    "rounds" -> native_gen/ref(copied, "kernel_unlimited"), "bytes" -> native_gen/ref(copied, "kernel_unlimited"),
+    "status" -> native_gen/ref(copied, "zero"), "signal" -> native_kernel/load_field(copied, native_tasks/slot(copied, "transaction"), "signal")}))
+  let arguments: list = [native_roots/worker(budgeted), native_tasks/attempt(budgeted), native_gen/address(vocabulary)]
+  for name in ["selectors", "parameters", "delegates", "programs", "prototypes", "selector", "roles"]
+    arguments = [@arguments, native_kernel/load_field(budgeted, pending, name)]
+  end
+  let [selected: map, called: map] = native_gen/bind(budgeted, "selected", native_gen/call(budgeted, "task_invoke", [
+    @arguments, native_gen/zero(native_tasks/pointer("Image")), native_gen/address(budget)]))
+  // Keep only scalar results across the poll; selected arguments are already
+  // rooted by the callee image when invocation succeeds.
+  let [status: map, with_status: map] = native_gen/bind(called, "status", native_gen/field(called, selected, "status"))
+  let [count: map, with_count: map] = native_gen/bind(with_status, "count", native_gen/field(with_status, selected, "count"))
+  // Selection work consumes the same segment budget as generated instructions.
+  let [charged: map, accounted: map] = native_gen/bind(with_count, "charged", native_gen/call(with_count, "task_poll", [
+    native_tasks/attempt(with_count), native_gen/subtract(allowance, native_gen/field(with_count, budget, "steps"))]))
+  builder = native_gen/unless(accounted, native_kernel/absent(status), fn(failed) => native_roots/return_value(failed, status))
+  builder = native_gen/unless(builder, native_kernel/absent(charged), fn(exhausted) => native_roots/return_value(exhausted, charged))
+  builder = native_gen/when(builder, native_kernel/absent(count), fn(missing) => native_roots/return_value(missing, native_gen/ref(missing, "task_no_method")))
+  builder = native_gen/unless(builder, native_gen/equal(count, native_gen/ref(builder, "one")), fn(ambiguous) => native_roots/return_value(ambiguous, native_gen/ref(ambiguous, "task_ambiguous_dispatch")))
+  let result: map = native_gen/finish(module, native_tasks/attempt_status(builder, "ok"))
+  return result
+end
+
+verb native_spawn/service_body(module: map) -> map
+  let builder: map = native_spawn/context(module, "service")
+  let configuration: map = native_spawn/configuration(builder)
+  builder = native_query/check(builder, native_gen/negate(native_kernel/absent(configuration)), "closed")
+  builder = native_query/check(builder, native_gen/negate(native_kernel/absent(native_kernel/load_field(builder,
+    native_gen/field(builder, configuration, "prototypes")[:pointer], "registration"))), "closed")
+  let [request: map, rooted: map] = native_roots/retain(builder, "spawn", native_tasks/effect_field(builder, "spawn"))
+  builder = native_query/check(rooted, native_gen/negate(native_kernel/absent(request)), "schema")
+  let fields: map = {"vocabulary" -> native_spawn/field(builder, "vocabulary"), "prototypes" -> native_spawn/prototypes(builder),
+    "selector" -> native_kernel/load_field(builder, request, "selector"), "roles" -> native_kernel/load_field(builder, request, "roles")}
+  for name in ["selectors", "parameters", "delegates", "programs"]
+    fields[name] = native_spawn/field(builder, name)
+  end
+  let [invocation: map, captured: map] = native_roots/retain(builder, "invocation", native_tasks/allocate_record(builder, "Invocation", fields))
+  builder = native_query/check(captured, native_gen/negate(native_kernel/absent(invocation)), "oom")
+  let [image: map, allocated: map] = native_roots/retain(builder, "child", native_tasks/allocate_record(builder, "Image", {
+    "entry" -> native_gen/expression([:FunctionPointer, "TaskEntry"], :FunctionAddress, ["task_spawn_entry"]),
+    "code" -> native_gen/zero(native_tasks/pointer("CodeRef")), "tenant" -> native_roots/ref(builder, "tenant"),
+    "environment" -> native_gen/zero(native_value/word()), "input" -> native_gen/zero(native_value/word()),
+    "handlers" -> native_gen/zero(native_tasks/pointer("Handler")), "unwind" -> native_gen/zero(native_tasks/pointer("Unwind")),
+    "depth" -> native_gen/ref(builder, "zero"), "caller" -> native_gen/zero(native_tasks/pointer("Image")), "pending" -> invocation}))
+  builder = native_query/check(allocated, native_gen/negate(native_kernel/absent(image)), "oom")
+  let [admission: map, admitted: map] = native_gen/bind(builder, "admitted", native_gen/call(builder, "task_scheduler_launch", [
+    native_spawn/field(builder, "scheduler"), native_roots/worker(builder), native_gen/ref(builder, "kernel"), image[:scope_root],
+    native_spawn/field(builder, "remaining"), native_spawn/field(builder, "retries"), native_spawn/field(builder, "depth_limit"),
+    native_kernel/load_field(builder, request, "delay")]))
+  builder = native_gen/unless(admitted, native_kernel/absent(native_gen/field(admitted, admission, "status")), fn(failed) => native_roots/return_value(failed, native_gen/field(failed, admission, "status")))
+  let reply: map = native_gen/field(builder, native_gen/call(builder, "value_int", [native_gen/bitcast(:I64, native_gen/field(builder, admission, "id"))]), "value")
+  let parent: map = native_gen/ref(builder, "parent")
+  let [observed: map, inspected: map] = native_gen/bind(builder, "parent", native_gen/call(builder, "task_observe", [parent, native_roots/worker(builder)]))
+  builder = native_gen/unless(inspected, native_kernel/absent(native_gen/field(inspected, observed, "status")), fn(closed) => native_roots/return_value(closed, native_gen/field(closed, observed, "status")))
+  // Admission already happened. Reply failure cannot retry or undo the child.
+  let result: map = native_gen/finish(module, native_roots/return_value(builder, native_gen/call(builder, "task_wake", [
+    parent, native_roots/worker(builder), native_gen/field(builder, observed, "generation"), reply])))
+  return result
+end
+
+verb native_spawn/program(input: map) -> map
+  let module: map = native_scheduler/launch(input)
+  let fields: list = [["scheduler", native_tasks/pointer("Scheduler")], ["vocabulary", [:Record, "TaskDispatchVocabulary"]], ["prototypes", [:Record, "MemoryRoot"]]]
+  for name in ["selectors", "parameters", "delegates", "programs", "remaining", "retries", "depth_limit"]
+    fields = [@fields, [name, :U64]]
+  end
+  module[:state] = native/record_type(module[:state], "TaskSpawnContext", fields)[1]
+  let worker: list = ["worker", native_memory/record_pointer("MemoryWorker"), :Borrow]
+  let attempt: list = ["attempt", native_tasks/pointer("Attempt"), :Borrow]
+  let configuration: list = ["configuration", native_tasks/pointer("SpawnContext"), :Borrow]
+  let parameters: list = [configuration, worker, ["scheduler", native_tasks/pointer("Scheduler"), :Borrow], ["vocabulary", native_tasks/pointer("DispatchVocabulary"), :Borrow]]
+  for name in ["selectors", "parameters", "delegates", "programs"]
+    parameters = [@parameters, [name, :U64, :Value]]
+  end
+  parameters = [@parameters, ["prototypes", native_value/word(), :Gc]]
+  for name in ["remaining", "retries", "depth_limit"]
+    parameters = [@parameters, [name, :U64, :Value]]
+  end
+  module = native_tasks/declare(module, "spawn_context_init", :U64, parameters)
+  module = native_tasks/declare(module, "spawn_context_release", :U64, [configuration, worker])
+  module = native_tasks/declare(module, "spawn_request", :U64, [worker, attempt,
+    ["selector", native_value/word(), :Gc], ["roles", native_value/word(), :Gc], ["delay", :U64, :Value]])
+  module = native_tasks/declare(module, "spawn_entry_body", :U64, [worker, attempt])
+  module = native_tasks/declare(module, "spawn_service", :U64, native_tasks/service_parameters())
+  module = native/declare_function(module, "task_spawn_entry", :U64, [attempt], [], native_tasks/effects(), :Value, "")
+  module = native/execution_function(module, "task_spawn_entry", :Tail)
+  module = native_spawn/context_bodies(module)
+  module = native_spawn/request_body(module)
+  module = native_spawn/entry_body(module)
+  module = native_spawn/service_body(module)
+  let builder: map = native_tasks/entry_context(module, "task_spawn_entry")
+  let [status: map, called: map] = native_gen/bind(builder, "status", native_gen/call(builder, "task_spawn_entry_body", [native_tasks/attempt_field(builder, "worker"), native_tasks/attempt(builder)]))
+  builder = native_gen/unless(called, native_kernel/absent(status), fn(failed) => native_gen/return_value(failed, status))
+  let result: map = native_gen/finish(module, native_handlers/transfer(builder))
+  return result
+end

@@ -77,7 +77,7 @@ verb native_calls/invoke_body(module: map) -> map
   let [caller: map, depth: map, ready: map] = native_calls/continuation(with_body)
   let [callee: map, constructed: map] = native_gen/bind(ready, "callee", native_handlers/copy_image(ready, native_handlers/current(ready), {
     "entry" -> native_kernel/load_field(ready, body, "entry"), "code" -> native_kernel/load_field(ready, body, "code"),
-    "environment" -> arguments, "input" -> native_gen/zero(native_value/word()), "caller" -> caller, "depth" -> depth}))
+    "pending" -> native_gen/zero(native_tasks/pointer("Invocation")), "environment" -> arguments, "input" -> native_gen/zero(native_value/word()), "caller" -> caller, "depth" -> depth}))
   builder = native_query/check(constructed, native_gen/negate(native_kernel/absent(callee)), "oom")
   // Everything above is fallible. Publish the new current image only after the
   // complete selection, binding, and continuation checks have succeeded.

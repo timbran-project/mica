@@ -10,19 +10,27 @@ end
 
 // Intern catalogue markers once, outside managed execution. The resulting
 // scalar IDs belong to the runtime symbol table, not a task's authority.
+verb native_dispatch/vocabulary_words() -> list
+  return [["required", "required"], ["optional", "optional"], ["rest", "rest"],
+    ["unrestricted", "dispatch/unrestricted"], ["frob_only", "dispatch/frob_only"]]
+end
+verb native_dispatch/vocabulary_fields() -> list
+  let fields: list = [["ready", :Bool]]
+  for word in native_dispatch/vocabulary_words()
+    fields = [@fields, [word[0], :U32]]
+  end
+  return fields
+end
+
 verb native_dispatch/vocabulary(input: map) -> map
   let module: map = input
-  let words: list = [["required", "required"], ["optional", "optional"], ["rest", "rest"],
-    ["unrestricted", "dispatch/unrestricted"], ["frob_only", "dispatch/frob_only"]]
-  let fields: list = [["ready", :Bool]]
+  let words: list = native_dispatch/vocabulary_words()
   let literals: map = {}
   for word in words
-    fields = [@fields, [word[0], :U32]]
     let [literal: map, ready: map] = native_literal/prepare(module, string_concat("dispatch_word_", word[0]), {:kind -> :Symbol, :value -> word[1]})
     literals[word[0]] = literal
     module = ready
   end
-  module[:state] = native/record_type(module[:state], "TaskDispatchVocabulary", fields)[1]
   module = native_memory/declare(module, "task_dispatch_vocabulary_init", :U64,
     [["symbols", native_memory/record_pointer("SymbolTable"), :Borrow],
       ["vocabulary", native_tasks/pointer("DispatchVocabulary"), :Borrow]],

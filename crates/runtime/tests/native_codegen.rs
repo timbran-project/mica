@@ -2155,6 +2155,8 @@ fn check_native_kernel_fixture(tasks: bool) {
                 include_str!("../../../apps/native/tasks/subscriptions.mica"),
                 include_str!("../../../apps/native/tasks/subscription_lifecycle.mica"),
                 include_str!("../../../apps/native/tasks/scheduler.mica"),
+                include_str!("../../../apps/native/tasks/scheduler_launch.mica"),
+                include_str!("../../../apps/native/tasks/spawn.mica"),
                 include_str!("../../../apps/native/tasks/scheduler_lifecycle.mica"),
                 include_str!("../../../apps/native/tasks/scheduler_admission.mica"),
                 include_str!("../../../apps/native/tasks/scheduler_workers.mica"),
@@ -2163,6 +2165,7 @@ fn check_native_kernel_fixture(tasks: bool) {
                 include_str!("../../../apps/native/tasks/scheduler_tests.mica"),
                 include_str!("../../../apps/native/tasks/handlers_tests.mica"),
                 include_str!("../../../apps/native/tasks/calls_tests.mica"),
+                include_str!("../../../apps/native/tasks/spawn_tests.mica"),
                 include_str!("../../../apps/native/tasks/tests.mica"),
             ] {
                 runner.run_filein(source).unwrap_or_else(|error| {
@@ -2259,6 +2262,11 @@ fn check_native_kernel_fixture(tasks: bool) {
             fs::write(
                 scratch.0.join("invocation_tests.c"),
                 include_str!("../../../apps/native/tasks/invocation_tests.c"),
+            )
+            .unwrap();
+            fs::write(
+                scratch.0.join("spawn_tests.c"),
+                include_str!("../../../apps/native/tasks/spawn_tests.c"),
             )
             .unwrap();
             fs::write(

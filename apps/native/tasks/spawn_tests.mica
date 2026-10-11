@@ -1,0 +1,46 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+verb native_spawn_tests/program(input: map) -> map
+  let module: map = input
+  module[:state] = native/record_type(module[:state], "TaskSpawnProbe", [
+    ["configuration", [:Record, "TaskSpawnContext"]], ["mutex", native_memory/pointer(:U8)], ["emitted", :U64]])[1]
+  let worker: list = ["worker", native_memory/record_pointer("MemoryWorker"), :Borrow]
+  let attempt: list = ["attempt", native_tasks/pointer("Attempt"), :Borrow]
+  module = native_tasks/declare(module, "test_spawn_body", :U64, [worker, attempt])
+  module = native/declare_function(module, "task_test_spawn", :U64, [attempt], [], native_tasks/effects(), :Value, "")
+  module = native/execution_function(module, "task_test_spawn", :Tail)
+  for name in ["emit", "service"]
+    module = native_tasks/declare(module, string_concat("test_spawn_", name), :U64, native_tasks/service_parameters())
+  end
+  let builder: map = native_tasks/context(module, "test_spawn_body")
+  builder = native_handlers/replace_current(builder, native_handlers/current(builder), {"entry" -> native_call_tests/entry("finish")})
+  let environment: map = native_kernel/load_field(builder, native_handlers/current(builder), "environment")
+  builder = native_roots/return_value(builder, native_gen/call(builder, "task_spawn_request", [native_gen/ref(builder, "worker"), native_tasks/attempt(builder),
+    native_query/cell(builder, environment, native_gen/ref(builder, "zero")), native_query/cell(builder, environment, native_gen/ref(builder, "one")),
+    native_gen/expression(:U64, :Payload, [native_kernel/load_field(builder, native_handlers/current(builder), "input")])]))
+  module = native_gen/finish(module, builder)
+  builder = native_tasks/entry_context(module, "task_test_spawn")
+  module = native_gen/finish(module, native_gen/return_value(builder, native_gen/call(builder, "task_test_spawn_body", [native_tasks/attempt_field(builder, "worker"), native_tasks/attempt(builder)])))
+  builder = native_tasks/context(module, "test_spawn_service")
+  let probe: map = native_gen/cast(native_tasks/pointer("SpawnProbe"), native_gen/ref(builder, "context"))
+  let arguments: list = []
+  for parameter in native_tasks/service_parameters()
+    let argument: map = native_roots/ref(builder, parameter[0])
+    if parameter[0] == "context"
+      argument = native_gen/cast(native_memory/pointer(:U8), native_gen/field(builder, probe, "configuration")[:pointer])
+    end
+    arguments = [@arguments, argument]
+  end
+  module = native_gen/finish(module, native_roots/return_value(builder, native_gen/call(builder, "task_spawn_service", arguments)))
+  builder = native_tasks/context(module, "test_spawn_emit")
+  probe = native_gen/cast(native_tasks/pointer("SpawnProbe"), native_gen/ref(builder, "context"))
+  let mutex: map = native_kernel/load_field(builder, probe, "mutex")
+  builder = native_tasks/check(builder, native_gen/call(builder, "memory_leave", [native_gen/ref(builder, "worker")]), "closed")
+  builder = native_gen/do_call(builder, "memory_lock", [mutex])
+  builder = native_kernel/store_field(builder, probe, "emitted", native_gen/add(native_kernel/load_field(builder, probe, "emitted"), native_gen/ref(builder, "one")))
+  builder = native_gen/do_call(builder, "memory_unlock", [mutex])
+  builder = native_tasks/check(builder, native_gen/call(builder, "memory_enter", [native_gen/ref(builder, "worker")]), "closed")
+  let result: map = native_gen/finish(module, native_tasks/attempt_status(builder, "ok"))
+  return result
+end

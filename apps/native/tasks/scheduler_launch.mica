@@ -1,0 +1,36 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+// Allocate and initialize outside the scheduler lock. Submission transfers the
+// control only on success; the scheduler then owns its eventual retirement.
+verb native_scheduler/launch(module: map) -> map
+  let worker: list = ["worker", native_memory/record_pointer("MemoryWorker"), :Borrow]
+  let parameters: list = [["scheduler", native_tasks/pointer("Scheduler"), :Borrow], worker,
+    ["kernel", native_memory/record_pointer("Kernel"), :Borrow], ["image", native_memory/record_pointer("MemoryRoot"), :Borrow]]
+  for name in ["remaining", "retries", "depth_limit", "delay"]
+    parameters = [@parameters, [name, :U64, :Value]]
+  end
+  let context: map = native_tasks/declare(module, "scheduler_launch", [:Record, "TaskAdmission"], parameters)
+  let builder: map = native_scheduler/context(context, "launch")
+  let [storage: map, allocated: map] = native_gen/bind(builder, "storage", native_gen/call(builder, "memory_platform_allocate", [native_gen/sizeof([:Record, "TaskControl"])]))
+  builder = native_scheduler/check(allocated, native_gen/negate(native_kernel/absent(storage)), "oom")
+  let task: map = native_gen/cast(native_tasks/pointer("Control"), storage)
+  builder = native_gen/store(builder, task, native_gen/zero([:Record, "TaskControl"]))
+  let [submitted: map, owned: map] = native_gen/bind(builder, "submitted", native_gen/ref(builder, "false"))
+  builder = native_gen/on_return(owned, fn(leaving, result)
+    return native_gen/unless(leaving, submitted, fn(private)
+      let ready: map = native_gen/unless(private, native_kernel/absent(native_kernel/load_field(private, task, "mutex")), fn(initialized)
+        let [released: map, cleaned: map] = native_gen/bind(initialized, "released", native_gen/call(initialized, "task_release", [task, native_gen/ref(initialized, "worker")]))
+        return cleaned
+      end)
+      return native_mailboxes/free(ready, storage)
+    end)
+  end)
+  builder = native_scheduler/status_call(builder, "task_init", [task, native_gen/ref(builder, "worker"), native_gen/ref(builder, "kernel"),
+    native_gen/ref(builder, "image"), native_gen/ref(builder, "remaining"), native_gen/ref(builder, "retries"), native_gen/ref(builder, "depth_limit")])
+  let [admission: map, admitted: map] = native_gen/bind(builder, "admission", native_gen/call(builder, "task_scheduler_submit", [
+    native_gen/ref(builder, "scheduler"), native_gen/ref(builder, "worker"), task, native_gen/ref(builder, "true"), native_gen/ref(builder, "delay")]))
+  builder = native_gen/assign(admitted, submitted, native_kernel/absent(native_gen/field(admitted, admission, "status")))
+  let result: map = native_gen/finish(context, native_roots/return_value(builder, admission))
+  return result
+end

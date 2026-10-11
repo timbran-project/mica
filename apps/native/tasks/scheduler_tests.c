@@ -55,7 +55,7 @@ static void scheduled_tasks(enum scheduler_reply reply) {
         mica_type_Value environment[] = {mica_value_root_get(&captures), integer(timeout)};
         mica_value_root_set(&captures, mailbox_receivers(&worker, environment, 2));
         image.f_pointer = (void *)mica_task_new_Image(&worker, mica_task_test_receive, NULL,
-            integer(7), mica_value_root_get(&captures), integer(0), NULL, NULL, 3, NULL);
+            integer(7), mica_value_root_get(&captures), integer(0), NULL, NULL, 3, NULL, NULL);
         assert(image.f_pointer);
         assert(mica_task_init(&tasks[i], &worker, &kernel, &image, 1000, 2, 8) == OK);
         assert(mica_memory_root_pop(&worker, &image));
@@ -199,7 +199,7 @@ static void scheduler_complete_task(struct mica_MemoryWorker *worker,
     struct mica_MemoryRoot image = {0};
     assert(mica_memory_root_push(worker, &image));
     image.f_pointer = (void *)mica_task_new_Image(worker, mica_task_test_complete, NULL,
-        integer(7), integer(0), integer(0), NULL, NULL, 3, NULL);
+        integer(7), integer(0), integer(0), NULL, NULL, 3, NULL, NULL);
     assert(image.f_pointer);
     assert(mica_task_init(task, worker, kernel, &image, 1000, 2, 8) == OK);
     assert(mica_memory_root_pop(worker, &image));
@@ -425,7 +425,7 @@ static uint64_t scheduler_suspend_task(struct mica_MemoryWorker *worker,
     struct mica_TaskServices services = {0};
     assert(mica_memory_root_push(worker, &image));
     image.f_pointer = (void *)mica_task_new_Image(worker, mica_task_test_suspend, NULL,
-        integer(7), integer(delay), integer(0), NULL, NULL, 1, NULL);
+        integer(7), integer(delay), integer(0), NULL, NULL, 1, NULL, NULL);
     assert(image.f_pointer);
     assert(mica_task_init(task, worker, kernel, &image, 100, 2, 8) == OK);
     assert(mica_memory_root_pop(worker, &image));
