@@ -4,7 +4,7 @@ verb native_roundtrip_child(reply: capability, key: int, value: int)
     assert NativeResult(key, value)
     round = round + 1
   end
-  mailbox_send(reply, value)
+  mailbox_send(@[reply, value])
   return value
 end
 
@@ -18,7 +18,7 @@ let child = 0
 let messages = []
 let count = 0
 while count < 2
-  child = spawn :native_roundtrip_child(reply: caps[1], key: 7 + count, value: saved[1] + count)
+  child = spawn :native_roundtrip_child(@[caps[1]], 7 + count, @[saved[1] + count])
   messages = native_roundtrip_receive([caps[0]])
   count = count + 1
 end

@@ -51,7 +51,7 @@ verb native_source/region_blocks(analysis: map, start: int, pcs: list) -> list
       current = []
     end
     current = [@current, pc]
-    if analysis[:instructions][pc][:boundary] || native/contains([:Return, :Branch, :Jump], code[pc][0])
+    if analysis[:instructions][pc][:boundary] || native/contains([:Return, :Abort, :Branch, :Jump], code[pc][0])
       blocks = [@blocks, {:start -> current[0], :pcs -> current, :last -> pc}]
       current = []
     end

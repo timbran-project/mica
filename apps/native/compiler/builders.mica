@@ -74,21 +74,7 @@ end
 // Value constructors do not relocate. Their stack input arrays borrow rooted
 // values until the constructor returns; retain the result before any safepoint.
 verb native_source/list(builder: map, values: list) -> list
-  let word: list = native_value/word()
-  let source: map = native_gen/zero([:Pointer, word, :Const])
-  let ready: map = builder
-  if len(values) > 0
-    let [storage: map, allocated: map] = native_gen/bind(ready, "values", native_gen/zero([:Array, word, len(values)]))
-    ready = allocated
-    let index: int = 0
-    for value in values
-      let slot: map = native_gen/element(native_gen/address(storage), native_source/number(ready, index))
-      ready = native_gen/root_write(ready, native_gen/location(slot), value)
-      index = index + 1
-    end
-    source = native_gen/freeze(native_gen/element(native_gen/address(storage), native_gen/ref(ready, "zero")))
-  end
-  let result: list = native_source/result(ready, "value_list", [native_roots/worker(ready), source, native_source/number(ready, len(values))], "oom")
+  let result: list = native_literal/list(builder, values, fn(failed) => native_tasks/attempt_status(failed, "oom"))
   return result
 end
 verb native_source/entry(name: string) -> map

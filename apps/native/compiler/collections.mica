@@ -1,0 +1,142 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+verb native_source/spliced(items: list) -> bool
+  for item in items
+    if item[0] == :Splice
+      return true
+    end
+  end
+  return false
+end
+
+// Private append buffers reuse the query builder's geometric storage growth.
+// Task polling bounds every copied item; allocation errors retain their status.
+verb native_source/collection_buffer(builder: map) -> list
+  let [buffer: map, rooted: map] = native_source/rooted_list(builder, "items", [])
+  let unlimited: map = native_gen/ref(rooted, "kernel_unlimited")
+  let [budget: map, ready: map] = native_gen/bind(rooted, "collection_budget", native_gen/record(rooted, [:Record, "KernelBudget"], {
+    "steps" -> unlimited, "rows" -> unlimited, "rounds" -> unlimited, "bytes" -> unlimited,
+    "status" -> native_gen/ref(rooted, "zero"), "signal" -> native_kernel/load_field(rooted, native_tasks/slot(rooted, "transaction"), "signal")}))
+  ready[:source_collection_budget] = native_gen/address(budget)
+  return [buffer, ready]
+end
+verb native_source/append_item(builder: map, buffer: map, value: map) -> map
+  let budget: map = builder[:source_collection_budget]
+  let ready: map = native_source/checked(builder, "task_poll", [native_tasks/attempt(builder), native_gen/ref(builder, "one")])
+  let [appended: map, checked: map] = native_gen/checked_bind(ready, "appended", native_gen/call(ready, "kernel_query_append", [native_roots/worker(ready), buffer, value, budget]), "ok", fn(failed)
+    let status: map = native_kernel/load_field(failed, budget, "status")
+    let checked: map = native_gen/unless(failed, native_kernel/absent(status), fn(cancelled) => native_roots/return_value(cancelled, status))
+    return native_tasks/attempt_status(checked, "oom")
+  end)
+  let result: map = native_roots/store(checked, buffer, native_gen/field(checked, appended, "value"))
+  return result
+end
+verb native_source/splice_check(builder: map, value: map, kind: string, language_error: bool) -> map
+  let result: map = native_gen/unless(builder, native_gen/equal(native_gen/call(builder, "value_kind", [value]), native_gen/ref(builder, string_concat("tag_", kind))), fn(invalid)
+    if language_error
+      return native_source/value_error(invalid, E_TYPE, "list splice requires a list", value)
+    end
+    return native_tasks/attempt_status(invalid, "schema")
+  end)
+  return result
+end
+verb native_source/list_items(builder: map, items: list, language_error: bool) -> list
+  if !native_source/spliced(items)
+    let result: list = native_source/list(builder, native_source/operands(builder, items))
+    return result
+  end
+  let [buffer: map, ready: map] = native_source/collection_buffer(builder)
+  for item in items
+    if item[0] == :Splice
+      let value: map = native_source/operand(ready, item[1])
+      ready = native_source/splice_check(ready, value, "list", language_error)
+      ready = native_gen/for_range(ready, "splice_index", native_gen/ref(ready, "zero"), native_query/width(ready, value), fn(step, index)
+        return native_source/append_item(step, buffer, native_query/cell(step, value, index))
+      end)
+    else
+      ready = native_source/append_item(ready, buffer, native_source/operand(ready, item))
+    end
+  end
+  return [buffer, ready]
+end
+
+// Maps collect key/value words in traced storage before sorting. This avoids
+// copying the entire persistent map for every inserted or spliced entry.
+verb native_source/map_items(builder: map, items: list) -> list
+  if !native_source/spliced(items)
+    let fields: list = [native_source/operands(builder, pair) for pair in items]
+    let result: list = native_literal/map(builder, fields, fn(failed) => native_tasks/attempt_status(failed, "oom"))
+    return result
+  end
+  let [buffer: map, ready: map] = native_source/collection_buffer(builder)
+  for item in items
+    if item[0] == :Splice
+      let value: map = native_source/operand(ready, item[1])
+      ready = native_source/splice_check(ready, value, "map", false)
+      let header: map = native_gen/expression(native_memory/record_pointer("HeapMap"), :UnpackPointer, [value])
+      ready = native_gen/for_range(ready, "splice_index", native_gen/ref(ready, "zero"), native_kernel/load_field(ready, header, "length"), fn(step, index)
+        let entry: map = native_gen/load(native_gen/offset(native_kernel/load_field(step, header, "data"), index))
+        let key: map = native_gen/field(step, entry, "key")
+        let copied: map = native_source/append_item(step, buffer, key)
+        return native_source/append_item(copied, buffer, native_gen/field(copied, entry, "value"))
+      end)
+    else
+      ready = native_source/append_item(ready, buffer, native_source/operand(ready, item[0]))
+      ready = native_source/append_item(ready, buffer, native_source/operand(ready, item[1]))
+    end
+  end
+  let entry_type: list = [:Record, "ValueMapEntry"]
+  let [length: map, counted: map] = native_gen/bind(ready, "map_length", native_gen/divide(native_query/width(ready, buffer), native_gen/ref(ready, "two")))
+  let [entries: map, allocated: map] = native_memory/array_storage(counted, native_roots/worker(counted), entry_type, length, "layout_opaque",
+    fn(failed) => native_tasks/attempt_status(failed, "oom"))
+  // The input buffer roots every word. This final copy and constructor contain
+  // no relocation boundary, so the borrowed entries cannot become stale.
+  ready = native_gen/for_range(allocated, "map_index", native_gen/ref(allocated, "zero"), length, fn(step, index)
+    let offset: map = native_gen/multiply(index, native_gen/ref(step, "two"))
+    let entry: map = native_gen/record(step, entry_type, {"key" -> native_query/cell(step, buffer, offset),
+      "value" -> native_query/cell(step, buffer, native_gen/add(offset, native_gen/ref(step, "one")))})
+    return native_gen/store(step, native_gen/offset(entries, index), entry)
+  end)
+  let result: list = native_source/result(ready, "value_map", [native_roots/worker(ready), native_gen/freeze(entries), length], "oom")
+  return result
+end
+
+// CollectionLen is also emitted when a special call has spliced arguments.
+// Like the VM instruction, unsupported kinds and open ranges have length zero.
+verb native_source/length_body(input: map) -> map
+  let name: string = string_concat(input[:source_prefix], "_collection_length")
+  let module: map = native/declare_function(input, name, native_value/word(), [["value", native_value/word(), :Gc]], [], [:ReadMemory], :Gc, "")
+  let builder: map = native_gen/context(module, name)
+  let value: map = native_gen/ref(builder, "value")
+  let [length: map, ready: map] = native_gen/bind(builder, "length", native_gen/ref(builder, "zero"))
+  let [kind: map, tagged: map] = native_gen/bind(ready, "kind", native_gen/call(ready, "value_kind", [value]))
+  ready = tagged
+  for kind_name in ["list", "map", "string", "relation"]
+    ready = native_gen/when(ready, native_gen/equal(kind, native_gen/ref(ready, string_concat("tag_", kind_name))), fn(collection)
+      let counted: map = native_gen/call(collection, string_concat("value_", kind_name, "_length"), [value])
+      return native_gen/assign(collection, length, native_gen/field(collection, counted, "number"))
+    end)
+  end
+  ready = native_gen/when(ready, native_gen/equal(kind, native_gen/ref(ready, "tag_range")), fn(range)
+    let header: map = native_gen/expression(native_memory/record_pointer("HeapRange"), :UnpackPointer, [value])
+    return native_gen/when(range, native_kernel/load_field(range, header, "has_end"), fn(finite)
+      let [start: map, first: map] = native_gen/bind(finite, "start", native_gen/call(finite, "value_as_int", [native_kernel/load_field(finite, header, "start")]))
+      let [finish: map, last: map] = native_gen/bind(first, "end", native_gen/call(first, "value_as_int", [native_kernel/load_field(first, header, "end")]))
+      return native_gen/when(last, native_gen/field(last, start, "ok"), fn(integer_start)
+        return native_gen/when(integer_start, native_gen/field(integer_start, finish, "ok"), fn(integer_end)
+          let low: map = native_gen/field(integer_end, start, "number")
+          let high: map = native_gen/field(integer_end, finish, "number")
+          return native_gen/unless(integer_end, native_gen/less(high, low), fn(ascending)
+            return native_gen/assign(ascending, length, native_gen/add(native_gen/subtract(native_gen/convert(:U64, high), native_gen/convert(:U64, low)), native_gen/ref(ascending, "one")))
+          end)
+        end)
+      end)
+    end)
+  end)
+  let [encoded: map, converted: map] = native_gen/bind(ready, "length_value", native_gen/call(ready, "value_int", [native_gen/bitcast(:I64, length)]))
+  ready = native_gen/when(converted, native_gen/field(converted, encoded, "ok"), fn(valid) => native_gen/return_value(valid, native_gen/field(valid, encoded, "value")))
+  let zero: map = native_gen/field(ready, native_gen/call(ready, "value_int", [native_gen/ref(ready, "int_zero")]), "value")
+  let result: map = native_gen/finish(module, native_gen/return_value(ready, zero))
+  return result
+end

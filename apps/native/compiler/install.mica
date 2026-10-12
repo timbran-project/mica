@@ -29,14 +29,14 @@ verb native_source/install_row(builder: map, relation: map, values: list) -> map
   return result
 end
 // Parameter catalogue rows are ordered by source position. The validated
-// signature currently contains required, unrestricted roles only.
+// signature preserves each mode and its installation-time default.
 verb native_source/install_parameters(input: map, relation: map, identity: map, parameters: list) -> map
   let builder: map = input
   let position: int = 0
   for parameter in parameters
     builder = native_source/install_row(builder, relation, [identity, native_source/literal(builder, parameter[:role]),
       native_source/literal(builder, :dispatch/unrestricted), native_source/literal(builder, position),
-      native_source/literal(builder, :required), native_gen/zero(native_value/word())])
+      native_source/literal(builder, parameter[:mode]), native_source/literal(builder, parameter[:default])])
     position = position + 1
   end
   return builder

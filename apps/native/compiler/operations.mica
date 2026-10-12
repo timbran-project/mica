@@ -12,6 +12,15 @@ verb native_source/raise_error(builder: map, code, value: map) -> map
   let result: map = native_source/return_call(rooted, "task_raise", [native_tasks/attempt(rooted), native_roots/worker(rooted), retained])
   return result
 end
+verb native_source/value_error(builder: map, code, message: string, value: map) -> map
+  let encoded: map = native_source/literal(builder, code)
+  let number: map = native_gen/convert(:U32, native_gen/expression(:U64, :Payload, [encoded]))
+  let [error: map, ready: map] = native_source/result(builder, "value_error", [native_roots/worker(builder), number,
+    native_gen/ref(builder, "true"), native_source/literal(builder, message), native_gen/ref(builder, "true"), value], "oom")
+  let [retained: map, rooted: map] = native_roots/retain(ready, "error", error)
+  let result: map = native_source/return_call(rooted, "task_raise", [native_tasks/attempt(rooted), native_roots/worker(rooted), retained])
+  return result
+end
 verb native_source/check_kind(builder: map, value: map, kind: symbol) -> map
   let spelling: string = native_source/symbol_text(kind)
   let condition: map = native_gen/equal(native_gen/call(builder, "value_kind", [value]), native_gen/ref(builder, string_concat("tag_", spelling)))
@@ -62,4 +71,24 @@ verb native_source/builtin(builder: map, name: symbol, args: list) -> list
   native/ensure(name == :mailbox_close && len(args) == 1, string_concat("unsupported native source builtin: ", to_literal(name)))
   ready = native_source/close_mailbox(ready, hub, args[0])
   return [native_source/literal(ready, [] {[]}), ready]
+end
+
+verb native_source/builtin_items(builder: map, name: symbol, items: list) -> list
+  if !native_source/spliced(items)
+    let result: list = native_source/builtin(builder, name, native_source/operands(builder, items))
+    return result
+  end
+  let arities: map = {:mailbox -> 0, :mailbox_send -> 2, :mailbox_close -> 1}
+  native/ensure(map_contains_key(arities, name), string_concat("unsupported native source builtin: ", to_literal(name)))
+  let [values: map, expanded: map] = native_source/list_items(builder, items, false)
+  let [arguments: map, rooted: map] = native_roots/retain(expanded, "arguments", values)
+  let ready: map = native_tasks/check(rooted, native_gen/equal(native_query/width(rooted, arguments), native_source/number(rooted, arities[name])), "schema")
+  let args: list = []
+  let position: int = 0
+  while position < arities[name]
+    args = [@args, native_query/cell(ready, arguments, native_source/number(ready, position))]
+    position = position + 1
+  end
+  let result: list = native_source/builtin(ready, name, args)
+  return result
 end

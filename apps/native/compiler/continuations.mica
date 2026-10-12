@@ -75,13 +75,14 @@ verb native_source/invoke(builder: map, selector: map, supplied: map, continuati
   return result
 end
 verb native_source/call_arguments(builder: map, instruction: list) -> list
-  if instruction[0] == :DynamicDispatch
+  if instruction[0] == :DynamicDispatch || instruction[0] == :SpawnDispatchDynamic
     let value: map = native_source/operand(builder, instruction[3])
     let checked: map = native_tasks/check(builder, native_gen/equal(native_gen/expression(:U8, :Tag, [value]), native_gen/ref(builder, "tag_map")), "schema")
     return [value, checked]
   end
-  if instruction[0] == :PositionalDispatch
-    let result: list = native_source/rooted_list(builder, "arguments", native_source/operands(builder, instruction[3]))
+  if instruction[0] == :PositionalDispatch || instruction[0] == :SpawnPositionalDispatch
+    let [value: map, ready: map] = native_source/list_items(builder, instruction[3], false)
+    let result: list = native_roots/retain(ready, "arguments", value)
     return result
   end
   let fields: list = [[native_source/literal(builder, role[0]), native_source/operand(builder, role[1])] for role in instruction[3]]
@@ -124,9 +125,8 @@ verb native_source/complete(builder: map, value: map) -> map
   let result: map = native_source/return_call(builder, "task_return", [native_roots/worker(builder), native_tasks/attempt(builder), value])
   return result
 end
-verb native_source/spawn_task(builder: map, selector: map, fields: list, continuation: string, captures: list) -> map
-  let [roles: map, built: map] = native_literal/map(builder, fields, fn(failed) => native_tasks/attempt_status(failed, "oom"))
-  let [retained: map, rooted: map] = native_roots/retain(built, "roles", roles)
+verb native_source/spawn_task(builder: map, selector: map, supplied: map, continuation: string, captures: list) -> map
+  let [retained: map, rooted: map] = native_roots/retain(builder, "arguments", supplied)
   let ready: map = native_source/capture(rooted, continuation, captures)
   let result: map = native_source/return_call(ready, "task_spawn_request", [native_roots/worker(ready), native_tasks/attempt(ready),
     selector, retained, native_gen/ref(ready, "zero")])

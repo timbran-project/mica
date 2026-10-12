@@ -2208,6 +2208,7 @@ fn native_source_analysis_tracks_continuations_and_definite_assignment() {
             include_str!("../../../apps/native/compiler/flow.mica"),
             include_str!("../../../apps/native/compiler/builders.mica"),
             include_str!("../../../apps/native/compiler/operations.mica"),
+            include_str!("../../../apps/native/compiler/collections.mica"),
             include_str!("../../../apps/native/compiler/expressions.mica"),
             include_str!("../../../apps/native/compiler/prepare.mica"),
             include_str!("../../../apps/native/compiler/continuations.mica"),
@@ -2359,6 +2360,20 @@ fn source_expression_cases() -> (String, String, String) {
         "begin\n let saved = [left, right]\n let first = native_expression_2(left, right)\n let second = :native_expression_3(left: first, right: right)\n [first, second, saved]\nend",
         "native_call_sum(left) + right",
         "begin\n let result = 0\n let index = 0\n while index < left\n result = native_expression_2(result, right)\n index = index + 1\n end\n result\nend",
+        "native_default_values(left)",
+        "native_default_values(left, right, 3, 4)",
+        ":native_default_values(first: left, tail: [right, 3])",
+        "native_default_none()",
+        "native_default_option()",
+        "native_default_bytes()",
+        "native_default_values(@[left], @[right, 3], 4)",
+        ":native_default_values(@{:first -> left}, @{:options -> right}, tail: [3, 4])",
+        "[@left, 7, @right, 8]",
+        ":native_default_values(@left, first: 7, @right)",
+        "invoke(@[:native_expression_2, {:left -> left, :right -> right}])",
+        "invoke(@left)",
+        "native_default_only_rest(@left, @right)",
+        "native_default_only_rest(@left, @right)[256]",
     ];
     let mut cases: Vec<(usize, Vec<&str>)> = Vec::new();
     for value in ["7", "2.5", "-36028797018963968", "true"] {
@@ -2457,6 +2472,41 @@ fn source_expression_cases() -> (String, String, String) {
         }
     }
     cases.push((21, vec!["true", "1"]));
+    for operation in 27..35 {
+        for operands in [["1", "2"], ["-3", "9"]] {
+            cases.push((operation, operands.to_vec()));
+        }
+    }
+    for operands in [
+        ["[]", "[]"],
+        ["[1, 2]", "[3, 4]"],
+        ["true", "[]"],
+        ["[]", "7"],
+    ] {
+        cases.push((35, operands.to_vec()));
+    }
+    for operands in [
+        ["{}", "{}"],
+        ["{:first -> 1, :options -> 2}", "{:first -> 3}"],
+        ["{1 -> 2}", "{3 -> 4}"],
+    ] {
+        cases.push((36, operands.to_vec()));
+    }
+    cases.push((37, vec!["1", "2"]));
+    cases.push((38, vec!["[]", "0"]));
+    cases.push((38, vec!["[:native_expression_2]", "0"]));
+    cases.push((38, vec!["[:native_expression_2, {}, 3]", "0"]));
+    for operands in [["[]", "[]"], ["[1, 2]", "[3, 4]"]] {
+        cases.push((39, operands.to_vec()));
+    }
+    let long_arguments = format!(
+        "[{}]",
+        (0..257)
+            .map(|value| format!("[\"retained across collection\", {value}]"))
+            .collect::<Vec<_>>()
+            .join(",")
+    );
+    cases.push((40, vec![&long_arguments, "[]"]));
     let mut ids = vec!["[602, 8003]".to_owned(), "[603, 8004]".to_owned()];
     for (index, operation) in operations.iter().enumerate() {
         let parameters = if index < 2 { "value" } else { "left, right" };
@@ -2473,6 +2523,17 @@ fn source_expression_cases() -> (String, String, String) {
     let recursive = "\nverb native_call_sum(number)\n if number == 0\n return 0\n end\n return number + native_call_sum(number - 1)\nend\n";
     source.push_str(recursive);
     ids.push("[1101, 10101]".to_owned());
+    let defaults = [
+        "verb native_default_values(first, ?options = {:nested -> [1, {2 -> 3.5}], :empty -> none}, @tail)\n return [first, options, tail]\nend",
+        "verb native_default_none(?value)\n return value\nend",
+        "verb native_default_option(?value = some([1, 2]))\n return value\nend",
+        "verb native_default_bytes(?value = b\"AP8=\")\n return value\nend",
+        "verb native_default_only_rest(@values)\n return values\nend",
+    ];
+    for (index, definition) in defaults.iter().enumerate() {
+        source.push_str(&format!("\n{definition}\n"));
+        ids.push(format!("[{}, {}]", 1110 + index, 10110 + index));
+    }
     for report in oracle.run_filein(&source).unwrap() {
         assert!(
             matches!(report.outcome, TaskOutcome::Complete { .. }),
@@ -2481,6 +2542,7 @@ fn source_expression_cases() -> (String, String, String) {
         );
     }
     checks.push_str(&format!("static uint64_t (*const source_recursive_entry)(struct mica_TaskAttempt *) = mica_source_roundtrip_method_{}_0;\n", operations.len() + 3));
+    checks.push_str("static uint64_t (*const source_splice_entry)(struct mica_TaskAttempt *) = mica_source_roundtrip_method_37_0;\n");
     checks.push_str("static uint64_t (*const source_named_entry)(struct mica_TaskAttempt *) = mica_source_roundtrip_method_23_0;\n");
     let mut entries = Vec::new();
     for (index, (operation, operands)) in cases.iter().enumerate() {
@@ -2507,10 +2569,10 @@ fn source_expression_cases() -> (String, String, String) {
         let mut serial = 0;
         let (literal, construction) = source_value_literal(&operands_value, &mut serial);
         checks.push_str(&format!("static mica_type_Value source_arguments_{index}(struct mica_MemoryWorker *worker, struct mica_SymbolTable *symbols) {{\n (void)symbols; // Most inputs contain no symbols.\n{construction}\n return {literal};\n}}\n"));
-        checks.push_str(&format!("static void source_check_{index}(mica_type_Value actual, struct mica_SymbolTable *symbols) {{\n    (void)symbols; // Some expected values contain no interned names.\n{}\n}}\n", source_value_check(&value, "actual")));
+        checks.push_str(&format!("static void source_check_{index}(mica_type_Value actual, struct mica_SymbolTable *symbols, struct mica_MemoryWorker *worker) {{\n    (void)symbols; (void)worker; // Scalar checks need no allocation or interning.\n{}\n}}\n", source_value_check(&value, "actual")));
         entries.push(format!("{{mica_source_roundtrip_method_{}_0, {status}, source_arguments_{index}, source_check_{index}}}", operation + 2));
     }
-    checks.push_str(&format!("static const struct {{\n    uint64_t (*entry)(struct mica_TaskAttempt *);\n    uint64_t status;\n    mica_type_Value (*arguments)(struct mica_MemoryWorker *, struct mica_SymbolTable *);\n    void (*check)(mica_type_Value, struct mica_SymbolTable *);\n}} source_cases[] = {{\n{}\n}};\n", entries.join(",\n")));
+    checks.push_str(&format!("static const struct {{\n    uint64_t (*entry)(struct mica_TaskAttempt *);\n    uint64_t status;\n    mica_type_Value (*arguments)(struct mica_MemoryWorker *, struct mica_SymbolTable *);\n    void (*check)(mica_type_Value, struct mica_SymbolTable *, struct mica_MemoryWorker *);\n}} source_cases[] = {{\n{}\n}};\n", entries.join(",\n")));
     (source, format!("[{}]", ids.join(",")), checks)
 }
 
@@ -2604,9 +2666,73 @@ fn source_value_literal(value: &Value, serial: &mut usize) -> (String, String) {
             };
             format!("mica_value_{constructor}((uint32_t){name}_symbol.f_number)")
         }
-        ValueKind::Relation if value.with_relation(|relation| relation.is_empty()).unwrap() => {
-            return ("0".to_owned(), setup);
-        }
+        ValueKind::Bytes => value
+            .with_bytes(|bytes| {
+                let data = bytes
+                    .iter()
+                    .map(u8::to_string)
+                    .collect::<Vec<_>>()
+                    .join(",");
+                setup.push_str(&format!(
+                    "const uint8_t {name}_bytes[] = {{{}}};\n",
+                    if data.is_empty() { "0" } else { &data }
+                ));
+                format!("mica_value_bytes(worker, {name}_bytes, {})", bytes.len())
+            })
+            .unwrap(),
+        ValueKind::Relation => value
+            .with_relation(|relation| {
+                let mut columns = Vec::new();
+                for column in relation.heading() {
+                    let (symbol, construction) =
+                        source_value_literal(&Value::symbol(*column), serial);
+                    setup.push_str(&construction);
+                    columns.push(format!("(uint32_t)mica_value_as_symbol({symbol}).f_number"));
+                }
+                setup.push_str(&format!(
+                    "const uint32_t {name}_heading[] = {{{}}};\n",
+                    if columns.is_empty() {
+                        "0".to_owned()
+                    } else {
+                        columns.join(",")
+                    }
+                ));
+                let mut tuples = Vec::new();
+                for (index, row) in relation.rows().iter().enumerate() {
+                    let mut cells = Vec::new();
+                    for cell in row.values() {
+                        let (cell, construction) = source_value_literal(cell, serial);
+                        setup.push_str(&construction);
+                        cells.push(cell);
+                    }
+                    setup.push_str(&format!(
+                        "mica_type_Value {name}_row_{index}[] = {{{}}};\n",
+                        if cells.is_empty() {
+                            "0".to_owned()
+                        } else {
+                            cells.join(",")
+                        }
+                    ));
+                    tuples.push(format!(
+                        "{{.f_arity = {}, .f_data = {name}_row_{index}}}",
+                        cells.len()
+                    ));
+                }
+                setup.push_str(&format!(
+                    "const struct mica_ValueTuple {name}_rows[] = {{{}}};\n",
+                    if tuples.is_empty() {
+                        "{0}".to_owned()
+                    } else {
+                        tuples.join(",")
+                    }
+                ));
+                format!(
+                    "mica_value_relation(worker, {name}_heading, {}, {name}_rows, {})",
+                    columns.len(),
+                    tuples.len()
+                )
+            })
+            .unwrap(),
         kind => panic!("unhandled conformance input kind: {kind:?}"),
     };
     setup.push_str(&format!(
@@ -2639,7 +2765,48 @@ fn source_value_check(expected: &Value, actual: &str) -> String {
             let value = source_value_check(error.value().unwrap(), "error.f_header->f_value");
             format!("{{ struct mica_HeapErrorResult error = mica_value_as_error({actual}); assert(error.f_ok); struct mica_IdResult code = mica_value_symbol_intern(symbols, (const uint8_t *){name:?}, {}); assert(code.f_ok && error.f_header->f_code == code.f_number); assert(error.f_header->f_has_message && error.f_header->f_has_value); {message}\n{value}\n}}", name.len())
         }).unwrap(),
+        ValueKind::Map | ValueKind::Relation | ValueKind::Bytes | ValueKind::Symbol | ValueKind::ErrorCode => {
+            let (value, construction) = source_value_literal(expected, &mut 0);
+            format!("{{ {construction}\n struct mica_IntResult compared = mica_value_compare({actual}, {value}); assert(compared.f_ok && compared.f_number == 0); }}")
+        }
         kind => panic!("unhandled conformance result kind: {kind:?}"),
+    }
+}
+
+#[test]
+fn native_source_composite_literals_preserve_ownership() {
+    for interpreter_only in [true, false] {
+        let mut runner = runner(interpreter_only);
+        load_native_kernel(&mut runner, false);
+        for source in [
+            include_str!("../../../apps/native/compiler/collections.mica"),
+            include_str!("../../../apps/native/compiler/prepare.mica"),
+        ] {
+            runner.run_filein(source).unwrap();
+        }
+        assert_eq!(
+            eval(
+                &mut runner,
+                r#"
+let module = native_value/definitions()
+module[:source_prefix] = "literal_fixture"
+module = native_source/length_body(module)
+let description = native_source/literal_description(some({:nested -> [1, none, {2 -> 3.5}], :bytes -> b"AP8="}))
+let [literal, prepared] = native_literal/prepare(module, "composite", description)
+module = native_memory/declare(prepared, "literal_fixture", native_value/word(), [
+  ["worker", native_memory/record_pointer("MemoryWorker"), :Borrow],
+  ["symbols", native_memory/record_pointer("SymbolTable"), :Borrow]],
+  [:ReadMemory, :WriteMemory, :Allocate, :Release, :Block], :Gc, "")
+let failure = fn(failed) => native_roots/return_value(failed, native_gen/zero(native_value/word()))
+let builder = native_roots/context(module, "literal_fixture", fn(failed, reason) => failure(failed))
+let [value, ready] = native_literal/emit(builder, literal, native_gen/ref(builder, "symbols"), failure)
+module = native_gen/finish(module, native_roots/return_value(ready, value))
+native/check(module[:state])
+return true
+"#,
+            ),
+            Value::bool(true)
+        );
     }
 }
 
@@ -2661,6 +2828,7 @@ fn native_source_program_executes_on_generated_runtime() {
             include_str!("../../../apps/native/compiler/flow.mica"),
             include_str!("../../../apps/native/compiler/builders.mica"),
             include_str!("../../../apps/native/compiler/operations.mica"),
+            include_str!("../../../apps/native/compiler/collections.mica"),
             include_str!("../../../apps/native/compiler/expressions.mica"),
             include_str!("../../../apps/native/compiler/prepare.mica"),
             include_str!("../../../apps/native/compiler/continuations.mica"),

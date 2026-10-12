@@ -200,7 +200,7 @@ static void source_conformance(void) {
         assert(mica_memory_root_pop(&worker, &acquired));
         assert(mica_task_release(&task, &worker));
         assert(mica_memory_safepoint(&worker, true));
-        source_cases[i].check(mica_value_root_get(&result), &symbols);
+        source_cases[i].check(mica_value_root_get(&result), &symbols, &worker);
     }
     // An infinite source loop must still honour the task's instruction budget.
     struct mica_ValueResult empty = mica_value_list(&worker, NULL, 0);
@@ -222,6 +222,21 @@ static void source_conformance(void) {
     assert(image.f_pointer);
     limited = (struct mica_TaskControl){0};
     assert(mica_task_init(&limited, &worker, &kernel, &image, 100000, 0, 4, &runtime) == 0);
+    assert(mica_task_execute(&limited, &worker) == 10);
+    assert(mica_task_release(&limited, &worker));
+    // Copying a splice is bounded even when it occupies a single instruction.
+    mica_type_Value many[512];
+    for (unsigned i = 0; i < 512; ++i) many[i] = mica_value_int(i).f_value;
+    struct mica_ValueResult sequence = mica_value_list(&worker, many, 512);
+    assert(sequence.f_ok);
+    mica_type_Value supplied[] = {sequence.f_value, sequence.f_value};
+    args = mica_value_list(&worker, supplied, 2);
+    assert(args.f_ok);
+    image.f_pointer = (void *)mica_task_new_Image(&worker, source_splice_entry,
+        (void *)code.f_pointer, tenant, args.f_value, 0, NULL, NULL, 0, NULL, NULL);
+    assert(image.f_pointer);
+    limited = (struct mica_TaskControl){0};
+    assert(mica_task_init(&limited, &worker, &kernel, &image, 100, 0, 4, &runtime) == 0);
     assert(mica_task_execute(&limited, &worker) == 10);
     assert(mica_task_release(&limited, &worker));
     source_dispatch_arguments(&worker, &vocabulary, &dispatch, &kernel);

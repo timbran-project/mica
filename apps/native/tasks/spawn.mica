@@ -47,7 +47,9 @@ end
 verb native_spawn/request_body(module: map) -> map
   let builder: map = native_invocation/context(module, "spawn_request")
   builder = native_query/check(builder, native_gen/field(builder, native_gen/call(builder, "value_as_symbol", [native_roots/ref(builder, "selector")]), "ok"), "schema")
-  builder = native_query/check(builder, native_gen/equal(native_gen/expression(:U8, :Tag, [native_roots/ref(builder, "roles")]), native_gen/ref(builder, "tag_map")), "schema")
+  builder = native_gen/unless(builder, native_gen/equal(native_gen/expression(:U8, :Tag, [native_roots/ref(builder, "roles")]), native_gen/ref(builder, "tag_map")), fn(positional)
+    return native_query/check(positional, native_gen/equal(native_gen/expression(:U8, :Tag, [native_roots/ref(positional, "roles")]), native_gen/ref(positional, "tag_list")), "schema")
+  end)
   let [request: map, captured: map] = native_roots/retain(builder, "spawn", native_tasks/allocate_record(builder, "SpawnRequest", {
     "selector" -> native_roots/ref(builder, "selector"), "roles" -> native_roots/ref(builder, "roles"), "delay" -> native_gen/ref(builder, "delay")}))
   builder = native_query/check(captured, native_gen/negate(native_kernel/absent(request)), "oom")

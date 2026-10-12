@@ -14,7 +14,9 @@ end
 verb native_source/pool_operands(values: list, operands: list) -> list
   let pool: list = values
   for operand in operands
-    if operand[0] == :Constant
+    if operand[0] == :Splice
+      pool = native_source/pool_operands(pool, [operand[1]])
+    elseif operand[0] == :Constant
       pool = native_source/pool(pool, operand[1])
     end
   end
@@ -59,17 +61,24 @@ verb native_source/program_literals(analysis: map, initial: list) -> list
       end
     elseif op == :BuildList || op == :AssertDynamic || op == :RetractDynamic
       pool = native_source/pool_operands(pool, instruction[2])
+      if op == :BuildList
+        pool = native_source/pool(pool, "list splice requires a list")
+      end
     elseif op == :BuiltinCall
       pool = native_source/pool_operands(pool, instruction[3])
     elseif op == :Index
       pool = native_source/pool_operands(pool, [instruction[3]])
     elseif op == :BuildMap
       for pair in instruction[2]
-        pool = native_source/pool_operands(pool, pair)
+        if pair[0] == :Splice
+          pool = native_source/pool_operands(pool, [pair[1]])
+        else
+          pool = native_source/pool_operands(pool, pair)
+        end
       end
-    elseif op == :PositionalDispatch
+    elseif op == :PositionalDispatch || op == :SpawnPositionalDispatch
       pool = native_source/pool_operands(pool, [instruction[2], @instruction[3]])
-    elseif op == :DynamicDispatch
+    elseif op == :DynamicDispatch || op == :SpawnDispatchDynamic
       pool = native_source/pool_operands(pool, [instruction[2], instruction[3]])
     elseif op == :Dispatch || op == :SpawnDispatch
       pool = native_source/pool_operands(pool, [instruction[2]])
@@ -85,7 +94,7 @@ verb native_source/program_literals(analysis: map, initial: list) -> list
       if instruction[3] != none
         pool = native_source/pool_operands(pool, [instruction[3]])
       end
-    elseif op == :Return
+    elseif op == :Return || op == :Abort
       pool = native_source/pool_operands(pool, [instruction[1]])
     end
     pc = pc + 1
@@ -93,6 +102,33 @@ verb native_source/program_literals(analysis: map, initial: list) -> list
   return pool
 end
 verb native_source/literal_description(value) -> map
+  if value == [] {[]}
+    return {:kind -> :Unit}
+  end
+  if value == none
+    return {:kind -> :Relation, :arity -> 1, :length -> 0,
+      :children -> [native_source/literal_description(:value)]}
+  end
+  if is_kind(value, :list)
+    return {:kind -> :List, :children -> [native_source/literal_description(item) for item in value]}
+  end
+  if is_kind(value, :map)
+    let children: list = []
+    for key, item in value
+      children = [@children, native_source/literal_description(key), native_source/literal_description(item)]
+    end
+    return {:kind -> :Map, :children -> children}
+  end
+  if is_kind(value, :relation) && len(value) > 0
+    let heading: list = [key for key, item in value[0]]
+    let children: list = [native_source/literal_description(key) for key in heading]
+    for row in value
+      for key in heading
+        children = [@children, native_source/literal_description(row[key])]
+      end
+    end
+    return {:kind -> :Relation, :arity -> len(heading), :length -> len(value), :children -> children}
+  end
   let kinds: list = [[:bool, :Bool], [:int, :Integer], [:float, :Float], [:string, :String], [:bytes, :Bytes]]
   for [source, target] in kinds
     if is_kind(value, source)
@@ -104,9 +140,6 @@ verb native_source/literal_description(value) -> map
   end
   if is_kind(value, :error_code)
     return {:kind -> :ErrorCode, :value -> to_literal(value)}
-  end
-  if value == [] {[]}
-    return {:kind -> :Unit}
   end
   native/ensure(false, string_concat("unsupported native source constant: ", to_literal(value)))
   return {}
@@ -158,8 +191,10 @@ verb native_source/prepare_module(input: map, prefix: string, emitted: map, rela
     let position: int = 0
     pool = native_source/pool(pool, definition[:selector])
     for parameter in definition[:parameters]
-      native/ensure(parameter[:mode] == :required && parameter[:restriction] == :dispatch/unrestricted,
-        "native source parameter defaults, rest, and restrictions are not lowered yet")
+      native/ensure(parameter[:restriction] == :dispatch/unrestricted,
+        "native source parameter prototypes require identity linking")
+      pool = native_source/pool(pool, parameter[:mode])
+      pool = native_source/pool(pool, parameter[:default])
       pool = native_source/pool(pool, parameter[:role])
       pool = native_source/pool(pool, position)
       position = position + 1

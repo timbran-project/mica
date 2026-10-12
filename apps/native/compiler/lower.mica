@@ -20,20 +20,23 @@ verb native_source/value_instruction(builder: map, instruction: list) -> list
     return result
   end
   if op == :BuildList
-    let result: list = native_source/list(builder, native_source/operands(builder, instruction[2]))
+    let result: list = native_source/list_items(builder, instruction[2], true)
     return result
   end
   if op == :BuildMap
-    let fields: list = [native_source/operands(builder, pair) for pair in instruction[2]]
-    let result: list = native_literal/map(builder, fields, fn(failed) => native_tasks/attempt_status(failed, "oom"))
+    let result: list = native_source/map_items(builder, instruction[2])
     return result
+  end
+  if op == :CollectionLen
+    let value: map = native_gen/call(builder, string_concat(builder[:source_prefix], "_collection_length"), [native_source/register(builder, instruction[2])])
+    return [value, builder]
   end
   if op == :Index
     let result: list = native_source/index(builder, native_source/register(builder, instruction[2]), native_source/operand(builder, instruction[3]))
     return result
   end
   if op == :BuiltinCall
-    let result: list = native_source/builtin(builder, instruction[2], native_source/operands(builder, instruction[3]))
+    let result: list = native_source/builtin_items(builder, instruction[2], instruction[3])
     return result
   end
   native/ensure(false, string_concat("unsupported native source lowering: ", to_literal(op)))
@@ -60,6 +63,11 @@ verb native_source/emit_instruction(builder: map, instruction: list) -> map
 end
 verb native_source/emit_boundary(builder: map, instruction: list, continuation: string, captures: list) -> map
   let op: symbol = instruction[0]
+  if op == :Abort
+    let failed: map = native_roots/store(builder, native_tasks/saved(builder, "error", native_value/word()), native_source/operand(builder, instruction[1]))
+    let result: map = native_roots/return_value(failed, native_gen/ref(failed, "task_language_error"))
+    return result
+  end
   if op == :Return
     let result: map = native_source/complete(builder, native_source/operand(builder, instruction[1]))
     return result
@@ -69,10 +77,10 @@ verb native_source/emit_boundary(builder: map, instruction: list, continuation: 
     let result: map = native_source/invoke(prepared, native_source/operand(prepared, instruction[2]), arguments, continuation, captures)
     return result
   end
-  if op == :SpawnDispatch
+  if native/contains([:SpawnDispatch, :SpawnDispatchDynamic, :SpawnPositionalDispatch], op)
     native/ensure(instruction[4] == none, "native source delayed spawn lowering is not implemented")
-    let roles: list = [[native_source/literal(builder, role[0]), native_source/operand(builder, role[1])] for role in instruction[3]]
-    let result: map = native_source/spawn_task(builder, native_source/operand(builder, instruction[2]), roles, continuation, captures)
+    let [arguments: map, ready: map] = native_source/call_arguments(builder, instruction)
+    let result: map = native_source/spawn_task(ready, native_source/operand(ready, instruction[2]), arguments, continuation, captures)
     return result
   end
   native/ensure(op == :MailboxRecv && instruction[3] == none, "unsupported native source suspension")
@@ -86,7 +94,7 @@ verb native_source/block_body(builder: map, program: map, block: map, continuati
   let ready: map = native_source/checked(builder, "task_poll", [native_tasks/attempt(builder), native_source/number(builder, len(block[:pcs]))])
   let code: list = program[:description][:code]
   let last: int = block[:last]
-  let terminal: bool = program[:instructions][last][:boundary] || native/contains([:Return, :Branch, :Jump], code[last][0])
+  let terminal: bool = program[:instructions][last][:boundary] || native/contains([:Return, :Abort, :Branch, :Jump], code[last][0])
   ready = native_roots/temporary(ready, fn(body)
     let current: map = body
     for pc in block[:pcs]

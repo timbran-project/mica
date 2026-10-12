@@ -6,6 +6,10 @@
 // these instructions. Continuations capture only values live across a boundary.
 verb native_source/operand_reads(operand) -> list
   native/ensure(is_kind(operand, :list) && len(operand) == 2, "source operand requires a tag and value")
+  if operand[0] == :Splice
+    let reads: list = native_source/operand_reads(operand[1])
+    return reads
+  end
   if operand[0] == :Constant
     return []
   end
@@ -29,9 +33,9 @@ verb native_source/instruction(code: list, pc: int) -> map
   native/ensure(is_kind(instruction, :list) && len(instruction) > 0, "source instruction must be a nonempty list")
   let op = instruction[0]
   let widths: map = {:Load -> 3, :Move -> 3, :Unary -> 4, :Binary -> 5,
-    :BuildList -> 3, :BuildMap -> 3, :Index -> 4, :CheckKind -> 5,
+    :BuildList -> 3, :BuildMap -> 3, :CollectionLen -> 3, :Abort -> 2, :Index -> 4, :CheckKind -> 5,
     :BuiltinCall -> 4, :Dispatch -> 4, :DynamicDispatch -> 4, :PositionalDispatch -> 4,
-    :SpawnDispatch -> 5, :SpawnDispatchDynamic -> 5, :MailboxRecv -> 4,
+    :SpawnDispatch -> 5, :SpawnDispatchDynamic -> 5, :SpawnPositionalDispatch -> 5, :MailboxRecv -> 4,
     :AssertDynamic -> 3, :RetractDynamic -> 3, :Return -> 2,
     :Branch -> 4, :Jump -> 2, :CommitValue -> 2, :SuspendValue -> 3, :Emit -> 3}
   native/ensure(map_contains_key(widths, op), string_concat("unsupported native source instruction ", to_literal(op)))
@@ -40,8 +44,8 @@ verb native_source/instruction(code: list, pc: int) -> map
   let writes: list = []
   let successors: list = [pc + 1]
   let boundary: bool = false
-  if native/contains([:Load, :Move, :Unary, :Binary, :BuildList, :BuildMap, :Index, :BuiltinCall,
-      :Dispatch, :DynamicDispatch, :PositionalDispatch, :SpawnDispatch, :SpawnDispatchDynamic, :MailboxRecv, :CommitValue, :SuspendValue], op)
+  if native/contains([:Load, :Move, :Unary, :Binary, :BuildList, :BuildMap, :CollectionLen, :Index, :BuiltinCall,
+      :Dispatch, :DynamicDispatch, :PositionalDispatch, :SpawnDispatch, :SpawnDispatchDynamic, :SpawnPositionalDispatch, :MailboxRecv, :CommitValue, :SuspendValue], op)
     writes = [instruction[1]]
   end
   if op == :Move || op == :CheckKind
@@ -50,6 +54,8 @@ verb native_source/instruction(code: list, pc: int) -> map
       source = instruction[2]
     end
     reads = [source]
+  elseif op == :CollectionLen
+    reads = [instruction[2]]
   elseif op == :Unary
     reads = [instruction[3]]
   elseif op == :Binary
@@ -61,7 +67,11 @@ verb native_source/instruction(code: list, pc: int) -> map
   elseif op == :BuildMap
     for pair in instruction[2]
       native/ensure(is_kind(pair, :list) && len(pair) == 2, "source map requires key/value pairs")
-      reads = [@reads, @native_source/items_reads(pair)]
+      if pair[0] == :Splice
+        reads = [@reads, @native_source/operand_reads(pair[1])]
+      else
+        reads = [@reads, @native_source/items_reads(pair)]
+      end
     end
   elseif op == :BuiltinCall
     reads = native_source/items_reads(instruction[3])
@@ -74,7 +84,7 @@ verb native_source/instruction(code: list, pc: int) -> map
       reads = [@reads, @native_source/operand_reads(pair[1])]
     end
     boundary = true
-  elseif op == :PositionalDispatch
+  elseif op == :PositionalDispatch || op == :SpawnPositionalDispatch
     reads = native_source/items_reads([instruction[2], @instruction[3]])
     boundary = true
   elseif op == :DynamicDispatch || op == :SpawnDispatchDynamic
@@ -93,7 +103,7 @@ verb native_source/instruction(code: list, pc: int) -> map
     boundary = true
   elseif op == :CommitValue
     boundary = true
-  elseif op == :Return
+  elseif op == :Return || op == :Abort
     reads = native_source/operand_reads(instruction[1])
     successors = []
   elseif op == :Emit
@@ -104,7 +114,7 @@ verb native_source/instruction(code: list, pc: int) -> map
   elseif op == :Jump
     successors = [instruction[1]]
   end
-  if (op == :SpawnDispatch || op == :SpawnDispatchDynamic) && instruction[4] != none
+  if (op == :SpawnDispatch || op == :SpawnDispatchDynamic || op == :SpawnPositionalDispatch) && instruction[4] != none
     reads = [@reads, @native_source/operand_reads(instruction[4])]
   end
   return {:reads -> reads, :writes -> writes, :successors -> successors, :boundary -> boundary}

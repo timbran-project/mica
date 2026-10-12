@@ -94,6 +94,22 @@ verb native_literal/prepare(input: map, name: string, literal: map) -> list
   let module: map = input
   let kind: symbol = literal[:kind]
   let prepared: map = {:kind -> kind, :name -> name}
+  if native/contains([:List, :Map, :Relation], kind)
+    let children: list = []
+    let index: int = 0
+    for child in literal[:children]
+      let [part: map, ready: map] = native_literal/prepare(module, string_concat(name, "_", to_literal(index)), child)
+      children = [@children, part]
+      module = ready
+      index = index + 1
+    end
+    prepared[:children] = children
+    if kind == :Relation
+      prepared[:arity] = literal[:arity]
+      prepared[:length] = literal[:length]
+    end
+    return [prepared, module]
+  end
   if kind == :Unit
     return [prepared, module]
   end
@@ -151,6 +167,32 @@ verb native_literal/prepare(input: map, name: string, literal: map) -> list
 end
 verb native_literal/emit(builder: map, literal: map, table: map, failure) -> list
   let kind: symbol = literal[:kind]
+  if native/contains([:List, :Map, :Relation], kind)
+    let values: list = []
+    let ready: map = builder
+    for child in literal[:children]
+      let [value: map, emitted: map] = native_literal/emit(ready, child, table, failure)
+      let [root: map, retained: map] = native_roots/retain(emitted, "literal_child", value)
+      values = [@values, root]
+      ready = retained
+    end
+    if kind == :List
+      let result: list = native_literal/list(ready, values, failure)
+      return result
+    end
+    if kind == :Map
+      let fields: list = []
+      let index: int = 0
+      while index < len(values)
+        fields = [@fields, [values[index], values[index + 1]]]
+        index = index + 2
+      end
+      let result: list = native_literal/map(ready, fields, failure)
+      return result
+    end
+    let result: list = native_literal/relation(ready, values, literal[:arity], literal[:length], failure)
+    return result
+  end
   if kind == :Unit
     let [tuple: map, ready: map] = native_gen/bind(builder, "unit_tuple", native_gen/zero([:Record, "ValueTuple"]))
     let [unit: map, checked: map] = native_gen/checked_bind(ready, "unit", native_gen/call(ready, "value_relation", [
@@ -215,4 +257,65 @@ verb native_literal/map(builder: map, fields: list, failure) -> list
   end
   let [result: map, checked: map] = native_gen/checked_bind(ready, "map", native_gen/call(ready, "value_map", [native_roots/worker(ready), source, count]), "ok", failure)
   return [native_gen/field(checked, result, "value"), checked]
+end
+
+// A borrowed array is populated from rooted expressions immediately before a
+// constructor call. No collection boundary may intervene before consumption.
+verb native_literal/array(builder: map, label: string, element, values: list) -> list
+  if len(values) == 0
+    return [native_gen/zero([:Pointer, element, :Mutable]), native_gen/zero(:U64), builder]
+  end
+  let array: list = [:Array, element, len(values)]
+  let [storage: map, allocated: map] = native_gen/bind(builder, label, native_gen/zero(array))
+  let first: map = native_gen/element(native_gen/address(storage), native_gen/ref(allocated, "zero"))
+  let [cursor: map, ready: map] = native_gen/bind(allocated, "element", first)
+  for value in values
+    if native/has_pointer(ready, element)
+      ready = native_gen/root_write(ready, native_gen/location(cursor), value)
+    else
+      ready = native_gen/store(ready, cursor, value)
+    end
+    ready = native_gen/assign(ready, cursor, native_gen/offset(cursor, native_gen/ref(ready, "one")))
+  end
+  return [first, native_gen/divide(native_gen/sizeof(array), native_gen/sizeof(element)), ready]
+end
+verb native_literal/list(builder: map, values: list, failure) -> list
+  let [source: map, length: map, ready: map] = native_literal/array(builder, "list_items", native_value/word(), values)
+  let [value: map, checked: map] = native_gen/checked_bind(ready, "list", native_gen/call(ready, "value_list", [native_roots/worker(ready), native_gen/freeze(source), length]), "ok", failure)
+  return [native_gen/field(checked, value, "value"), checked]
+end
+verb native_literal/relation(builder: map, values: list, arity: int, length: int, failure) -> list
+  let heading: list = []
+  let position: int = 0
+  while position < arity
+    heading = [@heading, native_gen/convert(:U32, native_gen/expression(:U64, :Payload, [values[position]]))]
+    position = position + 1
+  end
+  let [columns: map, width: map, ready: map] = native_literal/array(builder, "heading", :U32, heading)
+  // Tuple descriptors contain managed cell pointers. Keep cells in traced
+  // storage instead of embedding borrowed stack addresses in the descriptors.
+  let cell_count: map = native_gen/zero(:U64)
+  if len(values) > arity
+    cell_count = native_gen/divide(native_gen/sizeof([:Array, native_value/word(), len(values) - arity]), native_gen/sizeof(native_value/word()))
+  end
+  let [cells: map, allocated: map] = native_memory/array_storage(ready, native_roots/worker(ready), native_value/word(), cell_count, "layout_values", failure)
+  let [cursor: map, positioned: map] = native_gen/bind(allocated, "cell", cells)
+  ready = positioned
+  while position < len(values)
+    ready = native_gen/store(ready, cursor, values[position])
+    ready = native_gen/assign(ready, cursor, native_gen/offset(cursor, native_gen/ref(ready, "one")))
+    position = position + 1
+  end
+  ready = native_gen/assign(ready, cursor, cells)
+  let rows: list = []
+  let row: int = 0
+  while row < length
+    let [tuple: map, described: map] = native_gen/bind(ready, "tuple", native_gen/record(ready, [:Record, "ValueTuple"], {"arity" -> width, "data" -> cursor}))
+    rows = [@rows, tuple]
+    ready = native_gen/assign(described, cursor, native_gen/offset(cursor, width))
+    row = row + 1
+  end
+  let [tuples: map, count: map, copied: map] = native_literal/array(ready, "rows", [:Record, "ValueTuple"], rows)
+  let [value: map, checked: map] = native_gen/checked_bind(copied, "relation", native_gen/call(copied, "value_relation", [native_roots/worker(copied), native_gen/freeze(columns), width, native_gen/freeze(tuples), count]), "ok", failure)
+  return [native_gen/field(checked, value, "value"), checked]
 end
