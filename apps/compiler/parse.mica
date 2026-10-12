@@ -688,6 +688,23 @@ verb parse_call_pattern(input_state, name_text)
   return [call_pattern, state]
 end
 
+// List binding annotations belong to individual slots, not to the whole list.
+verb parse_list_pattern_element(input_state)
+  let [element, parsed] = parse_pattern(input_state)
+  let state = parsed
+  if at(state, :Colon)
+    state = bump(state)
+    let [annotation, after_annotation] = parse_type_text(state)
+    state = fact(after_annotation, element, :annotation, annotation, 0)
+  end
+  if at(state, :Eq)
+    state = bump(state)
+    let [default_node, after_default] = parse_expression(state)
+    state = fact(after_default, element, :default, default_node, 0)
+  end
+  return [element, state]
+end
+
 verb parse_list_pattern(input_state)
   let state = input_state
   let [_, after_lbracket] = expect(state, :LBracket, "expected '['")
@@ -697,7 +714,7 @@ verb parse_list_pattern(input_state)
   state = skip_newlines(state)
   let element_index = 0
   while !at(state, :RBracket) && !at(state, :Eof)
-    let [element, after_element] = parse_pattern(state)
+    let [element, after_element] = parse_list_pattern_element(state)
     state = after_element
     state = fact(state, list_pattern, :element, element, element_index)
     element_index = element_index + 1

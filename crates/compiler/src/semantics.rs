@@ -1783,7 +1783,11 @@ impl<'a> Analyzer<'a> {
                 ..
             } => {
                 let collection = self.lower_expr(collection, scope);
-                if let HirExpr::LocalRef { binding, .. } = &collection
+                let mut root = &collection;
+                while let HirExpr::Index { collection, .. } = root {
+                    root = collection;
+                }
+                if let HirExpr::LocalRef { binding, .. } = root
                     && self.bindings[binding.0 as usize].mutable
                 {
                     self.bindings[binding.0 as usize].assigned = true;

@@ -204,6 +204,96 @@ fn assert_emitted_agrees(runner: &mut SourceRunner, source: &str) {
 }
 
 #[test]
+fn mica_emitter_typed_list_bindings_check_slots_and_later_assignments() {
+    for interpreter_only in [true, false] {
+        let mut runner = compiler(interpreter_only);
+        for source in [
+            "let [head: int, ?middle: int = head + 1, @tail: list] = [1]\nreturn [head, middle, tail]",
+            "let [head: int, ?middle: int = 2, @tail: list] = [1, 3, 4, 5]\nreturn [head, middle, tail]",
+            "let [head: int] = [1]\nhead = 2\nreturn head",
+            "fn value() => [\"bad\"][0]\ntry\n let [head: int] = [value()]\ncatch E_TYPE as error\n return [error.code, error.value]\nend",
+            "fn value() => [\"bad\"][0]\nlet [head: int] = [1]\ntry\n head = value()\ncatch E_TYPE as error\n return [error.code, error.value, head]\nend",
+            "fn value() => [\"bad\"][0]\ntry\n let [?head: int = value()] = []\ncatch E_TYPE as error\n return [error.code, error.value]\nend",
+            "let result = []\nfor [item: int] in [[1], [2]]\n result = [@result, item]\nend\nreturn result",
+        ] {
+            assert_emitted_agrees(&mut runner, source);
+        }
+        let rejected = invoke(&mut runner, "emit_source", "let [@tail: map] = []");
+        assert_eq!(
+            rejected.map_get(&Value::symbol(Symbol::intern("ok"))),
+            Some(Value::bool(false))
+        );
+    }
+}
+
+#[test]
+fn mica_emitter_nested_indexed_assignments_follow_moo_evaluation_order() {
+    for interpreter_only in [true, false] {
+        let mut runner = compiler(interpreter_only);
+        for source in [
+            r#"let items = [{:a -> [1, 2]}]
+let alias = items
+let result: int = items[0][:a][1] = 9
+require result == 9
+require items == [{:a -> [1, 9]}]
+require alias == [{:a -> [1, 2]}]
+return true"#,
+            r#"let items = [[0]]
+let order = 0
+let result = items[begin order = order * 10 + 1; 0 end][begin order = order * 10 + 2; 0 end] = begin order = order * 10 + 3; 7 end
+require order == 123
+require result == 7
+require items == [[7]]
+return true"#,
+            r#"let items = [[1]]
+let key = 0
+let result = items[key][begin items = [[2]]; 0 end] = begin key = 9; 8 end
+require items == [[8]]
+require result == 8
+require key == 9
+return true"#,
+            r#"let items = [[1]]
+let seen = 0
+try
+ items[2][0] = (seen = 1)
+catch E_INDEX
+ require seen == 0
+end
+require items == [[1]]
+try
+ items[0][2] = (seen = 2)
+catch E_INDEX
+ require seen == 2
+end
+require items == [[1]]
+return true"#,
+            r#"let a = [[1]]
+let b = {:x -> 2}
+let result = a[0][0] = b[:x] = 9
+require result == 9
+require a == [[9]]
+require b == {:x -> 9}
+return true"#,
+            r#"let items = [[1]]
+let captured = [items, items[0][0] = 2, items]
+require captured == [[[1]], 2, [[2]]]
+return true"#,
+        ] {
+            assert_emitted_agrees(&mut runner, source);
+        }
+        let rejected = invoke(
+            &mut runner,
+            "emit_source",
+            "const items = [[1]]\nitems[0][0] = 2",
+        );
+        assert_eq!(
+            rejected.map_get(&Value::symbol(Symbol::intern("ok"))),
+            Some(Value::bool(false))
+        );
+    }
+}
+
+#[test]
 fn mica_emitter_rows_and_comprehensions_agree_with_rust_execution() {
     for interpreter_only in [true, false] {
         let mut runner = compiler(interpreter_only);

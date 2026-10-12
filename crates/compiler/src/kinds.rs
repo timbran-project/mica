@@ -228,11 +228,11 @@ impl<'a> KindInference<'a> {
                 HirPlace::Index {
                     collection, index, ..
                 } => {
-                    let mut flow = self.flow(value);
+                    let mut flow = self.flow(collection);
                     if let Some(index) = index {
                         flow = flow.then(self.flow(index));
                     }
-                    flow.with_normal(self.expr(collection))
+                    flow.then(self.flow(value))
                 }
                 HirPlace::Invalid { .. } => self.flow(value).with_normal(KindSet::ALL),
             },

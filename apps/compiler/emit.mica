@@ -922,9 +922,22 @@ verb emit_collection(rows, node, input_state)
   return [dst, emit_append(allocated, [:BuiltinCall, dst, :relation_from_rows, [[:Register, heading_reg], [:Register, rows_reg]]])]
 end
 
-verb emit_pattern(rows, node, source_reg, immutable, annotation, input_state)
+verb emit_pattern(rows, node, source_reg, immutable, input_annotation, input_state)
+  let annotation = input_annotation
   let state = input_state
   let kind = ast_kind(rows, node)
+  let [annotated, slot_annotation] = ast_attr(rows, node, :annotation)
+  if annotated
+    annotation = slot_annotation
+    if kind == :Rest_Pattern && annotation != "list" && annotation != "any"
+      return emit_error(state, "rest binding annotation must accept a list")
+    end
+    let [named, subject] = ast_attr(rows, node, :name)
+    if !named
+      subject = "_"
+    end
+    state = emit_annotation(state, source_reg, annotation, :Binding, subject)
+  end
   if kind == :Wildcard_Pattern
     return [source_reg, state]
   end
@@ -1093,41 +1106,57 @@ verb emit_assignment(rows, node, input_state)
     return [value, emit_append(emitted, [:ReplaceFunctional, relation, [[:Register, key], [:Register, value]]])]
   end
   let root = target
-  if target_kind == :Index
-    let [_, collection_node] = ast_attr(rows, target, :collection)
-    root = collection_node
+  let keys: list = []
+  while ast_kind(rows, root) == :Index
+    let [_, key] = ast_attr(rows, root, :key)
+    keys = [key, @keys]
+    let [_, collection] = ast_attr(rows, root, :collection)
+    root = collection
   end
   if ast_kind(rows, root) != :Name
-    return emit_error(input_state, "assignment requires a local name or one indexed local")
+    return emit_error(input_state, "indexed assignment requires a local collection target")
   end
   let name_text = string_join(ast_children(rows, root, :part), "/")
   let [found, dst, immutable] = emit_local(input_state, name_text)
   if !found || immutable
     return emit_error(input_state, string_concat("assignment requires a mutable local: ", name_text))
   end
-  let [value_reg, after_value] = emit_expr(rows, rhs, input_state)
-  let state = after_value
-  let collection_reg = dst
-  let key_reg = 0
-  if target_kind == :Index
-    let [copy, allocated] = emit_register(state)
-    state = emit_append(allocated, [:Move, copy, dst])
-    collection_reg = copy
-    let [_, key_node] = ast_attr(rows, target, :key)
-    let [key, after_key] = emit_expr(rows, key_node, state)
-    state = after_key
-    key_reg = key
-  end
-  if target_kind == :Index
-    state = emit_append(state, [:SetIndex, dst, collection_reg, [:Register, key_reg], [:Register, value_reg]])
-    let [result, allocated] = emit_register(state)
-    return [result, emit_append(allocated, [:Move, result, dst])]
-  else
+  if len(keys) == 0
+    let [value, state] = emit_expr(rows, rhs, input_state)
     let annotation = index_or(state[:binding_types], dst, "")
-    state = emit_annotation(state, value_reg, annotation, :Binding, name_text)
-    state = emit_append(state, [:Move, dst, value_reg])
+    state = emit_annotation(state, value, annotation, :Binding, name_text)
+    return [value, emit_append(state, [:Move, dst, value])]
   end
-  return [value_reg, state]
+  let [path, after_path] = emit_assignment_path(rows, keys, dst, input_state)
+  let [value, after_value] = emit_expr(rows, rhs, after_path)
+  let state = after_value
+  let updated = value
+  // Rebuild outward without changing the root until every indexed update succeeds.
+  for [collection, key] in path
+    let [result, allocated] = emit_register(state)
+    state = emit_append(allocated, [:SetIndex, result, collection, [:Register, key], [:Register, updated]])
+    updated = result
+  end
+  return [value, emit_append(state, [:Move, dst, updated])]
+end
+
+// Capture the target path before evaluating the right-hand side. The returned
+// path runs from the innermost collection to the root for writeback.
+verb emit_assignment_path(rows, keys: list, root: int, input_state: map) -> list
+  let [collection, allocated] = emit_register(input_state)
+  let state: map = emit_append(allocated, [:Move, collection, root])
+  let path: list = []
+  for position, key_node in keys
+    let [key, after_key] = emit_expr(rows, key_node, state)
+    path = [[collection, key], @path]
+    state = after_key
+    if position + 1 < len(keys)
+      let [child, after_child] = emit_register(state)
+      state = emit_append(after_child, [:Index, child, collection, [:Register, key]])
+      collection = child
+    end
+  end
+  return [path, state]
 end
 
 verb emit_collection_slot(rows, node, kind, source_reg, position, length, input_state)

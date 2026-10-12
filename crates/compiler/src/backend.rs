@@ -1707,9 +1707,9 @@ impl<'a> ProgramCompiler<'a> {
             }
             HirExpr::Assign { id, target, value } => {
                 let value_expr = value.as_ref();
-                let value = self.compile_expr_for_value(value_expr)?;
                 match target {
                     HirPlace::Local { binding, .. } => {
+                        let value = self.compile_expr_for_value(value_expr)?;
                         let dst = self.locals.get(binding).copied().ok_or_else(|| {
                             CompileError::UnboundLocal {
                                 node: *id,
@@ -1723,8 +1723,9 @@ impl<'a> ProgramCompiler<'a> {
                     }
                     HirPlace::Index {
                         collection, index, ..
-                    } => self.compile_index_assignment(*id, collection, index.as_deref(), value),
+                    } => self.compile_index_assignment(*id, collection, index.as_deref(), value_expr),
                     HirPlace::Dot { base, name, .. } => {
+                        let value = self.compile_expr_for_value(value_expr)?;
                         self.compile_dot_assignment(*id, base, name, value)
                     }
                     _ => Err(self.unsupported(
@@ -2339,26 +2340,23 @@ impl<'a> ProgramCompiler<'a> {
         id: NodeId,
         collection: &HirExpr,
         index: Option<&HirExpr>,
-        value: Register,
+        value: &HirExpr,
     ) -> Result<Register, CompileError> {
-        let Some(index) = index else {
-            return Err(self.unsupported(id, "indexed assignment requires an explicit index"));
+        let mut indexes = vec![index];
+        let mut root = collection;
+        while let HirExpr::Index {
+            collection, index, ..
+        } = root
+        {
+            indexes.push(index.as_deref());
+            root = collection;
+        }
+        let HirExpr::LocalRef { binding, .. } = root else {
+            return Err(
+                self.unsupported(id, "indexed assignment requires a local collection target")
+            );
         };
-        let HirExpr::LocalRef { binding, .. } = collection else {
-            return Err(self.unsupported(
-                id,
-                "indexed assignment currently requires a local collection target",
-            ));
-        };
-        let binding_info = self
-            .semantic
-            .bindings
-            .get(binding.0 as usize)
-            .ok_or_else(|| CompileError::UnboundLocal {
-                node: id,
-                span: self.span(id),
-                binding: *binding,
-            })?;
+        let binding_info = &self.semantic.bindings[binding.0 as usize];
         if !binding_info.mutable {
             return Err(self.unsupported(
                 id,
@@ -2368,7 +2366,7 @@ impl<'a> ProgramCompiler<'a> {
                 ),
             ));
         }
-        let collection =
+        let destination =
             self.locals
                 .get(binding)
                 .copied()
@@ -2377,19 +2375,48 @@ impl<'a> ProgramCompiler<'a> {
                     span: self.span(id),
                     binding: *binding,
                 })?;
-        let index = self.compile_expr_for_operand(index)?;
-        let updated = self.alloc_register();
-        self.emit(Instruction::SetIndex {
-            dst: updated,
-            collection,
-            index,
-            value: Operand::Register(value),
-        });
+
+        // Capture the collection and each key before later keys or the RHS can
+        // change their bindings. Write the root only after every update succeeds.
+        let mut collection = self.alloc_register();
         self.emit(Instruction::Move {
             dst: collection,
+            src: destination,
+        });
+        let mut path = Vec::with_capacity(indexes.len());
+        for (position, index) in indexes.iter().rev().enumerate() {
+            let Some(index) = index else {
+                return Err(self.unsupported(id, "indexed assignment requires an explicit index"));
+            };
+            let index = self.compile_expr_for_operand(index)?;
+            path.push((collection, index.clone()));
+            if position + 1 < indexes.len() {
+                let child = self.alloc_register();
+                self.emit(Instruction::Index {
+                    dst: child,
+                    collection,
+                    index,
+                });
+                collection = child;
+            }
+        }
+        let value = self.compile_expr_for_value(value)?;
+        let mut updated = value;
+        for (collection, index) in path.into_iter().rev() {
+            let dst = self.alloc_register();
+            self.emit(Instruction::SetIndex {
+                dst,
+                collection,
+                index,
+                value: Operand::Register(updated),
+            });
+            updated = dst;
+        }
+        self.emit(Instruction::Move {
+            dst: destination,
             src: updated,
         });
-        Ok(updated)
+        Ok(value)
     }
 
     fn compile_dot_read(
@@ -6861,6 +6888,75 @@ mod tests {
     }
 
     #[test]
+    fn nested_indexed_assignments_preserve_values_order_and_error_boundaries() {
+        for source in [
+            r#"let items = [{:a -> [1, 2]}]
+let alias = items
+let result: int = items[0][:a][1] = 9
+require result == 9
+require items == [{:a -> [1, 9]}]
+require alias == [{:a -> [1, 2]}]
+return true"#,
+            r#"let items = [[0]]
+let order = 0
+let result = items[begin order = order * 10 + 1; 0 end][begin order = order * 10 + 2; 0 end] = begin order = order * 10 + 3; 7 end
+require order == 123
+require result == 7
+require items == [[7]]
+return true"#,
+            r#"let items = [[1]]
+let key = 0
+let result = items[key][begin items = [[2]]; 0 end] = begin key = 9; 8 end
+require items == [[8]]
+require result == 8
+require key == 9
+return true"#,
+            r#"let items = [[1]]
+let seen = 0
+try
+ items[2][0] = (seen = 1)
+catch E_INDEX
+ require seen == 0
+end
+require items == [[1]]
+try
+ items[0][2] = (seen = 2)
+catch E_INDEX
+ require seen == 2
+end
+require items == [[1]]
+return true"#,
+            r#"let a = [[1]]
+let b = {:x -> 2}
+let result = a[0][0] = b[:x] = 9
+require result == 9
+require a == [[9]]
+require b == {:x -> 9}
+return true"#,
+            r#"let items = [[1]]
+let captured = [items, items[0][0] = 2, items]
+require captured == [[[1]], 2, [[2]]]
+return true"#,
+        ] {
+            let mut tasks = TaskManager::new(RelationKernel::new());
+            let submitted = submit_source_task(source, &CompileContext::new(), &mut tasks).unwrap();
+            assert!(
+                matches!(&submitted.outcome, TaskOutcome::Complete { value, .. }
+                if *value == Value::bool(true)),
+                "{source}: {:?}",
+                submitted.outcome
+            );
+        }
+        assert!(
+            compile_source(
+                "const items = [[1]]\nitems[0][0] = 2",
+                &CompileContext::new()
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
     fn compiled_task_assigns_indexed_list_values() {
         let context = CompileContext::new();
         let kernel = RelationKernel::new();
@@ -7263,10 +7359,10 @@ mod tests {
     }
 
     #[test]
-    fn indexed_assignment_expressions_infer_the_updated_collection_kind() {
+    fn indexed_assignment_expressions_infer_the_assigned_value_kind() {
         let compiled = compile_source(
             "let items: list = [1]\n\
-             let updated: list = items[0] = 2\n\
+             let updated: int = items[0] = 2\n\
              return updated",
             &CompileContext::new(),
         )
@@ -7275,14 +7371,14 @@ mod tests {
         assert_eq!(count_kind_checks(&compiled.program), 0);
         assert!(matches!(
             compile_source(
-                "let items: list = [1]\nlet updated: int = items[0] = 2",
+                "let items: list = [1]\nlet updated: list = items[0] = 2",
                 &CompileContext::new()
             ),
             Err(CompileError::ValueKindMismatch {
-                expected: ValueKind::Int,
+                expected: ValueKind::List,
                 inferred,
                 ..
-            }) if inferred == "list"
+            }) if inferred == "int"
         ));
     }
 

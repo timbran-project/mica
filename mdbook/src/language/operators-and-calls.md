@@ -84,16 +84,20 @@ Slice endpoints are bounds, not requests to clamp or wrap. A negative index, a r
 slice, or a slice extending past the list raises `E_INDEX`. The open-ended slice at the list's
 length is valid and returns an empty list. Strings and bytes do not support this index syntax.
 
-An indexed assignment requires a mutable local list or map as its immediate target. For nested data,
-extract the inner collection, construct its replacement, then assign that replacement into the outer
-collection. For example:
+An indexed assignment requires a mutable local list or map at its root. Nested indexes rebuild each
+containing collection and store the result in that local. Other bindings retain their previous values.
+
+The root collection and indexes are evaluated once, from left to right, before the right-hand side.
+The assignment expression returns the assigned value. The root is replaced only after all indexed
+updates succeed. This does not undo side effects from evaluating indexes or the right-hand side.
 
 ```mica,eval
 let settings = {:display -> {:colour -> "amber"}}
-let display = settings[:display]
-display[:colour] = "green"
-settings[:display] = display
+const saved = settings
+let assigned = settings[:display][:colour] = "green"
+require assigned == "green"
 require settings[:display][:colour] == "green"
+require saved[:display][:colour] == "amber"
 return settings
 ```
 
