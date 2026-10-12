@@ -1,0 +1,108 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+// Operators retain the language's error payloads, rather than exposing a failed
+// ValueResult as an allocation failure or silently returning an empty value.
+verb native_source/arithmetic_operations() -> map
+  return {:Add -> ["value_checked_add", "invalid addition"],
+    :Sub -> ["value_checked_sub", "invalid subtraction"],
+    :Mul -> ["value_checked_mul", "invalid multiplication"],
+    :Div -> ["value_checked_div", "invalid division", "division by zero"],
+    :Rem -> ["value_checked_rem", "invalid remainder", "remainder by zero"]}
+end
+verb native_source/arithmetic_error(builder: map, code, message: string, operands: list) -> map
+  let [values: map, ready: map] = native_source/rooted_list(builder, "operands", operands)
+  let encoded: map = native_source/literal(ready, code)
+  let number: map = native_gen/convert(:U32, native_gen/expression(:U64, :Payload, [encoded]))
+  let [error: map, created: map] = native_source/result(ready, "value_error", [native_roots/worker(ready), number,
+    native_gen/ref(ready, "true"), native_source/literal(ready, message), native_gen/ref(ready, "true"), values], "oom")
+  let [retained: map, rooted: map] = native_roots/retain(created, "error", error)
+  let result: map = native_source/return_call(rooted, "task_raise", [native_tasks/attempt(rooted), native_roots/worker(rooted), retained])
+  return result
+end
+
+// Only false, empty lists, and empty relations are false in Mica. In particular,
+// zero, empty strings, and empty maps are true. Emit this test once per module.
+verb native_source/truthy_body(input: map) -> map
+  let name: string = string_concat(input[:source_prefix], "_truthy")
+  let module: map = native/declare_function(input, name, :Bool, [["value", native_value/word(), :Gc]], [], [:ReadMemory], :Value, "")
+  let builder: map = native_gen/context(module, name)
+  let value: map = native_gen/ref(builder, "value")
+  let [kind: map, ready: map] = native_gen/bind(builder, "kind", native_gen/call(builder, "value_kind", [value]))
+  for spec in [["bool", "value_as_bool", "value"], ["list", "value_list_length", "number"], ["relation", "value_relation_length", "number"]]
+    ready = native_gen/when(ready, native_gen/equal(kind, native_gen/ref(ready, string_concat("tag_", spec[0]))), fn(matched)
+      let [decoded: map, found: map] = native_gen/bind(matched, "decoded", native_gen/call(matched, spec[1], [value]))
+      let field: map = native_gen/field(found, decoded, spec[2])
+      if spec[0] != "bool"
+        field = native_gen/negate(native_kernel/absent(field))
+      end
+      return native_gen/return_value(found, field)
+    end)
+  end
+  let result: map = native_gen/finish(module, native_gen/return_value(ready, native_gen/ref(ready, "true")))
+  return result
+end
+verb native_source/truthy(builder: map, value: map) -> map
+  let result: map = native_gen/call(builder, string_concat(builder[:source_prefix], "_truthy"), [value])
+  return result
+end
+verb native_source/unary(builder: map, op: symbol, value: map) -> list
+  if op == :Not
+    return [native_gen/call(builder, "value_bool", [native_gen/negate(native_source/truthy(builder, value))]), builder]
+  end
+  native/ensure(op == :Neg, "unknown source unary operator")
+  let [result: map, ready: map] = native_gen/checked_bind(builder, "negated", native_gen/call(builder, "value_checked_neg", [value]), "ok",
+    fn(failed) => native_source/arithmetic_error(failed, E_ARITH, "invalid unary arithmetic", [value]))
+  return [native_gen/field(ready, result, "value"), ready]
+end
+
+verb native_source/zero_divisor(input: map, right: map, message: string, operands: list) -> map
+  let builder: map = input
+  for spec in [["value_as_int", "int_zero"], ["value_as_float", "float_zero"]]
+    let [decoded: map, ready: map] = native_gen/bind(builder, "divisor", native_gen/call(builder, spec[0], [right]))
+    builder = native_gen/when(ready, native_gen/field(ready, decoded, "ok"), fn(numeric)
+      return native_gen/when(numeric, native_gen/equal(native_gen/field(numeric, decoded, "number"), native_gen/ref(numeric, spec[1])),
+        fn(zero) => native_source/arithmetic_error(zero, E_DIV, message, operands))
+    end)
+  end
+  return builder
+end
+verb native_source/arithmetic_failure(input: map, message: string, left: map, right: map) -> map
+  let [left_kind: map, first: map] = native_gen/bind(input, "left_kind", native_gen/call(input, "value_kind", [left]))
+  let [right_kind: map, builder: map] = native_gen/bind(first, "right_kind", native_gen/call(first, "value_kind", [right]))
+  for kinds in [["tag_int", "tag_float"], ["tag_float", "tag_int"]]
+    builder = native_gen/when(builder, native_gen/equal(left_kind, native_gen/ref(builder, kinds[0])), fn(numeric)
+      return native_gen/when(numeric, native_gen/equal(right_kind, native_gen/ref(numeric, kinds[1])),
+        fn(mixed) => native_source/arithmetic_error(mixed, E_TYPE, message, [left, right]))
+    end)
+  end
+  let result: map = native_source/arithmetic_error(builder, E_ARITH, message, [left, right])
+  return result
+end
+verb native_source/binary(builder: map, op: symbol, left: map, right: map) -> list
+  let comparisons: map = {:Eq -> :Equal, :Ne -> :Equal, :Lt -> :Less, :Le -> :Less, :Gt -> :Less, :Ge -> :Less}
+  if map_contains_key(comparisons, op)
+    let [compared: map, ready: map] = native_gen/checked_bind(builder, "comparison", native_gen/call(builder, "value_language_compare", [left, right]), "ok",
+      fn(failed) => native_tasks/attempt_status(failed, "schema"))
+    let order: map = native_gen/field(ready, compared, "number")
+    let zero: map = native_gen/ref(ready, "int_zero")
+    let test: map = native_gen/binary(comparisons[op], order, zero)
+    if op == :Gt || op == :Le
+      test = native_gen/binary(comparisons[op], zero, order)
+    end
+    if op == :Ne || op == :Le || op == :Ge
+      test = native_gen/negate(test)
+    end
+    return [native_gen/call(ready, "value_bool", [test]), ready]
+  end
+  let operations: map = native_source/arithmetic_operations()
+  native/ensure(map_contains_key(operations, op), "unknown source binary operator")
+  let spec: list = operations[op]
+  let checked: map = builder
+  if op == :Div || op == :Rem
+    checked = native_source/zero_divisor(checked, right, spec[2], [left, right])
+  end
+  let [result: map, ready: map] = native_gen/checked_bind(checked, "arithmetic", native_gen/call(checked, spec[0], [left, right]), "ok",
+    fn(failed) => native_source/arithmetic_failure(failed, spec[1], left, right))
+  return [native_gen/field(ready, result, "value"), ready]
+end

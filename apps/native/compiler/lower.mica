@@ -11,6 +11,14 @@ verb native_source/value_instruction(builder: map, instruction: list) -> list
   if op == :Move
     return [native_source/register(builder, instruction[2]), builder]
   end
+  if op == :Unary
+    let result: list = native_source/unary(builder, instruction[2], native_source/register(builder, instruction[3]))
+    return result
+  end
+  if op == :Binary
+    let result: list = native_source/binary(builder, instruction[2], native_source/register(builder, instruction[3]), native_source/register(builder, instruction[4]))
+    return result
+  end
   if op == :BuildList
     let result: list = native_source/list(builder, native_source/operands(builder, instruction[2]))
     return result

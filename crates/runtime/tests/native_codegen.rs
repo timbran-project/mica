@@ -9,7 +9,7 @@ use std::process::Command;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use mica_runtime::{SourceRunner, TaskLimits, TaskOutcome};
-use mica_var::Value;
+use mica_var::{Value, ValueKind};
 
 const SOURCES: &[&str] = &[
     include_str!("../../../apps/native/ir.mica"),
@@ -2122,6 +2122,7 @@ fn native_source_analysis_tracks_continuations_and_definite_assignment() {
             include_str!("../../../apps/native/compiler/analysis.mica"),
             include_str!("../../../apps/native/compiler/builders.mica"),
             include_str!("../../../apps/native/compiler/operations.mica"),
+            include_str!("../../../apps/native/compiler/expressions.mica"),
             include_str!("../../../apps/native/compiler/prepare.mica"),
             include_str!("../../../apps/native/compiler/continuations.mica"),
             include_str!("../../../apps/native/compiler/install.mica"),
@@ -2211,10 +2212,265 @@ return true
     }
 }
 
+// Generate all cases into one module: runtime generation dominates this test's
+// cost, while adding another source expression is cheap. Expected results come
+// from Rust execution, including error code, message, and operand payload.
+fn source_expression_cases() -> (String, String, String) {
+    let operations = [
+        "-value",
+        "!value",
+        "left + right",
+        "left - right",
+        "left * right",
+        "left / right",
+        "left % right",
+        "left == right",
+        "left != right",
+        "left < right",
+        "left <= right",
+        "left > right",
+        "left >= right",
+    ];
+    let mut cases: Vec<(usize, Vec<&str>)> = Vec::new();
+    for value in ["7", "2.5", "-36028797018963968", "true"] {
+        cases.push((0, vec![value]));
+    }
+    for value in [
+        "true",
+        "false",
+        "0",
+        "0.0",
+        "\"\"",
+        "\"text\"",
+        "[]",
+        "[0]",
+        "none",
+        "{}",
+        "{:key -> 0}",
+        ":name",
+        "E_TYPE",
+    ] {
+        cases.push((1, vec![value]));
+    }
+    for operation in 2..7 {
+        for (left, right) in [
+            ("12", "3"),
+            ("-12", "5"),
+            ("2.5", "0.5"),
+            ("1", "1.0"),
+            ("1.0", "1"),
+            ("\"x\"", "true"),
+        ] {
+            cases.push((operation, vec![left, right]));
+        }
+    }
+    cases.extend([
+        (2, vec!["36028797018963967", "1"]),
+        (3, vec!["-36028797018963968", "1"]),
+        (4, vec!["36028797018963967", "2"]),
+        (4, vec!["3.4e38", "2.0"]),
+        (5, vec!["1", "0"]),
+        (5, vec!["1.0", "0.0"]),
+        (5, vec!["true", "0"]),
+        (5, vec!["1", "0.0"]),
+        (6, vec!["1", "0"]),
+        (6, vec!["1.0", "0.0"]),
+        (6, vec!["true", "0"]),
+        (6, vec!["1.0", "0"]),
+        (5, vec!["7", "2"]),
+        (5, vec!["-36028797018963968", "-1"]),
+        (6, vec!["-36028797018963968", "-1"]),
+    ]);
+    for operation in 7..13 {
+        for (left, right) in [
+            ("3", "3.0"),
+            ("16777217", "16777216.0"),
+            ("16777216.0", "16777217"),
+            ("-36028797018963968", "-36028797018963968.0"),
+            ("[1]", "[1.0]"),
+            ("\"a\"", "\"b\""),
+        ] {
+            cases.push((operation, vec![left, right]));
+        }
+    }
+    let mut source = String::new();
+    let mut ids = vec!["[602, 8003]".to_owned()];
+    for (index, operation) in operations.iter().enumerate() {
+        let parameters = if index < 2 { "value" } else { "left, right" };
+        source.push_str(&format!(
+            "\nverb native_expression_{index}({parameters})\n return {operation}\nend\n"
+        ));
+        ids.push(format!("[{}, {}]", 1000 + index, 10000 + index));
+    }
+    let mut oracle = SourceRunner::new_empty().with_interpreter_only(true);
+    let mut checks = String::new();
+    let mut entries = Vec::new();
+    for (index, (operation, operands)) in cases.iter().enumerate() {
+        let expression = operations[*operation];
+        let bindings = if operands.len() == 1 {
+            format!("let value = {}", operands[0])
+        } else {
+            format!("let left = {}\nlet right = {}", operands[0], operands[1])
+        };
+        let report = oracle
+            .run_source(&format!("{bindings}\nreturn {expression}"))
+            .unwrap_or_else(|error| {
+                panic!(
+                    "{expression}, {operands:?}: {}",
+                    oracle.render_source_task_error(&error)
+                );
+            });
+        let (status, value) = match report.outcome {
+            TaskOutcome::Complete { value, .. } => (0, value),
+            TaskOutcome::Aborted { error, .. } => (14, error),
+            _ => panic!("expression suspended: {expression}"),
+        };
+        let operands_value = eval(&mut oracle, &format!("return [{}]", operands.join(",")));
+        let mut serial = 0;
+        let (literal, construction) = source_value_literal(&operands_value, &mut serial);
+        checks.push_str(&format!("static mica_type_Value source_arguments_{index}(struct mica_MemoryWorker *worker, struct mica_SymbolTable *symbols) {{\n (void)symbols; // Most inputs contain no symbols.\n{construction}\n return {literal};\n}}\n"));
+        checks.push_str(&format!("static void source_check_{index}(mica_type_Value actual, struct mica_SymbolTable *symbols) {{\n    (void)symbols; // Some expected values contain no interned names.\n{}\n}}\n", source_value_check(&value, "actual")));
+        entries.push(format!("{{mica_source_roundtrip_method_{}_0, {status}, source_arguments_{index}, source_check_{index}}}", operation + 1));
+    }
+    checks.push_str(&format!("static const struct {{\n    uint64_t (*entry)(struct mica_TaskAttempt *);\n    uint64_t status;\n    mica_type_Value (*arguments)(struct mica_MemoryWorker *, struct mica_SymbolTable *);\n    void (*check)(mica_type_Value, struct mica_SymbolTable *);\n}} source_cases[] = {{\n{}\n}};\n", entries.join(",\n")));
+    (source, format!("[{}]", ids.join(",")), checks)
+}
+
+// Fixture data uses generated value constructors, with no collection boundary
+// until the complete argument list has entered the task's rooted image.
+fn source_value_literal(value: &Value, serial: &mut usize) -> (String, String) {
+    let name = format!("literal_{}", *serial);
+    *serial += 1;
+    let mut setup = String::new();
+    let expression = match value.kind() {
+        ValueKind::Bool => {
+            return (
+                format!("mica_value_bool({})", value.as_bool().unwrap()),
+                setup,
+            );
+        }
+        ValueKind::Int => format!("mica_value_int(INT64_C({}))", value.as_int().unwrap()),
+        ValueKind::Float => format!(
+            "mica_value_float_from_bits(UINT32_C({}))",
+            value.as_float().unwrap().to_bits()
+        ),
+        ValueKind::String => value
+            .with_str(|text| {
+                let bytes = text
+                    .bytes()
+                    .map(|byte| byte.to_string())
+                    .collect::<Vec<_>>();
+                setup.push_str(&format!(
+                    "const uint8_t {name}_bytes[] = {{{}}};\n",
+                    if bytes.is_empty() {
+                        "0".to_owned()
+                    } else {
+                        bytes.join(",")
+                    }
+                ));
+                format!("mica_value_string(worker, {name}_bytes, {})", text.len())
+            })
+            .unwrap(),
+        ValueKind::List => value
+            .with_list(|values| {
+                let mut cells = Vec::new();
+                for value in values.iter() {
+                    let (cell, construction) = source_value_literal(value, serial);
+                    setup.push_str(&construction);
+                    cells.push(cell);
+                }
+                setup.push_str(&format!(
+                    "const mica_type_Value {name}_cells[] = {{{}}};\n",
+                    if cells.is_empty() {
+                        "0".to_owned()
+                    } else {
+                        cells.join(",")
+                    }
+                ));
+                format!("mica_value_list(worker, {name}_cells, {})", values.len())
+            })
+            .unwrap(),
+        ValueKind::Map => value
+            .with_map(|values| {
+                let mut entries = Vec::new();
+                for (key, value) in values.iter() {
+                    let (key, construction) = source_value_literal(key, serial);
+                    setup.push_str(&construction);
+                    let (value, construction) = source_value_literal(value, serial);
+                    setup.push_str(&construction);
+                    entries.push(format!("{{{key}, {value}}}"));
+                }
+                setup.push_str(&format!(
+                    "const struct mica_ValueMapEntry {name}_entries[] = {{{}}};\n",
+                    if entries.is_empty() {
+                        "{0, 0}".to_owned()
+                    } else {
+                        entries.join(",")
+                    }
+                ));
+                format!("mica_value_map(worker, {name}_entries, {})", values.len())
+            })
+            .unwrap(),
+        ValueKind::Symbol | ValueKind::ErrorCode => {
+            let symbol = value
+                .as_symbol()
+                .or_else(|| value.as_error_code())
+                .unwrap()
+                .name()
+                .unwrap();
+            setup.push_str(&format!("struct mica_IdResult {name}_symbol = mica_value_symbol_intern(symbols, (const uint8_t *){symbol:?}, {});\nassert({name}_symbol.f_ok);\n", symbol.len()));
+            let constructor = if value.kind() == ValueKind::Symbol {
+                "symbol"
+            } else {
+                "error_code"
+            };
+            format!("mica_value_{constructor}((uint32_t){name}_symbol.f_number)")
+        }
+        ValueKind::Relation if value.with_relation(|relation| relation.is_empty()).unwrap() => {
+            return ("0".to_owned(), setup);
+        }
+        kind => panic!("unhandled conformance input kind: {kind:?}"),
+    };
+    setup.push_str(&format!(
+        "struct mica_ValueResult {name} = {expression};\nassert({name}.f_ok);\n"
+    ));
+    (format!("{name}.f_value"), setup)
+}
+
+fn source_value_check(expected: &Value, actual: &str) -> String {
+    match expected.kind() {
+        ValueKind::Bool => format!("assert({actual} == mica_value_bool({}));", expected.as_bool().unwrap()),
+        ValueKind::Int => format!("assert({actual} == mica_value_int(INT64_C({})).f_value);", expected.as_int().unwrap()),
+        ValueKind::Float => format!("assert({actual} == mica_value_float_from_bits(UINT32_C({})).f_value);", expected.as_float().unwrap().to_bits()),
+        ValueKind::String => expected.with_str(|text| {
+            // Numeric byte arrays avoid C escaping and source-encoding ambiguity.
+            let bytes = text.bytes().map(|byte| byte.to_string()).collect::<Vec<_>>();
+            format!("{{ struct mica_HeapStringResult text = mica_value_as_string({actual}); assert(text.f_ok && text.f_header->f_length == {}); const unsigned char bytes[] = {{{}}}; assert(!memcmp(text.f_header->f_data, bytes, {})); }}", text.len(), if bytes.is_empty() { "0".to_owned() } else { bytes.join(",") }, text.len())
+        }).unwrap(),
+        ValueKind::List => expected.with_list(|values| {
+            let mut checks = format!("assert(mica_value_list_length({actual}).f_ok && mica_value_list_length({actual}).f_number == {});\n", values.len());
+            for (index, value) in values.iter().enumerate() {
+                checks.push_str(&source_value_check(value, &format!("mica_value_list_get({actual}, {index}).f_value")));
+                checks.push('\n');
+            }
+            checks
+        }).unwrap(),
+        ValueKind::Error => expected.with_error(|error| {
+            let name = error.code().name().unwrap();
+            let message = source_value_check(&Value::string(error.message().unwrap()), "error.f_header->f_message");
+            let value = source_value_check(error.value().unwrap(), "error.f_header->f_value");
+            format!("{{ struct mica_HeapErrorResult error = mica_value_as_error({actual}); assert(error.f_ok); struct mica_IdResult code = mica_value_symbol_intern(symbols, (const uint8_t *){name:?}, {}); assert(code.f_ok && error.f_header->f_code == code.f_number); assert(error.f_header->f_has_message && error.f_header->f_has_value); {message}\n{value}\n}}", name.len())
+        }).unwrap(),
+        kind => panic!("unhandled conformance result kind: {kind:?}"),
+    }
+}
+
 #[test]
 fn native_source_program_executes_on_generated_runtime() {
+    let (conformance_source, method_ids, checks) = source_expression_cases();
     let mut previous = None;
     for interpreter_only in [true, false] {
+        let generation_started = Instant::now();
         let mut runner = runner(interpreter_only).with_task_limits(TaskLimits {
             instruction_budget: 12_000_000_000,
             max_call_depth: 256,
@@ -2226,6 +2482,7 @@ fn native_source_program_executes_on_generated_runtime() {
             include_str!("../../../apps/native/compiler/analysis.mica"),
             include_str!("../../../apps/native/compiler/builders.mica"),
             include_str!("../../../apps/native/compiler/operations.mica"),
+            include_str!("../../../apps/native/compiler/expressions.mica"),
             include_str!("../../../apps/native/compiler/prepare.mica"),
             include_str!("../../../apps/native/compiler/continuations.mica"),
             include_str!("../../../apps/native/compiler/install.mica"),
@@ -2239,14 +2496,22 @@ fn native_source_program_executes_on_generated_runtime() {
         // Bootstrap catalogue lookup uses a committed setup transaction. Native
         // catalogue installation and rollback are exercised by the C fixture.
         eval(&mut runner, "return make_relation(:NativeResult, 2)");
-        let example = include_str!("../../../apps/native/compiler/examples/roundtrip.mica");
+        let example = format!(
+            "{}\n{conformance_source}",
+            include_str!("../../../apps/native/compiler/examples/roundtrip.mica")
+        );
         let generated = eval(&mut runner, &format!(
-            "let module = native_source/compile(native_tasks/definitions(), \"source_roundtrip\", {example:?}, {{:NativeResult -> 705}}, [[602, 8003]])\nreturn native/emit_c(module[:state])"
+            "let module = native_source/compile(native_tasks/definitions(), \"source_roundtrip\", {example:?}, {{:NativeResult -> 705}}, {method_ids})\nreturn native/emit_c(module[:state])"
         )).with_str(str::to_owned).unwrap();
         if let Some(previous) = &previous {
             assert_eq!(&generated, previous);
         }
         previous = Some(generated.clone());
+        eprintln!(
+            "native source: interpreter_only={interpreter_only}, generation={:?}, C bytes={}",
+            generation_started.elapsed(),
+            generated.len()
+        );
         let memory = eval(&mut runner, "return native_memory/platform()")
             .with_str(str::to_owned)
             .unwrap();
@@ -2259,9 +2524,10 @@ fn native_source_program_executes_on_generated_runtime() {
         fs::write(
             &source,
             format!(
-                "{generated}\n{memory}\n{tasks}\n{}\n{}\n{}",
+                "{generated}\n{memory}\n{tasks}\n{}\n{}\n#include <assert.h>\n{checks}\n{}\n#define MICA_SOURCE_CONFORMANCE\n{}",
                 include_str!("../../../native/platform/allocation.c"),
                 include_str!("../../../native/platform/mutex.c"),
+                include_str!("../../../apps/native/compiler/conformance.c"),
                 include_str!("../../../apps/native/compiler/tests.c")
             ),
         )

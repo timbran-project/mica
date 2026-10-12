@@ -239,6 +239,9 @@ static void source_roundtrip(bool force_conflict) {
 }
 int main(void) {
     assert(mica_task_resources_start());
+#ifdef MICA_SOURCE_CONFORMANCE
+    source_conformance();
+#endif
     source_roundtrip(false);
     source_roundtrip(true);
     assert(mica_task_resources_stop());

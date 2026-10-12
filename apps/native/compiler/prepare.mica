@@ -80,6 +80,17 @@ verb native_source/program_literals(analysis: map, initial: list) -> list
     let op: symbol = instruction[0]
     if op == :Load
       pool = native_source/pool(pool, instruction[2])
+    elseif op == :Unary && instruction[2] == :Neg
+      pool = native_source/pool(pool, E_ARITH)
+      pool = native_source/pool(pool, "invalid unary arithmetic")
+    elseif op == :Binary && map_contains_key(native_source/arithmetic_operations(), instruction[2])
+      let spec: list = native_source/arithmetic_operations()[instruction[2]]
+      pool = native_source/pool(pool, E_ARITH)
+      pool = native_source/pool(pool, spec[1])
+      if instruction[2] == :Div || instruction[2] == :Rem
+        pool = native_source/pool(pool, E_DIV)
+        pool = native_source/pool(pool, spec[2])
+      end
     elseif op == :BuildList || op == :AssertDynamic || op == :RetractDynamic
       pool = native_source/pool_operands(pool, instruction[2])
     elseif op == :BuiltinCall
