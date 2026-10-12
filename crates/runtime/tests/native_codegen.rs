@@ -791,6 +791,40 @@ return native/emit_c(first) == native/emit_c(second)
 }
 
 #[test]
+fn function_validation_rebuilds_parameter_groups_after_edits() {
+    let source = r#"
+let state = native/program()
+state[:functions] = [[0, "caller", :U64], [1, "callee", :U64], [2, "empty", :Void]]
+state[:parameters] = [[3, 1, 1, "b", :U64], [4, 1, 0, "a", :U64]]
+state[:locals] = [[5, 0, "result", :U64]]
+state[:constants] = [[6, :U64, "0000000000000001"]]
+state[:blocks] = [[7, 0, "entry", true], [8, 1, "entry", true], [9, 2, "entry", true]]
+state[:instructions] = [[10, 7, 0, :Call, 5, [1, 6, 6]]]
+state[:terminators] = [[7, :Return, [5]], [8, :Return, [4]], [9, :Return, []]]
+let original = native/emit_c(state)
+"#;
+    for interpreter_only in [true, false] {
+        let mut runner = runner(interpreter_only);
+        let emitted = eval(&mut runner, &format!("{source}\nreturn original"));
+        emitted
+            .with_str(|c| {
+                assert!(c.contains("mica_callee(uint64_t v_a, uint64_t v_b)"));
+                assert!(c.contains("mica_empty(void)"));
+            })
+            .unwrap();
+        let report = runner.run_source(&format!(
+            "{source}\nstate[:parameters] = [@state[:parameters], [11, 1, 2, \"c\", :U64]]\nreturn native/emit_c(state)"
+        )).unwrap();
+        assert!(matches!(report.outcome, TaskOutcome::Aborted { .. }));
+        assert!(
+            report.render().contains("call arity mismatch"),
+            "{}",
+            report.render()
+        );
+    }
+}
+
+#[test]
 fn definite_assignment_intersects_all_incoming_paths() {
     let diamond = r#"
 let state = native/program()

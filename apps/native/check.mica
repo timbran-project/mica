@@ -71,6 +71,22 @@ verb native/check(state)
   let index = {:records -> records, :functions -> functions, :variables -> variables, :constants -> constants,
                :blocks -> blocks, :terms -> terms}
   index[:function_blocks] = native/group_rows(state[:blocks], 1)
+  // Group parameters and locals once for function and call validation.
+  let parameters: map = native/group_rows(state[:parameters], 1)
+  let locals: map = native/group_rows(state[:locals], 1)
+  for function in state[:functions]
+    let id: int = function[0]
+    let rows: list = []
+    if map_contains_key(parameters, id)
+      rows = parameters[id]
+    end
+    parameters[id] = native/ordered(rows, 2)
+    if !map_contains_key(locals, id)
+      locals[id] = []
+    end
+  end
+  index[:function_parameters] = parameters
+  index[:function_locals] = locals
   let instructions: map = native/group_rows(state[:instructions], 1)
   for row in state[:blocks]
     let rows: list = []
@@ -89,7 +105,7 @@ verb native/check(state)
   index = native/check_execution_declarations(state, index)
   let signatures: map = {}
   for row in state[:functions]
-    signatures[row[0]] = native/function_signature(state, index, row[0])
+    signatures[row[0]] = native/function_signature(index, row[0])
   end
   index[:function_signatures] = signatures
   let graphs: map = {}
@@ -201,7 +217,7 @@ end
 
 verb native/check_function(state, index, fn_row)
   let fn_id = fn_row[0]
-  let parameters = native/ordered(native/owned(state[:parameters], 1, fn_id), 2)
+  let parameters = index[:function_parameters][fn_id]
   let position = 0
   for row in parameters
     native/ensure(row[2] == position, "parameter positions must be contiguous from zero")
@@ -259,7 +275,7 @@ verb native/check_function(state, index, fn_row)
       end
       if row[3] == :Call
         let args = row[5]
-        let callee_params = native/ordered(native/owned(state[:parameters], 1, args[0]), 2)
+        let callee_params = index[:function_parameters][args[0]]
         native/ensure(len(args) == len(callee_params) + 1, "call arity mismatch")
         let i = 1
         for parameter in callee_params
@@ -291,7 +307,7 @@ verb native/check_function(state, index, fn_row)
     initial[row[0]] = true
     universe[row[0]] = true
   end
-  for row in native/owned(state[:locals], 1, fn_id)
+  for row in index[:function_locals][fn_id]
     universe[row[0]] = true
   end
   let incoming = {}

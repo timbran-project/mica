@@ -63,9 +63,9 @@ verb native/check_function_type_contracts(index: map)
   end
 end
 
-verb native/function_signature(state: map, index: map, fn_id: int) -> list
+verb native/function_signature(index: map, fn_id: int) -> list
   let parameters: list = []
-  for row in native/ordered(native/owned(state[:parameters], 1, fn_id), 2)
+  for row in index[:function_parameters][fn_id]
     let mode = :Value
     if map_contains_key(index[:parameter_modes], row[0])
       mode = index[:parameter_modes][row[0]]
@@ -218,7 +218,7 @@ verb native/check_contracts(state, input_index)
       native/ensure(!native/has_address(index, fn_row[2]), "Immediate result cannot contain pointer fields")
     end
     let owners = []
-    for parameter in native/owned(state[:parameters], 1, fn_id)
+    for parameter in index[:function_parameters][fn_id]
       if native/has_pointer(index, parameter[4])
         native/ensure(map_contains_key(modes, parameter[0]), "missing pointer parameter contract")
         if modes[parameter[0]] == :Borrow

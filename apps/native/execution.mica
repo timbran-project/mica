@@ -100,7 +100,7 @@ verb native/check_transfer(state: map, index: map, function: int, term: list)
     position = position + 1
   end
   native/ensure(signature[0] == index[:functions][function][2] && signature[0] != :Void, "execution transfer requires matching non-void results")
-  native/ensure(native/signature_shape(native/function_signature(state, index, function)) == native/signature_shape(signature), "required tail call requires identical ABI and ownership")
+  native/ensure(native/signature_shape(native/function_signature(index, function)) == native/signature_shape(signature), "required tail call requires identical ABI and ownership")
 end
 verb native/check_execution_instruction(index: map, function: int, row: list, result_type) -> bool
   if !native/contains([:Manage, :RootLoad, :RootStore], row[3])

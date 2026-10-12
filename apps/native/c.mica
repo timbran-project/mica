@@ -23,14 +23,14 @@ verb native/c_notes(index, id, indent)
   return [string_concat(indent, native/c_comment(string_concat(note[0], ": ", note[1]))) for note in sort([[to_literal(row[0]), row[1]] for row in index[:annotations][id]])]
 end
 
-verb native/c_contract_notes(state, index, fn_id)
+verb native/c_contract_notes(index, fn_id)
   let contract = index[:contracts][fn_id]
   let result = to_literal(contract[2])
   if contract[2] == :Borrow
     result = string_concat(result, " from ", contract[3])
   end
   let lines = [native/c_comment(string_concat("Allowed effects: ", string_join(sort([to_literal(effect) for effect in contract[1]]), ", "), "; result: ", result))]
-  for parameter in native/ordered(native/owned(state[:parameters], 1, fn_id), 2)
+  for parameter in index[:function_parameters][fn_id]
     lines = [@lines, @native/c_notes(index, parameter[0], "")]
     if map_contains_key(index[:parameter_modes], parameter[0])
       let mode = to_literal(index[:parameter_modes][parameter[0]])
@@ -63,8 +63,8 @@ verb native/c_value(index, id)
   return string_concat("v_", index[:variables][id][1])
 end
 
-verb native/c_signature(state, index, fn_row)
-  let parameters = native/ordered(native/owned(state[:parameters], 1, fn_row[0]), 2)
+verb native/c_signature(index, fn_row)
+  let parameters = index[:function_parameters][fn_row[0]]
   let parts = [string_concat(native/c_type(row[4]), " v_", row[3]) for row in parameters]
   let arguments = "void"
   if len(parts) > 0
@@ -204,7 +204,7 @@ verb native/c_declarations(state, index, order: map, public: bool)
     if !public && !map_contains_key(index[:foreign], fn_row[0]) && !map_contains_key(order[:declare], fn_row[0])
       continue
     end
-    lines = [@lines, @native/c_notes(index, fn_row[0], ""), @native/c_contract_notes(state, index, fn_row[0]), string_concat(native/c_signature(state, index, fn_row), ";")]
+    lines = [@lines, @native/c_notes(index, fn_row[0], ""), @native/c_contract_notes(index, fn_row[0]), string_concat(native/c_signature(index, fn_row), ";")]
   end
   lines = [@lines, @native/c_globals(state, index, true)]
   return lines
@@ -268,7 +268,7 @@ verb native/c_definitions(state, index, order: map)
     if map_contains_key(index[:foreign], fn_id)
       continue
     end
-    lines = [@lines, "", @native/c_notes(index, fn_id, ""), @native/c_contract_notes(state, index, fn_id), string_concat(native/c_signature(state, index, fn_row), " {")]
+    lines = [@lines, "", @native/c_notes(index, fn_id, ""), @native/c_contract_notes(index, fn_id), string_concat(native/c_signature(index, fn_row), " {")]
     lines = [@lines, @native/c_function_body(state, index, fn_id)]
     lines = [@lines, "}"]
   end
