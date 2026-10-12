@@ -180,6 +180,38 @@ verb native/c_region(index: map, flow: map, input: map, start, stop, enter_loop:
       references = [term[2][0]]
     end
     let selection: map = native/flow_switch(index, flow, block)
+    // Emit a terminal guard now and walk its continuing arm in this loop.
+    // Recursing through that arm makes a flat sequence of checks consume one
+    // bootstrap call frame per check, before syntax normalization can flatten it.
+    if len(selection) == 0
+      let yes: int = term[2][1]
+      let no: int = term[2][2]
+      let yes_returns: bool = index[:terms][yes][1] == :Return || native/is_transfer(index[:terms][yes])
+      let no_returns: bool = index[:terms][no][1] == :Return || native/is_transfer(index[:terms][no])
+      if yes_returns != no_returns
+        let guard: int = yes
+        let following: int = no
+        let test: string = condition
+        if no_returns
+          guard = no
+          following = yes
+          test = string_concat("!(", condition, ")")
+        end
+        let local_guard: bool = guard != stop
+        if len(context[:loops]) > 0
+          // A target outside this loop is rendered as break, not return.
+          let loop: map = context[:loops][len(context[:loops]) - 1]
+          local_guard = local_guard && native/contains(loop[:members], guard)
+        end
+        if local_guard
+          let [body: list, after_guard: map] = native/c_region(index, flow, context, guard, stop, false)
+          context = after_guard
+          nodes = [@nodes, native/c_references(native/c_if(test, body, []), references)]
+          block = following
+          continue
+        end
+      end
+    end
     let join = flow[:joins][block]
     if join == :Exit && len(selection) == 0
       join = native/flow_shared_tail(index, flow, block)

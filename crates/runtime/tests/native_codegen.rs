@@ -1664,6 +1664,24 @@ return native/emit_c(state)
 }
 
 #[test]
+fn native_early_return_chains_do_not_consume_bootstrap_call_depth() {
+    for interpreter_only in [true, false] {
+        let mut runner = runner(interpreter_only);
+        let generated = eval(&mut runner, r#"
+let [constants, state] = native/constants(native/program(), [["zero", :U64, "0000000000000000"], ["one", :U64, "0000000000000001"]])
+let module = native/module_context(state, constants)
+module = native/declare_function(module, "guard_chain", :U64, [["stop", :Bool, :Value]], [], [], :Value, "")
+let statements = [native/when_statement("stop", [native/return_value("zero")]) for position in 1..300]
+module = native/define_function(module, "guard_chain", [@statements, native/return_value("one")])
+return native/emit_c(module[:state])
+"#).with_str(str::to_owned).unwrap();
+        assert_eq!(generated.matches("if (").count(), 300);
+        assert!(!generated.contains("\n    if ("));
+        assert!(!generated.contains("goto "));
+    }
+}
+
+#[test]
 fn structured_builders_preserve_control_flow_and_notes() {
     let mut previous = None;
     for interpreter_only in [true, false] {
