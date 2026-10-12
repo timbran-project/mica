@@ -186,6 +186,12 @@ static void source_conformance(void) {
         uint64_t status = mica_task_execute(&task, &worker);
         if (status != source_cases[i].status) fprintf(stderr, "source case %zu: status %llu, expected %llu\n", i, (unsigned long long)status, (unsigned long long)source_cases[i].status);
         assert(status == source_cases[i].status);
+        // Invalid builtin arguments are fatal runtime errors, not language
+        // exceptions. They carry no catchable error value in the task image.
+        if (status == 7) {
+            assert(mica_task_release(&task, &worker));
+            continue;
+        }
         struct mica_MemoryRoot acquired = {0};
         if (status) {
             assert(mica_memory_acquire(&worker, &task.f_error, &acquired));

@@ -1,0 +1,152 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+// Fixed signatures share argument expansion; ordinary calls retain direct
+// operands rather than constructing an argument list at runtime.
+verb native_builtins/arities() -> map
+  return {:mailbox -> 0, :mailbox_send -> 2, :mailbox_close -> 1,
+    :len -> 1, :string_len -> 1, :string_append -> 2,
+    :map_contains_key -> 2, :map_pairs -> 1, :index_or -> 3, :is_kind -> 2}
+end
+verb native_builtins/kind_check(builder: map, value: map, kind: string) -> map
+  let result: map = native_tasks/check(builder, native_access/kind(builder, value, kind), "schema")
+  return result
+end
+verb native_builtins/has_kind(builder: map, value: map, kinds: list) -> list
+  let [found: map, ready: map] = native_gen/bind(builder, "supported", native_gen/ref(builder, "false"))
+  for kind in kinds
+    ready = native_gen/when(ready, native_access/kind(ready, value, kind),
+      fn(matched) => native_gen/assign(matched, found, native_gen/ref(matched, "true")))
+  end
+  return [found, ready]
+end
+verb native_builtins/error(builder: map, message: string) -> map
+  let code: map = native_source/literal(builder, E_INVARG)
+  let [error: map, ready: map] = native_source/result(builder, "value_error", [native_roots/worker(builder),
+    native_gen/convert(:U32, native_gen/expression(:U64, :Payload, [code])),
+    native_gen/ref(builder, "true"), native_source/literal(builder, message),
+    native_gen/ref(builder, "false"), native_gen/zero(native_value/word())], "oom")
+  let result: map = native_source/throw(ready, error)
+  return result
+end
+verb native_builtins/arity_failure(builder: map, name: symbol) -> map
+  if name == :is_kind
+    let result: map = native_builtins/error(builder, "is_kind expects a value and kind symbol")
+    return result
+  end
+  let result: map = native_tasks/attempt_status(builder, "schema")
+  return result
+end
+verb native_builtins/length(builder: map, value: map, only_string: bool) -> list
+  let kinds: list = ["string", "bytes", "list", "map", "relation"]
+  if only_string
+    kinds = ["string"]
+  end
+  let [length: map, ready: map] = native_gen/bind(builder, "length", native_gen/ref(builder, "zero"))
+  let [accepted: map, checked_kinds: map] = native_builtins/has_kind(ready, value, kinds)
+  ready = checked_kinds
+  for kind in kinds
+    let matches: map = native_access/kind(ready, value, kind)
+    ready = native_gen/when(ready, matches, fn(collection)
+      let count: map = native_gen/zero(:U64)
+      if kind == "bytes"
+        let header: map = native_gen/expression(native_memory/record_pointer("HeapBytes"), :UnpackPointer, [value])
+        count = native_kernel/load_field(collection, header, "length")
+      else
+        count = native_access/length(collection, value, kind)
+      end
+      return native_gen/assign(collection, length, count)
+    end)
+  end
+  ready = native_tasks/check(ready, accepted, "schema")
+  ready = native_tasks/check(ready, native_gen/negate(native_gen/less(native_gen/bitcast(:U64, native_gen/ref(ready, "int_max")), length)), "schema")
+  let [encoded: map, checked: map] = native_gen/checked_bind(ready, "length", native_gen/call(ready, "value_int", [native_gen/bitcast(:I64, length)]), "ok",
+    fn(failed) => native_tasks/attempt_status(failed, "schema"))
+  return [native_gen/field(checked, encoded, "value"), checked]
+end
+verb native_builtins/index_or(builder: map, value: map, key: map, fallback: map) -> list
+  let [output: map, ready: map] = native_roots/retain(builder, "indexed", fallback)
+  ready = native_gen/branch(ready, native_access/kind(ready, value, "map"), fn(map)
+    let [found: map, searched: map] = native_gen/bind(map, "found", native_gen/call(map, "value_map_get", [value, key]))
+    return native_gen/when(searched, native_gen/field(searched, found, "ok"),
+      fn(present) => native_roots/store(present, output, native_gen/field(present, found, "value")))
+  end, fn(sequence)
+    let [ordinal: map, decoded: map] = native_gen/checked_bind(sequence, "index", native_gen/call(sequence, "value_as_int", [key]), "ok",
+      fn(invalid) => native_tasks/attempt_status(invalid, "schema"))
+    let position: map = native_gen/field(decoded, ordinal, "number")
+    let checked: map = native_tasks/check(decoded, native_gen/negate(native_gen/less(position, native_gen/ref(decoded, "int_zero"))), "schema")
+    let [supported: map, with_kind: map] = native_builtins/has_kind(checked, value, ["string", "list", "relation"])
+    checked = native_tasks/check(with_kind, supported, "schema")
+    let length: map = native_gen/call(checked, string_concat(checked[:source_prefix], "_collection_length"), [value])
+    let count: map = native_gen/field(checked, native_gen/call(checked, "value_as_int", [length]), "number")
+    return native_gen/when(checked, native_gen/less(position, count), fn(present)
+      let [found: map, read: map] = native_source/access(present, "read", [value, key])
+      return native_roots/store(read, output, found)
+    end)
+  end)
+  return [output, ready]
+end
+
+// Poll while constructing the result. Both the original map and completed
+// prefix stay rooted, so collection can move them between iterations.
+verb native_builtins/pairs(builder: map, value: map) -> list
+  let ready: map = native_builtins/kind_check(builder, value, "map")
+  let [result: map, rooted: map] = native_source/rooted_list(ready, "pairs", [])
+  let length: map = native_access/length(rooted, value, "map")
+  ready = native_gen/for_range(rooted, "pair", native_gen/ref(rooted, "zero"), length, fn(step, index)
+    let polled: map = native_source/checked(step, "task_poll", [native_tasks/attempt(step), native_gen/ref(step, "one")])
+    let key: map = native_access/integer(polled, native_gen/bitcast(:I64, index))
+    let [left: map, with_left: map] = native_source/access(polled, "key_at", [value, key])
+    let [right: map, with_right: map] = native_source/access(with_left, "value_at", [value, key])
+    let [pair: map, built: map] = native_source/list(with_right, [left, right])
+    let [appended: map, copied: map] = native_source/result(built, "value_list_append", [native_roots/worker(built), result, pair], "oom")
+    return native_roots/store(copied, result, appended)
+  end)
+  return [result, ready]
+end
+verb native_builtins/is_kind(builder: map, value: map, kind: map) -> list
+  let ready: map = native_gen/unless(builder, native_access/kind(builder, kind, "symbol"),
+    fn(invalid) => native_builtins/error(invalid, "expected a symbol"))
+  let [known: map, with_known: map] = native_gen/bind(ready, "known_kind", native_gen/ref(ready, "false"))
+  let [matched: map, with_match: map] = native_gen/bind(with_known, "matches_kind", native_gen/ref(with_known, "false"))
+  ready = with_match
+  for spec in native_value/kinds()
+    let name: symbol = to_symbol(spec[0])
+    ready = native_gen/when(ready, native_gen/equal(kind, native_source/literal(ready, name)), fn(selected)
+      let found: map = native_gen/assign(selected, known, native_gen/ref(selected, "true"))
+      return native_gen/assign(found, matched, native_access/kind(found, value, spec[0]))
+    end)
+  end
+  ready = native_gen/unless(ready, known, fn(invalid) => native_builtins/error(invalid, "unknown value kind"))
+  return [native_gen/call(ready, "value_bool", [matched]), ready]
+end
+verb native_builtins/call(builder: map, name: symbol, args: list) -> list
+  if name == :len || name == :string_len
+    let result: list = native_builtins/length(builder, args[0], name == :string_len)
+    return result
+  end
+  if name == :is_kind
+    let result: list = native_builtins/is_kind(builder, args[0], args[1])
+    return result
+  end
+  if name == :index_or
+    let result: list = native_builtins/index_or(builder, args[0], args[1], args[2])
+    return result
+  end
+  if name == :map_pairs
+    let result: list = native_builtins/pairs(builder, args[0])
+    return result
+  end
+  if name == :map_contains_key
+    let checked: map = native_builtins/kind_check(builder, args[0], "map")
+    let [found: map, ready: map] = native_gen/bind(checked, "found", native_gen/call(checked, "value_map_get", args))
+    return [native_gen/call(ready, "value_bool", [native_gen/field(ready, found, "ok")]), ready]
+  end
+  if name == :string_append
+    let checked: map = native_builtins/kind_check(native_builtins/kind_check(builder, args[0], "string"), args[1], "string")
+    let result: list = native_source/result(checked, "value_string_concat", [native_roots/worker(checked), @args], "oom")
+    return result
+  end
+  let result: list = native_source/mailbox_builtin(builder, name, args)
+  return result
+end

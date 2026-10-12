@@ -2265,6 +2265,7 @@ fn load_native_source_compiler(runner: &mut SourceRunner) {
         include_str!("../../../apps/native/compiler/builders.mica"),
         include_str!("../../../apps/native/compiler/errors.mica"),
         include_str!("../../../apps/native/compiler/operations.mica"),
+        include_str!("../../../apps/native/compiler/builtins.mica"),
         include_str!("../../../apps/native/compiler/collections.mica"),
         include_str!("../../../apps/native/compiler/access.mica"),
         include_str!("../../../apps/native/compiler/expressions.mica"),
@@ -2286,6 +2287,7 @@ fn native_source_analysis_tracks_continuations_and_definite_assignment() {
     for interpreter_only in [true, false] {
         let mut runner = runner(interpreter_only);
         for source in [
+            include_str!("../../../apps/native/value/program.mica"),
             include_str!("../../../apps/compiler/lex.mica"),
             include_str!("../../../apps/compiler/parse.mica"),
             include_str!("../../../apps/compiler/ast.mica"),
@@ -2490,6 +2492,18 @@ fn source_expression_cases() -> (String, String, String) {
         "try\n raise E_INVARG, \"original\", left\ncatch E_INVARG as error\n raise error, \"replacement\", right\nend",
         "begin\n try\n let result = native_expression_2(left, right)\n catch E_DIV\n return 999\n end\n left / 0\nend",
         "begin\n let changed = left\n try\n return native_expression_2(left, right)\n finally\n changed = native_expression_2(changed, 1)\n end\nend",
+        "len(left)",
+        "string_len(left)",
+        "string_append(left, right)",
+        "map_contains_key(left, right)",
+        "map_pairs(left)",
+        "index_or(left, right, 99)",
+        "try\n is_kind(left, right)\ncatch E_INVARG as error\n [error.code, error.message, error.value]\nend",
+        "len(@left)",
+        "index_or(@left)",
+        "try\n is_kind(@left)\ncatch E_INVARG as error\n [error.code, error.message, error.value]\nend",
+        "len()",
+        "begin\n let data = left\n for i in 0..right\n data[i] = [i]\n end\n let pairs = map_pairs(data)\n [len(pairs), pairs[0], pairs[right]]\nend",
     ];
     let mut cases: Vec<(usize, Vec<&str>)> = Vec::new();
     for value in ["7", "2.5", "-36028797018963968", "true"] {
@@ -2737,6 +2751,50 @@ fn source_expression_cases() -> (String, String, String) {
     cases.push((67, vec!["3", "4"]));
     cases.push((68, vec!["3", "4"]));
     cases.push((69, vec!["3", "4"]));
+    cases.push((70, vec!["\"Aé🍁\"", "0"]));
+    cases.push((70, vec!["b\"AAEC\"", "0"]));
+    cases.push((70, vec!["[1, 2]", "0"]));
+    cases.push((70, vec!["{:x -> none}", "0"]));
+    cases.push((70, vec!["[:x] {[1], [2]}", "0"]));
+    cases.push((70, vec!["none", "0"]));
+    cases.push((70, vec!["0..3", "0"]));
+    cases.push((71, vec!["\"Aé🍁\"", "0"]));
+    cases.push((71, vec!["3", "0"]));
+    cases.push((72, vec!["\"Aé\"", "\"🍁B\""]));
+    cases.push((72, vec!["\"\"", "\"\""]));
+    cases.push((72, vec!["1", "\"a\""]));
+    cases.push((73, vec!["{:x -> none}", ":x"]));
+    cases.push((73, vec!["{1 -> 7}", "1.0"]));
+    cases.push((73, vec!["[]", ":x"]));
+    cases.push((74, vec!["{2 -> [3], 1 -> none}", "0"]));
+    cases.push((74, vec!["{}", "0"]));
+    cases.push((74, vec!["4", "0"]));
+    cases.push((75, vec!["\"Aé🍁\"", "2"]));
+    cases.push((75, vec!["\"é\"", "1"]));
+    cases.push((75, vec!["[none]", "0"]));
+    cases.push((75, vec!["[2]", "1"]));
+    cases.push((75, vec!["{:x -> none}", ":x"]));
+    cases.push((75, vec!["{}", ":x"]));
+    cases.push((75, vec!["[:x] {[7]}", "0"]));
+    cases.push((75, vec!["none", "0"]));
+    cases.push((75, vec!["[1]", "-1"]));
+    cases.push((75, vec!["[1]", "0.0"]));
+    cases.push((75, vec!["b\"AA==\"", "0"]));
+    cases.push((76, vec!["[]", ":list"]));
+    cases.push((76, vec!["none", ":relation"]));
+    cases.push((76, vec!["2", ":float"]));
+    cases.push((76, vec!["E_DIV", ":error_code"]));
+    cases.push((76, vec!["true", ":bogus"]));
+    cases.push((76, vec!["true", "4"]));
+    cases.push((77, vec!["[[1, 2, 3]]", "0"]));
+    cases.push((77, vec!["[]", "0"]));
+    cases.push((77, vec!["[[], []]", "0"]));
+    cases.push((78, vec!["[{:x -> none}, :x, 99]", "0"]));
+    cases.push((79, vec!["[1, :int]", "0"]));
+    cases.push((79, vec!["[]", "0"]));
+    cases.push((79, vec!["[1, :int, 3]", "0"]));
+    cases.push((80, vec!["0", "0"]));
+    cases.push((81, vec!["{}", "128"]));
     let mut oracle = SourceRunner::new_empty().with_interpreter_only(true);
     let mut checks = String::new();
     source.push_str("\nverb native_control_spin()\n while true\n end\nend\n");
@@ -2774,18 +2832,22 @@ fn source_expression_cases() -> (String, String, String) {
         } else {
             format!("let left = {}\nlet right = {}", operands[0], operands[1])
         };
-        let report = oracle
-            .run_source(&format!("{bindings}\nreturn {expression}"))
-            .unwrap_or_else(|error| {
-                panic!(
-                    "{expression}, {operands:?}: {}",
-                    oracle.render_source_task_error(&error)
-                );
-            });
-        let (status, value) = match report.outcome {
-            TaskOutcome::Complete { value, .. } => (0, value),
-            TaskOutcome::Aborted { error, .. } => (14, error),
-            _ => panic!("expression suspended: {expression}"),
+        let report = oracle.run_source(&format!("{bindings}\nreturn {expression}"));
+        let (status, value) = match report {
+            Ok(report) => match report.outcome {
+                TaskOutcome::Complete { value, .. } => (0, value),
+                TaskOutcome::Aborted { error, .. } => (14, error),
+                _ => panic!("expression suspended: {expression}"),
+            },
+            Err(mica_runtime::SourceTaskError::TaskManager(
+                mica_runtime::TaskManagerError::Task(mica_runtime::TaskError::Runtime(
+                    mica_vm::RuntimeError::InvalidBuiltinCall { .. },
+                )),
+            )) => (7, Value::option_none()),
+            Err(error) => panic!(
+                "{expression}, {operands:?}: {}",
+                oracle.render_source_task_error(&error)
+            ),
         };
         let operands_value = eval(&mut oracle, &format!("return [{}]", operands.join(",")));
         let mut serial = 0;

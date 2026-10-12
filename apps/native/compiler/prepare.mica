@@ -66,6 +66,18 @@ verb native_source/program_literals(analysis: map, initial: list) -> list
       end
     elseif op == :BuiltinCall
       pool = native_source/pool_operands(pool, instruction[3])
+      pool = native_source/pool(pool, "list splice requires a list")
+      if instruction[2] == :index_or || instruction[2] == :map_pairs
+        pool = native_source/pool(pool, E_INDEX)
+        pool = native_source/pool(pool, "collection index is missing or invalid")
+      elseif instruction[2] == :is_kind
+        for value in [E_INVARG, "is_kind expects a value and kind symbol", "expected a symbol", "unknown value kind"]
+          pool = native_source/pool(pool, value)
+        end
+        for spec in native_value/kinds()
+          pool = native_source/pool(pool, to_symbol(spec[0]))
+        end
+      end
     elseif native/contains([:Index, :SetIndex, :CollectionKeyAt, :CollectionValueAt], op)
       pool = native_source/pool(pool, E_INDEX)
       pool = native_source/pool(pool, "collection index is missing or invalid")
