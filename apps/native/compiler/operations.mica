@@ -3,28 +3,62 @@
 
 // Runtime operations used by source instructions. These builders own checks,
 // error propagation, and effect staging; instruction dispatch only supplies values.
-verb native_source/raise_error(builder: map, code, value: map) -> map
+verb native_source/raise_error(builder: map, code, message: map, value: map) -> map
   let encoded: map = native_source/literal(builder, code)
   let number: map = native_gen/convert(:U32, native_gen/expression(:U64, :Payload, [encoded]))
   let [error: map, ready: map] = native_source/result(builder, "value_error", [native_roots/worker(builder), number,
-    native_gen/ref(builder, "false"), native_gen/zero(native_value/word()), native_gen/ref(builder, "true"), value], "oom")
+    native_gen/ref(builder, "true"), message, native_gen/ref(builder, "true"), value], "oom")
   let [retained: map, rooted: map] = native_roots/retain(ready, "error", error)
   let result: map = native_source/throw(rooted, retained)
   return result
 end
 verb native_source/value_error(builder: map, code, message: string, value: map) -> map
-  let encoded: map = native_source/literal(builder, code)
-  let number: map = native_gen/convert(:U32, native_gen/expression(:U64, :Payload, [encoded]))
-  let [error: map, ready: map] = native_source/result(builder, "value_error", [native_roots/worker(builder), number,
-    native_gen/ref(builder, "true"), native_source/literal(builder, message), native_gen/ref(builder, "true"), value], "oom")
-  let [retained: map, rooted: map] = native_roots/retain(ready, "error", error)
-  let result: map = native_source/throw(rooted, retained)
+  let result: map = native_source/raise_error(builder, code, native_source/literal(builder, message), value)
   return result
 end
-verb native_source/check_kind(builder: map, value: map, kind: symbol) -> map
+verb native_source/kind_prefix(kind: symbol, site: symbol, subject: symbol) -> string
+  let boundaries: map = {:Binding -> "binding", :Parameter -> "parameter", :Builtin -> "builtin result"}
+  native/ensure(map_contains_key(boundaries, site), "unknown source kind-check site")
+  let result: string = string_concat(boundaries[site], " `", native_source/symbol_text(subject), "` requires ", native_source/symbol_text(kind), ", got ")
+  return result
+end
+
+// Share kind-name selection across every annotation. Only a failing check
+// allocates its diagnostic; successful checks compare one tag.
+verb native_source/kind_message_body(input: map) -> map
+  let name: string = string_concat(input[:source_prefix], "_kind_message")
+  let word: list = native_value/word()
+  let module: map = native_memory/declare(input, name, [:Record, "ValueResult"], [
+    ["worker", native_memory/record_pointer("MemoryWorker"), :Borrow],
+    ["code", native_tasks/pointer("CodeRef"), :Gc], ["prefix", word, :Gc], ["value", word, :Gc]],
+    [:ReadMemory, :WriteMemory, :Allocate], :Gc, "")
+  let builder: map = native_gen/context(module, name)
+  builder[:source_prefix] = module[:source_prefix]
+  builder[:source_literals] = module[:source_literals]
+  builder[:source_code] = native_gen/ref(builder, "code")
+  let [message: map, ready: map] = native_gen/bind(builder, "kind", native_gen/zero(word))
+  let cases: list = []
+  for spec in native_value/kinds()
+    cases = [@cases, [native_gen/ref(ready, string_concat("tag_", spec[0])),
+      fn(branch) => native_gen/assign(branch, message, native_source/literal(branch, spec[0]))]]
+  end
+  ready = native_gen/switch(ready, native_gen/call(ready, "value_kind", [native_gen/ref(ready, "value")]), cases,
+    fn(invalid) => native_gen/return_value(invalid, native_gen/zero([:Record, "ValueResult"])))
+  ready = native_gen/return_value(ready, native_gen/call(ready, "value_string_concat", [
+    native_gen/ref(ready, "worker"), native_gen/ref(ready, "prefix"), message]))
+  let result: map = native_gen/finish(module, ready)
+  return result
+end
+verb native_source/check_kind(builder: map, value: map, kind: symbol, site: symbol, subject: symbol) -> map
   let spelling: string = native_source/symbol_text(kind)
   let condition: map = native_gen/equal(native_gen/call(builder, "value_kind", [value]), native_gen/ref(builder, string_concat("tag_", spelling)))
-  let result: map = native_gen/unless(builder, condition, fn(wrong) => native_source/raise_error(wrong, E_TYPE, value))
+  let result: map = native_gen/unless(builder, condition, fn(wrong)
+    let code: map = native_kernel/load_field(wrong, native_handlers/current(wrong), "code")
+    let prefix: map = native_source/literal(wrong, native_source/kind_prefix(kind, site, subject))
+    let [message: map, ready: map] = native_source/result(wrong, string_concat(wrong[:source_prefix], "_kind_message"),
+      [native_roots/worker(wrong), code, prefix, value], "oom")
+    return native_source/raise_error(ready, E_TYPE, message, value)
+  end)
   return result
 end
 // Mailbox sends join the attempt's staged effects. Resource creation and close

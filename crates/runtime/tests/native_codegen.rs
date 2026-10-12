@@ -6,6 +6,7 @@ use std::fs;
 use std::os::unix::process::ExitStatusExt;
 use std::path::PathBuf;
 use std::process::Command;
+use std::thread;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use mica_runtime::{SourceRunner, TaskInput, TaskLimits, TaskOutcome};
@@ -2266,6 +2267,7 @@ fn load_native_source_compiler(runner: &mut SourceRunner) {
         include_str!("../../../apps/native/compiler/errors.mica"),
         include_str!("../../../apps/native/compiler/operations.mica"),
         include_str!("../../../apps/native/compiler/builtins.mica"),
+        include_str!("../../../apps/native/compiler/patterns.mica"),
         include_str!("../../../apps/native/compiler/collections.mica"),
         include_str!("../../../apps/native/compiler/access.mica"),
         include_str!("../../../apps/native/compiler/expressions.mica"),
@@ -2400,6 +2402,22 @@ return true
                 "leaves its program",
             ),
             (
+                "{:registers -> 1, :code -> [[:BuildRelation, 0, [:x, :x], [], 0], [:Return, [:Register, 0]]]}",
+                "duplicate columns",
+            ),
+            (
+                "{:registers -> 1, :code -> [[:BuildRelation, 0, [:x], [], 1], [:Return, [:Register, 0]]]}",
+                "cell count",
+            ),
+            (
+                "{:registers -> 1, :code -> [[:BuildRelation, 0, [:x], [[:Splice, [:Constant, [1]]]], 1], [:Return, [:Register, 0]]]}",
+                "cannot be spliced",
+            ),
+            (
+                "{:registers -> 2, :code -> [[:Load, 0, none], [:RelationPattern, 1, 0, [:x], 1, [[:missing, 1]]], [:Return, [:Register, 1]]]}",
+                "unknown column",
+            ),
+            (
                 "{:registers -> 1, :code -> [[:LoadFunction, 0, {}, [], 0, 0, false]]}",
                 "unsupported native source instruction",
             ),
@@ -2504,6 +2522,22 @@ fn source_expression_cases() -> (String, String, String) {
         "try\n is_kind(@left)\ncatch E_INVARG as error\n [error.code, error.message, error.value]\nend",
         "len()",
         "begin\n let data = left\n for i in 0..right\n data[i] = [i]\n end\n let pairs = map_pairs(data)\n [len(pairs), pairs[0], pairs[right]]\nend",
+        "match left\ncase []\n []\ncase [1, @middle, 4] if len(middle) == right\n middle\ncase [first, @rest]\n [first, rest]\ncase _\n false\nend",
+        "match left\ncase {:items -> [x, 2]}\n x\ncase {:present -> none}\n 7\ncase _\n false\nend",
+        "match left\ncase none\n :none\ncase some(x)\n [:some, x]\ncase ok(x)\n [:ok, x]\ncase err(problem)\n [:err, problem.code]\ncase _\n :unmatched\nend",
+        "[some(left), ok(right), some(ok([left, right]))]",
+        "try\n raise E_INVARG, \"constructor payload\", left\ncatch E_INVARG as error\n let result = err(error)\n match result\n case err(problem)\n  [result, problem.code, problem.message, problem.value]\n end\nend",
+        "begin\n let exactly {:b -> second, a} = left\n [a, second]\nend",
+        "begin\n let result = []\n try\n for {:b -> second, a} in left\n  result = [@result, [a, second]]\n end\n catch E_MATCH as problem\n return [result, problem.code, problem.message, problem.value]\n finally\n result = [@result, [:finished]]\n end\n result\nend",
+        "match left\ncase [2]\n right\nend",
+        "begin\n let total = 0\n for item in left\n  try\n   match item\n   case 2\n    continue\n   case number\n    total = total + number\n   end\n  finally\n   total = total + 10\n  end\n end\n total\nend",
+        "match left\ncase {:absent -> x}\n x\ncase {:present -> x}\n x\ncase _\n false\nend",
+        "begin\n let exactly {} = left\n true\nend",
+        "err(left)",
+        "match left\ncase 1\n :one\ncase [@prefix, last]\n [prefix, last]\ncase _\n :other\nend",
+        "match left\ncase [x] if native_expression_5(x, right) > 0\n x\ncase _\n false\nend",
+        "begin\n let item: int = left\n item\nend",
+        "left",
     ];
     let mut cases: Vec<(usize, Vec<&str>)> = Vec::new();
     for value in ["7", "2.5", "-36028797018963968", "true"] {
@@ -2723,7 +2757,13 @@ fn source_expression_cases() -> (String, String, String) {
     cases.push((53, vec!["[[1, 2], [3, 4]]", "1"]));
     let mut ids = vec!["[602, 8003]".to_owned(), "[603, 8004]".to_owned()];
     for (index, operation) in operations.iter().enumerate() {
-        let parameters = if index < 2 { "value" } else { "left, right" };
+        let parameters = if index < 2 {
+            "value"
+        } else if index == 97 {
+            "left: int, right"
+        } else {
+            "left, right"
+        };
         source.push_str(&format!(
             "\nverb native_expression_{index}({parameters})\n return {operation}\nend\n"
         ));
@@ -2795,7 +2835,77 @@ fn source_expression_cases() -> (String, String, String) {
     cases.push((79, vec!["[1, :int, 3]", "0"]));
     cases.push((80, vec!["0", "0"]));
     cases.push((81, vec!["{}", "128"]));
-    let mut oracle = SourceRunner::new_empty().with_interpreter_only(true);
+    cases.push((82, vec!["[]", "0"]));
+    cases.push((82, vec!["[1, 4]", "0"]));
+    cases.push((82, vec!["[1, 2, 3, 4]", "2"]));
+    cases.push((82, vec!["[1, 2, 3, 4]", "9"]));
+    cases.push((82, vec!["[1]", "0"]));
+    cases.push((82, vec!["7", "0"]));
+    cases.push((83, vec!["{:items -> [7, 2], :extra -> true}", "0"]));
+    cases.push((83, vec!["{:items -> [7, 3]}", "0"]));
+    cases.push((83, vec!["{:present -> none}", "0"]));
+    cases.push((83, vec!["[:items] {[[8, 2]]}", "0"]));
+    cases.push((83, vec!["[:items, :extra] {[[8, 2], 1]}", "0"]));
+    cases.push((84, vec!["none", "0"]));
+    cases.push((84, vec!["some([1, 2])", "0"]));
+    cases.push((84, vec!["ok({:x -> 2})", "0"]));
+    cases.push((84, vec!["err(error(E_TEST))", "0"]));
+    cases.push((84, vec!["[] {}", "0"]));
+    cases.push((84, vec!["[:value] {[1], [2]}", "0"]));
+    cases.push((84, vec!["[:case, :value] {[:other, 3]}", "0"]));
+    cases.push((84, vec!["[:case, :value, :extra] {[:ok, 3, 4]}", "0"]));
+    cases.push((85, vec!["[1, {:nested -> none}]", "[2]"]));
+    cases.push((85, vec!["none", "true"]));
+    cases.push((86, vec!["[1, 2]", "0"]));
+    cases.push((87, vec!["[:a, :b] {[1, 2]}", "0"]));
+    cases.push((87, vec!["[:a, :b] {}", "0"]));
+    cases.push((87, vec!["[:a, :b] {[1, 2], [3, 4]}", "0"]));
+    cases.push((87, vec!["[:a, :b, :extra] {[1, 2, 3]}", "0"]));
+    cases.push((87, vec!["{:a -> 1, :b -> 2}", "0"]));
+    cases.push((88, vec!["[:a, :b] {[1, 2], [3, 4]}", "0"]));
+    cases.push((88, vec!["[:a, :b] {}", "0"]));
+    cases.push((
+        88,
+        vec!["[{:a -> 1, :b -> 2, :extra -> 3}, {:a -> 4, :b -> 5}]", "0"],
+    ));
+    cases.push((88, vec!["{1 -> {:a -> 2, :b -> 3}}", "0"]));
+    cases.push((88, vec!["[{:a -> 1}]", "0"]));
+    cases.push((88, vec!["[3]", "0"]));
+    cases.push((88, vec!["[:a, :b, :extra] {[1, 2, 3]}", "0"]));
+    cases.push((88, vec!["[{:a -> [1], :b -> [2]}, {:a -> [3]}]", "0"]));
+    cases.push((89, vec!["[2]", "7"]));
+    cases.push((89, vec!["[1]", "7"]));
+    cases.push((89, vec!["true", "7"]));
+    cases.push((90, vec!["[1, 2, 3]", "0"]));
+    cases.push((91, vec!["{:present -> none}", "0"]));
+    cases.push((91, vec!["{}", "0"]));
+    cases.push((91, vec!["[:present] {[7]}", "0"]));
+    cases.push((91, vec!["[:present] {}", "0"]));
+    cases.push((92, vec!["[] {[]}", "0"]));
+    cases.push((92, vec!["[] {}", "0"]));
+    cases.push((92, vec!["none", "0"]));
+    cases.push((93, vec!["7", "0"]));
+    cases.push((93, vec!["error(E_TEST)", "0"]));
+    cases.push((93, vec!["error(E_TEST, \"message\", [3])", "0"]));
+    cases.push((94, vec!["1.0", "0"]));
+    cases.push((94, vec!["[1, 2, 3]", "0"]));
+    cases.push((94, vec!["[9]", "0"]));
+    cases.push((94, vec!["[]", "0"]));
+    cases.push((95, vec!["[8]", "2"]));
+    cases.push((95, vec!["[8]", "0"]));
+    cases.push((95, vec!["[]", "0"]));
+    for operation in [96, 97] {
+        for value in ["7", "true", "1.0", "\"text\"", "[]", "{}", "none", "E_TYPE"] {
+            cases.push((operation, vec![value, "0"]));
+        }
+    }
+    let mut oracle = SourceRunner::new_empty()
+        .with_interpreter_only(true)
+        .with_task_limits(TaskLimits {
+            instruction_budget: 100_000_000,
+            max_call_depth: 256,
+            ..TaskLimits::default()
+        });
     let mut checks = String::new();
     source.push_str("\nverb native_control_spin()\n while true\n end\nend\n");
     ids.push("[1100, 10100]".to_owned());
@@ -2814,13 +2924,26 @@ fn source_expression_cases() -> (String, String, String) {
         source.push_str(&format!("\n{definition}\n"));
         ids.push(format!("[{}, {}]", 1110 + index, 10110 + index));
     }
-    for report in oracle.run_filein(&source).unwrap() {
-        assert!(
-            matches!(report.outcome, TaskOutcome::Complete { .. }),
-            "{}",
-            report.render()
-        );
+    // Use the Mica frontend for syntax it already supports beyond Rust's
+    // parser. The resulting register programs execute on the Rust VM oracle.
+    for filein in [
+        include_str!("../../../apps/compiler/lex.mica"),
+        include_str!("../../../apps/compiler/parse.mica"),
+        include_str!("../../../apps/compiler/ast.mica"),
+        include_str!("../../../apps/compiler/emit.mica"),
+        include_str!("../../../apps/compiler/install.mica"),
+    ] {
+        oracle.run_filein(filein).unwrap();
     }
+    assert_eq!(
+        eval(
+            &mut oracle,
+            &format!(
+                "let module = emit_source({source:?})\nif !module[:ok]\nreturn module[:errors]\nend\nlet installed = compiler/install(module, :native_conformance_entry)\nif !installed[:ok]\nreturn installed[:errors]\nend\nreturn true"
+            )
+        ),
+        Value::bool(true)
+    );
     checks.push_str(&format!("static uint64_t (*const source_recursive_entry)(struct mica_TaskAttempt *) = mica_source_roundtrip_method_{}_0;\n", operations.len() + 3));
     checks.push_str("static uint64_t (*const source_splice_entry)(struct mica_TaskAttempt *) = mica_source_roundtrip_method_37_0;\n");
     checks.push_str("static uint64_t (*const source_named_entry)(struct mica_TaskAttempt *) = mica_source_roundtrip_method_23_0;\n");
@@ -2832,7 +2955,13 @@ fn source_expression_cases() -> (String, String, String) {
         } else {
             format!("let left = {}\nlet right = {}", operands[0], operands[1])
         };
-        let report = oracle.run_source(&format!("{bindings}\nreturn {expression}"));
+        let request = if *operation < 82 {
+            // Preserve the independent Rust frontend check for shared syntax.
+            format!("{bindings}\nreturn {expression}")
+        } else {
+            format!("{bindings}\nreturn :native_expression_{operation}(left: left, right: right)")
+        };
+        let report = oracle.run_source(&request);
         let (status, value) = match report {
             Ok(report) => match report.outcome {
                 TaskOutcome::Complete { value, .. } => (0, value),
@@ -2964,6 +3093,21 @@ fn source_value_literal(value: &Value, serial: &mut usize) -> (String, String) {
                 format!("mica_value_bytes(worker, {name}_bytes, {})", bytes.len())
             })
             .unwrap(),
+        ValueKind::Error => value
+            .with_error(|error| {
+                let (code, construction) = source_value_literal(&Value::error_code(error.code()), serial);
+                setup.push_str(&construction);
+                let mut optional = |field: Option<Value>| {
+                    let Some(field) = field else { return "0".to_owned() };
+                    let (value, construction) = source_value_literal(&field, serial);
+                    setup.push_str(&construction);
+                    value
+                };
+                let message = optional(error.message().map(Value::string));
+                let payload = optional(error.value().cloned());
+                format!("mica_value_error(worker, (uint32_t)mica_value_as_error_code({code}).f_number, {}, {message}, {}, {payload})", error.message().is_some(), error.value().is_some())
+            })
+            .unwrap(),
         ValueKind::Range => value
             .with_range(|start, end| {
                 let (start, construction) = source_value_literal(start, serial);
@@ -3057,13 +3201,7 @@ fn source_value_check(expected: &Value, actual: &str) -> String {
             }
             checks
         }).unwrap(),
-        ValueKind::Error => expected.with_error(|error| {
-            let name = error.code().name().unwrap();
-            let message = source_value_check(&Value::string(error.message().unwrap()), "error.f_header->f_message");
-            let value = source_value_check(error.value().unwrap(), "error.f_header->f_value");
-            format!("{{ struct mica_HeapErrorResult error = mica_value_as_error({actual}); assert(error.f_ok); struct mica_IdResult code = mica_value_symbol_intern(symbols, (const uint8_t *){name:?}, {}); assert(code.f_ok && error.f_header->f_code == code.f_number); assert(error.f_header->f_has_message && error.f_header->f_has_value); {message}\n{value}\n}}", name.len())
-        }).unwrap(),
-        ValueKind::Map | ValueKind::Relation | ValueKind::Bytes | ValueKind::Range | ValueKind::Symbol | ValueKind::ErrorCode => {
+        ValueKind::Map | ValueKind::Relation | ValueKind::Bytes | ValueKind::Range | ValueKind::Symbol | ValueKind::ErrorCode | ValueKind::Error => {
             let (value, construction) = source_value_literal(expected, &mut 0);
             format!("{{ {construction}\n struct mica_IntResult compared = mica_value_compare({actual}, {value}); assert(compared.f_ok && compared.f_number == 0); }}")
         }
@@ -3110,126 +3248,141 @@ return true
     }
 }
 
+fn generate_native_source(
+    interpreter_only: bool,
+    conformance_source: &str,
+    method_ids: &str,
+) -> (String, String, String) {
+    let generation_started = Instant::now();
+    let mut runner = runner(interpreter_only).with_task_limits(TaskLimits {
+        instruction_budget: 12_000_000_000,
+        max_call_depth: 256,
+        ..TaskLimits::default()
+    });
+    load_native_kernel(&mut runner, true);
+    load_native_source_compiler(&mut runner);
+    // Bootstrap catalogue lookup uses a committed setup transaction. Native
+    // catalogue installation and rollback are exercised by the C fixture.
+    eval(&mut runner, "return make_relation(:NativeResult, 2)");
+    let example = format!(
+        "{}\n{conformance_source}",
+        include_str!("../../../apps/native/compiler/examples/roundtrip.mica")
+    );
+    let module = eval(
+        &mut runner,
+        &format!(
+            "return native_source/compile(native_tasks/definitions(), \"source_roundtrip\", {example:?}, {{:NativeResult -> 705}}, {method_ids})"
+        ),
+    );
+    eprintln!(
+        "native source: interpreter_only={interpreter_only}, module construction={:?}",
+        generation_started.elapsed()
+    );
+    let emission_started = Instant::now();
+    let state = module
+        .map_get(&Value::symbol(Symbol::intern("state")))
+        .unwrap();
+    let mut request = SourceRunner::root_source_request("");
+    request.input = TaskInput::Invocation {
+        selector: Symbol::intern("native/emit_c"),
+        roles: vec![(Symbol::intern("state"), state)],
+    };
+    let submitted = runner.submit_invocation(request).unwrap();
+    let TaskOutcome::Complete { value, .. } = submitted.outcome else {
+        panic!("C emission: {:?}", submitted.outcome);
+    };
+    let generated = value.with_str(str::to_owned).unwrap();
+    eprintln!(
+        "native source: interpreter_only={interpreter_only}, C emission={:?}",
+        emission_started.elapsed()
+    );
+    eprintln!(
+        "native source: interpreter_only={interpreter_only}, generation={:?}, C bytes={}",
+        generation_started.elapsed(),
+        generated.len()
+    );
+    let memory = eval(&mut runner, "return native_memory/platform()")
+        .with_str(str::to_owned)
+        .unwrap();
+    let tasks = eval(&mut runner, "return native_tasks/platform()")
+        .with_str(str::to_owned)
+        .unwrap();
+    (generated, memory, tasks)
+}
+
 #[test]
 fn native_source_program_executes_on_generated_runtime() {
     let (conformance_source, method_ids, checks) = source_expression_cases();
-    let mut previous = None;
-    for interpreter_only in [true, false] {
-        let generation_started = Instant::now();
-        let mut runner = runner(interpreter_only).with_task_limits(TaskLimits {
-            instruction_budget: 12_000_000_000,
-            max_call_depth: 256,
-            ..TaskLimits::default()
+    // Each bootstrap owns its runner. Generate concurrently, then require the
+    // same C and compile it once; runtime generation dominates this test.
+    thread::scope(|scope| {
+        let builds = [true, false].map(|interpreter_only| {
+            let source = &conformance_source;
+            let ids = &method_ids;
+            scope.spawn(move || generate_native_source(interpreter_only, source, ids))
         });
-        load_native_kernel(&mut runner, true);
-        load_native_source_compiler(&mut runner);
-        // Bootstrap catalogue lookup uses a committed setup transaction. Native
-        // catalogue installation and rollback are exercised by the C fixture.
-        eval(&mut runner, "return make_relation(:NativeResult, 2)");
-        let example = format!(
-            "{}\n{conformance_source}",
-            include_str!("../../../apps/native/compiler/examples/roundtrip.mica")
-        );
-        let module = eval(
-            &mut runner,
-            &format!(
-                "return native_source/compile(native_tasks/definitions(), \"source_roundtrip\", {example:?}, {{:NativeResult -> 705}}, {method_ids})"
-            ),
-        );
-        eprintln!(
-            "native source: interpreter_only={interpreter_only}, module construction={:?}",
-            generation_started.elapsed()
-        );
-        let emission_started = Instant::now();
-        let state = module
-            .map_get(&Value::symbol(Symbol::intern("state")))
-            .unwrap();
-        let mut request = SourceRunner::root_source_request("");
-        request.input = TaskInput::Invocation {
-            selector: Symbol::intern("native/emit_c"),
-            roles: vec![(Symbol::intern("state"), state)],
-        };
-        let submitted = runner.submit_invocation(request).unwrap();
-        let TaskOutcome::Complete { value, .. } = submitted.outcome else {
-            panic!("C emission: {:?}", submitted.outcome);
-        };
-        let generated = value.with_str(str::to_owned).unwrap();
-        eprintln!(
-            "native source: interpreter_only={interpreter_only}, C emission={:?}",
-            emission_started.elapsed()
-        );
-        eprintln!(
-            "native source: interpreter_only={interpreter_only}, generation={:?}, C bytes={}",
-            generation_started.elapsed(),
-            generated.len()
-        );
-        if let Some(previous) = &previous {
-            assert_eq!(&generated, previous);
-            // Identical C has already passed the compiler and execution checks.
-            continue;
-        }
-        previous = Some(generated.clone());
-        let memory = eval(&mut runner, "return native_memory/platform()")
-            .with_str(str::to_owned)
-            .unwrap();
-        let tasks = eval(&mut runner, "return native_tasks/platform()")
-            .with_str(str::to_owned)
-            .unwrap();
-        let scratch = Scratch::new();
-        let source = scratch.0.join("source.c");
-        let binary = scratch.0.join("source");
-        fs::write(
-            &source,
-            format!(
+        let mut previous = None;
+        for build in builds {
+            let (generated, memory, tasks) = build.join().unwrap();
+            if let Some(previous) = &previous {
+                assert_eq!(&generated, previous);
+                // Identical C has already passed the compiler and execution checks.
+                continue;
+            }
+            previous = Some(generated.clone());
+            let scratch = Scratch::new();
+            let source = scratch.0.join("source.c");
+            let binary = scratch.0.join("source");
+            let fixture = format!(
                 "{generated}\n{memory}\n{tasks}\n{}\n{}\n#include <assert.h>\n{checks}\n{}\n#define MICA_SOURCE_CONFORMANCE\n{}",
                 include_str!("../../../native/platform/allocation.c"),
                 include_str!("../../../native/platform/mutex.c"),
                 include_str!("../../../apps/native/compiler/conformance.c"),
                 include_str!("../../../apps/native/compiler/tests.c")
-            ),
-        )
-        .unwrap();
-        let sanitizer = if std::env::var_os("MICA_NATIVE_THREAD_SANITIZER").is_some() {
-            "-fsanitize=thread"
-        } else {
-            "-fsanitize=address,undefined,float-cast-overflow"
-        };
-        let compiled = Command::new("clang")
-            .args([
-                "-std=c11",
-                "-pthread",
-                "-O2",
-                "-g",
-                "-Wall",
-                "-Wextra",
-                "-Werror",
-                "-pedantic",
-                "-ffp-contract=off",
-                "-fno-fast-math",
-                sanitizer,
-                "-fno-sanitize-recover=all",
-                "-fno-omit-frame-pointer",
-            ])
-            .arg(&source)
-            .args(["-lm", "-ldl", "-o"])
-            .arg(&binary)
-            .output()
-            .unwrap();
-        assert!(
-            compiled.status.success(),
-            "{}",
-            String::from_utf8_lossy(&compiled.stderr)
-        );
-        let executed = Command::new(binary)
-            .current_dir(&scratch.0)
-            .env("ASAN_OPTIONS", "detect_leaks=1:halt_on_error=1")
-            .env("TSAN_OPTIONS", "halt_on_error=1")
-            .output()
-            .unwrap();
-        assert!(executed.status.success(), "{executed:?}");
-        assert!(executed.stderr.is_empty(), "{executed:?}");
-        eprintln!("native source: sanitizer execution passed");
-    }
+            );
+            fs::write(&source, fixture).unwrap();
+            let sanitizer = if std::env::var_os("MICA_NATIVE_THREAD_SANITIZER").is_some() {
+                "-fsanitize=thread"
+            } else {
+                "-fsanitize=address,undefined,float-cast-overflow"
+            };
+            let compiled = Command::new("clang")
+                .args([
+                    "-std=c11",
+                    "-pthread",
+                    "-O2",
+                    "-g",
+                    "-Wall",
+                    "-Wextra",
+                    "-Werror",
+                    "-pedantic",
+                    "-ffp-contract=off",
+                    "-fno-fast-math",
+                    sanitizer,
+                    "-fno-sanitize-recover=all",
+                    "-fno-omit-frame-pointer",
+                ])
+                .arg(&source)
+                .args(["-lm", "-ldl", "-o"])
+                .arg(&binary)
+                .output()
+                .unwrap();
+            assert!(
+                compiled.status.success(),
+                "{}",
+                String::from_utf8_lossy(&compiled.stderr)
+            );
+            let executed = Command::new(binary)
+                .current_dir(&scratch.0)
+                .env("ASAN_OPTIONS", "detect_leaks=1:halt_on_error=1")
+                .env("TSAN_OPTIONS", "halt_on_error=1")
+                .output()
+                .unwrap();
+            assert!(executed.status.success(), "{executed:?}");
+            assert!(executed.stderr.is_empty(), "{executed:?}");
+            eprintln!("native source: sanitizer execution passed");
+        }
+    });
 }
 
 fn load_native_kernel(runner: &mut SourceRunner, tasks: bool) {

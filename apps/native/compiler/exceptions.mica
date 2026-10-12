@@ -104,7 +104,7 @@ verb native_exceptions/transfer(input: map, context: list, mode: symbol, target:
 end
 verb native_exceptions/can_raise(op: symbol) -> bool
   let result: bool = native/contains([:Unary, :Binary, :Index, :SetIndex, :ErrorField, :CheckKind,
-    :BuiltinCall, :BuildList, :BuildMap, :CollectionKeyAt, :CollectionValueAt,
+    :BuiltinCall, :BuildList, :BuildMap, :CollectionKeyAt, :CollectionValueAt, :RelationCell, :CollectionFieldAt,
     :Dispatch, :PositionalDispatch, :DynamicDispatch], op)
   return result
 end

@@ -48,6 +48,34 @@ verb native_source/program_literals(analysis: map, initial: list) -> list
     let op: symbol = instruction[0]
     if op == :Load
       pool = native_source/pool(pool, instruction[2])
+    elseif op == :CheckKind
+      pool = native_source/pool(pool, native_source/kind_prefix(instruction[2], instruction[3], instruction[4]))
+    elseif op == :BuildRelation
+      for column in instruction[2]
+        pool = native_source/pool(pool, column)
+      end
+      pool = native_source/pool_operands(pool, instruction[3])
+    elseif op == :RelationPattern
+      for column in instruction[3]
+        pool = native_source/pool(pool, column)
+      end
+      for [column, value] in instruction[5]
+        pool = native_source/pool(pool, column)
+        pool = native_source/pool(pool, value)
+      end
+    elseif op == :RelationCell || op == :CollectionFieldAt
+      pool = native_source/pool(pool, E_MATCH)
+      if op == :RelationCell
+        pool = native_source/pool(pool, instruction[3])
+        pool = native_source/pool(pool, "relation cell load requires a matched row")
+      else
+        for column in [@instruction[4], instruction[5]]
+          pool = native_source/pool(pool, column)
+        end
+        for value in [E_INDEX, "collection index is missing or invalid", "collection row does not match the loop pattern"]
+          pool = native_source/pool(pool, value)
+        end
+      end
     elseif op == :Unary && instruction[2] == :Neg
       pool = native_source/pool(pool, E_ARITH)
       pool = native_source/pool(pool, "invalid unary arithmetic")
@@ -221,7 +249,7 @@ end
 verb native_source/prepare_module(input: map, prefix: string, emitted: map, relations: map, method_ids: list) -> map
   native/ensure(len(method_ids) == len(emitted[:methods]), "native module requires identities for every definition")
   let descriptions: list = [[emitted[:entry], 0, string_concat(prefix, "_entry")]]
-  let pool: list = [E_TYPE, E_RANGE, [] {[]}, :dispatch/unrestricted, :required]
+  let pool: list = [E_TYPE, E_RANGE, [] {[]}, :dispatch/unrestricted, :required, @[spec[0] for spec in native_value/kinds()]]
   let numbers: list = []
   let index: int = 0
   for definition in emitted[:methods]
@@ -245,6 +273,11 @@ verb native_source/prepare_module(input: map, prefix: string, emitted: map, rela
   let maximum: int = 6
   for [description, parameters, name] in descriptions
     let linked: map = native_exceptions/lower(native_source/link_relations(description, relations))
+    for instruction in linked[:code]
+      if instruction[0] == :BuildRelation || instruction[0] == :RelationPattern
+        numbers = [@numbers, instruction[4]]
+      end
+    end
     let analysis: map = native_source/analyse(linked, parameters)
     programs = [@programs, {:analysis -> analysis, :regions -> native_source/regions(analysis), :name -> name}]
     pool = native_source/program_literals(analysis, pool)

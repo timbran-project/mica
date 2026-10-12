@@ -28,12 +28,27 @@ verb native_source/items_reads(items: list) -> list
   return reads
 end
 
+verb native_source/relation_heading(heading) -> bool
+  native/ensure(is_kind(heading, :list) && len(heading) <= 65535, "invalid source relation heading")
+  let seen: map = {}
+  for column in heading
+    native/ensure(is_kind(column, :symbol), "source relation columns must be symbols")
+    native/ensure(!map_contains_key(seen, column), "source relation heading has duplicate columns")
+    seen[column] = true
+  end
+  return true
+end
+verb native_source/relation_cardinality(rows) -> bool
+  native/ensure(is_kind(rows, :int) && rows >= 0 && rows <= 65535, "invalid source relation cardinality")
+  return true
+end
+
 verb native_source/instruction(code: list, pc: int) -> map
   let instruction = code[pc]
   native/ensure(is_kind(instruction, :list) && len(instruction) > 0, "source instruction must be a nonempty list")
   let op = instruction[0]
   let widths: map = {:Load -> 3, :Move -> 3, :Unary -> 4, :Binary -> 5,
-    :BuildList -> 3, :BuildMap -> 3, :BuildRange -> 4, :CollectionLen -> 3,
+    :BuildList -> 3, :BuildMap -> 3, :BuildRelation -> 5, :RelationPattern -> 6, :RelationCell -> 4, :CollectionFieldAt -> 6, :BuildRange -> 4, :CollectionLen -> 3,
     :CollectionKeyAt -> 4, :CollectionValueAt -> 4, :SetIndex -> 5, :Abort -> 2, :Index -> 4, :CheckKind -> 5,
     :BuiltinCall -> 4, :Dispatch -> 4, :DynamicDispatch -> 4, :PositionalDispatch -> 4,
     :SpawnDispatch -> 5, :SpawnDispatchDynamic -> 5, :SpawnPositionalDispatch -> 5, :MailboxRecv -> 4,
@@ -45,7 +60,7 @@ verb native_source/instruction(code: list, pc: int) -> map
   let writes: list = []
   let successors: list = [pc + 1]
   let boundary: bool = false
-  if native/contains([:Load, :Move, :Unary, :Binary, :BuildList, :BuildMap, :BuildRange, :CollectionLen,
+  if native/contains([:Load, :Move, :Unary, :Binary, :BuildList, :BuildMap, :BuildRelation, :RelationPattern, :RelationCell, :CollectionFieldAt, :BuildRange, :CollectionLen,
       :CollectionKeyAt, :CollectionValueAt, :SetIndex, :Index, :NormalizeError, :ErrorField, :BuiltinCall,
       :Dispatch, :DynamicDispatch, :PositionalDispatch, :SpawnDispatch, :SpawnDispatchDynamic, :SpawnPositionalDispatch, :MailboxRecv, :CommitValue, :SuspendValue], op)
     writes = [instruction[1]]
@@ -56,6 +71,31 @@ verb native_source/instruction(code: list, pc: int) -> map
       source = instruction[2]
     end
     reads = [source]
+  elseif op == :BuildRelation
+    native_source/relation_heading(instruction[2])
+    native_source/relation_cardinality(instruction[4])
+    native/ensure(is_kind(instruction[3], :list), "source relation cells must be a list")
+    native/ensure(len(instruction[3]) == len(instruction[2]) * instruction[4], "source relation cell count does not match its heading and cardinality")
+    reads = native_source/items_reads(instruction[3])
+    for cell in instruction[3]
+      native/ensure(cell[0] != :Splice, "source relation cells cannot be spliced")
+    end
+  elseif op == :RelationPattern
+    native_source/relation_heading(instruction[3])
+    native_source/relation_cardinality(instruction[4])
+    native/ensure(is_kind(instruction[5], :list), "source relation equalities must be a list")
+    for equality in instruction[5]
+      native/ensure(is_kind(equality, :list) && len(equality) == 2, "source relation equality requires a column and value")
+      native/ensure(native/contains(instruction[3], equality[0]), "source relation equality names an unknown column")
+    end
+    reads = [instruction[2]]
+  elseif op == :RelationCell
+    native/ensure(is_kind(instruction[3], :symbol), "source relation column must be a symbol")
+    reads = [instruction[2]]
+  elseif op == :CollectionFieldAt
+    native_source/relation_heading(instruction[4])
+    native/ensure(native/contains(instruction[4], instruction[5]), "source iteration names an unknown column")
+    reads = [instruction[2], instruction[3]]
   elseif op == :ErrorField
     reads = [instruction[2]]
   elseif op == :NormalizeError

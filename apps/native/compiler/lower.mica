@@ -19,6 +19,22 @@ verb native_source/value_instruction(builder: map, instruction: list) -> list
     let result: list = native_source/binary(builder, instruction[2], native_source/register(builder, instruction[3]), native_source/register(builder, instruction[4]))
     return result
   end
+  if op == :BuildRelation
+    let result: list = native_patterns/relation(builder, instruction[2], instruction[3], instruction[4])
+    return result
+  end
+  if op == :RelationPattern
+    let result: list = native_patterns/test(builder, native_source/register(builder, instruction[2]), instruction[3], instruction[4], instruction[5])
+    return result
+  end
+  if op == :RelationCell
+    let result: list = native_patterns/read_cell(builder, native_source/register(builder, instruction[2]), instruction[3])
+    return result
+  end
+  if op == :CollectionFieldAt
+    let result: list = native_patterns/iteration_field(builder, native_source/register(builder, instruction[2]), native_source/register(builder, instruction[3]), instruction[4], instruction[5])
+    return result
+  end
   if op == :BuildList
     let result: list = native_source/list_items(builder, instruction[2], true)
     return result
@@ -75,7 +91,7 @@ end
 verb native_source/emit_instruction(builder: map, instruction: list) -> map
   let op: symbol = instruction[0]
   if op == :CheckKind
-    let result: map = native_source/check_kind(builder, native_source/register(builder, instruction[1]), instruction[2])
+    let result: map = native_source/check_kind(builder, native_source/register(builder, instruction[1]), instruction[2], instruction[3], instruction[4])
     return result
   end
   if op == :AssertDynamic || op == :RetractDynamic

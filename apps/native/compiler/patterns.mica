@@ -1,0 +1,90 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+// Headings are sets of symbolic columns. Resolve each column by its runtime
+// symbol ID; bootstrap interning order must not determine native row layout.
+verb native_patterns/column(builder: map, value: map, column: symbol) -> map
+  let name: map = native_source/literal(builder, column)
+  let id: map = native_gen/convert(:U32, native_gen/expression(:U64, :Payload, [name]))
+  let result: map = native_gen/call(builder, "value_relation_column", [value, id])
+  return result
+end
+verb native_patterns/heading(builder: map, value: map, heading: list) -> list
+  let [matched: map, ready: map] = native_gen/bind(builder, "heading_matches", native_access/kind(builder, value, "relation"))
+  ready = native_gen/when(ready, matched, fn(relation)
+    let width: map = native_gen/field(relation, native_gen/call(relation, "value_relation_arity", [value]), "number")
+    let checked: map = native_gen/assign(relation, matched, native_gen/equal(width, native_source/number(relation, len(heading))))
+    for column in heading
+      checked = native_gen/when(checked, matched, fn(present)
+        let [found: map, searched: map] = native_gen/bind(present, "column", native_patterns/column(present, value, column))
+        return native_gen/assign(searched, matched, native_gen/field(searched, found, "ok"))
+      end)
+    end
+    return checked
+  end)
+  return [matched, ready]
+end
+
+// Extract a cell without materializing a row map. All accesses are borrowed;
+// the error callback leaves the generated function before an invalid read.
+verb native_patterns/cell(builder: map, value: map, row: map, column: symbol, failure) -> list
+  let [position: map, with_column: map] = native_gen/checked_bind(builder, "column", native_patterns/column(builder, value, column), "ok", failure)
+  let [tuple: map, with_row: map] = native_gen/checked_bind(with_column, "row", native_gen/call(with_column, "value_relation_row", [value, row]), "ok", failure)
+  let data: map = native_gen/field(with_row, native_gen/field(with_row, tuple, "tuple"), "data")
+  let result: map = native_gen/load(native_gen/offset(data, native_gen/field(with_row, position, "number")))
+  return [result, with_row]
+end
+verb native_patterns/test(builder: map, value: map, heading: list, rows: int, equalities: list) -> list
+  let [matched: map, ready: map] = native_patterns/heading(builder, value, heading)
+  ready = native_gen/when(ready, matched, fn(relation)
+    let count: map = native_access/length(relation, value, "relation")
+    return native_gen/assign(relation, matched, native_gen/equal(count, native_source/number(relation, rows)))
+  end)
+  for [column, expected] in equalities
+    if rows == 0
+      ready = native_gen/assign(ready, matched, native_gen/ref(ready, "false"))
+      break
+    end
+    ready = native_gen/when(ready, matched, fn(compare)
+      let [actual: map, loaded: map] = native_patterns/cell(compare, value, native_gen/ref(compare, "zero"), column,
+        fn(invalid) => native_tasks/attempt_status(invalid, "schema"))
+      let [order: map, checked: map] = native_gen/checked_bind(loaded, "comparison", native_gen/call(loaded, "value_compare", [actual, native_source/literal(loaded, expected)]), "ok",
+        fn(invalid) => native_tasks/attempt_status(invalid, "schema"))
+      return native_gen/assign(checked, matched, native_kernel/absent(native_gen/field(checked, order, "number")))
+    end)
+  end
+  return [native_gen/call(ready, "value_bool", [matched]), ready]
+end
+verb native_patterns/read_cell(builder: map, value: map, column: symbol) -> list
+  let result: list = native_patterns/cell(builder, value, native_gen/ref(builder, "zero"), column,
+    fn(invalid) => native_source/value_error(invalid, E_MATCH, "relation cell load requires a matched row", value))
+  return result
+end
+
+// Relation iteration requires exactly the declared heading. Iteration over
+// other collections reads the selected element as a map and permits extra keys.
+verb native_patterns/iteration_field(builder: map, value: map, index: map, heading: list, column: symbol) -> list
+  let failure = fn(invalid) => native_source/value_error(invalid, E_MATCH, "collection row does not match the loop pattern", value)
+  let [ordinal: map, decoded: map] = native_gen/checked_bind(builder, "row_index", native_gen/call(builder, "value_as_int", [index]), "ok", failure)
+  let number: map = native_gen/field(decoded, ordinal, "number")
+  let ready: map = native_gen/when(decoded, native_gen/less(number, native_gen/ref(decoded, "int_zero")), failure)
+  let [output: map, allocated: map] = native_roots/retain(ready, "field", native_gen/zero(native_value/word()))
+  ready = native_gen/branch(allocated, native_access/kind(allocated, value, "relation"), fn(relation)
+    let [matched: map, tested: map] = native_patterns/heading(relation, value, heading)
+    let checked: map = native_gen/unless(tested, matched, failure)
+    let [cell: map, loaded: map] = native_patterns/cell(checked, value, native_gen/bitcast(:U64, number), column, failure)
+    return native_roots/store(loaded, output, cell)
+  end, fn(collection)
+    let [item: map, read: map] = native_source/access(collection, "value_at", [value, index])
+    let [found: map, checked: map] = native_gen/checked_bind(read, "field", native_gen/call(read, "value_map_get", [item, native_source/literal(read, column)]), "ok", failure)
+    return native_roots/store(checked, output, native_gen/field(checked, found, "value"))
+  end)
+  return [output, ready]
+end
+verb native_patterns/relation(builder: map, heading: list, cells: list, rows: int) -> list
+  let values: list = [native_source/literal(builder, column) for column in heading]
+  values = [@values, @native_source/operands(builder, cells)]
+  let result: list = native_literal/relation(builder, values, len(heading), rows,
+    fn(failed) => native_tasks/attempt_status(failed, "oom"))
+  return result
+end
