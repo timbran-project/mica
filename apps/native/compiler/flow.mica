@@ -1,0 +1,94 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+verb native_source/block_label(pc: int) -> string
+  return string_concat("pc_", to_literal(pc))
+end
+
+// Follow native control flow until a task boundary. Resumption can enter a
+// loop's interior, so regions may share instructions but have distinct frames.
+verb native_source/region_instructions(analysis: map, start: int) -> list
+  let seen: map = {}
+  let queue: map = {0 -> start}
+  let cursor: int = 0
+  let count: int = 1
+  while cursor < count
+    let pc: int = queue[cursor]
+    cursor = cursor + 1
+    if map_contains_key(seen, pc)
+      continue
+    end
+    seen[pc] = true
+    if analysis[:instructions][pc][:boundary]
+      continue
+    end
+    for target in analysis[:instructions][pc][:successors]
+      queue[count] = target
+      count = count + 1
+    end
+  end
+  let result: list = sort([pc for pc, present in seen])
+  return result
+end
+
+// Group straight-line instructions. Poll once per block; a backward edge can
+// never bypass the next budget/cancellation check or accumulate temporary roots.
+verb native_source/region_blocks(analysis: map, start: int, pcs: list) -> list
+  let leaders: map = {start -> true}
+  let code: list = analysis[:description][:code]
+  for pc in pcs
+    if code[pc][0] == :Branch || code[pc][0] == :Jump
+      for target in analysis[:instructions][pc][:successors]
+        leaders[target] = true
+      end
+    end
+  end
+  let blocks: list = []
+  let current: list = []
+  for pc in pcs
+    if len(current) > 0 && (map_contains_key(leaders, pc) || pc != current[len(current) - 1] + 1)
+      blocks = [@blocks, {:start -> current[0], :pcs -> current, :last -> current[len(current) - 1]}]
+      current = []
+    end
+    current = [@current, pc]
+    if analysis[:instructions][pc][:boundary] || native/contains([:Return, :Branch, :Jump], code[pc][0])
+      blocks = [@blocks, {:start -> current[0], :pcs -> current, :last -> pc}]
+      current = []
+    end
+  end
+  native/ensure(len(current) == 0, "source region has an unterminated final block")
+  return blocks
+end
+
+verb native_source/regions(analysis: map) -> list
+  let parameters: list = []
+  let reg: int = 0
+  while reg < analysis[:parameters]
+    parameters = [@parameters, reg]
+    reg = reg + 1
+  end
+  let origins: list = [[0, -1, parameters, -1]]
+  for pc in sort([pc for pc, captures in analysis[:captures]])
+    let targets: list = analysis[:instructions][pc][:successors]
+    native/ensure(len(targets) == 1, "source boundary requires one resumption target")
+    origins = [@origins, [targets[0], pc, analysis[:captures][pc], analysis[:description][:code][pc][1]]]
+  end
+  let regions: list = []
+  for [start, resume, restore, input] in origins
+    let pcs: list = native_source/region_instructions(analysis, start)
+    regions = [@regions, {:start -> start, :resume -> resume, :restore -> restore, :input -> input,
+      :pcs -> pcs, :blocks -> native_source/region_blocks(analysis, start, pcs)}]
+  end
+  return regions
+end
+verb native_source/continuations(program: map) -> map
+  let result: map = {}
+  let index: int = 0
+  for region in program[:regions]
+    if region[:resume] >= 0
+      result[region[:resume]] = string_concat(program[:name], "_", to_literal(index))
+    end
+    index = index + 1
+  end
+  return result
+end

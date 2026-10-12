@@ -33,40 +33,6 @@ verb native_source/dead_load(analysis: map, pc: int) -> bool
   return true
 end
 
-// A region has one native entry and ends at a return or committed suspension.
-// Branch lowering is not implemented here yet; diagnose it before generating
-// a partial module. The analysis itself already handles general control flow.
-verb native_source/regions(analysis: map) -> list
-  let regions: list = []
-  let start: int = 0
-  let restore: list = []
-  let index: int = 0
-  while index < analysis[:parameters]
-    restore = [@restore, index]
-    index = index + 1
-  end
-  let input: int = -1
-  let code: list = analysis[:description][:code]
-  let pc: int = 0
-  while pc < len(code)
-    if !map_contains_key(analysis[:reachable], pc)
-      pc = pc + 1
-      continue
-    end
-    native/ensure(code[pc][0] != :Branch && code[pc][0] != :Jump, "native source branch lowering is not implemented")
-    if analysis[:instructions][pc][:boundary] || code[pc][0] == :Return
-      regions = [@regions, {:start -> start, :last -> pc, :restore -> restore, :input -> input}]
-      start = pc + 1
-      if analysis[:instructions][pc][:boundary]
-        restore = analysis[:captures][pc]
-        input = code[pc][1]
-      end
-    end
-    pc = pc + 1
-  end
-  return regions
-end
-
 verb native_source/program_literals(analysis: map, initial: list) -> list
   let pool: list = initial
   let code: list = analysis[:description][:code]

@@ -51,6 +51,16 @@ static void source_conformance(void) {
         assert(mica_memory_safepoint(&worker, true));
         source_cases[i].check(mica_value_root_get(&result), &symbols);
     }
+    // An infinite source loop must still honour the task's instruction budget.
+    struct mica_ValueResult empty = mica_value_list(&worker, NULL, 0);
+    assert(empty.f_ok);
+    image.f_pointer = (void *)mica_task_new_Image(&worker, source_spin_entry,
+        (void *)code.f_pointer, tenant, empty.f_value, 0, NULL, NULL, 0, NULL, NULL);
+    assert(image.f_pointer);
+    struct mica_TaskControl limited = {0};
+    assert(mica_task_init(&limited, &worker, &kernel, &image, 100, 0, 16, &runtime) == 0);
+    assert(mica_task_execute(&limited, &worker) == 10);
+    assert(mica_task_release(&limited, &worker));
     assert(mica_kernel_release(&kernel, &worker));
     assert(mica_memory_root_pop(&worker, &result));
     assert(mica_memory_root_pop(&worker, &image));

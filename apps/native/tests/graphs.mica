@@ -1,0 +1,34 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+verb native/graph_example() -> map
+  let [constants: map, state: map] = native/constants(native/program(), [
+    ["zero", :U64, "0000000000000000"], ["one", :U64, "0000000000000001"]])
+  let module: map = native/module_context(state, constants)
+  module = native/declare_function(module, "graph_sum", :U64, [["limit", :U64, :Value]], [], [], :Value, "")
+  let builder: map = native_gen/context(module, "graph_sum")
+  let [sum: map, with_sum: map] = native_gen/bind(builder, "sum", native_gen/ref(builder, "zero"))
+  let [index: map, ready: map] = native_gen/bind(with_sum, "index", native_gen/ref(with_sum, "zero"))
+  // Deliberately place the exit before the entry. Labels, not list positions,
+  // determine execution order; mutations belong to the enclosing frame.
+  builder = native_gen/graph(ready, "test", [
+    ["done", fn(done) => native_gen/return_value(done, sum)],
+    ["test", fn(test) => native_gen/branch_to(test, native_gen/less(index, native_gen/ref(test, "limit")), "body", "done")],
+    ["body", fn(body)
+      let step: map = native_gen/assign(body, sum, native_gen/add(sum, index))
+      step = native_gen/assign(step, index, native_gen/add(index, native_gen/ref(step, "one")))
+      return native_gen/jump_to(step, "test")
+    end]])
+  module = native_gen/finish(module, builder)
+  module = native/declare_function(module, "graph_skip", :U64, [["limit", :U64, :Value]], [], [], :Value, "")
+  module = native/define_function(module, "graph_skip", [
+    native/let_statement("sum", :U64, "zero"),
+    @native/for_range("index", "zero", "limit", [native/graph_statement("step", [
+      ["step", [
+        native/when_statement(native/binary_expression(:Equal, "index", "one"), [native/continue_statement()]),
+        native/set_statement("sum", native/binary_expression(:Add, "sum", "index")),
+        native/continue_statement()]]])]),
+    native/return_value("sum")])
+  let result: map = module[:state]
+  return result
+end

@@ -6,12 +6,12 @@
 verb native_source/define_entries(input: map) -> map
   let module: map = input
   for program in module[:source_programs]
+    let continuations: map = native_source/continuations(program)
     let index: int = 0
     for region in program[:regions]
       let name: string = string_concat(program[:name], "_", to_literal(index))
-      let next: string = string_concat(program[:name], "_", to_literal(index + 1))
-      module = native_source/region_body(module, program[:analysis], region, name, next)
-      module = native_source/entry_body(module, program[:analysis], region, name)
+      module = native_source/region_body(module, program[:analysis], region, name, continuations)
+      module = native_source/entry_body(module, name)
       index = index + 1
     end
   end

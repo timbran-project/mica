@@ -398,6 +398,46 @@ verb native_gen/branch(input: map, condition: map, yes, no) -> map
   return builder
 end
 
+// Labels are confined to one graph; block callbacks retain the same lexical
+// isolation as if/else arms. Only bindings from the enclosing scope cross edges.
+verb native_gen/graph(input: map, entry: string, blocks: list) -> map
+  let labels: map = {}
+  for block in blocks
+    native/ensure(is_kind(block, :list) && len(block) == 2 && is_kind(block[0], :string), "generated graph requires labels and callbacks")
+    native/ensure(!map_contains_key(labels, block[0]), "duplicate graph label")
+    labels[block[0]] = true
+  end
+  native/ensure(map_contains_key(labels, entry), "unknown graph entry")
+  let builder: map = input
+  builder[:graph_labels] = labels
+  let bodies: list = []
+  for block in blocks
+    let [body: list, closed: bool, following: map] = native_gen/body(builder, block[1])
+    native/ensure(closed, "generated graph block can fall through")
+    bodies = [@bodies, [block[0], body]]
+    builder = following
+  end
+  builder[:graph_labels] = index_or(input, :graph_labels, {})
+  builder = native_gen/emit(builder, native/graph_statement(entry, bodies))
+  builder[:closed] = true
+  return builder
+end
+verb native_gen/jump_to(input: map, target: string) -> map
+  native/ensure(map_contains_key(input, :graph_labels) && map_contains_key(input[:graph_labels], target), "unknown generated graph target")
+  let result: map = native_gen/emit(input, native/jump_statement(target))
+  result[:closed] = true
+  return result
+end
+verb native_gen/branch_to(input: map, condition: map, yes: string, no: string) -> map
+  native/ensure(condition[:type] == :Bool, "generated graph branch requires Bool")
+  for target in [yes, no]
+    native/ensure(map_contains_key(input, :graph_labels) && map_contains_key(input[:graph_labels], target), "unknown generated graph target")
+  end
+  let result: map = native_gen/emit(input, native/branch_statement(native_gen/syntax(input, condition), yes, no))
+  result[:closed] = true
+  return result
+end
+
 // Each switch arm owns its lexical bindings, just like a conditional branch.
 // Labels must refer to module constants of the selector's integer type.
 verb native_gen/switch(input: map, value: map, cases: list, fallback) -> map

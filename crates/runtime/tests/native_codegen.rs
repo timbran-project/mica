@@ -1664,6 +1664,90 @@ return native/emit_c(state)
 }
 
 #[test]
+fn graph_builders_scope_labels_and_reconstruct_loops() {
+    for interpreter_only in [true, false] {
+        let mut runner = runner(interpreter_only);
+        runner
+            .run_filein(include_str!("../../../apps/native/tests/graphs.mica"))
+            .unwrap();
+        let generated = eval(&mut runner, "return native/emit_c(native/graph_example())")
+            .with_str(str::to_owned)
+            .unwrap();
+        assert!(generated.contains("while ("), "{generated}");
+        assert!(!generated.contains("goto "), "{generated}");
+        let scratch = Scratch::new();
+        let source = scratch.0.join("graph.c");
+        let binary = scratch.0.join("graph");
+        fs::write(&source, format!("{generated}\n#include <assert.h>\nint main(void) {{ for (uint64_t n = 0; n < 100; ++n) {{ uint64_t sum = n * (n - 1) / 2; assert(mica_graph_sum(n) == sum); assert(mica_graph_skip(n) == sum - (n > 1 ? 1 : 0)); }} }}\n")).unwrap();
+        let compiled = Command::new("cc")
+            .args([
+                "-std=c11",
+                "-Wall",
+                "-Wextra",
+                "-Werror",
+                "-pedantic",
+                "-fsanitize=undefined",
+                "-fno-sanitize-recover=all",
+            ])
+            .arg(&source)
+            .arg("-o")
+            .arg(&binary)
+            .output()
+            .unwrap();
+        assert!(
+            compiled.status.success(),
+            "{}",
+            String::from_utf8_lossy(&compiled.stderr)
+        );
+        let executed = Command::new(&binary).output().unwrap();
+        assert!(
+            executed.status.success() && executed.stderr.is_empty(),
+            "{executed:?}"
+        );
+        for (blocks, expected) in [
+            (
+                "[[\"entry\", fn(b) => native_gen/jump_to(b, \"missing\")]]",
+                "unknown generated graph target",
+            ),
+            ("[[\"entry\", fn(b) => b]]", "block can fall through"),
+            (
+                "[[\"entry\", fn(b) => native_gen/return_zero(b)], [\"entry\", fn(b) => native_gen/return_zero(b)]]",
+                "duplicate graph label",
+            ),
+        ] {
+            let message = eval(
+                &mut runner,
+                &format!(
+                    r#"
+let module = native/module_context(native/program(), {{}})
+module = native/declare_function(module, "invalid", :U64, [], [], [], :Value, "")
+try
+  native_gen/graph(native_gen/context(module, "invalid"), "entry", {blocks})
+  return "accepted"
+catch E_INVARG as problem
+  return native/error_message(problem)
+end
+"#
+                ),
+            )
+            .with_str(str::to_owned)
+            .unwrap();
+            assert!(message.contains(expected), "{message}");
+        }
+        assert_eq!(
+            eval(
+                &mut runner,
+                r#"
+let renamed = native/rename_bindings(native/graph_statement("value", [["value", [native/branch_statement("value", "yes", "value")]], ["yes", [native/return_value("value")]]]), {"value" -> "renamed"})
+return renamed == native/graph_statement("value", [["value", [native/branch_statement("renamed", "yes", "value")]], ["yes", [native/return_value("renamed")]]])
+"#
+            ),
+            Value::bool(true)
+        );
+    }
+}
+
+#[test]
 fn native_early_return_chains_do_not_consume_bootstrap_call_depth() {
     for interpreter_only in [true, false] {
         let mut runner = runner(interpreter_only);
@@ -2112,6 +2196,7 @@ fn native_tasks_execute_on_both_mica_tiers() {
 
 #[test]
 fn native_source_analysis_tracks_continuations_and_definite_assignment() {
+    let (conformance_source, _, _) = source_expression_cases();
     for interpreter_only in [true, false] {
         let mut runner = runner(interpreter_only);
         for source in [
@@ -2120,6 +2205,7 @@ fn native_source_analysis_tracks_continuations_and_definite_assignment() {
             include_str!("../../../apps/compiler/ast.mica"),
             include_str!("../../../apps/compiler/emit.mica"),
             include_str!("../../../apps/native/compiler/analysis.mica"),
+            include_str!("../../../apps/native/compiler/flow.mica"),
             include_str!("../../../apps/native/compiler/builders.mica"),
             include_str!("../../../apps/native/compiler/operations.mica"),
             include_str!("../../../apps/native/compiler/expressions.mica"),
@@ -2151,7 +2237,7 @@ let regions = native_source/regions(parent)
 native/ensure(len(regions) == 3, "parent lowers to three native entries")
 native/ensure(regions[0][:restore] == [] && regions[0][:input] == -1, "initial entry has no reply")
 for index in 1..2
-  let previous = regions[index - 1][:last]
+  let previous = regions[index][:resume]
   native/ensure(regions[index][:restore] == parent[:captures][previous], "region restores only live captured registers")
   native/ensure(regions[index][:input] == module[:entry][:code][previous][1], "region receives delivered result")
 end
@@ -2181,6 +2267,35 @@ return true
             ),
         );
         assert_eq!(checked, Value::bool(true));
+        assert_eq!(
+            eval(
+                &mut runner,
+                &format!(
+                    r#"
+let parsed = parse_rows({conformance_source:?})
+native/ensure(parsed[:errors] == [], to_literal(parsed[:errors]))
+let emitted = emit_program(parsed[:rows], parsed[:root])
+native/ensure(emitted[:errors] == [], to_literal(emitted[:errors]))
+for definition in emitted[:methods]
+  let analysis = native_source/analyse(definition[:program], len(definition[:parameters]))
+  for region in native_source/regions(analysis)
+    let starts = native_source/set([block[:start] for block in region[:blocks]])
+    native/ensure(map_contains_key(starts, region[:start]), "region entry requires a block")
+    for block in region[:blocks]
+      if !analysis[:instructions][block[:last]][:boundary]
+        for target in analysis[:instructions][block[:last]][:successors]
+          native/ensure(map_contains_key(starts, target), "native edge must reach a block start")
+        end
+      end
+    end
+  end
+end
+return true
+"#
+                )
+            ),
+            Value::bool(true)
+        );
         for (description, expected) in [
             (
                 "{:registers -> 2, :code -> [[:Load, 0, true], [:Branch, 0, 2, 3], [:Load, 1, 42], [:Return, [:Register, 1]]]}",
@@ -2230,6 +2345,14 @@ fn source_expression_cases() -> (String, String, String) {
         "left <= right",
         "left > right",
         "left >= right",
+        "if left < right\n 1\nelseif left == right\n 2\nelse\n 3\nend",
+        "begin\n let seen = 0\n let result = left && begin\n seen = seen + 1\n right\n end\n [result, seen]\nend",
+        "begin\n let seen = 0\n let result = left || begin\n seen = seen + 1\n right\n end\n [result, seen]\nend",
+        "begin\n let total = 0\n let i = 0\n let saved = [left, right]\n while i < left\n i = i + 1\n if i == 3\n continue\n end\n if i == right\n break\n end\n let item = [i, saved]\n total = total + item[0]\n end\n [total, i, saved]\nend",
+        "begin\n let total = 0\n let i = 0\n while i < left\n let j = 0\n i = i + 1\n while j < right\n j = j + 1\n if i == j\n continue\n end\n total = total + 1\n end\n end\n total\nend",
+        "begin\n if left < 0\n return left\n end\n if right < 0\n return right\n end\n left + right\nend",
+        "if left\n right / 0\nelse\n right\nend",
+        "left && (right / 0)",
     ];
     let mut cases: Vec<(usize, Vec<&str>)> = Vec::new();
     for value in ["7", "2.5", "-36028797018963968", "true"] {
@@ -2294,6 +2417,34 @@ fn source_expression_cases() -> (String, String, String) {
         }
     }
     let mut source = String::new();
+    for operands in [["0", "1"], ["1", "1"], ["2", "1"]] {
+        cases.push((13, operands.to_vec()));
+    }
+    for operation in [14, 15] {
+        for operands in [
+            ["false", "7"],
+            ["true", "8"],
+            ["0", "9"],
+            ["[]", "10"],
+            ["[1]", "11"],
+        ] {
+            cases.push((operation, operands.to_vec()));
+        }
+    }
+    for operands in [["0", "8"], ["10", "8"], ["1000", "2000"]] {
+        cases.push((16, operands.to_vec()));
+    }
+    for operands in [["0", "5"], ["3", "4"], ["10", "8"]] {
+        cases.push((17, operands.to_vec()));
+    }
+    for operands in [["-1", "8"], ["7", "-2"], ["7", "8"]] {
+        cases.push((18, operands.to_vec()));
+    }
+    for operation in [19, 20] {
+        for operands in [["false", "3"], ["true", "3"]] {
+            cases.push((operation, operands.to_vec()));
+        }
+    }
     let mut ids = vec!["[602, 8003]".to_owned()];
     for (index, operation) in operations.iter().enumerate() {
         let parameters = if index < 2 { "value" } else { "left, right" };
@@ -2304,6 +2455,9 @@ fn source_expression_cases() -> (String, String, String) {
     }
     let mut oracle = SourceRunner::new_empty().with_interpreter_only(true);
     let mut checks = String::new();
+    source.push_str("\nverb native_control_spin()\n while true\n end\nend\n");
+    ids.push("[1100, 10100]".to_owned());
+    checks.push_str(&format!("static uint64_t (*const source_spin_entry)(struct mica_TaskAttempt *) = mica_source_roundtrip_method_{}_0;\n", operations.len() + 1));
     let mut entries = Vec::new();
     for (index, (operation, operands)) in cases.iter().enumerate() {
         let expression = operations[*operation];
@@ -2480,6 +2634,7 @@ fn native_source_program_executes_on_generated_runtime() {
         for source in [
             include_str!("../../../apps/compiler/emit.mica"),
             include_str!("../../../apps/native/compiler/analysis.mica"),
+            include_str!("../../../apps/native/compiler/flow.mica"),
             include_str!("../../../apps/native/compiler/builders.mica"),
             include_str!("../../../apps/native/compiler/operations.mica"),
             include_str!("../../../apps/native/compiler/expressions.mica"),
@@ -2503,15 +2658,17 @@ fn native_source_program_executes_on_generated_runtime() {
         let generated = eval(&mut runner, &format!(
             "let module = native_source/compile(native_tasks/definitions(), \"source_roundtrip\", {example:?}, {{:NativeResult -> 705}}, {method_ids})\nreturn native/emit_c(module[:state])"
         )).with_str(str::to_owned).unwrap();
-        if let Some(previous) = &previous {
-            assert_eq!(&generated, previous);
-        }
-        previous = Some(generated.clone());
         eprintln!(
             "native source: interpreter_only={interpreter_only}, generation={:?}, C bytes={}",
             generation_started.elapsed(),
             generated.len()
         );
+        if let Some(previous) = &previous {
+            assert_eq!(&generated, previous);
+            // Identical C has already passed the compiler and execution checks.
+            continue;
+        }
+        previous = Some(generated.clone());
         let memory = eval(&mut runner, "return native_memory/platform()")
             .with_str(str::to_owned)
             .unwrap();
@@ -2571,6 +2728,7 @@ fn native_source_program_executes_on_generated_runtime() {
             .unwrap();
         assert!(executed.status.success(), "{executed:?}");
         assert!(executed.stderr.is_empty(), "{executed:?}");
+        eprintln!("native source: sanitizer execution passed");
     }
 }
 

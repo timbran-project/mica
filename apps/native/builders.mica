@@ -134,6 +134,18 @@ verb native/case_arm(value: string, body: list) -> list
   return [value, body]
 end
 
+// A graph owns its labels. Every block terminates; ordinary structured
+// statements can appear inside blocks, and C emission reconstructs their flow.
+verb native/graph_statement(entry: string, blocks: list) -> list
+  return [:Graph, entry, blocks]
+end
+verb native/jump_statement(target: string) -> list
+  return [:JumpTo, target]
+end
+verb native/branch_statement(condition, yes: string, no: string) -> list
+  return [:BranchTo, native/statement_expression(condition), yes, no]
+end
+
 verb native/return_value(value) -> list
   return [:Return, native/statement_expression(value)]
 end
@@ -297,13 +309,15 @@ verb native/advance_on_continue(body: list, advance: list) -> list
     elseif item[0] == :Switch
       item[3] = [[arm[0], native/advance_on_continue(arm[1], advance)] for arm in item[3]]
       item[4] = native/advance_on_continue(item[4], advance)
+    elseif item[0] == :Graph
+      item[2] = [[block[0], native/advance_on_continue(block[1], advance)] for block in item[2]]
     end
     result = [@result, item]
   end
   return result
 end
 
-verb native/body_falls_through(body: list, ?transfers: list = [:Return, :TailCall, :Break, :Continue]) -> bool
+verb native/body_falls_through(body: list, ?transfers: list = [:Return, :TailCall, :Break, :Continue, :Graph, :JumpTo, :BranchTo]) -> bool
   if len(body) == 0
     return true
   end
@@ -384,6 +398,9 @@ verb native/rename_bindings(tree, names: map)
   if !is_kind(tree, :list) || len(tree) == 0
     return tree
   end
+  if tree[0] == :Graph
+    return [:Graph, tree[1], [[block[0], native/rename_bindings(block[1], names)] for block in tree[2]]]
+  end
   let result: list = []
   let index: int = 0
   for item in tree
@@ -391,6 +408,7 @@ verb native/rename_bindings(tree, names: map)
     literal = literal || ((tree[0] == :Field || tree[0] == :FieldPointer) && index == 2)
     literal = literal || ((tree[0] == :Call || tree[0] == :FunctionAddress || tree[0] == :GlobalAddress || tree[0] == :SizeOf || tree[0] == :AlignOf) && index == 1)
     literal = literal || (tree[0] == :Switch && index == 1) || tree[0] == :Note
+    literal = literal || tree[0] == :JumpTo || (tree[0] == :BranchTo && index >= 2)
     if literal
       result = [@result, item]
     else
@@ -446,6 +464,32 @@ verb native/body_end(input: map, opcode: symbol, args: list) -> map
   native/ensure(context[:block] != :Closed, "statement after control flow terminates")
   context[:state] = native/terminate(context[:state], context[:block], opcode, args)
   context[:block] = :Closed
+  return context
+end
+
+verb native/body_target(context: map, label: string) -> int
+  native/ensure(map_contains_key(context, :graph_targets) && map_contains_key(context[:graph_targets], label), "unknown graph target")
+  let result: int = context[:graph_targets][label]
+  return result
+end
+verb native/body_graph(input: map, entry: string, blocks: list) -> map
+  let context: map = input
+  let targets: map = {}
+  for block in blocks
+    native/ensure(is_kind(block, :list) && len(block) == 2 && is_kind(block[0], :string), "graph block requires a label and body")
+    native/identifier(block[0])
+    native/ensure(!map_contains_key(targets, block[0]), "duplicate graph label")
+    let [id: int, declared: map] = native/body_block(context, block[0], false)
+    targets[block[0]] = id
+    context = declared
+  end
+  context[:graph_targets] = targets
+  context = native/body_end(context, :Jump, [native/body_target(context, entry)])
+  for block in blocks
+    context = native/body_statements(native/body_enter(context, targets[block[0]]), block[1])
+    native/ensure(context[:block] == :Closed, "graph block can fall through")
+  end
+  context[:graph_targets] = index_or(input, :graph_targets, {})
   return context
 end
 
@@ -619,6 +663,22 @@ verb native/body_statements(input: map, statements: list) -> map
     native/ensure(is_kind(statement, :list) && len(statement) > 0, "invalid structured statement")
     let op = statement[0]
     let arities: map = {:Let -> 4, :Set -> 3, :Do -> 2, :If -> 4, :While -> 3, :Switch -> 5, :Break -> 1, :Continue -> 1, :Note -> 3}
+    if op == :Graph
+      native/ensure(len(statement) == 3, "graph requires an entry label and blocks")
+      context = native/body_graph(context, statement[1], statement[2])
+      continue
+    end
+    if op == :JumpTo
+      native/ensure(len(statement) == 2, "graph jump requires a target")
+      context = native/body_end(context, :Jump, [native/body_target(context, statement[1])])
+      continue
+    end
+    if op == :BranchTo
+      native/ensure(len(statement) == 4, "graph branch requires a condition and two targets")
+      let [condition: int, ready: map] = native/body_value(context, :Bool, statement[1])
+      context = native/body_end(ready, :Branch, [condition, native/body_target(ready, statement[2]), native/body_target(ready, statement[3])])
+      continue
+    end
     if op == :TailCall
       native/ensure(len(statement) == 3, "transfer requires callee and argument list")
       let args: list = [native/body_binding(context, statement[1])]

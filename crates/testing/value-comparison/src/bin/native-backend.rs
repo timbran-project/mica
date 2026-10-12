@@ -169,6 +169,7 @@ fn run() -> Result<()> {
         "../compiler/ast",
         "../compiler/emit",
         "compiler/analysis",
+        "compiler/flow",
         "compiler/builders",
         "compiler/operations",
         "compiler/expressions",

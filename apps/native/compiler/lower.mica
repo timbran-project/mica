@@ -70,24 +70,48 @@ verb native_source/emit_boundary(builder: map, instruction: list, continuation: 
   return result
 end
 
-verb native_source/region_body(module: map, program: map, region: map, name: string, continuation: string) -> map
+// A block owns temporary roots only while its instructions execute. Source
+// registers remain rooted in the region prologue and carry values across edges.
+verb native_source/block_body(builder: map, program: map, block: map, continuations: map) -> map
+  let ready: map = native_source/checked(builder, "task_poll", [native_tasks/attempt(builder), native_source/number(builder, len(block[:pcs]))])
+  let code: list = program[:description][:code]
+  let last: int = block[:last]
+  let terminal: bool = program[:instructions][last][:boundary] || native/contains([:Return, :Branch, :Jump], code[last][0])
+  ready = native_roots/temporary(ready, fn(body)
+    let current: map = body
+    for pc in block[:pcs]
+      if !(pc == last && terminal) && !native_source/dead_load(program, pc)
+        current = native_source/emit_instruction(current, code[pc])
+      end
+    end
+    return current
+  end)
+  if !terminal
+    let result: map = native_gen/jump_to(ready, native_source/block_label(last + 1))
+    return result
+  end
+  let instruction: list = code[last]
+  if instruction[0] == :Jump
+    let result: map = native_gen/jump_to(ready, native_source/block_label(instruction[1]))
+    return result
+  end
+  if instruction[0] == :Branch
+    let condition: map = native_source/truthy(ready, native_source/register(ready, instruction[1]))
+    let result: map = native_gen/branch_to(ready, condition, native_source/block_label(instruction[2]), native_source/block_label(instruction[3]))
+    return result
+  end
+  let continuation: string = index_or(continuations, last, "")
+  let captures: list = index_or(program[:captures], last, [])
+  let result: map = native_source/emit_boundary(ready, instruction, continuation, captures)
+  return result
+end
+verb native_source/region_body(module: map, program: map, region: map, name: string, continuations: map) -> map
   let builder: map = native_source/context(module, string_concat(name, "_body"))
   builder[:source_registers] = {}
   builder = native_tasks/check(builder, native_gen/negate(native_kernel/absent(native_tasks/attempt_field(builder, "runtime"))), "closed")
   builder = native_source/restore_frame(builder, program, region)
-  builder = native_source/checked(builder, "task_poll", [native_tasks/attempt(builder), native_source/number(builder, region[:last] - region[:start] + 1)])
-  let pc: int = region[:start]
-  while pc < region[:last]
-    if !native_source/dead_load(program, pc)
-      builder = native_source/emit_instruction(builder, program[:description][:code][pc])
-    end
-    pc = pc + 1
-  end
-  let captures: list = []
-  if map_contains_key(program[:captures], pc)
-    captures = program[:captures][pc]
-  end
-  builder = native_source/emit_boundary(builder, program[:description][:code][pc], continuation, captures)
+  let blocks: list = [[native_source/block_label(block[:start]), fn(body) => native_source/block_body(body, program, block, continuations)] for block in region[:blocks]]
+  builder = native_gen/graph(builder, native_source/block_label(region[:start]), blocks)
   let result: map = native_gen/finish(module, builder)
   return result
 end
