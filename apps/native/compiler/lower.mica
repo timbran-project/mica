@@ -1,152 +1,72 @@
 // Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-verb native_source/raise_error(builder: map, code, value: map) -> map
-  let encoded: map = native_source/literal(builder, code)
-  let number: map = native_gen/convert(:U32, native_gen/expression(:U64, :Payload, [encoded]))
-  let [error: map, ready: map] = native_source/result(builder, "value_error", [native_roots/worker(builder), number,
-    native_gen/ref(builder, "false"), native_gen/zero(native_value/word()), native_gen/ref(builder, "true"), value], "oom")
-  let [retained: map, rooted: map] = native_roots/retain(ready, "error", error)
-  let result: map = native_roots/return_value(rooted, native_gen/call(rooted, "task_raise", [native_tasks/attempt(rooted), native_roots/worker(rooted), retained]))
-  return result
-end
-verb native_source/check_kind(builder: map, value: map, kind: symbol) -> map
-  let spelling: string = native_source/symbol_text(kind)
-  let condition: map = native_gen/equal(native_gen/call(builder, "value_kind", [value]), native_gen/ref(builder, string_concat("tag_", spelling)))
-  let result: map = native_gen/unless(builder, condition, fn(wrong) => native_source/raise_error(wrong, E_TYPE, value))
-  return result
-end
-verb native_source/index(builder: map, collection: map, key: map) -> list
-  let ready: map = native_source/check_kind(builder, collection, :list)
-  ready = native_source/check_kind(ready, key, :int)
-  let [decoded: map, checked: map] = native_gen/bind(ready, "index", native_gen/call(ready, "value_as_int", [key]))
-  let index: map = native_gen/convert(:U64, native_gen/field(checked, decoded, "number"))
-  let [value: map, found: map] = native_gen/checked_bind(checked, "element", native_gen/call(checked, "value_list_get", [collection, index]), "ok",
-    fn(missing) => native_source/raise_error(missing, E_RANGE, key))
-  return [native_gen/field(found, value, "value"), found]
-end
-verb native_source/builtin(builder: map, name: symbol, args: list) -> list
-  let hub: map = native_source/service(builder, "mailboxes")
-  let worker: map = native_roots/worker(builder)
-  let ready: map = native_tasks/check(builder, native_gen/negate(native_kernel/absent(hub)), "closed")
-  if name == :mailbox
-    native/ensure(len(args) == 0, "native mailbox expects no arguments")
-    let [caps: map, created: map] = native_gen/bind(ready, "mailbox", native_gen/call(ready, "task_mailbox_create", [hub, worker, native_source/service(ready, "mailbox_capacity")]))
-    ready = native_gen/unless(created, native_kernel/absent(native_gen/field(created, caps, "status")), fn(failed) => native_roots/return_value(failed, native_gen/field(failed, caps, "status")))
-    let result: list = native_source/list(ready, [native_gen/field(ready, caps, "receiver"), native_gen/field(ready, caps, "sender")])
+// Translate frontend instructions into semantic runtime builders. Register
+// storage, native call conventions, and continuation images live behind helpers.
+verb native_source/value_instruction(builder: map, instruction: list) -> list
+  let op: symbol = instruction[0]
+  if op == :Load
+    return [native_source/literal(builder, instruction[2]), builder]
+  end
+  if op == :Move
+    return [native_source/register(builder, instruction[2]), builder]
+  end
+  if op == :BuildList
+    let result: list = native_source/list(builder, native_source/operands(builder, instruction[2]))
     return result
   end
-  if name == :mailbox_send
-    native/ensure(len(args) == 2, "native mailbox_send expects sender and value")
-    ready = native_source/checked(ready, "task_mailbox_validate_sender", [hub, worker, args[0]])
-    ready = native_source/checked(ready, "task_stage", [worker, native_tasks/slot(ready, "effects"), native_gen/ref(ready, "task_effect_send"), args[0], args[1]])
-    return [args[1], ready]
+  if op == :Index
+    let result: list = native_source/index(builder, native_source/register(builder, instruction[2]), native_source/operand(builder, instruction[3]))
+    return result
   end
-  native/ensure(name == :mailbox_close && len(args) == 1, string_concat("unsupported native source builtin: ", to_literal(name)))
-  ready = native_source/checked(ready, "task_mailbox_close", [hub, worker, args[0]])
-  return [native_source/literal(ready, [] {[]}), ready]
+  if op == :BuiltinCall
+    let result: list = native_source/builtin(builder, instruction[2], native_source/operands(builder, instruction[3]))
+    return result
+  end
+  native/ensure(false, string_concat("unsupported native source lowering: ", to_literal(op)))
+  return []
 end
-
 verb native_source/emit_instruction(builder: map, instruction: list) -> map
   let op: symbol = instruction[0]
-  let ready: map = builder
-  let value: map = native_gen/zero(native_value/word())
   if op == :CheckKind
-    let result: map = native_source/check_kind(ready, native_source/register(ready, instruction[1]), instruction[2])
+    let result: map = native_source/check_kind(builder, native_source/register(builder, instruction[1]), instruction[2])
     return result
   end
   if op == :AssertDynamic || op == :RetractDynamic
-    let [row: map, built: map] = native_source/list(ready, native_source/operands(ready, instruction[2]))
-    let [retained: map, rooted: map] = native_roots/retain(built, "row", row)
     let present: string = "true"
     if op == :RetractDynamic
       present = "false"
     end
-    let result: map = native_source/checked(rooted, "kernel_write", [native_tasks/slot(rooted, "transaction"),
-      native_source/number(rooted, instruction[1]), retained, native_gen/ref(rooted, present)])
+    let result: map = native_source/write_fact(builder, native_tasks/slot(builder, "transaction"),
+      native_source/number(builder, instruction[1]), native_source/operands(builder, instruction[2]), native_gen/ref(builder, present))
     return result
   end
-  if op == :Load
-    value = native_source/literal(ready, instruction[2])
-  elseif op == :Move
-    value = native_source/register(ready, instruction[2])
-  elseif op == :BuildList
-    let [list: map, built: map] = native_source/list(ready, native_source/operands(ready, instruction[2]))
-    value = list
-    ready = built
-  elseif op == :Index
-    let [element: map, found: map] = native_source/index(ready, native_source/register(ready, instruction[2]), native_source/operand(ready, instruction[3]))
-    value = element
-    ready = found
-  elseif op == :BuiltinCall
-    let [returned: map, called: map] = native_source/builtin(ready, instruction[2], native_source/operands(ready, instruction[3]))
-    value = returned
-    ready = called
-  else
-    native/ensure(false, string_concat("unsupported native source lowering: ", to_literal(op)))
-  end
+  let [value: map, ready: map] = native_source/value_instruction(builder, instruction)
   let result: map = native_source/assign(ready, instruction[1], value)
   return result
 end
 verb native_source/emit_boundary(builder: map, instruction: list, continuation: string, captures: list) -> map
   let op: symbol = instruction[0]
   if op == :Return
-    let result: map = native_roots/return_value(builder, native_gen/call(builder, "task_return", [
-      native_roots/worker(builder), native_tasks/attempt(builder), native_source/operand(builder, instruction[1])]))
+    let result: map = native_source/complete(builder, native_source/operand(builder, instruction[1]))
     return result
   end
-  // Operands still refer to this native frame's roots after current changes.
-  let ready: map = builder
   if op == :SpawnDispatch
     native/ensure(instruction[4] == none, "native source delayed spawn lowering is not implemented")
-    let fields: list = [[native_source/literal(ready, role[0]), native_source/operand(ready, role[1])] for role in instruction[3]]
-    let [roles: map, built: map] = native_literal/map(ready, fields, fn(failed) => native_tasks/attempt_status(failed, "oom"))
-    let [retained: map, rooted: map] = native_roots/retain(built, "roles", roles)
-    ready = native_source/capture(rooted, continuation, captures)
-    let result: map = native_roots/return_value(ready, native_gen/call(ready, "task_spawn_request", [native_roots/worker(ready), native_tasks/attempt(ready),
-      native_source/operand(ready, instruction[2]), retained, native_gen/ref(ready, "zero")]))
+    let roles: list = [[native_source/literal(builder, role[0]), native_source/operand(builder, role[1])] for role in instruction[3]]
+    let result: map = native_source/spawn_task(builder, native_source/operand(builder, instruction[2]), roles, continuation, captures)
     return result
   end
   native/ensure(op == :MailboxRecv && instruction[3] == none, "unsupported native source suspension")
-  ready = native_source/capture(ready, continuation, captures)
-  let result: map = native_roots/return_value(ready, native_gen/call(ready, "task_mailbox_request", [native_source/service(ready, "mailboxes"),
-    native_roots/worker(ready), native_tasks/attempt(ready), native_source/operand(ready, instruction[2]), native_gen/ref(ready, "kernel_unlimited")]))
+  let result: map = native_source/receive(builder, native_source/operand(builder, instruction[2]), continuation, captures)
   return result
 end
 
 verb native_source/region_body(module: map, program: map, region: map, name: string, continuation: string) -> map
-  let builder: map = native_roots/context(module, string_concat(name, "_body"), fn(failed, reason) => native_tasks/attempt_status(failed, reason))
-  builder[:source_prefix] = module[:source_prefix]
-  builder[:source_literals] = module[:source_literals]
+  let builder: map = native_source/context(module, string_concat(name, "_body"))
   builder[:source_registers] = {}
   builder = native_tasks/check(builder, native_gen/negate(native_kernel/absent(native_tasks/attempt_field(builder, "runtime"))), "closed")
-  let registers: map = {}
-  let needed: map = {}
-  if map_contains_key(program[:captures], region[:last])
-    needed = native_source/set(program[:captures][region[:last]])
-  end
-  for pc in region[:start]..region[:last]
-    if !native_source/dead_load(program, pc)
-      needed = native_source/set([@[reg for reg, present in needed], @program[:instructions][pc][:reads], @program[:instructions][pc][:writes]])
-    end
-  end
-  for reg in sort([reg for reg, present in needed])
-    let [root: map, ready: map] = native_roots/retain(builder, string_concat("r", to_literal(reg)), native_gen/zero(native_value/word()))
-    registers[reg] = root
-    builder = ready
-  end
-  builder[:source_registers] = registers
-  let position: int = 0
-  for reg in region[:restore]
-    if map_contains_key(needed, reg)
-      let environment: map = native_kernel/load_field(builder, native_handlers/current(builder), "environment")
-      builder = native_source/assign(builder, reg, native_query/cell(builder, environment, native_source/number(builder, position)))
-    end
-    position = position + 1
-  end
-  if region[:input] >= 0 && map_contains_key(needed, region[:input])
-    builder = native_source/assign(builder, region[:input], native_kernel/load_field(builder, native_handlers/current(builder), "input"))
-  end
+  builder = native_source/restore_frame(builder, program, region)
   builder = native_source/checked(builder, "task_poll", [native_tasks/attempt(builder), native_source/number(builder, region[:last] - region[:start] + 1)])
   let pc: int = region[:start]
   while pc < region[:last]

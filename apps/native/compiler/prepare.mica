@@ -161,3 +161,70 @@ verb native_source/symbol_text(value: symbol) -> string
   end
   return name
 end
+
+// Resolve the frontend output, collect literals, and plan continuation regions.
+verb native_source/prepare_module(input: map, prefix: string, emitted: map, relations: map, method_ids: list) -> map
+  native/ensure(len(method_ids) == len(emitted[:methods]), "native module requires identities for every definition")
+  let descriptions: list = [[emitted[:entry], 0, string_concat(prefix, "_entry")]]
+  let pool: list = [E_TYPE, E_RANGE, [] {[]}, :dispatch/unrestricted, :required]
+  let numbers: list = []
+  let index: int = 0
+  for definition in emitted[:methods]
+    let position: int = 0
+    pool = native_source/pool(pool, definition[:selector])
+    for parameter in definition[:parameters]
+      native/ensure(parameter[:mode] == :required && parameter[:restriction] == :dispatch/unrestricted,
+        "native source parameter defaults, rest, and restrictions are not lowered yet")
+      pool = native_source/pool(pool, parameter[:role])
+      pool = native_source/pool(pool, position)
+      position = position + 1
+    end
+    native/ensure(len(method_ids[index]) == 2, "native definition requires definition and program identities")
+    numbers = [@numbers, @method_ids[index]]
+    descriptions = [@descriptions, [definition[:program], len(definition[:parameters]), string_concat(prefix, "_method_", to_literal(index))]]
+    index = index + 1
+  end
+  let programs: list = []
+  let maximum: int = 6
+  for [description, parameters, name] in descriptions
+    let linked: map = native_source/link_relations(description, relations)
+    let analysis: map = native_source/analyse(linked, parameters)
+    programs = [@programs, {:analysis -> analysis, :regions -> native_source/regions(analysis), :name -> name}]
+    pool = native_source/program_literals(analysis, pool)
+    if len(description[:code]) > maximum
+      maximum = len(description[:code])
+    end
+    if description[:registers] > maximum
+      maximum = description[:registers]
+    end
+  end
+  if len(pool) > maximum
+    maximum = len(pool)
+  end
+  for name, id in relations
+    numbers = [@numbers, id]
+  end
+  for number in 0..maximum
+    numbers = [@numbers, number]
+  end
+  let module: map = input
+  module[:source_prefix] = prefix
+  module[:source_literals] = pool
+  module[:source_programs] = programs
+  module[:source_method_ids] = method_ids
+  for number in numbers
+    native/ensure(is_kind(number, :int) && number >= 0, "native catalogue and index constants must be nonnegative integers")
+    let [name: string, ready: map] = native_rules/source_number(module, number)
+    module = ready
+  end
+  let prepared: list = []
+  index = 0
+  for value in pool
+    let [literal: map, ready: map] = native_literal/prepare(module, string_concat(prefix, "_literal_", to_literal(index)), native_source/literal_description(value))
+    prepared = [@prepared, literal]
+    module = ready
+    index = index + 1
+  end
+  module[:source_prepared] = prepared
+  return module
+end

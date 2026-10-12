@@ -1,0 +1,86 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+// Build code-owned constants and stage method installation in one transaction.
+verb native_source/constants_body(input: map) -> map
+  let name: string = string_concat(input[:source_prefix], "_constants")
+  let module: map = native_memory/declare(input, string_concat("task_", name), :U64, [
+    ["worker", native_memory/record_pointer("MemoryWorker"), :Borrow],
+    ["symbols", native_memory/record_pointer("SymbolTable"), :Borrow],
+    ["registry", native_tasks/pointer("CodeRegistry"), :Borrow], ["code", native_tasks/pointer("CodeRef"), :Gc]],
+    [@native_tasks/effects(), :Block], :Value, "")
+  let builder: map = native_source/context(module, string_concat("task_", name))
+  let values: list = []
+  for literal in module[:source_prepared]
+    let [value: map, emitted: map] = native_literal/emit(builder, literal, native_gen/ref(builder, "symbols"), fn(failed) => native_tasks/attempt_status(failed, "oom"))
+    let [root: map, retained: map] = native_roots/retain(emitted, "constant", value)
+    builder = retained
+    values = [@values, root]
+  end
+  let [retained: map, rooted: map] = native_source/rooted_list(builder, "constants", values)
+  builder = native_source/checked(rooted, "task_code_constants", [native_gen/ref(rooted, "registry"), native_roots/worker(rooted), native_roots/ref(rooted, "code"), retained])
+  builder = native_source/checked(builder, "task_code_seal", [native_gen/ref(builder, "registry"), native_roots/worker(builder), native_roots/ref(builder, "code")])
+  let result: map = native_gen/finish(module, native_tasks/attempt_status(builder, "ok"))
+  return result
+end
+
+verb native_source/install_row(builder: map, relation: map, values: list) -> map
+  let result: map = native_source/write_fact(builder, native_gen/ref(builder, "transaction"), relation, values, native_gen/ref(builder, "true"))
+  return result
+end
+// Parameter catalogue rows are ordered by source position. The validated
+// signature currently contains required, unrestricted roles only.
+verb native_source/install_parameters(input: map, relation: map, identity: map, parameters: list) -> map
+  let builder: map = input
+  let position: int = 0
+  for parameter in parameters
+    builder = native_source/install_row(builder, relation, [identity, native_source/literal(builder, parameter[:role]),
+      native_source/literal(builder, :dispatch/unrestricted), native_source/literal(builder, position),
+      native_source/literal(builder, :required), native_gen/zero(native_value/word())])
+    position = position + 1
+  end
+  return builder
+end
+
+verb native_source/install_program(input: map, artifact: int, entry: string) -> map
+  let builder: map = input
+  let [body: map, allocated: map] = native_roots/retain(builder, "program", native_gen/call(builder, "task_new_CompiledProgram", [
+    native_roots/worker(builder), native_source/entry(string_concat(entry, "_0")), native_roots/ref(builder, "code")]))
+  builder = native_tasks/check(allocated, native_gen/negate(native_kernel/absent(body)), "oom")
+  builder = native_source/checked(builder, "kernel_program_put", [native_gen/ref(builder, "transaction"), native_source/number(builder, artifact),
+    native_roots/ref(builder, "tenant"), native_gen/cast(native_memory/pointer(:U8), body)])
+  return builder
+end
+
+verb native_source/install_method(input: map, definition: map, ids: list, entry: string) -> map
+  let builder: map = input
+  let configuration: map = native_gen/ref(builder, "configuration")
+  let selectors: map = native_kernel/load_field(builder, configuration, "selectors")
+  let parameters: map = native_kernel/load_field(builder, configuration, "parameters")
+  let programs: map = native_kernel/load_field(builder, configuration, "programs")
+  let [identity: map, ready: map] = native_source/result(builder, "value_identity", [native_source/number(builder, ids[0])], "schema")
+  let [artifact: map, with_artifact: map] = native_source/result(ready, "value_identity", [native_source/number(ready, ids[1])], "schema")
+  builder = native_source/install_row(with_artifact, selectors, [identity, native_source/literal(with_artifact, definition[:selector])])
+  builder = native_source/install_parameters(builder, parameters, identity, definition[:parameters])
+  builder = native_source/install_row(builder, programs, [identity, artifact])
+  let result: map = native_source/install_program(builder, ids[1], entry)
+  return result
+end
+
+verb native_source/install_body(input: map, methods: list) -> map
+  let name: string = string_concat(input[:source_prefix], "_install")
+  let module: map = native_tasks/declare(input, name, :U64, [
+    ["transaction", native_kernel/pointer("Transaction"), :Borrow],
+    ["configuration", native_tasks/pointer("SpawnContext"), :Borrow],
+    ["code", native_tasks/pointer("CodeRef"), :Gc], ["tenant", native_value/word(), :Gc]])
+  let builder: map = native_source/context(module, string_concat("task_", name))
+  builder[:source_code] = native_roots/ref(builder, "code")
+  let index: int = 0
+  for definition in methods
+    builder = native_source/install_method(builder, definition,
+      module[:source_method_ids][index], module[:source_programs][index + 1][:name])
+    index = index + 1
+  end
+  let result: map = native_gen/finish(module, native_tasks/attempt_status(builder, "ok"))
+  return result
+end

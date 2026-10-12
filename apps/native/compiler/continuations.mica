@@ -1,0 +1,119 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+// Region frames root source registers and restore the committed continuation.
+// Entry wrappers perform tail transfers only after the rooted body has returned.
+verb native_source/region_registers(program: map, region: map) -> map
+  let needed: map = {}
+  if map_contains_key(program[:captures], region[:last])
+    needed = native_source/set(program[:captures][region[:last]])
+  end
+  for pc in region[:start]..region[:last]
+    if !native_source/dead_load(program, pc)
+      needed = native_source/set([@[reg for reg, present in needed], @program[:instructions][pc][:reads], @program[:instructions][pc][:writes]])
+    end
+  end
+  return needed
+end
+
+verb native_source/restore_frame(input: map, program: map, region: map) -> map
+  let builder: map = input
+  let registers: map = {}
+  let needed: map = native_source/region_registers(program, region)
+  for reg in sort([reg for reg, present in needed])
+    let [root: map, ready: map] = native_roots/retain(builder, string_concat("r", to_literal(reg)), native_gen/zero(native_value/word()))
+    registers[reg] = root
+    builder = ready
+  end
+  builder[:source_registers] = registers
+  let position: int = 0
+  for reg in region[:restore]
+    if map_contains_key(needed, reg)
+      let environment: map = native_kernel/load_field(builder, native_handlers/current(builder), "environment")
+      builder = native_source/assign(builder, reg, native_query/cell(builder, environment, native_source/number(builder, position)))
+    end
+    position = position + 1
+  end
+  if region[:input] >= 0 && map_contains_key(needed, region[:input])
+    builder = native_source/assign(builder, region[:input], native_kernel/load_field(builder, native_handlers/current(builder), "input"))
+  end
+  return builder
+end
+
+verb native_source/capture(builder: map, entry: string, registers: list) -> map
+  let values: list = [native_source/register(builder, register) for register in registers]
+  let [retained: map, rooted: map] = native_source/rooted_list(builder, "environment", values)
+  let result: map = native_handlers/replace_current(rooted, native_handlers/current(rooted), {
+    "entry" -> native_source/entry(entry), "environment" -> retained, "input" -> native_gen/zero(native_value/word())})
+  return result
+end
+
+verb native_source/declare_entries(input: map) -> map
+  let module: map = input
+  let attempt: list = ["attempt", native_tasks/pointer("Attempt"), :Borrow]
+  let worker: list = ["worker", native_memory/record_pointer("MemoryWorker"), :Borrow]
+  for program in module[:source_programs]
+    let index: int = 0
+    for region in program[:regions]
+      let name: string = string_concat(program[:name], "_", to_literal(index))
+      module = native/declare_function(module, name, :U64, [attempt], [], native_tasks/effects(), :Value, "")
+      module = native/execution_function(module, name, :Tail)
+      module = native_memory/declare(module, string_concat(name, "_body"), :U64, [attempt, worker], native_tasks/effects(), :Value, "")
+      module = native_source/describe_region(module, program[:analysis], region, name)
+      index = index + 1
+    end
+  end
+  return module
+end
+
+verb native_source/entry_body(input: map, program: map, region: map, name: string) -> map
+  let module: map = input
+  let builder: map = native_tasks/entry_context(module, name)
+  let [status: map, called: map] = native_gen/bind(builder, "status", native_gen/call(builder, string_concat(name, "_body"), [native_tasks/attempt(builder), native_tasks/attempt_field(builder, "worker")]))
+  builder = native_gen/unless(called, native_kernel/absent(status), fn(failed) => native_gen/return_value(failed, status))
+  let op: symbol = program[:description][:code][region[:last]][0]
+  if op == :Return
+    // task_return either completes this task or selects the caller image.
+    builder = native_gen/when(builder, native_kernel/absent(native_tasks/attempt_field(builder, "boundary")), fn(caller) => native_handlers/transfer(caller))
+  end
+  module = native_gen/finish(module, native_gen/return_value(builder, native_gen/ref(builder, "kernel_ok")))
+  return module
+end
+
+verb native_source/complete(builder: map, value: map) -> map
+  let result: map = native_source/return_call(builder, "task_return", [native_roots/worker(builder), native_tasks/attempt(builder), value])
+  return result
+end
+verb native_source/spawn_task(builder: map, selector: map, fields: list, continuation: string, captures: list) -> map
+  let [roles: map, built: map] = native_literal/map(builder, fields, fn(failed) => native_tasks/attempt_status(failed, "oom"))
+  let [retained: map, rooted: map] = native_roots/retain(built, "roles", roles)
+  let ready: map = native_source/capture(rooted, continuation, captures)
+  let result: map = native_source/return_call(ready, "task_spawn_request", [native_roots/worker(ready), native_tasks/attempt(ready),
+    selector, retained, native_gen/ref(ready, "zero")])
+  return result
+end
+verb native_source/receive(builder: map, receivers: map, continuation: string, captures: list) -> map
+  // Source operands reload their frame roots after replacing the current image.
+  let ready: map = native_source/capture(builder, continuation, captures)
+  let result: map = native_source/return_call(ready, "task_mailbox_request", [native_source/service(ready, "mailboxes"),
+    native_roots/worker(ready), native_tasks/attempt(ready), receivers, native_gen/ref(ready, "kernel_unlimited")])
+  return result
+end
+
+verb native_source/describe_region(input: map, program: map, region: map, name: string) -> map
+  let module: map = input
+  let origin: string = string_concat("Mica register instructions ", to_literal(region[:start]), "..", to_literal(region[:last]))
+  let purpose: string = "Initial entry"
+  if region[:input] >= 0
+    purpose = string_concat("Resume with delivered result in r", to_literal(region[:input]))
+  end
+  purpose = string_concat(purpose, "; restore registers ", to_literal(region[:restore]))
+  let op: symbol = program[:description][:code][region[:last]][0]
+  purpose = string_concat(purpose, "; end with ", native_source/symbol_text(op))
+  if map_contains_key(program[:captures], region[:last])
+    purpose = string_concat(purpose, "; capture registers ", to_literal(program[:captures][region[:last]]))
+  end
+  module[:state] = native/annotate(module[:state], module[:functions][name], :Purpose, purpose)
+  module[:state] = native/annotate(module[:state], module[:functions][string_concat(name, "_body")], :Source, origin)
+  return module
+end

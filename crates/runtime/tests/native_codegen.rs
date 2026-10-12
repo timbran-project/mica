@@ -2103,7 +2103,10 @@ fn native_source_analysis_tracks_continuations_and_definite_assignment() {
             include_str!("../../../apps/compiler/emit.mica"),
             include_str!("../../../apps/native/compiler/analysis.mica"),
             include_str!("../../../apps/native/compiler/builders.mica"),
+            include_str!("../../../apps/native/compiler/operations.mica"),
             include_str!("../../../apps/native/compiler/prepare.mica"),
+            include_str!("../../../apps/native/compiler/continuations.mica"),
+            include_str!("../../../apps/native/compiler/install.mica"),
             include_str!("../../../apps/native/compiler/lower.mica"),
             include_str!("../../../apps/native/compiler/program.mica"),
         ] {
@@ -2204,7 +2207,10 @@ fn native_source_program_executes_on_generated_runtime() {
             include_str!("../../../apps/compiler/emit.mica"),
             include_str!("../../../apps/native/compiler/analysis.mica"),
             include_str!("../../../apps/native/compiler/builders.mica"),
+            include_str!("../../../apps/native/compiler/operations.mica"),
             include_str!("../../../apps/native/compiler/prepare.mica"),
+            include_str!("../../../apps/native/compiler/continuations.mica"),
+            include_str!("../../../apps/native/compiler/install.mica"),
             include_str!("../../../apps/native/compiler/lower.mica"),
             include_str!("../../../apps/native/compiler/program.mica"),
         ] {

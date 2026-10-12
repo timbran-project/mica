@@ -3,6 +3,14 @@
 
 // Source registers are rooted native locals. Only registers live at a task
 // boundary enter an immutable image; there is no runtime instruction decoder.
+verb native_source/context(module: map, name: string) -> map
+  let builder: map = native_roots/context(module, name,
+    fn(failed, reason) => native_tasks/attempt_status(failed, reason))
+  builder[:source_prefix] = module[:source_prefix]
+  builder[:source_literals] = module[:source_literals]
+  return builder
+end
+
 verb native_source/number(builder: map, value: int) -> map
   let result: map = native_gen/ref(builder, string_concat(builder[:source_prefix], "_number_", to_literal(value)))
   return result
@@ -87,11 +95,20 @@ verb native_source/entry(name: string) -> map
   let result: map = native_gen/expression([:FunctionPointer, "TaskEntry"], :FunctionAddress, [name])
   return result
 end
-verb native_source/capture(builder: map, entry: string, registers: list) -> map
-  let values: list = [native_source/register(builder, register) for register in registers]
-  let [environment: map, packed: map] = native_source/list(builder, values)
-  let [retained: map, rooted: map] = native_roots/retain(packed, "environment", environment)
-  let result: map = native_handlers/replace_current(rooted, native_handlers/current(rooted), {
-    "entry" -> native_source/entry(entry), "environment" -> retained, "input" -> native_gen/zero(native_value/word())})
+
+// Retain a completed value before the next operation can reach a safepoint.
+verb native_source/rooted_list(builder: map, label: string, values: list) -> list
+  let [value: map, ready: map] = native_source/list(builder, values)
+  let result: list = native_roots/retain(ready, label, value)
+  return result
+end
+verb native_source/write_fact(builder: map, transaction: map, relation: map, values: list, present: map) -> map
+  let [row: map, ready: map] = native_source/rooted_list(builder, "row", values)
+  let result: map = native_source/checked(ready, "kernel_write", [transaction, relation, row, present])
+  return result
+end
+// Evaluate the operation before unlinking the native frame's roots.
+verb native_source/return_call(builder: map, name: string, arguments: list) -> map
+  let result: map = native_roots/return_value(builder, native_gen/call(builder, name, arguments))
   return result
 end

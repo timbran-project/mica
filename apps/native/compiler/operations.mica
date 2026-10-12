@@ -1,0 +1,65 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+// Runtime operations used by source instructions. These builders own checks,
+// error propagation, and effect staging; instruction dispatch only supplies values.
+verb native_source/raise_error(builder: map, code, value: map) -> map
+  let encoded: map = native_source/literal(builder, code)
+  let number: map = native_gen/convert(:U32, native_gen/expression(:U64, :Payload, [encoded]))
+  let [error: map, ready: map] = native_source/result(builder, "value_error", [native_roots/worker(builder), number,
+    native_gen/ref(builder, "false"), native_gen/zero(native_value/word()), native_gen/ref(builder, "true"), value], "oom")
+  let [retained: map, rooted: map] = native_roots/retain(ready, "error", error)
+  let result: map = native_source/return_call(rooted, "task_raise", [native_tasks/attempt(rooted), native_roots/worker(rooted), retained])
+  return result
+end
+verb native_source/check_kind(builder: map, value: map, kind: symbol) -> map
+  let spelling: string = native_source/symbol_text(kind)
+  let condition: map = native_gen/equal(native_gen/call(builder, "value_kind", [value]), native_gen/ref(builder, string_concat("tag_", spelling)))
+  let result: map = native_gen/unless(builder, condition, fn(wrong) => native_source/raise_error(wrong, E_TYPE, value))
+  return result
+end
+verb native_source/index(builder: map, collection: map, key: map) -> list
+  let ready: map = native_source/check_kind(builder, collection, :list)
+  ready = native_source/check_kind(ready, key, :int)
+  let [decoded: map, checked: map] = native_gen/bind(ready, "index", native_gen/call(ready, "value_as_int", [key]))
+  let index: map = native_gen/convert(:U64, native_gen/field(checked, decoded, "number"))
+  let [value: map, found: map] = native_gen/checked_bind(checked, "element", native_gen/call(checked, "value_list_get", [collection, index]), "ok",
+    fn(missing) => native_source/raise_error(missing, E_RANGE, key))
+  return [native_gen/field(found, value, "value"), found]
+end
+// Mailbox sends join the attempt's staged effects. Resource creation and close
+// use the native mailbox service directly, as required by its current API.
+verb native_source/mailbox(builder: map, hub: map) -> list
+  let [caps: map, created: map] = native_gen/bind(builder, "mailbox", native_gen/call(builder, "task_mailbox_create", [
+    hub, native_roots/worker(builder), native_source/service(builder, "mailbox_capacity")]))
+  let ready: map = native_gen/unless(created, native_kernel/absent(native_gen/field(created, caps, "status")),
+    fn(failed) => native_roots/return_value(failed, native_gen/field(failed, caps, "status")))
+  let result: list = native_source/list(ready, [native_gen/field(ready, caps, "receiver"), native_gen/field(ready, caps, "sender")])
+  return result
+end
+verb native_source/send(builder: map, hub: map, sender: map, value: map) -> map
+  let ready: map = native_source/checked(builder, "task_mailbox_validate_sender", [hub, native_roots/worker(builder), sender])
+  let result: map = native_source/checked(ready, "task_stage", [native_roots/worker(ready), native_tasks/slot(ready, "effects"),
+    native_gen/ref(ready, "task_effect_send"), sender, value])
+  return result
+end
+verb native_source/close_mailbox(builder: map, hub: map, receiver: map) -> map
+  let result: map = native_source/checked(builder, "task_mailbox_close", [hub, native_roots/worker(builder), receiver])
+  return result
+end
+verb native_source/builtin(builder: map, name: symbol, args: list) -> list
+  let hub: map = native_source/service(builder, "mailboxes")
+  let ready: map = native_tasks/check(builder, native_gen/negate(native_kernel/absent(hub)), "closed")
+  if name == :mailbox
+    native/ensure(len(args) == 0, "native mailbox expects no arguments")
+    let result: list = native_source/mailbox(ready, hub)
+    return result
+  end
+  if name == :mailbox_send
+    native/ensure(len(args) == 2, "native mailbox_send expects sender and value")
+    return [args[1], native_source/send(ready, hub, args[0], args[1])]
+  end
+  native/ensure(name == :mailbox_close && len(args) == 1, string_concat("unsupported native source builtin: ", to_literal(name)))
+  ready = native_source/close_mailbox(ready, hub, args[0])
+  return [native_source/literal(ready, [] {[]}), ready]
+end
