@@ -19,6 +19,10 @@ verb native_source/value_instruction(builder: map, instruction: list) -> list
     let result: list = native_source/binary(builder, instruction[2], native_source/register(builder, instruction[3]), native_source/register(builder, instruction[4]))
     return result
   end
+  if op == :ScanDynamic
+    let result: list = native_queries/scan(builder, instruction[2], instruction[3])
+    return result
+  end
   if op == :BuildRelation
     let result: list = native_patterns/relation(builder, instruction[2], instruction[3], instruction[4])
     return result

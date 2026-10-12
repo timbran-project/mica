@@ -2268,6 +2268,7 @@ fn load_native_source_compiler(runner: &mut SourceRunner) {
         include_str!("../../../apps/native/compiler/operations.mica"),
         include_str!("../../../apps/native/compiler/builtins.mica"),
         include_str!("../../../apps/native/compiler/patterns.mica"),
+        include_str!("../../../apps/native/compiler/queries.mica"),
         include_str!("../../../apps/native/compiler/collections.mica"),
         include_str!("../../../apps/native/compiler/access.mica"),
         include_str!("../../../apps/native/compiler/expressions.mica"),
@@ -2297,6 +2298,7 @@ fn native_source_analysis_tracks_continuations_and_definite_assignment() {
             runner.run_filein(source).unwrap();
         }
         load_native_source_compiler(&mut runner);
+        eval(&mut runner, "return make_relation(:NativeQuery, 3)");
         let example = include_str!("../../../apps/native/compiler/examples/roundtrip.mica");
         let checked = eval(
             &mut runner,
@@ -2416,6 +2418,18 @@ return true
             (
                 "{:registers -> 2, :code -> [[:Load, 0, none], [:RelationPattern, 1, 0, [:x], 1, [[:missing, 1]]], [:Return, [:Register, 1]]]}",
                 "unknown column",
+            ),
+            (
+                "{:registers -> 1, :code -> [[:ScanDynamic, 0, 1, [[:Query, 7]]], [:Return, [:Register, 0]]]}",
+                "invalid source query variable",
+            ),
+            (
+                "{:registers -> 0, :code -> [[:AssertDynamic, 1, [[:Hole]]], [:Return, [:Constant, 0]]]}",
+                "invalid source relation hole",
+            ),
+            (
+                "{:registers -> 2, :code -> [[:ScanDynamic, 0, 1, [[:Splice, [:Register, 1]]]], [:Return, [:Register, 0]]]}",
+                "read before assignment",
             ),
             (
                 "{:registers -> 1, :code -> [[:LoadFunction, 0, {}, [], 0, 0, false]]}",
@@ -2538,6 +2552,16 @@ fn source_expression_cases() -> (String, String, String) {
         "match left\ncase [x] if native_expression_5(x, right) > 0\n x\ncase _\n false\nend",
         "begin\n let item: int = left\n item\nend",
         "left",
+        "begin\n assert NativeQuery(left, right, 0)\n let result = NativeQuery(left, right, 0)\n retract NativeQuery(left, right, 0)\n [result, NativeQuery(_, _, _)]\nend",
+        "begin\n assert NativeQuery(left, right, 0)\n let result = NativeQuery(_, right, _)\n retract NativeQuery(left, right, 0)\n result\nend",
+        "begin\n assert NativeQuery(left, right, 0)\n let result = NativeQuery(?z, ?a, _)\n retract NativeQuery(left, right, 0)\n result\nend",
+        "begin\n assert NativeQuery(left, right, 0)\n let result = NativeQuery(?same, ?same, _)\n retract NativeQuery(left, right, 0)\n result\nend",
+        "NativeQuery(?absent, _, ?missing)",
+        "begin\n assert NativeQuery(1, 2, 3)\n let result = NativeQuery(@left, ?middle, @right)\n retract NativeQuery(1, 2, 3)\n result\nend",
+        "begin\n assert NativeQuery(1, 2, 2)\n let result = NativeQuery(@left, ?same, ?same)\n retract NativeQuery(1, 2, 2)\n result\nend",
+        "begin\n assert NativeQuery(left, right, 0)\n assert NativeQuery(left, right, 1)\n let result = NativeQuery(?x, ?y, _)\n retract NativeQuery(left, right, 0)\n retract NativeQuery(left, right, 1)\n result\nend",
+        "begin\n assert NativeQuery(left, right, 0)\n let result = [row[:x] for row in NativeQuery(?x, _, _)]\n retract NativeQuery(left, right, 0)\n result\nend",
+        "NativeQuery(@left, @right)",
     ];
     let mut cases: Vec<(usize, Vec<&str>)> = Vec::new();
     for value in ["7", "2.5", "-36028797018963968", "true"] {
@@ -2899,6 +2923,23 @@ fn source_expression_cases() -> (String, String, String) {
             cases.push((operation, vec![value, "0"]));
         }
     }
+    for operation in [98, 99, 100, 101, 102, 105, 106] {
+        for operands in [
+            ["1", "1"],
+            ["1", "1.0"],
+            ["[1, 2]", "[1, 2]"],
+            ["\"café\"", "\"café\""],
+        ] {
+            cases.push((operation, operands.to_vec()));
+        }
+    }
+    cases.push((103, vec!["[1]", "[3]"]));
+    cases.push((103, vec!["[9]", "[3]"]));
+    cases.push((103, vec!["[]", "[2, 3]"]));
+    cases.push((103, vec!["[1, 2]", "[]"]));
+    cases.push((104, vec!["[1]", "0"]));
+    cases.push((104, vec!["[9]", "0"]));
+    cases.push((107, vec!["[1, 2]", "[3]"]));
     let mut oracle = SourceRunner::new_empty()
         .with_interpreter_only(true)
         .with_task_limits(TaskLimits {
@@ -2906,13 +2947,14 @@ fn source_expression_cases() -> (String, String, String) {
             max_call_depth: 256,
             ..TaskLimits::default()
         });
+    eval(&mut oracle, "return make_relation(:NativeQuery, 3)");
     let mut checks = String::new();
     source.push_str("\nverb native_control_spin()\n while true\n end\nend\n");
-    ids.push("[1100, 10100]".to_owned());
+    ids.push("[2000, 20000]".to_owned());
     checks.push_str(&format!("static uint64_t (*const source_spin_entry)(struct mica_TaskAttempt *) = mica_source_roundtrip_method_{}_0;\n", operations.len() + 2));
     let recursive = "\nverb native_call_sum(number)\n if number == 0\n return 0\n end\n return number + native_call_sum(number - 1)\nend\n";
     source.push_str(recursive);
-    ids.push("[1101, 10101]".to_owned());
+    ids.push("[2001, 20001]".to_owned());
     let defaults = [
         "verb native_default_values(first, ?options = {:nested -> [1, {2 -> 3.5}], :empty -> none}, @tail)\n return [first, options, tail]\nend",
         "verb native_default_none(?value)\n return value\nend",
@@ -2922,7 +2964,7 @@ fn source_expression_cases() -> (String, String, String) {
     ];
     for (index, definition) in defaults.iter().enumerate() {
         source.push_str(&format!("\n{definition}\n"));
-        ids.push(format!("[{}, {}]", 1110 + index, 10110 + index));
+        ids.push(format!("[{}, {}]", 2010 + index, 20010 + index));
     }
     // Use the Mica frontend for syntax it already supports beyond Rust's
     // parser. The resulting register programs execute on the Rust VM oracle.
@@ -3264,6 +3306,7 @@ fn generate_native_source(
     // Bootstrap catalogue lookup uses a committed setup transaction. Native
     // catalogue installation and rollback are exercised by the C fixture.
     eval(&mut runner, "return make_relation(:NativeResult, 2)");
+    eval(&mut runner, "return make_relation(:NativeQuery, 3)");
     let example = format!(
         "{}\n{conformance_source}",
         include_str!("../../../apps/native/compiler/examples/roundtrip.mica")
@@ -3271,7 +3314,7 @@ fn generate_native_source(
     let module = eval(
         &mut runner,
         &format!(
-            "return native_source/compile(native_tasks/definitions(), \"source_roundtrip\", {example:?}, {{:NativeResult -> 705}}, {method_ids})"
+            "return native_source/compile(native_tasks/definitions(), \"source_roundtrip\", {example:?}, {{:NativeResult -> 705, :NativeQuery -> 706}}, {method_ids})"
         ),
     );
     eprintln!(

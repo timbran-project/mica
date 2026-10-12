@@ -1,0 +1,195 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+// Query variables name result columns. Repeated names constrain cells by
+// canonical equality; holes constrain neither values nor the result heading.
+verb native_queries/name(module: map, operation: string) -> string
+  return string_concat(module[:source_prefix], "_relation_", operation)
+end
+verb native_queries/position(builder: map, position: map) -> map
+  let result: map = native_gen/field(builder, native_gen/call(builder, "value_int", [native_gen/bitcast(:I64, position)]), "value")
+  return result
+end
+verb native_queries/bind_cell(builder: map, buffer: map, mask: map, value: map) -> map
+  let position: map = native_query/width(builder, buffer)
+  let ready: map = native_tasks/check(builder, native_gen/less(position, native_gen/ref(builder, "kernel_64")), "arity")
+  ready = native_gen/assign(ready, mask, native_gen/bit_or(mask, native_gen/shift_left(native_gen/ref(ready, "one"), position)))
+  let result: map = native_source/append_item(ready, buffer, value)
+  return result
+end
+verb native_queries/arguments(builder: map, items: list) -> list
+  let dynamic: bool = native_source/spliced(items)
+  let ready: map = builder
+  let buffer: map = {}
+  if dynamic
+    let [allocated: map, prepared: map] = native_source/collection_buffer(ready)
+    buffer = allocated
+    ready = prepared
+  else
+    native/ensure(len(items) <= 64, "native relation arguments exceed kernel arity")
+  end
+  let [mask: map, with_mask: map] = native_gen/bind(ready, "bound_columns", native_gen/ref(ready, "zero"))
+  ready = with_mask
+  let cells: list = []
+  let heading: list = []
+  let positions: list = []
+  let equalities: list = []
+  let named: map = {}
+  for item in items
+    if item[0] == :Splice
+      let value: map = native_source/operand(ready, item[1])
+      ready = native_source/splice_check(ready, value, "list", false)
+      ready = native_gen/for_range(ready, "splice_column", native_gen/ref(ready, "zero"), native_query/width(ready, value),
+        fn(step, index) => native_queries/bind_cell(step, buffer, mask, native_query/cell(step, value, index)))
+      continue
+    end
+    let position: map = native_source/number(ready, len(cells))
+    if dynamic
+      let [current: map, counted: map] = native_gen/bind(ready, "column", native_query/width(ready, buffer))
+      position = current
+      ready = native_tasks/check(counted, native_gen/less(position, native_gen/ref(counted, "kernel_64")), "arity")
+    end
+    let value: map = native_gen/zero(native_value/word())
+    if item[0] == :Query
+      let name: symbol = item[1]
+      if map_contains_key(named, name)
+        equalities = [@equalities, named[name], native_queries/position(ready, position)]
+      else
+        heading = [@heading, name]
+        let ordinal: map = native_queries/position(ready, position)
+        positions = [@positions, ordinal]
+        named[name] = ordinal
+      end
+    elseif item[0] != :Hole
+      value = native_source/operand(ready, item)
+      ready = native_gen/assign(ready, mask, native_gen/bit_or(mask, native_gen/shift_left(native_gen/ref(ready, "one"), position)))
+    end
+    if dynamic
+      ready = native_source/append_item(ready, buffer, value)
+    else
+      cells = [@cells, value]
+    end
+  end
+  if !dynamic
+    let [row: map, rooted: map] = native_source/rooted_list(ready, "pattern", cells)
+    buffer = row
+    ready = rooted
+  end
+  let [projection: map, projected: map] = native_source/rooted_list(ready, "projection", positions)
+  let [constraints: map, constrained: map] = native_source/rooted_list(projected, "equalities", equalities)
+  return [buffer, mask, heading, projection, constraints, constrained]
+end
+
+// Build a canonical relation from rooted row lists. The borrowed descriptors
+// live only through value_relation; there is no relocation in this final copy.
+verb native_queries/relation_value(builder: map, heading: map, rows: map) -> list
+  let worker: map = native_roots/worker(builder)
+  let width: map = native_query/width(builder, heading)
+  let count: map = native_query/width(builder, rows)
+  let failure = fn(failed) => native_query/error(failed, "oom")
+  let [columns: map, allocated: map] = native_memory/array_storage(builder, worker, :U32, width, "layout_opaque", failure)
+  let ready: map = native_gen/for_range(allocated, "column", native_gen/ref(allocated, "zero"), width, fn(step, index)
+    let id: map = native_gen/convert(:U32, native_gen/expression(:U64, :Payload, [native_query/cell(step, heading, index)]))
+    return native_gen/store(step, native_gen/offset(columns, index), id)
+  end)
+  let [tuples: map, described: map] = native_memory/array_storage(ready, worker, [:Record, "ValueTuple"], count, "layout_opaque", failure)
+  ready = native_gen/for_range(described, "tuple", native_gen/ref(described, "zero"), count, fn(step, index)
+    let row: map = native_query/cell(step, rows, index)
+    let header: map = native_gen/expression(native_memory/record_pointer("HeapList"), :UnpackPointer, [row])
+    let tuple: map = native_gen/record(step, [:Record, "ValueTuple"], {"data" -> native_kernel/load_field(step, header, "data"), "arity" -> width})
+    return native_gen/store(step, native_gen/offset(tuples, index), tuple)
+  end)
+  let result: list = native_query/value(ready, "value_relation", [worker, native_gen/freeze(columns), width, native_gen/freeze(tuples), count])
+  return result
+end
+
+verb native_queries/matches(builder: map, row: map, equalities: map) -> list
+  let [matches: map, ready: map] = native_gen/bind(builder, "matches", native_gen/ref(builder, "true"))
+  let [index: map, indexed: map] = native_gen/bind(ready, "equality", native_gen/ref(ready, "zero"))
+  ready = native_gen/while_loop(indexed, native_gen/less(index, native_query/width(indexed, equalities)), fn(step)
+    let left: map = native_gen/expression(:U64, :Payload, [native_query/cell(step, equalities, index)])
+    let right: map = native_gen/expression(:U64, :Payload, [native_query/cell(step, equalities, native_gen/add(index, native_gen/ref(step, "one")))])
+    let [comparison: map, compared: map] = native_gen/checked_bind(step, "equality", native_gen/call(step, "value_compare", [
+      native_query/cell(step, row, left), native_query/cell(step, row, right)]), "ok", fn(failed) => native_query/error(failed, "schema"))
+    compared = native_gen/unless(compared, native_kernel/absent(native_gen/field(compared, comparison, "number")), fn(different)
+      return native_gen/break_loop(native_gen/assign(different, matches, native_gen/ref(different, "false")))
+    end)
+    return native_gen/assign(compared, index, native_gen/add(index, native_gen/ref(compared, "two")))
+  end)
+  return [matches, ready]
+end
+
+verb native_queries/scan_body(module: map) -> map
+  let builder: map = native_gen/context(module, native_queries/name(module, "scan"))
+  let [work: map, opened: map] = native_kernel/open_transaction(builder, fn(failed) => native_query/error(failed, "closed"))
+  builder = native_query/begin_roots(opened)
+  let [allowance: map, bounded: map] = native_gen/bind(builder, "query_allowance", native_kernel/load_field(builder, work, "rule_limit"))
+  let remaining: map = native_tasks/attempt_field(bounded, "remaining")
+  builder = native_gen/when(bounded, native_gen/less(remaining, allowance), fn(task_bound) => native_gen/assign(task_bound, allowance, remaining))
+  builder = native_execution/local_budget(builder, allowance)
+  let budget: map = native_roots/ref(builder, "budget")
+  builder = native_gen/on_return(builder, fn(leaving, result)
+    let spent: map = native_gen/subtract(allowance, native_kernel/load_field(leaving, budget, "steps"))
+    return native_kernel/store_field(leaving, native_tasks/attempt(leaving), "remaining", native_gen/subtract(native_tasks/attempt_field(leaving, "remaining"), spent))
+  end)
+  let pattern: map = native_roots/ref(builder, "pattern")
+  let heading: map = native_roots/ref(builder, "heading")
+  let output: map = native_roots/root_value(builder, native_gen/ref(builder, "output"), native_value/word())
+  let [relation: map, read: map] = native_rules/checked_call(builder, "read", [native_roots/ref(builder, "transaction"),
+    native_roots/ref(builder, "id"), native_roots/ref(builder, "budget")], "relation")
+  builder = native_query/check(read, native_gen/negate(native_kernel/absent(relation)), "unknown")
+  builder = native_kernel/check_tuple(builder, pattern, relation, fn(failed) => native_query/error(failed, "arity"))
+  let [view: map, rooted: map] = native_roots/retain(builder, "relation", relation)
+  let [rows: map, with_rows: map] = native_query/row_set(rooted)
+  let [ticks: map, counted: map] = native_gen/bind(with_rows, "visited", native_gen/ref(with_rows, "zero"))
+  builder = native_query/scan_rows(counted, view, pattern, native_roots/ref(counted, "mask"), native_gen/address(ticks), fn(step, row)
+    let [matches: map, tested: map] = native_queries/matches(step, row, native_roots/ref(step, "equalities"))
+    return native_gen/when(tested, matches, fn(matched)
+      let ready: map = native_gen/when(matched, native_kernel/absent(native_query/width(matched, heading)), fn(exists)
+        let stored: map = native_roots/store(exists, output, native_gen/call(exists, "value_bool", [native_gen/ref(exists, "true")]))
+        return native_roots/return_value(stored, native_gen/ref(stored, "kernel_ok"))
+      end)
+      let [projected: map, prepared: map] = native_query/project_row(ready, row, native_roots/ref(ready, "positions"))
+      return native_query/offer(prepared, rows, projected)
+    end)
+  end)
+  builder = native_gen/when(builder, native_kernel/absent(native_query/width(builder, heading)), fn(absent)
+    let stored: map = native_roots/store(absent, output, native_gen/call(absent, "value_bool", [native_gen/ref(absent, "false")]))
+    return native_roots/return_value(stored, native_gen/ref(stored, "kernel_ok"))
+  end)
+  let [empty: map, allocated: map] = native_query/tuple(builder, [])
+  let [gathered: map, gathered_builder: map] = native_query/value(allocated, "kernel_query_gather", [native_roots/worker(allocated), rows, empty])
+  let [value: map, ready: map] = native_queries/relation_value(gathered_builder, heading, gathered)
+  builder = native_roots/store(ready, output, value)
+  let result: map = native_gen/finish(module, native_roots/return_value(builder, native_gen/ref(builder, "kernel_ok")))
+  return result
+end
+verb native_queries/definitions(input: map) -> map
+  let used: bool = false
+  for program in input[:source_programs]
+    for instruction in program[:analysis][:description][:code]
+      if instruction[0] == :ScanDynamic
+        used = true
+      end
+    end
+  end
+  if !used
+    return input
+  end
+  let word: list = native_value/word()
+  let module: map = native_memory/declare(input, native_queries/name(input, "scan"), :U64, [
+    ["worker", native_memory/record_pointer("MemoryWorker"), :Borrow], ["attempt", native_tasks/pointer("Attempt"), :Borrow], ["transaction", native_kernel/pointer("Transaction"), :Borrow],
+    ["id", :U64, :Value], ["pattern", word, :Gc], ["mask", :U64, :Value], ["heading", word, :Gc],
+    ["positions", word, :Gc], ["equalities", word, :Gc], ["output", native_memory/record_pointer("MemoryRoot"), :Borrow]],
+    [:ReadMemory, :WriteMemory, :Allocate, :Release, :Relocate], :Value, "")
+  let result: map = native_queries/scan_body(module)
+  return result
+end
+verb native_queries/scan(builder: map, id: int, items: list) -> list
+  let [pattern: map, mask: map, heading: list, positions: map, equalities: map, ready: map] = native_queries/arguments(builder, items)
+  let [output: map, rooted: map] = native_roots/retain(ready, "query", native_gen/zero(native_value/word()))
+  ready = native_source/checked(rooted, native_queries/name(rooted[:module], "scan"), [native_roots/worker(rooted), native_tasks/attempt(rooted),
+    native_tasks/slot(rooted, "transaction"), native_source/number(rooted, id), pattern, mask, native_source/literal(rooted, heading),
+    positions, equalities, output[:scope_root]])
+  return [output, ready]
+end

@@ -87,6 +87,15 @@ verb native_source/program_literals(analysis: map, initial: list) -> list
         pool = native_source/pool(pool, E_DIV)
         pool = native_source/pool(pool, spec[2])
       end
+    elseif op == :ScanDynamic
+      pool = native_source/pool_operands(pool, instruction[3])
+      let heading: list = []
+      for item in instruction[3]
+        if item[0] == :Query && !native/contains(heading, item[1])
+          heading = [@heading, item[1]]
+        end
+      end
+      pool = native_source/pool(pool, heading)
     elseif op == :BuildList || op == :AssertDynamic || op == :RetractDynamic
       pool = native_source/pool_operands(pool, instruction[2])
       if op == :BuildList
@@ -219,11 +228,15 @@ verb native_source/link_relations(description: map, relations: map) -> map
   end
   let code: list = []
   for instruction in description[:code]
-    if instruction[0] == :AssertDynamic || instruction[0] == :RetractDynamic
-      native/ensure(map_contains_key(names, instruction[1]), "source relation identity has no catalogue name")
-      let name: symbol = names[instruction[1]]
+    if native/contains([:ScanDynamic, :AssertDynamic, :RetractDynamic], instruction[0])
+      let position: int = 1
+      if instruction[0] == :ScanDynamic
+        position = 2
+      end
+      native/ensure(map_contains_key(names, instruction[position]), "source relation identity has no catalogue name")
+      let name: symbol = names[instruction[position]]
       native/ensure(map_contains_key(relations, name), string_concat("unlinked native relation: ", to_literal(name)))
-      instruction = [instruction[0], relations[name], instruction[2]]
+      instruction[position] = relations[name]
     end
     code = [@code, instruction]
   end
@@ -270,7 +283,7 @@ verb native_source/prepare_module(input: map, prefix: string, emitted: map, rela
     index = index + 1
   end
   let programs: list = []
-  let maximum: int = 6
+  let maximum: int = 64
   for [description, parameters, name] in descriptions
     let linked: map = native_exceptions/lower(native_source/link_relations(description, relations))
     for instruction in linked[:code]

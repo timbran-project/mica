@@ -134,6 +134,79 @@ static void source_call_failures(struct mica_MemoryWorker *worker,
     assert(mica_memory_root_pop(worker, &image));
 }
 
+// The source scan helper shares transaction visibility and resource controls
+// with the kernel. Its output root changes only after a complete result exists.
+static void source_query_controls(struct mica_MemoryWorker *worker,
+        struct mica_SymbolTable *symbols, struct mica_Kernel *kernel) {
+    struct mica_MemoryRoot pattern = {0}, heading = {0}, positions = {0};
+    struct mica_MemoryRoot equalities = {0}, output = {0};
+    struct mica_MemoryRoot *roots[] = {&pattern, &heading, &positions, &equalities, &output};
+    for (unsigned i = 0; i < 5; ++i) assert(mica_memory_root_push(worker, roots[i]));
+    mica_type_Value zero = mica_value_int(0).f_value;
+    mica_type_Value cells[] = {zero, zero, zero};
+    struct mica_ValueResult value = mica_value_list(worker, cells, 3);
+    assert(value.f_ok);
+    mica_value_root_set(&pattern, value.f_value);
+    struct mica_IdResult symbol = mica_value_symbol_intern(symbols, (const uint8_t *)"x", 1);
+    assert(symbol.f_ok);
+    mica_type_Value column = mica_value_symbol((uint32_t)symbol.f_number).f_value;
+    value = mica_value_list(worker, &column, 1);
+    assert(value.f_ok);
+    mica_value_root_set(&heading, value.f_value);
+    value = mica_value_list(worker, &zero, 1);
+    assert(value.f_ok);
+    mica_value_root_set(&positions, value.f_value);
+    value = mica_value_list(worker, NULL, 0);
+    assert(value.f_ok);
+    mica_value_root_set(&equalities, value.f_value);
+    struct mica_KernelTransaction draft = {0}, observer = {0};
+    mica_type_Value tenant = mica_value_int(7).f_value;
+    assert(mica_kernel_begin(kernel, worker, &draft, tenant) == 0);
+    assert(mica_kernel_begin(kernel, worker, &observer, tenant) == 0);
+    for (unsigned i = 0; i < 160; ++i) {
+        cells[0] = mica_value_int(i).f_value;
+        value = mica_value_list(worker, cells, 3);
+        assert(value.f_ok && mica_kernel_write(&draft, 706, value.f_value, true) == 0);
+    }
+    assert(mica_memory_safepoint(worker, true));
+    struct mica_TaskAttempt attempt = {.f_remaining = 1000000};
+    assert(mica_source_roundtrip_relation_scan(worker, &attempt, &draft, 706,
+        mica_value_root_get(&pattern), 0, mica_value_root_get(&heading),
+        mica_value_root_get(&positions), mica_value_root_get(&equalities), &output) == 0);
+    assert(attempt.f_remaining < 1000000);
+    assert(mica_memory_safepoint(worker, true));
+    assert(mica_value_relation_length(mica_value_root_get(&output)).f_number == 160);
+    assert(mica_source_roundtrip_relation_scan(worker, &attempt, &observer, 706,
+        mica_value_root_get(&pattern), 0, mica_value_root_get(&heading),
+        mica_value_root_get(&positions), mica_value_root_get(&equalities), &output) == 0);
+    assert(mica_value_relation_length(mica_value_root_get(&output)).f_number == 0);
+    mica_value_root_set(&output, mica_value_bool(false));
+    attempt.f_remaining = 0;
+    assert(mica_source_roundtrip_relation_scan(worker, &attempt, &draft, 706,
+        mica_value_root_get(&pattern), 0, mica_value_root_get(&heading),
+        mica_value_root_get(&positions), mica_value_root_get(&equalities), &output) == 10);
+    assert(mica_value_root_get(&output) == mica_value_bool(false));
+    attempt.f_remaining = 1000000;
+    assert(mica_kernel_set_limits(&draft, UINT64_MAX, 0, UINT64_MAX, UINT64_MAX) == 0);
+    assert(mica_source_roundtrip_relation_scan(worker, &attempt, &draft, 706,
+        mica_value_root_get(&pattern), 0, mica_value_root_get(&heading),
+        mica_value_root_get(&positions), mica_value_root_get(&equalities), &output) == 10);
+    assert(mica_value_root_get(&output) == mica_value_bool(false));
+    assert(mica_kernel_cancel(&draft));
+    assert(mica_source_roundtrip_relation_scan(worker, &attempt, &draft, 706,
+        mica_value_root_get(&pattern), 0, mica_value_root_get(&heading),
+        mica_value_root_get(&positions), mica_value_root_get(&equalities), &output) == 11);
+    assert(mica_value_root_get(&output) == mica_value_bool(false));
+    assert(mica_kernel_end(&observer) && mica_kernel_end(&draft));
+    assert(mica_kernel_begin(kernel, worker, &observer, mica_value_int(99).f_value) == 0);
+    assert(mica_source_roundtrip_relation_scan(worker, &attempt, &observer, 706,
+        mica_value_root_get(&pattern), 0, mica_value_root_get(&heading),
+        mica_value_root_get(&positions), mica_value_root_get(&equalities), &output) == 12);
+    assert(mica_value_root_get(&output) == mica_value_bool(false));
+    assert(mica_kernel_end(&observer));
+    for (unsigned i = 5; i-- > 0;) assert(mica_memory_root_pop(worker, roots[i]));
+}
+
 // source_cases and their structural result checks come from Rust execution of
 // the same source. Every case runs as a native task, including commit or abort.
 static void source_conformance(void) {
@@ -169,8 +242,8 @@ static void source_conformance(void) {
         702, 703, 701, 704, prototypes.f_value) == 0);
     struct mica_KernelTransaction setup = {0};
     assert(mica_kernel_begin(&kernel, &worker, &setup, tenant) == 0);
-    for (uint64_t id = 701; id <= 705; ++id) {
-        uint64_t arity = id == 701 ? 3 : id == 703 ? 6 : 2;
+    for (uint64_t id = 701; id <= 706; ++id) {
+        uint64_t arity = id == 701 || id == 706 ? 3 : id == 703 ? 6 : 2;
         assert(mica_kernel_declare(&setup, id, id, arity, 0, 0, 0) == 0);
     }
     assert(mica_task_source_roundtrip_install(&setup, &dispatch, (void *)code.f_pointer, tenant) == 0);
@@ -208,6 +281,7 @@ static void source_conformance(void) {
         assert(mica_memory_safepoint(&worker, true));
         source_cases[i].check(mica_value_root_get(&result), &symbols, &worker);
     }
+    source_query_controls(&worker, &symbols, &kernel);
     // An infinite source loop must still honour the task's instruction budget.
     struct mica_ValueResult empty = mica_value_list(&worker, NULL, 0);
     assert(empty.f_ok);

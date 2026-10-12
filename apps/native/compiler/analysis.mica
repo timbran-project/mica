@@ -28,6 +28,21 @@ verb native_source/items_reads(items: list) -> list
   return reads
 end
 
+verb native_source/relation_reads(items: list, query: bool, holes: bool) -> list
+  let reads: list = []
+  for item in items
+    native/ensure(is_kind(item, :list) && len(item) > 0, "invalid source relation argument")
+    if item[0] == :Query
+      native/ensure(query && len(item) == 2 && is_kind(item[1], :symbol), "invalid source query variable")
+    elseif item[0] == :Hole
+      native/ensure(holes && len(item) == 1, "invalid source relation hole")
+    else
+      reads = [@reads, @native_source/operand_reads(item)]
+    end
+  end
+  return reads
+end
+
 verb native_source/relation_heading(heading) -> bool
   native/ensure(is_kind(heading, :list) && len(heading) <= 65535, "invalid source relation heading")
   let seen: map = {}
@@ -52,7 +67,7 @@ verb native_source/instruction(code: list, pc: int) -> map
     :CollectionKeyAt -> 4, :CollectionValueAt -> 4, :SetIndex -> 5, :Abort -> 2, :Index -> 4, :CheckKind -> 5,
     :BuiltinCall -> 4, :Dispatch -> 4, :DynamicDispatch -> 4, :PositionalDispatch -> 4,
     :SpawnDispatch -> 5, :SpawnDispatchDynamic -> 5, :SpawnPositionalDispatch -> 5, :MailboxRecv -> 4,
-    :AssertDynamic -> 3, :RetractDynamic -> 3, :Return -> 2,
+    :ScanDynamic -> 4, :AssertDynamic -> 3, :RetractDynamic -> 3, :Return -> 2,
     :Branch -> 4, :Jump -> 2, :NormalizeError -> 5, :ErrorField -> 4, :Throw -> 2, :CommitValue -> 2, :SuspendValue -> 3, :Emit -> 3}
   native/ensure(map_contains_key(widths, op), string_concat("unsupported native source instruction ", to_literal(op)))
   native/ensure(len(instruction) == widths[op], "source instruction has the wrong operand count")
@@ -60,7 +75,7 @@ verb native_source/instruction(code: list, pc: int) -> map
   let writes: list = []
   let successors: list = [pc + 1]
   let boundary: bool = false
-  if native/contains([:Load, :Move, :Unary, :Binary, :BuildList, :BuildMap, :BuildRelation, :RelationPattern, :RelationCell, :CollectionFieldAt, :BuildRange, :CollectionLen,
+  if native/contains([:Load, :Move, :Unary, :Binary, :BuildList, :BuildMap, :BuildRelation, :ScanDynamic, :RelationPattern, :RelationCell, :CollectionFieldAt, :BuildRange, :CollectionLen,
       :CollectionKeyAt, :CollectionValueAt, :SetIndex, :Index, :NormalizeError, :ErrorField, :BuiltinCall,
       :Dispatch, :DynamicDispatch, :PositionalDispatch, :SpawnDispatch, :SpawnDispatchDynamic, :SpawnPositionalDispatch, :MailboxRecv, :CommitValue, :SuspendValue], op)
     writes = [instruction[1]]
@@ -135,8 +150,10 @@ verb native_source/instruction(code: list, pc: int) -> map
     end
   elseif op == :BuiltinCall
     reads = native_source/items_reads(instruction[3])
+  elseif op == :ScanDynamic
+    reads = native_source/relation_reads(instruction[3], true, true)
   elseif op == :AssertDynamic || op == :RetractDynamic
-    reads = native_source/items_reads(instruction[2])
+    reads = native_source/relation_reads(instruction[2], false, false)
   elseif op == :Dispatch || op == :SpawnDispatch
     reads = native_source/operand_reads(instruction[2])
     for pair in instruction[3]
