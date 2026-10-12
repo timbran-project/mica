@@ -11,6 +11,11 @@ verb native_source/region_registers(program: map, region: map) -> map
         needed[reg] = true
       end
     end
+    if map_contains_key(program[:exceptions], pc)
+      for reg in program[:handlers][program[:exceptions][pc][0]]
+        needed[reg] = true
+      end
+    end
     if !native_source/dead_load(program, pc)
       for reg in [@program[:instructions][pc][:reads], @program[:instructions][pc][:writes]]
         needed[reg] = true
@@ -22,6 +27,11 @@ end
 
 verb native_source/restore_frame(input: map, program: map, region: map) -> map
   let builder: map = input
+  if region[:pop_handler]
+    let current: map = native_handlers/current(builder)
+    let handler: map = native_kernel/load_field(builder, current, "handlers")
+    builder = native_handlers/replace_current(builder, current, {"handlers" -> native_kernel/load_field(builder, handler, "next")})
+  end
   let registers: map = {}
   let needed: map = native_source/region_registers(program, region)
   for reg in sort([reg for reg, present in needed])
@@ -65,6 +75,7 @@ verb native_source/invoke(builder: map, selector: map, supplied: map, continuati
   ready = native_tasks/check(ready, native_gen/equal(native_kernel/load_field(ready, configuration, "heap"), native_kernel/load_field(ready, native_roots/worker(ready), "heap")), "schema")
   let root: map = native_gen/field(ready, configuration, "prototypes")[:pointer]
   ready = native_tasks/check(ready, native_gen/negate(native_kernel/absent(native_kernel/load_field(ready, root, "registration"))), "closed")
+  ready = native_source/arm_handler(ready)
   let [image: map, captured: map] = native_source/capture_image(ready, continuation, captures)
   let arguments: list = [native_roots/worker(captured), native_tasks/attempt(captured), native_gen/field(captured, configuration, "vocabulary")[:pointer]]
   for name in ["selectors", "parameters", "delegates", "programs"]

@@ -17,7 +17,7 @@ verb native_source/arithmetic_error(builder: map, code, message: string, operand
   let [error: map, created: map] = native_source/result(ready, "value_error", [native_roots/worker(ready), number,
     native_gen/ref(ready, "true"), native_source/literal(ready, message), native_gen/ref(ready, "true"), values], "oom")
   let [retained: map, rooted: map] = native_roots/retain(created, "error", error)
-  let result: map = native_source/return_call(rooted, "task_raise", [native_tasks/attempt(rooted), native_roots/worker(rooted), retained])
+  let result: map = native_source/throw(rooted, retained)
   return result
 end
 

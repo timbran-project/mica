@@ -31,6 +31,14 @@ verb native_source/value_instruction(builder: map, instruction: list) -> list
     let value: map = native_gen/call(builder, string_concat(builder[:source_prefix], "_collection_length"), [native_source/register(builder, instruction[2])])
     return [value, builder]
   end
+  if op == :NormalizeError
+    let result: list = native_source/normalize_error(builder, instruction)
+    return result
+  end
+  if op == :ErrorField
+    let result: list = native_source/error_field(builder, native_source/register(builder, instruction[2]), instruction[3])
+    return result
+  end
   if op == :BuildRange
     let finish: map = native_gen/zero(native_value/word())
     let present: string = "false"
@@ -90,6 +98,10 @@ verb native_source/emit_boundary(builder: map, instruction: list, continuation: 
     let result: map = native_roots/return_value(failed, native_gen/ref(failed, "task_language_error"))
     return result
   end
+  if op == :Throw
+    let result: map = native_source/throw(builder, native_source/operand(builder, instruction[1]))
+    return result
+  end
   if op == :Return
     let result: map = native_source/complete(builder, native_source/operand(builder, instruction[1]))
     return result
@@ -116,11 +128,12 @@ verb native_source/block_body(builder: map, program: map, block: map, continuati
   let ready: map = native_source/checked(builder, "task_poll", [native_tasks/attempt(builder), native_source/number(builder, len(block[:pcs]))])
   let code: list = program[:description][:code]
   let last: int = block[:last]
-  let terminal: bool = program[:instructions][last][:boundary] || native/contains([:Return, :Abort, :Branch, :Jump], code[last][0])
+  let terminal: bool = program[:instructions][last][:boundary] || native/contains([:Return, :Abort, :Throw, :Branch, :Jump], code[last][0])
   ready = native_roots/temporary(ready, fn(body)
     let current: map = body
     for pc in block[:pcs]
       if !(pc == last && terminal) && !native_source/dead_load(program, pc)
+        current = native_source/at_instruction(current, program, pc, continuations)
         current = native_source/emit_instruction(current, code[pc])
       end
     end
@@ -130,6 +143,7 @@ verb native_source/block_body(builder: map, program: map, block: map, continuati
     let result: map = native_gen/jump_to(ready, native_source/block_label(last + 1))
     return result
   end
+  ready = native_source/at_instruction(ready, program, last, continuations)
   let instruction: list = code[last]
   if instruction[0] == :Jump
     let result: map = native_gen/jump_to(ready, native_source/block_label(instruction[1]))

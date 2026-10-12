@@ -51,7 +51,7 @@ verb native_source/region_blocks(analysis: map, start: int, pcs: list) -> list
       current = []
     end
     current = [@current, pc]
-    if analysis[:instructions][pc][:boundary] || native/contains([:Return, :Abort, :Branch, :Jump], code[pc][0])
+    if analysis[:instructions][pc][:boundary] || native/contains([:Return, :Abort, :Throw, :Branch, :Jump], code[pc][0])
       blocks = [@blocks, {:start -> current[0], :pcs -> current, :last -> pc}]
       current = []
     end
@@ -67,17 +67,29 @@ verb native_source/regions(analysis: map) -> list
     parameters = [@parameters, reg]
     reg = reg + 1
   end
-  let origins: list = [[0, -1, parameters, -1]]
+  let origins: list = [[0, -1, parameters, -1, -1, false]]
   for pc in sort([pc for pc, captures in analysis[:captures]])
     let targets: list = analysis[:instructions][pc][:successors]
     native/ensure(len(targets) == 1, "source boundary requires one resumption target")
-    origins = [@origins, [targets[0], pc, analysis[:captures][pc], analysis[:description][:code][pc][1]]]
+    let call: bool = native/contains([:Dispatch, :PositionalDispatch, :DynamicDispatch], analysis[:description][:code][pc][0])
+    origins = [@origins, [targets[0], pc, analysis[:captures][pc], analysis[:description][:code][pc][1], -1,
+      call && map_contains_key(analysis[:exceptions], pc)]]
+  end
+  for target, captures in analysis[:handlers]
+    let input: int = -1
+    for pc, edge in analysis[:exceptions]
+      if edge[0] == target
+        input = edge[1]
+        break
+      end
+    end
+    origins = [@origins, [target, -1, captures, input, target, false]]
   end
   let regions: list = []
-  for [start, resume, restore, input] in origins
+  for [start, resume, restore, input, error_target, pop_handler] in origins
     let pcs: list = native_source/region_instructions(analysis, start)
     regions = [@regions, {:start -> start, :resume -> resume, :restore -> restore, :input -> input,
-      :pcs -> pcs, :blocks -> native_source/region_blocks(analysis, start, pcs)}]
+      :pcs -> pcs, :blocks -> native_source/region_blocks(analysis, start, pcs), :error_target -> error_target, :pop_handler -> pop_handler}]
   end
   return regions
 end
@@ -87,6 +99,9 @@ verb native_source/continuations(program: map) -> map
   for region in program[:regions]
     if region[:resume] >= 0
       result[region[:resume]] = string_concat(program[:name], "_", to_literal(index))
+    end
+    if region[:error_target] >= 0
+      result[string_concat("error_", to_literal(region[:error_target]))] = string_concat(program[:name], "_", to_literal(index))
     end
     index = index + 1
   end

@@ -131,6 +131,15 @@ static void source_roundtrip(bool force_conflict) {
         assert(mica_task_scheduler_settle(&scheduler, &worker, parent_slot.f_id, (void *)waiting.f_pointer) == 0);
         assert(mica_memory_root_pop(&worker, &waiting));
         assert(mica_task_observe(&parent, &worker).f_state == 4);
+        // Entering a receive must not run its finalizer before delivery.
+        struct mica_KernelTransaction waiting_view = {0};
+        assert(mica_kernel_begin(&kernel, &worker, &waiting_view, source_integer(7)) == 0);
+        mica_type_Value waiting_cells[] = {source_integer(9), source_integer(1)}, waiting_matches[1];
+        struct mica_ValueResult waiting_pattern = mica_value_list(&worker, waiting_cells, 2);
+        assert(waiting_pattern.f_ok);
+        struct mica_KernelScanResult waiting_rows = mica_kernel_scan(&waiting_view, 705, waiting_pattern.f_value, 3, 0, waiting_matches, 1);
+        assert(waiting_rows.f_status == 0 && waiting_rows.f_count == 0);
+        assert(mica_kernel_end(&waiting_view));
         struct mica_TaskAttempt attempt = {0};
         assert(mica_task_claim(child, &worker, &attempt) == 0);
         struct mica_TaskImage *entry = (void *)attempt.f_current.f_pointer;
@@ -220,6 +229,12 @@ static void source_roundtrip(bool force_conflict) {
     assert(scanned.f_status == 0 && scanned.f_count == 1);
     cells[0] = source_integer(8);
     cells[1] = source_integer(43);
+    list = mica_value_list(&worker, cells, 2);
+    assert(list.f_ok);
+    scanned = mica_kernel_scan(&setup, 705, list.f_value, 3, 0, rows, 2);
+    assert(scanned.f_status == 0 && scanned.f_count == 1);
+    cells[0] = source_integer(9);
+    cells[1] = source_integer(1);
     list = mica_value_list(&worker, cells, 2);
     assert(list.f_ok);
     scanned = mica_kernel_scan(&setup, 705, list.f_value, 3, 0, rows, 2);

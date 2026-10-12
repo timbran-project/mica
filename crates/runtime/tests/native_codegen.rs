@@ -8,8 +8,8 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use mica_runtime::{SourceRunner, TaskLimits, TaskOutcome};
-use mica_var::{Value, ValueKind};
+use mica_runtime::{SourceRunner, TaskInput, TaskLimits, TaskOutcome};
+use mica_var::{Symbol, Value, ValueKind};
 
 const SOURCES: &[&str] = &[
     include_str!("../../../apps/native/ir.mica"),
@@ -2256,6 +2256,30 @@ fn native_tasks_execute_on_both_mica_tiers() {
     check_native_kernel_fixture(true);
 }
 
+fn load_native_source_compiler(runner: &mut SourceRunner) {
+    for source in [
+        include_str!("../../../apps/compiler/emit.mica"),
+        include_str!("../../../apps/native/compiler/exceptions.mica"),
+        include_str!("../../../apps/native/compiler/analysis.mica"),
+        include_str!("../../../apps/native/compiler/flow.mica"),
+        include_str!("../../../apps/native/compiler/builders.mica"),
+        include_str!("../../../apps/native/compiler/errors.mica"),
+        include_str!("../../../apps/native/compiler/operations.mica"),
+        include_str!("../../../apps/native/compiler/collections.mica"),
+        include_str!("../../../apps/native/compiler/access.mica"),
+        include_str!("../../../apps/native/compiler/expressions.mica"),
+        include_str!("../../../apps/native/compiler/prepare.mica"),
+        include_str!("../../../apps/native/compiler/continuations.mica"),
+        include_str!("../../../apps/native/compiler/install.mica"),
+        include_str!("../../../apps/native/compiler/lower.mica"),
+        include_str!("../../../apps/native/compiler/program.mica"),
+    ] {
+        runner.run_filein(source).unwrap_or_else(|error| {
+            panic!("{}", runner.render_source_task_error(&error));
+        });
+    }
+}
+
 #[test]
 fn native_source_analysis_tracks_continuations_and_definite_assignment() {
     let (conformance_source, _, _) = source_expression_cases();
@@ -2265,24 +2289,10 @@ fn native_source_analysis_tracks_continuations_and_definite_assignment() {
             include_str!("../../../apps/compiler/lex.mica"),
             include_str!("../../../apps/compiler/parse.mica"),
             include_str!("../../../apps/compiler/ast.mica"),
-            include_str!("../../../apps/compiler/emit.mica"),
-            include_str!("../../../apps/native/compiler/analysis.mica"),
-            include_str!("../../../apps/native/compiler/flow.mica"),
-            include_str!("../../../apps/native/compiler/builders.mica"),
-            include_str!("../../../apps/native/compiler/operations.mica"),
-            include_str!("../../../apps/native/compiler/collections.mica"),
-            include_str!("../../../apps/native/compiler/access.mica"),
-            include_str!("../../../apps/native/compiler/expressions.mica"),
-            include_str!("../../../apps/native/compiler/prepare.mica"),
-            include_str!("../../../apps/native/compiler/continuations.mica"),
-            include_str!("../../../apps/native/compiler/install.mica"),
-            include_str!("../../../apps/native/compiler/lower.mica"),
-            include_str!("../../../apps/native/compiler/program.mica"),
         ] {
-            runner.run_filein(source).unwrap_or_else(|error| {
-                panic!("{}", runner.render_source_task_error(&error));
-            });
+            runner.run_filein(source).unwrap();
         }
+        load_native_source_compiler(&mut runner);
         let example = include_str!("../../../apps/native/compiler/examples/roundtrip.mica");
         let checked = eval(
             &mut runner,
@@ -2312,6 +2322,20 @@ let literals = native_source/program_literals(parent, [])
 native/ensure(native/contains(literals, "parent continuation") && native/contains(literals, 42), "source literals retained")
 native/ensure(len(native_source/pool([42], 42.0)) == 2, "literal pool preserves numeric kinds")
 native/ensure(native_source/symbol_text(:"line\nMontréal") == "line\nMontréal", "quoted symbol names survive lowering")
+for source in [
+  "let x = 1\ntry\n x = 2\nfinally\n x = x + 3\nend\nreturn x",
+  "try\n return 1\nfinally\n return 2\nend",
+  "let x = 0\nwhile x < 3\n try\n x = x + 1\n continue\n finally\n x = x + 1\n end\nend\nreturn x",
+  "let x = 1\ntry\n x = 2\n let y = 1 / 0\ncatch E_DIV as error\n return [x, error.code]\nfinally\n x = x + 1\nend",
+  "try\n try\n raise E_DIV\n finally\n let x = 7\n end\ncatch E_DIV\n return 8\nend"
+]
+  let parsed = parse_rows(source)
+  let emitted = emit_program(parsed[:rows], parsed[:root])
+  native/ensure(emitted[:errors] == [], to_literal(emitted[:errors]))
+  let lowered = native_exceptions/lower(emitted[:entry])
+  let checked = native_source/analyse(lowered, 0)
+  native/ensure(len(checked[:reachable]) > 0, "exception flow is reachable")
+end
 for pc, captures in parent[:captures]
   native/ensure(len(captures) > 0, "parent must retain locals")
   let destination = module[:entry][:code][pc][1]
@@ -2341,7 +2365,7 @@ native/ensure(parsed[:errors] == [], to_literal(parsed[:errors]))
 let emitted = emit_program(parsed[:rows], parsed[:root])
 native/ensure(emitted[:errors] == [], to_literal(emitted[:errors]))
 for definition in emitted[:methods]
-  let analysis = native_source/analyse(definition[:program], len(definition[:parameters]))
+  let analysis = native_source/analyse(native_exceptions/lower(definition[:program]), len(definition[:parameters]))
   for region in native_source/regions(analysis)
     let starts = native_source/set([block[:start] for block in region[:blocks]])
     native/ensure(map_contains_key(starts, region[:start]), "region entry requires a block")
@@ -2450,6 +2474,22 @@ fn source_expression_cases() -> (String, String, String) {
         "begin\n let total = 0\n for item in left\n if item == 2\n continue\n end\n if item == right\n break\n end\n total = total + item\n end\n total\nend",
         "begin\n let [first, @rest] = left\n [first, rest]\nend",
         "begin\n let changed = left\n let key = right\n let assigned = changed[0][key] = begin key = key + 1; 9 end\n [changed, assigned, key]\nend",
+        "try\n left / right\ncatch E_DIV as error\n [error.code, error.message, error.value]\nend",
+        "try\n raise E_INVARG, \"explicit error\", [left, right]\ncatch E_INVARG as error\n [error.code, error.message, error.value]\nend",
+        "begin\n let changed = left\n try\n changed = changed + 1\n let ignored = changed / right\n catch E_DIV\n return changed\n end\n changed\nend",
+        "begin\n let changed = left\n try\n changed = changed + right\n finally\n changed = changed + 1\n end\n changed\nend",
+        "try\n return left\nfinally\n let ignored = right\nend",
+        "try\n return left\nfinally\n return right\nend",
+        "begin\n let changed = left\n try\n try\n changed = changed + 1\n let ignored = changed / right\n finally\n changed = changed + 10\n end\n catch E_DIV as error\n return [changed, error.code]\n end\n changed\nend",
+        "begin\n let changed = left + 1\n try\n native_expression_5(changed, right)\n catch E_DIV as error\n [changed, error.code, error.value]\n end\nend",
+        "try\n try\n raise E_INVARG, \"original\", left\n catch E_INVARG as error\n raise error\n end\ncatch E_INVARG as error\n [error.code, error.message, error.value]\nend",
+        "begin\n let count = 0\n let trace = []\n while count < left\n try\n count = count + 1\n if count == right\n break\n end\n continue\n finally\n trace = [@trace, count]\n end\n end\n [count, trace]\nend",
+        "try\n return left\nfinally\n try\n raise E_DIV\n catch E_DIV\n let ignored = right\n end\nend",
+        "[E_DIV.code, E_DIV.message, E_DIV.value]",
+        "try\n left.message\ncatch E_TYPE as error\n [error.code, error.value]\nend",
+        "try\n raise E_INVARG, \"original\", left\ncatch E_INVARG as error\n raise error, \"replacement\", right\nend",
+        "begin\n try\n let result = native_expression_2(left, right)\n catch E_DIV\n return 999\n end\n left / 0\nend",
+        "begin\n let changed = left\n try\n return native_expression_2(left, right)\n finally\n changed = native_expression_2(changed, 1)\n end\nend",
     ];
     let mut cases: Vec<(usize, Vec<&str>)> = Vec::new();
     for value in ["7", "2.5", "-36028797018963968", "true"] {
@@ -2675,6 +2715,28 @@ fn source_expression_cases() -> (String, String, String) {
         ));
         ids.push(format!("[{}, {}]", 1000 + index, 10000 + index));
     }
+    cases.push((54, vec!["7", "0"]));
+    cases.push((54, vec!["7", "2"]));
+    cases.push((54, vec!["true", "2"]));
+    cases.push((55, vec!["3", "4"]));
+    cases.push((56, vec!["3", "0"]));
+    cases.push((56, vec!["3", "2"]));
+    cases.push((57, vec!["3", "4"]));
+    cases.push((58, vec!["3", "4"]));
+    cases.push((59, vec!["3", "4"]));
+    cases.push((60, vec!["3", "0"]));
+    cases.push((60, vec!["3", "2"]));
+    cases.push((61, vec!["3", "0"]));
+    cases.push((61, vec!["3", "2"]));
+    cases.push((62, vec!["3", "4"]));
+    cases.push((63, vec!["4", "2"]));
+    cases.push((63, vec!["3", "9"]));
+    cases.push((64, vec!["3", "4"]));
+    cases.push((65, vec!["3", "4"]));
+    cases.push((66, vec!["3", "4"]));
+    cases.push((67, vec!["3", "4"]));
+    cases.push((68, vec!["3", "4"]));
+    cases.push((69, vec!["3", "4"]));
     let mut oracle = SourceRunner::new_empty().with_interpreter_only(true);
     let mut checks = String::new();
     source.push_str("\nverb native_control_spin()\n while true\n end\nend\n");
@@ -2998,25 +3060,7 @@ fn native_source_program_executes_on_generated_runtime() {
             ..TaskLimits::default()
         });
         load_native_kernel(&mut runner, true);
-        for source in [
-            include_str!("../../../apps/compiler/emit.mica"),
-            include_str!("../../../apps/native/compiler/analysis.mica"),
-            include_str!("../../../apps/native/compiler/flow.mica"),
-            include_str!("../../../apps/native/compiler/builders.mica"),
-            include_str!("../../../apps/native/compiler/operations.mica"),
-            include_str!("../../../apps/native/compiler/collections.mica"),
-            include_str!("../../../apps/native/compiler/access.mica"),
-            include_str!("../../../apps/native/compiler/expressions.mica"),
-            include_str!("../../../apps/native/compiler/prepare.mica"),
-            include_str!("../../../apps/native/compiler/continuations.mica"),
-            include_str!("../../../apps/native/compiler/install.mica"),
-            include_str!("../../../apps/native/compiler/lower.mica"),
-            include_str!("../../../apps/native/compiler/program.mica"),
-        ] {
-            runner.run_filein(source).unwrap_or_else(|error| {
-                panic!("{}", runner.render_source_task_error(&error));
-            });
-        }
+        load_native_source_compiler(&mut runner);
         // Bootstrap catalogue lookup uses a committed setup transaction. Native
         // catalogue installation and rollback are exercised by the C fixture.
         eval(&mut runner, "return make_relation(:NativeResult, 2)");
@@ -3024,9 +3068,34 @@ fn native_source_program_executes_on_generated_runtime() {
             "{}\n{conformance_source}",
             include_str!("../../../apps/native/compiler/examples/roundtrip.mica")
         );
-        let generated = eval(&mut runner, &format!(
-            "let module = native_source/compile(native_tasks/definitions(), \"source_roundtrip\", {example:?}, {{:NativeResult -> 705}}, {method_ids})\nreturn native/emit_c(module[:state])"
-        )).with_str(str::to_owned).unwrap();
+        let module = eval(
+            &mut runner,
+            &format!(
+                "return native_source/compile(native_tasks/definitions(), \"source_roundtrip\", {example:?}, {{:NativeResult -> 705}}, {method_ids})"
+            ),
+        );
+        eprintln!(
+            "native source: interpreter_only={interpreter_only}, module construction={:?}",
+            generation_started.elapsed()
+        );
+        let emission_started = Instant::now();
+        let state = module
+            .map_get(&Value::symbol(Symbol::intern("state")))
+            .unwrap();
+        let mut request = SourceRunner::root_source_request("");
+        request.input = TaskInput::Invocation {
+            selector: Symbol::intern("native/emit_c"),
+            roles: vec![(Symbol::intern("state"), state)],
+        };
+        let submitted = runner.submit_invocation(request).unwrap();
+        let TaskOutcome::Complete { value, .. } = submitted.outcome else {
+            panic!("C emission: {:?}", submitted.outcome);
+        };
+        let generated = value.with_str(str::to_owned).unwrap();
+        eprintln!(
+            "native source: interpreter_only={interpreter_only}, C emission={:?}",
+            emission_started.elapsed()
+        );
         eprintln!(
             "native source: interpreter_only={interpreter_only}, generation={:?}, C bytes={}",
             generation_started.elapsed(),

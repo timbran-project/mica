@@ -9,7 +9,12 @@ verb native_roundtrip_child(reply: capability, key: int, value: int)
 end
 
 verb native_roundtrip_receive(receivers)
-  return mailbox_recv(receivers)
+  try
+    return mailbox_recv(receivers)
+  finally
+    // Record completion after resumption, in the resumed transaction.
+    assert NativeResult(9, 1)
+  end
 end
 
 let saved = ["parent continuation", 42]

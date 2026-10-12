@@ -1,0 +1,322 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+// Resolve lexical exception regions into ordinary control flow. A finalizer
+// keeps its pending transfer in source registers, so calls and suspension use
+// the same liveness and immutable continuation capture as other expressions.
+verb native_exceptions/label(pc: int) -> string
+  return string_concat("source_", to_literal(pc))
+end
+verb native_exceptions/mark(input: map, label: string) -> map
+  let state: map = input
+  state[:labels][label] = len(state[:code])
+  return state
+end
+verb native_exceptions/emit(input: map, instruction: list, handler: string) -> map
+  let state: map = input
+  if handler != ""
+    state[:exceptions][len(state[:code])] = handler
+  end
+  state[:code] = [@state[:code], instruction]
+  return state
+end
+verb native_exceptions/register(input: map) -> list
+  let state: map = input
+  let reg: int = state[:registers]
+  state[:registers] = reg + 1
+  return [reg, state]
+end
+verb native_exceptions/move(state: map, dst: int, operand: list) -> map
+  let op: symbol = :Move
+  if operand[0] == :Constant
+    op = :Load
+  end
+  let result: map = native_exceptions/emit(state, [op, dst, operand[1]], "")
+  return result
+end
+verb native_exceptions/route(input: map, context: list, mode: symbol, target: int) -> list
+  let key: list = [context, mode, target]
+  if map_contains_key(input[:routes_by_key], key)
+    return [input[:routes_by_key][key], input]
+  end
+  let state: map = input
+  let label: string = string_concat("transfer_", to_literal(len(state[:routes])))
+  state[:routes_by_key][key] = label
+  state[:routes] = [@state[:routes], {:label -> label, :context -> context, :mode -> mode, :target -> target}]
+  return [label, state]
+end
+verb native_exceptions/jump(state: map, label: string) -> map
+  let result: map = native_exceptions/emit(state, [:Jump, label], "")
+  return result
+end
+
+// Each source PC has a lexical stack. A catch cannot catch its own errors;
+// a running finalizer cannot run itself again on an abrupt transfer.
+verb native_exceptions/scopes(code: list, input: map) -> map
+  let state: map = input
+  let scopes: list = []
+  for pc, instruction in code
+    if instruction[0] != :EnterTry
+      continue
+    end
+    let [tag: int, with_tag: map] = native_exceptions/register(state)
+    let [saved: int, with_saved: map] = native_exceptions/register(with_tag)
+    state = with_saved
+    let first: int = instruction[3]
+    if instruction[2] != none
+      first = instruction[2]
+    end
+    if len(instruction[1]) > 0
+      first = instruction[1][0][2]
+    end
+    scopes = [@scopes, {:enter -> pc, :finish -> instruction[3], :first -> first,
+      :catches -> instruction[1], :cleanup -> instruction[2], :tag -> tag, :saved -> saved}]
+  end
+  let contexts: map = {}
+  for pc, instruction in code
+    let context: list = []
+    for index, scope in scopes
+      if pc <= scope[:enter] || pc >= scope[:finish]
+        continue
+      end
+      let phase: symbol = :Body
+      if pc >= scope[:first]
+        phase = :Catch
+      end
+      if scope[:cleanup] != none && pc >= scope[:cleanup]
+        phase = :Finally
+      end
+      context = [@context, [index, phase]]
+    end
+    contexts[pc] = context
+  end
+  state[:scopes] = scopes
+  state[:contexts] = contexts
+  return state
+end
+
+verb native_exceptions/transfer(input: map, context: list, mode: symbol, target: int) -> list
+  if mode == :Jump && context == input[:contexts][target]
+    return [native_exceptions/label(target), input]
+  end
+  let result: list = native_exceptions/route(input, context, mode, target)
+  return result
+end
+verb native_exceptions/can_raise(op: symbol) -> bool
+  let result: bool = native/contains([:Unary, :Binary, :Index, :SetIndex, :ErrorField, :CheckKind,
+    :BuiltinCall, :BuildList, :BuildMap, :CollectionKeyAt, :CollectionValueAt,
+    :Dispatch, :PositionalDispatch, :DynamicDispatch], op)
+  return result
+end
+
+verb native_exceptions/source_instruction(input: map, pc: int, instruction: list) -> map
+  let state: map = native_exceptions/mark(input, native_exceptions/label(pc))
+  let context: list = state[:contexts][pc]
+  let op: symbol = instruction[0]
+  if op == :EnterTry
+    for scope in state[:scopes]
+      if scope[:enter] == pc
+        state = native_exceptions/emit(state, [:Load, scope[:tag], 0], "")
+        state = native_exceptions/emit(state, [:Load, scope[:saved], [] {}], "")
+        break
+      end
+    end
+    let result: map = native_exceptions/jump(state, native_exceptions/label(pc + 1))
+    return result
+  end
+  if op == :EndFinally
+    native/ensure(len(context) > 0 && context[len(context) - 1][1] == :Finally, "finalizer end has no lexical region")
+    let result: map = native_exceptions/jump(state, string_concat("finally_", to_literal(context[len(context) - 1][0])))
+    return result
+  end
+  if op == :ExitTry
+    native/ensure(len(context) > 0, "try exit has no lexical region")
+    let scope: map = state[:scopes][context[len(context) - 1][0]]
+    let [target: string, routed: map] = native_exceptions/route(state, context, :Jump, scope[:finish])
+    let result: map = native_exceptions/jump(routed, target)
+    return result
+  end
+  if op == :Return
+    state = native_exceptions/move(state, state[:value], instruction[1])
+    let [target: string, routed: map] = native_exceptions/route(state, context, :Return, -1)
+    let result: map = native_exceptions/jump(routed, target)
+    return result
+  end
+  if op == :Jump
+    let [target: string, routed: map] = native_exceptions/transfer(state, context, :Jump, instruction[1])
+    let result: map = native_exceptions/jump(routed, target)
+    return result
+  end
+  if op == :Branch
+    let [yes: string, after_yes: map] = native_exceptions/transfer(state, context, :Jump, instruction[2])
+    let [no: string, after_no: map] = native_exceptions/transfer(after_yes, context, :Jump, instruction[3])
+    let result: map = native_exceptions/emit(after_no, [:Branch, instruction[1], yes, no], "")
+    return result
+  end
+  if op == :Raise
+    state = native_exceptions/emit(state, [:NormalizeError, state[:value], instruction[1], instruction[2], instruction[3]], "")
+    let [target: string, routed: map] = native_exceptions/route(state, context, :Throw, -1)
+    let result: map = native_exceptions/jump(routed, target)
+    return result
+  end
+  let handler: string = ""
+  if len(context) > 0 && native_exceptions/can_raise(op)
+    let [target: string, routed: map] = native_exceptions/route(state, context, :Throw, -1)
+    handler = target
+    state = routed
+  end
+  let result: map = native_exceptions/emit(state, instruction, handler)
+  return result
+end
+
+verb native_exceptions/enter_finally(input: map, index: int, next: string, mode: symbol) -> map
+  let state: map = input
+  let scope: map = state[:scopes][index]
+  let continuations: list = index_or(state[:finalizers], index, [])
+  let tag: int = len(continuations)
+  let resume: string = string_concat("finally_resume_", to_literal(index), "_", to_literal(tag))
+  state[:finalizers][index] = [@continuations, [tag, resume]]
+  state = native_exceptions/emit(state, [:Load, scope[:tag], tag], "")
+  if mode != :Jump
+    state = native_exceptions/emit(state, [:Move, scope[:saved], state[:value]], "")
+  end
+  state = native_exceptions/jump(state, native_exceptions/label(scope[:cleanup]))
+  state = native_exceptions/mark(state, resume)
+  if mode != :Jump
+    state = native_exceptions/emit(state, [:Move, state[:value], scope[:saved]], "")
+  end
+  let result: map = native_exceptions/jump(state, next)
+  return result
+end
+
+verb native_exceptions/emit_route(input: map, route: map) -> map
+  let state: map = native_exceptions/mark(input, route[:label])
+  let context: list = route[:context]
+  let mode: symbol = route[:mode]
+  if len(context) == 0
+    if mode == :Jump
+      let result: map = native_exceptions/jump(state, native_exceptions/label(route[:target]))
+      return result
+    end
+    let op: symbol = :Return
+    if mode == :Throw
+      op = :Throw
+    end
+    let result: map = native_exceptions/emit(state, [op, [:Register, state[:value]]], "")
+    return result
+  end
+  let current: list = context[len(context) - 1]
+  let outer: list = []
+  if len(context) > 1
+    outer = context[0..(len(context) - 2)]
+  end
+  let scope: map = state[:scopes][current[0]]
+  if mode == :Jump && native/contains(state[:contexts][route[:target]], current)
+    let result: map = native_exceptions/jump(state, native_exceptions/label(route[:target]))
+    return result
+  end
+  if mode == :Throw && current[1] == :Body
+    for ordinal, handler in scope[:catches]
+      let caught: string = string_concat(route[:label], "_catch_", to_literal(ordinal))
+      let missed: string = string_concat(route[:label], "_next_", to_literal(ordinal))
+      if handler[0] != none
+        let [code: int, with_code: map] = native_exceptions/register(state)
+        let [expected: int, with_expected: map] = native_exceptions/register(with_code)
+        let [matches: int, with_matches: map] = native_exceptions/register(with_expected)
+        state = native_exceptions/emit(with_matches, [:ErrorField, code, state[:value], :Code], "")
+        state = native_exceptions/emit(state, [:Load, expected, handler[0]], "")
+        state = native_exceptions/emit(state, [:Binary, matches, :Eq, code, expected], "")
+        state = native_exceptions/emit(state, [:Branch, matches, caught, missed], "")
+      else
+        state = native_exceptions/jump(state, caught)
+      end
+      state = native_exceptions/mark(state, caught)
+      if handler[1] != none
+        state = native_exceptions/emit(state, [:Move, handler[1], state[:value]], "")
+      end
+      state = native_exceptions/jump(state, native_exceptions/label(handler[2]))
+      state = native_exceptions/mark(state, missed)
+      if handler[0] == none
+        return state
+      end
+    end
+  end
+  let [next: string, routed: map] = native_exceptions/route(state, outer, mode, route[:target])
+  state = routed
+  if current[1] != :Finally && scope[:cleanup] != none
+    let result: map = native_exceptions/enter_finally(state, current[0], next, mode)
+    return result
+  end
+  let result: map = native_exceptions/jump(state, next)
+  return result
+end
+
+verb native_exceptions/finish_finalizers(input: map) -> map
+  let state: map = input
+  for index, entries in state[:finalizers]
+    let scope: map = state[:scopes][index]
+    state = native_exceptions/mark(state, string_concat("finally_", to_literal(index)))
+    for ordinal, entry in entries
+      if ordinal + 1 == len(entries)
+        state = native_exceptions/jump(state, entry[1])
+        break
+      end
+      let [expected: int, with_expected: map] = native_exceptions/register(state)
+      let [matches: int, with_matches: map] = native_exceptions/register(with_expected)
+      let next: string = string_concat("finally_next_", to_literal(index), "_", to_literal(ordinal))
+      state = native_exceptions/emit(with_matches, [:Load, expected, entry[0]], "")
+      state = native_exceptions/emit(state, [:Binary, matches, :Eq, scope[:tag], expected], "")
+      state = native_exceptions/emit(state, [:Branch, matches, entry[1], next], "")
+      state = native_exceptions/mark(state, next)
+    end
+  end
+  return state
+end
+
+verb native_exceptions/lower(description: map) -> map
+  let needed: bool = false
+  for instruction in description[:code]
+    if native/contains([:EnterTry, :Raise], instruction[0])
+      needed = true
+    end
+  end
+  if !needed
+    return description
+  end
+  let state: map = {:code -> [], :labels -> {}, :exceptions -> {}, :registers -> description[:registers],
+    :routes -> [], :routes_by_key -> {}, :finalizers -> {}}
+  let [value: int, allocated: map] = native_exceptions/register(state)
+  state = allocated
+  state[:value] = value
+  state = native_exceptions/scopes(description[:code], state)
+  state = native_exceptions/emit(state, [:Load, value, [] {}], "")
+  for pc, instruction in description[:code]
+    state = native_exceptions/source_instruction(state, pc, instruction)
+  end
+  let cursor: int = 0
+  while cursor < len(state[:routes])
+    state = native_exceptions/emit_route(state, state[:routes][cursor])
+    cursor = cursor + 1
+  end
+  state = native_exceptions/finish_finalizers(state)
+  let code: list = []
+  for instruction in state[:code]
+    let rewritten: list = instruction
+    if instruction[0] == :Jump
+      rewritten[1] = state[:labels][instruction[1]]
+    elseif instruction[0] == :Branch
+      rewritten[2] = state[:labels][instruction[2]]
+      rewritten[3] = state[:labels][instruction[3]]
+    end
+    code = [@code, rewritten]
+  end
+  let handlers: map = {}
+  for pc, label in state[:exceptions]
+    handlers[pc] = [state[:labels][label], value]
+  end
+  let result: map = description
+  result[:code] = code
+  result[:registers] = state[:registers]
+  result[:exceptions] = handlers
+  return result
+end

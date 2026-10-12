@@ -9,7 +9,7 @@ verb native_source/raise_error(builder: map, code, value: map) -> map
   let [error: map, ready: map] = native_source/result(builder, "value_error", [native_roots/worker(builder), number,
     native_gen/ref(builder, "false"), native_gen/zero(native_value/word()), native_gen/ref(builder, "true"), value], "oom")
   let [retained: map, rooted: map] = native_roots/retain(ready, "error", error)
-  let result: map = native_source/return_call(rooted, "task_raise", [native_tasks/attempt(rooted), native_roots/worker(rooted), retained])
+  let result: map = native_source/throw(rooted, retained)
   return result
 end
 verb native_source/value_error(builder: map, code, message: string, value: map) -> map
@@ -18,7 +18,7 @@ verb native_source/value_error(builder: map, code, message: string, value: map) 
   let [error: map, ready: map] = native_source/result(builder, "value_error", [native_roots/worker(builder), number,
     native_gen/ref(builder, "true"), native_source/literal(builder, message), native_gen/ref(builder, "true"), value], "oom")
   let [retained: map, rooted: map] = native_roots/retain(ready, "error", error)
-  let result: map = native_source/return_call(rooted, "task_raise", [native_tasks/attempt(rooted), native_roots/worker(rooted), retained])
+  let result: map = native_source/throw(rooted, retained)
   return result
 end
 verb native_source/check_kind(builder: map, value: map, kind: symbol) -> map

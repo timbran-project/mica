@@ -1,0 +1,115 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+verb native_source/at_instruction(input: map, program: map, pc: int, entries: map) -> map
+  let builder: map = input
+  builder[:source_error] = {}
+  if map_contains_key(program[:exceptions], pc)
+    let edge: list = program[:exceptions][pc]
+    builder[:source_error] = {:entry -> entries[string_concat("error_", to_literal(edge[0]))],
+      :captures -> program[:handlers][edge[0]]}
+  end
+  return builder
+end
+
+// Capture at the failing instruction, after all preceding local changes.
+// The entry wrapper releases the native roots before its required tail transfer.
+verb native_source/throw(builder: map, value: map) -> map
+  let handler: map = index_or(builder, :source_error, {})
+  let [error: map, rooted: map] = native_roots/retain(builder, "raised", value)
+  if len(handler) == 0
+    let result: map = native_source/return_call(rooted, "task_raise", [native_tasks/attempt(rooted), native_roots/worker(rooted), error])
+    return result
+  end
+  let [image: map, captured: map] = native_source/capture_image(rooted, handler[:entry], handler[:captures])
+  let ready: map = native_handlers/replace_current(captured, image, {"input" -> error})
+  let result: map = native_tasks/attempt_status(ready, "ok")
+  return result
+end
+
+// Only a call needs a runtime catch image. Same-function failures select their
+// generated landing directly. The normal continuation removes this call's catch.
+verb native_source/arm_handler(builder: map) -> map
+  let handler: map = index_or(builder, :source_error, {})
+  if len(handler) == 0
+    return builder
+  end
+  let [image: map, captured: map] = native_source/capture_image(builder, handler[:entry], handler[:captures])
+  let result: map = native_source/checked(captured, "task_handler_push", [native_tasks/attempt(captured), native_roots/worker(captured), image,
+    native_gen/ref(captured, "task_handler_catch")])
+  return result
+end
+
+verb native_source/normalize_error(builder: map, instruction: list) -> list
+  let source: map = native_source/operand(builder, instruction[2])
+  let [code: map, with_code: map] = native_gen/bind(builder, "error_code", native_gen/zero(:U32))
+  let [has_message: map, with_message_flag: map] = native_gen/bind(with_code, "has_message", native_gen/ref(with_code, "false"))
+  let [message: map, with_message: map] = native_gen/bind(with_message_flag, "message", native_gen/zero(native_value/word()))
+  let [has_value: map, with_value_flag: map] = native_gen/bind(with_message, "has_value", native_gen/ref(with_message, "false"))
+  let [value: map, ready: map] = native_gen/bind(with_value_flag, "value", native_gen/zero(native_value/word()))
+  ready = native_gen/branch(ready, native_access/kind(ready, source, "error_code"), fn(immediate)
+    let number: map = native_gen/convert(:U32, native_gen/expression(:U64, :Payload, [source]))
+    let result: map = native_gen/assign(immediate, code, number)
+    return result
+  end, fn(existing)
+    let checked: map = native_tasks/check(existing, native_access/kind(existing, source, "error"), "schema")
+    let header: map = native_gen/expression(native_memory/record_pointer("HeapError"), :UnpackPointer, [source])
+    checked = native_gen/assign(checked, code, native_kernel/load_field(checked, header, "code"))
+    checked = native_gen/assign(checked, has_message, native_kernel/load_field(checked, header, "has_message"))
+    checked = native_gen/assign(checked, message, native_kernel/load_field(checked, header, "message"))
+    checked = native_gen/assign(checked, has_value, native_kernel/load_field(checked, header, "has_value"))
+    let result: map = native_gen/assign(checked, value, native_kernel/load_field(checked, header, "value"))
+    return result
+  end)
+  if instruction[3] != none
+    let supplied: map = native_source/operand(ready, instruction[3])
+    ready = native_gen/branch(ready, native_access/kind(ready, supplied, "relation"), fn(absent)
+      let result: map = native_tasks/check(absent, native_kernel/absent(native_access/length(absent, supplied, "relation")), "schema")
+      return result
+    end, fn(present)
+      let checked: map = native_tasks/check(present, native_access/kind(present, supplied, "string"), "schema")
+      checked = native_gen/assign(checked, has_message, native_gen/ref(checked, "true"))
+      let result: map = native_gen/assign(checked, message, supplied)
+      return result
+    end)
+  end
+  if instruction[4] != none
+    ready = native_gen/assign(ready, has_value, native_gen/ref(ready, "true"))
+    ready = native_gen/assign(ready, value, native_source/operand(ready, instruction[4]))
+  end
+  let result: list = native_source/result(ready, "value_error", [native_roots/worker(ready), code, has_message, message, has_value, value], "oom")
+  return result
+end
+
+verb native_source/error_field(builder: map, value: map, field: symbol) -> list
+  let initial: map = native_source/literal(builder, none)
+  let [result: map, ready: map] = native_gen/bind(builder, "error_field", initial)
+  ready = native_gen/branch(ready, native_access/kind(ready, value, "error_code"), fn(immediate)
+    if field == :Code
+      let assigned: map = native_gen/assign(immediate, result, value)
+      return assigned
+    end
+    return immediate
+  end, fn(heap)
+    let checked: map = native_gen/unless(heap, native_access/kind(heap, value, "error"), fn(invalid) => native_source/value_error(invalid, E_TYPE, "error field access requires an error or error code", value))
+    let header: map = native_gen/expression(native_memory/record_pointer("HeapError"), :UnpackPointer, [value])
+    if field == :Code
+      let code: map = native_gen/call(checked, "value_error_code", [native_kernel/load_field(checked, header, "code")])
+      let assigned: map = native_gen/assign(checked, result, native_gen/field(checked, code, "value"))
+      return assigned
+    end
+    let name: string = "value"
+    if field == :Message
+      name = "message"
+    end
+    let assigned: map = native_gen/when(checked, native_kernel/load_field(checked, header, string_concat("has_", name)), fn(present)
+      let payload: map = native_kernel/load_field(present, header, name)
+      let [some: map, built: map] = native_literal/relation(present, [native_source/literal(present, :value), payload], 1, 1,
+        fn(failed) => native_tasks/attempt_status(failed, "oom"))
+      let assigned: map = native_gen/assign(built, result, some)
+      return assigned
+    end)
+    return assigned
+  end)
+  return [result, ready]
+end

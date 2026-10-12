@@ -38,7 +38,7 @@ verb native_source/instruction(code: list, pc: int) -> map
     :BuiltinCall -> 4, :Dispatch -> 4, :DynamicDispatch -> 4, :PositionalDispatch -> 4,
     :SpawnDispatch -> 5, :SpawnDispatchDynamic -> 5, :SpawnPositionalDispatch -> 5, :MailboxRecv -> 4,
     :AssertDynamic -> 3, :RetractDynamic -> 3, :Return -> 2,
-    :Branch -> 4, :Jump -> 2, :CommitValue -> 2, :SuspendValue -> 3, :Emit -> 3}
+    :Branch -> 4, :Jump -> 2, :NormalizeError -> 5, :ErrorField -> 4, :Throw -> 2, :CommitValue -> 2, :SuspendValue -> 3, :Emit -> 3}
   native/ensure(map_contains_key(widths, op), string_concat("unsupported native source instruction ", to_literal(op)))
   native/ensure(len(instruction) == widths[op], "source instruction has the wrong operand count")
   let reads: list = []
@@ -46,7 +46,7 @@ verb native_source/instruction(code: list, pc: int) -> map
   let successors: list = [pc + 1]
   let boundary: bool = false
   if native/contains([:Load, :Move, :Unary, :Binary, :BuildList, :BuildMap, :BuildRange, :CollectionLen,
-      :CollectionKeyAt, :CollectionValueAt, :SetIndex, :Index, :BuiltinCall,
+      :CollectionKeyAt, :CollectionValueAt, :SetIndex, :Index, :NormalizeError, :ErrorField, :BuiltinCall,
       :Dispatch, :DynamicDispatch, :PositionalDispatch, :SpawnDispatch, :SpawnDispatchDynamic, :SpawnPositionalDispatch, :MailboxRecv, :CommitValue, :SuspendValue], op)
     writes = [instruction[1]]
   end
@@ -56,6 +56,15 @@ verb native_source/instruction(code: list, pc: int) -> map
       source = instruction[2]
     end
     reads = [source]
+  elseif op == :ErrorField
+    reads = [instruction[2]]
+  elseif op == :NormalizeError
+    reads = native_source/operand_reads(instruction[2])
+    for operand in [instruction[3], instruction[4]]
+      if operand != none
+        reads = [@reads, @native_source/operand_reads(operand)]
+      end
+    end
   elseif op == :CollectionLen
     reads = [instruction[2]]
   elseif op == :Unary
@@ -114,7 +123,7 @@ verb native_source/instruction(code: list, pc: int) -> map
     boundary = true
   elseif op == :CommitValue
     boundary = true
-  elseif op == :Return || op == :Abort
+  elseif op == :Return || op == :Abort || op == :Throw
     reads = native_source/operand_reads(instruction[1])
     successors = []
   elseif op == :Emit
@@ -163,6 +172,7 @@ verb native_source/analyse(description: map, parameters: int) -> map
     end
     reg = reg + 1
   end
+  let exceptions: map = index_or(description, :exceptions, {})
   let instructions: map = {}
   let predecessors: map = {}
   for pc in 0..(len(code) - 1)
@@ -186,17 +196,23 @@ verb native_source/analyse(description: map, parameters: int) -> map
       continue
     end
     reachable[pc] = true
-    for target in instructions[pc][:successors]
+    let targets: list = [[target, false] for target in instructions[pc][:successors]]
+    if map_contains_key(exceptions, pc)
+      targets = [@targets, [exceptions[pc][0], true]]
+    end
+    for [target, exceptional] in targets
       native/ensure(is_kind(target, :int) && target >= 0 && target < len(code), "source branch or fallthrough leaves its program")
-      predecessors[target] = [@predecessors[target], pc]
+      predecessors[target] = [@predecessors[target], [pc, exceptional]]
       queue[count] = target
       count = count + 1
     end
   end
   let available: map = {}
+  let before: map = {}
   let live: map = {}
   for pc in 0..(len(code) - 1)
     available[pc] = universe
+    before[pc] = universe
     live[pc] = {}
   end
   let changed: bool = true
@@ -210,8 +226,17 @@ verb native_source/analyse(description: map, parameters: int) -> map
       if pc == 0
         incoming = arguments
       end
-      for predecessor in predecessors[pc]
-        incoming = native_source/intersection(incoming, available[predecessor])
+      for [predecessor, exceptional] in predecessors[pc]
+        let supplied: map = available[predecessor]
+        if exceptional
+          supplied = before[predecessor]
+          supplied[exceptions[predecessor][1]] = true
+        end
+        incoming = native_source/intersection(incoming, supplied)
+      end
+      if incoming != before[pc]
+        before[pc] = incoming
+        changed = true
       end
       for reg in instructions[pc][:writes]
         incoming[reg] = true
@@ -226,13 +251,7 @@ verb native_source/analyse(description: map, parameters: int) -> map
     if !map_contains_key(reachable, pc)
       continue
     end
-    let incoming: map = universe
-    if pc == 0
-      incoming = arguments
-    end
-    for predecessor in predecessors[pc]
-      incoming = native_source/intersection(incoming, available[predecessor])
-    end
+    let incoming: map = before[pc]
     for reg in instructions[pc][:reads]
       native/ensure(map_contains_key(incoming, reg), string_concat("source register read before assignment at instruction ", to_literal(pc)))
     end
@@ -244,17 +263,25 @@ verb native_source/analyse(description: map, parameters: int) -> map
     while pc >= 0
       if map_contains_key(reachable, pc)
         let info: map = instructions[pc]
-        let before: map = native_source/set(info[:reads])
+        let needed: map = native_source/set(info[:reads])
         let defined: map = native_source/set(info[:writes])
         for successor in info[:successors]
           for reg, present in live[successor]
             if !map_contains_key(defined, reg)
-              before[reg] = true
+              needed[reg] = true
             end
           end
         end
-        if before != live[pc]
-          live[pc] = before
+        if map_contains_key(exceptions, pc)
+          let edge: list = exceptions[pc]
+          for reg, present in live[edge[0]]
+            if reg != edge[1]
+              needed[reg] = true
+            end
+          end
+        end
+        if needed != live[pc]
+          live[pc] = needed
           changed = true
         end
       end
@@ -276,6 +303,12 @@ verb native_source/analyse(description: map, parameters: int) -> map
       captures[pc] = sort([reg for reg, present in saved])
     end
   end
+  let handlers: map = {}
+  for pc, edge in exceptions
+    if map_contains_key(reachable, pc)
+      handlers[edge[0]] = sort([reg for reg, present in live[edge[0]] if reg != edge[1]])
+    end
+  end
   return {:description -> description, :instructions -> instructions, :reachable -> reachable,
-    :live -> live, :captures -> captures, :parameters -> parameters}
+    :live -> live, :captures -> captures, :parameters -> parameters, :handlers -> handlers, :exceptions -> exceptions}
 end

@@ -75,6 +75,16 @@ verb native_source/program_literals(analysis: map, initial: list) -> list
       if op == :SetIndex
         pool = native_source/pool_operands(pool, [instruction[4]])
       end
+    elseif op == :ErrorField
+      for literal in [none, :value, "error field access requires an error or error code"]
+        pool = native_source/pool(pool, literal)
+      end
+    elseif op == :NormalizeError
+      for operand in [instruction[2], instruction[3], instruction[4]]
+        if operand != none
+          pool = native_source/pool_operands(pool, [operand])
+        end
+      end
     elseif op == :BuildRange
       pool = native_source/pool_operands(pool, [instruction[2]])
       if instruction[3] != none
@@ -106,7 +116,7 @@ verb native_source/program_literals(analysis: map, initial: list) -> list
       if instruction[3] != none
         pool = native_source/pool_operands(pool, [instruction[3]])
       end
-    elseif op == :Return || op == :Abort
+    elseif op == :Return || op == :Abort || op == :Throw
       pool = native_source/pool_operands(pool, [instruction[1]])
     end
     pc = pc + 1
@@ -222,15 +232,15 @@ verb native_source/prepare_module(input: map, prefix: string, emitted: map, rela
   let programs: list = []
   let maximum: int = 6
   for [description, parameters, name] in descriptions
-    let linked: map = native_source/link_relations(description, relations)
+    let linked: map = native_exceptions/lower(native_source/link_relations(description, relations))
     let analysis: map = native_source/analyse(linked, parameters)
     programs = [@programs, {:analysis -> analysis, :regions -> native_source/regions(analysis), :name -> name}]
     pool = native_source/program_literals(analysis, pool)
-    if len(description[:code]) > maximum
-      maximum = len(description[:code])
+    if len(linked[:code]) > maximum
+      maximum = len(linked[:code])
     end
-    if description[:registers] > maximum
-      maximum = description[:registers]
+    if linked[:registers] > maximum
+      maximum = linked[:registers]
     end
   end
   if len(pool) > maximum
