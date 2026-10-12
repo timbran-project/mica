@@ -33,7 +33,8 @@ verb native_source/instruction(code: list, pc: int) -> map
   native/ensure(is_kind(instruction, :list) && len(instruction) > 0, "source instruction must be a nonempty list")
   let op = instruction[0]
   let widths: map = {:Load -> 3, :Move -> 3, :Unary -> 4, :Binary -> 5,
-    :BuildList -> 3, :BuildMap -> 3, :CollectionLen -> 3, :Abort -> 2, :Index -> 4, :CheckKind -> 5,
+    :BuildList -> 3, :BuildMap -> 3, :BuildRange -> 4, :CollectionLen -> 3,
+    :CollectionKeyAt -> 4, :CollectionValueAt -> 4, :SetIndex -> 5, :Abort -> 2, :Index -> 4, :CheckKind -> 5,
     :BuiltinCall -> 4, :Dispatch -> 4, :DynamicDispatch -> 4, :PositionalDispatch -> 4,
     :SpawnDispatch -> 5, :SpawnDispatchDynamic -> 5, :SpawnPositionalDispatch -> 5, :MailboxRecv -> 4,
     :AssertDynamic -> 3, :RetractDynamic -> 3, :Return -> 2,
@@ -44,7 +45,8 @@ verb native_source/instruction(code: list, pc: int) -> map
   let writes: list = []
   let successors: list = [pc + 1]
   let boundary: bool = false
-  if native/contains([:Load, :Move, :Unary, :Binary, :BuildList, :BuildMap, :CollectionLen, :Index, :BuiltinCall,
+  if native/contains([:Load, :Move, :Unary, :Binary, :BuildList, :BuildMap, :BuildRange, :CollectionLen,
+      :CollectionKeyAt, :CollectionValueAt, :SetIndex, :Index, :BuiltinCall,
       :Dispatch, :DynamicDispatch, :PositionalDispatch, :SpawnDispatch, :SpawnDispatchDynamic, :SpawnPositionalDispatch, :MailboxRecv, :CommitValue, :SuspendValue], op)
     writes = [instruction[1]]
   end
@@ -62,6 +64,15 @@ verb native_source/instruction(code: list, pc: int) -> map
     reads = [instruction[3], instruction[4]]
   elseif op == :Index
     reads = [instruction[2], @native_source/operand_reads(instruction[3])]
+  elseif op == :SetIndex
+    reads = [instruction[2], @native_source/items_reads([instruction[3], instruction[4]])]
+  elseif op == :CollectionKeyAt || op == :CollectionValueAt
+    reads = [instruction[2], instruction[3]]
+  elseif op == :BuildRange
+    reads = native_source/operand_reads(instruction[2])
+    if instruction[3] != none
+      reads = [@reads, @native_source/operand_reads(instruction[3])]
+    end
   elseif op == :BuildList
     reads = native_source/items_reads(instruction[2])
   elseif op == :BuildMap

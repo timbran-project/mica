@@ -2209,6 +2209,7 @@ fn native_source_analysis_tracks_continuations_and_definite_assignment() {
             include_str!("../../../apps/native/compiler/builders.mica"),
             include_str!("../../../apps/native/compiler/operations.mica"),
             include_str!("../../../apps/native/compiler/collections.mica"),
+            include_str!("../../../apps/native/compiler/access.mica"),
             include_str!("../../../apps/native/compiler/expressions.mica"),
             include_str!("../../../apps/native/compiler/prepare.mica"),
             include_str!("../../../apps/native/compiler/continuations.mica"),
@@ -2374,6 +2375,19 @@ fn source_expression_cases() -> (String, String, String) {
         "invoke(@left)",
         "native_default_only_rest(@left, @right)",
         "native_default_only_rest(@left, @right)[256]",
+        "left[right]",
+        "left[0..right]",
+        "left[right.._]",
+        "begin\n let changed = left\n let assigned = changed[right] = 7\n [left, changed, assigned]\nend",
+        "[item for item in left]",
+        "[[key, value] for key, value in left]",
+        "[item + right for item in left if item >= 0]",
+        "begin\n let total = right\n for item in left\n total = native_expression_2(total, item)\n end\n total\nend",
+        "[item for item in left..right]",
+        "begin\n let changed = left\n let assigned = changed[0][right] = 9\n [left, changed, assigned]\nend",
+        "begin\n let total = 0\n for item in left\n if item == 2\n continue\n end\n if item == right\n break\n end\n total = total + item\n end\n total\nend",
+        "begin\n let [first, @rest] = left\n [first, rest]\nend",
+        "begin\n let changed = left\n let key = right\n let assigned = changed[0][key] = begin key = key + 1; 9 end\n [changed, assigned, key]\nend",
     ];
     let mut cases: Vec<(usize, Vec<&str>)> = Vec::new();
     for value in ["7", "2.5", "-36028797018963968", "true"] {
@@ -2507,6 +2521,90 @@ fn source_expression_cases() -> (String, String, String) {
             .join(",")
     );
     cases.push((40, vec![&long_arguments, "[]"]));
+    for operands in [
+        ["[1, 2, 3]", "1"],
+        ["[1]", "-1"],
+        ["[1]", "1"],
+        ["[1]", "1.0"],
+        ["[]", "0"],
+        ["true", "0"],
+        ["{:answer -> [42]}", ":answer"],
+        ["{}", ":missing"],
+        ["{true -> 3, -1 -> 4}", "true"],
+        ["{true -> 3, -1 -> 4}", "-1"],
+        ["\"aé🙂\"", "0"],
+        ["\"aé🙂\"", "1"],
+        ["\"aé🙂\"", "2"],
+        ["\"aé🙂\"", "3"],
+        ["b\"AP8=\"", "1"],
+        ["b\"\"", "0"],
+        ["b\"AP8=\"", "-1"],
+        ["[:name, :age] { [\"Ada\", 37], [\"Sam\", 25] }", "0"],
+        ["[:name, :age] { [\"Ada\", 37], [\"Sam\", 25] }", "1"],
+        ["[:name] {}", "0"],
+        ["[] {[]}", "0"],
+        ["[0, 1, 2, 3]", "1..2"],
+        ["[0, 1, 2, 3]", "2.._"],
+        ["[0, 1]", "-1..1"],
+        ["[0, 1]", "1..0"],
+        ["[0, 1]", "0..true"],
+    ] {
+        cases.push((41, operands.to_vec()));
+    }
+    for operation in [42, 43] {
+        for index in ["-1", "0", "1", "2", "3", "4", "true"] {
+            cases.push((operation, vec!["[10, 20, 30]", index]));
+        }
+    }
+    for operands in [
+        ["[1, 2]", "1"],
+        ["[1]", "-1"],
+        ["[1]", "1"],
+        ["[1]", "true"],
+        ["{}", ":added"],
+        ["{:added -> [1]}", ":added"],
+        ["{1 -> 2}", "[3]"],
+        ["\"text\"", "0"],
+        ["b\"AP8=\"", "0"],
+        ["none", "0"],
+    ] {
+        cases.push((44, operands.to_vec()));
+    }
+    for operation in [45, 46] {
+        for collection in [
+            "[]",
+            "[1, 2, 3]",
+            "{3 -> [30], 1 -> [10]}",
+            "{}",
+            "\"aé🙂\"",
+            "[:name, :age] { [\"Ada\", 37], [\"Sam\", 25] }",
+            "[] {[]}",
+            "none",
+            "-2..2",
+            "3..1",
+            "1.._",
+            "true",
+            "b\"AP8=\"",
+        ] {
+            cases.push((operation, vec![collection, "0"]));
+        }
+    }
+    cases.push((47, vec!["[-2, 0, 3]", "7"]));
+    cases.push((48, vec!["[1, 2, 3]", "10"]));
+    for operands in [
+        ["-2", "2"],
+        ["3", "1"],
+        ["36028797018963966", "36028797018963967"],
+        ["-36028797018963968", "-36028797018963967"],
+    ] {
+        cases.push((49, operands.to_vec()));
+    }
+    cases.push((50, vec!["[[1, 2], [3, 4]]", "1"]));
+    cases.push((50, vec!["[{1 -> 2}]", "1"]));
+    cases.push((51, vec!["[1, 2, 3, 4, 5]", "4"]));
+    cases.push((52, vec!["[1, 2, 3]", "0"]));
+    cases.push((52, vec!["[]", "0"]));
+    cases.push((53, vec!["[[1, 2], [3, 4]]", "1"]));
     let mut ids = vec!["[602, 8003]".to_owned(), "[603, 8004]".to_owned()];
     for (index, operation) in operations.iter().enumerate() {
         let parameters = if index < 2 { "value" } else { "left, right" };
@@ -2680,6 +2778,20 @@ fn source_value_literal(value: &Value, serial: &mut usize) -> (String, String) {
                 format!("mica_value_bytes(worker, {name}_bytes, {})", bytes.len())
             })
             .unwrap(),
+        ValueKind::Range => value
+            .with_range(|start, end| {
+                let (start, construction) = source_value_literal(start, serial);
+                setup.push_str(&construction);
+                let (present, finish) = if let Some(end) = end {
+                    let (end, construction) = source_value_literal(end, serial);
+                    setup.push_str(&construction);
+                    (true, end)
+                } else {
+                    (false, "0".to_owned())
+                };
+                format!("mica_value_range(worker, {start}, {present}, {finish})")
+            })
+            .unwrap(),
         ValueKind::Relation => value
             .with_relation(|relation| {
                 let mut columns = Vec::new();
@@ -2765,7 +2877,7 @@ fn source_value_check(expected: &Value, actual: &str) -> String {
             let value = source_value_check(error.value().unwrap(), "error.f_header->f_value");
             format!("{{ struct mica_HeapErrorResult error = mica_value_as_error({actual}); assert(error.f_ok); struct mica_IdResult code = mica_value_symbol_intern(symbols, (const uint8_t *){name:?}, {}); assert(code.f_ok && error.f_header->f_code == code.f_number); assert(error.f_header->f_has_message && error.f_header->f_has_value); {message}\n{value}\n}}", name.len())
         }).unwrap(),
-        ValueKind::Map | ValueKind::Relation | ValueKind::Bytes | ValueKind::Symbol | ValueKind::ErrorCode => {
+        ValueKind::Map | ValueKind::Relation | ValueKind::Bytes | ValueKind::Range | ValueKind::Symbol | ValueKind::ErrorCode => {
             let (value, construction) = source_value_literal(expected, &mut 0);
             format!("{{ {construction}\n struct mica_IntResult compared = mica_value_compare({actual}, {value}); assert(compared.f_ok && compared.f_number == 0); }}")
         }
@@ -2780,6 +2892,7 @@ fn native_source_composite_literals_preserve_ownership() {
         load_native_kernel(&mut runner, false);
         for source in [
             include_str!("../../../apps/native/compiler/collections.mica"),
+            include_str!("../../../apps/native/compiler/access.mica"),
             include_str!("../../../apps/native/compiler/prepare.mica"),
         ] {
             runner.run_filein(source).unwrap();
@@ -2791,6 +2904,7 @@ fn native_source_composite_literals_preserve_ownership() {
 let module = native_value/definitions()
 module[:source_prefix] = "literal_fixture"
 module = native_source/length_body(module)
+module = native_access/definitions(module)
 let description = native_source/literal_description(some({:nested -> [1, none, {2 -> 3.5}], :bytes -> b"AP8="}))
 let [literal, prepared] = native_literal/prepare(module, "composite", description)
 module = native_memory/declare(prepared, "literal_fixture", native_value/word(), [
@@ -2829,6 +2943,7 @@ fn native_source_program_executes_on_generated_runtime() {
             include_str!("../../../apps/native/compiler/builders.mica"),
             include_str!("../../../apps/native/compiler/operations.mica"),
             include_str!("../../../apps/native/compiler/collections.mica"),
+            include_str!("../../../apps/native/compiler/access.mica"),
             include_str!("../../../apps/native/compiler/expressions.mica"),
             include_str!("../../../apps/native/compiler/prepare.mica"),
             include_str!("../../../apps/native/compiler/continuations.mica"),

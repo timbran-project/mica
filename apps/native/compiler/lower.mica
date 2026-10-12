@@ -31,8 +31,30 @@ verb native_source/value_instruction(builder: map, instruction: list) -> list
     let value: map = native_gen/call(builder, string_concat(builder[:source_prefix], "_collection_length"), [native_source/register(builder, instruction[2])])
     return [value, builder]
   end
+  if op == :BuildRange
+    let finish: map = native_gen/zero(native_value/word())
+    let present: string = "false"
+    if instruction[3] != none
+      finish = native_source/operand(builder, instruction[3])
+      present = "true"
+    end
+    let result: list = native_source/result(builder, "value_range", [native_roots/worker(builder), native_source/operand(builder, instruction[2]), native_gen/ref(builder, present), finish], "oom")
+    return result
+  end
+  if op == :CollectionKeyAt || op == :CollectionValueAt
+    let operation: string = "key_at"
+    if op == :CollectionValueAt
+      operation = "value_at"
+    end
+    let result: list = native_source/access(builder, operation, [native_source/register(builder, instruction[2]), native_source/register(builder, instruction[3])])
+    return result
+  end
   if op == :Index
-    let result: list = native_source/index(builder, native_source/register(builder, instruction[2]), native_source/operand(builder, instruction[3]))
+    let result: list = native_source/access(builder, "read", [native_source/register(builder, instruction[2]), native_source/operand(builder, instruction[3])])
+    return result
+  end
+  if op == :SetIndex
+    let result: list = native_source/access(builder, "write", [native_source/register(builder, instruction[2]), native_source/operand(builder, instruction[3]), native_source/operand(builder, instruction[4])])
     return result
   end
   if op == :BuiltinCall

@@ -66,8 +66,20 @@ verb native_source/program_literals(analysis: map, initial: list) -> list
       end
     elseif op == :BuiltinCall
       pool = native_source/pool_operands(pool, instruction[3])
-    elseif op == :Index
-      pool = native_source/pool_operands(pool, [instruction[3]])
+    elseif native/contains([:Index, :SetIndex, :CollectionKeyAt, :CollectionValueAt], op)
+      pool = native_source/pool(pool, E_INDEX)
+      pool = native_source/pool(pool, "collection index is missing or invalid")
+      if op == :Index || op == :SetIndex
+        pool = native_source/pool_operands(pool, [instruction[3]])
+      end
+      if op == :SetIndex
+        pool = native_source/pool_operands(pool, [instruction[4]])
+      end
+    elseif op == :BuildRange
+      pool = native_source/pool_operands(pool, [instruction[2]])
+      if instruction[3] != none
+        pool = native_source/pool_operands(pool, [instruction[3]])
+      end
     elseif op == :BuildMap
       for pair in instruction[2]
         if pair[0] == :Splice
@@ -108,6 +120,9 @@ verb native_source/literal_description(value) -> map
   if value == none
     return {:kind -> :Relation, :arity -> 1, :length -> 0,
       :children -> [native_source/literal_description(:value)]}
+  end
+  if value == [] {}
+    return {:kind -> :Relation, :arity -> 0, :length -> 0, :children -> []}
   end
   if is_kind(value, :list)
     return {:kind -> :List, :children -> [native_source/literal_description(item) for item in value]}

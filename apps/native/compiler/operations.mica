@@ -27,15 +27,6 @@ verb native_source/check_kind(builder: map, value: map, kind: symbol) -> map
   let result: map = native_gen/unless(builder, condition, fn(wrong) => native_source/raise_error(wrong, E_TYPE, value))
   return result
 end
-verb native_source/index(builder: map, collection: map, key: map) -> list
-  let ready: map = native_source/check_kind(builder, collection, :list)
-  ready = native_source/check_kind(ready, key, :int)
-  let [decoded: map, checked: map] = native_gen/bind(ready, "index", native_gen/call(ready, "value_as_int", [key]))
-  let index: map = native_gen/convert(:U64, native_gen/field(checked, decoded, "number"))
-  let [value: map, found: map] = native_gen/checked_bind(checked, "element", native_gen/call(checked, "value_list_get", [collection, index]), "ok",
-    fn(missing) => native_source/raise_error(missing, E_RANGE, key))
-  return [native_gen/field(found, value, "value"), found]
-end
 // Mailbox sends join the attempt's staged effects. Resource creation and close
 // use the native mailbox service directly, as required by its current API.
 verb native_source/mailbox(builder: map, hub: map) -> list

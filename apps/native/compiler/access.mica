@@ -1,0 +1,224 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+// Shared collection operations keep language semantics out of instruction
+// dispatch. These helpers allocate without relocating; their caller owns roots.
+verb native_access/name(module: map, operation: string) -> string
+  return string_concat(module[:source_prefix], "_collection_", operation)
+end
+verb native_access/result(builder: map, status: string, value: map) -> map
+  let module: map = builder[:module]
+  let result: map = native_gen/record(builder, module[:source_access_result], {
+    "status" -> native_gen/ref(builder, native_access/name(module, status)), "value" -> value})
+  let generated: map = native_gen/return_value(builder, result)
+  return generated
+end
+verb native_access/fail(builder: map, status: string) -> map
+  let generated: map = native_access/result(builder, status, native_gen/zero(native_value/word()))
+  return generated
+end
+verb native_access/checked(builder: map, label: string, call: map, status: string) -> list
+  let generated: list = native_gen/checked_bind(builder, label, call, "ok", fn(failed) => native_access/fail(failed, status))
+  return generated
+end
+verb native_access/check(builder: map, condition: map, status: string) -> map
+  let generated: map = native_gen/unless(builder, condition, fn(failed) => native_access/fail(failed, status))
+  return generated
+end
+verb native_access/ordinal(builder: map, value: map, status: string) -> list
+  let [decoded: map, checked: map] = native_access/checked(builder, "ordinal", native_gen/call(builder, "value_as_int", [value]), status)
+  let number: map = native_gen/field(checked, decoded, "number")
+  let ready: map = native_access/check(checked, native_gen/negate(native_gen/less(number, native_gen/ref(checked, "int_zero"))), status)
+  return [native_gen/convert(:U64, number), ready]
+end
+verb native_access/kind(builder: map, value: map, kind: string) -> map
+  let generated: map = native_gen/equal(native_gen/call(builder, "value_kind", [value]), native_gen/ref(builder, string_concat("tag_", kind)))
+  return generated
+end
+verb native_access/return_call(builder: map, name: string, arguments: list, status: string) -> map
+  let [result: map, checked: map] = native_access/checked(builder, "value", native_gen/call(builder, name, arguments), status)
+  let generated: map = native_access/result(checked, "ok", native_gen/field(checked, result, "value"))
+  return generated
+end
+verb native_access/integer(builder: map, number: map) -> map
+  let generated: map = native_gen/field(builder, native_gen/call(builder, "value_int", [number]), "value")
+  return generated
+end
+verb native_access/length(builder: map, value: map, kind: string) -> map
+  let generated: map = native_gen/field(builder, native_gen/call(builder, string_concat("value_", kind, "_length"), [value]), "number")
+  return generated
+end
+
+// Relation indexing returns a map for one row. The borrowed entry array is
+// consumed before any safepoint; the input relation keeps every cell alive.
+verb native_access/row_body(module: map) -> map
+  let name: string = native_access/name(module, "row")
+  let builder: map = native_gen/context(module, name)
+  let worker: map = native_gen/ref(builder, "worker")
+  let value: map = native_gen/ref(builder, "value")
+  let [row: map, found: map] = native_access/checked(builder, "row", native_gen/call(builder, "value_relation_row", [value, native_gen/ref(builder, "position")]), "invalid")
+  let tuple: map = native_gen/field(found, row, "tuple")
+  let width: map = native_gen/field(found, tuple, "arity")
+  let type_id: list = [:Record, "ValueMapEntry"]
+  let [entries: map, allocated: map] = native_memory/array_storage(found, worker, type_id, width, "layout_opaque", fn(failed) => native_access/fail(failed, "oom"))
+  let ready: map = native_gen/for_range(allocated, "column", native_gen/ref(allocated, "zero"), width, fn(step, index)
+    let number: map = native_gen/field(step, native_gen/call(step, "value_relation_column_at", [value, index]), "number")
+    let key: map = native_gen/field(step, native_gen/call(step, "value_symbol", [native_gen/convert(:U32, number)]), "value")
+    let cell: map = native_gen/load(native_gen/offset(native_gen/field(step, tuple, "data"), index))
+    let generated: map = native_gen/store(step, native_gen/offset(entries, index), native_gen/record(step, type_id, {"key" -> key, "value" -> cell}))
+    return generated
+  end)
+  let generated: map = native_gen/finish(module, native_access/return_call(ready, "value_map", [worker, native_gen/freeze(entries), width], "oom"))
+  return generated
+end
+
+verb native_access/slice(builder: map, value: map, key: map) -> map
+  let range: map = native_gen/expression(native_memory/record_pointer("HeapRange"), :UnpackPointer, [key])
+  let [start: map, checked: map] = native_access/ordinal(builder, native_kernel/load_field(builder, range, "start"), "invalid")
+  let length: map = native_access/length(checked, value, "list")
+  let [finish: map, ready: map] = native_gen/bind(checked, "finish", length)
+  ready = native_gen/when(ready, native_kernel/load_field(ready, range, "has_end"), fn(closed)
+    let [last: map, bounded: map] = native_access/ordinal(closed, native_kernel/load_field(closed, range, "end"), "invalid")
+    let ordered: map = native_access/check(bounded, native_gen/negate(native_gen/less(last, start)), "invalid")
+    let generated: map = native_gen/assign(ordered, finish, native_gen/add(last, native_gen/ref(ordered, "one")))
+    return generated
+  end)
+  ready = native_access/check(ready, native_gen/negate(native_gen/less(finish, start)), "invalid")
+  ready = native_access/check(ready, native_gen/negate(native_gen/less(length, finish)), "invalid")
+  let generated: map = native_access/return_call(ready, "value_list_slice", [native_gen/ref(ready, "worker"), value, start, finish], "oom")
+  return generated
+end
+verb native_access/string_at(builder: map, value: map, position: map, failure: string) -> map
+  let [decoded: map, ready: map] = native_access/checked(builder, "rune", native_gen/call(builder, "value_string_scalar_at", [value, position]), failure)
+  let rune: map = native_gen/expression(:U32, :Unwrap, [native_gen/field(ready, decoded, "rune")])
+  let generated: map = native_access/result(ready, "ok", native_access/integer(ready, native_gen/convert(:I64, rune)))
+  return generated
+end
+verb native_access/read_body(module: map) -> map
+  let builder: map = native_gen/context(module, native_access/name(module, "read"))
+  let value: map = native_gen/ref(builder, "value")
+  let key: map = native_gen/ref(builder, "key")
+  builder = native_gen/when(builder, native_access/kind(builder, value, "map"), fn(map)
+    let generated: map = native_access/return_call(map, "value_map_get", [value, key], "invalid")
+    return generated
+  end)
+  builder = native_gen/when(builder, native_access/kind(builder, value, "list"), fn(list)
+    let generated: map = native_gen/when(list, native_access/kind(list, key, "range"), fn(slice) => native_access/slice(slice, value, key))
+    return generated
+  end)
+  let [position: map, ready: map] = native_access/ordinal(builder, key, "invalid")
+  ready = native_gen/switch(ready, native_gen/call(ready, "value_kind", [value]), [
+    [native_gen/ref(ready, "tag_list"), fn(list) => native_access/return_call(list, "value_list_get", [value, position], "invalid")],
+    [native_gen/ref(ready, "tag_string"), fn(string) => native_access/string_at(string, value, position, "invalid")],
+    [native_gen/ref(ready, "tag_relation"), fn(relation) => native_gen/return_value(relation, native_gen/call(relation, native_access/name(module, "row"), [native_gen/ref(relation, "worker"), value, position]))],
+    [native_gen/ref(ready, "tag_bytes"), fn(bytes)
+      let header: map = native_gen/expression(native_memory/record_pointer("HeapBytes"), :UnpackPointer, [value])
+      let checked: map = native_access/check(bytes, native_gen/less(position, native_kernel/load_field(bytes, header, "length")), "invalid")
+      let byte: map = native_gen/load(native_gen/offset(native_kernel/load_field(checked, header, "data"), position))
+      let generated: map = native_access/result(checked, "ok", native_access/integer(checked, native_gen/convert(:I64, byte)))
+      return generated
+    end]], fn(invalid) => native_access/fail(invalid, "invalid"))
+  let generated: map = native_gen/finish(module, ready)
+  return generated
+end
+verb native_access/write_body(module: map) -> map
+  let builder: map = native_gen/context(module, native_access/name(module, "write"))
+  let worker: map = native_gen/ref(builder, "worker")
+  let value: map = native_gen/ref(builder, "value")
+  let key: map = native_gen/ref(builder, "key")
+  let item: map = native_gen/ref(builder, "item")
+  builder = native_gen/when(builder, native_access/kind(builder, value, "map"), fn(map)
+    let generated: map = native_access/return_call(map, "value_map_set", [worker, value, key, item], "oom")
+    return generated
+  end)
+  builder = native_access/check(builder, native_access/kind(builder, value, "list"), "invalid")
+  let [position: map, ready: map] = native_access/ordinal(builder, key, "invalid")
+  ready = native_access/check(ready, native_gen/less(position, native_access/length(ready, value, "list")), "invalid")
+  let generated: map = native_gen/finish(module, native_access/return_call(ready, "value_list_set", [worker, value, position, item], "oom"))
+  return generated
+end
+
+verb native_access/range_at(builder: map, value: map, key: map) -> map
+  let range: map = native_gen/expression(native_memory/record_pointer("HeapRange"), :UnpackPointer, [value])
+  let ready: map = native_access/check(builder, native_kernel/load_field(builder, range, "has_end"), "ok")
+  let [start: map, first: map] = native_access/checked(ready, "start", native_gen/call(ready, "value_as_int", [native_kernel/load_field(ready, range, "start")]), "ok")
+  let [finish: map, last: map] = native_access/checked(first, "end", native_gen/call(first, "value_as_int", [native_kernel/load_field(first, range, "end")]), "ok")
+  let [sum: map, added: map] = native_access/checked(last, "element", native_gen/call(last, "value_checked_add", [native_kernel/load_field(last, range, "start"), key]), "ok")
+  let word: map = native_gen/field(added, sum, "value")
+  let number: map = native_gen/field(added, native_gen/call(added, "value_as_int", [word]), "number")
+  ready = native_access/check(added, native_gen/negate(native_gen/less(native_gen/field(added, finish, "number"), number)), "ok")
+  let generated: map = native_access/result(ready, "ok", word)
+  return generated
+end
+verb native_access/at_body(module: map, field: string) -> map
+  let builder: map = native_gen/context(module, native_access/name(module, string_concat(field, "_at")))
+  let value: map = native_gen/ref(builder, "value")
+  let key: map = native_gen/ref(builder, "key")
+  let [position: map, ready: map] = native_access/ordinal(builder, key, "ok")
+  ready = native_gen/when(ready, native_access/kind(ready, value, "map"), fn(map)
+    let header: map = native_gen/expression(native_memory/record_pointer("HeapMap"), :UnpackPointer, [value])
+    let checked: map = native_access/check(map, native_gen/less(position, native_kernel/load_field(map, header, "length")), "ok")
+    let entry: map = native_gen/load(native_gen/offset(native_kernel/load_field(checked, header, "data"), position))
+    let generated: map = native_access/result(checked, "ok", native_gen/field(checked, entry, field))
+    return generated
+  end)
+  if field == "key"
+    for kind in ["list", "string", "relation", "range"]
+      ready = native_gen/when(ready, native_access/kind(ready, value, kind), fn(ordinal) => native_access/result(ordinal, "ok", key))
+    end
+    let generated: map = native_gen/finish(module, native_access/fail(ready, "ok"))
+    return generated
+  end
+  ready = native_gen/switch(ready, native_gen/call(ready, "value_kind", [value]), [
+    [native_gen/ref(ready, "tag_list"), fn(list) => native_access/return_call(list, "value_list_get", [value, position], "ok")],
+    [native_gen/ref(ready, "tag_string"), fn(string) => native_access/string_at(string, value, position, "ok")],
+    [native_gen/ref(ready, "tag_range"), fn(range) => native_access/range_at(range, value, key)],
+    [native_gen/ref(ready, "tag_relation"), fn(relation)
+      let checked: map = native_access/check(relation, native_gen/less(position, native_access/length(relation, value, "relation")), "ok")
+      let generated: map = native_gen/return_value(checked, native_gen/call(checked, native_access/name(module, "row"), [native_gen/ref(checked, "worker"), value, position]))
+      return generated
+    end]], fn(empty) => native_access/fail(empty, "ok"))
+  let generated: map = native_gen/finish(module, ready)
+  return generated
+end
+
+verb native_access/definitions(input: map) -> map
+  let module: map = input
+  let type_id: list = [:Record, native_access/name(module, "Result")]
+  module[:state] = native/record_type(module[:state], type_id[1], [["status", :U64], ["value", native_value/word()]])[1]
+  module[:source_access_result] = type_id
+  for [status, number] in [["ok", 0], ["invalid", 1], ["oom", 2]]
+    module = native_literal/constant(module, native_access/name(module, status), :U64, native_value/hex(number))
+  end
+  let worker: list = ["worker", native_memory/record_pointer("MemoryWorker"), :Borrow]
+  let value: list = ["value", native_value/word(), :Gc]
+  let key: list = ["key", native_value/word(), :Gc]
+  for operation in ["read", "write", "key_at", "value_at", "row"]
+    let parameters: list = [worker, value, key]
+    if operation == "write"
+      parameters = [@parameters, ["item", native_value/word(), :Gc]]
+    elseif operation == "row"
+      parameters = [worker, value, ["position", :U64, :Value]]
+    end
+    module = native_memory/declare(module, native_access/name(module, operation), type_id, parameters, [:ReadMemory, :WriteMemory, :Allocate], :Gc, "")
+  end
+  module = native_access/row_body(module)
+  module = native_access/read_body(module)
+  module = native_access/write_body(module)
+  module = native_access/at_body(module, "key")
+  let generated: map = native_access/at_body(module, "value")
+  return generated
+end
+
+verb native_source/access(builder: map, operation: string, arguments: list) -> list
+  let call: map = native_gen/call(builder, native_access/name(builder[:module], operation), [native_roots/worker(builder), @arguments])
+  let [result: map, ready: map] = native_gen/bind(builder, "collection", call)
+  let status: map = native_gen/field(ready, result, "status")
+  ready = native_gen/when(ready, native_gen/equal(status, native_gen/ref(ready, native_access/name(ready[:module], "invalid"))), fn(invalid)
+    let [operands: map, rooted: map] = native_source/rooted_list(invalid, "operands", [arguments[0], arguments[1]])
+    let generated: map = native_source/value_error(rooted, E_INDEX, "collection index is missing or invalid", operands)
+    return generated
+  end)
+  ready = native_gen/unless(ready, native_kernel/absent(status), fn(failed) => native_tasks/attempt_status(failed, "oom"))
+  return [native_gen/field(ready, result, "value"), ready]
+end
