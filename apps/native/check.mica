@@ -335,23 +335,7 @@ verb native/check_function(state, index, fn_row)
         let parents: list = predecessors[id]
         assigned = outgoing[parents[0]]
         for predecessor in parents
-          let other: map = outgoing[predecessor]
-          if assigned == other
-            continue
-          end
-          let smaller: map = assigned
-          let larger: map = other
-          if len(smaller) > len(larger)
-            smaller = other
-            larger = assigned
-          end
-          let intersection: map = {}
-          for item, present in smaller
-            if map_contains_key(larger, item)
-              intersection[item] = true
-            end
-          end
-          assigned = intersection
+          assigned = native/set_intersection(assigned, outgoing[predecessor])
         end
       end
       incoming[id] = assigned

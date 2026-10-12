@@ -56,6 +56,27 @@ verb native/function_order(state: map, index: map) -> map
   return {:order -> order, :declare -> declarations}
 end
 
+// Graph analyses represent membership as keys with true values. Preserve
+// shared sets when equal; otherwise walk the smaller input at a join.
+verb native/set_intersection(left: map, right: map) -> map
+  if left == right
+    return left
+  end
+  let smaller: map = left
+  let larger: map = right
+  if len(smaller) > len(larger)
+    smaller = right
+    larger = left
+  end
+  let common: map = {}
+  for item, present in smaller
+    if map_contains_key(larger, item)
+      common[item] = true
+    end
+  end
+  return common
+end
+
 // Both analyses use a fixed point over the checked graph. Postdominators have
 // a virtual exit; non-returning regions have no common return continuation.
 verb native/flow_sets(order: list, incoming: map, root, live: list) -> map
@@ -77,15 +98,13 @@ verb native/flow_sets(order: list, incoming: map, root, live: list) -> map
       if id == root || !map_contains_key(universe, id)
         continue
       end
+      let parents: list = incoming[id]
       let common: map = universe
-      for predecessor in incoming[id]
-        let intersection: map = {}
-        for item, present in common
-          if map_contains_key(sets[predecessor], item)
-            intersection[item] = true
-          end
-        end
-        common = intersection
+      if len(parents) > 0
+        common = sets[parents[0]]
+      end
+      for predecessor in parents
+        common = native/set_intersection(common, sets[predecessor])
       end
       common[id] = true
       if common != sets[id]

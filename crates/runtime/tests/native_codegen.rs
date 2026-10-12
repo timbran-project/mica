@@ -880,7 +880,11 @@ for position in 0..199
     state[:terminators] = [@state[:terminators], [block, :Jump, [block + 3]]]
   end
 end
-native/check(state)
+let index = native/check(state)
+let flow = native/flow_analysis(index, 0)
+native/ensure(len(flow[:dominators][2]) == 1, "entry dominates itself")
+native/ensure(len(flow[:dominators][599]) == 200, "every earlier block dominates the exit")
+native/ensure(flow[:joins][2] == 5 && flow[:joins][599] == :Exit, "linear postdominators")
 return true
 "#
             ),
