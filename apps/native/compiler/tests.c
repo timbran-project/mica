@@ -47,6 +47,7 @@ static void source_roundtrip(bool force_conflict) {
     struct mica_TaskMailboxHub hub = {0};
     struct mica_TaskScheduler scheduler = {0};
     struct mica_TaskSpawnContext spawn = {0};
+    struct mica_TaskDispatchContext dispatch = {0};
     struct mica_TaskDispatchVocabulary vocabulary = {0};
     struct mica_MemoryRoot code = {0}, prototypes = {0}, image = {0}, result = {0};
     assert(mica_task_heap_init(&heap));
@@ -78,9 +79,10 @@ static void source_roundtrip(bool force_conflict) {
     assert(list.f_ok);
     mica_value_root_set(&prototypes, list.f_value);
     struct mica_TaskRuntime runtime = {.f_symbols = &symbols, .f_mailboxes = &hub,
-        .f_spawn = &spawn, .f_mailbox_capacity = 64};
-    assert(mica_task_spawn_context_init(&spawn, &worker, &scheduler, &vocabulary,
-        702, 703, 701, 704, mica_value_root_get(&prototypes), 100000, 3, 16, &runtime) == 0);
+        .f_spawn = &spawn, .f_dispatch = &dispatch, .f_mailbox_capacity = 64};
+    assert(mica_task_dispatch_context_init(&dispatch, &worker, &vocabulary,
+        702, 703, 701, 704, mica_value_root_get(&prototypes)) == 0);
+    assert(mica_task_spawn_context_init(&spawn, &worker, &scheduler, 100000, 3, 16, &runtime) == 0);
     struct mica_TaskServices services = {.f_context = (void *)&runtime,
         .f_send = mica_task_runtime_send, .f_spawn = mica_task_runtime_spawn};
     struct mica_KernelTransaction setup = {0};
@@ -94,14 +96,14 @@ static void source_roundtrip(bool force_conflict) {
     // discards both method facts and the compiled-program catalogue entry.
     struct mica_KernelTransaction install = {0}, outsider = {0};
     assert(mica_kernel_begin(&kernel, &worker, &install, source_integer(7)) == 0);
-    assert(mica_task_source_roundtrip_install(&install, &spawn, (void *)code.f_pointer, source_integer(7)) == 0);
+    assert(mica_task_source_roundtrip_install(&install, &dispatch, (void *)code.f_pointer, source_integer(7)) == 0);
     assert(mica_kernel_program_get(&install, 8003).f_program);
     assert(mica_kernel_begin(&kernel, &worker, &outsider, source_integer(7)) == 0);
     assert(!mica_kernel_program_get(&outsider, 8003).f_program);
     assert(mica_kernel_end(&outsider) && mica_kernel_end(&install));
     assert(mica_kernel_begin(&kernel, &worker, &install, source_integer(7)) == 0);
     assert(!mica_kernel_program_get(&install, 8003).f_program);
-    assert(mica_task_source_roundtrip_install(&install, &spawn, (void *)code.f_pointer, source_integer(7)) == 0);
+    assert(mica_task_source_roundtrip_install(&install, &dispatch, (void *)code.f_pointer, source_integer(7)) == 0);
     assert(mica_kernel_commit(&install) == 0 && mica_kernel_end(&install));
     list = mica_value_list(&worker, NULL, 0);
     assert(list.f_ok);
@@ -226,6 +228,7 @@ static void source_roundtrip(bool force_conflict) {
     assert(mica_task_scheduler_release(&scheduler, &worker) == 0);
     assert(mica_task_release(&parent, &worker));
     assert(mica_task_spawn_context_release(&spawn, &worker) == 0);
+    assert(mica_task_dispatch_context_release(&dispatch, &worker) == 0);
     assert(mica_task_mailbox_hub_shutdown(&hub, &worker) == 0);
     assert(mica_task_mailbox_hub_release(&hub, &worker));
     assert(mica_kernel_release(&kernel, &worker));

@@ -81,6 +81,7 @@ verb native_dispatch/program(input: map) -> map
     ["budget", native_kernel/pointer("Budget"), :Borrow]])
   module = native_dispatch/reaches_body(module)
   module = native_dispatch/bindings(module)
+  module = native_dispatch/context_program(module)
   module = native_dispatch/restrictions(module)
   module = native_dispatch/signatures(module)
   let result: map = native_dispatch/selection(module)

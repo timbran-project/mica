@@ -71,7 +71,7 @@ verb native_source/install_body(input: map, methods: list) -> map
   let name: string = string_concat(input[:source_prefix], "_install")
   let module: map = native_tasks/declare(input, name, :U64, [
     ["transaction", native_kernel/pointer("Transaction"), :Borrow],
-    ["configuration", native_tasks/pointer("SpawnContext"), :Borrow],
+    ["configuration", native_tasks/pointer("DispatchContext"), :Borrow],
     ["code", native_tasks/pointer("CodeRef"), :Gc], ["tenant", native_value/word(), :Gc]])
   let builder: map = native_source/context(module, string_concat("task_", name))
   builder[:source_code] = native_roots/ref(builder, "code")

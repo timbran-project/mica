@@ -8,6 +8,7 @@ struct spawn_fixture {
     struct mica_TaskSpawnProbe probe;
     struct mica_TaskServices services;
     struct mica_TaskRuntime runtime;
+    struct mica_TaskDispatchContext dispatch;
 };
 static void spawn_fixture_init(struct spawn_fixture *f, uint64_t capacity) {
     call_fixture_init(&f->call, mica_task_test_call_value);
@@ -17,10 +18,12 @@ static void spawn_fixture_init(struct spawn_fixture *f, uint64_t capacity) {
     f->probe.f_mutex = mica_foreign_memory_sync_create();
     assert(f->probe.f_mutex);
     f->runtime = (struct mica_TaskRuntime){.f_symbols = &f->call.symbols,
-        .f_mailboxes = &f->hub, .f_spawn = &f->probe.f_configuration, .f_mailbox_capacity = 64};
-    assert(mica_task_spawn_context_init(&f->probe.f_configuration, worker, &f->scheduler,
+        .f_dispatch = &f->dispatch, .f_mailboxes = &f->hub, .f_spawn = &f->probe.f_configuration, .f_mailbox_capacity = 64};
+    assert(mica_task_dispatch_context_init(&f->dispatch, worker,
         mica_task_test_call_vocabulary(), 702, 703, 701, 704,
-        mica_value_root_get(&f->call.prototypes), 10000, 3, 8, &f->runtime) == OK);
+        mica_value_root_get(&f->call.prototypes)) == OK);
+    assert(mica_task_spawn_context_init(&f->probe.f_configuration, worker, &f->scheduler,
+        10000, 3, 8, &f->runtime) == OK);
     f->services = (struct mica_TaskServices){.f_context = (void *)&f->probe,
         .f_emit = mica_task_test_spawn_emit, .f_spawn = mica_task_test_spawn_service};
     ((struct mica_TaskImage *)f->call.image.f_pointer)->f_entry = mica_task_test_spawn;
@@ -36,6 +39,7 @@ static void spawn_fixture_release(struct spawn_fixture *f) {
     assert(mica_memory_enter(worker));
     assert(mica_task_scheduler_release(&f->scheduler, worker) == OK);
     assert(mica_task_spawn_context_release(&f->probe.f_configuration, worker) == OK);
+    assert(mica_task_dispatch_context_release(&f->dispatch, worker) == OK);
     assert(mica_task_mailbox_hub_shutdown(&f->hub, worker) == OK);
     assert(mica_task_mailbox_hub_release(&f->hub, worker));
     mica_foreign_memory_sync_destroy(f->probe.f_mutex);

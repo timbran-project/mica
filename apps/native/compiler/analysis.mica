@@ -30,7 +30,7 @@ verb native_source/instruction(code: list, pc: int) -> map
   let op = instruction[0]
   let widths: map = {:Load -> 3, :Move -> 3, :Unary -> 4, :Binary -> 5,
     :BuildList -> 3, :BuildMap -> 3, :Index -> 4, :CheckKind -> 5,
-    :BuiltinCall -> 4, :Dispatch -> 4, :DynamicDispatch -> 4,
+    :BuiltinCall -> 4, :Dispatch -> 4, :DynamicDispatch -> 4, :PositionalDispatch -> 4,
     :SpawnDispatch -> 5, :SpawnDispatchDynamic -> 5, :MailboxRecv -> 4,
     :AssertDynamic -> 3, :RetractDynamic -> 3, :Return -> 2,
     :Branch -> 4, :Jump -> 2, :CommitValue -> 2, :SuspendValue -> 3, :Emit -> 3}
@@ -41,7 +41,7 @@ verb native_source/instruction(code: list, pc: int) -> map
   let successors: list = [pc + 1]
   let boundary: bool = false
   if native/contains([:Load, :Move, :Unary, :Binary, :BuildList, :BuildMap, :Index, :BuiltinCall,
-      :Dispatch, :DynamicDispatch, :SpawnDispatch, :SpawnDispatchDynamic, :MailboxRecv, :CommitValue, :SuspendValue], op)
+      :Dispatch, :DynamicDispatch, :PositionalDispatch, :SpawnDispatch, :SpawnDispatchDynamic, :MailboxRecv, :CommitValue, :SuspendValue], op)
     writes = [instruction[1]]
   end
   if op == :Move || op == :CheckKind
@@ -73,6 +73,9 @@ verb native_source/instruction(code: list, pc: int) -> map
       native/ensure(is_kind(pair, :list) && len(pair) == 2 && is_kind(pair[0], :symbol), "source dispatch requires named roles")
       reads = [@reads, @native_source/operand_reads(pair[1])]
     end
+    boundary = true
+  elseif op == :PositionalDispatch
+    reads = native_source/items_reads([instruction[2], @instruction[3]])
     boundary = true
   elseif op == :DynamicDispatch || op == :SpawnDispatchDynamic
     reads = native_source/items_reads([instruction[2], instruction[3]])

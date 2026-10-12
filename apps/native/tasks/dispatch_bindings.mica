@@ -61,19 +61,21 @@ end
 
 // Signatures have validated declaration order and modes. Restrictions are
 // checked by selection against the bound values, including default/rest values.
-verb native_dispatch/bind_named_body(module: map) -> map
-  let builder: map = native_query/context(module, "task_dispatch_bind_named")
+verb native_dispatch/bind_body(module: map) -> map
+  let builder: map = native_query/context(module, "task_dispatch_bind")
   builder = native_execution/control_scope(builder, native_roots/worker(builder), native_roots/ref(builder, "budget"))
   builder = native_dispatch/vocabulary_check(builder)
   let signature: map = native_roots/ref(builder, "signature")
   builder = native_query/check(builder, native_gen/negate(native_kernel/absent(signature)), "schema")
   let parameters: map = native_kernel/load_field(builder, signature, "parameters")
-  let roles: map = native_roots/ref(builder, "roles")
-  builder = native_query/check(builder, native_gen/equal(native_gen/expression(:U8, :Tag, [roles]), native_gen/ref(builder, "tag_map")), "schema")
+  let roles: map = native_roots/ref(builder, "supplied")
   let [empty: map, with_empty: map] = native_query/tuple(builder, [])
   let [arguments: map, rooted: map] = native_roots/retain(with_empty, "arguments", empty)
   let no_match = fn(missing) => native_dispatch/binding_result(missing, native_gen/ref(missing, "false"), native_gen/zero(native_value/word()))
-  builder = native_query/each_row(rooted, parameters, fn(parameter, row)
+  builder = native_gen/when(rooted, native_gen/equal(native_gen/expression(:U8, :Tag, [roles]), native_gen/ref(rooted, "tag_list")),
+    fn(positional) => native_dispatch/bind_positional(positional, parameters, roles, arguments))
+  builder = native_query/check(builder, native_gen/equal(native_gen/expression(:U8, :Tag, [roles]), native_gen/ref(builder, "tag_map")), "schema")
+  builder = native_query/each_row(builder, parameters, fn(parameter, row)
     let role: map = native_dispatch/parameter(parameter, row, "role")
     let [mode: map, with_mode: map] = native_gen/bind(parameter, "mode", native_dispatch/parameter(parameter, row, "mode"))
     let [supplied: map, with_supplied: map] = native_gen/bind(with_mode, "supplied", native_gen/call(with_mode, "value_map_get", [roles, role]))
@@ -102,12 +104,12 @@ end
 verb native_dispatch/bindings(input: map) -> map
   let module: map = native_dispatch/vocabulary(input)
   module[:state] = native/record_type(module[:state], "TaskDispatchBinding", [["status", :U64], ["applicable", :Bool], ["arguments", native_value/word()]])[1]
-  module = native_tasks/declare(module, "dispatch_bind_named", [:Record, "TaskDispatchBinding"], [
+  module = native_tasks/declare(module, "dispatch_bind", [:Record, "TaskDispatchBinding"], [
     ["worker", native_memory/record_pointer("MemoryWorker"), :Borrow],
     ["vocabulary", native_tasks/pointer("DispatchVocabulary"), :Borrow],
-    ["signature", native_tasks/pointer("DispatchSignature"), :Gc], ["roles", native_value/word(), :Gc],
+    ["signature", native_tasks/pointer("DispatchSignature"), :Gc], ["supplied", native_value/word(), :Gc],
     ["budget", native_kernel/pointer("Budget"), :Borrow]], :Gc)
-  let result: map = native_dispatch/bind_named_body(module)
+  let result: map = native_dispatch/bind_body(module)
   let generated_result: map = result
   return generated_result
 end

@@ -63,13 +63,21 @@ verb native_source/program_literals(analysis: map, initial: list) -> list
       pool = native_source/pool_operands(pool, instruction[3])
     elseif op == :Index
       pool = native_source/pool_operands(pool, [instruction[3]])
-    elseif op == :SpawnDispatch
+    elseif op == :BuildMap
+      for pair in instruction[2]
+        pool = native_source/pool_operands(pool, pair)
+      end
+    elseif op == :PositionalDispatch
+      pool = native_source/pool_operands(pool, [instruction[2], @instruction[3]])
+    elseif op == :DynamicDispatch
+      pool = native_source/pool_operands(pool, [instruction[2], instruction[3]])
+    elseif op == :Dispatch || op == :SpawnDispatch
       pool = native_source/pool_operands(pool, [instruction[2]])
       for role in instruction[3]
         pool = native_source/pool(pool, role[0])
         pool = native_source/pool_operands(pool, [role[1]])
       end
-      if instruction[4] != none
+      if op == :SpawnDispatch && instruction[4] != none
         pool = native_source/pool_operands(pool, [instruction[4]])
       end
     elseif op == :MailboxRecv

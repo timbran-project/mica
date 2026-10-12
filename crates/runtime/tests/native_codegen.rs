@@ -2353,6 +2353,12 @@ fn source_expression_cases() -> (String, String, String) {
         "begin\n if left < 0\n return left\n end\n if right < 0\n return right\n end\n left + right\nend",
         "if left\n right / 0\nelse\n right\nend",
         "left && (right / 0)",
+        ":native_expression_2(right: right, left: left)",
+        "native_expression_3(left, right)",
+        "invoke(:native_expression_4, {:right -> right, :left -> left})",
+        "begin\n let saved = [left, right]\n let first = native_expression_2(left, right)\n let second = :native_expression_3(left: first, right: right)\n [first, second, saved]\nend",
+        "native_call_sum(left) + right",
+        "begin\n let result = 0\n let index = 0\n while index < left\n result = native_expression_2(result, right)\n index = index + 1\n end\n result\nend",
     ];
     let mut cases: Vec<(usize, Vec<&str>)> = Vec::new();
     for value in ["7", "2.5", "-36028797018963968", "true"] {
@@ -2445,7 +2451,13 @@ fn source_expression_cases() -> (String, String, String) {
             cases.push((operation, operands.to_vec()));
         }
     }
-    let mut ids = vec!["[602, 8003]".to_owned()];
+    for operation in 21..27 {
+        for operands in [["0", "2"], ["5", "3"]] {
+            cases.push((operation, operands.to_vec()));
+        }
+    }
+    cases.push((21, vec!["true", "1"]));
+    let mut ids = vec!["[602, 8003]".to_owned(), "[603, 8004]".to_owned()];
     for (index, operation) in operations.iter().enumerate() {
         let parameters = if index < 2 { "value" } else { "left, right" };
         source.push_str(&format!(
@@ -2457,7 +2469,19 @@ fn source_expression_cases() -> (String, String, String) {
     let mut checks = String::new();
     source.push_str("\nverb native_control_spin()\n while true\n end\nend\n");
     ids.push("[1100, 10100]".to_owned());
-    checks.push_str(&format!("static uint64_t (*const source_spin_entry)(struct mica_TaskAttempt *) = mica_source_roundtrip_method_{}_0;\n", operations.len() + 1));
+    checks.push_str(&format!("static uint64_t (*const source_spin_entry)(struct mica_TaskAttempt *) = mica_source_roundtrip_method_{}_0;\n", operations.len() + 2));
+    let recursive = "\nverb native_call_sum(number)\n if number == 0\n return 0\n end\n return number + native_call_sum(number - 1)\nend\n";
+    source.push_str(recursive);
+    ids.push("[1101, 10101]".to_owned());
+    for report in oracle.run_filein(&source).unwrap() {
+        assert!(
+            matches!(report.outcome, TaskOutcome::Complete { .. }),
+            "{}",
+            report.render()
+        );
+    }
+    checks.push_str(&format!("static uint64_t (*const source_recursive_entry)(struct mica_TaskAttempt *) = mica_source_roundtrip_method_{}_0;\n", operations.len() + 3));
+    checks.push_str("static uint64_t (*const source_named_entry)(struct mica_TaskAttempt *) = mica_source_roundtrip_method_23_0;\n");
     let mut entries = Vec::new();
     for (index, (operation, operands)) in cases.iter().enumerate() {
         let expression = operations[*operation];
@@ -2484,7 +2508,7 @@ fn source_expression_cases() -> (String, String, String) {
         let (literal, construction) = source_value_literal(&operands_value, &mut serial);
         checks.push_str(&format!("static mica_type_Value source_arguments_{index}(struct mica_MemoryWorker *worker, struct mica_SymbolTable *symbols) {{\n (void)symbols; // Most inputs contain no symbols.\n{construction}\n return {literal};\n}}\n"));
         checks.push_str(&format!("static void source_check_{index}(mica_type_Value actual, struct mica_SymbolTable *symbols) {{\n    (void)symbols; // Some expected values contain no interned names.\n{}\n}}\n", source_value_check(&value, "actual")));
-        entries.push(format!("{{mica_source_roundtrip_method_{}_0, {status}, source_arguments_{index}, source_check_{index}}}", operation + 1));
+        entries.push(format!("{{mica_source_roundtrip_method_{}_0, {status}, source_arguments_{index}, source_check_{index}}}", operation + 2));
     }
     checks.push_str(&format!("static const struct {{\n    uint64_t (*entry)(struct mica_TaskAttempt *);\n    uint64_t status;\n    mica_type_Value (*arguments)(struct mica_MemoryWorker *, struct mica_SymbolTable *);\n    void (*check)(mica_type_Value, struct mica_SymbolTable *);\n}} source_cases[] = {{\n{}\n}};\n", entries.join(",\n")));
     (source, format!("[{}]", ids.join(",")), checks)
@@ -2788,6 +2812,8 @@ fn load_native_kernel(runner: &mut SourceRunner, tasks: bool) {
             include_str!("../../../apps/native/tasks/images.mica"),
             include_str!("../../../apps/native/tasks/dispatch.mica"),
             include_str!("../../../apps/native/tasks/dispatch_bindings.mica"),
+            include_str!("../../../apps/native/tasks/dispatch_context.mica"),
+            include_str!("../../../apps/native/tasks/dispatch_positional.mica"),
             include_str!("../../../apps/native/tasks/dispatch_restrictions.mica"),
             include_str!("../../../apps/native/tasks/dispatch_signatures.mica"),
             include_str!("../../../apps/native/tasks/dispatch_selection.mica"),

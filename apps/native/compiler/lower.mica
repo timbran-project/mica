@@ -23,6 +23,11 @@ verb native_source/value_instruction(builder: map, instruction: list) -> list
     let result: list = native_source/list(builder, native_source/operands(builder, instruction[2]))
     return result
   end
+  if op == :BuildMap
+    let fields: list = [native_source/operands(builder, pair) for pair in instruction[2]]
+    let result: list = native_literal/map(builder, fields, fn(failed) => native_tasks/attempt_status(failed, "oom"))
+    return result
+  end
   if op == :Index
     let result: list = native_source/index(builder, native_source/register(builder, instruction[2]), native_source/operand(builder, instruction[3]))
     return result
@@ -57,6 +62,11 @@ verb native_source/emit_boundary(builder: map, instruction: list, continuation: 
   let op: symbol = instruction[0]
   if op == :Return
     let result: map = native_source/complete(builder, native_source/operand(builder, instruction[1]))
+    return result
+  end
+  if native/contains([:Dispatch, :PositionalDispatch, :DynamicDispatch], op)
+    let [arguments: map, prepared: map] = native_source/call_arguments(builder, instruction)
+    let result: map = native_source/invoke(prepared, native_source/operand(prepared, instruction[2]), arguments, continuation, captures)
     return result
   end
   if op == :SpawnDispatch

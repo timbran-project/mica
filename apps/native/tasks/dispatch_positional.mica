@@ -1,0 +1,100 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+// A signature's positional domain is a minimum arity, a fixed prefix, and an
+// optional rest list. Role names do not participate in positional specificity.
+verb native_dispatch/positional_layout(builder: map, parameters: map) -> list
+  let [required: map, counted: map] = native_gen/bind(builder, "required", native_gen/ref(builder, "zero"))
+  let [fixed: map, sized: map] = native_gen/bind(counted, "fixed", native_gen/ref(counted, "zero"))
+  let [rest: map, flagged: map] = native_gen/bind(sized, "rest", native_gen/ref(sized, "false"))
+  let ready: map = native_query/each_row(flagged, parameters, fn(step, row)
+    let mode: map = native_dispatch/parameter(step, row, "mode")
+    let counted: map = native_gen/when(step, native_gen/equal(mode, native_dispatch/symbol(step, "required")),
+      fn(required_arg) => native_gen/assign(required_arg, required, native_gen/add(required, native_gen/ref(required_arg, "one"))))
+    return native_gen/branch(counted, native_gen/equal(mode, native_dispatch/symbol(counted, "rest")),
+      fn(tail) => native_gen/assign(tail, rest, native_gen/ref(tail, "true")),
+      fn(slot) => native_gen/assign(slot, fixed, native_gen/add(fixed, native_gen/ref(slot, "one"))))
+  end)
+  return [required, fixed, rest, ready]
+end
+verb native_dispatch/bind_positional(builder: map, parameters: map, supplied: map, arguments: map) -> map
+  let [position: map, counted: map] = native_gen/bind(builder, "position", native_gen/ref(builder, "zero"))
+  let [length: map, sized: map] = native_gen/bind(counted, "length", native_query/width(counted, supplied))
+  let no_match = fn(missing) => native_dispatch/binding_result(missing, native_gen/ref(missing, "false"), native_gen/zero(native_value/word()))
+  let [argument: map, rooted: map] = native_roots/retain(sized, "argument", native_gen/zero(native_value/word()))
+  let ready: map = native_query/each_row(rooted, parameters, fn(step, row)
+    let mode: map = native_dispatch/parameter(step, row, "mode")
+    let initial: map = native_roots/store(step, argument, native_dispatch/parameter(step, row, "default"))
+    let bound: map = native_gen/branch(initial, native_gen/equal(mode, native_dispatch/symbol(initial, "rest")), fn(tail)
+      let [rest: map, sliced: map] = native_query/value(tail, "value_list_slice", [native_roots/worker(tail), supplied, position, length])
+      let saved: map = native_roots/store(sliced, argument, rest)
+      return native_gen/assign(saved, position, length)
+    end, fn(fixed)
+      return native_gen/branch(fixed, native_gen/less(position, length), fn(present)
+        let saved: map = native_roots/store(present, argument, native_query/cell(present, supplied, position))
+        return native_gen/assign(saved, position, native_gen/add(position, native_gen/ref(saved, "one")))
+      end, fn(absent)
+        return native_gen/when(absent, native_gen/equal(mode, native_dispatch/symbol(absent, "required")), no_match)
+      end)
+    end)
+    let [appended: map, stored: map] = native_query/value(bound, "kernel_query_append", [native_roots/worker(bound), arguments, argument])
+    return native_roots/store(stored, arguments, appended)
+  end)
+  ready = native_gen/unless(ready, native_gen/equal(position, length), no_match)
+  let result: map = native_dispatch/binding_result(ready, native_gen/ref(ready, "true"), arguments)
+  return result
+end
+
+// A candidate dominates only if its accepted arities are narrower and each
+// comparable slot implies the other restriction. Rest lists are not scalars.
+verb native_dispatch/positional_specific_body(module: map) -> map
+  let builder: map = native_dispatch/matching_context(module, "dispatch_positional_more_specific")
+  for name in ["left", "right"]
+    builder = native_query/check(builder, native_gen/negate(native_kernel/absent(native_roots/ref(builder, name))), "schema")
+  end
+  let left: map = native_kernel/load_field(builder, native_roots/ref(builder, "left"), "parameters")
+  let right: map = native_kernel/load_field(builder, native_roots/ref(builder, "right"), "parameters")
+  let [left_required: map, left_fixed: map, left_rest: map, with_left: map] = native_dispatch/positional_layout(builder, left)
+  let [right_required: map, right_fixed: map, right_rest: map, with_right: map] = native_dispatch/positional_layout(with_left, right)
+  let no_match = fn(failed) => native_dispatch/match_result(failed, native_gen/ref(failed, "false"))
+  builder = native_gen/when(with_right, native_gen/less(left_required, right_required), no_match)
+  builder = native_gen/unless(builder, right_rest, fn(finite)
+    let checked: map = native_gen/when(finite, left_rest, no_match)
+    return native_gen/when(checked, native_gen/less(right_fixed, left_fixed), no_match)
+  end)
+  builder = native_gen/when(builder, right_rest, fn(tail)
+    let restriction: map = native_dispatch/parameter(tail, native_query/cell(tail, right, right_fixed), "restriction")
+    return native_gen/unless(tail, native_gen/equal(restriction, native_dispatch/symbol(tail, "unrestricted")), fn(restricted)
+      let checked: map = native_gen/unless(restricted, left_rest, no_match)
+      return native_gen/unless(checked, native_gen/equal(left_fixed, right_fixed), no_match)
+    end)
+  end)
+  let [stricter: map, compared: map] = native_gen/bind(builder, "stricter", native_gen/less(right_required, left_required))
+  builder = native_gen/unless(compared, left_rest, fn(finite)
+    let checked: map = native_gen/when(finite, right_rest, fn(narrower) => native_gen/assign(narrower, stricter, native_gen/ref(narrower, "true")))
+    return native_gen/when(checked, native_gen/less(left_fixed, right_fixed), fn(narrower) => native_gen/assign(narrower, stricter, native_gen/ref(narrower, "true")))
+  end)
+  builder = native_gen/for_range(builder, "position", native_gen/ref(builder, "zero"), native_query/width(builder, right), fn(step, position)
+    let polled: map = native_query/poll_interval(step, position)
+    let general: map = native_dispatch/parameter(polled, native_query/cell(polled, right, position), "restriction")
+    let checked: map = native_gen/unless(polled, native_gen/less(position, native_query/width(polled, left)), fn(missing)
+      let rejected: map = native_gen/when(missing, left_rest, fn(tail)
+        return native_gen/unless(tail, native_gen/equal(general, native_dispatch/symbol(tail, "unrestricted")), no_match)
+      end)
+      return native_gen/continue_loop(rejected)
+    end)
+    checked = native_gen/unless(checked, native_gen/less(position, left_fixed), fn(tail)
+      return native_gen/when(tail, native_gen/less(position, right_fixed), fn(scalar)
+        let accepted: map = native_gen/unless(scalar, native_gen/equal(general, native_dispatch/symbol(scalar, "unrestricted")), no_match)
+        return native_gen/continue_loop(accepted)
+      end)
+    end)
+    let specific: map = native_dispatch/parameter(checked, native_query/cell(checked, left, position), "restriction")
+    let [implies: map, forward: map] = native_dispatch/implication(checked, specific, general)
+    checked = native_gen/unless(forward, implies, no_match)
+    let [reverse: map, backward: map] = native_dispatch/implication(checked, general, specific)
+    return native_gen/unless(backward, reverse, fn(narrower) => native_gen/assign(narrower, stricter, native_gen/ref(narrower, "true")))
+  end)
+  let result: map = native_gen/finish(module, native_dispatch/match_result(builder, stricter))
+  return result
+end

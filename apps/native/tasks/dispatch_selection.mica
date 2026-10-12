@@ -36,8 +36,8 @@ end
 // An inapplicable candidate is distinct from a failed/cancelled selection.
 verb native_dispatch/applicable_body(module: map) -> map
   let builder: map = native_dispatch/matching_context(module, "dispatch_applicable")
-  let [bound: map, called: map] = native_gen/bind(builder, "bound", native_query/call(builder, "task_dispatch_bind_named", [
-    native_roots/worker(builder), native_gen/ref(builder, "vocabulary"), native_roots/ref(builder, "signature"), native_roots/ref(builder, "roles")]))
+  let [bound: map, called: map] = native_gen/bind(builder, "bound", native_query/call(builder, "task_dispatch_bind", [
+    native_roots/worker(builder), native_gen/ref(builder, "vocabulary"), native_roots/ref(builder, "signature"), native_roots/ref(builder, "supplied")]))
   builder = native_gen/unless(called, native_kernel/absent(native_gen/field(called, bound, "status")),
     fn(failed) => native_roots/return_value(failed, bound))
   builder = native_gen/unless(builder, native_gen/field(builder, bound, "applicable"), fn(missing) => native_roots/return_value(missing, bound))
@@ -60,7 +60,7 @@ verb native_dispatch/collect_candidate(builder: map, identity: map, cache: map, 
   let [retained: map, rooted: map] = native_roots/retain(built, "signature", signature)
   let [bound: map, called: map] = native_gen/bind(rooted, "bound", native_query/call(rooted, "task_dispatch_applicable", [
     native_roots/worker(rooted), native_gen/ref(rooted, "vocabulary"), native_roots/ref(rooted, "delegates"), native_roots/ref(rooted, "prototypes"),
-    cache[:scope_root], retained, native_roots/ref(rooted, "roles")]))
+    cache[:scope_root], retained, native_roots/ref(rooted, "supplied")]))
   let ready: map = native_gen/unless(called, native_kernel/absent(native_gen/field(called, bound, "status")),
     fn(failed) => native_query/fail(failed, native_gen/field(failed, bound, "status")))
   let result: map = native_gen/when(ready, native_gen/field(ready, bound, "applicable"), fn(applicable)
@@ -87,13 +87,18 @@ verb native_dispatch/prune(builder: map, candidates: map, cache: map) -> map
     compared = native_gen/while_loop(compared, native_gen/negate(native_kernel/absent(other)), fn(pair)
       let checked: map = native_query/poll_interval(pair, native_gen/ref(pair, "zero"))
       checked = native_gen/unless(checked, native_gen/equal(candidate, other), fn(different)
-        let [stricter: map, narrowed: map] = native_dispatch/checked_match(different, "task_dispatch_more_specific", [
-          native_roots/worker(different), native_gen/ref(different, "vocabulary"), native_roots/ref(different, "delegates"), native_roots/ref(different, "prototypes"),
-          cache[:scope_root], native_kernel/load_field(different, other, "signature"), native_kernel/load_field(different, candidate, "signature")])
-        return native_gen/when(narrowed, stricter, fn(found)
-          let rejected: map = native_gen/assign(found, dominated, native_gen/ref(found, "true"))
-          return native_gen/break_loop(rejected)
-        end)
+        let compare = fn(mode, operation)
+          let [stricter: map, narrowed: map] = native_dispatch/checked_match(mode, operation, [
+            native_roots/worker(mode), native_gen/ref(mode, "vocabulary"), native_roots/ref(mode, "delegates"), native_roots/ref(mode, "prototypes"),
+            cache[:scope_root], native_kernel/load_field(mode, other, "signature"), native_kernel/load_field(mode, candidate, "signature")])
+          return native_gen/when(narrowed, stricter, fn(found)
+            let rejected: map = native_gen/assign(found, dominated, native_gen/ref(found, "true"))
+            return native_gen/break_loop(rejected)
+          end)
+        end
+        return native_gen/branch(different, native_gen/equal(native_gen/expression(:U8, :Tag, [native_roots/ref(different, "supplied")]), native_gen/ref(different, "tag_list")),
+          fn(positional) => compare(positional, "task_dispatch_positional_more_specific"),
+          fn(named) => compare(named, "task_dispatch_more_specific"))
       end)
       return native_roots/store(checked, other, native_kernel/load_field(checked, other, "next"))
     end)
@@ -123,7 +128,9 @@ verb native_dispatch/select_body(module: map) -> map
     builder = native_query/check(builder, native_gen/equal(native_kernel/load_field(builder, relation, "arity"), width), "arity")
   end
   builder = native_query/check(builder, native_gen/equal(native_gen/expression(:U8, :Tag, [native_roots/ref(builder, "selector")]), native_gen/ref(builder, "tag_symbol")), "schema")
-  builder = native_query/check(builder, native_gen/equal(native_gen/expression(:U8, :Tag, [native_roots/ref(builder, "roles")]), native_gen/ref(builder, "tag_map")), "schema")
+  builder = native_gen/unless(builder, native_gen/equal(native_gen/expression(:U8, :Tag, [native_roots/ref(builder, "supplied")]), native_gen/ref(builder, "tag_map")), fn(positional)
+    return native_query/check(positional, native_gen/equal(native_gen/expression(:U8, :Tag, [native_roots/ref(positional, "supplied")]), native_gen/ref(positional, "tag_list")), "schema")
+  end)
   let [cache: map, cached: map] = native_roots/retain(builder, "cache", native_gen/zero(native_tasks/pointer("DispatchReach")))
   let [candidates: map, accumulated: map] = native_roots/retain(cached, "candidates", native_gen/zero(native_tasks/pointer("DispatchCandidate")))
   let [pattern: map, built: map] = native_query/tuple(accumulated, [native_gen/zero(native_value/word()), native_roots/ref(accumulated, "selector")])
@@ -154,7 +161,7 @@ verb native_dispatch/resolve_body(module: map) -> map
   end
   let result: map = native_gen/finish(module, native_roots/return_value(builder, native_query/call(builder, "task_dispatch_select", [
     native_roots/worker(builder), native_gen/ref(builder, "vocabulary"), @views, native_roots/ref(builder, "prototypes"),
-    native_roots/ref(builder, "selector"), native_roots/ref(builder, "roles")])))
+    native_roots/ref(builder, "selector"), native_roots/ref(builder, "supplied")])))
   return result
 end
 
@@ -166,7 +173,7 @@ verb native_dispatch/selection(input: map) -> map
   let budget: list = ["budget", native_kernel/pointer("Budget"), :Borrow]
   let delegates: list = ["delegates", native_kernel/pointer("Relation"), :Gc]
   let prototypes: list = ["prototypes", word, :Gc]
-  let roles: list = ["roles", word, :Gc]
+  let roles: list = ["supplied", word, :Gc]
   let selector: list = ["selector", word, :Gc]
   module[:state] = native/record_type(module[:state], "TaskDispatchSelection", [["status", :U64], ["count", :U64], ["method", word], ["arguments", word]])[1]
   module = native_tasks/declare(module, "dispatch_signature_for_method", [:Record, "TaskDispatchSignatureResult"], [worker, vocabulary,

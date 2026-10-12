@@ -8,6 +8,10 @@ verb native_roundtrip_child(reply: capability, key: int, value: int)
   return value
 end
 
+verb native_roundtrip_receive(receivers)
+  return mailbox_recv(receivers)
+end
+
 let saved = ["parent continuation", 42]
 let caps = mailbox()
 let child = 0
@@ -15,7 +19,7 @@ let messages = []
 let count = 0
 while count < 2
   child = spawn :native_roundtrip_child(reply: caps[1], key: 7 + count, value: saved[1] + count)
-  messages = mailbox_recv([caps[0]])
+  messages = native_roundtrip_receive([caps[0]])
   count = count + 1
 end
 mailbox_close(caps[0])

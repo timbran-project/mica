@@ -190,6 +190,8 @@ fn run() -> Result<()> {
         "tasks/images",
         "tasks/dispatch",
         "tasks/dispatch_bindings",
+        "tasks/dispatch_context",
+        "tasks/dispatch_positional",
         "tasks/dispatch_restrictions",
         "tasks/dispatch_signatures",
         "tasks/dispatch_selection",
@@ -509,7 +511,7 @@ fn check_fixtures(
     let mut checked = false;
     let source = fs::read_to_string(root.join("apps/native/compiler/examples/roundtrip.mica"))?;
     let source_expression = format!(
-        "(fn() let module = native_source/compile(native_tasks/definitions(), \"source_roundtrip\", {source:?}, {{:NativeResult -> 705}}, [[602, 8003]]) return module[:state] end)()"
+        "(fn() let module = native_source/compile(native_tasks/definitions(), \"source_roundtrip\", {source:?}, {{:NativeResult -> 705}}, [[602, 8003], [603, 8004]]) return module[:state] end)()"
     );
     for (name, expression, symbol, traps) in [
         ("scalar", "native/scalar_example()", "mica_sum", ""),

@@ -169,7 +169,12 @@ verb native_dispatch/signatures(input: map) -> map
     ["delegates", native_kernel/pointer("Relation"), :Gc], ["prototypes", native_value/word(), :Gc],
     ["cache", native_memory/record_pointer("MemoryRoot"), :Borrow],
     ["left", native_tasks/pointer("DispatchSignature"), :Gc], ["right", native_tasks/pointer("DispatchSignature"), :Gc], budget])
+  module = native_tasks/declare(module, "dispatch_positional_more_specific", [:Record, "TaskDispatchMatch"], [worker, vocabulary,
+    ["delegates", native_kernel/pointer("Relation"), :Gc], ["prototypes", native_value/word(), :Gc],
+    ["cache", native_memory/record_pointer("MemoryRoot"), :Borrow],
+    ["left", native_tasks/pointer("DispatchSignature"), :Gc], ["right", native_tasks/pointer("DispatchSignature"), :Gc], budget])
   module = native_dispatch/signature_body(module)
+  module = native_dispatch/positional_specific_body(module)
   let generated_result: map = native_dispatch/more_specific_body(module)
   return generated_result
 end

@@ -75,6 +75,7 @@ verb native_tasks/types(input: map) -> map
   // Authority remains per attempt and is refreshed independently on resumption.
   module[:state] = native/record_type(module[:state], "TaskRuntime", [
     ["symbols", native_memory/record_pointer("SymbolTable")],
+    ["dispatch", native_tasks/pointer("DispatchContext")],
     ["mailboxes", native_tasks/pointer("MailboxHub")], ["spawn", native_tasks/pointer("SpawnContext")],
     ["mailbox_capacity", :U64]])[1]
   module[:state] = native/record_type(module[:state], "TaskAttempt", [
@@ -108,6 +109,7 @@ verb native_tasks/types(input: map) -> map
   module = native_mailboxes/types(module)
   module = native_tasks/queue_types(module)
   module = native_scheduler/types(module)
+  module = native_dispatch/context_types(module)
   module = native_spawn/types(module)
   let kinds: list = ["emit", "send", "subscribe", "spawn"]
   let ordinal: int = 1

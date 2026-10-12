@@ -122,7 +122,7 @@ static struct mica_TaskDispatchBinding dispatch_bind_parameters(struct mica_Memo
         worker, vocabulary, integer(700), parameters, budget);
     if (signature.f_status != OK)
         return (struct mica_TaskDispatchBinding){.f_status = signature.f_status};
-    return mica_task_dispatch_bind_named(worker, vocabulary, signature.f_signature, roles, budget);
+    return mica_task_dispatch_bind(worker, vocabulary, signature.f_signature, roles, budget);
 }
 
 static void dispatch_named_bindings(void) {

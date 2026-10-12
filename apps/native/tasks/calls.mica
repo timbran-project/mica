@@ -68,7 +68,7 @@ verb native_calls/invoke_body(module: map) -> map
   let [selection: map, selected: map] = native_gen/bind(builder, "selected", native_query/call(builder, "task_dispatch_resolve", [
     native_tasks/slot(builder, "transaction"), native_gen/ref(builder, "vocabulary"), native_gen/ref(builder, "selectors"),
     native_gen/ref(builder, "parameters"), native_gen/ref(builder, "delegates"), native_roots/ref(builder, "prototypes"),
-    native_roots/ref(builder, "selector"), native_roots/ref(builder, "roles")]))
+    native_roots/ref(builder, "selector"), native_roots/ref(builder, "supplied")]))
   builder = native_gen/unless(selected, native_kernel/absent(native_gen/field(selected, selection, "status")), fn(failed) => native_roots/return_value(failed, selection))
   builder = native_gen/unless(builder, native_gen/equal(native_gen/field(builder, selection, "count"), native_gen/ref(builder, "one")), fn(unselected) => native_roots/return_value(unselected, selection))
   let [identity: map, with_identity: map] = native_roots/retain(builder, "selected_method", native_gen/field(builder, selection, "method"))
@@ -105,6 +105,32 @@ verb native_calls/return_body(module: map) -> map
   return result
 end
 
+// Dispatch and generated instructions consume one segment budget. Keep only
+// scalar selection results across the accounting poll; the callee image owns
+// selected arguments after a successful invocation.
+verb native_calls/invoke_accounted(input: map, arguments: list, continuation: map) -> map
+  let builder: map = input
+  let [allowance: map, bounded: map] = native_gen/bind(builder, "allowance", native_tasks/attempt_field(builder, "remaining"))
+  let [budget: map, budgeted: map] = native_gen/bind(bounded, "budget", native_gen/record(bounded, [:Record, "KernelBudget"], {
+    "steps" -> allowance, "rows" -> native_gen/ref(bounded, "kernel_unlimited"),
+    "rounds" -> native_gen/ref(bounded, "kernel_unlimited"), "bytes" -> native_gen/ref(bounded, "kernel_unlimited"),
+    "status" -> native_gen/ref(bounded, "zero"), "signal" -> native_kernel/load_field(bounded, native_tasks/slot(bounded, "transaction"), "signal")}))
+  let [selected: map, called: map] = native_gen/bind(budgeted, "selected", native_gen/call(budgeted, "task_invoke", [
+    @arguments, continuation, native_gen/address(budget)]))
+  // Keep only scalar results across the poll; selected arguments are already
+  // rooted by the callee image when invocation succeeds.
+  let [status: map, with_status: map] = native_gen/bind(called, "status", native_gen/field(called, selected, "status"))
+  let [count: map, with_count: map] = native_gen/bind(with_status, "count", native_gen/field(with_status, selected, "count"))
+  // Selection work consumes the same segment budget as generated instructions.
+  let [charged: map, accounted: map] = native_gen/bind(with_count, "charged", native_gen/call(with_count, "task_poll", [
+    native_tasks/attempt(with_count), native_gen/subtract(allowance, native_gen/field(with_count, budget, "steps"))]))
+  builder = native_gen/unless(accounted, native_kernel/absent(status), fn(failed) => native_roots/return_value(failed, status))
+  builder = native_gen/unless(builder, native_kernel/absent(charged), fn(exhausted) => native_roots/return_value(exhausted, charged))
+  builder = native_gen/when(builder, native_kernel/absent(count), fn(missing) => native_roots/return_value(missing, native_gen/ref(missing, "task_no_method")))
+  builder = native_gen/unless(builder, native_gen/equal(count, native_gen/ref(builder, "one")), fn(ambiguous) => native_roots/return_value(ambiguous, native_gen/ref(ambiguous, "task_ambiguous_dispatch")))
+  return builder
+end
+
 verb native_calls/program(input: map) -> map
   let module: map = input
   let worker: list = ["worker", native_memory/record_pointer("MemoryWorker"), :Borrow]
@@ -112,7 +138,7 @@ verb native_calls/program(input: map) -> map
   let word: list = native_value/word()
   module = native_tasks/declare(module, "invoke", [:Record, "TaskDispatchSelection"], [worker, attempt,
     ["vocabulary", native_tasks/pointer("DispatchVocabulary"), :Borrow], ["selectors", :U64, :Value], ["parameters", :U64, :Value],
-    ["delegates", :U64, :Value], ["programs", :U64, :Value], ["prototypes", word, :Gc], ["selector", word, :Gc], ["roles", word, :Gc],
+    ["delegates", :U64, :Value], ["programs", :U64, :Value], ["prototypes", word, :Gc], ["selector", word, :Gc], ["supplied", word, :Gc],
     ["continuation", native_tasks/pointer("Image"), :Gc], ["budget", native_kernel/pointer("Budget"), :Borrow]], :Gc)
   module = native_tasks/declare(module, "return", :U64, [worker, attempt, ["value", word, :Gc]])
   module = native/declare_function(module, "task_return_complete", :U64, [attempt], [], native_tasks/effects(), :Value, "")

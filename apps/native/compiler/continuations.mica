@@ -44,11 +44,49 @@ verb native_source/restore_frame(input: map, program: map, region: map) -> map
   return builder
 end
 
-verb native_source/capture(builder: map, entry: string, registers: list) -> map
+verb native_source/capture_image(builder: map, entry: string, registers: list) -> list
   let values: list = [native_source/register(builder, register) for register in registers]
   let [retained: map, rooted: map] = native_source/rooted_list(builder, "environment", values)
-  let result: map = native_handlers/replace_current(rooted, native_handlers/current(rooted), {
-    "entry" -> native_source/entry(entry), "environment" -> retained, "input" -> native_gen/zero(native_value/word())})
+  let [image: map, allocated: map] = native_roots/retain(rooted, "continuation", native_handlers/copy_image(rooted, native_handlers/current(rooted), {
+    "entry" -> native_source/entry(entry), "environment" -> retained, "input" -> native_gen/zero(native_value/word())}))
+  let checked: map = native_tasks/check(allocated, native_gen/negate(native_kernel/absent(image)), "oom")
+  return [image, checked]
+end
+verb native_source/capture(builder: map, entry: string, registers: list) -> map
+  let [image: map, captured: map] = native_source/capture_image(builder, entry, registers)
+  let result: map = native_roots/store(captured, native_handlers/current(captured), image)
+  return result
+end
+
+verb native_source/invoke(builder: map, selector: map, supplied: map, continuation: string, captures: list) -> map
+  let ready: map = native_tasks/check(builder, native_gen/negate(native_kernel/absent(native_tasks/attempt_field(builder, "runtime"))), "closed")
+  let configuration: map = native_source/service(ready, "dispatch")
+  ready = native_tasks/check(ready, native_gen/negate(native_kernel/absent(configuration)), "closed")
+  ready = native_tasks/check(ready, native_gen/equal(native_kernel/load_field(ready, configuration, "heap"), native_kernel/load_field(ready, native_roots/worker(ready), "heap")), "schema")
+  let root: map = native_gen/field(ready, configuration, "prototypes")[:pointer]
+  ready = native_tasks/check(ready, native_gen/negate(native_kernel/absent(native_kernel/load_field(ready, root, "registration"))), "closed")
+  let [image: map, captured: map] = native_source/capture_image(ready, continuation, captures)
+  let arguments: list = [native_roots/worker(captured), native_tasks/attempt(captured), native_gen/field(captured, configuration, "vocabulary")[:pointer]]
+  for name in ["selectors", "parameters", "delegates", "programs"]
+    arguments = [@arguments, native_kernel/load_field(captured, configuration, name)]
+  end
+  ready = native_calls/invoke_accounted(captured, [@arguments, native_dispatch/prototypes(captured, configuration), selector, supplied], image)
+  let result: map = native_tasks/attempt_status(ready, "ok")
+  return result
+end
+verb native_source/call_arguments(builder: map, instruction: list) -> list
+  if instruction[0] == :DynamicDispatch
+    let value: map = native_source/operand(builder, instruction[3])
+    let checked: map = native_tasks/check(builder, native_gen/equal(native_gen/expression(:U8, :Tag, [value]), native_gen/ref(builder, "tag_map")), "schema")
+    return [value, checked]
+  end
+  if instruction[0] == :PositionalDispatch
+    let result: list = native_source/rooted_list(builder, "arguments", native_source/operands(builder, instruction[3]))
+    return result
+  end
+  let fields: list = [[native_source/literal(builder, role[0]), native_source/operand(builder, role[1])] for role in instruction[3]]
+  let [roles: map, built: map] = native_literal/map(builder, fields, fn(failed) => native_tasks/attempt_status(failed, "oom"))
+  let result: list = native_roots/retain(built, "arguments", roles)
   return result
 end
 
