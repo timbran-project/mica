@@ -377,6 +377,14 @@ verb emit_expr(rows, node, input_state)
   if kind == :Unary
     let [_, child] = ast_attr(rows, node, :operand)
     let [_, op_symbol] = ast_attr(rows, node, :op)
+    // Parse a signed literal together: the minimum integer's positive
+    // magnitude lies outside the value range. Defaults use the same rule.
+    if op_symbol == :neg
+      let [valid: bool, literal] = emit_parameter_default(rows, node)
+      if valid
+        return emit_constant(state, literal)
+      end
+    end
     let [src, emitted] = emit_expr(rows, child, state)
     let [dst, allocated] = emit_register(emitted)
     let operation = :Not

@@ -504,6 +504,21 @@ fn mica_emitter_functional_fields_preserve_visibility_cardinality_and_authority(
 }
 
 #[test]
+fn mica_emitter_signed_integer_boundaries_agree_with_rust_execution() {
+    for interpreter_only in [true, false] {
+        let mut runner = compiler(interpreter_only);
+        for source in [
+            "return -36028797018963968",
+            "return [-7, -2.5, -0.0, -(-7)]",
+            "try\n return -(-36028797018963968)\ncatch E_ARITH as error\n return error\nend",
+            "return -36028797018963968 % -1",
+        ] {
+            assert_emitted_agrees(&mut runner, source);
+        }
+    }
+}
+
+#[test]
 fn mica_emitter_dom_and_structural_literals_agree_with_rust_execution() {
     for interpreter_only in [true, false] {
         let mut runner = compiler(interpreter_only);
