@@ -1222,6 +1222,7 @@ int main(void) {
     service_delivery();
     handler_continuations();
     code_registry();
+    code_closure_lifetime();
     code_catalogue_lifetimes();
     code_task_lifetimes();
     code_active_entry();

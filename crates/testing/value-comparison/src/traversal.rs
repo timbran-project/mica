@@ -69,29 +69,54 @@ pub fn hash(value: &Value) -> u64 {
     }
 }
 
-/// Rebuilds heap storage recursively for comparison with arena copies. An Arc
-/// clone would preserve the result but would not measure equivalent work.
-pub fn copy(value: &Value) -> Value {
-    match value.as_value_ref() {
+/// Rebuilds independent value storage. Executable closures cannot be copied to
+/// another heap without retaining their runtime's code ownership; publication
+/// within that runtime uses the collector instead.
+pub fn copy(value: &Value) -> Option<Value> {
+    Some(match value.as_value_ref() {
+        ValueRef::Function(_) => return None,
         ValueRef::String(text) => Value::string(text),
         ValueRef::Bytes(data) => Value::bytes(data),
-        ValueRef::List(values) => Value::list(values.iter().map(copy)),
-        ValueRef::Map(entries) => Value::map(entries.iter().map(|(k, v)| (copy(k), copy(v)))),
+        ValueRef::List(values) => Value::list(values.iter().map(copy).collect::<Option<Vec<_>>>()?),
+        ValueRef::Map(entries) => Value::map(
+            entries
+                .iter()
+                .map(|(key, value)| Some((copy(key)?, copy(value)?)))
+                .collect::<Option<Vec<_>>>()?,
+        ),
         ValueRef::Relation(relation) => Value::relation(
             relation.heading().iter().copied(),
             relation
                 .rows()
                 .iter()
-                .map(|row| Tuple::new(row.values().iter().map(copy))),
+                .map(|row| {
+                    Some(Tuple::new(
+                        row.values().iter().map(copy).collect::<Option<Vec<_>>>()?,
+                    ))
+                })
+                .collect::<Option<Vec<_>>>()?,
         )
         .expect("source relation is canonical"),
-        ValueRef::Range { start, end } => Value::range(copy(start), end.map(copy)),
+        ValueRef::Range { start, end } => Value::range(
+            copy(start)?,
+            match end {
+                Some(end) => Some(copy(end)?),
+                None => None,
+            },
+        ),
         ValueRef::Error {
             code,
             message,
             value,
-        } => Value::error(code, message, value.map(copy)),
-        ValueRef::Frob { delegate, value } => Value::frob(delegate, copy(value)),
+        } => Value::error(
+            code,
+            message,
+            match value {
+                Some(value) => Some(copy(value)?),
+                None => None,
+            },
+        ),
+        ValueRef::Frob { delegate, value } => Value::frob(delegate, copy(value)?),
         _ => value.clone(),
-    }
+    })
 }

@@ -4,13 +4,17 @@ verb native_roundtrip_child(reply: capability, key: int, value: int)
     assert NativeResult(key, value)
     round = round + 1
   end
-  mailbox_send(@[reply, value])
+  let result = fn() => value
+  mailbox_send(@[reply, result])
   return value
 end
 
 verb native_roundtrip_receive(receivers)
   try
-    return mailbox_recv(receivers)
+    let messages = mailbox_recv(receivers)
+    // Invoke the child-created closure after publication and task resumption.
+    messages[0][1][0] = messages[0][1][0]()
+    return messages
   finally
     // Record completion after resumption, in the resumed transaction.
     assert NativeResult(9, 1)

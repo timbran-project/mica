@@ -65,7 +65,7 @@ verb native_source/instruction(code: list, pc: int) -> map
   let widths: map = {:Load -> 3, :Move -> 3, :Unary -> 4, :Binary -> 5,
     :BuildList -> 3, :BuildMap -> 3, :BuildRelation -> 5, :RelationPattern -> 6, :RelationCell -> 4, :CollectionFieldAt -> 6, :BuildRange -> 4, :CollectionLen -> 3,
     :CollectionKeyAt -> 4, :CollectionValueAt -> 4, :SetIndex -> 5, :Abort -> 2, :Index -> 4, :CheckKind -> 5,
-    :BuiltinCall -> 4, :Dispatch -> 4, :DynamicDispatch -> 4, :PositionalDispatch -> 4,
+    :LoadFunction -> 7, :CallValue -> 4, :BuiltinCall -> 4, :Dispatch -> 4, :DynamicDispatch -> 4, :PositionalDispatch -> 4,
     :SpawnDispatch -> 5, :SpawnDispatchDynamic -> 5, :SpawnPositionalDispatch -> 5, :MailboxRecv -> 4,
     :ScanDynamic -> 4, :AssertDynamic -> 3, :RetractDynamic -> 3, :Return -> 2,
     :Branch -> 4, :Jump -> 2, :NormalizeError -> 5, :ErrorField -> 4, :Throw -> 2, :CommitValue -> 2, :SuspendValue -> 3, :Emit -> 3}
@@ -75,7 +75,7 @@ verb native_source/instruction(code: list, pc: int) -> map
   let writes: list = []
   let successors: list = [pc + 1]
   let boundary: bool = false
-  if native/contains([:Load, :Move, :Unary, :Binary, :BuildList, :BuildMap, :BuildRelation, :ScanDynamic, :RelationPattern, :RelationCell, :CollectionFieldAt, :BuildRange, :CollectionLen,
+  if native/contains([:LoadFunction, :CallValue, :Load, :Move, :Unary, :Binary, :BuildList, :BuildMap, :BuildRelation, :ScanDynamic, :RelationPattern, :RelationCell, :CollectionFieldAt, :BuildRange, :CollectionLen,
       :CollectionKeyAt, :CollectionValueAt, :SetIndex, :Index, :NormalizeError, :ErrorField, :BuiltinCall,
       :Dispatch, :DynamicDispatch, :PositionalDispatch, :SpawnDispatch, :SpawnDispatchDynamic, :SpawnPositionalDispatch, :MailboxRecv, :CommitValue, :SuspendValue], op)
     writes = [instruction[1]]
@@ -86,6 +86,17 @@ verb native_source/instruction(code: list, pc: int) -> map
       source = instruction[2]
     end
     reads = [source]
+  elseif op == :LoadFunction
+    native/ensure(is_kind(instruction[2], :map) && map_contains_key(instruction[2], :code) && map_contains_key(instruction[2], :registers), "invalid source function description")
+    native/ensure(is_kind(instruction[4], :int) && is_kind(instruction[5], :int) && instruction[4] >= 0 && instruction[4] <= instruction[5] && instruction[5] <= 65535, "invalid source function arity")
+    native/ensure(is_kind(instruction[6], :bool), "invalid source function self binding")
+    reads = native_source/items_reads(instruction[3])
+    for capture in instruction[3]
+      native/ensure(capture[0] != :Splice, "source function captures cannot be spliced")
+    end
+  elseif op == :CallValue
+    reads = native_source/items_reads([instruction[2], @instruction[3]])
+    boundary = true
   elseif op == :BuildRelation
     native_source/relation_heading(instruction[2])
     native_source/relation_cardinality(instruction[4])

@@ -101,6 +101,10 @@ verb native_source/program_literals(analysis: map, initial: list) -> list
       if op == :BuildList
         pool = native_source/pool(pool, "list splice requires a list")
       end
+    elseif op == :LoadFunction
+      pool = native_source/pool_operands(pool, instruction[3])
+    elseif op == :CallValue
+      pool = native_source/pool_operands(pool, [instruction[2], @instruction[3]])
     elseif op == :BuiltinCall
       pool = native_source/pool_operands(pool, instruction[3])
       pool = native_source/pool(pool, "list splice requires a list")
@@ -284,7 +288,30 @@ verb native_source/prepare_module(input: map, prefix: string, emitted: map, rela
   end
   let programs: list = []
   let maximum: int = 64
-  for [description, parameters, name] in descriptions
+  let functions: list = []
+  index = 0
+  while index < len(descriptions)
+    let [description: map, parameters: int, name: string] = descriptions[index]
+    let lifted: list = []
+    for instruction in description[:code]
+      if instruction[0] == :LoadFunction
+        let function_index: int = len(functions)
+        let function_name: string = string_concat(prefix, "_function_", to_literal(function_index))
+        let child: map = instruction[2]
+        child[:native_index] = function_index
+        instruction[2] = child
+        let parameter_count: int = len(instruction[3]) + 1
+        if instruction[6]
+          parameter_count = parameter_count + 1
+        end
+        descriptions = [@descriptions, [child, parameter_count, function_name]]
+        functions = [@functions, [function_name, instruction[4], instruction[5], instruction[6]]]
+        numbers = [@numbers, instruction[4], instruction[5]]
+      end
+      lifted = [@lifted, instruction]
+    end
+    description[:code] = lifted
+    index = index + 1
     let linked: map = native_exceptions/lower(native_source/link_relations(description, relations))
     for instruction in linked[:code]
       if instruction[0] == :BuildRelation || instruction[0] == :RelationPattern
@@ -301,6 +328,9 @@ verb native_source/prepare_module(input: map, prefix: string, emitted: map, rela
       maximum = linked[:registers]
     end
   end
+  if len(functions) > maximum
+    maximum = len(functions)
+  end
   if len(pool) > maximum
     maximum = len(pool)
   end
@@ -313,6 +343,7 @@ verb native_source/prepare_module(input: map, prefix: string, emitted: map, rela
   let module: map = input
   module[:source_prefix] = prefix
   module[:source_literals] = pool
+  module[:source_functions] = functions
   module[:source_programs] = programs
   module[:source_method_ids] = method_ids
   for number in numbers

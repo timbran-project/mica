@@ -19,6 +19,7 @@ verb native_source/constants_body(input: map) -> map
   end
   let [retained: map, rooted: map] = native_source/rooted_list(builder, "constants", values)
   builder = native_source/checked(rooted, "task_code_constants", [native_gen/ref(rooted, "registry"), native_roots/worker(rooted), native_roots/ref(rooted, "code"), retained])
+  builder = native_source/function_table(builder, module[:source_functions])
   builder = native_source/checked(builder, "task_code_seal", [native_gen/ref(builder, "registry"), native_roots/worker(builder), native_roots/ref(builder, "code")])
   let result: map = native_gen/finish(module, native_tasks/attempt_status(builder, "ok"))
   return result

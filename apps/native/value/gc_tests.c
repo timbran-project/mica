@@ -26,7 +26,7 @@ static void value_graph(void) {
     mica_type_Value immediate[] = {0, mica_value_bool(true), integer(-17),
         checked(mica_value_float(1.5f)), checked(mica_value_identity(32)),
         checked(mica_value_symbol(19)), checked(mica_value_error_code(3)),
-        checked(mica_value_capability(71)), checked(mica_value_function(22))};
+        checked(mica_value_capability(71))};
     struct mica_MemoryRoot root = {0};
     mica_memory_root_push(&worker, &root);
     for (size_t i = 0; i < sizeof(immediate) / sizeof(*immediate); ++i) {
@@ -320,7 +320,52 @@ static void bounded_value_tracing(void) {
     assert(mica_memory_heap_release(&heap));
 }
 
+// Closure identity is independent of storage. Both captures and executable
+// metadata are managed edges, including after publication and compaction.
+static void function_graph(void) {
+    struct mica_MemoryHeap heap = {0};
+    struct mica_MemoryWorker worker = {0};
+    struct mica_MemoryRoot root = {0};
+    assert(mica_value_heap_init(&heap));
+    assert(mica_memory_worker_init(&worker, &heap, 4096));
+    assert(mica_memory_enter(&worker) && mica_memory_root_push(&worker, &root));
+    mica_type_Value text = checked(mica_value_string(&worker, (const uint8_t *)"capture", 7));
+    mica_type_Value captures = checked(mica_value_list(&worker, &text, 1));
+    uint8_t *target = mica_memory_allocate(&worker, 8, 0);
+    assert(target);
+    memcpy(target, "metadata", 8);
+    mica_type_Value first = checked(mica_value_function(&worker, 42, target, captures));
+    mica_type_Value second = checked(mica_value_function(&worker, 43, target, captures));
+    assert(mica_value_compare(first, second).f_number < 0);
+    assert(!mica_value_is_persistable(first) && !mica_value_copy(&worker, first).f_ok);
+    uint64_t hash = mica_value_hash(first).f_number;
+    mica_type_Value aliases[] = {first, first, second};
+    mica_value_root_set(&root, checked(mica_value_list(&worker, aliases, 3)));
+    for (unsigned i = 0; i < 4; ++i) {
+        if (i == 1) {
+            root.f_pointer = mica_memory_share(&worker, root.f_pointer);
+            assert(root.f_pointer);
+        }
+        collect(&worker);
+        mica_type_Value values = mica_value_root_get(&root);
+        mica_type_Value a = mica_value_list_get(values, 0).f_value;
+        mica_type_Value b = mica_value_list_get(values, 1).f_value;
+        mica_type_Value c = mica_value_list_get(values, 2).f_value;
+        assert(a == b && mica_value_compare(a, c).f_number < 0);
+        assert(mica_value_hash(a).f_number == hash);
+        const struct mica_HeapFunction *function = mica_value_as_function(a).f_header;
+        assert(function->f_identity == 42 && !memcmp(function->f_target, "metadata", 8));
+        const struct mica_HeapString *captured = mica_value_as_string(
+            mica_value_list_get(function->f_captures, 0).f_value).f_header;
+        assert(captured->f_length == 7 && !memcmp(captured->f_data, "capture", 7));
+    }
+    assert(mica_memory_root_pop(&worker, &root));
+    assert(mica_memory_leave(&worker) && mica_memory_worker_release(&worker));
+    assert(mica_memory_heap_release(&heap));
+}
+
 int main(void) {
+    function_graph();
     bounded_value_tracing();
     value_graph();
     tuple_and_buffer();

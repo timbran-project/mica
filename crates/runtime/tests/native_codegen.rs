@@ -2269,6 +2269,7 @@ fn load_native_source_compiler(runner: &mut SourceRunner) {
         include_str!("../../../apps/native/compiler/builtins.mica"),
         include_str!("../../../apps/native/compiler/patterns.mica"),
         include_str!("../../../apps/native/compiler/queries.mica"),
+        include_str!("../../../apps/native/compiler/functions.mica"),
         include_str!("../../../apps/native/compiler/collections.mica"),
         include_str!("../../../apps/native/compiler/access.mica"),
         include_str!("../../../apps/native/compiler/expressions.mica"),
@@ -2433,7 +2434,7 @@ return true
             ),
             (
                 "{:registers -> 1, :code -> [[:LoadFunction, 0, {}, [], 0, 0, false]]}",
-                "unsupported native source instruction",
+                "invalid source function description",
             ),
         ] {
             let message = eval(
@@ -2562,6 +2563,19 @@ fn source_expression_cases() -> (String, String, String) {
         "begin\n assert NativeQuery(left, right, 0)\n assert NativeQuery(left, right, 1)\n let result = NativeQuery(?x, ?y, _)\n retract NativeQuery(left, right, 0)\n retract NativeQuery(left, right, 1)\n result\nend",
         "begin\n assert NativeQuery(left, right, 0)\n let result = [row[:x] for row in NativeQuery(?x, _, _)]\n retract NativeQuery(left, right, 0)\n result\nend",
         "NativeQuery(@left, @right)",
+        "begin\n let add = fn(x) => x + left\n add(right)\nend",
+        "begin\n let make = fn(x) => fn(y) => x + y\n let add = make(left)\n add(right)\nend",
+        "begin\n let captured = left\n let read = fn() => captured\n captured = right\n [read(), captured]\nend",
+        "begin\n let apply = fn(f, x) => f(x)\n apply(fn(x) => x + left, right)\nend",
+        "begin\n let f = fn(?x = left, @tail) => [x, tail]\n [f(), f(right, 3, 4), f(@[right], @[5, 6])]\nend",
+        "begin\n fn sum(n)\n if n == 0\n return 0\n end\n return n + sum(n - 1)\n end\n let alias = sum\n alias(left) + right\nend",
+        "begin\n let divide = fn(x) => x / right\n try\n divide(left)\n catch E_DIV as problem\n [problem.code, problem.value]\n end\nend",
+        "begin\n let f = fn(x: int) -> int => x + left\n try\n f(right)\n catch E_TYPE as problem\n problem.code\n end\nend",
+        "begin\n let make = fn(x) => fn() => x\n let first = make(left)\n let second = make(left)\n let alias = first\n [first == second, first == alias, first < second, len({first -> 1, second -> 2, alias -> 3}), first(), second()]\nend",
+        "begin\n let f = fn() => left\n let saved = [f, {f -> right}]\n [saved[0] == f, saved[1][f]]\nend",
+        "begin\n let f = fn()\n let total = 0\n for i in 0..left\n total = total + native_expression_2(i, right)\n end\n return total\n end\n f()\nend",
+        "begin\n let total = 0\n let previous = fn() => 0\n for i in 0..left\n let current = fn() => i\n if current != previous\n total = total + 1\n end\n previous = current\n end\n [total, previous()]\nend",
+        "begin\n let f = fn()\n try\n return left\n finally\n return right\n end\n end\n f()\nend",
     ];
     let mut cases: Vec<(usize, Vec<&str>)> = Vec::new();
     for value in ["7", "2.5", "-36028797018963968", "true"] {
@@ -2940,6 +2954,12 @@ fn source_expression_cases() -> (String, String, String) {
     cases.push((104, vec!["[1]", "0"]));
     cases.push((104, vec!["[9]", "0"]));
     cases.push((107, vec!["[1, 2]", "[3]"]));
+    for operation in 108..121 {
+        cases.push((operation, vec!["5", "2"]));
+    }
+    cases.push((114, vec!["5", "0"]));
+    cases.push((115, vec!["5", "\"wrong\""]));
+    cases.push((119, vec!["300", "0"]));
     let mut oracle = SourceRunner::new_empty()
         .with_interpreter_only(true)
         .with_task_limits(TaskLimits {
@@ -3002,6 +3022,13 @@ fn source_expression_cases() -> (String, String, String) {
             format!("{bindings}\nreturn {expression}")
         } else {
             format!("{bindings}\nreturn :native_expression_{operation}(left: left, right: right)")
+        };
+        // Fresh native closure identity deliberately differs from bootstrap
+        // interning. Pin the approved result rather than copying that policy.
+        let request = if *operation == 116 {
+            format!("{bindings}\nreturn [false, true, true, 2, left, left]")
+        } else {
+            request
         };
         let report = oracle.run_source(&request);
         let (status, value) = match report {
@@ -3297,7 +3324,8 @@ fn generate_native_source(
 ) -> (String, String, String) {
     let generation_started = Instant::now();
     let mut runner = runner(interpreter_only).with_task_limits(TaskLimits {
-        instruction_budget: 12_000_000_000,
+        // The conformance module includes lifted closure bodies and continuations.
+        instruction_budget: 20_000_000_000,
         max_call_depth: 256,
         ..TaskLimits::default()
     });
@@ -3496,6 +3524,7 @@ fn load_native_kernel(runner: &mut SourceRunner, tasks: bool) {
             include_str!("../../../apps/native/tasks/boundaries.mica"),
             include_str!("../../../apps/native/tasks/execution.mica"),
             include_str!("../../../apps/native/tasks/calls.mica"),
+            include_str!("../../../apps/native/tasks/functions.mica"),
             include_str!("../../../apps/native/tasks/queue.mica"),
             include_str!("../../../apps/native/tasks/services.mica"),
             include_str!("../../../apps/native/tasks/resources.mica"),

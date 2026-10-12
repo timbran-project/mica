@@ -86,7 +86,7 @@ verb native_code/register_body(module: map) -> map
   end)
   builder = native_code/check(builder, native_gen/negate(native_kernel/absent(candidate)), "schema")
   let [reference: map, retained: map] = native_roots/retain(builder, "reference", native_gen/call(builder, "task_new_CodeRef", [
-    native_gen/ref(builder, "worker"), native_gen/zero(native_tasks/pointer("CodeOwner")), native_gen/zero(native_tasks/pointer("CodeLink")), native_gen/zero(native_value/word())]))
+    native_gen/ref(builder, "worker"), native_gen/zero(native_tasks/pointer("CodeOwner")), native_gen/zero(native_tasks/pointer("CodeLink")), native_gen/zero(native_value/word()), native_gen/zero(native_tasks/pointer("FunctionTable"))]))
   builder = native_code/check(retained, native_gen/negate(native_kernel/absent(reference)), "oom")
   let [storage: map, allocated: map] = native_gen/bind(builder, "storage", native_gen/call(builder, "memory_platform_allocate", [native_gen/sizeof([:Record, "TaskCodeOwner"])]))
   builder = native_code/check(allocated, native_gen/negate(native_kernel/absent(storage)), "oom")
@@ -135,8 +135,10 @@ verb native_code/mutate_body(module: map, name: string) -> map
     builder = native_kernel/store_field(builder, owner, "sealed", native_gen/ref(builder, "true"))
   elseif name == "depend"
     builder = native_kernel/store_field(builder, native_roots/ref(builder, "code"), "dependencies", link)
-  else
+  elseif name == "constants"
     builder = native_kernel/store_field(builder, native_roots/ref(builder, "code"), "constants", native_roots/ref(builder, "value"))
+  else
+    builder = native_kernel/store_field(builder, native_roots/ref(builder, "code"), "functions", native_roots/ref(builder, "functions"))
   end
   let result: map = native_gen/finish(module, native_code/status(builder, "ok"))
   return result
@@ -153,11 +155,12 @@ verb native_code/program(input: map) -> map
   module = native_tasks/declare(module, "code_register", :U64, [registry, worker, ["library", native_memory/pointer(:U8), :Borrow], ["output", native_memory/record_pointer("MemoryRoot"), :Borrow]])
   module = native_tasks/declare(module, "code_depend", :U64, [registry, worker, code, ["dependency", native_tasks/pointer("CodeRef"), :Gc]])
   module = native_tasks/declare(module, "code_constants", :U64, [registry, worker, code, ["value", native_value/word(), :Gc]])
+  module = native_tasks/declare(module, "code_functions", :U64, [registry, worker, code, ["functions", native_tasks/pointer("FunctionTable"), :Gc]])
   module = native_tasks/declare(module, "code_seal", :U64, [registry, worker, code])
   module = native_tasks/declare(module, "code_reap", [:Record, "TaskCodeReap"], [registry, worker])
   module = native_code/lifecycle(module)
   module = native_code/register_body(module)
-  for name in ["depend", "constants", "seal"]
+  for name in ["depend", "constants", "functions", "seal"]
     module = native_code/mutate_body(module, name)
   end
   let result: map = native_code/reap_body(module)

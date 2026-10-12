@@ -876,7 +876,10 @@ static void traversal_cases(void) {
     roots[12]=mica_value_error(&source,7,true,roots[7],true,roots[11]).f_value;
     roots[13]=mica_value_capability(9).f_value;
     roots[14]=mica_value_frob(&source,123,roots[12]).f_value;
-    roots[15]=mica_value_function(9).f_value;
+    // Closures retain runtime code and transfer through publication, not data copy.
+    mica_type_Value function=mica_value_function(&source,9,NULL,0).f_value;
+    assert(!mica_value_copy(&destination,function).f_ok);
+    roots[15]=mica_value_bool(false);
     uint32_t heading[]={3,1};
     mica_type_Value row_cells[]={roots[12],roots[10]};
     struct mica_ValueTuple row={row_cells,2};
@@ -1048,7 +1051,7 @@ static void codec_cases(void) {
 
     // Restrictions recurse, but absent optional fields do not count as children.
     mica_type_Value cap=mica_value_capability(1).f_value;
-    mica_type_Value function=mica_value_function(0).f_value;
+    mica_type_Value function=mica_value_function(&source,0,NULL,0).f_value;
     assert(!mica_value_is_persistable(cap) && !mica_value_is_persistable(function));
     mica_type_Value absent=mica_value_range(&source,integer(1),false,cap).f_value;
     assert(mica_value_is_persistable(absent));
@@ -1108,7 +1111,7 @@ int main(void) {
     assert(mica_value_float_from_bits(1).f_ok);
     assert(mica_value_identity(UINT64_C(0x00ffffffffffffff)).f_ok);
     assert(!mica_value_identity(UINT64_C(0x0100000000000000)).f_ok);
-    assert(mica_value_identity(0).f_ok && mica_value_function(0).f_ok);
+    assert(mica_value_identity(0).f_ok);
     assert(!mica_value_capability(0).f_ok && mica_value_capability(1).f_ok);
     assert(mica_value_as_symbol(mica_value_symbol(UINT32_MAX).f_value).f_number == UINT32_MAX);
     assert(mica_value_as_error_code(mica_value_error_code(77).f_value).f_number == 77);

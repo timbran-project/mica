@@ -7,7 +7,7 @@ verb native_value/kinds() -> list
     ["identity", 4, false], ["symbol", 5, false], ["error_code", 6, false],
     ["string", 7, true], ["bytes", 8, true], ["list", 9, true],
     ["map", 10, true], ["range", 11, true], ["error", 12, true],
-    ["capability", 13, false], ["frob", 14, true], ["function", 15, false], ["relation", 16, true]]
+    ["capability", 13, false], ["frob", 14, true], ["function", 15, true], ["relation", 16, true]]
 end
 
 verb native_value/word() -> list

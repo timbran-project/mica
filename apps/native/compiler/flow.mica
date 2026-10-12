@@ -71,7 +71,7 @@ verb native_source/regions(analysis: map) -> list
   for pc in sort([pc for pc, captures in analysis[:captures]])
     let targets: list = analysis[:instructions][pc][:successors]
     native/ensure(len(targets) == 1, "source boundary requires one resumption target")
-    let call: bool = native/contains([:Dispatch, :PositionalDispatch, :DynamicDispatch], analysis[:description][:code][pc][0])
+    let call: bool = native/contains([:Dispatch, :PositionalDispatch, :DynamicDispatch, :CallValue], analysis[:description][:code][pc][0])
     origins = [@origins, [targets[0], pc, analysis[:captures][pc], analysis[:description][:code][pc][1], -1,
       call && map_contains_key(analysis[:exceptions], pc)]]
   end

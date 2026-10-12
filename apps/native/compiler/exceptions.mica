@@ -105,7 +105,7 @@ end
 verb native_exceptions/can_raise(op: symbol) -> bool
   let result: bool = native/contains([:Unary, :Binary, :Index, :SetIndex, :ErrorField, :CheckKind,
     :BuiltinCall, :BuildList, :BuildMap, :CollectionKeyAt, :CollectionValueAt, :RelationCell, :CollectionFieldAt,
-    :Dispatch, :PositionalDispatch, :DynamicDispatch], op)
+    :Dispatch, :PositionalDispatch, :DynamicDispatch, :CallValue], op)
   return result
 end
 

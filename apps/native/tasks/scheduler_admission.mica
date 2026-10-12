@@ -84,7 +84,7 @@ verb native_scheduler/submit_body(module: map) -> map
   let [now: map, measured: map] = native_gen/bind(builder, "now", native_gen/call(builder, "task_clock_now", []))
   let delay: map = native_gen/ref(measured, "delay")
   builder = native_scheduler/check(measured, native_gen/less(delay, native_gen/subtract(native_gen/ref(measured, "kernel_unlimited"), now)), "limit")
-  let [identity: map, identified: map] = native_gen/bind(builder, "identity", native_gen/call(builder, "task_resource_id", [worker]))
+  let [identity: map, identified: map] = native_gen/bind(builder, "identity", native_gen/call(builder, "task_resource_reserve", [worker, native_gen/ref(builder, "one")]))
   builder = native_scheduler/check(identified, native_gen/field(identified, identity, "ok"), "limit")
   let id: map = native_gen/field(builder, identity, "number")
   builder = native_scheduler/status_call(builder, "task_scheduler_bind", [scheduler, worker, task, id, native_gen/ref(builder, "true")])

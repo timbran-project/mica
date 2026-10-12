@@ -1,0 +1,57 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+// Every nested source function has one immutable code descriptor. Closures
+// reference it directly and keep their own identity and captured values.
+verb native_source/function_table(input: map, functions: list) -> map
+  if len(functions) == 0
+    return input
+  end
+  let builder: map = input
+  let count: map = native_source/number(builder, len(functions))
+  let [storage: map, allocated: map] = native_memory/array_storage(builder, native_roots/worker(builder), native_tasks/pointer("FunctionCode"), count, "layout_opaque",
+    fn(failed) => native_tasks/attempt_status(failed, "oom"))
+  let [data: map, rooted: map] = native_roots/retain(allocated, "function_data", storage)
+  builder = native_gen/for_range(rooted, "clear_function", native_gen/ref(rooted, "zero"), count, fn(step, index)
+    return native_gen/store(step, native_gen/offset(data, index), native_gen/zero(native_tasks/pointer("FunctionCode")))
+  end)
+  let [table: map, retained: map] = native_roots/retain(builder, "functions", native_gen/call(builder, "task_new_FunctionTable", [native_roots/worker(builder), data, count]))
+  builder = native_tasks/check(retained, native_gen/negate(native_kernel/absent(table)), "oom")
+  let index: int = 0
+  for [name, minimum, maximum, bind_self] in functions
+    let flag: string = "false"
+    if bind_self
+      flag = "true"
+    end
+    let limit: map = native_source/number(builder, maximum)
+    if maximum == 65535
+      limit = native_gen/ref(builder, "kernel_unlimited")
+    end
+    let [body: map, created: map] = native_gen/bind(builder, "function_code", native_gen/call(builder, "task_new_FunctionCode", [native_roots/worker(builder),
+      native_source/entry(string_concat(name, "_0")), native_roots/ref(builder, "code"), native_source/number(builder, minimum), limit, native_gen/ref(builder, flag)]))
+    builder = native_tasks/check(created, native_gen/negate(native_kernel/absent(body)), "oom")
+    builder = native_gen/store(builder, native_gen/offset(native_kernel/load_field(builder, table, "data"), native_source/number(builder, index)), body)
+    index = index + 1
+  end
+  let result: map = native_source/checked(builder, "task_code_functions", [native_gen/ref(builder, "registry"), native_roots/worker(builder), native_roots/ref(builder, "code"), table])
+  return result
+end
+verb native_source/closure(builder: map, instruction: list) -> list
+  let [captures: map, captured: map] = native_source/rooted_list(builder, "captures", native_source/operands(builder, instruction[3]))
+  let [value: map, ready: map] = native_roots/retain(captured, "closure", native_gen/zero(native_value/word()))
+  let code: map = native_kernel/load_field(ready, native_handlers/current(ready), "code")
+  let table: map = native_kernel/load_field(ready, code, "functions")
+  let body: map = native_gen/load(native_gen/offset(native_kernel/load_field(ready, table, "data"), native_source/number(ready, instruction[2][:native_index])))
+  ready = native_source/checked(ready, "task_function_create", [native_roots/worker(ready), native_tasks/attempt(ready), body, captures, value[:scope_root]])
+  return [value, ready]
+end
+verb native_source/call_function(builder: map, instruction: list, continuation: string, captures: list) -> map
+  let [arguments: map, made: map] = native_source/list_items(builder, instruction[3], false)
+  let [actuals: map, ready: map] = native_roots/retain(made, "arguments", arguments)
+  let function: map = native_source/operand(ready, instruction[2])
+  ready = native_source/arm_handler(ready)
+  let [image: map, captured: map] = native_source/capture_image(ready, continuation, captures)
+  ready = native_source/checked(captured, "task_function_call", [native_roots/worker(captured), native_tasks/attempt(captured), function, actuals, image])
+  let result: map = native_tasks/attempt_status(ready, "ok")
+  return result
+end

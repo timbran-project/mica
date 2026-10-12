@@ -466,3 +466,57 @@ static void code_catalogue_lifetimes(void) {
     assert(mica_memory_worker_release(&worker));
     assert(mica_memory_heap_release(&heap));
 }
+
+// A published closure alone retains its library, including a code/table cycle.
+// Once the last closure dies, tracing must permit both the cycle and dlclose.
+static void code_closure_lifetime(void) {
+    struct mica_MemoryHeap heap = {0};
+    struct mica_MemoryWorker worker = {0};
+    struct mica_TaskCodeRegistry registry = {0};
+    struct mica_MemoryRoot code = {0}, table = {0}, closure = {0}, shared = {0};
+    assert(mica_task_heap_init(&heap));
+    assert(mica_memory_worker_init(&worker, &heap, 4096));
+    assert(mica_memory_enter(&worker));
+    assert(mica_task_code_init(&registry, &worker) == OK);
+    assert(mica_memory_root_push(&worker, &code));
+    assert(mica_memory_root_push(&worker, &table));
+    assert(mica_memory_root_push(&worker, &closure));
+    void *library = code_library_open();
+    assert(mica_task_code_register(&registry, &worker, library, &code) == OK);
+    struct mica_TaskFunctionCode **data = (void *)mica_memory_allocate(&worker, sizeof(*data), 0);
+    assert(data);
+    data[0] = mica_task_new_FunctionCode(&worker, code_entry(library), code_reference(&code), 0, 0, false);
+    assert(data[0]);
+    table.f_pointer = (void *)mica_task_new_FunctionTable(&worker, data, 1);
+    assert(table.f_pointer);
+    assert(mica_task_code_functions(&registry, &worker, code_reference(&code), (void *)table.f_pointer) == OK);
+    assert(mica_task_code_seal(&registry, &worker, code_reference(&code)) == OK);
+    struct mica_ValueResult captures = mica_value_list(&worker, NULL, 0);
+    assert(captures.f_ok);
+    struct mica_TaskFunctionTable *functions = (void *)table.f_pointer;
+    struct mica_ValueResult function = mica_value_function(&worker, 42, (void *)functions->f_data[0], captures.f_value);
+    assert(function.f_ok);
+    mica_value_root_set(&closure, function.f_value);
+    assert(mica_memory_publish(&worker, &closure, &shared));
+    assert(mica_memory_root_pop(&worker, &closure));
+    assert(mica_memory_root_pop(&worker, &table));
+    assert(mica_memory_root_pop(&worker, &code));
+    for (unsigned round = 0; round < 4; ++round) {
+        struct mica_TaskCodeReap reap = mica_task_code_reap(&registry, &worker);
+        assert(reap.f_status == OK && !reap.f_released && code_library_loaded());
+        struct mica_HeapFunctionResult value = mica_value_as_function(mica_value_root_get(&shared));
+        assert(value.f_ok && value.f_header->f_identity == 42);
+        struct mica_TaskFunctionCode *body = (void *)value.f_header->f_target;
+        assert(body->f_code->f_functions->f_data[0] == body);
+    }
+    assert(mica_memory_unpublish(&worker, &shared));
+    struct mica_TaskCodeReap reap = mica_task_code_reap(&registry, &worker);
+    assert(reap.f_status == OK && reap.f_released == 1 && !code_library_loaded());
+    assert(mica_task_code_close(&registry, &worker) == OK);
+    assert(mica_task_code_release(&registry, &worker) == OK);
+    assert(mica_memory_safepoint(&worker, true));
+    assert(!heap.f_retained && !worker.f_roots);
+    assert(mica_memory_leave(&worker));
+    assert(mica_memory_worker_release(&worker));
+    assert(mica_memory_heap_release(&heap));
+}

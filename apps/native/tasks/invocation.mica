@@ -33,7 +33,7 @@ verb native_invocation/mint_body(module: map) -> map
   let builder: map = native_invocation/context(module, "invoke_mint")
   builder = native_execution/control_scope(builder, native_roots/worker(builder), native_roots/ref(builder, "budget"))
   builder = native_invocation/rights(builder)
-  let [id: map, claimed: map] = native_gen/checked_bind(builder, "token_id", native_gen/call(builder, "task_resource_id", [native_roots/worker(builder)]), "ok",
+  let [id: map, claimed: map] = native_gen/checked_bind(builder, "token_id", native_gen/call(builder, "task_resource_reserve", [native_roots/worker(builder), native_gen/ref(builder, "one")]), "ok",
     fn(exhausted) => native_query/error(exhausted, "limit"))
   // Resource allocation reserves the same pair used by mailboxes. A token's
   // resource ID cannot name a mailbox, including after a hub is restarted.

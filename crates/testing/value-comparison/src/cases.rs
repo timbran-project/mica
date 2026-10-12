@@ -291,7 +291,7 @@ impl Prepared {
                 })
                 .flatten(),
             Operation::Hash => return Outcome::Hash(crate::traversal::hash(left)),
-            Operation::Copy => Some(crate::traversal::copy(left)),
+            Operation::Copy => crate::traversal::copy(left),
             Operation::IsPersistable => Some(Value::bool(left.is_persistable())),
             Operation::Encode => crate::codecs::encode(left, right.as_bool().unwrap_or(false)),
             Operation::Decode => crate::codecs::decode(left, right.as_bool().unwrap_or(false)),

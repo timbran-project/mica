@@ -79,7 +79,7 @@ verb native_tasks/open_body(module: map) -> map
   builder = native_roots/store(builder, native_tasks/saved(builder, "current", native_tasks/pointer("Image")), image)
   // A scheduled segment gets a unique authority epoch. Retry keeps this epoch
   // and its minted invocation tokens along with the segment authority.
-  let [epoch: map, claimed: map] = native_gen/bind(builder, "epoch", native_gen/call(builder, "task_resource_id", [worker]))
+  let [epoch: map, claimed: map] = native_gen/bind(builder, "epoch", native_gen/call(builder, "task_resource_reserve", [worker, native_gen/ref(builder, "one")]))
   builder = native_gen/unless(claimed, native_gen/field(claimed, epoch, "ok"), fn(exhausted) => native_tasks/attempt_status(exhausted, "limit"))
   builder = native_kernel/store_field(builder, attempt, "epoch", native_gen/field(builder, epoch, "number"))
   let tx: map = native_tasks/slot(builder, "transaction")

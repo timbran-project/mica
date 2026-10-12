@@ -2,7 +2,9 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 // A copy owns every reachable heap allocation in the destination worker.
-// Symbol, identity, capability, and function IDs stay in their original namespace.
+// Symbol, identity, and capability IDs stay in their original namespace.
+// Executable closures require memory_publish: their identity and native code
+// belong to the runtime heap, not to a standalone destination value graph.
 verb native_value/copying(input: map) -> map
   let context: map = input
   let word: list = native_value/word()

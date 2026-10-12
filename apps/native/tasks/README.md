@@ -179,7 +179,7 @@ Creation and closure manage ephemeral resources outside relation transactions.
 These APIs are runtime primitives; language builtin lowering remains unfinished.
 
 `task_mailbox_stream_open` registers a tagged stream with a positive message budget.
-Its ID comes from `task_resource_id` and must never be reused.
+Its ID comes from `task_resource_reserve` and must never be reused.
 Each empty stream reserves one mailbox slot, so ordinary sends cannot consume the space needed for a recovery marker.
 Registration returns `kernel_limit` when the mailbox has no unreserved space.
 

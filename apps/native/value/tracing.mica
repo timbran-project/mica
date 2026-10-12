@@ -61,7 +61,9 @@ verb native_value/trace_record_fields(builder: map, record: map, fields: list, c
   let current: map = builder
   for field in fields
     if field[2] == :Gc
-      if field[3] == ""
+      if native/is_pointer(field[1])
+        current = native_value/trace_external(current, record, field[0], collection)
+      elseif field[3] == ""
         current = native_value/trace_word_field(current, record, field[0], collection)
       else
         current = native_gen/when(current, native_gen/read(native_gen/field(current, record, field[3])),

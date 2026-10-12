@@ -16,6 +16,7 @@ verb native_value/layouts() -> list
     native_value/layout("range", 11, "HeapRange", :Fixed),
     native_value/layout("error", 12, "HeapError", :Fixed),
     native_value/layout("frob", 14, "HeapFrob", :Fixed),
+    native_value/layout("function", 15, "HeapFunction", :Fixed),
     native_value/layout("relation", 16, "HeapRelation", :InlineRelation),
     native_value/layout("string_view", 17, "HeapString", :View),
     native_value/layout("list_view", 18, "HeapList", :View),

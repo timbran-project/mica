@@ -70,7 +70,7 @@ verb native_subscriptions/register_request(module: map) -> map
       checked = native_rules/check(decoded, native_gen/field(decoded, list, "ok"), "schema")
       return native_rules/check(checked, native_kernel/absent(native_kernel/load_field(checked, native_gen/field(checked, list, "header"), "length")), "schema")
     end]], fn(invalid) => native_rules/error(invalid, "schema"))
-  let [id: map, reserved: map] = native_gen/bind(builder, "identity", native_gen/call(builder, "task_resource_id", [native_roots/worker(builder)]))
+  let [id: map, reserved: map] = native_gen/bind(builder, "identity", native_gen/call(builder, "task_resource_reserve", [native_roots/worker(builder), native_gen/ref(builder, "one")]))
   builder = native_rules/check(reserved, native_gen/field(reserved, id, "ok"), "limit")
   // The process-wide namespace allocates the entire pair. No mailbox can
   // acquire either half of this subscription's identity, including after retry.

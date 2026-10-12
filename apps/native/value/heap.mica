@@ -26,6 +26,8 @@ end
 // and conditional GC edges. Presence fields are stored booleans.
 verb native_value/fixed_records() -> list
   return [
+    ["function", "HeapFunction", [native_value/scalar_field("identity", :U64),
+      ["target", native_memory/pointer(:U8), :Gc, ""], native_value/value_field("captures")]],
     ["range", "HeapRange", [native_value/value_field("start"),
       native_value/scalar_field("has_end", :Bool), native_value/value_field("end", "has_end")]],
     ["frob", "HeapFrob", [native_value/scalar_field("delegate", :U64), native_value/value_field("value")]],
@@ -64,6 +66,11 @@ verb native_value/record_plan(operation: symbol) -> list
       end
     end
     plan = [@plan, [spec[0], spec[1], fields]]
+  end
+  // A closure's identity survives movement and publication. Captures and
+  // executable metadata do not participate in equality or hashing.
+  if operation == :Compare || operation == :Hash
+    plan = [@plan, ["function", "HeapFunction", [["identity", :U64, "", :Scalar]]]]
   end
   return plan
 end

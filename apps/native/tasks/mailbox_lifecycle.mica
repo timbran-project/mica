@@ -69,7 +69,7 @@ verb native_mailboxes/create_body(module: map) -> map
   builder = native_mailboxes/check(builder, native_gen/negate(native_kernel/absent(native_gen/ref(builder, "capacity"))), "schema")
   builder = native_mailboxes/check(builder, native_gen/less(native_mailboxes/field(builder, "count"), native_mailboxes/field(builder, "limit")), "limit")
   builder = native_mailboxes/check(builder, native_gen/less(native_mailboxes/field(builder, "revision"), native_gen/ref(builder, "kernel_unlimited")), "limit")
-  let [claimed: map, with_id: map] = native_gen/bind(builder, "identity", native_gen/call(builder, "task_resource_id", [native_gen/ref(builder, "worker")]))
+  let [claimed: map, with_id: map] = native_gen/bind(builder, "identity", native_gen/call(builder, "task_resource_reserve", [native_gen/ref(builder, "worker"), native_gen/ref(builder, "one")]))
   builder = native_mailboxes/check(with_id, native_gen/field(with_id, claimed, "ok"), "limit")
   let id: map = native_gen/field(builder, claimed, "number")
   let [raw: map, allocated: map] = native_gen/bind(builder, "storage", native_gen/call(builder, "memory_platform_allocate", [native_gen/sizeof([:Record, "TaskMailbox"])]))

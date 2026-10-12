@@ -98,7 +98,7 @@ static struct mica_ValueResult read_value(struct mica_MemoryWorker *worker) {
         if (!value.f_ok) return value;
         return mica_value_frob(worker,n,value.f_value);
     }
-    case 15: return mica_value_function(read_number(8));
+    case 15: return mica_value_function(worker,read_number(8),NULL,0);
     case 16: {
         uint64_t arity=read_number(8);
         uint32_t *heading=allocate_array(arity,sizeof(*heading));
@@ -134,7 +134,8 @@ static void write_value(mica_type_Value v) {
     case 3: {
         float f = mica_value_as_float(v).f_number; uint32_t bits; memcpy(&bits,&f,sizeof(bits)); write_number(bits,4); return;
     }
-    case 4: case 13: case 15: write_number(v & UINT64_C(0x00ffffffffffffff),8); return;
+    case 15: write_number(mica_value_as_function(v).f_header->f_identity,8); return;
+    case 4: case 13: write_number(v & UINT64_C(0x00ffffffffffffff),8); return;
     case 5: case 6: write_number(v & UINT64_C(0x00ffffffffffffff),4); return;
     case 7: { const struct mica_HeapString *h = mica_value_as_string(v).f_header; write_bytes(h->f_data,h->f_length); return; }
     case 8: { const struct mica_HeapBytes *h = mica_value_as_bytes(v).f_header; write_bytes(h->f_data,h->f_length); return; }

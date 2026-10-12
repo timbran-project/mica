@@ -22,7 +22,7 @@ verb native_tasks/schemas() -> list
     ["Handler", [["next", native_tasks/pointer("Handler")], ["image", native_tasks/pointer("Image")], ["kind", :U64]]],
     ["Unwind", [["handlers", native_tasks/pointer("Handler")], ["target", native_tasks/pointer("Image")], ["value", word]]],
     ["CompiledProgram", [["entry", [:FunctionPointer, "TaskEntry"]], ["code", native_tasks/pointer("CodeRef")]]],
-    ["CodeRef", [["owner", native_tasks/pointer("CodeOwner")], ["dependencies", native_tasks/pointer("CodeLink")], ["constants", word]]],
+    ["CodeRef", [["owner", native_tasks/pointer("CodeOwner")], ["dependencies", native_tasks/pointer("CodeLink")], ["constants", word], ["functions", native_tasks/pointer("FunctionTable")]]],
     ["CodeLink", [["next", native_tasks/pointer("CodeLink")], ["code", native_tasks/pointer("CodeRef")]]],
     ["SubscriptionRequest", [["capability", word], ["tenant", word], ["sender", word], ["subject", :U64], ["relation", :U64],
       ["pattern", word], ["mask", :U64], ["initial", :Bool], ["resume", :Bool], ["cursor", :U64],
@@ -34,7 +34,10 @@ verb native_tasks/schemas() -> list
       ["signature", native_tasks/pointer("DispatchSignature")], ["arguments", word]]],
     ["Invocation", [["vocabulary", [:Record, "TaskDispatchVocabulary"]], ["selectors", :U64], ["parameters", :U64],
       ["delegates", :U64], ["programs", :U64], ["prototypes", word], ["selector", word], ["roles", word]]],
-    ["SpawnRequest", [["selector", word], ["roles", word], ["delay", :U64]]]]
+    ["SpawnRequest", [["selector", word], ["roles", word], ["delay", :U64]]],
+    ["FunctionCode", [["entry", [:FunctionPointer, "TaskEntry"]], ["code", native_tasks/pointer("CodeRef")],
+      ["minimum", :U64], ["maximum", :U64], ["bind_self", :Bool]]],
+    ["FunctionTable", [["data", native_memory/pointer(native_tasks/pointer("FunctionCode"))], ["length", :U64]]]]
 end
 
 verb native_tasks/allocate_record(builder: map, name: string, fields: map) -> map
@@ -82,7 +85,7 @@ verb native_tasks/types(input: map) -> map
     ["worker", worker], ["kernel", native_memory/record_pointer("Kernel")],
     ["transaction", [:Record, "KernelTransaction"]],
     ["retry", root], ["current", root], ["effects", root], ["request", root], ["error", root], ["authority", root], ["invocations", root], ["executing", root],
-    ["remaining", :U64], ["retries", :U64], ["depth_limit", :U64], ["boundary", :U64], ["epoch", :U64], ["resources", :Bool],
+    ["remaining", :U64], ["retries", :U64], ["depth_limit", :U64], ["function_next", :U64], ["function_limit", :U64], ["boundary", :U64], ["epoch", :U64], ["resources", :Bool],
     ["runtime", native_tasks/pointer("Runtime")]])[1]
   module[:state] = native/record_type(module[:state], "TaskControl", [
     ["mutex", native_memory/pointer(:U8)], ["kernel", native_memory/record_pointer("Kernel")],
@@ -93,7 +96,7 @@ verb native_tasks/types(input: map) -> map
     ["cancel_requested", :Bool], ["committed", :Bool], ["delivery_claimed", :Bool],
     ["runtime", native_tasks/pointer("Runtime")]])[1]
   module = native_code/types(module)
-  let constants: list = [["task_language_error", :U64, native_value/hex(14)],
+  let constants: list = [["function_id_batch", :U64, native_value/hex(256)], ["task_language_error", :U64, native_value/hex(14)],
     ["task_no_method", :U64, native_value/hex(15)], ["task_ambiguous_dispatch", :U64, native_value/hex(16)],
     ["task_subscription_facts", :U64, native_value/hex(1)],
     ["task_subscription_relation", :U64, native_value/hex(2)],
@@ -163,6 +166,15 @@ verb native_tasks/trace_schema(builder: map, schema: list, collection: map, payl
       ready = native_value/trace_word_field(ready, object, field[0], collection)
     end
   end
+  if schema[0] == "FunctionTable"
+    let data: map = native_kernel/load_field(ready, object, "data")
+    ready = native_gen/for_range(ready, "function", native_gen/ref(ready, "zero"), native_kernel/load_field(ready, object, "length"), fn(step, index)
+      let slot: map = native_gen/offset(data, index)
+      let target: map = native_gen/cast(native_memory/pointer(:U8), native_gen/load(slot))
+      let [moved: map, visited: map] = native_gen/bind(step, "function_code", native_gen/call(step, "memory_visit", [collection, target]))
+      return native_gen/store(visited, slot, native_gen/cast(native_tasks/pointer("FunctionCode"), moved))
+    end)
+  end
   let result: map = native_gen/return_void(ready)
   return result
 end
@@ -209,6 +221,7 @@ verb native_tasks/definitions() -> map
   module = native_tasks/boundaries(module)
   module = native_tasks/execution(module)
   module = native_calls/program(module)
+  module = native_functions/program(module)
   module = native_tasks/services(module)
   module = native_mailboxes/program(module)
   module = native_tasks/wait_requests(module)

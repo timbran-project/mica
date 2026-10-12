@@ -41,7 +41,7 @@ verb native_tasks/resources(input: map) -> map
   module = native_tasks/declare(module, "resources_stop", :Bool, [])
   let worker: list = ["worker", native_memory/record_pointer("MemoryWorker"), :Borrow]
   module = native_tasks/declare(module, "resource_user", :Bool, [worker, ["add", :Bool, :Value]])
-  module = native_tasks/declare(module, "resource_id", [:Record, "IdResult"], [worker])
+  module = native_tasks/declare(module, "resource_reserve", [:Record, "IdResult"], [worker, ["count", :U64, :Value]])
 
   builder = native_gen/context(module, "task_resources_start")
   builder = native_gen/unless(builder, native_kernel/absent(native_tasks/resource_field(builder, "mutex")), fn(open) => native_gen/return_zero(open))
@@ -71,13 +71,17 @@ verb native_tasks/resources(input: map) -> map
   builder = native_gen/return_value(builder, native_gen/ref(builder, "true"))
   module = native_gen/finish(module, builder)
 
-  builder = native_tasks/resource_lock(native_gen/context(module, "task_resource_id"), fn(failed) => native_gen/return_zero(failed))
+  builder = native_tasks/resource_lock(native_gen/context(module, "task_resource_reserve"), fn(failed) => native_gen/return_zero(failed))
   let [id: map, with_id: map] = native_gen/bind(builder, "id", native_tasks/resource_field(builder, "next"))
   // One payload bit distinguishes send from receive. Each allocation reserves
   // both capabilities, including when a later mailbox allocation fails.
   let maximum: map = native_gen/shift_right(native_gen/ref(with_id, "payload_mask"), native_gen/ref(with_id, "one"))
   builder = native_gen/when(with_id, native_gen/less(maximum, id), fn(exhausted) => native_gen/return_zero(exhausted))
-  builder = native_tasks/resource_store(builder, "next", native_gen/add(id, native_gen/ref(builder, "one")))
+  let count: map = native_gen/ref(builder, "count")
+  builder = native_gen/when(builder, native_kernel/absent(count), fn(empty) => native_gen/return_zero(empty))
+  let available: map = native_gen/add(native_gen/subtract(maximum, id), native_gen/ref(builder, "one"))
+  builder = native_gen/when(builder, native_gen/less(available, count), fn(exhausted) => native_gen/return_zero(exhausted))
+  builder = native_tasks/resource_store(builder, "next", native_gen/add(id, count))
   builder = native_gen/return_value(builder, native_gen/record(builder, [:Record, "IdResult"], {"ok" -> native_gen/ref(builder, "true"), "number" -> id}))
   let result: map = native_gen/finish(module, builder)
   return result
