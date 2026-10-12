@@ -39,7 +39,7 @@ static void *handler_thread(void *argument) {
         image.f_pointer = (void *)mica_task_new_Image(&worker, mica_task_test_handler_start, NULL,
             integer(7), integer(run->scenario == 9 ? 2 : run->scenario), integer(0), NULL, NULL, 3, NULL, NULL);
         assert(image.f_pointer);
-        assert(mica_task_init(run->task, &worker, run->kernel, &image, 100, 2, 8) == OK);
+        assert(mica_task_init(run->task, &worker, run->kernel, &image, 100, 2, 8, NULL) == OK);
         assert(mica_memory_root_pop(&worker, &image));
         assert(mica_task_execute(run->task, &worker) == OK);
         handler_delivery(run->task, &worker, (int64_t[]){1}, 1);

@@ -12,6 +12,33 @@ verb native_tasks/service_parameters() -> list
     ["parent", native_tasks/pointer("Control"), :Borrow]]
 end
 
+// Route committed runtime effects through the same stable service context that
+// entries borrow. Application-specific emit/subscription handlers remain the
+// caller's responsibility; these two handlers contain no host-language logic.
+verb native_tasks/runtime_services(input: map) -> map
+  let module: map = input
+  for [name, field, target] in [["send", "mailboxes", "mailbox"], ["spawn", "spawn", "spawn"]]
+    let function_name: string = string_concat("runtime_", name)
+    module = native_tasks/declare(module, function_name, :U64, native_tasks/service_parameters())
+    let builder: map = native_tasks/context(module, function_name)
+    let context: map = native_gen/cast(native_tasks/pointer("Runtime"), native_gen/ref(builder, "context"))
+    builder = native_tasks/check(builder, native_gen/negate(native_kernel/absent(context)), "closed")
+    let service: map = native_kernel/load_field(builder, context, field)
+    builder = native_tasks/check(builder, native_gen/negate(native_kernel/absent(service)), "closed")
+    let arguments: list = []
+    for parameter in native_tasks/service_parameters()
+      let argument: map = native_roots/ref(builder, parameter[0])
+      if parameter[0] == "context"
+        argument = native_gen/cast(native_memory/pointer(:U8), service)
+      end
+      arguments = [@arguments, argument]
+    end
+    builder = native_roots/return_value(builder, native_gen/call(builder, string_concat("task_", target, "_service"), arguments))
+    module = native_gen/finish(module, builder)
+  end
+  return module
+end
+
 verb native_tasks/effect_field(builder: map, field: string) -> map
   let result: map = native_kernel/load_field(builder, native_roots/ref(builder, "effect"), field)
   return result

@@ -80,7 +80,7 @@ static void call_fixture_release(struct call_fixture *f) {
     mica_value_symbol_table_release(&f->symbols);
 }
 static void call_task_init(struct call_fixture *f, struct mica_TaskControl *task, uint64_t depth) {
-    assert(mica_task_init(task, &f->worker, &f->kernel, &f->image, 10000, 3, depth) == OK);
+    assert(mica_task_init(task, &f->worker, &f->kernel, &f->image, 10000, 3, depth, NULL) == OK);
 }
 static struct mica_TaskDispatchSelection call_select(struct call_fixture *f,
         struct mica_TaskAttempt *attempt, mica_type_Value selector,

@@ -1,0 +1,163 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+verb native_source/pool(values: list, value) -> list
+  for existing in values
+    // Language numeric equality also compares integers with floats. Literal
+    // interning must preserve their distinct runtime kinds.
+    if to_literal(existing) == to_literal(value)
+      return values
+    end
+  end
+  return [@values, value]
+end
+verb native_source/pool_operands(values: list, operands: list) -> list
+  let pool: list = values
+  for operand in operands
+    if operand[0] == :Constant
+      pool = native_source/pool(pool, operand[1])
+    end
+  end
+  return pool
+end
+verb native_source/dead_load(analysis: map, pc: int) -> bool
+  let instruction: list = analysis[:description][:code][pc]
+  if instruction[0] != :Load && instruction[0] != :Move
+    return false
+  end
+  for successor in analysis[:instructions][pc][:successors]
+    if map_contains_key(analysis[:live][successor], instruction[1])
+      return false
+    end
+  end
+  return true
+end
+
+// A region has one native entry and ends at a return or committed suspension.
+// Branch lowering is not implemented here yet; diagnose it before generating
+// a partial module. The analysis itself already handles general control flow.
+verb native_source/regions(analysis: map) -> list
+  let regions: list = []
+  let start: int = 0
+  let restore: list = []
+  let index: int = 0
+  while index < analysis[:parameters]
+    restore = [@restore, index]
+    index = index + 1
+  end
+  let input: int = -1
+  let code: list = analysis[:description][:code]
+  let pc: int = 0
+  while pc < len(code)
+    if !map_contains_key(analysis[:reachable], pc)
+      pc = pc + 1
+      continue
+    end
+    native/ensure(code[pc][0] != :Branch && code[pc][0] != :Jump, "native source branch lowering is not implemented")
+    if analysis[:instructions][pc][:boundary] || code[pc][0] == :Return
+      regions = [@regions, {:start -> start, :last -> pc, :restore -> restore, :input -> input}]
+      start = pc + 1
+      if analysis[:instructions][pc][:boundary]
+        restore = analysis[:captures][pc]
+        input = code[pc][1]
+      end
+    end
+    pc = pc + 1
+  end
+  return regions
+end
+
+verb native_source/program_literals(analysis: map, initial: list) -> list
+  let pool: list = initial
+  let code: list = analysis[:description][:code]
+  let pc: int = 0
+  while pc < len(code)
+    if !map_contains_key(analysis[:reachable], pc) || native_source/dead_load(analysis, pc)
+      pc = pc + 1
+      continue
+    end
+    let instruction: list = code[pc]
+    let op: symbol = instruction[0]
+    if op == :Load
+      pool = native_source/pool(pool, instruction[2])
+    elseif op == :BuildList || op == :AssertDynamic || op == :RetractDynamic
+      pool = native_source/pool_operands(pool, instruction[2])
+    elseif op == :BuiltinCall
+      pool = native_source/pool_operands(pool, instruction[3])
+    elseif op == :Index
+      pool = native_source/pool_operands(pool, [instruction[3]])
+    elseif op == :SpawnDispatch
+      pool = native_source/pool_operands(pool, [instruction[2]])
+      for role in instruction[3]
+        pool = native_source/pool(pool, role[0])
+        pool = native_source/pool_operands(pool, [role[1]])
+      end
+      if instruction[4] != none
+        pool = native_source/pool_operands(pool, [instruction[4]])
+      end
+    elseif op == :MailboxRecv
+      pool = native_source/pool_operands(pool, [instruction[2]])
+      if instruction[3] != none
+        pool = native_source/pool_operands(pool, [instruction[3]])
+      end
+    elseif op == :Return
+      pool = native_source/pool_operands(pool, [instruction[1]])
+    end
+    pc = pc + 1
+  end
+  return pool
+end
+verb native_source/literal_description(value) -> map
+  let kinds: list = [[:bool, :Bool], [:int, :Integer], [:float, :Float], [:string, :String], [:bytes, :Bytes]]
+  for [source, target] in kinds
+    if is_kind(value, source)
+      return {:kind -> target, :value -> value}
+    end
+  end
+  if is_kind(value, :symbol)
+    return {:kind -> :Symbol, :value -> native_source/symbol_text(value)}
+  end
+  if is_kind(value, :error_code)
+    return {:kind -> :ErrorCode, :value -> to_literal(value)}
+  end
+  if value == [] {[]}
+    return {:kind -> :Unit}
+  end
+  native/ensure(false, string_concat("unsupported native source constant: ", to_literal(value)))
+  return {}
+end
+
+// Resolve bootstrap relation identities by name, then replace them with explicit
+// native catalogue IDs. A bootstrap identity is never a generated literal.
+verb native_source/link_relations(description: map, relations: map) -> map
+  let names: map = {}
+  for row in RelationName(?relation, ?name)
+    names[row[:relation]] = row[:name]
+  end
+  let code: list = []
+  for instruction in description[:code]
+    if instruction[0] == :AssertDynamic || instruction[0] == :RetractDynamic
+      native/ensure(map_contains_key(names, instruction[1]), "source relation identity has no catalogue name")
+      let name: symbol = names[instruction[1]]
+      native/ensure(map_contains_key(relations, name), string_concat("unlinked native relation: ", to_literal(name)))
+      instruction = [instruction[0], relations[name], instruction[2]]
+    end
+    code = [@code, instruction]
+  end
+  let result: map = description
+  result[:code] = code
+  return result
+end
+
+// The literal spelling preserves arbitrary symbol names, including escapes.
+verb native_source/symbol_text(value: symbol) -> string
+  let spelling: string = to_literal(value)
+  let name: string = string_slice(spelling, 1, len(spelling))
+  if string_starts_with(name, "\"")
+    let parsed: relation = from_literal(name)
+    native/ensure(parsed[0][:case] == :ok && is_kind(parsed[0][:value], :string), "invalid quoted symbol spelling")
+    let result: string = parsed[0][:value]
+    return result
+  end
+  return name
+end

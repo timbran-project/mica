@@ -14,6 +14,7 @@ verb native_spawn_tests/program(input: map) -> map
     module = native_tasks/declare(module, string_concat("test_spawn_", name), :U64, native_tasks/service_parameters())
   end
   let builder: map = native_tasks/context(module, "test_spawn_body")
+  builder = native_tasks/check(builder, native_gen/negate(native_kernel/absent(native_tasks/attempt_field(builder, "runtime"))), "schema")
   builder = native_handlers/replace_current(builder, native_handlers/current(builder), {"entry" -> native_call_tests/entry("finish")})
   let environment: map = native_kernel/load_field(builder, native_handlers/current(builder), "environment")
   builder = native_roots/return_value(builder, native_gen/call(builder, "task_spawn_request", [native_gen/ref(builder, "worker"), native_tasks/attempt(builder),

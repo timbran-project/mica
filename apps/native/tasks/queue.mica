@@ -135,13 +135,18 @@ verb native_tasks/drain_body(module: map) -> map
   return result
 end
 
-verb native_tasks/queue(input: map) -> map
+verb native_tasks/queue_types(input: map) -> map
   let module: map = input
   module[:state] = native/record_type(module[:state], "TaskQueue", [
     ["mutex", native_memory/pointer(:U8)], ["slots", native_memory/pointer(:U64)],
     ["capacity", :U64], ["head", :U64], ["count", :U64], ["closed", :Bool]])[1]
   module[:state] = native/record_type(module[:state], "TaskQueueResult", [["status", :U64], ["id", :U64]])[1]
   module[:state] = native/record_type(module[:state], "TaskDrainResult", [["status", :U64], ["taken", :U64], ["completed", :U64]])[1]
+  return module
+end
+
+verb native_tasks/queue(input: map) -> map
+  let module: map = input
   let [bindings: map, state: map] = native/constants(module[:state], [["task_queue_empty", :U64, native_value/hex(13)]])
   module[:state] = state
   let constants: map = module[:constants]

@@ -36,7 +36,7 @@ static void service_delivery(void) {
         probe.f_calls = probe.f_delivered = probe.f_order = 0;
         probe.f_fail_at = scenario == 1 ? 3 : 0;
         services.f_send = scenario == 2 ? NULL : mica_task_test_service_send;
-        assert(mica_task_init(&task, &worker, &kernel, &image, 100, 1, 8) == OK);
+        assert(mica_task_init(&task, &worker, &kernel, &image, 100, 1, 8, NULL) == OK);
         assert(mica_task_claim(&task, &worker, &attempt) == OK);
         if (scenario) assert(mica_kernel_declare(&attempt.f_transaction, 100 + scenario, 100 + scenario, 2, 0, 0, 0) == OK);
         for (uint64_t kind = 1; kind <= 4; ++kind) {

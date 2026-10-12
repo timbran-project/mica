@@ -80,7 +80,7 @@ verb native_scheduler/enqueue(builder: map, id: map, slot: map) -> map
   return result
 end
 
-verb native_scheduler/declarations(input: map) -> map
+verb native_scheduler/types(input: map) -> map
   let module: map = input
   module[:state] = native/record_type(module[:state], "TaskSlot", [
     ["next", native_tasks/pointer("Slot")], ["index", :U64], ["id", :U64],
@@ -96,6 +96,11 @@ verb native_scheduler/declarations(input: map) -> map
   module[:state] = native/record_type(module[:state], "TaskAdmission", [["status", :U64], ["id", :U64]])[1]
   module[:state] = native/record_type(module[:state], "TaskSchedulerObservation", [["status", :U64], ["count", :U64], ["remaining", :U64], ["workers", :U64], ["events", :Bool], ["closed", :Bool]])[1]
   module[:state] = native/record_type(module[:state], "TaskDeadline", [["status", :U64], ["deadline", :U64]])[1]
+  return module
+end
+
+verb native_scheduler/declarations(input: map) -> map
+  let module: map = input
   let constants: list = []
   for [name, value] in [["queued", 1], ["running", 2], ["waiting", 3], ["done", 4], ["delayed", 5]]
     constants = [@constants, [string_concat("task_slot_", name), :U64, native_value/hex(value)]]

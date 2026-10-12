@@ -1,0 +1,257 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+// Analyse the Mica compiler's register descriptions before native lowering.
+// Registers are compile-time names; the generated process does not interpret
+// these instructions. Continuations capture only values live across a boundary.
+verb native_source/operand_reads(operand) -> list
+  native/ensure(is_kind(operand, :list) && len(operand) == 2, "source operand requires a tag and value")
+  if operand[0] == :Constant
+    return []
+  end
+  if operand[0] == :Register
+    return [operand[1]]
+  end
+  native/ensure(false, "unsupported native source operand")
+  return []
+end
+
+verb native_source/items_reads(items: list) -> list
+  let reads: list = []
+  for operand in items
+    reads = [@reads, @native_source/operand_reads(operand)]
+  end
+  return reads
+end
+
+verb native_source/instruction(code: list, pc: int) -> map
+  let instruction = code[pc]
+  native/ensure(is_kind(instruction, :list) && len(instruction) > 0, "source instruction must be a nonempty list")
+  let op = instruction[0]
+  let widths: map = {:Load -> 3, :Move -> 3, :Unary -> 4, :Binary -> 5,
+    :BuildList -> 3, :BuildMap -> 3, :Index -> 4, :CheckKind -> 5,
+    :BuiltinCall -> 4, :Dispatch -> 4, :DynamicDispatch -> 4,
+    :SpawnDispatch -> 5, :SpawnDispatchDynamic -> 5, :MailboxRecv -> 4,
+    :AssertDynamic -> 3, :RetractDynamic -> 3, :Return -> 2,
+    :Branch -> 4, :Jump -> 2, :CommitValue -> 2, :SuspendValue -> 3, :Emit -> 3}
+  native/ensure(map_contains_key(widths, op), string_concat("unsupported native source instruction ", to_literal(op)))
+  native/ensure(len(instruction) == widths[op], "source instruction has the wrong operand count")
+  let reads: list = []
+  let writes: list = []
+  let successors: list = [pc + 1]
+  let boundary: bool = false
+  if native/contains([:Load, :Move, :Unary, :Binary, :BuildList, :BuildMap, :Index, :BuiltinCall,
+      :Dispatch, :DynamicDispatch, :SpawnDispatch, :SpawnDispatchDynamic, :MailboxRecv, :CommitValue, :SuspendValue], op)
+    writes = [instruction[1]]
+  end
+  if op == :Move || op == :CheckKind
+    let source: int = instruction[1]
+    if op == :Move
+      source = instruction[2]
+    end
+    reads = [source]
+  elseif op == :Unary
+    reads = [instruction[3]]
+  elseif op == :Binary
+    reads = [instruction[3], instruction[4]]
+  elseif op == :Index
+    reads = [instruction[2], @native_source/operand_reads(instruction[3])]
+  elseif op == :BuildList
+    reads = native_source/items_reads(instruction[2])
+  elseif op == :BuildMap
+    for pair in instruction[2]
+      native/ensure(is_kind(pair, :list) && len(pair) == 2, "source map requires key/value pairs")
+      reads = [@reads, @native_source/items_reads(pair)]
+    end
+  elseif op == :BuiltinCall
+    reads = native_source/items_reads(instruction[3])
+  elseif op == :AssertDynamic || op == :RetractDynamic
+    reads = native_source/items_reads(instruction[2])
+  elseif op == :Dispatch || op == :SpawnDispatch
+    reads = native_source/operand_reads(instruction[2])
+    for pair in instruction[3]
+      native/ensure(is_kind(pair, :list) && len(pair) == 2 && is_kind(pair[0], :symbol), "source dispatch requires named roles")
+      reads = [@reads, @native_source/operand_reads(pair[1])]
+    end
+    boundary = true
+  elseif op == :DynamicDispatch || op == :SpawnDispatchDynamic
+    reads = native_source/items_reads([instruction[2], instruction[3]])
+    boundary = true
+  elseif op == :MailboxRecv
+    reads = native_source/operand_reads(instruction[2])
+    if instruction[3] != none
+      reads = [@reads, @native_source/operand_reads(instruction[3])]
+    end
+    boundary = true
+  elseif op == :SuspendValue
+    if instruction[2] != none
+      reads = native_source/operand_reads(instruction[2])
+    end
+    boundary = true
+  elseif op == :CommitValue
+    boundary = true
+  elseif op == :Return
+    reads = native_source/operand_reads(instruction[1])
+    successors = []
+  elseif op == :Emit
+    reads = native_source/items_reads([instruction[1], instruction[2]])
+  elseif op == :Branch
+    reads = [instruction[1]]
+    successors = [instruction[2], instruction[3]]
+  elseif op == :Jump
+    successors = [instruction[1]]
+  end
+  if (op == :SpawnDispatch || op == :SpawnDispatchDynamic) && instruction[4] != none
+    reads = [@reads, @native_source/operand_reads(instruction[4])]
+  end
+  return {:reads -> reads, :writes -> writes, :successors -> successors, :boundary -> boundary}
+end
+
+verb native_source/set(items: list) -> map
+  let result: map = {}
+  for item in items
+    result[item] = true
+  end
+  return result
+end
+
+verb native_source/intersection(left: map, right: map) -> map
+  let result: map = {}
+  for item, present in left
+    if map_contains_key(right, item)
+      result[item] = true
+    end
+  end
+  return result
+end
+
+verb native_source/analyse(description: map, parameters: int) -> map
+  let code: list = description[:code]
+  let registers: int = description[:registers]
+  native/ensure(len(code) > 0 && parameters >= 0 && registers >= parameters, "invalid source register frame")
+  let universe: map = {}
+  let arguments: map = {}
+  let reg: int = 0
+  while reg < registers
+    universe[reg] = true
+    if reg < parameters
+      arguments[reg] = true
+    end
+    reg = reg + 1
+  end
+  let instructions: map = {}
+  let predecessors: map = {}
+  for pc in 0..(len(code) - 1)
+    let info: map = native_source/instruction(code, pc)
+    for reg in [@info[:reads], @info[:writes]]
+      native/ensure(is_kind(reg, :int) && reg >= 0 && reg < registers, "source register is outside its frame")
+    end
+    instructions[pc] = info
+    predecessors[pc] = []
+  end
+  // Only reachable instructions contribute edges or require a fallthrough.
+  // The frontend may append a default return after an explicit return.
+  let reachable: map = {}
+  let queue: map = {0 -> 0}
+  let cursor: int = 0
+  let count: int = 1
+  while cursor < count
+    let pc: int = queue[cursor]
+    cursor = cursor + 1
+    if map_contains_key(reachable, pc)
+      continue
+    end
+    reachable[pc] = true
+    for target in instructions[pc][:successors]
+      native/ensure(is_kind(target, :int) && target >= 0 && target < len(code), "source branch or fallthrough leaves its program")
+      predecessors[target] = [@predecessors[target], pc]
+      queue[count] = target
+      count = count + 1
+    end
+  end
+  let available: map = {}
+  let live: map = {}
+  for pc in 0..(len(code) - 1)
+    available[pc] = universe
+    live[pc] = {}
+  end
+  let changed: bool = true
+  while changed
+    changed = false
+    for pc in 0..(len(code) - 1)
+      if !map_contains_key(reachable, pc)
+        continue
+      end
+      let incoming: map = universe
+      if pc == 0
+        incoming = arguments
+      end
+      for predecessor in predecessors[pc]
+        incoming = native_source/intersection(incoming, available[predecessor])
+      end
+      for reg in instructions[pc][:writes]
+        incoming[reg] = true
+      end
+      if incoming != available[pc]
+        available[pc] = incoming
+        changed = true
+      end
+    end
+  end
+  for pc in 0..(len(code) - 1)
+    if !map_contains_key(reachable, pc)
+      continue
+    end
+    let incoming: map = universe
+    if pc == 0
+      incoming = arguments
+    end
+    for predecessor in predecessors[pc]
+      incoming = native_source/intersection(incoming, available[predecessor])
+    end
+    for reg in instructions[pc][:reads]
+      native/ensure(map_contains_key(incoming, reg), string_concat("source register read before assignment at instruction ", to_literal(pc)))
+    end
+  end
+  changed = true
+  while changed
+    changed = false
+    let pc: int = len(code) - 1
+    while pc >= 0
+      if map_contains_key(reachable, pc)
+        let info: map = instructions[pc]
+        let before: map = native_source/set(info[:reads])
+        let defined: map = native_source/set(info[:writes])
+        for successor in info[:successors]
+          for reg, present in live[successor]
+            if !map_contains_key(defined, reg)
+              before[reg] = true
+            end
+          end
+        end
+        if before != live[pc]
+          live[pc] = before
+          changed = true
+        end
+      end
+      pc = pc - 1
+    end
+  end
+  let captures: map = {}
+  for pc in 0..(len(code) - 1)
+    if map_contains_key(reachable, pc) && instructions[pc][:boundary]
+      let saved: map = {}
+      let defined: map = native_source/set(instructions[pc][:writes])
+      for successor in instructions[pc][:successors]
+        for reg, present in live[successor]
+          if !map_contains_key(defined, reg)
+            saved[reg] = true
+          end
+        end
+      end
+      captures[pc] = sort([reg for reg, present in saved])
+    end
+  end
+  return {:description -> description, :instructions -> instructions, :reachable -> reachable,
+    :live -> live, :captures -> captures, :parameters -> parameters}
+end

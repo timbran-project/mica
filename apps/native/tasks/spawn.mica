@@ -35,6 +35,7 @@ verb native_spawn/context_bodies(input: map) -> map
   let [prototypes: map, rooted: map] = native_roots/retain(builder, "prototypes", native_roots/ref(builder, "prototypes"))
   builder = native_query/check(rooted, native_gen/call(rooted, "memory_publish", [native_roots/worker(rooted), prototypes[:scope_root], root]), "oom")
   builder = native_mailboxes/native_store(builder, configuration, "scheduler", native_gen/ref(builder, "scheduler"))
+  builder = native_mailboxes/native_store(builder, configuration, "runtime", native_gen/ref(builder, "runtime"))
   builder = native_kernel/store_field(builder, configuration, "vocabulary", native_gen/load(native_gen/ref(builder, "vocabulary")))
   for name in ["selectors", "parameters", "delegates", "programs", "remaining", "retries", "depth_limit"]
     builder = native_kernel/store_field(builder, configuration, name, native_gen/ref(builder, name))
@@ -128,7 +129,7 @@ verb native_spawn/service_body(module: map) -> map
   let [admission: map, admitted: map] = native_gen/bind(builder, "admitted", native_gen/call(builder, "task_scheduler_launch", [
     native_spawn/field(builder, "scheduler"), native_roots/worker(builder), native_gen/ref(builder, "kernel"), image[:scope_root],
     native_spawn/field(builder, "remaining"), native_spawn/field(builder, "retries"), native_spawn/field(builder, "depth_limit"),
-    native_kernel/load_field(builder, request, "delay")]))
+    native_kernel/load_field(builder, request, "delay"), native_spawn/field(builder, "runtime")]))
   builder = native_gen/unless(admitted, native_kernel/absent(native_gen/field(admitted, admission, "status")), fn(failed) => native_roots/return_value(failed, native_gen/field(failed, admission, "status")))
   let reply: map = native_gen/field(builder, native_gen/call(builder, "value_int", [native_gen/bitcast(:I64, native_gen/field(builder, admission, "id"))]), "value")
   let parent: map = native_gen/ref(builder, "parent")
@@ -140,13 +141,19 @@ verb native_spawn/service_body(module: map) -> map
   return result
 end
 
-verb native_spawn/program(input: map) -> map
-  let module: map = native_scheduler/launch(input)
-  let fields: list = [["scheduler", native_tasks/pointer("Scheduler")], ["vocabulary", [:Record, "TaskDispatchVocabulary"]], ["prototypes", [:Record, "MemoryRoot"]]]
+verb native_spawn/types(input: map) -> map
+  let module: map = input
+  let fields: list = [["scheduler", native_tasks/pointer("Scheduler")], ["vocabulary", [:Record, "TaskDispatchVocabulary"]], ["prototypes", [:Record, "MemoryRoot"]],
+    ["runtime", native_tasks/pointer("Runtime")]]
   for name in ["selectors", "parameters", "delegates", "programs", "remaining", "retries", "depth_limit"]
     fields = [@fields, [name, :U64]]
   end
   module[:state] = native/record_type(module[:state], "TaskSpawnContext", fields)[1]
+  return module
+end
+
+verb native_spawn/program(input: map) -> map
+  let module: map = native_scheduler/launch(input)
   let worker: list = ["worker", native_memory/record_pointer("MemoryWorker"), :Borrow]
   let attempt: list = ["attempt", native_tasks/pointer("Attempt"), :Borrow]
   let configuration: list = ["configuration", native_tasks/pointer("SpawnContext"), :Borrow]
@@ -158,6 +165,7 @@ verb native_spawn/program(input: map) -> map
   for name in ["remaining", "retries", "depth_limit"]
     parameters = [@parameters, [name, :U64, :Value]]
   end
+  parameters = [@parameters, ["runtime", native_tasks/pointer("Runtime"), :Borrow]]
   module = native_tasks/declare(module, "spawn_context_init", :U64, parameters)
   module = native_tasks/declare(module, "spawn_context_release", :U64, [configuration, worker])
   module = native_tasks/declare(module, "spawn_request", :U64, [worker, attempt,

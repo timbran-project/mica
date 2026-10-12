@@ -35,7 +35,7 @@ static void subscription_prepare_cancel(struct mica_MemoryWorker *worker,
     image.f_pointer = (void *)mica_task_new_Image(worker, mica_task_test_entry, NULL,
         tenant, integer(0), integer(0), NULL, NULL, 3, NULL, NULL);
     assert(image.f_pointer);
-    assert(mica_task_init(task, worker, kernel, &image, 100, 1, 8) == OK);
+    assert(mica_task_init(task, worker, kernel, &image, 100, 1, 8, NULL) == OK);
     assert(mica_memory_root_pop(worker, &image));
     assert(mica_task_claim(task, worker, &attempt) == OK);
     assert(mica_task_subscription_cancel(worker, &attempt, capability) == OK);

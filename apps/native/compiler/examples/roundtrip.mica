@@ -1,0 +1,12 @@
+verb native_roundtrip_child(reply: capability, key: int, value: int)
+  assert NativeResult(key, value)
+  mailbox_send(reply, value)
+  return value
+end
+
+let saved = ["parent continuation", 42]
+let caps = mailbox()
+let child = spawn :native_roundtrip_child(reply: caps[1], key: 7, value: saved[1])
+let messages = mailbox_recv([caps[0]])
+mailbox_close(caps[0])
+return [child, saved, messages]

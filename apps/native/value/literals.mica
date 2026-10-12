@@ -94,6 +94,9 @@ verb native_literal/prepare(input: map, name: string, literal: map) -> list
   let module: map = input
   let kind: symbol = literal[:kind]
   let prepared: map = {:kind -> kind, :name -> name}
+  if kind == :Unit
+    return [prepared, module]
+  end
   if kind == :Bool
     prepared[:name] = "false"
     if literal[:value]
@@ -148,6 +151,13 @@ verb native_literal/prepare(input: map, name: string, literal: map) -> list
 end
 verb native_literal/emit(builder: map, literal: map, table: map, failure) -> list
   let kind: symbol = literal[:kind]
+  if kind == :Unit
+    let [tuple: map, ready: map] = native_gen/bind(builder, "unit_tuple", native_gen/zero([:Record, "ValueTuple"]))
+    let [unit: map, checked: map] = native_gen/checked_bind(ready, "unit", native_gen/call(ready, "value_relation", [
+      native_roots/worker(ready), native_gen/ref(ready, "null_heading"), native_gen/ref(ready, "zero"),
+      native_gen/freeze(native_gen/address(tuple)), native_gen/ref(ready, "one")]), "ok", failure)
+    return [native_gen/field(checked, unit, "value"), checked]
+  end
   let argument: map = native_gen/ref(builder, literal[:name])
   if kind == :Bool
     return [native_gen/call(builder, "value_bool", [argument]), builder]

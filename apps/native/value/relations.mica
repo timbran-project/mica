@@ -422,7 +422,7 @@ verb native_value/relation_project_rows(builder: map, source: map, order: map, a
       let descriptor: map = native_gen/load(native_gen/offset(order, position))
       let source_index: map = native_gen/field(cell, descriptor, "source")
       return native_gen/store(cell, native_gen/offset(cells, position),
-        native_gen/load(native_gen/offset(data, source_index)))
+        native_gen/root_read(native_gen/location(native_gen/offset(data, source_index))))
     end)
     body = native_gen/store(body, native_gen/offset(rows, index),
       native_gen/record(body, tuple, {"data" -> cells, "arity" -> arity}))
@@ -449,8 +449,9 @@ verb native_value/relation_constructor(input: map) -> map
   let context: map = native/declare_function(input, "value_relation", [:Record, "ValueResult"], [
     ["worker", native_memory/record_pointer("MemoryWorker"), :Borrow],
     ["heading", [:Pointer, :U32, :Const], :Borrow], ["arity", :U64, :Value],
-    ["source", [:Pointer, [:Record, "ValueTuple"], :Const], :Gc], ["length", :U64, :Value]], [],
+    ["source", [:Pointer, [:Record, "ValueTuple"], :Const], :Borrow], ["length", :U64, :Value]], [],
     [:Allocate, :ReadMemory, :WriteMemory], :Gc, "")
+  context = native/execution_function(context, "value_relation", :Collector)
   let builder: map = native_gen/context(context, "value_relation")
   let worker: map = native_gen/ref(builder, "worker")
   let heading: map = native_gen/ref(builder, "heading")

@@ -70,18 +70,27 @@ verb native_tasks/types(input: map) -> map
   let [entry: list, state: map] = native/execution_pointer_type(module[:state], "TaskEntry", :U64,
     [["attempt", native_tasks/pointer("Attempt"), :Borrow]], native_tasks/effects(), :Tail)
   module[:state] = state
+  // Runtime services occupy stable native storage shared by task controls.
+  // They outlive their tasks; images retain values and code, never this pointer.
+  // Authority remains per attempt and is refreshed independently on resumption.
+  module[:state] = native/record_type(module[:state], "TaskRuntime", [
+    ["symbols", native_memory/record_pointer("SymbolTable")],
+    ["mailboxes", native_tasks/pointer("MailboxHub")], ["spawn", native_tasks/pointer("SpawnContext")],
+    ["mailbox_capacity", :U64]])[1]
   module[:state] = native/record_type(module[:state], "TaskAttempt", [
     ["worker", worker], ["kernel", native_memory/record_pointer("Kernel")],
     ["transaction", [:Record, "KernelTransaction"]],
     ["retry", root], ["current", root], ["effects", root], ["request", root], ["error", root], ["authority", root], ["invocations", root], ["executing", root],
-    ["remaining", :U64], ["retries", :U64], ["depth_limit", :U64], ["boundary", :U64], ["epoch", :U64], ["resources", :Bool]])[1]
+    ["remaining", :U64], ["retries", :U64], ["depth_limit", :U64], ["boundary", :U64], ["epoch", :U64], ["resources", :Bool],
+    ["runtime", native_tasks/pointer("Runtime")]])[1]
   module[:state] = native/record_type(module[:state], "TaskControl", [
     ["mutex", native_memory/pointer(:U8)], ["kernel", native_memory/record_pointer("Kernel")],
     ["scheduler", native_memory/pointer(:U8)], ["id", :U64],
     ["image", root], ["prepared", root], ["committed_view", root], ["event", root], ["error", root],
     ["active", native_kernel/pointer("Transaction")], ["state", :U64], ["generation", :U64],
     ["remaining", :U64], ["retries", :U64], ["depth_limit", :U64], ["status", :U64],
-    ["cancel_requested", :Bool], ["committed", :Bool], ["delivery_claimed", :Bool]])[1]
+    ["cancel_requested", :Bool], ["committed", :Bool], ["delivery_claimed", :Bool],
+    ["runtime", native_tasks/pointer("Runtime")]])[1]
   module = native_code/types(module)
   let constants: list = [["task_language_error", :U64, native_value/hex(14)],
     ["task_no_method", :U64, native_value/hex(15)], ["task_ambiguous_dispatch", :U64, native_value/hex(16)],
@@ -95,6 +104,11 @@ verb native_tasks/types(input: map) -> map
     constants = [@constants, [string_concat("task_layout_", schema[0]), :U64, native_value/hex(layout)]]
     layout = layout + 1
   end
+  // Register native service records before any function builder checks types.
+  module = native_mailboxes/types(module)
+  module = native_tasks/queue_types(module)
+  module = native_scheduler/types(module)
+  module = native_spawn/types(module)
   let kinds: list = ["emit", "send", "subscribe", "spawn"]
   let ordinal: int = 1
   for kind in kinds
@@ -201,6 +215,7 @@ verb native_tasks/definitions() -> map
   module = native_tasks/queue(module)
   module = native_scheduler/program(module)
   module = native_spawn/program(module)
+  module = native_tasks/runtime_services(module)
   return module
 end
 

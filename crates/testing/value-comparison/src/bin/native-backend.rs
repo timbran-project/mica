@@ -167,6 +167,12 @@ fn run() -> Result<()> {
         "../compiler/lex",
         "../compiler/parse",
         "../compiler/ast",
+        "../compiler/emit",
+        "compiler/analysis",
+        "compiler/builders",
+        "compiler/prepare",
+        "compiler/lower",
+        "compiler/program",
         "value/literals",
         "rules/source",
         "rules/install",
@@ -496,6 +502,10 @@ fn check_fixtures(
     backend: &Path,
 ) -> Result<()> {
     let mut checked = false;
+    let source = fs::read_to_string(root.join("apps/native/compiler/examples/roundtrip.mica"))?;
+    let source_expression = format!(
+        "(fn() let module = native_source/compile(native_tasks/definitions(), \"source_roundtrip\", {source:?}, {{:NativeResult -> 705}}, [[602, 8003]]) return module[:state] end)()"
+    );
     for (name, expression, symbol, traps) in [
         ("scalar", "native/scalar_example()", "mica_sum", ""),
         (
@@ -541,6 +551,12 @@ fn check_fixtures(
             "mica_task_heap_init",
             "",
         ),
+        (
+            "source",
+            source_expression.as_str(),
+            "mica_source_roundtrip_entry_0",
+            "",
+        ),
     ] {
         if options
             .fixture
@@ -550,6 +566,9 @@ fn check_fixtures(
             continue;
         }
         checked = true;
+        if name == "source" {
+            eval(runner, "return make_relation(:NativeResult, 2)")?;
+        }
         let directory = options.output.join(name);
         fs::create_dir_all(&directory)?;
         // Freeze fixture sources before generation, which can take several minutes.
@@ -603,6 +622,14 @@ fn check_fixtures(
                 fs::read_to_string(root.join("native/platform/allocation.c"))?,
                 fs::read_to_string(root.join("native/platform/mutex.c"))?,
                 fs::read_to_string(root.join("apps/native/tasks/tests.c"))?,
+            ),
+            "source" => format!(
+                "{}\n{}\n{}\n{}\n{}",
+                text(&eval(runner, "return native_memory/platform()")?)?,
+                text(&eval(runner, "return native_tasks/platform()")?)?,
+                fs::read_to_string(root.join("native/platform/allocation.c"))?,
+                fs::read_to_string(root.join("native/platform/mutex.c"))?,
+                fs::read_to_string(root.join("apps/native/compiler/tests.c"))?,
             ),
             _ => unreachable!(),
         };
@@ -716,7 +743,7 @@ fn check_fixtures(
             format!("#include \"module.h\"\n{oracle}"),
         )?;
         for input in ["module.c", "module.o", "module.so"] {
-            let cc = if matches!(name, "execution" | "tasks") && input == "module.c" {
+            let cc = if matches!(name, "execution" | "tasks" | "source") && input == "module.c" {
                 std::env::var_os("CLANG").unwrap_or_else(|| "clang".into())
             } else {
                 std::env::var_os("CC").unwrap_or_else(|| "cc".into())

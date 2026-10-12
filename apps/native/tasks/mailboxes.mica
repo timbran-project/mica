@@ -75,7 +75,7 @@ verb native_mailboxes/notify(builder: map) -> map
   end)
   return notified
 end
-verb native_mailboxes/declarations(input: map) -> map
+verb native_mailboxes/types(input: map) -> map
   let module: map = input
   let mailbox: list = native_tasks/pointer("Mailbox")
   let root: list = [:Record, "MemoryRoot"]
@@ -90,6 +90,11 @@ verb native_mailboxes/declarations(input: map) -> map
   module[:state] = native/record_type(module[:state], "TaskMailboxCaps", [["status", :U64], ["receiver", native_value/word()], ["sender", native_value/word()]])[1]
   module[:state] = native/record_type(module[:state], "TaskMailboxRead", [["status", :U64], ["count", :U64], ["revision", :U64]])[1]
   module[:state] = native/record_type(module[:state], "TaskMailboxChange", [["status", :U64], ["revision", :U64]])[1]
+  return module
+end
+
+verb native_mailboxes/declarations(input: map) -> map
+  let module: map = input
   let hub: list = ["hub", native_tasks/pointer("MailboxHub"), :Borrow]
   let worker: list = ["worker", native_memory/record_pointer("MemoryWorker"), :Borrow]
   let sender: list = ["sender", native_value/word(), :Gc]

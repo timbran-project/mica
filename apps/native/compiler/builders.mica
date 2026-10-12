@@ -1,0 +1,97 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+// Source registers are rooted native locals. Only registers live at a task
+// boundary enter an immutable image; there is no runtime instruction decoder.
+verb native_source/number(builder: map, value: int) -> map
+  let result: map = native_gen/ref(builder, string_concat(builder[:source_prefix], "_number_", to_literal(value)))
+  return result
+end
+verb native_source/checked(builder: map, operation: string, arguments: list) -> map
+  let [status: map, called: map] = native_gen/bind(builder, "status", native_gen/call(builder, operation, arguments))
+  let result: map = native_gen/unless(called, native_kernel/absent(status), fn(failed) => native_roots/return_value(failed, status))
+  return result
+end
+verb native_source/result(builder: map, operation: string, arguments: list, reason: string) -> list
+  let [result: map, checked: map] = native_gen/checked_bind(builder, operation, native_gen/call(builder, operation, arguments), "ok",
+    fn(failed) => native_tasks/attempt_status(failed, reason))
+  return [native_gen/field(checked, result, "value"), checked]
+end
+verb native_source/service(builder: map, name: string) -> map
+  let result: map = native_kernel/load_field(builder, native_tasks/attempt_field(builder, "runtime"), name)
+  return result
+end
+verb native_source/register(builder: map, index: int) -> map
+  native/ensure(map_contains_key(builder[:source_registers], index), "native source register has no root")
+  let result: map = builder[:source_registers][index]
+  return result
+end
+verb native_source/assign(builder: map, index: int, value: map) -> map
+  let result: map = native_roots/store(builder, native_source/register(builder, index), value)
+  return result
+end
+verb native_source/literal(builder: map, value) -> map
+  let position: int = 0
+  for literal in builder[:source_literals]
+    if to_literal(literal) == to_literal(value)
+      let code: map = {}
+      if map_contains_key(builder, :source_code)
+        code = builder[:source_code]
+      else
+        code = native_kernel/load_field(builder, native_handlers/current(builder), "code")
+      end
+      let constants: map = native_kernel/load_field(builder, code, "constants")
+      let result: map = native_query/cell(builder, constants, native_source/number(builder, position))
+      return result
+    end
+    position = position + 1
+  end
+  native/ensure(false, "source literal is missing from its code constant pool")
+  return {}
+end
+verb native_source/operand(builder: map, operand: list) -> map
+  if operand[0] == :Register
+    let result: map = native_source/register(builder, operand[1])
+    return result
+  end
+  native/ensure(operand[0] == :Constant, "unsupported native source operand")
+  let result: map = native_source/literal(builder, operand[1])
+  return result
+end
+verb native_source/operands(builder: map, operands: list) -> list
+  let result: list = [native_source/operand(builder, operand) for operand in operands]
+  return result
+end
+
+// Value constructors do not relocate. Their stack input arrays borrow rooted
+// values until the constructor returns; retain the result before any safepoint.
+verb native_source/list(builder: map, values: list) -> list
+  let word: list = native_value/word()
+  let source: map = native_gen/zero([:Pointer, word, :Const])
+  let ready: map = builder
+  if len(values) > 0
+    let [storage: map, allocated: map] = native_gen/bind(ready, "values", native_gen/zero([:Array, word, len(values)]))
+    ready = allocated
+    let index: int = 0
+    for value in values
+      let slot: map = native_gen/element(native_gen/address(storage), native_source/number(ready, index))
+      ready = native_gen/root_write(ready, native_gen/location(slot), value)
+      index = index + 1
+    end
+    source = native_gen/freeze(native_gen/element(native_gen/address(storage), native_gen/ref(ready, "zero")))
+  end
+  let result: list = native_source/result(ready, "value_list", [native_roots/worker(ready), source, native_source/number(ready, len(values))], "oom")
+  return result
+end
+verb native_source/entry(name: string) -> map
+  let result: map = native_gen/expression([:FunctionPointer, "TaskEntry"], :FunctionAddress, [name])
+  return result
+end
+verb native_source/capture(builder: map, entry: string, registers: list) -> map
+  let values: list = [native_source/register(builder, register) for register in registers]
+  let [environment: map, packed: map] = native_source/list(builder, values)
+  let [retained: map, rooted: map] = native_roots/retain(packed, "environment", environment)
+  let result: map = native_handlers/replace_current(rooted, native_handlers/current(rooted), {
+    "entry" -> native_source/entry(entry), "environment" -> retained, "input" -> native_gen/zero(native_value/word())})
+  return result
+end

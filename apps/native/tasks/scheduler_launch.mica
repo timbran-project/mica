@@ -10,6 +10,7 @@ verb native_scheduler/launch(module: map) -> map
   for name in ["remaining", "retries", "depth_limit", "delay"]
     parameters = [@parameters, [name, :U64, :Value]]
   end
+  parameters = [@parameters, ["runtime", native_tasks/pointer("Runtime"), :Borrow]]
   let context: map = native_tasks/declare(module, "scheduler_launch", [:Record, "TaskAdmission"], parameters)
   let builder: map = native_scheduler/context(context, "launch")
   let [storage: map, allocated: map] = native_gen/bind(builder, "storage", native_gen/call(builder, "memory_platform_allocate", [native_gen/sizeof([:Record, "TaskControl"])]))
@@ -27,7 +28,7 @@ verb native_scheduler/launch(module: map) -> map
     end)
   end)
   builder = native_scheduler/status_call(builder, "task_init", [task, native_gen/ref(builder, "worker"), native_gen/ref(builder, "kernel"),
-    native_gen/ref(builder, "image"), native_gen/ref(builder, "remaining"), native_gen/ref(builder, "retries"), native_gen/ref(builder, "depth_limit")])
+    native_gen/ref(builder, "image"), native_gen/ref(builder, "remaining"), native_gen/ref(builder, "retries"), native_gen/ref(builder, "depth_limit"), native_gen/ref(builder, "runtime")])
   let [admission: map, admitted: map] = native_gen/bind(builder, "admission", native_gen/call(builder, "task_scheduler_submit", [
     native_gen/ref(builder, "scheduler"), native_gen/ref(builder, "worker"), task, native_gen/ref(builder, "true"), native_gen/ref(builder, "delay")]))
   builder = native_gen/assign(admitted, submitted, native_kernel/absent(native_gen/field(admitted, admission, "status")))

@@ -7,6 +7,7 @@ struct spawn_fixture {
     struct mica_TaskScheduler scheduler;
     struct mica_TaskSpawnProbe probe;
     struct mica_TaskServices services;
+    struct mica_TaskRuntime runtime;
 };
 static void spawn_fixture_init(struct spawn_fixture *f, uint64_t capacity) {
     call_fixture_init(&f->call, mica_task_test_call_value);
@@ -15,12 +16,18 @@ static void spawn_fixture_init(struct spawn_fixture *f, uint64_t capacity) {
     assert(mica_task_scheduler_init(&f->scheduler, worker, &f->hub, capacity) == OK);
     f->probe.f_mutex = mica_foreign_memory_sync_create();
     assert(f->probe.f_mutex);
+    f->runtime = (struct mica_TaskRuntime){.f_symbols = &f->call.symbols,
+        .f_mailboxes = &f->hub, .f_spawn = &f->probe.f_configuration, .f_mailbox_capacity = 64};
     assert(mica_task_spawn_context_init(&f->probe.f_configuration, worker, &f->scheduler,
         mica_task_test_call_vocabulary(), 702, 703, 701, 704,
-        mica_value_root_get(&f->call.prototypes), 10000, 3, 8) == OK);
+        mica_value_root_get(&f->call.prototypes), 10000, 3, 8, &f->runtime) == OK);
     f->services = (struct mica_TaskServices){.f_context = (void *)&f->probe,
         .f_emit = mica_task_test_spawn_emit, .f_spawn = mica_task_test_spawn_service};
     ((struct mica_TaskImage *)f->call.image.f_pointer)->f_entry = mica_task_test_spawn;
+}
+static void spawn_parent(struct spawn_fixture *f, struct mica_TaskControl *task) {
+    assert(mica_task_init(task, &f->call.worker, &f->call.kernel, &f->call.image,
+        10000, 3, 8, &f->runtime) == OK);
 }
 static void spawn_fixture_release(struct spawn_fixture *f) {
     struct mica_MemoryWorker *worker = &f->call.worker;
@@ -45,6 +52,7 @@ static void spawn_child(struct spawn_fixture *f, uint64_t expected) {
     struct mica_TaskQueueResult selected = mica_task_scheduler_take(&f->scheduler, worker);
     assert(selected.f_status == OK);
     struct mica_TaskControl *child = f->scheduler.f_slots[selected.f_id].f_task;
+    assert(child->f_runtime == &f->runtime);
     assert(mica_memory_safepoint(worker, true));
     assert(mica_task_execute(child, worker) == expected);
     struct mica_MemoryRoot boundary = {0};
@@ -77,7 +85,7 @@ static void spawn_transactions(void) {
     spawn_fixture_init(&f, 2);
     struct mica_TaskControl parent = {0};
     struct mica_TaskAttempt attempt = {0};
-    call_task_init(&f.call, &parent, 8);
+    spawn_parent(&f, &parent);
     assert(mica_task_claim(&parent, &f.call.worker, &attempt) == OK);
     assert(mica_task_test_spawn(&attempt) == OK);
     assert(attempt.f_effects.f_pointer && !f.scheduler.f_count);
@@ -85,7 +93,7 @@ static void spawn_transactions(void) {
     assert(!f.scheduler.f_count && mica_task_dispatch(&parent, &f.call.worker, &f.services) == CLOSED);
     assert(mica_task_release(&parent, &f.call.worker));
 
-    call_task_init(&f.call, &parent, 8);
+    spawn_parent(&f, &parent);
     assert(mica_task_claim(&parent, &f.call.worker, &attempt) == OK);
     // A real read conflict discards the request. Only the replay is admitted.
     mica_type_Value cells[] = {dispatch_identity(601), dispatch_identity(8001)}, rows[2];
@@ -102,7 +110,7 @@ static void spawn_transactions(void) {
     assert(mica_task_detach(&parent, &f.call.worker) == OK);
     assert(mica_task_attempt_retry(&attempt) == OK);
     assert(mica_task_attach(&parent, &f.call.worker, &attempt) == OK);
-    assert(!attempt.f_effects.f_pointer);
+    assert(!attempt.f_effects.f_pointer && attempt.f_runtime == &f.runtime);
     assert(mica_task_test_spawn(&attempt) == OK);
     spawn_publish(&f, &parent, &attempt);
     assert(mica_memory_safepoint(&f.call.worker, true));
@@ -128,7 +136,7 @@ static void spawn_failures(void) {
             struct spawn_fixture f = {0};
             spawn_fixture_init(&f, 1);
             struct mica_TaskControl parent = {0};
-            call_task_init(&f.call, &parent, 8);
+            spawn_parent(&f, &parent);
             assert(mica_task_execute(&parent, &f.call.worker) == OK);
             struct mica_KernelBudget budget = {UINT64_MAX, UINT64_MAX, UINT64_MAX, (uint64_t)fail, OK, NULL};
             struct mica_MemoryControl control = {.f_context = (void *)&budget, .f_check = mica_kernel_memory_check};
@@ -164,7 +172,7 @@ static void spawn_concurrent(void) {
     struct mica_TaskControl parents[3] = {{0}};
     uint64_t ids[3];
     for (unsigned i = 0; i < 3; ++i) {
-        call_task_init(&f.call, &parents[i], 8);
+        spawn_parent(&f, &parents[i]);
         struct mica_TaskAdmission admitted = mica_task_scheduler_submit(&f.scheduler, &f.call.worker, &parents[i], false, 0);
         assert(admitted.f_status == OK);
         ids[i] = admitted.f_id;
@@ -218,7 +226,7 @@ static void spawn_late_resolution(bool revoke) {
     image->f_tenant = integer(revoke ? 8 : 7);
     image->f_input = integer(1); // One nanosecond: still enters the delayed queue.
     struct mica_TaskControl parent = {0};
-    call_task_init(&f.call, &parent, 8);
+    spawn_parent(&f, &parent);
     assert(mica_task_execute(&parent, &f.call.worker) == OK);
     assert(mica_task_dispatch(&parent, &f.call.worker, &f.services) == OK);
     uint64_t id = spawn_reply(&f, &parent);
@@ -248,7 +256,7 @@ static void spawn_admission_failures(void) {
         struct spawn_fixture f = {0};
         spawn_fixture_init(&f, 1);
         struct mica_TaskControl parent = {0}, other = {0};
-        call_task_init(&f.call, &parent, 8);
+        spawn_parent(&f, &parent);
         assert(mica_task_execute(&parent, &f.call.worker) == OK);
         uint64_t id = 0;
         if (closed) {
@@ -256,7 +264,7 @@ static void spawn_admission_failures(void) {
             mica_task_scheduler_stop(&f.scheduler);
             assert(mica_memory_enter(&f.call.worker));
         } else {
-            call_task_init(&f.call, &other, 8);
+            spawn_parent(&f, &other);
             struct mica_TaskAdmission admitted = mica_task_scheduler_submit(&f.scheduler, &f.call.worker, &other, false, 0);
             assert(admitted.f_status == OK);
             id = admitted.f_id;
@@ -288,7 +296,7 @@ static void spawn_cancel_and_limits(void) {
         spawn_fixture_init(&f, 1);
         if (mode == 1) f.probe.f_configuration.f_remaining = 8;
         struct mica_TaskControl parent = {0};
-        call_task_init(&f.call, &parent, 8);
+        spawn_parent(&f, &parent);
         assert(mica_task_execute(&parent, &f.call.worker) == OK);
         if (mode == 0) assert(mica_task_cancel(&parent));
         if (mode == 2) {

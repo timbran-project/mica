@@ -65,7 +65,7 @@ static void invocation_authority(void) {
     image.f_pointer = (void *)mica_task_new_Image(&worker, mica_task_test_entry, NULL,
         integer(8), integer(0), integer(0), NULL, NULL, 0, NULL, NULL);
     assert(image.f_pointer);
-    assert(mica_task_init(&task, &worker, &kernel, &image, 1000, 2, 8) == OK);
+    assert(mica_task_init(&task, &worker, &kernel, &image, 1000, 2, 8, NULL) == OK);
     assert(mica_task_claim(&task, &worker, &attempt) == OK);
     uint64_t epoch = attempt.f_epoch;
     assert(epoch && !mica_task_resources_stop());
@@ -108,7 +108,7 @@ static void invocation_authority(void) {
     assert(mica_task_invoke_check(&worker, &attempt, allowed, capability) == OK);
     assert(mica_task_finish(&task, &worker, &attempt, CLOSED) == CLOSED);
     assert(mica_task_release(&task, &worker));
-    assert(mica_task_init(&task, &worker, &kernel, &image, 1000, 2, 8) == OK);
+    assert(mica_task_init(&task, &worker, &kernel, &image, 1000, 2, 8, NULL) == OK);
     assert(mica_task_claim(&task, &worker, &attempt) == OK);
     assert(attempt.f_epoch != epoch);
     assert(mica_task_invoke_authorize(&worker, &attempt, allowed) == PERMISSION);
@@ -119,7 +119,7 @@ static void invocation_authority(void) {
     assert(mica_kernel_begin(&kernel, &worker, &owner, integer(7)) == OK);
     assert(mica_kernel_write(&owner, 2, mailbox_receivers(&worker, right, 2), true) == OK);
     assert(mica_kernel_commit(&owner) == OK && mica_kernel_end(&owner));
-    assert(mica_task_init(&task, &worker, &kernel, &image, 1000, 2, 8) == OK);
+    assert(mica_task_init(&task, &worker, &kernel, &image, 1000, 2, 8, NULL) == OK);
     assert(mica_task_claim(&task, &worker, &attempt) == OK);
     budget = dispatch_budget(&attempt.f_transaction);
     minted = mica_task_invoke_mint(&worker, &attempt, allowed, &budget);
@@ -142,7 +142,7 @@ static void invocation_authority(void) {
     assert(mica_memory_enter(&worker));
     assert(mica_task_release(&task, &worker));
 
-    assert(mica_task_init(&task, &worker, &kernel, &image, 1000, 2, 8) == OK);
+    assert(mica_task_init(&task, &worker, &kernel, &image, 1000, 2, 8, NULL) == OK);
     assert(mica_task_claim(&task, &worker, &attempt) == OK);
     assert(mica_kernel_cancel(&attempt.f_transaction));
     assert(mica_task_invoke_check(&worker, &attempt, allowed, capability) == CANCELLED);

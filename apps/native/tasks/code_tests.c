@@ -240,7 +240,7 @@ static void code_task_lifetimes(void) {
         image.f_pointer = (void *)mica_task_new_Image(&worker, code_entry(library), code_reference(&code),
             integer(7), integer(8), integer(0), NULL, NULL, 1, NULL, NULL);
         assert(image.f_pointer);
-        assert(mica_task_init(&tasks[i], &worker, &kernel, &image, 100, 3, 8) == OK);
+        assert(mica_task_init(&tasks[i], &worker, &kernel, &image, 100, 3, 8, NULL) == OK);
         image.f_pointer = code.f_pointer = NULL;
     }
     assert(mica_memory_root_pop(&worker, &image));
@@ -313,7 +313,7 @@ static void code_program_task(struct mica_MemoryWorker *worker,
     image.f_pointer = (void *)mica_task_new_Image(worker, body->f_entry, body->f_code,
         integer(7), integer(0), integer(0), NULL, NULL, 1, NULL, NULL);
     assert(image.f_pointer);
-    assert(mica_task_init(task, worker, tx->f_kernel, &image, 1000, 2, 8) == OK);
+    assert(mica_task_init(task, worker, tx->f_kernel, &image, 1000, 2, 8, NULL) == OK);
     assert(mica_memory_root_pop(worker, &image));
 }
 

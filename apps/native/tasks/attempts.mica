@@ -55,7 +55,7 @@ verb native_tasks/open_body(module: map) -> map
   let worker: map = native_gen/ref(builder, "worker")
   builder = native_gen/unless(builder, native_kernel/absent(native_tasks/attempt_field(builder, "worker")), fn(busy) => native_tasks/attempt_status(busy, "closed"))
   builder = native_gen/unless(builder, native_gen/equal(native_kernel/load_field(builder, worker, "heap"), native_kernel/load_field(builder, native_gen/ref(builder, "kernel"), "heap")), fn(wrong) => native_tasks/attempt_status(wrong, "schema"))
-  for name in ["worker", "kernel"]
+  for name in ["worker", "kernel", "runtime"]
     builder = native_gen/root_write(builder, native_gen/field(builder, attempt, name), native_gen/manage(native_gen/ref(builder, name)))
   end
   for name in ["remaining", "retries", "depth_limit"]
@@ -147,7 +147,8 @@ verb native_tasks/attempts(input: map) -> map
   module = native_tasks/declare(module, "attempt_open", :U64,
     [attempt, ["worker", native_memory/record_pointer("MemoryWorker"), :Borrow],
       ["kernel", native_memory/record_pointer("Kernel"), :Borrow], ["image", native_memory/record_pointer("MemoryRoot"), :Borrow],
-      ["remaining", :U64, :Value], ["retries", :U64, :Value], ["depth_limit", :U64, :Value]])
+      ["remaining", :U64, :Value], ["retries", :U64, :Value], ["depth_limit", :U64, :Value],
+      ["runtime", native_tasks/pointer("Runtime"), :Borrow]])
   module = native_tasks/declare(module, "attempt_close", :Bool, [attempt])
   module = native_tasks/declare(module, "attempt_retry", :U64, [attempt])
   module = native_tasks/declare(module, "poll", :U64, [attempt, ["cost", :U64, :Value]])

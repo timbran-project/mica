@@ -1,0 +1,181 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+verb native_source/decorate(builder: map, module: map) -> map
+  let result: map = builder
+  result[:source_prefix] = module[:source_prefix]
+  result[:source_literals] = module[:source_literals]
+  return result
+end
+verb native_source/constants_body(input: map) -> map
+  let name: string = string_concat(input[:source_prefix], "_constants")
+  let module: map = native_memory/declare(input, string_concat("task_", name), :U64, [
+    ["worker", native_memory/record_pointer("MemoryWorker"), :Borrow],
+    ["symbols", native_memory/record_pointer("SymbolTable"), :Borrow],
+    ["registry", native_tasks/pointer("CodeRegistry"), :Borrow], ["code", native_tasks/pointer("CodeRef"), :Gc]],
+    [@native_tasks/effects(), :Block], :Value, "")
+  let builder: map = native_roots/context(module, string_concat("task_", name), fn(failed, reason) => native_tasks/attempt_status(failed, reason))
+  builder = native_source/decorate(builder, module)
+  let values: list = []
+  for literal in module[:source_prepared]
+    let [value: map, emitted: map] = native_literal/emit(builder, literal, native_gen/ref(builder, "symbols"), fn(failed) => native_tasks/attempt_status(failed, "oom"))
+    let [root: map, retained: map] = native_roots/retain(emitted, "constant", value)
+    builder = retained
+    values = [@values, root]
+  end
+  let [pool: map, built: map] = native_source/list(builder, values)
+  let [retained: map, rooted: map] = native_roots/retain(built, "constants", pool)
+  builder = native_source/checked(rooted, "task_code_constants", [native_gen/ref(rooted, "registry"), native_roots/worker(rooted), native_roots/ref(rooted, "code"), retained])
+  builder = native_source/checked(builder, "task_code_seal", [native_gen/ref(builder, "registry"), native_roots/worker(builder), native_roots/ref(builder, "code")])
+  let result: map = native_gen/finish(module, native_tasks/attempt_status(builder, "ok"))
+  return result
+end
+
+verb native_source/install_row(builder: map, relation: map, values: list) -> map
+  let [row: map, built: map] = native_source/list(builder, values)
+  let [retained: map, rooted: map] = native_roots/retain(built, "row", row)
+  let result: map = native_source/checked(rooted, "kernel_write", [native_gen/ref(rooted, "transaction"), relation, retained, native_gen/ref(rooted, "true")])
+  return result
+end
+verb native_source/install_body(input: map, methods: list) -> map
+  let name: string = string_concat(input[:source_prefix], "_install")
+  let module: map = native_tasks/declare(input, name, :U64, [
+    ["transaction", native_kernel/pointer("Transaction"), :Borrow],
+    ["configuration", native_tasks/pointer("SpawnContext"), :Borrow],
+    ["code", native_tasks/pointer("CodeRef"), :Gc], ["tenant", native_value/word(), :Gc]])
+  let builder: map = native_roots/context(module, string_concat("task_", name), fn(failed, reason) => native_tasks/attempt_status(failed, reason))
+  builder = native_source/decorate(builder, module)
+  builder[:source_code] = native_roots/ref(builder, "code")
+  let configuration: map = native_gen/ref(builder, "configuration")
+  let selectors: map = native_kernel/load_field(builder, configuration, "selectors")
+  let parameters: map = native_kernel/load_field(builder, configuration, "parameters")
+  let programs: map = native_kernel/load_field(builder, configuration, "programs")
+  let index: int = 0
+  for definition in methods
+    let ids: list = module[:source_method_ids][index]
+    let [identity: map, ready: map] = native_source/result(builder, "value_identity", [native_source/number(builder, ids[0])], "schema")
+    let [artifact: map, with_artifact: map] = native_source/result(ready, "value_identity", [native_source/number(ready, ids[1])], "schema")
+    builder = native_source/install_row(with_artifact, selectors, [identity, native_source/literal(with_artifact, definition[:selector])])
+    let position: int = 0
+    for parameter in definition[:parameters]
+      builder = native_source/install_row(builder, parameters, [identity, native_source/literal(builder, parameter[:role]),
+        native_source/literal(builder, :dispatch/unrestricted), native_source/literal(builder, position),
+        native_source/literal(builder, :required), native_gen/zero(native_value/word())])
+      position = position + 1
+    end
+    builder = native_source/install_row(builder, programs, [identity, artifact])
+    let entry: string = module[:source_programs][index + 1][:name]
+    let [body: map, allocated: map] = native_roots/retain(builder, "program", native_gen/call(builder, "task_new_CompiledProgram", [
+      native_roots/worker(builder), native_source/entry(string_concat(entry, "_0")), native_roots/ref(builder, "code")]))
+    builder = native_tasks/check(allocated, native_gen/negate(native_kernel/absent(body)), "oom")
+    builder = native_source/checked(builder, "kernel_program_put", [native_gen/ref(builder, "transaction"), native_source/number(builder, ids[1]),
+      native_roots/ref(builder, "tenant"), native_gen/cast(native_memory/pointer(:U8), body)])
+    index = index + 1
+  end
+  let result: map = native_gen/finish(module, native_tasks/attempt_status(builder, "ok"))
+  return result
+end
+
+// The caller assigns catalogue identities. This compiler owns code and literal
+// construction, while the installation transaction owns publication and retry.
+verb native_source/compile(input: map, prefix: string, source: string, relations: map, method_ids: list) -> map
+  let parsed: map = parse_rows(source)
+  native/ensure(parsed[:errors] == [], to_literal(parsed[:errors]))
+  let emitted: map = emit_program(parsed[:rows], parsed[:root])
+  native/ensure(emitted[:errors] == [], to_literal(emitted[:errors]))
+  native/ensure(len(method_ids) == len(emitted[:methods]), "native module requires identities for every definition")
+  let descriptions: list = [[emitted[:entry], 0, string_concat(prefix, "_entry")]]
+  let pool: list = [E_TYPE, E_RANGE, [] {[]}, :dispatch/unrestricted, :required]
+  let numbers: list = []
+  let index: int = 0
+  for definition in emitted[:methods]
+    let position: int = 0
+    pool = native_source/pool(pool, definition[:selector])
+    for parameter in definition[:parameters]
+      native/ensure(parameter[:mode] == :required && parameter[:restriction] == :dispatch/unrestricted,
+        "native source parameter defaults, rest, and restrictions are not lowered yet")
+      pool = native_source/pool(pool, parameter[:role])
+      pool = native_source/pool(pool, position)
+      position = position + 1
+    end
+    native/ensure(len(method_ids[index]) == 2, "native definition requires definition and program identities")
+    numbers = [@numbers, @method_ids[index]]
+    descriptions = [@descriptions, [definition[:program], len(definition[:parameters]), string_concat(prefix, "_method_", to_literal(index))]]
+    index = index + 1
+  end
+  let programs: list = []
+  let maximum: int = 6
+  for [description, parameters, name] in descriptions
+    let linked: map = native_source/link_relations(description, relations)
+    let analysis: map = native_source/analyse(linked, parameters)
+    programs = [@programs, {:analysis -> analysis, :regions -> native_source/regions(analysis), :name -> name}]
+    pool = native_source/program_literals(analysis, pool)
+    if len(description[:code]) > maximum
+      maximum = len(description[:code])
+    end
+    if description[:registers] > maximum
+      maximum = description[:registers]
+    end
+  end
+  if len(pool) > maximum
+    maximum = len(pool)
+  end
+  for name, id in relations
+    numbers = [@numbers, id]
+  end
+  for number in 0..maximum
+    numbers = [@numbers, number]
+  end
+  let module: map = input
+  module[:source_prefix] = prefix
+  module[:source_literals] = pool
+  module[:source_programs] = programs
+  module[:source_method_ids] = method_ids
+  for number in numbers
+    native/ensure(is_kind(number, :int) && number >= 0, "native catalogue and index constants must be nonnegative integers")
+    let [name: string, ready: map] = native_rules/source_number(module, number)
+    module = ready
+  end
+  let prepared: list = []
+  index = 0
+  for value in pool
+    let [literal: map, ready: map] = native_literal/prepare(module, string_concat(prefix, "_literal_", to_literal(index)), native_source/literal_description(value))
+    prepared = [@prepared, literal]
+    module = ready
+    index = index + 1
+  end
+  module[:source_prepared] = prepared
+  let attempt: list = ["attempt", native_tasks/pointer("Attempt"), :Borrow]
+  let worker: list = ["worker", native_memory/record_pointer("MemoryWorker"), :Borrow]
+  for program in programs
+    index = 0
+    for region in program[:regions]
+      let name: string = string_concat(program[:name], "_", to_literal(index))
+      module = native/declare_function(module, name, :U64, [attempt], [], native_tasks/effects(), :Value, "")
+      module = native/execution_function(module, name, :Tail)
+      module = native_memory/declare(module, string_concat(name, "_body"), :U64, [attempt, worker], native_tasks/effects(), :Value, "")
+      index = index + 1
+    end
+  end
+  module = native_source/constants_body(module)
+  module = native_source/install_body(module, emitted[:methods])
+  for program in programs
+    index = 0
+    for region in program[:regions]
+      let name: string = string_concat(program[:name], "_", to_literal(index))
+      let next: string = string_concat(program[:name], "_", to_literal(index + 1))
+      module = native_source/region_body(module, program[:analysis], region, name, next)
+      let builder: map = native_tasks/entry_context(module, name)
+      let [status: map, called: map] = native_gen/bind(builder, "status", native_gen/call(builder, string_concat(name, "_body"), [native_tasks/attempt(builder), native_tasks/attempt_field(builder, "worker")]))
+      builder = native_gen/unless(called, native_kernel/absent(status), fn(failed) => native_gen/return_value(failed, status))
+      let op: symbol = program[:analysis][:description][:code][region[:last]][0]
+      if op == :Return
+        // task_return either completes this task or selects the caller image.
+        builder = native_gen/when(builder, native_kernel/absent(native_tasks/attempt_field(builder, "boundary")), fn(caller) => native_handlers/transfer(caller))
+      end
+      module = native_gen/finish(module, native_gen/return_value(builder, native_gen/ref(builder, "kernel_ok")))
+      index = index + 1
+    end
+  end
+  return module
+end

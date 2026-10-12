@@ -44,7 +44,8 @@ verb native_tasks/control_declarations(input: map) -> map
   module = native_tasks/declare(module, "lock", :Bool, [task, worker])
   module = native_tasks/declare(module, "init", :U64, [task, worker,
     ["kernel", native_memory/record_pointer("Kernel"), :Borrow], ["image", native_memory/record_pointer("MemoryRoot"), :Borrow],
-    ["remaining", :U64, :Value], ["retries", :U64, :Value], ["depth_limit", :U64, :Value]])
+    ["remaining", :U64, :Value], ["retries", :U64, :Value], ["depth_limit", :U64, :Value],
+    ["runtime", native_tasks/pointer("Runtime"), :Borrow]])
   module = native_tasks/declare(module, "release", :Bool, [task, worker])
   module = native_tasks/declare(module, "cancel", :Bool, [task])
   module = native_tasks/declare(module, "observe", [:Record, "TaskObservation"], [task, worker])
@@ -80,6 +81,7 @@ verb native_tasks/control_lifecycle(input: map) -> map
   builder = native_gen/when(allocated, native_kernel/absent(mutex), fn(failed) => native_tasks/attempt_status(failed, "oom"))
   builder = native_gen/root_write(builder, native_gen/field(builder, native_gen/ref(builder, "task"), "mutex"), native_gen/manage(mutex))
   builder = native_gen/root_write(builder, native_gen/field(builder, native_gen/ref(builder, "task"), "kernel"), native_gen/manage(native_gen/ref(builder, "kernel")))
+  builder = native_gen/root_write(builder, native_gen/field(builder, native_gen/ref(builder, "task"), "runtime"), native_gen/manage(native_gen/ref(builder, "runtime")))
   builder = native_gen/unless(builder, native_gen/call(builder, "memory_publish", [native_gen/ref(builder, "worker"), native_gen/ref(builder, "image"), native_tasks/control_slot(builder, "image")]), fn(failed)
     let ready: map = native_gen/do_call(failed, "memory_sync_destroy", [mutex])
     ready = native_gen/store(ready, native_gen/ref(ready, "task"), native_gen/zero([:Record, "TaskControl"]))
@@ -189,7 +191,7 @@ verb native_tasks/claim_body(module: map) -> map
   builder = native_tasks/unlock(builder)
   let [status: map, opened: map] = native_gen/bind(builder, "status", native_gen/call(builder, "task_attempt_open",
     [native_tasks/attempt(builder), native_gen/ref(builder, "worker"), native_tasks/control_field(builder, "kernel"), native_tasks/control_slot(builder, "image"),
-      native_tasks/control_field(builder, "remaining"), native_tasks/control_field(builder, "retries"), native_tasks/control_field(builder, "depth_limit")]))
+      native_tasks/control_field(builder, "remaining"), native_tasks/control_field(builder, "retries"), native_tasks/control_field(builder, "depth_limit"), native_tasks/control_field(builder, "runtime")]))
   builder = native_gen/unless(opened, native_kernel/absent(status), fn(failed)
     let ready: map = native_tasks/lock(failed)
     ready = native_tasks/control_store(ready, "status", status)

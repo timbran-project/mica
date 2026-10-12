@@ -61,22 +61,26 @@ verb native_value/list_allocation(input: map) -> map
   )
   context = native/declare_function(context, "value_list", [:Record, "ValueResult"], [
     ["worker", [:Pointer, [:Record, "MemoryWorker"], :Mutable], :Borrow],
-    ["source", [:Pointer, word, :Const], :Gc], ["length", :U64, :Value]], [],
+    ["source", [:Pointer, word, :Const], :Borrow], ["length", :U64, :Value]], [],
     [:Allocate, :ReadMemory, :WriteMemory], :Gc, "")
-  context = native/define_function(context, "value_list", [
-    native/unless_statement(
-      native/binary_expression(:Equal, "length", "zero"),
-      [ native/when_statement(native/binary_expression(:Equal, "source", "null_values"), [native/return_zero()])]
-    ),
-    native/let_call("target", pointer, "list_allocate", ["worker", "length", "length"]),
-    native/when_statement(native/binary_expression(:Equal, "target", "null_list_header"), [native/return_zero()]),
-    native/let_load("header", header, "target"),
-    native/let_field("data", values, "header", "data"),
-    @native/copy_elements(word, "data", "source", "length"),
-    native/return_record(
-      ["true", native/typed_expression(word, native/binary_expression(:PackPointer, "target", "tag_list"))]
-    )
-  ])
+  context = native/execution_function(context, "value_list", :Collector)
+  let builder: map = native_gen/context(context, "value_list")
+  let length: map = native_gen/ref(builder, "length")
+  let source: map = native_gen/ref(builder, "source")
+  builder = native_gen/unless(builder, native_gen/equal(length, native_gen/ref(builder, "zero")), fn(nonempty)
+    return native_gen/when(nonempty, native_gen/equal(source, native_gen/ref(nonempty, "null_values")), fn(invalid) => native_gen/return_zero(invalid))
+  end)
+  let [target: map, allocated: map] = native_gen/bind(builder, "target", native_gen/call(builder, "list_allocate", [native_gen/ref(builder, "worker"), length, length]))
+  builder = native_gen/when(allocated, native_gen/equal(target, native_gen/ref(allocated, "null_list_header")), fn(failed) => native_gen/return_zero(failed))
+  let data: map = native_gen/read(native_gen/field(builder, target, "data"))
+  // The caller roots the values in this borrowed span. Allocation and copying
+  // contain no safepoint; the new list owns the copied managed value words.
+  builder = native_gen/for_range(builder, "copy", native_gen/ref(builder, "zero"), length, fn(body, index)
+    let value: map = native_gen/root_read(native_gen/location(native_gen/offset(source, index)))
+    return native_gen/store(body, native_gen/offset(data, index), value)
+  end)
+  builder = native_gen/return_value(builder, native_value/packed_result(builder, target, "list"))
+  context = native_gen/finish(context, builder)
   return context
 end
 
