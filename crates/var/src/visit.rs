@@ -11,10 +11,10 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-use crate::RelationValue;
 use crate::heap::HeapValue;
 use crate::symbol::Symbol;
 use crate::value::{CapabilityId, ErrorValue, FunctionId, Identity, Value, ValueKind};
+use crate::{ListValue, MapValue, RelationValue};
 
 /// A borrowed, structured view of a `Value`.
 ///
@@ -30,8 +30,8 @@ pub enum ValueRef<'a> {
     ErrorCode(Symbol),
     String(&'a str),
     Bytes(&'a [u8]),
-    List(&'a [Value]),
-    Map(&'a [(Value, Value)]),
+    List(&'a ListValue),
+    Map(&'a MapValue),
     Relation(&'a RelationValue),
     Range {
         start: &'a Value,
@@ -173,7 +173,7 @@ impl Value {
         match self.heap_ref().unwrap() {
             HeapValue::String(value) => ValueRef::String(value.as_str()),
             HeapValue::Bytes(value) => ValueRef::Bytes(value),
-            HeapValue::List(values) => ValueRef::List(values.as_slice()),
+            HeapValue::List(values) => ValueRef::List(values),
             HeapValue::Map(entries) => ValueRef::Map(entries),
             HeapValue::Relation(relation) => ValueRef::Relation(relation),
             HeapValue::Range { start, end } => ValueRef::Range {

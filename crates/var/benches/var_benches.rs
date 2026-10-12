@@ -125,10 +125,39 @@ fn ordered_key_identity(_ctx: &mut NoContext, chunk_size: usize, _chunk_num: usi
     }
 }
 
+// Each operation builds an independent persistent map; sizes expose update scaling.
+fn map_insert<const N: i64>(_ctx: &mut NoContext, chunk_size: usize, _chunk_num: usize) {
+    for _ in 0..chunk_size {
+        let mut map = Value::map([]);
+        for n in 0..N {
+            let key = Value::int(n).unwrap();
+            map = map.map_set(key.clone(), Value::list([key])).unwrap();
+        }
+        black_box(map);
+    }
+}
+
+fn list_append<const N: usize, const NESTED: bool>(
+    _ctx: &mut NoContext,
+    chunk_size: usize,
+    _chunk_num: usize,
+) {
+    for _ in 0..chunk_size {
+        let mut list = Value::list([]);
+        for n in 0..N {
+            let value = Value::int(n as i64).unwrap();
+            let value = if NESTED { Value::list([value]) } else { value };
+            list = list.list_append(value).unwrap();
+        }
+        black_box(list);
+    }
+}
+
 benchmark_main!(
     BenchmarkMainOptions {
         filter_help: Some(
-            "all, construct, symbol, int, arc, key, or any benchmark name substring".to_string()
+            "all, construct, symbol, int, arc, list, map, key, or any benchmark name substring"
+                .to_string()
         ),
         runtime: micromeasure::BenchmarkRuntimeOptions {
             benchmark_duration: Duration::from_secs(1),
@@ -169,6 +198,26 @@ benchmark_main!(
         runner.group::<ListContext>("arc", |g| {
             g.throughput(Throughput::per_operation(1, "clone"))
                 .bench("list_arc_clone", list_arc_clone);
+        });
+
+        runner.group::<NoContext>("list", |g| {
+            g.throughput(Throughput::per_operation(2000, "element"))
+                .bench("list_append_nested_2000", list_append::<2000, true>);
+            g.throughput(Throughput::per_operation(8000, "element"))
+                .bench("list_append_nested_8000", list_append::<8000, true>);
+            g.throughput(Throughput::per_operation(16000, "element"))
+                .bench("list_append_nested_16000", list_append::<16000, true>);
+            g.throughput(Throughput::per_operation(16000, "element"))
+                .bench("list_append_scalar_16000", list_append::<16000, false>);
+        });
+
+        runner.group::<NoContext>("map", |g| {
+            g.throughput(Throughput::per_operation(2000, "entry"))
+                .bench("map_insert_2000", map_insert::<2000>);
+            g.throughput(Throughput::per_operation(8000, "entry"))
+                .bench("map_insert_8000", map_insert::<8000>);
+            g.throughput(Throughput::per_operation(16000, "entry"))
+                .bench("map_insert_16000", map_insert::<16000>);
         });
 
         runner.group::<NoContext>("key", |g| {

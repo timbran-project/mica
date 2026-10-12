@@ -159,7 +159,7 @@ pub fn sync_envelope_from_value(default_session_id: u64, value: &Value) -> Optio
             server_revision,
             server_signature,
             payload,
-        ] = values
+        ] = values.as_slice()
         else {
             return None;
         };

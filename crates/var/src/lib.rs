@@ -21,6 +21,7 @@
 mod codec;
 mod heap;
 mod list;
+mod map;
 mod string;
 mod symbol;
 mod traits;
@@ -39,6 +40,8 @@ pub use codec::{
     encode_value, encode_value_segments, encode_value_segments_with_options, encode_value_to_sink,
     encode_value_with_options,
 };
+pub use list::ListValue;
+pub use map::MapValue;
 pub use symbol::{Symbol, SymbolMetadata};
 pub use traits::OrderedKeySink;
 pub use tuple::{RelationValue, RelationValueError, Tuple};

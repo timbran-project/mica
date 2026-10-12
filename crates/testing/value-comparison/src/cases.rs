@@ -396,7 +396,7 @@ impl Prepared {
                 .and_then(|n| left.list_get(n)),
             Operation::ListSlice => right
                 .with_list(|args| {
-                    let [start, end] = args else {
+                    let [start, end] = args.as_slice() else {
                         return None;
                     };
                     left.list_slice(
@@ -408,7 +408,7 @@ impl Prepared {
             Operation::ListAppend => left.list_append(right.clone()),
             Operation::ListSet => right
                 .with_list(|args| {
-                    let [index, value] = args else {
+                    let [index, value] = args.as_slice() else {
                         return None;
                     };
                     left.list_set(usize::try_from(index.as_int()?).ok()?, value.clone())
@@ -416,7 +416,7 @@ impl Prepared {
                 .flatten(),
             Operation::MapSet => right
                 .with_list(|args| {
-                    let [key, value] = args else {
+                    let [key, value] = args.as_slice() else {
                         return None;
                     };
                     left.map_set(key.clone(), value.clone())
@@ -434,7 +434,7 @@ impl Prepared {
             Operation::MapGet => left.map_get(right),
             Operation::MapBuild => left
                 .with_list(|items| {
-                    let (pairs, remainder) = items.as_chunks::<2>();
+                    let (pairs, remainder) = items.as_slice().as_chunks::<2>();
                     if !remainder.is_empty() {
                         return None;
                     }

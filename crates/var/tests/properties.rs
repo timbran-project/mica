@@ -93,11 +93,11 @@ proptest! {
 
         let map = Value::map(entries.clone());
         map.with_map(|actual| {
-            for window in actual.windows(2) {
+            for window in actual.indexed_entries().windows(2) {
                 prop_assert!(window[0].0 < window[1].0);
             }
 
-            prop_assert_eq!(actual, canonical.as_slice());
+            prop_assert_eq!(actual.iter().map(|(k, v)| (k.clone(), v.clone())).collect::<Vec<_>>(), canonical);
 
             Ok(())
         }).unwrap()?;

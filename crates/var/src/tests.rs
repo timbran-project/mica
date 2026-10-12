@@ -569,7 +569,10 @@ fn string_bytes_list_map_and_range_are_values() {
     let map = Value::map([(k.clone(), red), (k.clone(), blue)]);
     assert_eq!(map.with_map(|entries| entries.len()), Some(1));
     assert_eq!(
-        map.with_map(|entries| entries[0].1.with_str(|s| s.to_string()).unwrap()),
+        map.with_map(|entries| entries.indexed_entries()[0]
+            .1
+            .with_str(|s| s.to_string())
+            .unwrap()),
         Some("blue".to_string())
     );
     assert_eq!(map.map_len(), Some(1));

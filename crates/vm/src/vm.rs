@@ -2489,7 +2489,7 @@ impl RegisterVm {
                 timeout,
             } => {
                 let receivers_value = self.resolve_operand_ref(program, *receivers);
-                let Some(receivers) = receivers_value.with_list(<[Value]>::to_vec) else {
+                let Some(receivers) = receivers_value.with_list(|values| values.to_vec()) else {
                     return Err(RuntimeError::InvalidBuiltinCall {
                         name: Symbol::intern("mailbox_recv"),
                         message: "mailbox_recv expects a list of receive caps".to_owned(),
@@ -3041,7 +3041,7 @@ impl RegisterVm {
                 CompactMapItem::Splice(operand) => {
                     let splice = self.resolve_operand_ref(program, *operand);
                     let Some(()) = splice.with_map(|items| {
-                        entries.extend(items.iter().cloned());
+                        entries.extend(items.iter().map(|(k, v)| (k.clone(), v.clone())));
                     }) else {
                         return Err(RuntimeError::InvalidArgumentSplice(splice));
                     };
@@ -3587,8 +3587,8 @@ fn natural_loop_collection_view(collection: &Value) -> Option<NaturalLoopCollect
             start,
             end: Some(end),
         } => NaturalLoopCollectionView::range(start.as_int()?, end.as_int()?),
-        ValueRef::List(values) => Some(NaturalLoopCollectionView::list(values)),
-        ValueRef::Map(entries) => Some(NaturalLoopCollectionView::map(entries)),
+        ValueRef::List(values) => Some(NaturalLoopCollectionView::list(values.as_slice())),
+        ValueRef::Map(entries) => Some(NaturalLoopCollectionView::map(entries.indexed_entries())),
         _ => None,
     }
 }
@@ -3659,7 +3659,12 @@ fn collection_key_at(collection: &Value, index: &Value) -> Value {
             .unwrap_or_else(Value::empty_relation);
     }
     collection
-        .with_map(|entries| entries.get(index).map(|(key, _)| key.clone()))
+        .with_map(|entries| {
+            entries
+                .indexed_entries()
+                .get(index)
+                .map(|(key, _)| key.clone())
+        })
         .flatten()
         .unwrap_or_else(Value::empty_relation)
 }
@@ -3697,7 +3702,12 @@ fn collection_value_at(collection: &Value, index: &Value) -> Value {
         })
         .or_else(|| {
             collection
-                .with_map(|entries| entries.get(index).map(|(_, value)| value.clone()))
+                .with_map(|entries| {
+                    entries
+                        .indexed_entries()
+                        .get(index)
+                        .map(|(_, value)| value.clone())
+                })
                 .flatten()
         })
         .unwrap_or_else(Value::empty_relation)
@@ -3746,7 +3756,12 @@ fn select_authorized_method_call(
 
 fn dynamic_dispatch_roles(value: &Value) -> Result<Vec<(Value, Value)>, RuntimeError> {
     value
-        .with_map(|entries| entries.to_vec())
+        .with_map(|entries| {
+            entries
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect()
+        })
         .ok_or_else(|| RuntimeError::InvalidBuiltinCall {
             name: Symbol::intern("invoke"),
             message: "invoke expects roles to be a map".to_owned(),

@@ -127,11 +127,7 @@ fn map_contains_key_builtin(
         ));
     };
     let present = map
-        .with_map(|entries| {
-            entries
-                .binary_search_by(|(candidate, _)| candidate.cmp(key))
-                .is_ok()
-        })
+        .with_map(|entries| entries.get(key).is_some())
         .ok_or_else(|| invalid_builtin_call("map_contains_key", "expected a map argument"))?;
     Ok(Value::bool(present))
 }
@@ -432,7 +428,7 @@ fn sort_builtin(
     if args.len() != 1 {
         return Err(invalid_builtin_call("sort", "expected sort(list)"));
     }
-    let Some(mut values) = args[0].with_list(<[Value]>::to_vec) else {
+    let Some(mut values) = args[0].with_list(|values| values.to_vec()) else {
         return Err(invalid_builtin_call("sort", "expected list argument"));
     };
     values.sort();

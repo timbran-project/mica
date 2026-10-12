@@ -618,7 +618,7 @@ fn agent_command_sync_event_appends_user_message_and_suspends_for_llm() {
                     let input = request
                         .payload
                         .map_get(&Value::symbol(Symbol::intern("input")))
-                        .and_then(|value| value.with_list(<[Value]>::to_vec))
+                        .and_then(|value| value.with_list(|values| values.to_vec()))
                         .unwrap();
                     assert_eq!(input.len(), 1);
                     assert_eq!(
@@ -807,7 +807,7 @@ fn agent_command_sync_event_appends_user_message_and_suspends_for_llm() {
         let TaskOutcome::Complete { value, .. } = input_query.outcome else {
             panic!("Responses input query did not complete")
         };
-        let input = value.with_list(<[Value]>::to_vec).unwrap();
+        let input = value.with_list(|values| values.to_vec()).unwrap();
         assert_eq!(input.len(), 2);
         assert_eq!(
             input[1].map_get(&Value::symbol(Symbol::intern("type"))),
@@ -841,7 +841,7 @@ fn agent_responses_tool_call_round_trip_resubmits_full_context() {
                         let input = request
                             .payload
                             .map_get(&Value::symbol(Symbol::intern("input")))
-                            .and_then(|value| value.with_list(<[Value]>::to_vec))
+                            .and_then(|value| value.with_list(|values| values.to_vec()))
                             .unwrap();
                         assert!(
                             request
@@ -1052,7 +1052,7 @@ fn agent_steering_cancels_the_active_stream_and_resubmits_full_context() {
                         let input = request
                             .payload
                             .map_get(&Value::symbol(Symbol::intern("input")))
-                            .and_then(|value| value.with_list(<[Value]>::to_vec))
+                            .and_then(|value| value.with_list(|values| values.to_vec()))
                             .unwrap();
                         if turn == 0 {
                             assert_eq!(input.len(), 1);

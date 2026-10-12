@@ -217,7 +217,7 @@ fn map_headers(value: &Value) -> Result<Vec<(String, Vec<u8>)>, String> {
 fn header_pair(value: &Value) -> Result<(String, Vec<u8>), String> {
     value
         .with_list(|parts| {
-            let [name, value] = parts else {
+            let [name, value] = parts.as_slice() else {
                 return Err("header entries must be [name, value]".to_owned());
             };
             let name = name

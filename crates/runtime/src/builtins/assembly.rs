@@ -94,7 +94,7 @@ fn invalid(message: impl Into<String>) -> AssemblyError {
 
 fn list(value: &Value) -> Result<Vec<Value>, AssemblyError> {
     value
-        .with_list(<[Value]>::to_vec)
+        .with_list(|values| values.to_vec())
         .ok_or_else(|| invalid("expected a list"))
 }
 
@@ -226,7 +226,12 @@ fn program(value: &Value, depth: usize, remaining: &mut usize) -> Result<Program
         return Err(invalid("nested program depth exceeds 16"));
     }
     let fields = value
-        .with_map(<[(Value, Value)]>::to_vec)
+        .with_map(|entries| {
+            entries
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect::<Vec<_>>()
+        })
         .ok_or_else(|| invalid("program description must be a map"))?;
     if fields.len() != 2
         || fields.iter().any(|(key, _)| {

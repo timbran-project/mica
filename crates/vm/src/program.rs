@@ -2210,7 +2210,8 @@ fn numeric_collection_candidates(value: &Value) -> (Option<ValueKind>, Option<Va
     if let Some((key_kind, value_kind)) = value
         .with_map(|entries| {
             entries
-                .first()
+                .iter()
+                .next()
                 .map(|(key, value)| (numeric_kind(key), numeric_kind(value)))
         })
         .flatten()

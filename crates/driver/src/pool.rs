@@ -3180,7 +3180,12 @@ fn read_only_query_options_from_payload(
     let Some(value) = payload.map_get(&Value::symbol(Symbol::intern("options"))) else {
         return Ok(options);
     };
-    let Some(entries) = value.with_map(<[(Value, Value)]>::to_vec) else {
+    let Some(entries) = value.with_map(|entries| {
+        entries
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect::<Vec<_>>()
+    }) else {
         return Err("mica_query options must be a map".to_owned());
     };
     for (key, value) in entries {

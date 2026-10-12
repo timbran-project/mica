@@ -80,7 +80,10 @@ use mica_relation_kernel::{
     ConflictPolicy, DispatchRelations, KernelError, RelationDurability, RelationId, RelationKernel,
     RelationMetadata, RelationRead, RelationSource, Snapshot, relation_algebra,
 };
-use mica_var::{Identity, PRIMITIVE_PROTOTYPES, RelationValue, Symbol, Value, ValueKind};
+use mica_var::{
+    Identity, PRIMITIVE_PROTOTYPES, RelationValue, Symbol, Value, ValueKind, ValueRef,
+    ValueVisitor, VisitDecision,
+};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::BufReader;
 #[cfg(feature = "fjall")]
@@ -5002,15 +5005,52 @@ fn to_literal_builtin(
             "expected to_literal(value)",
         ));
     }
-    if !args[0].is_persistable() {
-        return Err(invalid_builtin_call(
-            "to_literal",
-            "this value does not have a source literal",
-        ));
-    }
+    Ok(Value::string(source_literal_for_reader(
+        &args[0],
+        context.tx(),
+    )?))
+}
 
-    let identity_names = identity_name_map(context.tx())?;
-    Ok(Value::string(source_literal(&args[0], &identity_names)))
+#[derive(Default)]
+struct SourceLiteralCheck {
+    needs_identity_names: bool,
+}
+
+impl ValueVisitor for SourceLiteralCheck {
+    type Error = RuntimeError;
+
+    fn visit_value(
+        &mut self,
+        _value: &Value,
+        value: ValueRef<'_>,
+    ) -> Result<VisitDecision, Self::Error> {
+        match value {
+            ValueRef::Capability(_) | ValueRef::Function(_) => {
+                return Err(invalid_builtin_call(
+                    "to_literal",
+                    "this value does not have a source literal",
+                ));
+            }
+            ValueRef::Identity(_) | ValueRef::Frob { .. } => self.needs_identity_names = true,
+            _ => {}
+        }
+        Ok(VisitDecision::Descend)
+    }
+}
+
+fn source_literal_for_reader(
+    value: &Value,
+    reader: &impl RelationRead,
+) -> Result<String, RuntimeError> {
+    let mut check = SourceLiteralCheck::default();
+    value.walk(&mut check)?;
+    // Name resolution reads transactional state only when the literal uses it.
+    let identity_names = if check.needs_identity_names {
+        identity_name_map(reader)?
+    } else {
+        BTreeMap::new()
+    };
+    Ok(source_literal(value, &identity_names))
 }
 
 fn error_builtin(
@@ -6039,7 +6079,7 @@ fn dom_element(value: &Value) -> Option<(String, Value, Vec<Value>)> {
     let attrs = value.map_get(&Value::symbol(Symbol::intern("attrs")))?;
     let children = value.map_get(&Value::symbol(Symbol::intern("children")))?;
     attrs.with_map(|_| ())?;
-    let children = children.with_list(<[Value]>::to_vec)?;
+    let children = children.with_list(|values| values.to_vec())?;
     Some((tag, attrs, children))
 }
 

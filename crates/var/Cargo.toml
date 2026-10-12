@@ -8,6 +8,7 @@ description = "Compact value representation for Mica"
 
 [dependencies]
 base64.workspace = true
+imbl.workspace = true
 
 [dev-dependencies]
 micromeasure.workspace = true

@@ -1118,11 +1118,8 @@ fn subscription_message(message: &Value) -> Option<(CapabilityId, &'static str)>
     })?
 }
 
-fn map_value<'a>(entries: &'a [(Value, Value)], name: &str) -> Option<&'a Value> {
-    let name = Symbol::intern(name);
-    entries
-        .iter()
-        .find_map(|(key, value)| (key.as_symbol() == Some(name)).then_some(value))
+fn map_value<'a>(entries: &'a mica_var::MapValue, name: &str) -> Option<&'a Value> {
+    entries.get(&Value::symbol(Symbol::intern(name)))
 }
 
 fn effect_datagrams(target: Identity, value: &Value) -> Vec<Bytes> {

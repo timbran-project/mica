@@ -1562,6 +1562,102 @@ fn runner_to_literal_renders_parseable_value_source() {
 }
 
 #[test]
+fn to_literal_without_identities_does_not_read_the_name_catalogue() {
+    // A bare kernel has no named-identity relation: any lookup would fail.
+    let snapshot = mica_relation_kernel::RelationKernel::new().snapshot();
+    let source = Value::list([
+        Value::bool(true),
+        Value::int(42).unwrap(),
+        Value::float(1.5).unwrap(),
+        Value::symbol(Symbol::intern("name")),
+        Value::string("#not_an_identity"),
+        Value::bytes([0, 255]),
+        Value::range(Value::int(1).unwrap(), Some(Value::int(3).unwrap())),
+        Value::map([(Value::string("key"), Value::list([Value::bool(false)]))]),
+        Value::error(
+            Symbol::intern("E_TEST"),
+            Some("message"),
+            Some(Value::string("payload")),
+        ),
+        query_relation(["cell"], [[Value::int(5).unwrap()]]),
+        Value::unit(),
+        Value::empty_relation(),
+    ]);
+    let expected = super::source_literal(&source, &Default::default());
+    assert_eq!(
+        super::source_literal_for_reader(&source, snapshot.as_ref()).unwrap(),
+        expected
+    );
+
+    let identity = Value::identity(Identity::new(42).unwrap());
+    for value in [
+        identity.clone(),
+        Value::list([identity.clone()]),
+        Value::map([(identity.clone(), Value::bool(true))]),
+        Value::map([(Value::bool(true), identity.clone())]),
+        query_relation(["cell"], [[identity.clone()]]),
+        Value::range(Value::int(1).unwrap(), Some(identity.clone())),
+        Value::range(identity.clone(), None),
+        Value::error(Symbol::intern("E_TEST"), None::<&str>, Some(identity)),
+        Value::frob(Identity::new(42).unwrap(), Value::int(1).unwrap()),
+    ] {
+        assert!(
+            matches!(
+                super::source_literal_for_reader(&value, snapshot.as_ref()),
+                Err(RuntimeError::Kernel(_))
+            ),
+            "expected name catalogue read for {value:?}"
+        );
+    }
+}
+
+#[test]
+fn to_literal_rejects_nested_ephemeral_values_before_name_lookup() {
+    let snapshot = mica_relation_kernel::RelationKernel::new().snapshot();
+    let identity = Identity::new(42).unwrap();
+    for ephemeral in [
+        Value::capability_raw(1).unwrap(),
+        Value::function_raw(1).unwrap(),
+    ] {
+        for value in [
+            ephemeral.clone(),
+            Value::list([Value::identity(identity), ephemeral.clone()]),
+            Value::map([(ephemeral.clone(), Value::bool(true))]),
+            Value::map([(Value::bool(true), ephemeral.clone())]),
+            Value::range(ephemeral.clone(), None),
+            Value::range(Value::int(1).unwrap(), Some(ephemeral.clone())),
+            query_relation(["cell"], [[ephemeral.clone()]]),
+            Value::error(
+                Symbol::intern("E_TEST"),
+                None::<&str>,
+                Some(ephemeral.clone()),
+            ),
+            Value::frob(identity, ephemeral),
+        ] {
+            assert!(
+                matches!(super::source_literal_for_reader(&value, snapshot.as_ref()),
+                Err(RuntimeError::InvalidBuiltinCall { name, message })
+                if name == Symbol::intern("to_literal") && message == "this value does not have a source literal")
+            );
+        }
+    }
+}
+
+#[test]
+fn to_literal_keeps_nested_names_and_sees_transactional_identity_creation() {
+    let mut runner = SourceRunner::new_empty();
+    let report = runner.run_source(
+        "let named = make_identity(:literal_nested)\nreturn to_literal([named, {named -> [named]}, [:cell] {[named]}, error(E_TEST, \"message\", named)])"
+    ).unwrap();
+    assert_completed_value(
+        &report,
+        Value::string(
+            "[#literal_nested, {#literal_nested -> [#literal_nested]}, [:cell] {[#literal_nested]}, error(E_TEST, \"message\", #literal_nested)]",
+        ),
+    );
+}
+
+#[test]
 fn runner_from_literal_parses_to_literal_output() {
     let mut runner = SourceRunner::new_empty();
     runner.run_source("make_identity(:take_event)").unwrap();
@@ -2591,7 +2687,7 @@ fn runner_agent_llm_messages_with_tools_maps_transcript_with_tool_calls() {
     let assistant_with_calls = &items[2];
     let calls = assistant_with_calls
         .map_get(&Value::symbol(Symbol::intern("tool_calls")))
-        .and_then(|v| v.with_list(<[Value]>::to_vec))
+        .and_then(|v| v.with_list(|values| values.to_vec()))
         .expect("assistant with tool calls should have :tool_calls");
     assert_eq!(calls.len(), 1);
     let tool_message = &items[3];
@@ -4492,7 +4588,7 @@ fn runner_tasks_builtin_lists_running_and_suspended_tasks() {
     let TaskOutcome::Complete { value, .. } = report.outcome else {
         panic!("tasks() did not complete");
     };
-    let tasks = value.with_list(<[Value]>::to_vec).unwrap();
+    let tasks = value.with_list(|values| values.to_vec()).unwrap();
 
     assert!(
         tasks
@@ -4526,7 +4622,7 @@ fn runner_context_builtins_return_runtime_identities() {
     assert!(matches!(
         submitted.outcome,
         TaskOutcome::Complete { value, .. }
-            if value.with_list(<[Value]>::to_vec).unwrap()
+            if value.with_list(|values| values.to_vec()).unwrap()
                 == vec![
                     Value::option_some(Value::identity(alice)),
                     Value::option_some(Value::identity(alice)),
@@ -4545,7 +4641,7 @@ fn runner_context_builtins_return_system_endpoint_without_actor_context() {
     assert!(matches!(
         report.outcome,
         TaskOutcome::Complete { value, .. }
-            if value.with_list(<[Value]>::to_vec).unwrap()
+            if value.with_list(|values| values.to_vec()).unwrap()
                 == vec![
                     Value::option_none(),
                     Value::option_none(),

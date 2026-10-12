@@ -360,11 +360,9 @@ pub fn json_null_value() -> Value {
 pub fn is_json_null(value: &Value) -> bool {
     value
         .with_map(|entries| {
-            entries
-                == [(
-                    Value::symbol(Symbol::intern("json")),
-                    Value::symbol(Symbol::intern("null")),
-                )]
+            entries.len() == 1
+                && entries.get(&Value::symbol(Symbol::intern("json")))
+                    == Some(&Value::symbol(Symbol::intern("null")))
         })
         .unwrap_or(false)
 }

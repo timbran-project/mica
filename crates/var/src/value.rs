@@ -11,8 +11,9 @@
 // You should have received a copy of the GNU Affero General Public License along
 // with this program. If not, see <https://www.gnu.org/licenses/>.
 
+use crate::MapValue;
 use crate::heap::HeapValue;
-use crate::list::HeapList;
+use crate::list::ListValue;
 use crate::string::HeapString;
 use crate::symbol::Symbol;
 use crate::tuple::empty_relation;
@@ -429,23 +430,11 @@ impl Value {
     }
 
     pub fn list(values: impl IntoIterator<Item = Value>) -> Self {
-        Self::heap(HeapValue::List(HeapList::new(values.into_iter().collect())))
+        Self::heap(HeapValue::List(ListValue::new(values)))
     }
 
     pub fn map(entries: impl IntoIterator<Item = (Value, Value)>) -> Self {
-        let mut entries = entries.into_iter().collect::<Vec<_>>();
-        entries.sort_by(|(left, _), (right, _)| left.cmp(right));
-        let mut canonical = Vec::with_capacity(entries.len());
-        for (key, value) in entries {
-            if let Some((last_key, last_value)) = canonical.last_mut()
-                && last_key == &key
-            {
-                *last_value = value;
-                continue;
-            }
-            canonical.push((key, value));
-        }
-        Self::heap(HeapValue::Map(canonical.into_boxed_slice()))
+        Self::heap(HeapValue::Map(MapValue::new(entries)))
     }
 
     pub fn relation(
@@ -674,14 +663,14 @@ impl Value {
         })?
     }
 
-    pub fn with_list<R>(&self, f: impl FnOnce(&[Value]) -> R) -> Option<R> {
+    pub fn with_list<R>(&self, f: impl FnOnce(&ListValue) -> R) -> Option<R> {
         self.with_heap(|heap| match heap {
-            HeapValue::List(values) => Some(f(values.as_slice())),
+            HeapValue::List(values) => Some(f(values)),
             _ => None,
         })?
     }
 
-    pub fn with_map<R>(&self, f: impl FnOnce(&[(Value, Value)]) -> R) -> Option<R> {
+    pub fn with_map<R>(&self, f: impl FnOnce(&MapValue) -> R) -> Option<R> {
         self.with_heap(|heap| match heap {
             HeapValue::Map(entries) => Some(f(entries)),
             _ => None,
@@ -777,7 +766,7 @@ impl Value {
     }
 
     pub fn list_len(&self) -> Option<usize> {
-        self.with_list(<[Value]>::len)
+        self.with_list(ListValue::len)
     }
 
     pub fn list_get(&self, index: usize) -> Option<Value> {
@@ -786,10 +775,9 @@ impl Value {
 
     pub fn list_slice(&self, start: usize, end_exclusive: usize) -> Option<Self> {
         self.with_list(|values| {
-            if start > end_exclusive || end_exclusive > values.len() {
-                return None;
-            }
-            Some(Self::list(values[start..end_exclusive].iter().cloned()))
+            values
+                .slice(start, end_exclusive)
+                .map(|list| Self::heap(HeapValue::List(list)))
         })?
     }
 
@@ -803,32 +791,22 @@ impl Value {
 
     pub fn list_set(&self, index: usize, value: Value) -> Option<Self> {
         self.with_list(|values| {
-            let mut values = values.to_vec();
-            let slot = values.get_mut(index)?;
-            *slot = value;
-            Some(Self::list(values))
+            values
+                .set(index, value)
+                .map(|list| Self::heap(HeapValue::List(list)))
         })?
     }
 
     pub fn map_len(&self) -> Option<usize> {
-        self.with_map(<[(Value, Value)]>::len)
+        self.with_map(MapValue::len)
     }
 
     pub fn map_get(&self, key: &Value) -> Option<Value> {
-        self.with_map(|entries| {
-            entries
-                .binary_search_by(|(entry_key, _)| entry_key.cmp(key))
-                .ok()
-                .map(|index| entries[index].1.clone())
-        })?
+        self.with_map(|entries| entries.get(key).cloned())?
     }
 
     pub fn map_set(&self, key: Value, value: Value) -> Option<Self> {
-        self.with_map(|entries| {
-            let mut entries = entries.to_vec();
-            entries.push((key, value));
-            Self::map(entries)
-        })
+        self.with_map(|entries| Self::heap(HeapValue::Map(entries.update(key, value))))
     }
 
     pub fn index_set(&self, index: &Value, value: Value) -> Option<Self> {

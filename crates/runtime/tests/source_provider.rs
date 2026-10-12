@@ -898,11 +898,8 @@ mod tests {
         path.to_str().expect("test path should be utf-8")
     }
 
-    fn map_get<'a>(entries: &'a [(Value, Value)], key: &str) -> Option<&'a Value> {
-        let key = Value::symbol(Symbol::intern(key));
-        entries
-            .iter()
-            .find_map(|(candidate, value)| (candidate == &key).then_some(value))
+    fn map_get<'a>(entries: &'a mica_var::MapValue, key: &str) -> Option<&'a Value> {
+        entries.get(&Value::symbol(Symbol::intern(key)))
     }
 
     #[test]
@@ -982,9 +979,8 @@ mod tests {
             let symbol = value
                 .with_map(|entries| {
                     entries
-                        .iter()
-                        .find(|(key, _)| key == &Value::symbol(Symbol::intern("symbol")))
-                        .map(|(_, value)| value.clone())
+                        .get(&Value::symbol(Symbol::intern("symbol")))
+                        .cloned()
                 })
                 .flatten()
                 .and_then(|value| value.with_str(str::to_owned))

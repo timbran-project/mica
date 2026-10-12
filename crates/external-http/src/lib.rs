@@ -461,7 +461,7 @@ fn normalize_openai_tool_call_value(response: Value) -> Result<Value, String> {
     let Some(choices) = map_get(&response, "choices") else {
         return Ok(response);
     };
-    let Some(mut choices) = choices.with_list(<[Value]>::to_vec) else {
+    let Some(mut choices) = choices.with_list(|values| values.to_vec()) else {
         return Ok(response);
     };
 
@@ -680,7 +680,7 @@ async fn perform_embedding_request(spec: HttpRequestSpec) -> Result<Value, Strin
     let Some(embedding) = map_get(&item, "embedding") else {
         return Err("embedding response did not contain data[0].embedding".to_owned());
     };
-    let Some(values) = embedding.with_list(<[Value]>::to_vec) else {
+    let Some(values) = embedding.with_list(|values| values.to_vec()) else {
         return Err("embedding response did not contain data[0].embedding".to_owned());
     };
     let values = values

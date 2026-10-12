@@ -91,11 +91,8 @@ fn decode_dependency(index: usize, value: &Value) -> Result<SyncViewDependency, 
         .ok_or_else(|| dependency_error(index, "entry must be a map"))?
 }
 
-fn map_field<'a>(entries: &'a [(Value, Value)], name: &str) -> Option<&'a Value> {
-    let key = Symbol::intern(name);
-    entries
-        .iter()
-        .find_map(|(candidate, value)| (candidate.as_symbol() == Some(key)).then_some(value))
+fn map_field<'a>(entries: &'a mica_var::MapValue, name: &str) -> Option<&'a Value> {
+    entries.get(&Value::symbol(Symbol::intern(name)))
 }
 
 fn dependency_error(index: usize, message: &str) -> String {

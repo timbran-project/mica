@@ -780,7 +780,7 @@ fn generated_map_index_uses_canonical_helper_for_heap_keys() {
     let ValueRef::Map(entries) = map.as_value_ref() else {
         panic!("expected map value");
     };
-    let view = [NaturalLoopCollectionView::map(entries)];
+    let view = [NaturalLoopCollectionView::map(entries.indexed_entries())];
     let compiled = CompiledNaturalLoop::compile(&index_plan()).unwrap();
 
     for key in &keys {
@@ -828,7 +828,7 @@ fn generated_map_index_matches_value_lookup_across_immediate_kinds() {
     let ValueRef::Map(entries) = map.as_value_ref() else {
         panic!("expected map value");
     };
-    let view = [NaturalLoopCollectionView::map(entries)];
+    let view = [NaturalLoopCollectionView::map(entries.indexed_entries())];
     let compiled = CompiledNaturalLoop::compile(&index_plan()).unwrap();
 
     for key in keys.iter().filter(|key| key.is_immediate()) {
@@ -888,7 +888,7 @@ fn generated_heap_map_index_helper_executes_concurrently() {
             let ValueRef::Map(entries) = map.as_value_ref() else {
                 panic!("expected map value");
             };
-            let view = [NaturalLoopCollectionView::map(entries)];
+            let view = [NaturalLoopCollectionView::map(entries.indexed_entries())];
             let mut scratch = [bits(Value::empty_relation()), borrowed_value_bits(&key)];
             barrier.wait();
             let outcome = unsafe { compiled.run(&mut scratch, &view, 1) };
