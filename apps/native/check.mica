@@ -316,19 +316,38 @@ verb native/check_function(state, index, fn_row)
     incoming[block[0]] = universe
     outgoing[block[0]] = universe
   end
+  // Visit predecessors before successors where possible. Construction order
+  // can run backwards through cleanup paths and require a pass per block.
+  let order: list = []
+  for id in native/flow_postorder(index[:terms], entries[0])
+    order = [id, @order]
+  end
   let changed = true
   while changed
     changed = false
-    for block in blocks
-      let id = block[0]
+    for id in order
       let assigned = universe
       if id == entries[0]
         assigned = initial
       else
-        for predecessor in predecessors[id]
+        // A single predecessor needs no intersection or copy. At joins,
+        // intersect the smaller set and share identical persistent maps.
+        let parents: list = predecessors[id]
+        assigned = outgoing[parents[0]]
+        for predecessor in parents
+          let other: map = outgoing[predecessor]
+          if assigned == other
+            continue
+          end
+          let smaller: map = assigned
+          let larger: map = other
+          if len(smaller) > len(larger)
+            smaller = other
+            larger = assigned
+          end
           let intersection: map = {}
-          for item, present in assigned
-            if map_contains_key(outgoing[predecessor], item)
+          for item, present in smaller
+            if map_contains_key(larger, item)
               intersection[item] = true
             end
           end

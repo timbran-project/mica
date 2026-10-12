@@ -855,6 +855,64 @@ state[:terminators] = [[4, :Branch, [1, 5, 6]], [5, :Jump, [7]],
 }
 
 #[test]
+fn definite_assignment_handles_backwards_construction_and_loop_backedges() {
+    for interpreter_only in [true, false] {
+        let mut runner = runner(interpreter_only).with_task_limits(TaskLimits {
+            instruction_budget: 20_000_000,
+            ..TaskLimits::default()
+        });
+        assert_eq!(
+            eval(
+                &mut runner,
+                r#"
+let state = native/program()
+state[:functions] = [[0, "chain", :U64]]
+state[:constants] = [[1, :U64, "0000000000000001"]]
+for position in 0..199
+  let block = 2 + position * 3
+  let local = block + 1
+  state[:locals] = [@state[:locals], [local, 0, string_concat("local_", to_literal(position)), :U64]]
+  state[:blocks] = [[block, 0, string_concat("step_", to_literal(position)), position == 0], @state[:blocks]]
+  state[:instructions] = [@state[:instructions], [block + 2, block, 0, :Copy, local, [1]]]
+  if position == 199
+    state[:terminators] = [@state[:terminators], [block, :Return, [local]]]
+  else
+    state[:terminators] = [@state[:terminators], [block, :Jump, [block + 3]]]
+  end
+end
+native/check(state)
+return true
+"#
+            ),
+            Value::bool(true)
+        );
+        let loop_source = r#"
+let state = native/program()
+state[:functions] = [[0, "loop_assignment", :U64]]
+state[:parameters] = [[1, 0, 0, "condition", :Bool]]
+state[:locals] = [[2, 0, "result", :U64]]
+state[:constants] = [[3, :U64, "0000000000000001"]]
+state[:blocks] = [[7, 0, "exit", false], [6, 0, "body", false],
+                  [5, 0, "head", false], [4, 0, "entry", true]]
+state[:instructions] = [[8, 4, 0, :Copy, 2, [3]], [9, 6, 0, :Copy, 2, [3]]]
+state[:terminators] = [[4, :Jump, [5]], [5, :Branch, [1, 6, 7]],
+                       [6, :Jump, [5]], [7, :Return, [2]]]
+"#;
+        eval(
+            &mut runner,
+            &format!("{loop_source}\nnative/check(state)\nreturn true"),
+        );
+        let rejected = runner.run_source(&format!("{loop_source}\nstate[:instructions] = [state[:instructions][1]]\nnative/check(state)")).unwrap();
+        assert!(matches!(rejected.outcome, TaskOutcome::Aborted { .. }));
+        assert!(
+            rejected
+                .render()
+                .contains("read before definite assignment")
+        );
+    }
+}
+
+#[test]
 fn value_checks_report_instruction_types_effect_paths_and_ownership() {
     let cases = [
         (
