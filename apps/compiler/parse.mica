@@ -649,6 +649,15 @@ verb parse_pattern(input_state)
     state = fact(state, bind_pattern, :name, name_text, 0)
     return [bind_pattern, state]
   end
+  if kind == :LParen
+    state = skip_newlines(bump(state))
+    let [_, closed] = expect(state, :RParen, "expected ')' in unit pattern")
+    let [unit, after_unit] = make_node(closed, :Unit_Literal)
+    state = fact(after_unit, unit, :text, "()", 0)
+    let [literal_pattern, after_pattern] = make_node(state, :Literal_Pattern)
+    state = fact(after_pattern, literal_pattern, :value, unit, 0)
+    return [literal_pattern, state]
+  end
   if kind == :Int || kind == :Float || kind == :String || kind == :Bytes || kind == :True || kind == :False || kind == :Error_Code || kind == :Hash || kind == :Colon
     let [literal, after_literal] = parse_primary(state)
     state = after_literal
@@ -1990,6 +1999,12 @@ verb parse_primary_token(input_state, token)
   end
   if kind == :LParen
     state = skip_newlines(state)
+    if at(state, :RParen)
+      state = bump(state)
+      let [unit, after_unit] = make_node(state, :Unit_Literal)
+      state = fact(after_unit, unit, :text, "()", 0)
+      return [unit, state]
+    end
     let [inner, after_inner] = parse_expression(state)
     state = after_inner
     state = skip_newlines(state)

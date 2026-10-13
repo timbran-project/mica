@@ -1570,3 +1570,42 @@ fn verb_defaults_reject_expressions_and_invalid_parameter_order() {
         assert!(native.run_source(&source).is_err(), "{source}");
     }
 }
+
+#[test]
+fn mica_emitter_supports_unit_literals() {
+    for interpreter_only in [true, false] {
+        let mut runner = compiler(interpreter_only);
+        for source in [
+            "return ()",
+            "return (\n)",
+            "return [(), [] {}, () == [] {[]}, () == [] {}, (1)]",
+            "return {() -> [()]}",
+        ] {
+            assert_emitted_agrees(&mut runner, source);
+        }
+        // Rust's match grammar does not support literal patterns. Check their
+        // unit semantics directly, as for the other Mica emitter pattern tests.
+        for source in [
+            "let subject = ()\nreturn match subject\ncase ()\n42\ncase _\n0\nend",
+            "let subject = [] {}\nreturn match subject\ncase ()\n0\ncase _\n42\nend",
+            "let subject = [()]\nreturn match subject\ncase [()]\n42\ncase _\n0\nend",
+        ] {
+            let module = invoke(&mut runner, "emit_source", source);
+            install_emitted(&mut runner, module);
+            let actual = runner.run_source("return :compiler_test_entry()").unwrap();
+            assert!(
+                matches!(actual.outcome, TaskOutcome::Complete { value, .. } if value == Value::int(42).unwrap())
+            );
+        }
+        let module = invoke(
+            &mut runner,
+            "emit_source",
+            "verb unit_default(?value = ())\nreturn value\nend\nreturn unit_default()",
+        );
+        install_emitted(&mut runner, module);
+        let actual = runner.run_source("return :compiler_test_entry()").unwrap();
+        assert!(
+            matches!(actual.outcome, TaskOutcome::Complete { value, .. } if value == Value::unit())
+        );
+    }
+}

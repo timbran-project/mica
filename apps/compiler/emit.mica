@@ -134,7 +134,7 @@ end
 // Defaults are values fixed at installation, not expressions run during a call.
 verb emit_parameter_default(rows, node)
   let kind = ast_kind(rows, node)
-  if kind == :Int_Literal || kind == :Float_Literal || kind == :String_Literal || kind == :Bytes_Literal || kind == :Error_Code_Literal
+  if kind == :Unit_Literal || kind == :Int_Literal || kind == :Float_Literal || kind == :String_Literal || kind == :Bytes_Literal || kind == :Error_Code_Literal
     let [_, text] = ast_attr(rows, node, :text)
     let parsed = from_literal(text)
     if parsed[0][:case] == :ok
@@ -338,7 +338,7 @@ end
 verb emit_expr(rows, node, input_state)
   let state = input_state
   let kind = ast_kind(rows, node)
-  if kind == :Int_Literal || kind == :Float_Literal || kind == :String_Literal || kind == :Bytes_Literal || kind == :Error_Code_Literal
+  if kind == :Unit_Literal || kind == :Int_Literal || kind == :Float_Literal || kind == :String_Literal || kind == :Bytes_Literal || kind == :Error_Code_Literal
     let [_, text] = ast_attr(rows, node, :text)
     let parsed = from_literal(text)
     if parsed[0][:case] != :ok
