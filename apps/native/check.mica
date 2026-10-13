@@ -11,11 +11,13 @@ verb native/check(state)
     end
   end
   let records = native/check_records(state)
+  let checked_types: map = {}
+  let checked_names: map = {}
   let functions = {}
   let symbols = {}
   for row in state[:functions]
-    native/identifier(row[1])
-    native/check_type(records, row[2])
+    checked_names = native/check_identifier_once(checked_names, row[1])
+    checked_types = native/check_type_once(records, checked_types, row[2])
     native/ensure(!map_contains_key(symbols, row[1]), "duplicate function name")
     symbols[row[1]] = true
     functions[row[0]] = row
@@ -25,8 +27,8 @@ verb native/check(state)
   let slots = {}
   for row in state[:parameters]
     native/ensure(map_contains_key(functions, row[1]), "parameter has unknown function")
-    native/identifier(row[3])
-    native/check_type(records, row[4])
+    checked_names = native/check_identifier_once(checked_names, row[3])
+    checked_types = native/check_type_once(records, checked_types, row[4])
     native/ensure(row[4] != :Void, "Void parameter")
     native/ensure(!map_contains_key(names, [row[1], row[3]]), "duplicate variable name")
     native/ensure(!map_contains_key(slots, [row[1], row[2]]), "duplicate parameter position")
@@ -36,8 +38,8 @@ verb native/check(state)
   end
   for row in state[:locals]
     native/ensure(map_contains_key(functions, row[1]), "local has unknown function")
-    native/identifier(row[2])
-    native/check_type(records, row[3])
+    checked_names = native/check_identifier_once(checked_names, row[2])
+    checked_types = native/check_type_once(records, checked_types, row[3])
     native/ensure(row[3] != :Void, "Void local")
     native/ensure(!map_contains_key(names, [row[1], row[2]]), "duplicate variable name")
     names[[row[1], row[2]]] = true
@@ -45,7 +47,7 @@ verb native/check(state)
   end
   let constants = {}
   for row in state[:constants]
-    native/check_type(records, row[1])
+    checked_types = native/check_type_once(records, checked_types, row[1])
     native/check_constant(row)
     constants[row[0]] = row
   end
@@ -53,7 +55,7 @@ verb native/check(state)
   let block_names = {}
   for row in state[:blocks]
     native/ensure(map_contains_key(functions, row[1]), "block has unknown function")
-    native/identifier(row[2])
+    checked_names = native/check_identifier_once(checked_names, row[2])
     native/ensure(row[3] == true || row[3] == false, "entry flag must be Bool")
     native/ensure(!map_contains_key(block_names, [row[1], row[2]]), "duplicate block name")
     block_names[[row[1], row[2]]] = true
@@ -121,6 +123,28 @@ verb native/check(state)
   let origins: map = native/check_ownership(state, index)
   native/check_relocation_liveness(state, index, origins)
   return index
+end
+
+// These sets belong to one validation pass. Repeated variable types and names
+// need no repeated character scans, while edited modules always start fresh.
+verb native/check_type_once(records: map, input: map, type_id) -> map
+  if map_contains_key(input, type_id)
+    return input
+  end
+  native/check_type(records, type_id)
+  let checked: map = input
+  checked[type_id] = true
+  return checked
+end
+
+verb native/check_identifier_once(input: map, spelling: string) -> map
+  if map_contains_key(input, spelling)
+    return input
+  end
+  native/identifier(spelling)
+  let checked: map = input
+  checked[spelling] = true
+  return checked
 end
 
 verb native/value_type(index, fn_id, id)

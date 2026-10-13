@@ -186,6 +186,71 @@ return len(module[:state][:functions])
 }
 
 #[test]
+fn native_validation_reuses_repeated_names_and_types() {
+    for tier in [true, false] {
+        let mut host = runner(tier).with_task_limits(TaskLimits {
+            instruction_budget: 4_000_000,
+            ..TaskLimits::default()
+        });
+        assert_eq!(
+            eval(
+                &mut host,
+                r#"
+let spelling = ""
+for part in 0..19
+  spelling = string_concat(spelling, "SharedRecord")
+end
+let state = native/record_type(native/program(), spelling, [["value", :U64]])[1]
+let module = native/module_context(state, {})
+for i in 0..511
+  module = native/declare_function(module, string_concat("function_", to_literal(i)), :Void,
+    [], [["value", [:Record, spelling]]], [], :Value, "")
+end
+for i in 0..511
+  module = native/define_function(module, string_concat("function_", to_literal(i)), [[:Return]])
+end
+let index = native/check(module[:state])
+return len(index[:variables])
+"#
+            ),
+            Value::int(512).unwrap()
+        );
+        for (edit, expected) in [
+            (
+                "state[:locals] = [[row[0], row[1], row[2], [:Record, \"Missing\"]]]",
+                "unknown record type",
+            ),
+            (
+                "state[:locals] = [[row[0], row[1], \"bad-name\", row[3]]]",
+                "invalid identifier",
+            ),
+        ] {
+            let result = eval(
+                &mut host,
+                &format!(
+                    r#"
+let module = native/module_context(native/program(), {{}})
+module = native/declare_function(module, "subject", :Void, [], [["value", :U64]], [], :Value, "")
+module = native/define_function(module, "subject", [[:Return]])
+let state = module[:state]
+native/check(state)
+let row = state[:locals][0]
+{edit}
+try
+  native/check(state)
+  return "accepted"
+catch E_INVARG as problem
+  return native/error_message(problem)
+end
+"#
+                ),
+            );
+            assert!(result.with_str(|text| text.contains(expected)).unwrap());
+        }
+    }
+}
+
+#[test]
 fn native_module_body_bindings_scale_with_function_count() {
     for tier in [true, false] {
         let mut host = runner(tier).with_task_limits(TaskLimits {
