@@ -470,6 +470,19 @@ CC=clang cargo test --release -p mica-runtime --test native_codegen \
   native_source_executes_the_compiler_parser -- --ignored --nocapture
 ```
 
+The emitter check compiles `emit_program` and the AST helpers to native C.
+It compares complete register descriptions and diagnostics with Rust-hosted Mica, including nested functions, patterns, loops, and exception handlers.
+The bootstrap host parses inputs. This check does not compile source text through a fully native frontend.
+
+Each case also runs with forced collection, and both bootstrap tiers must produce identical C.
+The large fixture uses `-O0` with ASan and UBSan. Smaller source tests exercise optimized C.
+Ordinary test runs exclude this integration test because generation takes several minutes.
+
+```sh
+CC=clang cargo test --release -p mica-runtime --test native_codegen \
+  native_source_executes_the_compiler_emitter -- --ignored --nocapture
+```
+
 ## Remaining integration
 
 The broader integration gate is in `sketches/NATIVE_TASKS_AND_MEMORY_DESIGN.md`, section 16.1.

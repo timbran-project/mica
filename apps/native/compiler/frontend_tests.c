@@ -8,20 +8,20 @@ static mica_type_Value source_integer(int64_t number) {
     assert(value.f_ok);
     return value.f_value;
 }
-static void run_parser(struct mica_MemoryWorker *worker, struct mica_Kernel *kernel,
+static void run_frontend(struct mica_MemoryWorker *worker, struct mica_Kernel *kernel,
     struct mica_MemoryRoot *code, struct mica_TaskRuntime *runtime,
     struct mica_MemoryRoot *input, struct mica_MemoryRoot *output, bool collect) {
     struct mica_MemoryRoot image = {0};
     assert(mica_memory_root_push(worker, &image));
-    mica_type_Value text = mica_value_root_get(input);
-    struct mica_ValueResult arguments = mica_value_list(worker, &text, 1);
+    mica_type_Value value = mica_value_root_get(input);
+    struct mica_ValueResult arguments = mica_value_list(worker, &value, 1);
     assert(arguments.f_ok);
     image.f_pointer = (void *)mica_task_new_Image(worker, mica_source_roundtrip_method_0_0,
         (void *)code->f_pointer, source_integer(7), arguments.f_value, 0, NULL, NULL, 0, NULL, NULL);
     assert(image.f_pointer);
     struct mica_TaskControl task = {0};
     struct mica_TaskServices services = {0};
-    // Match the call-depth limit used by the Rust-hosted parser oracle.
+    // Match the call-depth limit used by the Rust-hosted frontend oracle.
     assert(mica_task_init(&task, worker, kernel, &image, 10000000, 3, 256, runtime) == 0);
     uint64_t limit = worker->f_heap->f_collection_limit;
     if (collect) worker->f_heap->f_collection_limit = 0;
@@ -37,11 +37,11 @@ static void run_parser(struct mica_MemoryWorker *worker, struct mica_Kernel *ker
     assert(mica_memory_root_pop(worker, &image));
     worker->f_heap->f_collection_limit = limit;
 }
-static void parser_checks(struct mica_MemoryWorker *worker, struct mica_Kernel *kernel,
+static void frontend_checks(struct mica_MemoryWorker *worker, struct mica_Kernel *kernel,
     struct mica_MemoryRoot *code, struct mica_TaskRuntime *runtime, struct mica_SymbolTable *symbols) {
     struct mica_MemoryRoot input = {0}, output = {0};
     assert(mica_memory_root_push(worker, &input) && mica_memory_root_push(worker, &output));
-    /* PARSER_CONFORMANCE_CASES */
+    /* FRONTEND_CONFORMANCE_CASES */
     assert(mica_memory_root_pop(worker, &output) && mica_memory_root_pop(worker, &input));
 }
 int main(void) {
@@ -80,10 +80,17 @@ int main(void) {
         uint64_t arity = id == 701 ? 3 : id == 703 ? 6 : 2;
         assert(mica_kernel_declare(&install, id, id, arity, 0, 0, 0) == 0);
     }
+    const char *catalogues[] = {"RelationName", "Arity", "FunctionalKey"};
+    for (unsigned i = 0; i < 3; ++i) {
+        struct mica_IdResult name = mica_value_symbol_intern(&symbols,
+            (const uint8_t *)catalogues[i], strlen(catalogues[i]), NULL);
+        assert(name.f_ok);
+        assert(mica_kernel_declare_catalogue(&install, 707 + i, name.f_number, i + 1) == 0);
+    }
     assert(mica_task_source_roundtrip_install(&install, &dispatch, (void *)code.f_pointer, source_integer(7)) == 0);
     assert(mica_kernel_commit(&install) == 0 && mica_kernel_end(&install));
     struct mica_TaskRuntime runtime = {.f_symbols = &symbols, .f_dispatch = &dispatch};
-    parser_checks(&worker, &kernel, &code, &runtime, &symbols);
+    frontend_checks(&worker, &kernel, &code, &runtime, &symbols);
     assert(mica_task_dispatch_context_release(&dispatch, &worker) == 0);
     assert(mica_kernel_release(&kernel, &worker));
     assert(mica_memory_root_pop(&worker, &prototypes) && mica_memory_root_pop(&worker, &code));

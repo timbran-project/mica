@@ -4084,13 +4084,13 @@ fn native_source_executes_the_compiler_parser() {
         }
         let (input, construction) = source_value_literal(&input, &mut 0);
         checks.push_str(&format!(
-            "{{ {construction}\nmica_value_root_set(&input, {input});\nrun_parser(worker, kernel, code, runtime, &input, &output, false);\n{}\nrun_parser(worker, kernel, code, runtime, &input, &output, true);\n{}\n}}\n",
+            "{{ {construction}\nmica_value_root_set(&input, {input});\nrun_frontend(worker, kernel, code, runtime, &input, &output, false);\n{}\nrun_frontend(worker, kernel, code, runtime, &input, &output, true);\n{}\n}}\n",
             source_value_check(&expected, "mica_value_root_get(&output)"),
             source_value_check(&expected, "mica_value_root_get(&output)"),
         ));
     }
-    let fixture = include_str!("../../../apps/native/compiler/parser_tests.c")
-        .replace("/* PARSER_CONFORMANCE_CASES */", &checks);
+    let fixture = include_str!("../../../apps/native/compiler/frontend_tests.c")
+        .replace("/* FRONTEND_CONFORMANCE_CASES */", &checks);
     let (generated, memory, tasks) = thread::scope(|scope| {
         let [first, second] = [true, false].map(|tier| {
             let source = &source;
@@ -4150,6 +4150,106 @@ fn native_source_converts_numbers_and_parses_decimals() {
         include_str!("../../../apps/native/compiler/numeric_tests.mica"),
         include_str!("../../../apps/native/compiler/numeric_tests.c"),
         &[],
+    );
+}
+
+#[test]
+#[ignore = "full emitter bootstrap generates and compiles a large native module"]
+fn native_source_executes_the_compiler_emitter() {
+    let ast = include_str!("../../../apps/compiler/ast.mica");
+    let emitter = include_str!("../../../apps/compiler/emit.mica");
+    let entry =
+        "verb native_emit_fixture(parsed)\nreturn emit_program(parsed[:rows], parsed[:root])\nend";
+    // Compile the existing emitter and AST helpers. emit_source is the Rust
+    // bytecode serializer; this entry returns the neutral register descriptions.
+    let source = format!(
+        "{entry}\n{ast}\n{}",
+        &emitter[emitter.find("verb emit_state(").unwrap()..]
+    );
+    let method_ids = format!(
+        "[{}]",
+        source
+            .lines()
+            .filter(|line| line.starts_with("verb "))
+            .enumerate()
+            .map(|(index, _)| format!("[{}, {}]", 10000 + index, 20000 + index))
+            .collect::<Vec<_>>()
+            .join(",")
+    );
+    let mut oracle = SourceRunner::new_empty().with_task_limits(TaskLimits {
+        instruction_budget: 20_000_000,
+        max_call_depth: 256,
+        ..TaskLimits::default()
+    });
+    for filein in [
+        include_str!("../../../apps/compiler/lex.mica"),
+        include_str!("../../../apps/compiler/parse.mica"),
+        ast,
+        emitter,
+    ] {
+        oracle.run_filein(filein).unwrap();
+    }
+    let cases = [
+        "return [(), none, 42, 1.25, \"Montréal 🦊\", :name, b\"AAH-_w==\"]",
+        "verb choose(value: int, ?fallback = (), @rest) -> list\nreturn [value, fallback, rest]\nend\nreturn choose(7)",
+        "let total = 0\nfor x in 1..3\nif x > 1\ntotal = total + x\nend\nend\nreturn total",
+        "let f = fn(x) => x + 1\nreturn [f(x) for x in [1, 2] if x > 0]",
+        "try\nreturn 1 / 0\ncatch E_DIV as problem\nreturn problem.message\nfinally\nlet cleaned = true\nend",
+        "let subject = [1, 2]\nreturn match subject\ncase [first, @rest] if first > 0\nfirst\ncase _\n0\nend",
+        "return [error(E_FAIL, \"bad\", [1]), some(3), ok(false), {:a -> 2}]",
+        "let x: int = 1\nx = 2\nreturn x",
+        "return missing_name",
+        "verb invalid(?first = 1, second)\nreturn second\nend",
+    ];
+    let mut checks = String::new();
+    for (index, text) in cases.iter().enumerate() {
+        let input = eval(&mut oracle, &format!("return parse_rows({text:?})"));
+        assert_eq!(
+            input.map_get(&Value::symbol(Symbol::intern("errors"))),
+            Some(Value::list([]))
+        );
+        let expected = eval(
+            &mut oracle,
+            &format!(
+                "let parsed = parse_rows({text:?})\nreturn emit_program(parsed[:rows], parsed[:root])"
+            ),
+        );
+        assert_eq!(
+            expected.map_get(&Value::symbol(Symbol::intern("errors"))) == Some(Value::list([])),
+            index < cases.len() - 2
+        );
+        let (input, construction) = source_value_literal(&input, &mut 0);
+        checks.push_str(&format!(
+            "{{ {construction}\nmica_value_root_set(&input, {input});\nrun_frontend(worker, kernel, code, runtime, &input, &output, false);\n{}\nrun_frontend(worker, kernel, code, runtime, &input, &output, true);\n{}\n}}\n",
+            source_value_check(&expected, "mica_value_root_get(&output)"),
+            source_value_check(&expected, "mica_value_root_get(&output)"),
+        ));
+    }
+    let fixture = include_str!("../../../apps/native/compiler/frontend_tests.c")
+        .replace("/* FRONTEND_CONFORMANCE_CASES */", &checks);
+    let (generated, memory, tasks) = thread::scope(|scope| {
+        let [first, second] = [true, false].map(|tier| {
+            let source = &source;
+            let method_ids = &method_ids;
+            scope.spawn(move || generate_native_source_example(tier, source, method_ids))
+        });
+        let first = first.join().unwrap();
+        let second = second.join().unwrap();
+        assert!(
+            first == second,
+            "emitter output differs between bootstrap tiers"
+        );
+        first
+    });
+    // This large fixture checks execution and collection; smaller source tests
+    // exercise optimized C. Avoid optimizing the whole compiler for this gate.
+    check_native_source_fixture_with_flags(
+        &format!(
+            "{generated}\n{memory}\n{tasks}\n{}\n{}\n{fixture}",
+            include_str!("../../../native/platform/allocation.c"),
+            include_str!("../../../native/platform/mutex.c"),
+        ),
+        &["-O0", "-g0"],
     );
 }
 
@@ -4440,6 +4540,10 @@ fn check_native_source_body_against(
 }
 
 fn check_native_source_fixture(fixture: &str) {
+    check_native_source_fixture_with_flags(fixture, &["-O2", "-g"]);
+}
+
+fn check_native_source_fixture_with_flags(fixture: &str, compilation_flags: &[&str]) {
     let scratch = Scratch::new();
     let source = scratch.0.join("source.c");
     let binary = scratch.0.join("source");
@@ -4455,8 +4559,6 @@ fn check_native_source_fixture(fixture: &str) {
         .args([
             "-std=c11",
             "-pthread",
-            "-O2",
-            "-g",
             "-Wall",
             "-Wextra",
             "-Werror",
@@ -4467,6 +4569,7 @@ fn check_native_source_fixture(fixture: &str) {
             "-fno-sanitize-recover=all",
             "-fno-omit-frame-pointer",
         ])
+        .args(compilation_flags)
         .arg(&source)
         .args(["-lm", "-ldl", "-o"])
         .arg(&binary)
