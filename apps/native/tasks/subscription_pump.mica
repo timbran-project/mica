@@ -85,6 +85,23 @@ verb native_subscriptions/pump_marker(builder: map, claim: map, request: map, cu
   return result
 end
 
+// Refresh access against current metadata before disclosing retained rows.
+// Catalogue projections use the same permission as a direct relation read.
+verb native_subscriptions/delivery_permission(builder: map, authority: map, current: map, request: map) -> list
+  let [allowed: map, ready: map] = native_gen/bind(builder, "allowed", native_kernel/load_field(builder, authority, "root"))
+  ready = native_gen/unless(ready, native_gen/equal(native_kernel/load_field(ready, request, "subject"), native_gen/ref(ready, "task_subscription_catalogue")), fn(relation)
+    let id: map = native_kernel/load_field(relation, request, "relation")
+    let [schema: map, found: map] = native_gen/bind(relation, "subscription_schema", native_gen/call(relation, "kernel_schema_index_lookup", [
+      native_kernel/load_field(relation, current, "schemas"), id]))
+    return native_gen/branch(found, native_kernel/absent(schema),
+      fn(missing) => native_gen/assign(missing, allowed, native_gen/ref(missing, "false")),
+      fn(present) => native_gen/branch(present, native_kernel/absent(native_kernel/load_field(present, schema, "source")),
+        fn(stored) => native_gen/assign(stored, allowed, native_gen/call(stored, "kernel_authority_allows", [authority, id, native_gen/ref(stored, "authority_read")])),
+        fn(catalogue) => native_gen/assign(catalogue, allowed, native_gen/call(catalogue, "kernel_authority_catalogue", [authority]))))
+  end)
+  return [allowed, ready]
+end
+
 verb native_subscriptions/pump_batch(builder: map, claim: map, request: map, previous: map, current: map) -> map
   let cursor: map = native_kernel/load_field(builder, current, "version")
   let vocabulary: map = native_gen/field(builder, native_gen/ref(builder, "hub"), "vocabulary")[:pointer]
@@ -165,11 +182,8 @@ verb native_subscriptions/pump_body(module: map) -> map
   let [authority: map, compiled: map] = native_rules/checked_call(rooted, "authority_for", [native_roots/worker(rooted),
     native_kernel/load_field(rooted, current, "owner"), native_kernel/load_field(rooted, current, "policy_views"),
     native_kernel/load_field(rooted, request, "tenant"), native_roots/ref(rooted, "budget")], "authority")
-  let [allowed: map, with_allowed: map] = native_gen/bind(compiled, "allowed", native_kernel/load_field(compiled, authority, "root"))
-  builder = native_gen/unless(with_allowed, native_gen/equal(native_kernel/load_field(with_allowed, request, "subject"), native_gen/ref(with_allowed, "task_subscription_catalogue")), fn(relation)
-    return native_gen/assign(relation, allowed, native_gen/call(relation, "kernel_authority_allows", [
-      authority, native_kernel/load_field(relation, request, "relation"), native_gen/ref(relation, "authority_read")]))
-  end)
+  let [allowed: map, authorized: map] = native_subscriptions/delivery_permission(compiled, authority, current, request)
+  builder = authorized
   builder = native_gen/unless(builder, allowed, fn(revoked) => native_subscriptions/pump_marker(revoked, ticket, request, native_kernel/load_field(revoked, current, "version"), true))
   builder = native_gen/when(builder, native_gen/field(builder, ticket, "initial"), fn(initial)
     let ready: map = native_rules/check(initial, native_gen/negate(native_kernel/absent(view)), "schema")

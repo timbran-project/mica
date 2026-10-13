@@ -176,7 +176,7 @@ Hubs reject capabilities issued for another hub.
 `task_mailbox_service` connects committed send effects to a hub.
 Direct `task_mailbox_send` reports delivery status to external producers.
 Creation and closure manage ephemeral resources outside relation transactions.
-These APIs are runtime primitives; language builtin lowering remains unfinished.
+Source builtins expose creation, closure, and transactional sends. Receive instructions suspend through the mailbox service.
 
 `task_mailbox_stream_open` registers a tagged stream with a positive message budget.
 Its ID comes from `task_resource_reserve` and must never be reused.
@@ -197,7 +197,9 @@ These operations supply bounded transport for subscriptions.
 
 `task_subscription_request` stages a typed registration and returns a capability from the process-wide namespace.
 It checks the sender capability, subject, binding width, column mask, cursor mode, and current read authority.
-Catalogue requests require root authority. Relation schema and policy dependencies participate in commit validation.
+Catalogue event requests require root authority.
+Subscriptions to catalogue projections require catalogue authority at registration and delivery, as direct reads do.
+Stored-fact subscriptions reject computed projections. Relation schema and policy dependencies participate in commit validation.
 The request retains its pattern and full-width cursor through collection and publication.
 `task_subscription_cancel` stages cancellation in the same effect sequence.
 Retry discards both operations and never reuses an abandoned registration identity.

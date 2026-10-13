@@ -1254,6 +1254,7 @@ int main(void) {
     subscription_delivery();
     subscription_catalogue();
     subscription_pump();
+    subscription_catalogue_authority();
     subscription_events();
     scheduled_tasks(SCHEDULER_CANCEL);
     scheduled_tasks(SCHEDULER_EXTERNAL);

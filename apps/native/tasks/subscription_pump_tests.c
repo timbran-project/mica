@@ -186,6 +186,127 @@ static void subscription_pump(void) {
     mica_value_symbol_table_release(&symbols);
 }
 
+static struct mica_TaskSubscriptionResult subscription_projection_request(
+        struct mica_MemoryWorker *worker, struct mica_Kernel *kernel,
+        struct mica_TaskMailboxHub *mailboxes, mica_type_Value sender, int64_t tenant,
+        uint64_t subject, uint64_t source, bool initial,
+        struct mica_TaskControl *task, struct mica_TaskAttempt *attempt) {
+    struct mica_MemoryRoot image = {0};
+    assert(mica_memory_root_push(worker, &image));
+    image.f_pointer = (void *)mica_task_new_Image(worker, mica_task_test_entry, NULL,
+        integer(tenant), integer(0), integer(0), NULL, NULL, 3, NULL, NULL);
+    assert(image.f_pointer);
+    assert(mica_task_init(task, worker, kernel, &image, 1000, 1, 8, NULL) == OK);
+    assert(mica_memory_root_pop(worker, &image));
+    assert(mica_task_claim(task, worker, attempt) == OK);
+    mica_type_Value cells[] = {integer(0), integer(0), integer(0)};
+    mica_type_Value pattern = mailbox_receivers(worker, cells, source == 3 ? 3 : 2);
+    return mica_task_subscription_request(worker, attempt, mailboxes, sender,
+        subject, 100 + source, pattern, 0, initial, false, 0, 4);
+}
+
+static void subscription_catalogue_authority(void) {
+    struct mica_MemoryHeap heap = {0};
+    struct mica_MemoryWorker worker = {0};
+    struct mica_Kernel kernel = {0};
+    struct mica_TaskMailboxHub mailboxes = {0};
+    struct mica_TaskSubscriptionHub hub = {0};
+    struct mica_SymbolTable symbols = {0};
+    struct mica_TaskSubscriptionVocabulary vocabulary = {0};
+    struct mica_MemoryRoot message = {0};
+    struct mica_KernelTransaction transaction = {0};
+    struct mica_TaskServices services = {.f_context = (void *)&hub, .f_subscribe = mica_task_subscription_service};
+    assert(mica_value_symbol_table_init(&symbols));
+    assert(mica_task_subscription_vocabulary_init(&symbols, &vocabulary) == OK);
+    assert(mica_task_resources_start() && mica_task_heap_init(&heap));
+    assert(mica_memory_worker_init(&worker, &heap, 4096) && mica_memory_enter(&worker));
+    assert(mica_kernel_init(&kernel, &worker, integer(7), 8));
+    assert(mica_memory_root_push(&worker, &message));
+    assert(mica_kernel_begin(&kernel, &worker, &transaction, integer(7)) == OK);
+    assert(mica_kernel_declare(&transaction, 10, 10, 1, 0, 0, 0) == OK);
+    assert(mica_kernel_declare(&transaction, 11, 11, 2, 0, 0, 0) == OK);
+    assert(mica_kernel_declare(&transaction, 12, 12, 2, 1, 1, 0) == OK);
+    assert(mica_kernel_declare(&transaction, 13, 13, 1, 0, 0, 0) == OK);
+    mica_type_Value owner = integer(7);
+    assert(mica_kernel_write(&transaction, 13, mailbox_receivers(&worker, &owner, 1), true) == OK);
+    mica_type_Value tenant = integer(8);
+    assert(mica_kernel_write(&transaction, 10, mailbox_receivers(&worker, &tenant, 1), true) == OK);
+    for (uint64_t source = 1; source <= 3; ++source) {
+        assert(mica_kernel_declare_catalogue(&transaction, 100 + source, 100 + source, source) == OK);
+        mica_type_Value cells[] = {integer(9), mica_value_identity(100 + source).f_value};
+        assert(mica_kernel_write(&transaction, 11, mailbox_receivers(&worker, cells, 2), true) == OK);
+    }
+    assert(mica_kernel_set_authority_policy(&transaction, 13, 10, 0, 11, 0, 0, 0, 0) == OK);
+    assert(mica_kernel_commit(&transaction) == OK && mica_kernel_end(&transaction));
+    assert(mica_task_mailbox_hub_init(&mailboxes, &worker, 1) == OK);
+    struct mica_TaskMailboxCaps caps = mica_task_mailbox_create(&mailboxes, &worker, 16);
+    assert(caps.f_status == OK);
+    assert(mica_task_subscription_hub_init(&hub, &worker, &kernel, &mailboxes, &vocabulary, 8) == OK);
+    heap.f_collection_limit = 0;
+    for (uint64_t source = 1; source <= 3; ++source) {
+        struct mica_TaskControl task = {0};
+        struct mica_TaskAttempt attempt = {0};
+        // Ordinary read permission cannot disclose a catalogue projection.
+        struct mica_TaskSubscriptionResult registration = subscription_projection_request(
+            &worker, &kernel, &mailboxes, caps.f_sender, 9, 2, source, true, &task, &attempt);
+        assert(registration.f_status == PERMISSION && !attempt.f_effects.f_pointer);
+        assert(mica_task_finish(&task, &worker, &attempt, CANCELLED) == CANCELLED);
+        assert(mica_task_release(&task, &worker));
+        // Projections are computed metadata, not stored facts.
+        registration = subscription_projection_request(&worker, &kernel, &mailboxes,
+            caps.f_sender, 8, 1, source, true, &task, &attempt);
+        assert(registration.f_status == SCHEMA && !attempt.f_effects.f_pointer);
+        assert(mica_task_finish(&task, &worker, &attempt, CANCELLED) == CANCELLED);
+        assert(mica_task_release(&task, &worker));
+        mica_type_Value capabilities[3];
+        for (unsigned initial = 0; initial < 3; ++initial) {
+            // Catalogue authority suffices without a redundant CanRead grant.
+            registration = subscription_projection_request(&worker, &kernel, &mailboxes,
+                caps.f_sender, 8, 2, source, initial != 0, &task, &attempt);
+            assert(registration.f_status == OK && mica_kernel_work(&attempt.f_transaction)->f_catalogue_read);
+            capabilities[initial] = registration.f_capability;
+            assert(mica_task_request(&attempt, 1) == OK);
+            assert(mica_task_prepare(&task, &worker, &attempt) == OK);
+            assert(mica_task_commit(&task, &worker, &attempt) == OK);
+            assert(mica_task_finish(&task, &worker, &attempt, OK) == OK);
+            assert(mica_task_dispatch(&task, &worker, &services) == OK);
+            assert(mica_task_release(&task, &worker));
+        }
+        subscription_pump_once(&hub, &worker, capabilities[1], true);
+        subscription_take_message(&worker, &kernel, &mailboxes, caps.f_receiver, &message);
+        assert(subscription_message_field(&symbols, mica_value_root_get(&message), "subject") == subscription_symbol(&symbols, "snapshot"));
+        struct mica_ValueResult rows = mica_value_map_get(mica_value_root_get(&message), subscription_symbol(&symbols, "assertions"));
+        assert(rows.f_ok && mica_value_list_length(rows.f_value).f_number > 0);
+        // A read grant cannot preserve access after catalogue authority is revoked.
+        // Check pending changes, subsequent delivery, and an undelivered snapshot.
+        assert(mica_kernel_begin(&kernel, &worker, &transaction, integer(7)) == OK);
+        assert(mica_kernel_write(&transaction, 10, mailbox_receivers(&worker, &tenant, 1), false) == OK);
+        mica_type_Value permission[] = {tenant, mica_value_identity(100 + source).f_value};
+        assert(mica_kernel_write(&transaction, 11, mailbox_receivers(&worker, permission, 2), true) == OK);
+        assert(mica_kernel_commit(&transaction) == OK && mica_kernel_end(&transaction));
+        for (unsigned initial = 0; initial < 3; ++initial) {
+            subscription_pump_once(&hub, &worker, capabilities[initial], true);
+            assert(!subscription_entry(&hub, capabilities[initial]));
+            subscription_take_message(&worker, &kernel, &mailboxes, caps.f_receiver, &message);
+            assert(subscription_message_field(&symbols, mica_value_root_get(&message), "kind") == subscription_symbol(&symbols, "revoked"));
+        }
+        assert(mica_kernel_begin(&kernel, &worker, &transaction, integer(7)) == OK);
+        assert(mica_kernel_write(&transaction, 10, mailbox_receivers(&worker, &tenant, 1), true) == OK);
+        assert(mica_kernel_commit(&transaction) == OK && mica_kernel_end(&transaction));
+    }
+    assert(!hub.f_count && heap.f_collections > 0);
+    assert(mica_task_subscription_hub_close(&hub, &worker) == OK);
+    assert(mica_task_subscription_hub_release(&hub, &worker) == OK);
+    assert(mica_task_mailbox_hub_shutdown(&mailboxes, &worker) == OK);
+    assert(mica_task_mailbox_hub_release(&mailboxes, &worker));
+    assert(mica_memory_root_pop(&worker, &message));
+    assert(mica_kernel_release(&kernel, &worker));
+    assert(mica_memory_safepoint(&worker, true) && !heap.f_retained);
+    assert(mica_memory_leave(&worker) && mica_memory_worker_release(&worker));
+    assert(mica_memory_heap_release(&heap) && mica_task_resources_stop());
+    mica_value_symbol_table_release(&symbols);
+}
+
 struct subscription_event_job {
     struct mica_MemoryHeap *heap;
     struct mica_TaskSubscriptionHub *hub;

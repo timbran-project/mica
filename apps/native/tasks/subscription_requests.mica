@@ -34,9 +34,12 @@ verb native_subscriptions/stage(builder: map, fields: map) -> map
 end
 verb native_subscriptions/validate_relation(builder: map, work: map) -> map
   let id: map = native_gen/ref(builder, "relation")
-  let ready: map = native_authority/check_permission(builder, work, "read", id)
+  let ready: map = native_catalogue/read_permission(builder, work, id)
   let [relation: map, found: map] = native_gen/bind(ready, "relation_view", native_gen/call(ready, "kernel_view", [native_tasks/slot(ready, "transaction"), id]))
   ready = native_rules/check(found, native_gen/negate(native_kernel/absent(relation)), "unknown")
+  ready = native_gen/when(ready, native_gen/equal(native_gen/ref(ready, "subject"), native_gen/ref(ready, "task_subscription_facts")), fn(facts)
+    return native_rules/check(facts, native_kernel/absent(native_kernel/load_field(facts, relation, "source")), "schema")
+  end)
   ready = native_kernel/check_tuple(ready, native_roots/ref(ready, "pattern"), relation, fn(failed) => native_rules/error(failed, "arity"))
   ready = native_kernel/check_column_mask(ready, native_kernel/load_field(ready, relation, "arity"), native_gen/ref(ready, "mask"), fn(failed) => native_rules/error(failed, "schema"))
   // Observe the base schema even when the relation was declared in this draft.
