@@ -1,6 +1,7 @@
 // Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 #[cfg(unix)]
 use std::os::unix::process::ExitStatusExt;
@@ -3861,10 +3862,12 @@ let emitted = emit_program(parsed[:rows], parsed[:root])
 native/ensure(emitted[:errors] == [], to_literal(emitted[:errors]))
 let excluded = {excluded}
 let definitions = {{}}
+let dependencies = {{}}
 let pending = []
 for definition in emitted[:methods]
   if !native/contains(excluded, definition[:selector])
     definitions[definition[:selector]] = true
+    dependencies[definition[:selector]] = {{}}
     pending = [@pending, [definition[:selector], definition[:program]]]
   end
 end
@@ -3892,6 +3895,10 @@ while position < len(pending)
       let selector = instruction[2]
       if selector[0] != :Constant || !map_contains_key(definitions, selector[1])
         missing = [@missing, [owner, :dispatch, selector]]
+      else
+        let calls = dependencies[owner]
+        calls[selector[1]] = true
+        dependencies[owner] = calls
       end
     elseif op == :DynamicDispatch
       missing = [@missing, [owner, :dynamic_dispatch]]
@@ -3906,10 +3913,64 @@ for catalogue in catalogues
   native/ensure(native/contains([:RelationName, :Arity, :FunctionalKey], catalogue), to_literal(catalogue))
 end
 native/ensure(len(catalogues) == len(relations), "unresolved catalogue dependency")
-return {{:programs -> position, :builtins -> builtins, :catalogues -> catalogues}}
+return {{:programs -> position, :builtins -> builtins, :catalogues -> catalogues, :dependencies -> dependencies}}
 "#
         ),
     )
+}
+
+fn native_source_dependency_closure(sources: &[&str], entry: &str) -> String {
+    let inventory = native_source_dependency_inventory(sources, &[]);
+    let dependencies = inventory
+        .map_get(&Value::symbol(Symbol::intern("dependencies")))
+        .unwrap();
+    // These library fileins put each top-level verb at column zero. Preserve
+    // their original source, including annotations and nested functions.
+    let mut definitions = BTreeMap::new();
+    for source in sources {
+        let starts = source
+            .match_indices("verb ")
+            .filter_map(|(offset, _)| {
+                (offset == 0 || source.as_bytes()[offset - 1] == b'\n').then_some(offset)
+            })
+            .collect::<Vec<_>>();
+        for (position, &start) in starts.iter().enumerate() {
+            let end = starts.get(position + 1).copied().unwrap_or(source.len());
+            let definition = &source[start..end];
+            let name = definition[5..].split_once('(').unwrap().0.trim();
+            assert!(definitions.insert(name, definition).is_none(), "{name}");
+        }
+    }
+    assert_eq!(definitions.len(), dependencies.map_len().unwrap());
+    let mut selected = BTreeSet::new();
+    let mut pending = vec![entry.to_owned()];
+    while let Some(name) = pending.pop() {
+        if !selected.insert(name.clone()) {
+            continue;
+        }
+        assert!(definitions.contains_key(name.as_str()), "missing {name}");
+        dependencies
+            .map_get(&Value::symbol(Symbol::intern(&name)))
+            .unwrap()
+            .with_map(|calls| {
+                pending.extend(
+                    calls
+                        .iter()
+                        .map(|(name, _)| name.as_symbol().unwrap().name().unwrap().to_string()),
+                );
+            })
+            .unwrap();
+    }
+    eprintln!(
+        "native source: {entry} uses {} of {} library methods",
+        selected.len(),
+        definitions.len()
+    );
+    selected
+        .iter()
+        .map(|name| definitions[name.as_str()])
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 #[test]
@@ -4293,6 +4354,78 @@ fn native_source_converts_numbers_and_parses_decimals() {
         include_str!("../../../apps/native/compiler/numeric_tests.c"),
         &[],
     );
+}
+
+#[test]
+#[ignore = "C emitter bootstrap generates and compiles a large native module"]
+fn native_source_executes_the_c_emitter() {
+    let entry = "verb native_c_fixture(state)\nreturn native/emit_c(state)\nend\n";
+    let source = format!(
+        "{entry}\n{}",
+        native_source_dependency_closure(SOURCES, "native/emit_c")
+    );
+    let method_ids = format!(
+        "[{}]",
+        source
+            .lines()
+            .filter(|line| line.starts_with("verb "))
+            .enumerate()
+            .map(|(index, _)| format!("[{}, {}]", 10000 + index, 20000 + index))
+            .collect::<Vec<_>>()
+            .join(",")
+    );
+    let mut oracle = runner(true);
+    let mut checks = String::new();
+    let mut outputs = Vec::new();
+    for expression in [
+        "native/program()",
+        "native/scalar_example()",
+        "native/value_examples()",
+    ] {
+        let input = eval(&mut oracle, &format!("return {expression}"));
+        let expected = eval(&mut oracle, &format!("return native/emit_c({expression})"));
+        let (input, construction) = source_value_literal(&input, &mut 0);
+        checks.push_str(&format!(
+            "{{ {construction}\nmica_value_root_set(&input, {input});\nrun_frontend(worker, kernel, code, runtime, &input, &output, false);\n{}\nrun_frontend(worker, kernel, code, runtime, &input, &output, true);\n{}\n}}\n",
+            source_value_check(&expected, "mica_value_root_get(&output)"),
+            source_value_check(&expected, "mica_value_root_get(&output)"),
+        ));
+        outputs.push(expected.with_str(str::to_owned).unwrap());
+    }
+    let fixture = include_str!("../../../apps/native/compiler/frontend_tests.c")
+        .replace("/* FRONTEND_CONFORMANCE_CASES */", &checks);
+    let (generated, memory, tasks) = thread::scope(|scope| {
+        let [first, second] = [true, false].map(|tier| {
+            let source = &source;
+            let method_ids = &method_ids;
+            scope.spawn(move || generate_native_source_example(tier, source, method_ids))
+        });
+        let first = first.join().unwrap();
+        let second = second.join().unwrap();
+        assert!(first == second, "C emitter differs between bootstrap tiers");
+        first
+    });
+    check_native_source_fixture_with_flags(
+        &format!(
+            "{generated}\n{memory}\n{tasks}\n{}\n{}\n{fixture}",
+            include_str!("../../../native/platform/allocation.c"),
+            include_str!("../../../native/platform/mutex.c"),
+        ),
+        &["-O0", "-g0"],
+    );
+    // Native emission above must match these bytes exactly. Compile them too,
+    // then run the existing value example's independent semantic assertions.
+    for output in &outputs[..2] {
+        check_native_source_fixture(&format!("{output}\nint main(void) {{ return 0; }}\n"));
+    }
+    check_native_source_fixture(&format!(
+        "{}\n#define mica_foreign_allocate native_test_allocate\n\
+         #define mica_foreign_release native_test_release\n{}\n\
+         #undef mica_foreign_allocate\n#undef mica_foreign_release\n{}",
+        outputs[2],
+        include_str!("../../../native/platform/allocation.c"),
+        include_str!("../../../apps/native/tests/values.c"),
+    ));
 }
 
 #[test]
@@ -4755,6 +4888,9 @@ fn check_native_source_fixture_with_flags(fixture: &str, compilation_flags: &[&s
             "-pedantic",
             "-ffp-contract=off",
             "-fno-fast-math",
+            // Large sanitizer fixtures can exceed AArch64's branch range.
+            // Separate sections leave cross-function range extension to the linker.
+            "-ffunction-sections",
             sanitizer,
             "-fno-sanitize-recover=all",
             "-fno-omit-frame-pointer",

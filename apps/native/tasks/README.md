@@ -476,12 +476,28 @@ cargo test --release -p mica-runtime --test native_codegen \
 The C generator dependency check covers the core generator modules and their scalar and value examples.
 It checks every method and nested function for supported instructions, builtins, and resolved method calls.
 It excludes no methods. These sources contain no catalogue queries.
-The gate establishes dependency closure. Execution of the generator in the native runtime still needs qualification.
+The gate establishes dependency closure. The execution check below exercises the C emitter itself.
 
 ```sh
 cargo test --release -p mica-runtime --test native_codegen \
   native_source_supports_c_generator_dependencies
 ```
+
+The C emitter check compiles `native/emit_c` and its complete transitive method dependencies into the generated runtime.
+It follows calls inside nested functions and preserves the original verb sources.
+Empty, scalar, and value example modules must produce byte-identical C to Rust-hosted Mica, with ordinary and forced collection.
+The resulting C must compile, and the value example must pass its existing semantic assertions.
+Both bootstrap tiers must also produce identical emitter code.
+The sanitizer harness uses separate function sections so the linker can extend calls across large AArch64 modules.
+
+```sh
+CC=clang cargo test --release -p mica-runtime --test native_codegen \
+  native_source_executes_the_c_emitter -- --ignored --nocapture
+```
+
+This gate starts from native IR supplied by the bootstrap host.
+It does not yet execute the authoring builders or native lowering as part of a complete self-hosting rebuild.
+Generation and sanitizer compilation take several minutes, so ordinary test runs exclude this check.
 
 The full parser check compiles the lexer and every verb in `apps/compiler/parse.mica`.
 It compares complete `parse` and `parse_rows` results with Rust-hosted Mica, including diagnostics for malformed inputs.
