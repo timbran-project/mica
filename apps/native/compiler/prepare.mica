@@ -128,6 +128,9 @@ verb native_source/program_literals(analysis: map, initial: map) -> map
           pool = native_source/pool(pool, value)
         end
       end
+      if instruction[2] == :lower || instruction[2] == :string_equal_fold
+        pool = native_source/pool(native_source/pool(pool, E_INVARG), string_concat(native_source/symbol_text(instruction[2]), " expects strings"))
+      end
       if instruction[2] == :words || instruction[2] == :parse_ordinal
         for value in native_command_text/literals(instruction[2])
           pool = native_source/pool(pool, value)

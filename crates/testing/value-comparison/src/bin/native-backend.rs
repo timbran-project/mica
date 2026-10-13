@@ -184,6 +184,8 @@ fn run() -> Result<()> {
         "compiler/subscriptions",
         "compiler/time",
         "compiler/text",
+        "compiler/case_data",
+        "compiler/case",
         "compiler/text_scan",
         "compiler/text_search",
         "compiler/distance",

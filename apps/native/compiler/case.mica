@@ -1,0 +1,178 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+// Locale-independent Unicode lowercasing. Compact range tables keep generated
+// code size independent of Unicode coverage; each lookup is a binary search.
+verb native_case/number(builder: map, value: int) -> map
+  let result: map = native_gen/ref(builder, string_concat("case_", to_literal(value)))
+  return result
+end
+verb native_case/lookup_name(module: map, property: bool) -> string
+  let operation: string = "lower_scalar"
+  if property
+    operation = "case_properties"
+  end
+  let result: string = native_text/name(module, operation)
+  return result
+end
+// Globals use portable byte initializers. Decode fixed-width little-endian
+// table cells explicitly, without alignment or host byte-order assumptions.
+verb native_case/table_cell(builder: map, pointer: map, index: map) -> map
+  let offset: map = native_gen/multiply(index, native_case/number(builder, 4))
+  let value: map = native_gen/ref(builder, "zero")
+  for byte in 0..3
+    let part: map = native_gen/convert(:U64, native_gen/load(native_gen/element(pointer,
+      native_gen/add(offset, native_case/number(builder, byte)))))
+    value = native_gen/bit_or(value, native_gen/shift_left(part, native_case/number(builder, byte * 8)))
+  end
+  return value
+end
+verb native_case/table(module: map, property: bool) -> map
+  let rows: list = native_case/lower_ranges()
+  let width: int = 4
+  if property
+    rows = native_case/property_ranges()
+    width = 3
+  end
+  let data: list = []
+  for row in rows
+    for value in row
+      let remaining: int = value
+      for byte in 0..3
+        let part: int = remaining % 256
+        data = [@data, part]
+        remaining = (remaining - part) / 256
+      end
+    end
+  end
+  let name: string = native_case/lookup_name(module, property)
+  let array: list = [:Array, :U8, len(data)]
+  let [global: int, state: map] = native/add_global(module[:state], string_concat(name, "_data"), array, :Constant, data)
+  let ready: map = module
+  ready[:state] = state
+  ready[:constants][string_concat(name, "_data")] = global
+  ready = native_literal/constant(ready, string_concat(name, "_count"), :U64, native_value/hex(len(rows)))
+  ready = native/declare_function(ready, name, :U64, [["scalar", :U64, :Value]], [], [:ReadMemory], :Value, "")
+  let builder: map = native_gen/context(ready, name)
+  let pointer: map = native_gen/expression([:Pointer, array, :Const], :GlobalAddress, [string_concat(name, "_data")])
+  let [first: map, initialized: map] = native_gen/bind(builder, "first", native_gen/ref(builder, "zero"))
+  let [limit: map, bounded: map] = native_gen/bind(initialized, "limit", native_gen/ref(initialized, string_concat(name, "_count")))
+  let scalar: map = native_gen/ref(bounded, "scalar")
+  let fallback: map = scalar
+  if property
+    fallback = native_gen/ref(bounded, "zero")
+  end
+  builder = native_gen/while_loop(bounded, native_gen/less(first, limit), fn(step)
+    let [middle: map, divided: map] = native_gen/bind(step, "middle", native_gen/add(first,
+      native_gen/divide(native_gen/subtract(limit, first), native_case/number(step, 2))))
+    let offset: map = native_gen/multiply(middle, native_case/number(divided, width))
+    let cell = fn(column) => native_case/table_cell(divided, pointer,
+      native_gen/add(offset, native_case/number(divided, column)))
+    return native_gen/branch(divided, native_gen/less(scalar, cell(0)),
+      fn(left) => native_gen/assign(left, limit, middle), fn(right)
+        let beyond: map = native_gen/unless(right, native_gen/less(scalar, cell(1)), fn(past)
+          let advanced: map = native_gen/assign(past, first, native_gen/add(middle, native_gen/ref(past, "one")))
+          return native_gen/continue_loop(advanced)
+        end)
+        if property
+          return native_gen/return_value(beyond, cell(2))
+        end
+        let distance: map = native_gen/subtract(scalar, cell(0))
+        beyond = native_gen/unless(beyond, native_kernel/absent(native_gen/remainder(distance, cell(2))),
+          fn(gap) => native_gen/return_value(gap, scalar))
+        return native_gen/return_value(beyond, native_gen/add(cell(3), distance))
+      end)
+  end)
+  let result: map = native_gen/finish(ready, native_gen/return_value(builder, fallback))
+  return result
+end
+verb native_case/properties(builder: map, scalar: map) -> map
+  let result: map = native_gen/call(builder, native_case/lookup_name(builder[:module], true), [scalar])
+  return result
+end
+verb native_case/flag(builder: map, properties: map, flag: int) -> map
+  let result: map = native_gen/negate(native_kernel/absent(native_gen/bit_and(properties, native_case/number(builder, flag))))
+  return result
+end
+
+// Final sigma ignores Case_Ignorable scalars on both sides. Look ahead from
+// the current byte offset, without rescanning the string prefix. Ignorable
+// runs following different sigmas do not overlap, keeping total work linear.
+verb native_case/following_cased(builder: map, text: map, start: map) -> list
+  let [cursor: map, located: map] = native_gen/bind(builder, "case_cursor", start)
+  let [count: map, counted: map] = native_gen/bind(located, "case_steps", native_gen/ref(located, "zero"))
+  let [found: map, ready: map] = native_gen/bind(counted, "following_cased", native_gen/ref(counted, "false"))
+  ready = native_gen/while_loop(ready, native_gen/less(cursor, native_value/string_field(ready, text, "length")), fn(step)
+    let polled: map = native_query/poll_interval(step, count)
+    polled = native_gen/assign(polled, count, native_gen/add(count, native_gen/ref(polled, "one")))
+    let data: map = native_value/string_field(polled, text, "data")
+    let [decoded: map, read: map] = native_gen/checked_bind(polled, "case_scalar", native_gen/call(polled, "utf8_decode", [
+      native_gen/freeze(native_gen/offset(data, cursor)), native_gen/subtract(native_value/string_field(polled, text, "length"), cursor)]), "ok",
+      fn(invalid) => native_query/error(invalid, "schema"))
+    let scalar: map = native_gen/convert(:U64, native_gen/expression(:U32, :Unwrap, [native_gen/field(read, decoded, "rune")]))
+    let [properties: map, classified: map] = native_gen/bind(read, "properties", native_case/properties(read, scalar))
+    let decisive: map = native_gen/unless(classified, native_case/flag(classified, properties, 2), fn(significant)
+      let selected: map = native_gen/assign(significant, found, native_case/flag(significant, properties, 1))
+      return native_gen/break_loop(selected)
+    end)
+    return native_gen/assign(decisive, cursor, native_gen/add(cursor, native_gen/field(decisive, decoded, "width")))
+  end)
+  return [found, ready]
+end
+verb native_case/lower_body(module: map) -> map
+  let builder: map = native_queries/budget_scope(native_gen/context(module, native_text/name(module, "lower")))
+  let text: map = native_roots/ref(builder, "text")
+  builder = native_builtins/kind_check(builder, text, "string")
+  let [buffer: map, buffered: map] = native_text/byte_buffer(builder)
+  let [preceding: map, ready: map] = native_gen/bind(buffered, "preceding_cased", native_gen/ref(buffered, "false"))
+  builder = native_text/each_decoded(ready, text, native_gen/ref(ready, "zero"), fn(step, index, scalar, offset, width)
+    let [lowered: map, mapped: map] = native_gen/bind(step, "lower_scalar",
+      native_gen/call(step, native_case/lookup_name(module, false), [scalar]))
+    mapped = native_gen/when(mapped, native_gen/equal(scalar, native_case/number(mapped, 931)), fn(sigma)
+      return native_gen/when(sigma, preceding, fn(after_cased)
+        let [following: map, looked: map] = native_case/following_cased(after_cased, text, native_gen/add(offset, width))
+        return native_gen/unless(looked, following, fn(final) => native_gen/assign(final, lowered, native_case/number(final, 962)))
+      end)
+    end)
+    let written: map = native_quoting/scalar(mapped, buffer, lowered)
+    // U+0130 is the sole unconditional multi-scalar lowercase mapping.
+    written = native_gen/when(written, native_gen/equal(scalar, native_case/number(written, 304)),
+      fn(dotted) => native_quoting/scalar(dotted, buffer, native_case/number(dotted, 775)))
+    let [properties: map, classified: map] = native_gen/bind(written, "properties", native_case/properties(written, scalar))
+    written = native_gen/unless(classified, native_case/flag(classified, properties, 2),
+      fn(significant) => native_gen/assign(significant, preceding, native_case/flag(significant, properties, 1)))
+    return native_gen/unless(written, native_gen/less(buffer[:used], native_case/number(written, 248)),
+      fn(full) => native_text/flush_bytes(full, buffer))
+  end)
+  builder = native_text/flush_bytes(builder, buffer)
+  let output: map = native_roots/root_value(builder, native_gen/ref(builder, "output"), native_value/word())
+  builder = native_roots/store(builder, output, buffer[:text])
+  let result: map = native_gen/finish(module, native_tasks/attempt_status(builder, "ok"))
+  return result
+end
+verb native_case/definition(input: map, parameters: list, output: list) -> map
+  let module: map = input
+  for number in [0, 1, 2, 3, 4, 8, 16, 24, 248, 304, 775, 931, 962]
+    module = native_literal/constant(module, string_concat("case_", to_literal(number)), :U64, native_value/hex(number))
+  end
+  module = native_case/table(module, false)
+  module = native_case/table(module, true)
+  module = native_memory/declare(module, native_text/name(module, "lower"), :U64,
+    [@parameters, ["text", native_value/word(), :Gc], output], native_tasks/effects(), :Value, "")
+  let result: map = native_case/lower_body(module)
+  return result
+end
+verb native_case/builtin(builder: map, name: symbol, arguments: list) -> list
+  let ready: map = builder
+  for argument in arguments
+    ready = native_gen/unless(ready, native_access/kind(ready, argument, "string"),
+      fn(invalid) => native_builtins/error(invalid, string_concat(native_source/symbol_text(name), " expects strings")))
+  end
+  let [left: map, lowered: map] = native_text/construct(ready, "lower", [arguments[0]])
+  if name == :lower
+    return [left, lowered]
+  end
+  let [right: map, compared: map] = native_text/construct(lowered, "lower", [arguments[1]])
+  let [equal: map, checked: map] = native_source/result(compared, "value_equal", [left, right], "schema")
+  return [native_gen/call(checked, "value_bool", [equal]), checked]
+end

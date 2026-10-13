@@ -438,6 +438,15 @@ Catalogue fixtures replace loaded code on another worker, retain an older snapsh
 Method-call fixtures cover staged bindings, rollback, conflict retry, selector rights, normal and tail returns, cleanup, and replacement during suspension.
 Spawn fixtures cover rollback, conflict retry, delayed resolution, policy revocation, admission and reply failures, cancellation, and concurrent parent/child execution.
 
+Native `lower(text)` uses locale-independent Unicode 15.1 lowercasing, including final sigma and the two-scalar mapping for `İ`.
+`string_equal_fold(left, right)` compares the resulting lowercase strings, as specified by the language guide.
+It does not normalize text or apply full case folding: `Straße` and `STRASSE` remain unequal.
+Wrong argument counts or types raise catchable `E_INVARG` errors.
+
+Compact lookup tables contain the Unicode mappings and case-context properties, with source hashes and the Unicode licence notice.
+The string walk and sigma lookahead charge work and check cancellation and collection.
+Output remains rooted during construction and is published only after the operation succeeds.
+
 Native `edit_distance(left, right)` computes Levenshtein distance over Unicode scalars, with unit insertion, deletion, and substitution costs.
 Its rooted scratch arrays scale with the shorter input. Inner-loop checks charge work and permit cancellation and collection.
 

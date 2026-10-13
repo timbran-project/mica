@@ -2482,6 +2482,8 @@ fn load_native_source_compiler(runner: &mut SourceRunner) {
         include_str!("../../../apps/native/compiler/subscriptions.mica"),
         include_str!("../../../apps/native/compiler/time.mica"),
         include_str!("../../../apps/native/compiler/text.mica"),
+        include_str!("../../../apps/native/compiler/case_data.mica"),
+        include_str!("../../../apps/native/compiler/case.mica"),
         include_str!("../../../apps/native/compiler/text_scan.mica"),
         include_str!("../../../apps/native/compiler/text_search.mica"),
         include_str!("../../../apps/native/compiler/distance.mica"),
@@ -5113,6 +5115,47 @@ fn native_source_measures_unicode_edit_distance_with_resource_controls() {
     check_native_source_body(
         include_str!("../../../apps/native/compiler/distance_tests.mica"),
         include_str!("../../../apps/native/compiler/distance_tests.c"),
+        &[],
+    );
+}
+
+#[test]
+fn native_source_lowercases_unicode_text() {
+    let body = r#"
+let samples = ["", "HELLO", "Montréal", "İ", "Iıİi", "ẞß", "Σ", "ΟΣ", "ΟΣΑ", "ΟΣΣ",
+  "AΣ\u{301}", "AΣ\u{301}B", "AΣ'", "AΣ'B", "Σ\u{301}", "A\u{345}Σ", "\u{345}Σ",
+  "AΣ\u{200d}", "AΣ\u{200d}B", "AΣ1", "AΣ Σ", "AΣ\0B", "KÅΩ", "ԱԲԳ", "ႠႡႢ", "ᲐᲑᲒ",
+  "𐐀𐐁𐐂", "ＡＢＣ", "ᾈᾉᾊ", "世界🙂", string_slice("xΟΣy", 1, 3)]
+let lowered = [lower(text) for text in samples]
+let pairs = [["Straße", "STRASSE"], ["ΟΣ", "οσ"], ["ΟΣ", "ος"], ["İ", "i\u{307}"],
+  ["É", "E\u{301}"], ["Hello", "hELLO"], ["ẞ", "ß"], ["I", "ı"]]
+let failures = []
+for arguments in [[], [1], ["a", "b"]]
+  try
+    lower(@arguments)
+  catch problem
+    failures = [@failures, problem.code]
+  end
+end
+for arguments in [[], ["a"], ["a", "b", "c"], [1, "a"], ["a", 1]]
+  try
+    string_equal_fold(@arguments)
+  catch problem
+    failures = [@failures, problem.code]
+  end
+end
+return [lowered, [string_equal_fold(left, right) for [left, right] in pairs],
+  lower(@["HELLO"]), string_equal_fold(@["ΟΣ", "ος"]), failures]
+"#;
+    // Rust reports invalid builtin calls at the task boundary; native source
+    // exposes the same error code through its existing catchable-error path.
+    let oracle = body
+        .replace("lower(@arguments)", "raise error(E_INVARG)")
+        .replace("string_equal_fold(@arguments)", "raise error(E_INVARG)");
+    check_native_source_body_against(
+        body,
+        &oracle,
+        include_str!("../../../apps/native/compiler/case_tests.c"),
         &[],
     );
 }
