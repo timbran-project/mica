@@ -1,0 +1,79 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+// Keep one distance row and the shorter string's scalars. Scratch arrays are
+// opaque managed objects; root loads refresh their addresses after each poll.
+verb native_distance/array(builder: map, name: string, element, length: map) -> list
+  let [storage: map, allocated: map] = native_memory/array_storage(builder, native_roots/worker(builder),
+    element, length, "layout_opaque", fn(failed) => native_query/error(failed, "oom"))
+  let result: list = native_roots/retain(allocated, name, storage)
+  return result
+end
+verb native_distance/result(builder: map, distance: map) -> map
+  let [value: map, encoded: map] = native_query/value(builder, "value_int", [native_gen/bitcast(:I64, distance)])
+  let output: map = native_roots/root_value(encoded, native_gen/ref(encoded, "output"), native_value/word())
+  let stored: map = native_roots/store(encoded, output, value)
+  let result: map = native_tasks/attempt_status(stored, "ok")
+  return result
+end
+
+// Each cell chooses deletion, insertion, or substitution. Save the preceding
+// row's cell before overwriting it, then carry it as the next diagonal.
+verb native_distance/cell(builder: map, row: map, scalars: map, index: map, scalar: map, diagonal: map, previous: map) -> map
+  let next: map = native_gen/add(index, native_gen/ref(builder, "one"))
+  let [above: map, loaded: map] = native_gen/bind(builder, "above", native_gen/load(native_gen/offset(row, next)))
+  let [cost: map, ready: map] = native_gen/bind(loaded, "cost", native_gen/add(above, native_gen/ref(loaded, "one")))
+  let insertion: map = native_gen/add(previous, native_gen/ref(ready, "one"))
+  ready = native_gen/when(ready, native_gen/less(insertion, cost), fn(smaller) => native_gen/assign(smaller, cost, insertion))
+  let different: map = native_gen/not_equal(scalar, native_gen/convert(:U64, native_gen/load(native_gen/offset(scalars, index))))
+  let [substitution: map, compared: map] = native_gen/bind(ready, "substitution", diagonal)
+  ready = native_gen/when(compared, different, fn(changed) => native_gen/assign(changed, substitution, native_gen/add(substitution, native_gen/ref(changed, "one"))))
+  ready = native_gen/when(ready, native_gen/less(substitution, cost), fn(smaller) => native_gen/assign(smaller, cost, substitution))
+  ready = native_gen/store(ready, native_gen/offset(row, next), cost)
+  ready = native_gen/assign(ready, diagonal, above)
+  let result: map = native_gen/assign(ready, previous, cost)
+  return result
+end
+verb native_distance/body(module: map) -> map
+  let builder: map = native_queries/budget_scope(native_gen/context(module, native_text/name(module, "edit_distance")))
+  builder = native_query/charge(builder, native_gen/ref(builder, "one"), native_gen/ref(builder, "zero"))
+  let left: map = native_roots/ref(builder, "left")
+  let right: map = native_roots/ref(builder, "right")
+  builder = native_builtins/kind_check(native_builtins/kind_check(builder, left, "string"), right, "string")
+  let [shorter: map, with_shorter: map] = native_roots/retain(builder, "shorter", left)
+  let [longer: map, with_longer: map] = native_roots/retain(with_shorter, "longer", right)
+  builder = native_gen/when(with_longer, native_gen/less(native_access/length(with_longer, right, "string"), native_access/length(with_longer, left, "string")), fn(swapped)
+    return native_roots/store(native_roots/store(swapped, shorter, right), longer, left)
+  end)
+  let [width: map, with_width: map] = native_gen/bind(builder, "width", native_access/length(builder, shorter, "string"))
+  let [height: map, sized: map] = native_gen/bind(with_width, "height", native_access/length(with_width, longer, "string"))
+  builder = native_query/check(sized, native_gen/negate(native_gen/less(native_gen/bitcast(:U64, native_gen/ref(sized, "int_max")), height)), "schema")
+  builder = native_gen/when(builder, native_kernel/absent(width), fn(empty) => native_distance/result(empty, height))
+  let [scalars: map, allocated: map] = native_distance/array(builder, "scalars", :U32, width)
+  let [row: map, reserved: map] = native_distance/array(allocated, "distances", :U64, native_gen/add(width, native_gen/ref(allocated, "one")))
+  builder = native_gen/store(reserved, row, native_gen/ref(reserved, "zero"))
+  builder = native_text/each_scalar(builder, shorter, native_gen/ref(builder, "zero"), fn(step, index, scalar)
+    let stored: map = native_gen/store(step, native_gen/offset(scalars, index), native_gen/convert(:U32, scalar))
+    let next: map = native_gen/add(index, native_gen/ref(stored, "one"))
+    return native_gen/store(stored, native_gen/offset(row, next), next)
+  end)
+  builder = native_text/each_scalar(builder, longer, native_gen/ref(builder, "zero"), fn(step, index, scalar)
+    let [diagonal: map, loaded: map] = native_gen/bind(step, "diagonal", native_gen/load(row))
+    let [previous: map, counted: map] = native_gen/bind(loaded, "previous", native_gen/add(index, native_gen/ref(loaded, "one")))
+    let begun: map = native_gen/store(counted, row, previous)
+    return native_gen/for_range(begun, "column", native_gen/ref(begun, "zero"), width, fn(cell, column)
+      let polled: map = native_query/poll_interval(cell, column)
+      return native_distance/cell(polled, row, scalars, column, scalar, diagonal, previous)
+    end)
+  end)
+  let result: map = native_gen/finish(module, native_distance/result(builder, native_gen/load(native_gen/offset(row, width))))
+  return result
+end
+verb native_distance/definition(input: map) -> map
+  let module: map = native_memory/declare(input, native_text/name(input, "edit_distance"), :U64, [
+    ["worker", native_memory/record_pointer("MemoryWorker"), :Borrow], ["attempt", native_tasks/pointer("Attempt"), :Borrow],
+    ["transaction", native_kernel/pointer("Transaction"), :Borrow], ["left", native_value/word(), :Gc],
+    ["right", native_value/word(), :Gc], ["output", native_memory/record_pointer("MemoryRoot"), :Borrow]], native_tasks/effects(), :Value, "")
+  let result: map = native_distance/body(module)
+  return result
+end

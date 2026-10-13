@@ -56,6 +56,7 @@ verb native_text/characters_body(module: map) -> map
   return result
 end
 verb native_text/definitions(input: map) -> map
+  let distance: bool = false
   let assembly: bool = false
   let characters: bool = false
   let scanning: bool = false
@@ -66,6 +67,7 @@ verb native_text/definitions(input: map) -> map
   for program in input[:source_programs]
     for instruction in program[:analysis][:description][:code]
       if instruction[0] == :BuiltinCall
+        distance = distance || instruction[2] == :edit_distance
         assembly = assembly || native/contains([:string_concat, :string_join, :string_from_chars], instruction[2])
         characters = characters || instruction[2] == :string_chars
         searching = searching || instruction[2] == :string_contains
@@ -80,6 +82,9 @@ verb native_text/definitions(input: map) -> map
   let parameters: list = [["worker", native_memory/record_pointer("MemoryWorker"), :Borrow],
     ["attempt", native_tasks/pointer("Attempt"), :Borrow], ["transaction", native_kernel/pointer("Transaction"), :Borrow]]
   let output: list = ["output", native_memory/record_pointer("MemoryRoot"), :Borrow]
+  if distance
+    module = native_distance/definition(module)
+  end
   if assembly
     module = native_memory/declare(module, native_text/name(module, "assemble"), :U64, [@parameters,
       ["parts", native_value/word(), :Gc], ["separator", native_value/word(), :Gc], ["characters", :Bool, :Value], output], native_tasks/effects(), :Value, "")

@@ -406,6 +406,9 @@ Catalogue fixtures replace loaded code on another worker, retain an older snapsh
 Method-call fixtures cover staged bindings, rollback, conflict retry, selector rights, normal and tail returns, cleanup, and replacement during suspension.
 Spawn fixtures cover rollback, conflict retry, delayed resolution, policy revocation, admission and reply failures, cancellation, and concurrent parent/child execution.
 
+Native `edit_distance(left, right)` computes Levenshtein distance over Unicode scalars, with unit insertion, deletion, and substitution costs.
+Its rooted scratch arrays scale with the shorter input. Inner-loop checks charge work and permit cancellation and collection.
+
 Native `is_builtin(symbol)` reports the source backend's supported builtin inventory, including its variadic calls.
 Compiler forms and Rust-only builtins return false. Invalid arguments raise catchable `E_TYPE` or `E_INVARG` errors.
 

@@ -2326,6 +2326,7 @@ fn load_native_source_compiler(runner: &mut SourceRunner) {
         include_str!("../../../apps/native/compiler/text.mica"),
         include_str!("../../../apps/native/compiler/text_scan.mica"),
         include_str!("../../../apps/native/compiler/text_search.mica"),
+        include_str!("../../../apps/native/compiler/distance.mica"),
         include_str!("../../../apps/native/compiler/url.mica"),
         include_str!("../../../apps/native/compiler/numeric.mica"),
         include_str!("../../../apps/native/compiler/functions.mica"),
@@ -3788,6 +3789,15 @@ fn native_source_converts_numbers_and_parses_decimal_integers() {
     check_native_source_body(
         include_str!("../../../apps/native/compiler/numeric_tests.mica"),
         include_str!("../../../apps/native/compiler/numeric_tests.c"),
+        &[],
+    );
+}
+
+#[test]
+fn native_source_measures_unicode_edit_distance_with_resource_controls() {
+    check_native_source_body(
+        include_str!("../../../apps/native/compiler/distance_tests.mica"),
+        include_str!("../../../apps/native/compiler/distance_tests.c"),
         &[],
     );
 }

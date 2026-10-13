@@ -1,0 +1,12 @@
+let texts = ["", "a", "b", "ab", "ba", "aaa", "kitten", "sitting", "é", "é",
+  "🙂", "🦀", "Aé🙂\0Z", "a\0b", "Saturday", "Sunday"]
+let distances = []
+for left in texts
+  for right in texts
+    distances = [@distances, edit_distance(left, right)]
+  end
+end
+let source = "prefix-é🙂é-tail"
+let slice = string_slice(source, 7, 11)
+return [distances, edit_distance(slice, "é🙂é"), edit_distance(@["kitten", "sitting"]),
+  edit_distance("é", "é"), edit_distance("ab", "ba")]
