@@ -347,6 +347,10 @@ Cache entries retain complete reachable sets and their immutable relation views,
 A draft rewrite gets a separate entry. A failed traversal cannot install a partial result.
 Discard the cache when selection ends.
 
+Declare `MethodSelector(method, selector)` with secondary index mask `2` for lookup by selector.
+Without that index, selection remains correct but scans unrelated selectors on each invocation.
+Lookups in `Param`, `Delegates`, and the method-to-program relation bind the first column and can use the primary index.
+
 `task_dispatch_resolve` reads `MethodSelector`, `Param`, and `Delegates` through the calling transaction.
 It binds candidate arguments, checks restrictions, and removes candidates dominated by a more specific signature.
 Named rest outranks unrestricted optional: both accept omission, but a supplied rest argument must be a list.

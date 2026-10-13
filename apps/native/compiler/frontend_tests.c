@@ -78,7 +78,10 @@ int main(void) {
     assert(mica_kernel_begin(&kernel, &worker, &install, source_integer(7)) == 0);
     for (uint64_t id = 701; id <= 704; ++id) {
         uint64_t arity = id == 701 ? 3 : id == 703 ? 6 : 2;
-        assert(mica_kernel_declare(&install, id, id, arity, 0, 0, 0) == 0);
+        // Dispatch binds column 1 of MethodSelector(method, selector).
+        // The other catalogue lookups bind the primary index's first column.
+        uint64_t indexes = id == 702 ? 2 : 0;
+        assert(mica_kernel_declare(&install, id, id, arity, 0, 0, indexes) == 0);
     }
     const char *catalogues[] = {"RelationName", "Arity", "FunctionalKey"};
     for (unsigned i = 0; i < 3; ++i) {

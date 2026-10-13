@@ -4324,13 +4324,15 @@ return input
             construction.len(),
             expectation.len()
         );
+        // The unindexed selector catalogue exhausts this allowance on the
+        // larger case. Keep the bound to catch accidental full catalogue scans.
         checks.push_str(&format!(
             "{{ {construction}\nmica_value_root_set(&input, argument.f_value);\n\
              struct mica_MemoryRoot expected_root = {{0}};\n\
              assert(mica_memory_root_push(worker, &expected_root));\n\
              {expectation}\nmica_value_root_set(&expected_root, expected.f_value);\n\
-             run_frontend(worker, kernel, code, runtime, &input, &output, 500000000, false);\n{{{assertions}}}\n\
-             run_frontend(worker, kernel, code, runtime, &input, &output, 500000000, true);\n{{{assertions}}}\n\
+             run_frontend(worker, kernel, code, runtime, &input, &output, 100000000, false);\n{{{assertions}}}\n\
+             run_frontend(worker, kernel, code, runtime, &input, &output, 100000000, true);\n{{{assertions}}}\n\
              assert(mica_memory_root_pop(worker, &expected_root));\n}}\n",
         ));
     }
