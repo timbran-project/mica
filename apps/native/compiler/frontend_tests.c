@@ -10,7 +10,7 @@ static mica_type_Value source_integer(int64_t number) {
 }
 static void run_frontend(struct mica_MemoryWorker *worker, struct mica_Kernel *kernel,
     struct mica_MemoryRoot *code, struct mica_TaskRuntime *runtime,
-    struct mica_MemoryRoot *input, struct mica_MemoryRoot *output, bool collect) {
+    struct mica_MemoryRoot *input, struct mica_MemoryRoot *output, uint64_t steps, bool collect) {
     struct mica_MemoryRoot image = {0};
     assert(mica_memory_root_push(worker, &image));
     mica_type_Value value = mica_value_root_get(input);
@@ -22,7 +22,7 @@ static void run_frontend(struct mica_MemoryWorker *worker, struct mica_Kernel *k
     struct mica_TaskControl task = {0};
     struct mica_TaskServices services = {0};
     // Match the call-depth limit used by the Rust-hosted frontend oracle.
-    assert(mica_task_init(&task, worker, kernel, &image, 10000000, 3, 256, runtime) == 0);
+    assert(mica_task_init(&task, worker, kernel, &image, steps, 3, 256, runtime) == 0);
     uint64_t limit = worker->f_heap->f_collection_limit;
     if (collect) worker->f_heap->f_collection_limit = 0;
     uint64_t collections = worker->f_heap->f_collections;

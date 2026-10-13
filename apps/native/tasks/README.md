@@ -573,8 +573,35 @@ CC=clang cargo test --release -p mica-runtime --test native_codegen \
 ```
 
 This gate ends at `emit_program` register descriptions.
-Native lowering of those descriptions, live installation, and the complete self-hosting rebuild remain separate acceptance gates.
 The fixture supplies catalogue identities and excludes `emit_source`, which calls the Rust bytecode assembler.
+
+The backend dependency check covers the value, memory, kernel, task, and source compiler generators.
+It checks instructions, builtins, catalogue queries, and method dependencies, including calls inside nested functions.
+It also resolves the complete method closures for runtime construction and source compilation.
+
+```sh
+cargo test --release -p mica-runtime --test native_codegen \
+  native_source_supports_backend_dependencies
+```
+
+The register-lowering check compiles analysis, native body generation, and their dependencies into the generated runtime.
+Inputs contain linked register descriptions, literal layout, and runtime declarations. They contain no cached analysis or native function bodies.
+The runtime computes analysis, continuation regions, rooted function bodies, and continuation wrappers.
+Cases cover a constant return and a method with a captured closure, loop control, a commit boundary, and exception handlers.
+
+Complete IR results must match Rust-hosted Mica and pass the native IR validator.
+Each case runs with ordinary and forced collection under ASan and UBSan.
+Both bootstrap tiers must produce identical C for the lowering library.
+The fixture uses the shared value codec to avoid large C stack frames for input construction.
+
+```sh
+CC=clang cargo test --release -p mica-runtime --test native_codegen \
+  native_source_executes_register_lowering -- --ignored --nocapture
+```
+
+Generation and sanitizer compilation take several minutes, so ordinary test runs exclude this check.
+This check starts after literal preparation and exception lowering. It uses supplied runtime declarations and predeclared continuation entry points.
+Native execution of the complete `native_source/compile` pipeline, live installation, and a self-hosting rebuild remain separate acceptance gates.
 
 ## Remaining integration
 

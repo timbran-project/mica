@@ -11,7 +11,7 @@ use std::thread;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use mica_runtime::{SourceRunner, TaskInput, TaskLimits, TaskOutcome};
-use mica_var::{Symbol, Value, ValueKind};
+use mica_var::{Symbol, Value, ValueKind, encode_value};
 
 const SOURCES: &[&str] = &[
     include_str!("../../../apps/native/ir.mica"),
@@ -1767,36 +1767,38 @@ state = native/block_body(state, v["entry"], [[:PackPointer, v["word"], [v["inpu
     }
 }
 
+const VALUE_SOURCES: &[&str] = &[
+    include_str!("../../../apps/native/value/program.mica"),
+    include_str!("../../../apps/native/value/immediates.mica"),
+    include_str!("../../../apps/native/value/numbers.mica"),
+    include_str!("../../../apps/native/value/symbol_storage.mica"),
+    include_str!("../../../apps/native/memory/program.mica"),
+    include_str!("../../../apps/native/memory/allocation.mica"),
+    include_str!("../../../apps/native/memory/collection.mica"),
+    include_str!("../../../apps/native/memory/lifecycle.mica"),
+    include_str!("../../../apps/native/memory/platform.mica"),
+    include_str!("../../../apps/native/value/memory.mica"),
+    include_str!("../../../apps/native/value/tracing.mica"),
+    include_str!("../../../apps/native/value/heap.mica"),
+    include_str!("../../../apps/native/value/utf8.mica"),
+    include_str!("../../../apps/native/value/strings.mica"),
+    include_str!("../../../apps/native/value/symbols.mica"),
+    include_str!("../../../apps/native/value/string_append.mica"),
+    include_str!("../../../apps/native/value/string_search.mica"),
+    include_str!("../../../apps/native/value/compare.mica"),
+    include_str!("../../../apps/native/value/maps.mica"),
+    include_str!("../../../apps/native/value/collections.mica"),
+    include_str!("../../../apps/native/value/relations.mica"),
+    include_str!("../../../apps/native/value/hash.mica"),
+    include_str!("../../../apps/native/value/copy.mica"),
+    include_str!("../../../apps/native/value/buffer.mica"),
+    include_str!("../../../apps/native/value/codec.mica"),
+    include_str!("../../../apps/native/value/codec_decode.mica"),
+    include_str!("../../../apps/native/value/persistence.mica"),
+];
+
 fn load_native_values(runner: &mut SourceRunner) {
-    for source in [
-        include_str!("../../../apps/native/value/program.mica"),
-        include_str!("../../../apps/native/value/immediates.mica"),
-        include_str!("../../../apps/native/value/numbers.mica"),
-        include_str!("../../../apps/native/value/symbol_storage.mica"),
-        include_str!("../../../apps/native/memory/program.mica"),
-        include_str!("../../../apps/native/memory/allocation.mica"),
-        include_str!("../../../apps/native/memory/collection.mica"),
-        include_str!("../../../apps/native/memory/lifecycle.mica"),
-        include_str!("../../../apps/native/memory/platform.mica"),
-        include_str!("../../../apps/native/value/memory.mica"),
-        include_str!("../../../apps/native/value/tracing.mica"),
-        include_str!("../../../apps/native/value/heap.mica"),
-        include_str!("../../../apps/native/value/utf8.mica"),
-        include_str!("../../../apps/native/value/strings.mica"),
-        include_str!("../../../apps/native/value/symbols.mica"),
-        include_str!("../../../apps/native/value/string_append.mica"),
-        include_str!("../../../apps/native/value/string_search.mica"),
-        include_str!("../../../apps/native/value/compare.mica"),
-        include_str!("../../../apps/native/value/maps.mica"),
-        include_str!("../../../apps/native/value/collections.mica"),
-        include_str!("../../../apps/native/value/relations.mica"),
-        include_str!("../../../apps/native/value/hash.mica"),
-        include_str!("../../../apps/native/value/copy.mica"),
-        include_str!("../../../apps/native/value/buffer.mica"),
-        include_str!("../../../apps/native/value/codec.mica"),
-        include_str!("../../../apps/native/value/codec_decode.mica"),
-        include_str!("../../../apps/native/value/persistence.mica"),
-    ] {
+    for source in VALUE_SOURCES {
         runner.run_filein(source).unwrap_or_else(|error| {
             panic!("{}", runner.render_source_task_error(&error));
         });
@@ -2464,51 +2466,53 @@ fn native_tasks_execute_on_both_mica_tiers() {
     check_native_kernel_fixture(true);
 }
 
+const SOURCE_COMPILER_SOURCES: &[&str] = &[
+    include_str!("../../../apps/compiler/emit.mica"),
+    include_str!("../../../apps/native/compiler/exceptions.mica"),
+    include_str!("../../../apps/native/compiler/analysis.mica"),
+    include_str!("../../../apps/native/compiler/flow.mica"),
+    include_str!("../../../apps/native/compiler/builders.mica"),
+    include_str!("../../../apps/native/compiler/errors.mica"),
+    include_str!("../../../apps/native/compiler/operations.mica"),
+    include_str!("../../../apps/native/compiler/builtins.mica"),
+    include_str!("../../../apps/native/compiler/constructors.mica"),
+    include_str!("../../../apps/native/compiler/patterns.mica"),
+    include_str!("../../../apps/native/compiler/queries.mica"),
+    include_str!("../../../apps/native/compiler/updates.mica"),
+    include_str!("../../../apps/native/compiler/ordering.mica"),
+    include_str!("../../../apps/native/compiler/subscriptions.mica"),
+    include_str!("../../../apps/native/compiler/time.mica"),
+    include_str!("../../../apps/native/compiler/text.mica"),
+    include_str!("../../../apps/native/compiler/case_data.mica"),
+    include_str!("../../../apps/native/compiler/case.mica"),
+    include_str!("../../../apps/native/compiler/text_scan.mica"),
+    include_str!("../../../apps/native/compiler/text_search.mica"),
+    include_str!("../../../apps/native/compiler/distance.mica"),
+    include_str!("../../../apps/native/compiler/algebra.mica"),
+    include_str!("../../../apps/native/compiler/url.mica"),
+    include_str!("../../../apps/native/compiler/command_text.mica"),
+    include_str!("../../../apps/native/compiler/quoting.mica"),
+    include_str!("../../../apps/native/compiler/format_number.mica"),
+    include_str!("../../../apps/native/compiler/literal_read.mica"),
+    include_str!("../../../apps/native/compiler/literal_write.mica"),
+    include_str!("../../../apps/native/compiler/json.mica"),
+    include_str!("../../../apps/native/compiler/json_read.mica"),
+    include_str!("../../../apps/native/compiler/json_write.mica"),
+    include_str!("../../../apps/native/compiler/numeric.mica"),
+    include_str!("../../../apps/native/compiler/decimal.mica"),
+    include_str!("../../../apps/native/compiler/functions.mica"),
+    include_str!("../../../apps/native/compiler/collections.mica"),
+    include_str!("../../../apps/native/compiler/access.mica"),
+    include_str!("../../../apps/native/compiler/expressions.mica"),
+    include_str!("../../../apps/native/compiler/prepare.mica"),
+    include_str!("../../../apps/native/compiler/continuations.mica"),
+    include_str!("../../../apps/native/compiler/install.mica"),
+    include_str!("../../../apps/native/compiler/lower.mica"),
+    include_str!("../../../apps/native/compiler/program.mica"),
+];
+
 fn load_native_source_compiler(runner: &mut SourceRunner) {
-    for source in [
-        include_str!("../../../apps/compiler/emit.mica"),
-        include_str!("../../../apps/native/compiler/exceptions.mica"),
-        include_str!("../../../apps/native/compiler/analysis.mica"),
-        include_str!("../../../apps/native/compiler/flow.mica"),
-        include_str!("../../../apps/native/compiler/builders.mica"),
-        include_str!("../../../apps/native/compiler/errors.mica"),
-        include_str!("../../../apps/native/compiler/operations.mica"),
-        include_str!("../../../apps/native/compiler/builtins.mica"),
-        include_str!("../../../apps/native/compiler/constructors.mica"),
-        include_str!("../../../apps/native/compiler/patterns.mica"),
-        include_str!("../../../apps/native/compiler/queries.mica"),
-        include_str!("../../../apps/native/compiler/updates.mica"),
-        include_str!("../../../apps/native/compiler/ordering.mica"),
-        include_str!("../../../apps/native/compiler/subscriptions.mica"),
-        include_str!("../../../apps/native/compiler/time.mica"),
-        include_str!("../../../apps/native/compiler/text.mica"),
-        include_str!("../../../apps/native/compiler/case_data.mica"),
-        include_str!("../../../apps/native/compiler/case.mica"),
-        include_str!("../../../apps/native/compiler/text_scan.mica"),
-        include_str!("../../../apps/native/compiler/text_search.mica"),
-        include_str!("../../../apps/native/compiler/distance.mica"),
-        include_str!("../../../apps/native/compiler/algebra.mica"),
-        include_str!("../../../apps/native/compiler/url.mica"),
-        include_str!("../../../apps/native/compiler/command_text.mica"),
-        include_str!("../../../apps/native/compiler/quoting.mica"),
-        include_str!("../../../apps/native/compiler/format_number.mica"),
-        include_str!("../../../apps/native/compiler/literal_read.mica"),
-        include_str!("../../../apps/native/compiler/literal_write.mica"),
-        include_str!("../../../apps/native/compiler/json.mica"),
-        include_str!("../../../apps/native/compiler/json_read.mica"),
-        include_str!("../../../apps/native/compiler/json_write.mica"),
-        include_str!("../../../apps/native/compiler/numeric.mica"),
-        include_str!("../../../apps/native/compiler/decimal.mica"),
-        include_str!("../../../apps/native/compiler/functions.mica"),
-        include_str!("../../../apps/native/compiler/collections.mica"),
-        include_str!("../../../apps/native/compiler/access.mica"),
-        include_str!("../../../apps/native/compiler/expressions.mica"),
-        include_str!("../../../apps/native/compiler/prepare.mica"),
-        include_str!("../../../apps/native/compiler/continuations.mica"),
-        include_str!("../../../apps/native/compiler/install.mica"),
-        include_str!("../../../apps/native/compiler/lower.mica"),
-        include_str!("../../../apps/native/compiler/program.mica"),
-    ] {
+    for source in SOURCE_COMPILER_SOURCES {
         runner.run_filein(source).unwrap_or_else(|error| {
             panic!("{}", runner.render_source_task_error(&error));
         });
@@ -3565,6 +3569,24 @@ fn source_value_check(expected: &Value, actual: &str) -> String {
     }
 }
 
+// Large compiler modules use the shared value codec instead of emitting one
+// automatic C variable per cell. Named symbols cross the host namespace safely.
+fn source_encoded_value(value: &Value, name: &str) -> String {
+    let mut bytes = Vec::new();
+    encode_value(value, &mut bytes).unwrap();
+    let data = bytes
+        .iter()
+        .map(u8::to_string)
+        .collect::<Vec<_>>()
+        .join(",");
+    format!(
+        "static const uint8_t {name}_bytes[] = {{{data}}};\n\
+         struct mica_ValueResult {name} = mica_value_decode_exact(worker, symbols,\n\
+         {name}_bytes, sizeof({name}_bytes), (struct mica_ValueCodecOptions){{0}});\n\
+         assert({name}.f_ok);\n"
+    )
+}
+
 #[test]
 fn native_source_links_prototype_restrictions_and_identity_constants() {
     let source = r#"
@@ -3623,7 +3645,7 @@ end
         mica_value_root_set(&input, case_index == 4 ? source_integer(7) :
             mica_value_identity(11001 + case_index).f_value);
         for (unsigned collect = 0; collect < 2; ++collect) {
-            run_frontend(worker, kernel, code, runtime, &input, &output, collect);
+            run_frontend(worker, kernel, code, runtime, &input, &output, 10000000, collect);
             mica_type_Value result = mica_value_root_get(&output);
             assert(mica_value_list_length(result).f_number == 7);
             const int64_t numbers[] = {expected[case_index], 30, 40, 10, 2};
@@ -3641,7 +3663,7 @@ end
     assert(edge.f_ok && mica_kernel_write(&graph, 701, edge.f_value, false) == 0);
     assert(mica_kernel_commit(&graph) == 0 && mica_kernel_end(&graph));
     mica_value_root_set(&input, mica_value_identity(11003).f_value);
-    run_frontend(worker, kernel, code, runtime, &input, &output, true);
+    run_frontend(worker, kernel, code, runtime, &input, &output, 10000000, true);
     assert(mica_value_list_get(mica_value_root_get(&output), 0).f_value == source_integer(0));
 "#;
     let fixture = include_str!("../../../apps/native/compiler/frontend_tests.c")
@@ -4111,9 +4133,238 @@ fn native_source_supports_c_generator_dependencies() {
     );
 }
 
+fn native_backend_library() -> Vec<&'static str> {
+    let mut sources = Vec::new();
+    for source in SOURCES
+        .iter()
+        .chain(VALUE_SOURCES)
+        .chain(KERNEL_SOURCES)
+        .chain(TASK_SOURCES)
+        .chain(SOURCE_COMPILER_SOURCES)
+    {
+        if !sources.contains(source) {
+            sources.push(*source);
+        }
+    }
+    sources
+}
+
+#[test]
+fn native_source_supports_backend_dependencies() {
+    let library = native_backend_library();
+    let inventory = native_source_dependency_inventory(&library, &["emit_source"]);
+    let dependencies = inventory
+        .map_get(&Value::symbol(Symbol::intern("dependencies")))
+        .unwrap();
+    for name in [
+        "native_source/compile",
+        "native_source/define_entries",
+        "native_tasks/definitions",
+    ] {
+        assert!(
+            dependencies
+                .map_get(&Value::symbol(Symbol::intern(name)))
+                .is_some()
+        );
+        let source = native_source_dependency_closure_from_inventory(&library, name, &inventory);
+        eprintln!(
+            "native backend closure: {name}, {} source bytes",
+            source.len()
+        );
+    }
+    eprintln!(
+        "native backend inventory: {} methods, {} programs",
+        dependencies.map_len().unwrap(),
+        inventory
+            .map_get(&Value::symbol(Symbol::intern("programs")))
+            .unwrap()
+            .as_int()
+            .unwrap()
+    );
+}
+
+#[test]
+#[ignore = "native backend bootstrap and sanitizer compilation take several minutes"]
+fn native_source_executes_register_lowering() {
+    let entry = r#"
+verb native_lowering_fixture(input: map) -> map
+  let module = input
+  let programs = []
+  for program in module[:source_programs]
+    let analysis = native_source/analyse(program[:analysis][:description], program[:analysis][:parameters])
+    program[:analysis] = analysis
+    program[:regions] = native_source/regions(analysis)
+    programs = [@programs, program]
+  end
+  module[:source_programs] = programs
+  module = native_source/define_entries(module)
+  let state: map = module[:state]
+  return state
+end
+"#;
+    let mut library = native_backend_library();
+    library.push(entry);
+    let inventory = native_source_dependency_inventory(&library, &["emit_source"]);
+    let dependencies = native_source_dependency_closure_from_inventory(
+        &library,
+        "native_lowering_fixture",
+        &inventory,
+    );
+    // The harness invokes method zero. The remaining selected methods retain
+    // their original Mica source and are installed under explicit identities.
+    let source = format!("{entry}\n{}", dependencies.replace(entry.trim(), ""));
+    let method_ids = format!(
+        "[{}]",
+        source
+            .lines()
+            .filter(|line| line.starts_with("verb "))
+            .enumerate()
+            .map(|(index, _)| format!("[{}, {}]", 10000 + index, 20000 + index))
+            .collect::<Vec<_>>()
+            .join(",")
+    );
+    let mut oracle = runner(true).with_task_limits(TaskLimits {
+        instruction_budget: 2_000_000_000,
+        max_call_depth: 256,
+        ..TaskLimits::default()
+    });
+    load_native_kernel(&mut oracle, true);
+    load_native_source_compiler(&mut oracle);
+    oracle.run_filein(entry).unwrap();
+    let mut checks = String::new();
+    for source in [
+        "return 42",
+        r#"
+verb lowering_subject(value)
+  let adjust = fn(amount) => value + amount
+  let total = 0
+  for index in 0..4
+    if index == 2
+      continue
+    end
+    total = total + adjust(index)
+  end
+  try
+    require value >= 0
+    commit()
+  catch E_INVARG as problem
+    return [:failed, problem.code]
+  finally
+    total = total + 1
+  end
+  return [total, {:value -> value}, adjust]
+end
+"#,
+    ] {
+        // Retain runtime declarations and literal layout, but no pre-lowered
+        // function bodies. The generated runtime reconstructs analysis, native
+        // bodies, continuation wrappers, roots, and source annotations.
+        let method_ids = if source.starts_with("return") {
+            "[]"
+        } else {
+            "[[810, 811]]"
+        };
+        let input = eval(
+            &mut oracle,
+            &format!(
+                r#"
+let module = native_source/compile(native_tasks/definitions(), "subject", {source:?}, {{}}, {{}}, {method_ids})
+for table in [:locals, :blocks, :instructions, :terminators, :annotations]
+  module[:state][table] = []
+end
+let entries = {{}}
+for program in module[:source_programs]
+  entries[module[:functions][string_concat(program[:name], "_body")]] = true
+  for index in 0..(len(program[:regions]) - 1)
+    entries[module[:functions][string_concat(program[:name], "_", to_literal(index))]] = true
+  end
+end
+module[:state][:foreign] = [[row[0]] for row in module[:state][:functions] if !map_contains_key(entries, row[0])]
+// Analysis is computed by the native fixture, not supplied by its host.
+module[:source_programs] = [{{:name -> program[:name], :analysis -> {{
+  :description -> program[:analysis][:description], :parameters -> program[:analysis][:parameters]}}}}
+  for program in module[:source_programs]]
+let input = {{}}
+for key in [:state, :functions, :bindings, :constants, :function_values,
+  :call_shapes, :source_prefix, :source_literal_index, :source_programs]
+  input[key] = module[key]
+end
+return input
+"#
+            ),
+        );
+        let mut request = SourceRunner::root_source_request("");
+        request.input = TaskInput::Invocation {
+            selector: Symbol::intern("native_lowering_fixture"),
+            roles: vec![(Symbol::intern("input"), input.clone())],
+        };
+        let submitted = oracle.submit_invocation(request).unwrap();
+        let TaskOutcome::Complete {
+            value: expected, ..
+        } = submitted.outcome
+        else {
+            panic!("lowering oracle: {:?}", submitted.outcome);
+        };
+        let mut validation = SourceRunner::root_source_request("");
+        validation.input = TaskInput::Invocation {
+            selector: Symbol::intern("native/check"),
+            roles: vec![(Symbol::intern("state"), expected.clone())],
+        };
+        let validated = oracle.submit_invocation(validation).unwrap();
+        assert!(
+            matches!(validated.outcome, TaskOutcome::Complete { .. }),
+            "lowered IR validation: {:?}",
+            validated.outcome
+        );
+        let construction = source_encoded_value(&input, "argument");
+        let expectation = source_encoded_value(&expected, "expected");
+        let assertions = "struct mica_IntResult compared = mica_value_compare(mica_value_root_get(&output), mica_value_root_get(&expected_root)); assert(compared.f_ok && compared.f_number == 0);";
+        eprintln!(
+            "native lowering fixture: {} input C bytes, {} expected IR C bytes",
+            construction.len(),
+            expectation.len()
+        );
+        checks.push_str(&format!(
+            "{{ {construction}\nmica_value_root_set(&input, argument.f_value);\n\
+             struct mica_MemoryRoot expected_root = {{0}};\n\
+             assert(mica_memory_root_push(worker, &expected_root));\n\
+             {expectation}\nmica_value_root_set(&expected_root, expected.f_value);\n\
+             run_frontend(worker, kernel, code, runtime, &input, &output, 500000000, false);\n{{{assertions}}}\n\
+             run_frontend(worker, kernel, code, runtime, &input, &output, 500000000, true);\n{{{assertions}}}\n\
+             assert(mica_memory_root_pop(worker, &expected_root));\n}}\n",
+        ));
+    }
+    let fixture = include_str!("../../../apps/native/compiler/frontend_tests.c")
+        .replace("/* FRONTEND_CONFORMANCE_CASES */", &checks);
+    let (generated, memory, tasks) = thread::scope(|scope| {
+        let [first, second] = [true, false].map(|tier| {
+            let source = &source;
+            let method_ids = &method_ids;
+            scope.spawn(move || generate_native_source_example(tier, source, method_ids, &[]))
+        });
+        let first = first.join().unwrap();
+        let second = second.join().unwrap();
+        assert!(
+            first == second,
+            "register lowering differs between bootstrap tiers"
+        );
+        first
+    });
+    check_native_source_fixture_with_flags(
+        &format!(
+            "{generated}\n{memory}\n{tasks}\n{}\n{}\n{fixture}",
+            include_str!("../../../native/platform/allocation.c"),
+            include_str!("../../../native/platform/mutex.c")
+        ),
+        &["-O0", "-g0"],
+    );
+}
+
 fn native_source_dependency_inventory(sources: &[&str], excluded: &[&str]) -> Value {
     let mut runner = runner(true).with_task_limits(TaskLimits {
-        instruction_budget: 500_000_000,
+        // The backend inventory includes the value, kernel, task, and compiler
+        // generators, beyond the smaller frontend and C-emitter libraries.
+        instruction_budget: 2_000_000_000,
         max_call_depth: 256,
         ..TaskLimits::default()
     });
@@ -4125,7 +4376,14 @@ fn native_source_dependency_inventory(sources: &[&str], excluded: &[&str]) -> Va
         runner.run_filein(source).unwrap();
     }
     load_native_source_compiler(&mut runner);
-    let source = sources.join("\n");
+    let source_files = format!(
+        "[{}]",
+        sources
+            .iter()
+            .map(|source| format!("{source:?}"))
+            .collect::<Vec<_>>()
+            .join(",")
+    );
     let excluded = format!(
         "[{}]",
         excluded
@@ -4138,19 +4396,22 @@ fn native_source_dependency_inventory(sources: &[&str], excluded: &[&str]) -> Va
         &mut runner,
         &format!(
             r#"
-let parsed = parse_rows({source:?})
-native/ensure(parsed[:errors] == [], to_literal(parsed[:errors]))
-let emitted = emit_program(parsed[:rows], parsed[:root])
-native/ensure(emitted[:errors] == [], to_literal(emitted[:errors]))
 let excluded = {excluded}
 let definitions = {{}}
 let dependencies = {{}}
 let pending = []
-for definition in emitted[:methods]
-  if !native/contains(excluded, definition[:selector])
-    definitions[definition[:selector]] = true
-    dependencies[definition[:selector]] = {{}}
-    pending = [@pending, [definition[:selector], definition[:program]]]
+for source in {source_files}
+  let parsed = parse_rows(source)
+  native/ensure(parsed[:errors] == [], to_literal(parsed[:errors]))
+  let emitted = emit_program(parsed[:rows], parsed[:root])
+  native/ensure(emitted[:errors] == [], to_literal(emitted[:errors]))
+  for definition in emitted[:methods]
+    if !native/contains(excluded, definition[:selector])
+      native/ensure(!map_contains_key(definitions, definition[:selector]), "duplicate generator method")
+      definitions[definition[:selector]] = true
+      dependencies[definition[:selector]] = {{}}
+      pending = [@pending, [definition[:selector], definition[:program]]]
+    end
   end
 end
 let supported = native_builtins/names()
@@ -4203,6 +4464,14 @@ return {{:programs -> position, :builtins -> builtins, :catalogues -> catalogues
 
 fn native_source_dependency_closure(sources: &[&str], entry: &str) -> String {
     let inventory = native_source_dependency_inventory(sources, &[]);
+    native_source_dependency_closure_from_inventory(sources, entry, &inventory)
+}
+
+fn native_source_dependency_closure_from_inventory(
+    sources: &[&str],
+    entry: &str,
+    inventory: &Value,
+) -> String {
     let dependencies = inventory
         .map_get(&Value::symbol(Symbol::intern("dependencies")))
         .unwrap();
@@ -4223,7 +4492,6 @@ fn native_source_dependency_closure(sources: &[&str], entry: &str) -> String {
             assert!(definitions.insert(name, definition).is_none(), "{name}");
         }
     }
-    assert_eq!(definitions.len(), dependencies.map_len().unwrap());
     let mut selected = BTreeSet::new();
     let mut pending = vec![entry.to_owned()];
     while let Some(name) = pending.pop() {
@@ -4514,7 +4782,7 @@ fn native_source_executes_the_compiler_parser() {
         }
         let (input, construction) = source_value_literal(&input, &mut 0);
         checks.push_str(&format!(
-            "{{ {construction}\nmica_value_root_set(&input, {input});\nrun_frontend(worker, kernel, code, runtime, &input, &output, false);\n{}\nrun_frontend(worker, kernel, code, runtime, &input, &output, true);\n{}\n}}\n",
+            "{{ {construction}\nmica_value_root_set(&input, {input});\nrun_frontend(worker, kernel, code, runtime, &input, &output, 10000000, false);\n{}\nrun_frontend(worker, kernel, code, runtime, &input, &output, 10000000, true);\n{}\n}}\n",
             source_value_check(&expected, "mica_value_root_get(&output)"),
             source_value_check(&expected, "mica_value_root_get(&output)"),
         ));
@@ -4757,7 +5025,7 @@ end
         let expected = eval(&mut oracle, &format!("return native/emit_c({expression})"));
         let (input, construction) = source_value_literal(&input, &mut 0);
         checks.push_str(&format!(
-            "{{ {construction}\nmica_value_root_set(&input, {input});\nrun_frontend(worker, kernel, code, runtime, &input, &output, false);\n{}\nrun_frontend(worker, kernel, code, runtime, &input, &output, true);\n{}\n}}\n",
+            "{{ {construction}\nmica_value_root_set(&input, {input});\nrun_frontend(worker, kernel, code, runtime, &input, &output, 10000000, false);\n{}\nrun_frontend(worker, kernel, code, runtime, &input, &output, 10000000, true);\n{}\n}}\n",
             source_value_check(&expected, "mica_value_root_get(&output)"),
             source_value_check(&expected, "mica_value_root_get(&output)"),
         ));
@@ -4908,7 +5176,7 @@ end
         );
         let (input, construction) = source_value_literal(&input, &mut 0);
         checks.push_str(&format!(
-            "{{ {construction}\nmica_value_root_set(&input, {input});\nrun_frontend(worker, kernel, code, runtime, &input, &output, false);\n{}\nrun_frontend(worker, kernel, code, runtime, &input, &output, true);\n{}\n}}\n",
+            "{{ {construction}\nmica_value_root_set(&input, {input});\nrun_frontend(worker, kernel, code, runtime, &input, &output, 10000000, false);\n{}\nrun_frontend(worker, kernel, code, runtime, &input, &output, 10000000, true);\n{}\n}}\n",
             source_value_check(&expected, "mica_value_root_get(&output)"),
             source_value_check(&expected, "mica_value_root_get(&output)"),
         ));
@@ -5346,107 +5614,111 @@ fn check_native_source_fixture_with_flags(fixture: &str, compilation_flags: &[&s
     );
 }
 
+const KERNEL_SOURCES: &[&str] = &[
+    include_str!("../../../apps/native/memory/roots.mica"),
+    include_str!("../../../apps/native/rules/schema.mica"),
+    include_str!("../../../apps/native/rules/builders.mica"),
+    include_str!("../../../apps/native/rules/validate.mica"),
+    include_str!("../../../apps/native/rules/stratify.mica"),
+    include_str!("../../../apps/native/rules/catalog.mica"),
+    include_str!("../../../apps/native/rules/program.mica"),
+    include_str!("../../../apps/native/kernel/code_catalog.mica"),
+    include_str!("../../../apps/native/kernel/program.mica"),
+    include_str!("../../../apps/native/kernel/execution.mica"),
+    include_str!("../../../apps/native/kernel/authority.mica"),
+    include_str!("../../../apps/native/kernel/policy.mica"),
+    include_str!("../../../apps/native/kernel/indexes.mica"),
+    include_str!("../../../apps/native/kernel/relations.mica"),
+    include_str!("../../../apps/native/kernel/transactions.mica"),
+    include_str!("../../../apps/native/kernel/catalogue.mica"),
+    include_str!("../../../apps/native/kernel/rule_indexes.mica"),
+    include_str!("../../../apps/native/kernel/rules.mica"),
+    include_str!("../../../apps/native/kernel/history.mica"),
+    include_str!("../../../apps/native/kernel/lifecycle.mica"),
+    include_str!("../../../apps/native/query/builders.mica"),
+    include_str!("../../../apps/native/query/roots.mica"),
+    include_str!("../../../apps/native/query/indexes.mica"),
+    include_str!("../../../apps/native/query/operators.mica"),
+    include_str!("../../../apps/native/query/sources.mica"),
+    include_str!("../../../apps/native/query/probes.mica"),
+    include_str!("../../../apps/native/query/program.mica"),
+    include_str!("../../../apps/native/rules/execution_builders.mica"),
+    include_str!("../../../apps/native/rules/lower.mica"),
+    include_str!("../../../apps/native/rules/bindings.mica"),
+    include_str!("../../../apps/native/rules/evaluate.mica"),
+    include_str!("../../../apps/native/rules/maintain.mica"),
+    include_str!("../../../apps/compiler/lex.mica"),
+    include_str!("../../../apps/compiler/parse.mica"),
+    include_str!("../../../apps/compiler/ast.mica"),
+    include_str!("../../../apps/native/value/literals.mica"),
+    include_str!("../../../apps/native/rules/source.mica"),
+    include_str!("../../../apps/native/rules/install.mica"),
+    include_str!("../../../apps/native/tests/rule_sources.mica"),
+];
+
+const TASK_SOURCES: &[&str] = &[
+    include_str!("../../../apps/native/tasks/program.mica"),
+    include_str!("../../../apps/native/tasks/platform.mica"),
+    include_str!("../../../apps/native/tasks/code.mica"),
+    include_str!("../../../apps/native/tasks/code_lifecycle.mica"),
+    include_str!("../../../apps/native/tasks/code_tests.mica"),
+    include_str!("../../../apps/native/tasks/images.mica"),
+    include_str!("../../../apps/native/tasks/dispatch.mica"),
+    include_str!("../../../apps/native/tasks/dispatch_bindings.mica"),
+    include_str!("../../../apps/native/tasks/dispatch_context.mica"),
+    include_str!("../../../apps/native/tasks/dispatch_positional.mica"),
+    include_str!("../../../apps/native/tasks/dispatch_restrictions.mica"),
+    include_str!("../../../apps/native/tasks/dispatch_signatures.mica"),
+    include_str!("../../../apps/native/tasks/dispatch_selection.mica"),
+    include_str!("../../../apps/native/tasks/attempts.mica"),
+    include_str!("../../../apps/native/tasks/invocation.mica"),
+    include_str!("../../../apps/native/tasks/handlers.mica"),
+    include_str!("../../../apps/native/tasks/control.mica"),
+    include_str!("../../../apps/native/tasks/boundaries.mica"),
+    include_str!("../../../apps/native/tasks/execution.mica"),
+    include_str!("../../../apps/native/tasks/calls.mica"),
+    include_str!("../../../apps/native/tasks/functions.mica"),
+    include_str!("../../../apps/native/tasks/queue.mica"),
+    include_str!("../../../apps/native/tasks/services.mica"),
+    include_str!("../../../apps/native/tasks/resources.mica"),
+    include_str!("../../../apps/native/tasks/mailboxes.mica"),
+    include_str!("../../../apps/native/tasks/mailbox_streams.mica"),
+    include_str!("../../../apps/native/tasks/mailbox_lifecycle.mica"),
+    include_str!("../../../apps/native/tasks/mailbox_delivery.mica"),
+    include_str!("../../../apps/native/tasks/requests.mica"),
+    include_str!("../../../apps/native/tasks/subscription_requests.mica"),
+    include_str!("../../../apps/native/tasks/subscription_messages.mica"),
+    include_str!("../../../apps/native/tasks/subscription_rows.mica"),
+    include_str!("../../../apps/native/tasks/subscription_delivery.mica"),
+    include_str!("../../../apps/native/tasks/subscription_catalogue.mica"),
+    include_str!("../../../apps/native/tasks/subscription_pump.mica"),
+    include_str!("../../../apps/native/tasks/subscription_events.mica"),
+    include_str!("../../../apps/native/tasks/subscriptions.mica"),
+    include_str!("../../../apps/native/tasks/subscription_lifecycle.mica"),
+    include_str!("../../../apps/native/tasks/scheduler.mica"),
+    include_str!("../../../apps/native/tasks/scheduler_launch.mica"),
+    include_str!("../../../apps/native/tasks/spawn.mica"),
+    include_str!("../../../apps/native/tasks/scheduler_lifecycle.mica"),
+    include_str!("../../../apps/native/tasks/scheduler_admission.mica"),
+    include_str!("../../../apps/native/tasks/scheduler_workers.mica"),
+    include_str!("../../../apps/native/tasks/scheduler_events.mica"),
+    include_str!("../../../apps/native/tasks/services_tests.mica"),
+    include_str!("../../../apps/native/tasks/scheduler_tests.mica"),
+    include_str!("../../../apps/native/tasks/handlers_tests.mica"),
+    include_str!("../../../apps/native/tasks/calls_tests.mica"),
+    include_str!("../../../apps/native/tasks/spawn_tests.mica"),
+    include_str!("../../../apps/native/tasks/tests.mica"),
+];
+
 fn load_native_kernel(runner: &mut SourceRunner, tasks: bool) {
     load_native_values(runner);
-    for source in [
-        include_str!("../../../apps/native/memory/roots.mica"),
-        include_str!("../../../apps/native/rules/schema.mica"),
-        include_str!("../../../apps/native/rules/builders.mica"),
-        include_str!("../../../apps/native/rules/validate.mica"),
-        include_str!("../../../apps/native/rules/stratify.mica"),
-        include_str!("../../../apps/native/rules/catalog.mica"),
-        include_str!("../../../apps/native/rules/program.mica"),
-        include_str!("../../../apps/native/kernel/code_catalog.mica"),
-        include_str!("../../../apps/native/kernel/program.mica"),
-        include_str!("../../../apps/native/kernel/execution.mica"),
-        include_str!("../../../apps/native/kernel/authority.mica"),
-        include_str!("../../../apps/native/kernel/policy.mica"),
-        include_str!("../../../apps/native/kernel/indexes.mica"),
-        include_str!("../../../apps/native/kernel/relations.mica"),
-        include_str!("../../../apps/native/kernel/transactions.mica"),
-        include_str!("../../../apps/native/kernel/catalogue.mica"),
-        include_str!("../../../apps/native/kernel/rule_indexes.mica"),
-        include_str!("../../../apps/native/kernel/rules.mica"),
-        include_str!("../../../apps/native/kernel/history.mica"),
-        include_str!("../../../apps/native/kernel/lifecycle.mica"),
-        include_str!("../../../apps/native/query/builders.mica"),
-        include_str!("../../../apps/native/query/roots.mica"),
-        include_str!("../../../apps/native/query/indexes.mica"),
-        include_str!("../../../apps/native/query/operators.mica"),
-        include_str!("../../../apps/native/query/sources.mica"),
-        include_str!("../../../apps/native/query/probes.mica"),
-        include_str!("../../../apps/native/query/program.mica"),
-        include_str!("../../../apps/native/rules/execution_builders.mica"),
-        include_str!("../../../apps/native/rules/lower.mica"),
-        include_str!("../../../apps/native/rules/bindings.mica"),
-        include_str!("../../../apps/native/rules/evaluate.mica"),
-        include_str!("../../../apps/native/rules/maintain.mica"),
-        include_str!("../../../apps/compiler/lex.mica"),
-        include_str!("../../../apps/compiler/parse.mica"),
-        include_str!("../../../apps/compiler/ast.mica"),
-        include_str!("../../../apps/native/value/literals.mica"),
-        include_str!("../../../apps/native/rules/source.mica"),
-        include_str!("../../../apps/native/rules/install.mica"),
-        include_str!("../../../apps/native/tests/rule_sources.mica"),
-    ] {
+    for source in KERNEL_SOURCES {
         runner.run_filein(source).unwrap_or_else(|error| {
             panic!("{}", runner.render_source_task_error(&error));
         });
     }
     if tasks {
-        for source in [
-            include_str!("../../../apps/native/tasks/program.mica"),
-            include_str!("../../../apps/native/tasks/platform.mica"),
-            include_str!("../../../apps/native/tasks/code.mica"),
-            include_str!("../../../apps/native/tasks/code_lifecycle.mica"),
-            include_str!("../../../apps/native/tasks/code_tests.mica"),
-            include_str!("../../../apps/native/tasks/images.mica"),
-            include_str!("../../../apps/native/tasks/dispatch.mica"),
-            include_str!("../../../apps/native/tasks/dispatch_bindings.mica"),
-            include_str!("../../../apps/native/tasks/dispatch_context.mica"),
-            include_str!("../../../apps/native/tasks/dispatch_positional.mica"),
-            include_str!("../../../apps/native/tasks/dispatch_restrictions.mica"),
-            include_str!("../../../apps/native/tasks/dispatch_signatures.mica"),
-            include_str!("../../../apps/native/tasks/dispatch_selection.mica"),
-            include_str!("../../../apps/native/tasks/attempts.mica"),
-            include_str!("../../../apps/native/tasks/invocation.mica"),
-            include_str!("../../../apps/native/tasks/handlers.mica"),
-            include_str!("../../../apps/native/tasks/control.mica"),
-            include_str!("../../../apps/native/tasks/boundaries.mica"),
-            include_str!("../../../apps/native/tasks/execution.mica"),
-            include_str!("../../../apps/native/tasks/calls.mica"),
-            include_str!("../../../apps/native/tasks/functions.mica"),
-            include_str!("../../../apps/native/tasks/queue.mica"),
-            include_str!("../../../apps/native/tasks/services.mica"),
-            include_str!("../../../apps/native/tasks/resources.mica"),
-            include_str!("../../../apps/native/tasks/mailboxes.mica"),
-            include_str!("../../../apps/native/tasks/mailbox_streams.mica"),
-            include_str!("../../../apps/native/tasks/mailbox_lifecycle.mica"),
-            include_str!("../../../apps/native/tasks/mailbox_delivery.mica"),
-            include_str!("../../../apps/native/tasks/requests.mica"),
-            include_str!("../../../apps/native/tasks/subscription_requests.mica"),
-            include_str!("../../../apps/native/tasks/subscription_messages.mica"),
-            include_str!("../../../apps/native/tasks/subscription_rows.mica"),
-            include_str!("../../../apps/native/tasks/subscription_delivery.mica"),
-            include_str!("../../../apps/native/tasks/subscription_catalogue.mica"),
-            include_str!("../../../apps/native/tasks/subscription_pump.mica"),
-            include_str!("../../../apps/native/tasks/subscription_events.mica"),
-            include_str!("../../../apps/native/tasks/subscriptions.mica"),
-            include_str!("../../../apps/native/tasks/subscription_lifecycle.mica"),
-            include_str!("../../../apps/native/tasks/scheduler.mica"),
-            include_str!("../../../apps/native/tasks/scheduler_launch.mica"),
-            include_str!("../../../apps/native/tasks/spawn.mica"),
-            include_str!("../../../apps/native/tasks/scheduler_lifecycle.mica"),
-            include_str!("../../../apps/native/tasks/scheduler_admission.mica"),
-            include_str!("../../../apps/native/tasks/scheduler_workers.mica"),
-            include_str!("../../../apps/native/tasks/scheduler_events.mica"),
-            include_str!("../../../apps/native/tasks/services_tests.mica"),
-            include_str!("../../../apps/native/tasks/scheduler_tests.mica"),
-            include_str!("../../../apps/native/tasks/handlers_tests.mica"),
-            include_str!("../../../apps/native/tasks/calls_tests.mica"),
-            include_str!("../../../apps/native/tasks/spawn_tests.mica"),
-            include_str!("../../../apps/native/tasks/tests.mica"),
-        ] {
+        for source in TASK_SOURCES {
             runner.run_filein(source).unwrap_or_else(|error| {
                 panic!("{}", runner.render_source_task_error(&error));
             });
