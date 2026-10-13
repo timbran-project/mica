@@ -2478,6 +2478,7 @@ fn load_native_source_compiler(runner: &mut SourceRunner) {
         include_str!("../../../apps/native/compiler/queries.mica"),
         include_str!("../../../apps/native/compiler/updates.mica"),
         include_str!("../../../apps/native/compiler/ordering.mica"),
+        include_str!("../../../apps/native/compiler/subscriptions.mica"),
         include_str!("../../../apps/native/compiler/time.mica"),
         include_str!("../../../apps/native/compiler/text.mica"),
         include_str!("../../../apps/native/compiler/text_scan.mica"),
@@ -3855,6 +3856,11 @@ fn native_builtin_definitions_ignore_unreachable_calls() {
                 "../../../apps/native/compiler/literal_read.mica"
             ))
             .unwrap();
+        runner
+            .run_filein(include_str!(
+                "../../../apps/native/compiler/subscriptions.mica"
+            ))
+            .unwrap();
         assert_eq!(
             eval(
                 &mut runner,
@@ -3862,9 +3868,10 @@ fn native_builtin_definitions_ignore_unreachable_calls() {
 let input = {:source_programs -> [{:analysis -> {
   :description -> {:code -> [[:Return, 0], [:BuiltinCall, 0, :is_builtin, []],
     [:BuiltinCall, 0, :to_symbol, []], [:BuiltinCall, 0, :sort, []],
-    [:BuiltinCall, 0, :relation_from_rows, []], [:BuiltinCall, 0, :from_literal, []]]},
+    [:BuiltinCall, 0, :relation_from_rows, []], [:BuiltinCall, 0, :from_literal, []],
+    [:BuiltinCall, 0, :subscribe_changes, []]]},
   :reachable -> {0 -> true}}}]}
-return native_builtins/definitions(input) == input && native_read/definitions(input) == input
+return native_builtins/definitions(input) == input && native_read/definitions(input) == input && native_source_subscriptions/definitions(input) == input
 "#
             ),
             Value::bool(true)
@@ -4441,6 +4448,21 @@ fn native_source_queries_relation_catalogue() {
         include_str!("../../../apps/native/compiler/catalogue_tests.mica"),
         "static void source_body_checks(struct mica_MemoryWorker *worker, struct mica_Kernel *kernel, struct mica_MemoryRoot *code, struct mica_SymbolTable *symbols) { (void)worker; (void)kernel; (void)code; (void)symbols; }\n",
         &[],
+    );
+}
+
+#[test]
+fn native_source_stages_transactional_subscriptions() {
+    check_native_source_body_against(
+        include_str!("../../../apps/native/compiler/subscriptions_tests.mica"),
+        "return true",
+        include_str!("../../../apps/native/compiler/subscriptions_tests.c"),
+        &[
+            ("mode", ":validate"),
+            ("sender", "none"),
+            ("target", "none"),
+            ("cursor", "none"),
+        ],
     );
 }
 

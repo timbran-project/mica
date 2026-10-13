@@ -32,6 +32,7 @@ verb native_source/compile(input: map, prefix: string, source: string, relations
   module = native_updates/definitions(module)
   module = native_builtins/definitions(module)
   module = native_algebra/definitions(module)
+  module = native_source_subscriptions/definitions(module)
   module = native_time/definitions(module)
   module = native_text/definitions(module)
   module = native_quoting/definitions(module)

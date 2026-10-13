@@ -119,6 +119,15 @@ verb native_source/program_literals(analysis: map, initial: map) -> map
     elseif op == :BuiltinCall
       pool = native_source/pool_operands(pool, instruction[3])
       pool = native_source/pool(pool, "list splice requires a list")
+      if instruction[2] == :subscribe_changes
+        for value in native_source_subscriptions/literals()
+          pool = native_source/pool(pool, value)
+        end
+      elseif instruction[2] == :cancel_subscription
+        for value in [E_INVARG, "cancel_subscription expects one capability"]
+          pool = native_source/pool(pool, value)
+        end
+      end
       if instruction[2] == :to_literal
         for value in [E_INVARG, "to_literal expects one value", "this value does not have a source literal"]
           pool = native_source/pool(pool, value)

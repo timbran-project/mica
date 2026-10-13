@@ -205,6 +205,17 @@ The request retains its pattern and full-width cursor through collection and pub
 Retry discards both operations and never reuses an abandoned registration identity.
 Staging neither opens a stream nor consumes mailbox capacity.
 
+Source code uses `subscribe_changes(sender, subject, relation, bindings, initial[, cursor[, queue_budget]])` and `cancel_subscription(capability)`.
+Subjects are `:facts`, `:relation`, or root-only `:catalogue` events.
+The relation is `some(identity)` or `some(name)`; name lookup requires catalogue authority and observes the transaction's draft catalogue.
+Bindings are a list of options, with `none` for each unbound column.
+Catalogue events require `none` for the relation and an empty binding list.
+
+Initial mode is `:changes` or `:snapshot`; snapshot mode rejects a resume cursor.
+The optional cursor is `none` or `some(nonnegative_integer)`. The positive queue budget defaults to 64 messages.
+Invalid argument shapes raise catchable `E_INVARG`; resource, cancellation, and authority failures preserve their runtime status.
+Both calls stage effects for commit. Cancellation returns unit.
+
 `TaskSubscriptionHub` owns a bounded registry for one kernel and mailbox hub.
 Initialize its vocabulary from the runtime symbol table before entering managed execution, then pass it to hub initialization.
 The hub copies scalar symbol IDs; the symbol table must outlive the subscription messages.

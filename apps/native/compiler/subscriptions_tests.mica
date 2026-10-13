@@ -1,0 +1,66 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+if mode == :validate
+  let invalid = [
+    [], [sender, :facts, none, [], :changes, none, 64, 1],
+    [sender, :wrong, none, [], :changes], [sender, 1, none, [], :changes],
+    [sender, :facts, 1, [], :changes], [sender, :facts, some(target), 1, :changes],
+    [sender, :catalogue, some(target), [], :changes], [sender, :catalogue, none, [none], :changes],
+    [sender, :facts, none, [], :changes], [sender, :facts, some(1), [], :changes],
+    [sender, :facts, some(:NoSuchRelation), [], :changes],
+    [sender, :facts, some(:NativeResult), [none for i in 0..64], :changes],
+    [sender, :catalogue, none, [], :wrong], [sender, :catalogue, none, [], :changes, 1],
+    [sender, :catalogue, none, [], :changes, some(-1)],
+    [sender, :catalogue, none, [], :changes, some("bad")],
+    [sender, :catalogue, none, [], :snapshot, some(0)],
+    [sender, :catalogue, none, [], :changes, none, 0],
+    [sender, :catalogue, none, [], :changes, none, "bad"],
+    [sender, :facts, some(:NativeResult), [false, none], :changes],
+    [sender, :facts, [:other] {[1]}, [], :changes],
+    [sender, :facts, [:value] {[1], [2]}, [], :changes]]
+  if is_kind(sender, :capability)
+    invalid = [@invalid, [sender, :facts, some(:NativeResult), [none], :changes],
+      [sender, :facts, some(:RelationName), [none, none], :changes]]
+  end
+  let caught = 0
+  for arguments in invalid
+    try
+      subscribe_changes(@arguments)
+    catch problem
+      if problem.code == E_INVARG
+        caught = caught + 1
+      end
+    end
+  end
+  try
+    cancel_subscription()
+  catch problem
+    if problem.code == E_INVARG
+      caught = caught + 1
+    end
+  end
+  return caught == len(invalid) + 1 && is_builtin(:subscribe_changes) && is_builtin(:cancel_subscription)
+end
+if mode == :cancel || mode == :cancel_rollback
+  let result = cancel_subscription(@[sender])
+  if mode == :cancel_rollback
+    raise E_INVARG, "discard cancellation"
+  end
+  return result
+end
+if mode == :catalogue
+  return subscribe_changes(sender, :catalogue, none, [], :changes)
+end
+if mode == :resume
+  return subscribe_changes(sender, :relation, some(target), [none, none], :changes, some(cursor), 4)
+end
+let initial = :changes
+if mode == :snapshot
+  initial = :snapshot
+end
+let capability = subscribe_changes(sender, @[:facts, some(target), [some(1), none], initial])
+if mode == :rollback
+  raise E_INVARG, "discard subscription"
+end
+return capability
