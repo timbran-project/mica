@@ -1,0 +1,32 @@
+let decoded = [json_decode(text) for text in valid]
+let failures = []
+for text in invalid
+  try
+    json_decode(text)
+    failures = [@failures, :accepted]
+  catch problem
+    failures = [@failures, problem.code]
+  end
+end
+let values = [false, true, 0, -36028797018963968, 36028797018963967,
+  0.0, 1.0, -1.25, 0.1, 1.1754944e-38, 1.4012985e-45, 3.4028235e38,
+  "", "café🦊\0\u{8}\n\r\t\"\\/", :name, :"café🦊", [], {}, [1, true, "x"],
+  {:a -> [1, "x"], :b -> json_null()}, {"a" -> 1, :a -> 2, :b -> 3}, json_null()]
+let roundtrips = [json_decode(json_encode(value)) for value in values]
+let encoded = [json_encode(value) for value in [false, true, 0, -123, "café🦊\0\u{8}\u{c}\n\r\t\"\\/", [], {}, json_null()]]
+for value in [none, (), [1..3], {:a -> E_FAIL}, {1 -> "invalid"}, fn() => 1]
+  try
+    json_encode(value)
+    failures = [@failures, :accepted]
+  catch problem
+    failures = [@failures, problem.code]
+  end
+end
+try
+  json_decode(42)
+catch problem
+  failures = [@failures, problem.code]
+end
+return [arity_errors, decoded, failures, roundtrips, encoded,
+  [json_is_null(value) for value in [json_null(), {:json -> :null}, {:json -> :null, :extra -> 1}, {"json" -> "null"}, none, []]],
+  json_decode(@["42"]), json_encode(@[true]), json_is_null(@[json_null(@[])])]

@@ -4,7 +4,7 @@
 // Fixed signatures share argument expansion; ordinary calls retain direct
 // operands rather than constructing an argument list at runtime.
 verb native_builtins/arities() -> map
-  return {:lower -> 1, :string_equal_fold -> 2, :words -> 1, :parse_ordinal -> 1, :to_literal -> 1, :from_literal -> 1, :union -> 2, :difference -> 2, :natural_join -> 2, :edit_distance -> 2, :is_builtin -> 1, :to_symbol -> 1, :error_code -> 1, :frob -> 2, :frob_delegate -> 1, :frob_value -> 1, :is_frob -> 1,
+  return {:json_encode -> 1, :json_decode -> 1, :json_null -> 0, :json_is_null -> 1, :lower -> 1, :string_equal_fold -> 2, :words -> 1, :parse_ordinal -> 1, :to_literal -> 1, :from_literal -> 1, :union -> 2, :difference -> 2, :natural_join -> 2, :edit_distance -> 2, :is_builtin -> 1, :to_symbol -> 1, :error_code -> 1, :frob -> 2, :frob_delegate -> 1, :frob_value -> 1, :is_frob -> 1,
     :url_encode_component -> 1, :url_decode_component -> 1, :to_int -> 1, :to_float -> 1, :parse_int -> 1, :parse_float -> 1, :emit -> 2, :mailbox -> 0, :mailbox_send -> 2, :mailbox_close -> 1, :cancel_subscription -> 1,
     :len -> 1, :string_len -> 1, :string_append -> 2, :string_contains -> 2, :string_starts_with -> 2,
     :string_span -> 3, :string_find_any -> 3, :string_slice -> 3, :string_chars -> 1, :string_from_chars -> 1, :string_join -> 2,
@@ -63,6 +63,10 @@ verb native_builtins/error(builder: map, message: string, ?error_code = E_INVARG
   return result
 end
 verb native_builtins/arity_failure(builder: map, name: symbol) -> map
+  if native/contains(native_json/names(), name)
+    let result: map = native_builtins/error(builder, native_json/arity_message(name))
+    return result
+  end
   if name == :lower || name == :string_equal_fold
     let result: map = native_builtins/error(builder, string_concat(native_source/symbol_text(name), " expects strings"))
     return result
@@ -182,6 +186,10 @@ verb native_builtins/is_kind(builder: map, value: map, kind: map) -> list
   return [native_gen/call(ready, "value_bool", [matched]), ready]
 end
 verb native_builtins/call(builder: map, name: symbol, args: list) -> list
+  if native/contains(native_json/names(), name)
+    let result: list = native_json/builtin(builder, name, args)
+    return result
+  end
   if name == :lower || name == :string_equal_fold
     let result: list = native_case/builtin(builder, name, args)
     return result
@@ -408,7 +416,7 @@ verb native_builtins/definitions(input: map) -> map
     for instruction in program[:analysis][:description][:code]
       if map_contains_key(program[:analysis][:reachable], pc) && instruction[0] == :BuiltinCall
         lookup = lookup || instruction[2] == :is_builtin
-        symbols = symbols || native/contains([:to_symbol, :from_literal], instruction[2])
+        symbols = symbols || native/contains([:to_symbol, :from_literal, :json_decode], instruction[2])
         sorting = sorting || instruction[2] == :sort
         relations = relations || native/contains([:relation_from_rows, :from_literal], instruction[2])
       end

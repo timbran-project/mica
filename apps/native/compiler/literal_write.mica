@@ -365,8 +365,8 @@ verb native_write/value_body(module: map) -> map
   let result: map = native_gen/finish(module, selected)
   return result
 end
-verb native_write/entry_body(module: map) -> map
-  let builder: map = native_write/context(module, "text_value")
+verb native_write/buffer(builder: map) -> map
+  let module: map = builder[:module]
   let [empty: map, allocated: map] = native_query/value(builder, "value_string", [native_roots/worker(builder), native_gen/zero([:Pointer, :U8, :Const]), native_gen/ref(builder, "zero")])
   let [output: map, retained: map] = native_roots/retain(allocated, "output", empty)
   let type_id: list = [:Record, string_concat(module[:source_prefix], "_LiteralWriter")]
@@ -374,6 +374,12 @@ verb native_write/entry_body(module: map) -> map
     "bytes" -> native_gen/zero([:Array, :U8, 256]), "used" -> native_gen/ref(retained, "zero"), "output" -> output[:scope_root]}))
   let [writer: map, with_writer: map] = native_gen/bind(initialized, "writer", native_gen/address(storage))
   with_writer[:literal_writer] = writer
+  return with_writer
+end
+verb native_write/entry_body(module: map) -> map
+  let builder: map = native_write/context(module, "text_value")
+  let with_writer: map = native_write/buffer(builder)
+  let writer: map = native_write/writer(with_writer)
   let [written: map, called: map] = native_gen/bind(with_writer, "written", native_gen/call(with_writer, native_write/name(module, "value"), [
     native_roots/worker(with_writer), native_roots/ref(with_writer, "transaction"), native_gen/ref(with_writer, "symbols"), writer, native_roots/ref(with_writer, "value"), native_gen/ref(with_writer, "zero"), native_roots/ref(with_writer, "budget")]))
   builder = native_gen/unless(called, native_kernel/absent(native_gen/field(called, written, "status")), fn(failed) => native_roots/return_value(failed, written))
@@ -391,29 +397,32 @@ verb native_write/definitions(input: map) -> map
       pc = pc + 1
     end
   end
-  if !required
+  if !required && !native_json/needed(input, [:json_encode])
     return input
   end
   let module: map = input
   for number in 0..256
     module = native_literal/constant(module, string_concat("writer_", to_literal(number)), :U64, native_value/hex(number))
   end
-  let [global: int, state: map] = native/add_global(module[:state], native_write/name(module, "base64"), [:Array, :U8, 64], :Constant,
-    native_literal/utf8("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"))
-  module[:state] = state
-  module[:constants][native_write/name(module, "base64")] = global
   let writer: list = [:Record, string_concat(module[:source_prefix], "_LiteralWriter")]
   module[:state] = native/record_type(module[:state], writer[1], [["bytes", [:Array, :U8, 256]], ["used", :U64], ["output", native_memory/record_pointer("MemoryRoot")]])[1]
   let common: list = [["worker", native_memory/record_pointer("MemoryWorker"), :Borrow], ["transaction", native_kernel/pointer("Transaction"), :Borrow]]
   let parameters: list = [["symbols", native_memory/record_pointer("SymbolTable"), :Borrow], ["writer", [:Pointer, writer, :Mutable], :Borrow], ["value", native_value/word(), :Gc], ["depth", :U64, :Value], ["budget", native_kernel/pointer("Budget"), :Borrow]]
   let result_type: list = [:Record, string_concat(module[:source_prefix], "_LiteralTextResult")]
+  module = native_memory/declare(module, native_write/name(module, "flush"), :U64, [@common, ["writer", [:Pointer, writer, :Mutable], :Borrow], ["budget", native_kernel/pointer("Budget"), :Borrow]], native_tasks/effects(), :Value, "")
+  module = native_write/flush_body(module)
+  if !required
+    return module
+  end
+  let [global: int, state: map] = native/add_global(module[:state], native_write/name(module, "base64"), [:Array, :U8, 64], :Constant,
+    native_literal/utf8("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"))
+  module[:state] = state
+  module[:constants][native_write/name(module, "base64")] = global
   let variants: list = ["symbol", "error_code", "list", "map", "relation", "range", "frob", "error", "bytes"]
   for operation in ["value", @variants]
     module = native_memory/declare(module, native_write/name(module, operation), result_type, [@common, @parameters], native_tasks/effects(), :Gc, "")
   end
-  module = native_memory/declare(module, native_write/name(module, "flush"), :U64, [@common, ["writer", [:Pointer, writer, :Mutable], :Borrow], ["budget", native_kernel/pointer("Budget"), :Borrow]], native_tasks/effects(), :Value, "")
   module = native_queries/operation(module, native_write/name(module, "text"), result_type, [["symbols", native_memory/record_pointer("SymbolTable"), :Borrow], ["value", native_value/word(), :Gc]])
-  module = native_write/flush_body(module)
   for kind in variants
     let builder: map = native_write/context(module, kind)
     module = native_gen/finish(module, native_write/variant(builder, kind))

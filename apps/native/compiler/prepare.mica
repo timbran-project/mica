@@ -136,6 +136,11 @@ verb native_source/program_literals(analysis: map, initial: map) -> map
           pool = native_source/pool(pool, value)
         end
       end
+      if native/contains(native_json/names(), instruction[2])
+        for value in native_json/literals(instruction[2])
+          pool = native_source/pool(pool, value)
+        end
+      end
       if instruction[2] == :to_literal
         for value in [E_INVARG, "to_literal expects one value", "this value does not have a source literal"]
           pool = native_source/pool(pool, value)

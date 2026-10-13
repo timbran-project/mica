@@ -1,0 +1,137 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+verb native_json_write/call(builder: map, operation: string, value: map, depth: map) -> map
+  let [written: map, ready: map] = native_json/checked_result(builder, operation, [native_roots/worker(builder), native_roots/ref(builder, "transaction"),
+    native_roots/ref(builder, "code"), native_gen/ref(builder, "symbols"), value, native_write/writer(builder), depth, native_roots/ref(builder, "budget")])
+  return ready
+end
+verb native_json_write/child(builder: map, value: map) -> map
+  let result: map = native_json_write/call(builder, "write", value, native_gen/add(native_gen/ref(builder, "depth"), native_gen/ref(builder, "one")))
+  return result
+end
+verb native_json_write/bytes(builder: map, buffer: map, text: string) -> map
+  let ready: map = builder
+  for byte in native_literal/utf8(text)
+    ready = native_text/buffer_byte(ready, buffer, native_write/number(ready, byte))
+  end
+  return ready
+end
+verb native_json_write/quote_body(module: map) -> map
+  let builder: map = native_json/context(module, "quote")
+  let value: map = native_roots/ref(builder, "value")
+  let [buffer: map, buffered: map] = native_text/byte_buffer(builder)
+  builder = native_json_write/bytes(buffered, buffer, "\"")
+  builder = native_text/each_decoded(builder, value, native_gen/ref(builder, "zero"), fn(step, index, scalar, offset, width)
+    let cases: list = []
+    for [rune, text] in [[8, "\\b"], [9, "\\t"], [10, "\\n"], [12, "\\f"], [13, "\\r"], [34, "\\\""], [92, "\\\\"]]
+      cases = [@cases, [native_write/number(step, rune), fn(escaped) => native_json_write/bytes(escaped, buffer, text)]]
+    end
+    let ready: map = native_gen/switch(step, scalar, cases, fn(other)
+      return native_gen/branch(other, native_gen/less(scalar, native_json/number(other, 32)), fn(control)
+        let written: map = native_json_write/bytes(control, buffer, "\\u00")
+        for shift in [4, 0]
+          let nibble: map = native_gen/bit_and(native_gen/shift_right(scalar, native_write/number(written, shift)), native_write/number(written, 15))
+          let [digit: map, initialized: map] = native_gen/bind(written, "hex", native_gen/add(nibble, native_json/number(written, 48)))
+          written = native_gen/unless(initialized, native_gen/less(nibble, native_json/number(initialized, 10)), fn(letter) => native_gen/assign(letter, digit, native_gen/add(nibble, native_json/number(letter, 87))))
+          written = native_text/buffer_byte(written, buffer, digit)
+        end
+        return written
+      end, fn(plain) => native_quoting/scalar(plain, buffer, scalar))
+    end)
+    return native_quoting/flush_full(ready, buffer)
+  end)
+  builder = native_json_write/bytes(builder, buffer, "\"")
+  builder = native_text/flush_bytes(builder, buffer)
+  let result: map = native_gen/finish(module, native_write/done(native_write/fragment(builder, buffer[:text])))
+  return result
+end
+verb native_json_write/entry(builder: map, value: map, index: map, field: string) -> map
+  let data: map = native_write/header(builder, "Map", value, "data")
+  let result: map = native_kernel/load_field(builder, native_gen/offset(data, index), field)
+  return result
+end
+// Normalize key spellings before writing. A string key and a symbol key with
+// the same spelling occupy one JSON field; the later Mica map entry wins.
+verb native_json_write/object_body(module: map) -> map
+  let builder: map = native_json/context(module, "write_object")
+  let value: map = native_roots/ref(builder, "value")
+  let [object: map, initialized: map] = native_roots/retain(builder, "pairs", native_source/literal(builder, []))
+  builder = native_gen/for_range(initialized, "entry", native_gen/ref(initialized, "zero"), native_access/length(initialized, value, "map"), fn(step, index)
+    let polled: map = native_query/poll_interval(step, index)
+    return native_roots/temporary(polled, fn(pair)
+      let [key: map, retained: map] = native_roots/retain(pair, "key", native_json_write/entry(pair, value, index, "key"))
+      let ready: map = native_gen/when(retained, native_access/kind(retained, key, "symbol"), fn(symbol)
+        let [text: map, named: map] = native_write/symbol_text(symbol, native_gen/convert(:U32, native_gen/expression(:U64, :Payload, [key])))
+        return native_roots/store(named, key, text)
+      end)
+      ready = native_quoting/check(ready, native_access/kind(ready, key, "string"), 2)
+      ready = native_json/append(ready, object, key)
+      return native_json/append(ready, object, native_json_write/entry(ready, value, index, "value"))
+    end)
+  end)
+  let [mapping: map, constructed: map] = native_json/map(builder, object)
+  builder = native_roots/store(constructed, object, mapping)
+  builder = native_write/text(builder, "{")
+  builder = native_gen/for_range(builder, "entry", native_gen/ref(builder, "zero"), native_access/length(builder, object, "map"), fn(step, index)
+    let ready: map = native_query/poll_interval(step, index)
+    ready = native_gen/unless(ready, native_kernel/absent(index), fn(more) => native_write/text(more, ","))
+    ready = native_json_write/call(ready, "quote", native_json_write/entry(ready, object, index, "key"), native_gen/ref(ready, "depth"))
+    ready = native_write/text(ready, ":")
+    return native_json_write/child(ready, native_json_write/entry(ready, object, index, "value"))
+  end)
+  let result: map = native_gen/finish(module, native_write/done(native_write/text(builder, "}")))
+  return result
+end
+verb native_json_write/array_body(module: map) -> map
+  let builder: map = native_json/context(module, "write_array")
+  let value: map = native_roots/ref(builder, "value")
+  builder = native_write/text(builder, "[")
+  builder = native_gen/for_range(builder, "item", native_gen/ref(builder, "zero"), native_access/length(builder, value, "list"), fn(step, index)
+    let ready: map = native_query/poll_interval(step, index)
+    ready = native_gen/unless(ready, native_kernel/absent(index), fn(more) => native_write/text(more, ","))
+    return native_json_write/child(ready, native_query/cell(ready, value, index))
+  end)
+  let result: map = native_gen/finish(module, native_write/done(native_write/text(builder, "]")))
+  return result
+end
+verb native_json_write/value_body(module: map) -> map
+  let builder: map = native_json/context(module, "write")
+  builder = native_query/check(builder, native_gen/less(native_gen/ref(builder, "depth"), native_json/number(builder, 64)), "limit")
+  builder = native_roots/poll(native_query/charge(builder, native_gen/ref(builder, "one"), native_gen/ref(builder, "zero")))
+  let value: map = native_roots/ref(builder, "value")
+  builder = native_gen/when(builder, native_json/is_null(builder, value), fn(null) => native_write/done(native_write/text(null, "null")))
+  let cases: list = []
+  for [kind, operation] in [["string", "quote"], ["list", "write_array"], ["map", "write_object"]]
+    cases = [@cases, [native_gen/ref(builder, string_concat("tag_", kind)), fn(selected) => native_write/done(native_json_write/call(selected, operation, value, native_gen/ref(selected, "depth")))]]
+  end
+  cases = [@cases, [native_gen/ref(builder, "tag_symbol"), fn(symbol)
+    let [text: map, named: map] = native_write/symbol_text(symbol, native_gen/convert(:U32, native_gen/expression(:U64, :Payload, [value])))
+    return native_write/done(native_json_write/call(named, "quote", text, native_gen/ref(named, "depth")))
+  end], [native_gen/ref(builder, "tag_bool"), fn(boolean)
+    let bit: map = native_gen/field(boolean, native_gen/call(boolean, "value_as_bool", [value]), "value")
+    return native_write/done(native_gen/branch(boolean, bit, fn(yes) => native_write/text(yes, "true"), fn(no) => native_write/text(no, "false")))
+  end]]
+  for kind in ["int", "float"]
+    cases = [@cases, [native_gen/ref(builder, string_concat("tag_", kind)), fn(number)
+      let [text: map, called: map] = native_gen/bind(number, "number", native_gen/call(number, string_concat(native_format/name(number[:module], "number"), "_value"), [
+        native_roots/worker(number), native_roots/ref(number, "transaction"), value, native_roots/ref(number, "budget")]))
+      let ready: map = native_gen/unless(called, native_kernel/absent(native_gen/field(called, text, "status")), fn(failed) => native_roots/return_value(failed, text))
+      return native_write/done(native_write/fragment(ready, native_gen/field(ready, text, "value")))
+    end]]
+  end
+  let result: map = native_gen/finish(module, native_gen/switch(builder, native_gen/expression(:U8, :Tag, [value]), cases, fn(invalid) => native_write/done(invalid, 2)))
+  return result
+end
+verb native_json_write/definitions(input: map) -> map
+  let module: map = native_json_write/quote_body(input)
+  module = native_json_write/object_body(module)
+  module = native_json_write/array_body(module)
+  module = native_json_write/value_body(module)
+  let builder: map = native_json/context(module, "encode_value")
+  builder = native_write/buffer(builder)
+  builder = native_json_write/call(builder, "write", native_roots/ref(builder, "value"), native_gen/ref(builder, "zero"))
+  builder = native_write/flush(builder)
+  let result: map = native_gen/finish(module, native_write/done(builder))
+  return result
+end

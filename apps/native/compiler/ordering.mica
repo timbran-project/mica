@@ -13,8 +13,12 @@ verb native_ordering/compare(builder: map, input: map, left: map, right: map) ->
   return [native_gen/negate(native_gen/less(native_gen/ref(ready, "int_zero"), native_gen/field(ready, order, "number"))), ready]
 end
 verb native_ordering/positions(initial: map, input: map) -> list
+  let compare = fn(step, left, right) => native_ordering/compare(step, input, left, right)
+  let result: list = native_ordering/positions_by(initial, native_query/width(initial, input), compare)
+  return result
+end
+verb native_ordering/positions_by(initial: map, length: map, compare) -> list
   let builder: map = initial
-  let length: map = native_query/width(builder, input)
   let controls: map = {
     :retain -> fn(step, label, value) => native_roots/retain(step, label, value),
     :assign -> fn(step, cursor, value) => native_roots/store(step, cursor, value),
@@ -26,7 +30,6 @@ verb native_ordering/positions(initial: map, input: map) -> list
     let polled: map = native_sequence/checkpoint(step, index, controls)
     return native_gen/store(polled, native_gen/offset(data, index), index)
   end)
-  let compare = fn(step, left, right) => native_ordering/compare(step, input, left, right)
   let [ordered: map, tested: map] = native_sequence/is_ordered(builder, native_sequence/span(data, length), compare, controls)
   let [result: map, selected: map] = native_roots/retain(tested, "ordered_positions", data)
   builder = native_gen/unless(selected, ordered, fn(disordered) => native_roots/temporary(disordered, fn(unsorted)

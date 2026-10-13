@@ -1,0 +1,177 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+// JSON has its own grammar, with shared rooted text storage and numeric
+// conversion. Syntax/type errors remain separate from task resource failures.
+verb native_json/names() -> list
+  return [:json_encode, :json_decode, :json_null, :json_is_null]
+end
+verb native_json/arity_message(name: symbol) -> string
+  if name == :json_null
+    return "json_null expects no arguments"
+  end
+  return string_concat(native_source/symbol_text(name), " expects one argument")
+end
+verb native_json/literals(name: symbol) -> list
+  return [E_INVARG, E_TYPE, native_json/arity_message(name), "json_decode expects a string",
+    "invalid JSON", "value cannot be encoded as JSON", {:json -> :null}, {}, [], true, false]
+end
+verb native_json/needed(module: map, names: list) -> bool
+  for program in module[:source_programs]
+    let pc: int = 0
+    for instruction in program[:analysis][:description][:code]
+      if map_contains_key(program[:analysis][:reachable], pc) && instruction[0] == :BuiltinCall && native/contains(names, instruction[2])
+        return true
+      end
+      pc = pc + 1
+    end
+  end
+  return false
+end
+verb native_json/name(module: map, operation: string) -> string
+  return string_concat(module[:source_prefix], "_json_", operation)
+end
+verb native_json/number(builder: map, number: int) -> map
+  let result: map = native_gen/ref(builder, string_concat("json_", to_literal(number)))
+  return result
+end
+verb native_json/context(module: map, operation: string) -> map
+  let builder: map = native_queries/borrow_budget(native_gen/context(module, native_json/name(module, operation)))
+  builder[:source_prefix] = module[:source_prefix]
+  builder[:source_literal_index] = module[:source_literal_index]
+  builder[:source_code] = native_roots/ref(builder, "code")
+  return builder
+end
+verb native_json/checked_result(builder: map, name: string, arguments: list) -> list
+  let [value: map, called: map] = native_gen/bind(builder, "json_result", native_gen/call(builder, native_json/name(builder[:module], name), arguments))
+  let ready: map = native_gen/unless(called, native_kernel/absent(native_gen/field(called, value, "status")), fn(failed) => native_roots/return_value(failed, value))
+  ready = native_gen/unless(ready, native_kernel/absent(native_gen/field(ready, value, "shape")), fn(failed) => native_roots/return_value(failed, value))
+  return [value, ready]
+end
+verb native_json/is_null(builder: map, value: map) -> map
+  let result: map = native_gen/field(builder, native_gen/call(builder, "value_equal", [value, native_source/literal(builder, {:json -> :null})]), "value")
+  return result
+end
+verb native_json/builtin(builder: map, name: symbol, args: list) -> list
+  if name == :json_null
+    return [native_source/literal(builder, {:json -> :null}), builder]
+  end
+  if name == :json_is_null
+    return [native_gen/call(builder, "value_bool", [native_json/is_null(builder, args[0])]), builder]
+  end
+  let ready: map = builder
+  let operation: string = "encode"
+  let message: string = "value cannot be encoded as JSON"
+  if name == :json_decode
+    operation = "decode"
+    message = "invalid JSON"
+    ready = native_gen/unless(ready, native_access/kind(ready, args[0], "string"), fn(invalid) => native_builtins/error(invalid, "json_decode expects a string", E_TYPE))
+  end
+  let [symbols: map, initialized: map] = native_gen/bind(ready, "symbols", native_gen/zero(native_memory/record_pointer("SymbolTable")))
+  ready = native_gen/when(initialized, native_gen/negate(native_kernel/absent(native_tasks/attempt_field(initialized, "runtime"))),
+    fn(attached) => native_gen/assign(attached, symbols, native_source/service(attached, "symbols")))
+  let code: map = native_kernel/load_field(ready, native_handlers/current(ready), "code")
+  let [converted: map, called: map] = native_gen/bind(ready, "json", native_gen/call(ready, native_json/name(ready[:module], operation), [
+    native_roots/worker(ready), native_tasks/attempt(ready), native_tasks/slot(ready, "transaction"), code, symbols, args[0]]))
+  let status: map = native_gen/field(called, converted, "status")
+  ready = native_gen/unless(called, native_kernel/absent(status), fn(failed) => native_roots/return_value(failed, status))
+  ready = native_gen/unless(ready, native_kernel/absent(native_gen/field(ready, converted, "shape")), fn(invalid) => native_builtins/error(invalid, message))
+  return [native_gen/field(ready, converted, "value"), ready]
+end
+verb native_json/definitions(input: map) -> map
+  let read: bool = native_json/needed(input, [:json_decode])
+  let write: bool = native_json/needed(input, [:json_encode])
+  if !read && !write
+    return input
+  end
+  let module: map = input
+  for number in [4, 10, 16, 32, 48, 64, 87, 1024, 55296, 56320, 65536]
+    module = native_literal/constant(module, string_concat("json_", to_literal(number)), :U64, native_value/hex(number))
+  end
+  let common: list = [["worker", native_memory/record_pointer("MemoryWorker"), :Borrow], ["transaction", native_kernel/pointer("Transaction"), :Borrow]]
+  let context: list = [["code", native_tasks/pointer("CodeRef"), :Gc], ["symbols", native_memory/record_pointer("SymbolTable"), :Borrow]]
+  let result_type: list = [:Record, string_concat(module[:source_prefix], "_LiteralTextResult")]
+  module = native_memory/declare(module, native_json/name(module, "map"), result_type,
+    [@common, ["pairs", native_value/word(), :Gc], ["budget", native_kernel/pointer("Budget"), :Borrow]], native_tasks/effects(), :Gc, "")
+  module = native_json/map_body(module)
+  if read
+    if !native_json/needed(input, [:from_literal])
+      for number in 0..128
+        module = native_literal/constant(module, string_concat("literal_", to_literal(number)), :U64, native_value/hex(number))
+      end
+    end
+    let parameters: list = [@context, ["text", native_value/word(), :Gc]]
+    for operation in ["read", "string", "number", "array", "object"]
+      module = native_memory/declare(module, native_json/name(module, operation), result_type,
+        [@common, @parameters, ["start", :U64, :Value], ["depth", :U64, :Value], ["budget", native_kernel/pointer("Budget"), :Borrow]], native_tasks/effects(), :Gc, "")
+    end
+    module = native_queries/operation(module, native_json/name(module, "decode"), result_type, parameters)
+    module = native_json_read/definitions(module)
+  end
+  if write
+    let writer: list = [:Pointer, [:Record, string_concat(module[:source_prefix], "_LiteralWriter")], :Mutable]
+    let parameters: list = [@context, ["value", native_value/word(), :Gc]]
+    for operation in ["write", "quote", "write_array", "write_object"]
+      module = native_memory/declare(module, native_json/name(module, operation), result_type,
+        [@common, @parameters, ["writer", writer, :Borrow], ["depth", :U64, :Value], ["budget", native_kernel/pointer("Budget"), :Borrow]], native_tasks/effects(), :Gc, "")
+    end
+    module = native_queries/operation(module, native_json/name(module, "encode"), result_type, parameters)
+    module = native_json_write/definitions(module)
+  end
+  return module
+end
+
+verb native_json/append(builder: map, buffer: map, value: map) -> map
+  let [appended: map, ready: map] = native_query/value(builder, "kernel_query_append", [native_roots/worker(builder), buffer, value])
+  let result: map = native_roots/store(ready, buffer, appended)
+  return result
+end
+verb native_json/map(builder: map, pairs: map) -> list
+  let [value: map, ready: map] = native_json/checked_result(builder, "map", [native_roots/worker(builder), native_roots/ref(builder, "transaction"), pairs, native_roots/ref(builder, "budget")])
+  return [native_gen/field(ready, value, "value"), ready]
+end
+verb native_json/key(builder: map, pairs: map, index: map) -> map
+  let result: map = native_query/cell(builder, pairs, native_gen/multiply(index, native_gen/ref(builder, "two")))
+  return result
+end
+verb native_json/key_order(builder: map, pairs: map, left: map, right: map) -> list
+  let [order: map, ready: map] = native_gen/checked_bind(builder, "order", native_gen/call(builder, "value_compare", [
+    native_json/key(builder, pairs, left), native_json/key(builder, pairs, right)]), "ok", fn(failed) => native_query/error(failed, "schema"))
+  return [native_gen/field(ready, order, "number"), ready]
+end
+// Sort positions, leaving keys and values in traced storage. During copying,
+// the map header exposes only initialized entries to a moving collection.
+verb native_json/map_body(module: map) -> map
+  let builder: map = native_queries/borrow_budget(native_gen/context(module, native_json/name(module, "map")))
+  let pairs: map = native_roots/ref(builder, "pairs")
+  let length: map = native_gen/divide(native_query/width(builder, pairs), native_gen/ref(builder, "two"))
+  let [positions: map, ordered: map, sorted: map] = native_ordering/positions_by(builder, length, fn(step, left, right)
+    let [order: map, ready: map] = native_json/key_order(step, pairs, left, right)
+    return [native_gen/negate(native_gen/less(native_gen/ref(ready, "int_zero"), order)), ready]
+  end)
+  let [header: map, entries: map, allocated: map] = native_memory/tail_storage(sorted, native_roots/worker(sorted), [:Record, "HeapMap"], [:Record, "ValueMapEntry"], length, "layout_map", fn(failed) => native_query/error(failed, "oom"))
+  builder = native_gen/store(allocated, header, native_gen/record(allocated, [:Record, "HeapMap"], {"data" -> entries, "length" -> native_gen/ref(allocated, "zero")}))
+  let [map: map, rooted: map] = native_roots/retain(builder, "map", header)
+  let [previous: map, initialized: map] = native_gen/bind(rooted, "previous", native_gen/ref(rooted, "zero"))
+  builder = native_gen/for_range(initialized, "entry", native_gen/ref(initialized, "zero"), length, fn(step, index)
+    let polled: map = native_query/poll_interval(step, index)
+    let [position: map, loaded: map] = native_gen/bind(polled, "position", native_gen/load(native_gen/offset(positions, index)))
+    let [replace: map, ready: map] = native_gen/bind(loaded, "replace", native_gen/ref(loaded, "false"))
+    ready = native_gen/unless(ready, native_kernel/absent(index), fn(next)
+      let [order: map, compared: map] = native_json/key_order(next, pairs, previous, position)
+      return native_gen/assign(compared, replace, native_gen/equal(order, native_gen/ref(compared, "int_zero")))
+    end)
+    let count: map = native_kernel/load_field(ready, map, "length")
+    let [destination: map, positioned: map] = native_gen/bind(ready, "destination", count)
+    ready = native_gen/branch(positioned, replace,
+      fn(duplicate) => native_gen/assign(duplicate, destination, native_gen/subtract(count, native_gen/ref(duplicate, "one"))),
+      fn(fresh) => native_kernel/store_field(fresh, map, "length", native_gen/add(count, native_gen/ref(fresh, "one"))))
+    let value: map = native_query/cell(ready, pairs, native_gen/add(native_gen/multiply(position, native_gen/ref(ready, "two")), native_gen/ref(ready, "one")))
+    let entry: map = native_gen/record(ready, [:Record, "ValueMapEntry"], {"key" -> native_json/key(ready, pairs, position), "value" -> value})
+    ready = native_gen/store(ready, native_gen/offset(native_kernel/load_field(ready, map, "data"), destination), entry)
+    return native_gen/assign(ready, previous, position)
+  end)
+  let value: map = native_gen/expression(native_value/word(), :PackPointer, [map, native_gen/ref(builder, "tag_map")])
+  let result: map = native_gen/finish(module, native_quoting/result(builder, 0, native_gen/ref(builder, "zero"), value))
+  return result
+end

@@ -1,0 +1,227 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+// RFC 8259 tokens: four whitespace bytes, strict number spelling, and UTF-16
+// escape pairs. Input strings are valid UTF-8; no comment or Mica escape syntax.
+verb native_json_read/space(builder: map, position: map, length: map) -> map
+  let result: map = native_gen/while_loop(builder, native_gen/less(position, length), fn(step)
+    let ready: map = native_query/poll_interval(step, position)
+    let cases: list = []
+    for byte in [9, 10, 13, 32]
+      cases = [@cases, [native_read/number(ready, byte), fn(space) => native_gen/continue_loop(native_read/advance(space, position))]]
+    end
+    return native_gen/break_loop(native_gen/switch(ready, native_read/byte(ready, position), cases, fn(done) => done))
+  end)
+  return result
+end
+verb native_json_read/call(builder: map, operation: string, position: map, depth: map) -> list
+  let result: list = native_json/checked_result(builder, operation, [native_roots/worker(builder), native_roots/ref(builder, "transaction"),
+    native_roots/ref(builder, "code"), native_gen/ref(builder, "symbols"), native_roots/ref(builder, "text"), position, depth, native_roots/ref(builder, "budget")])
+  return result
+end
+verb native_json_read/child(builder: map, operation: string, position: map) -> list
+  let [parsed: map, called: map] = native_json_read/call(builder, operation, position, native_gen/add(native_gen/ref(builder, "depth"), native_gen/ref(builder, "one")))
+  let [value: map, retained: map] = native_roots/retain(called, "child", native_gen/field(called, parsed, "value"))
+  return [value, native_gen/assign(retained, position, native_gen/field(retained, parsed, "next"))]
+end
+verb native_json_read/hex_quad(builder: map, position: map, length: map) -> list
+  let ready: map = native_read/check(builder, native_gen/negate(native_gen/less(native_gen/subtract(length, position), native_json/number(builder, 4))))
+  let [quad: map, initialized: map] = native_gen/bind(ready, "utf16_unit", native_gen/ref(ready, "zero"))
+  ready = native_gen/for_range(initialized, "digit", native_gen/ref(initialized, "zero"), native_json/number(initialized, 4), fn(step, index)
+    let [digit: map, prepared: map] = native_gen/bind(step, "hex", native_json/number(step, 16))
+    let byte: map = native_read/byte(prepared, native_gen/add(position, index))
+    for [first, limit, bias] in [[48, 58, 0], [65, 71, 10], [97, 103, 10]]
+      prepared = native_gen/when(prepared, native_gen/less(native_gen/subtract(byte, native_read/number(prepared, first)), native_read/number(prepared, limit - first)),
+        fn(hex) => native_gen/assign(hex, digit, native_gen/add(native_gen/subtract(byte, native_read/number(hex, first)), native_read/number(hex, bias))))
+    end
+    prepared = native_read/check(prepared, native_gen/less(digit, native_json/number(prepared, 16)))
+    return native_gen/assign(prepared, quad, native_gen/add(native_gen/shift_left(quad, native_json/number(prepared, 4)), digit))
+  end)
+  ready = native_gen/assign(ready, position, native_gen/add(position, native_json/number(ready, 4)))
+  return [quad, ready]
+end
+verb native_json_read/escape(builder: map, position: map, length: map, scalar: map) -> map
+  let checked: map = native_read/check(builder, native_gen/less(position, length))
+  let [byte: map, loaded: map] = native_gen/bind(checked, "escape", native_read/byte(checked, position))
+  let ready: map = native_read/advance(loaded, position)
+  let cases: list = []
+  for [escaped, decoded] in [[34, 34], [47, 47], [92, 92], [98, 8], [102, 12], [110, 10], [114, 13], [116, 9]]
+    cases = [@cases, [native_read/number(ready, escaped), fn(short) => native_gen/assign(short, scalar, native_read/number(short, decoded))]]
+  end
+  cases = [@cases, [native_read/number(ready, 117), fn(unicode)
+    let [high: map, read: map] = native_json_read/hex_quad(unicode, position, length)
+    let decoded: map = native_gen/assign(read, scalar, high)
+    decoded = native_gen/when(decoded, native_gen/less(native_gen/subtract(high, native_json/number(decoded, 55296)), native_json/number(decoded, 1024)), fn(pair)
+      let next: map = native_read/expect(pair, position, length, 92)
+      next = native_read/expect(next, position, length, 117)
+      let [low: map, parsed: map] = native_json_read/hex_quad(next, position, length)
+      let checked: map = native_read/check(parsed, native_gen/less(native_gen/subtract(low, native_json/number(parsed, 56320)), native_json/number(parsed, 1024)))
+      return native_gen/assign(checked, scalar, native_gen/add(native_json/number(checked, 65536),
+        native_gen/add(native_gen/shift_left(native_gen/subtract(high, native_json/number(checked, 55296)), native_json/number(checked, 10)), native_gen/subtract(low, native_json/number(checked, 56320)))))
+    end)
+    return native_read/check(decoded, native_gen/negate(native_gen/less(native_gen/subtract(scalar, native_json/number(decoded, 56320)), native_json/number(decoded, 1024))))
+  end]]
+  let result: map = native_gen/switch(ready, byte, cases, fn(invalid) => native_quoting/result(invalid, 2, position, native_gen/zero(native_value/word())))
+  return result
+end
+verb native_json_read/string_body(module: map) -> map
+  let builder: map = native_json/context(module, "string")
+  let text: map = native_roots/ref(builder, "text")
+  let [position: map, positioned: map] = native_gen/bind(builder, "position", native_gen/ref(builder, "start"))
+  let length: map = native_value/string_field(positioned, text, "length")
+  builder = native_read/expect(positioned, position, length, 34)
+  let [buffer: map, buffered: map] = native_text/byte_buffer(builder)
+  let [ticks: map, counted: map] = native_gen/bind(buffered, "visited", native_gen/ref(buffered, "zero"))
+  builder = native_gen/while_loop(counted, native_gen/less(position, length), fn(step)
+    let ready: map = native_query/poll_interval(step, ticks)
+    ready = native_read/advance(ready, ticks)
+    let data: map = native_gen/freeze(native_gen/offset(native_value/string_field(ready, text, "data"), position))
+    let [decoded: map, loaded: map] = native_gen/checked_bind(ready, "decoded", native_gen/call(ready, "utf8_decode", [data, native_gen/subtract(length, position)]), "ok", fn(invalid) => native_query/error(invalid, "schema"))
+    let [scalar: map, parsed: map] = native_gen/bind(loaded, "scalar", native_gen/convert(:U64, native_gen/expression(:U32, :Unwrap, [native_gen/field(loaded, decoded, "rune")])))
+    ready = native_gen/assign(parsed, position, native_gen/add(position, native_gen/field(parsed, decoded, "width")))
+    ready = native_gen/when(ready, native_gen/equal(scalar, native_read/number(ready, 34)), fn(done)
+      let flushed: map = native_text/flush_bytes(done, buffer)
+      return native_quoting/result(flushed, 0, position, buffer[:text])
+    end)
+    ready = native_read/check(ready, native_gen/negate(native_gen/less(scalar, native_json/number(ready, 32))))
+    ready = native_gen/when(ready, native_gen/equal(scalar, native_read/number(ready, 92)), fn(escape) => native_json_read/escape(escape, position, length, scalar))
+    return native_quoting/flush_full(native_quoting/scalar(ready, buffer, scalar), buffer)
+  end)
+  let result: map = native_gen/finish(module, native_quoting/result(builder, 2, position, native_gen/zero(native_value/word())))
+  return result
+end
+verb native_json_read/digits(builder: map, position: map, length: map) -> map
+  let ready: map = native_read/check(builder, native_gen/less(position, length))
+  ready = native_read/check(ready, native_read/digit(ready, native_read/byte(ready, position)))
+  let result: map = native_read/digits(ready, position, length)
+  return result
+end
+verb native_json_read/number_body(module: map) -> map
+  let builder: map = native_json/context(module, "number")
+  let [position: map, positioned: map] = native_gen/bind(builder, "position", native_gen/ref(builder, "start"))
+  let first: map = native_gen/ref(positioned, "start")
+  let length: map = native_value/string_field(positioned, native_roots/ref(positioned, "text"), "length")
+  let [minus: map, signed: map] = native_read/is_byte(positioned, position, length, 45)
+  builder = native_gen/when(signed, minus, fn(sign) => native_read/advance(sign, position))
+  let [zero: map, checked: map] = native_read/is_byte(builder, position, length, 48)
+  builder = native_gen/branch(checked, zero, fn(zero) => native_read/advance(zero, position), fn(digits) => native_json_read/digits(digits, position, length))
+  let [floating: map, typed: map] = native_gen/bind(builder, "float", native_gen/ref(builder, "false"))
+  let [point: map, tested: map] = native_read/is_byte(typed, position, length, 46)
+  builder = native_gen/when(tested, point, fn(fraction)
+    let marked: map = native_gen/assign(fraction, floating, native_gen/ref(fraction, "true"))
+    return native_json_read/digits(native_read/advance(marked, position), position, length)
+  end)
+  let [exponent: map, initialized: map] = native_gen/bind(builder, "exponent", native_gen/ref(builder, "false"))
+  for byte in [69, 101]
+    let [matched: map, checked: map] = native_read/is_byte(initialized, position, length, byte)
+    initialized = native_gen/when(checked, matched, fn(found) => native_gen/assign(found, exponent, native_gen/ref(found, "true")))
+  end
+  builder = native_gen/when(initialized, exponent, fn(exponent)
+    let marked: map = native_gen/assign(exponent, floating, native_gen/ref(exponent, "true"))
+    marked = native_read/advance(marked, position)
+    let [sign: map, initialized: map] = native_gen/bind(marked, "sign", native_gen/ref(marked, "false"))
+    for byte in [43, 45]
+      let [matched: map, checked: map] = native_read/is_byte(initialized, position, length, byte)
+      initialized = native_gen/when(checked, matched, fn(found) => native_gen/assign(found, sign, native_gen/ref(found, "true")))
+    end
+    return native_json_read/digits(native_gen/when(initialized, sign, fn(sign) => native_read/advance(sign, position)), position, length)
+  end)
+  let result: map = native_gen/finish(module, native_read/convert_number(builder, first, position, floating))
+  return result
+end
+verb native_json_read/sequence_body(module: map, mapping: bool) -> map
+  let kind: string = "array"
+  let close: int = 93
+  if mapping
+    kind = "object"
+    close = 125
+  end
+  let builder: map = native_json/context(module, kind)
+  let [position: map, positioned: map] = native_gen/bind(builder, "position", native_gen/add(native_gen/ref(builder, "start"), native_gen/ref(builder, "one")))
+  let length: map = native_value/string_field(positioned, native_roots/ref(positioned, "text"), "length")
+  let [output: map, retained: map] = native_roots/retain(positioned, "collection", native_source/literal(positioned, []))
+  builder = native_json_read/space(retained, position, length)
+  let [closed: map, checked: map] = native_read/is_byte(builder, position, length, close)
+  builder = native_gen/when(checked, closed, fn(empty)
+    let value: map = output
+    if mapping
+      value = native_source/literal(empty, {})
+    end
+    return native_quoting/result(native_read/advance(empty, position), 0, position, value)
+  end)
+  builder = native_gen/while_loop(builder, native_gen/ref(builder, "true"), fn(step)
+    let ready: map = native_roots/temporary(step, fn(element)
+      let spaced: map = native_json_read/space(element, position, length)
+      if mapping
+        let [spelling: map, read: map] = native_json_read/child(spaced, "string", position)
+        let [key: map, interned: map] = native_read/intern(read, spelling)
+        let colon: map = native_read/expect(native_json_read/space(interned, position, length), position, length, 58)
+        let [value: map, paired: map] = native_json_read/child(colon, "read", position)
+        let ready: map = native_json/append(paired, output, key)
+        return native_json/append(ready, output, value)
+      end
+      let [value: map, read: map] = native_json_read/child(spaced, "read", position)
+      let [updated: map, stored: map] = native_query/value(read, "kernel_query_append", [native_roots/worker(read), output, value])
+      return native_roots/store(stored, output, updated)
+    end)
+    ready = native_json_read/space(ready, position, length)
+    let [closed: map, checked: map] = native_read/is_byte(ready, position, length, close)
+    ready = native_gen/when(checked, closed, fn(done) => native_gen/break_loop(native_read/advance(done, position)))
+    return native_read/expect(ready, position, length, 44)
+  end)
+  if mapping
+    let [value: map, constructed: map] = native_json/map(builder, output)
+    builder = native_roots/store(constructed, output, value)
+  end
+  let result: map = native_gen/finish(module, native_quoting/result(builder, 0, position, output))
+  return result
+end
+verb native_json_read/read_body(module: map) -> map
+  let builder: map = native_json/context(module, "read")
+  builder = native_query/check(builder, native_gen/less(native_gen/ref(builder, "depth"), native_json/number(builder, 64)), "limit")
+  builder = native_roots/poll(native_query/charge(builder, native_gen/ref(builder, "one"), native_gen/ref(builder, "zero")))
+  let [position: map, positioned: map] = native_gen/bind(builder, "position", native_gen/ref(builder, "start"))
+  let length: map = native_value/string_field(positioned, native_roots/ref(positioned, "text"), "length")
+  builder = native_read/check(native_json_read/space(positioned, position, length), native_gen/less(position, length))
+  let [byte: map, loaded: map] = native_gen/bind(builder, "token", native_read/byte(builder, position))
+  let cases: list = []
+  for [initial, word, value] in [[110, "null", {:json -> :null}], [116, "true", true], [102, "false", false]]
+    cases = [@cases, [native_read/number(loaded, initial), fn(keyword)
+      let ready: map = keyword
+      for byte in native_literal/utf8(word)
+        ready = native_read/expect(ready, position, length, byte)
+      end
+      return native_quoting/result(ready, 0, position, native_source/literal(ready, value))
+    end]]
+  end
+  for [initial, operation] in [[34, "string"], [91, "array"], [123, "object"], [45, "number"]]
+    cases = [@cases, [native_read/number(loaded, initial), fn(selected)
+      let [parsed: map, ready: map] = native_json_read/call(selected, operation, position, native_gen/ref(selected, "depth"))
+      return native_roots/return_value(ready, parsed)
+    end]]
+  end
+  builder = native_gen/switch(loaded, byte, cases, fn(number)
+    let checked: map = native_read/check(number, native_read/digit(number, byte))
+    let [parsed: map, ready: map] = native_json_read/call(checked, "number", position, native_gen/ref(checked, "depth"))
+    return native_roots/return_value(ready, parsed)
+  end)
+  let result: map = native_gen/finish(module, builder)
+  return result
+end
+verb native_json_read/definitions(input: map) -> map
+  let module: map = native_json_read/string_body(input)
+  module = native_json_read/number_body(module)
+  module = native_json_read/sequence_body(module, false)
+  module = native_json_read/sequence_body(module, true)
+  module = native_json_read/read_body(module)
+  let builder: map = native_json/context(module, "decode_value")
+  builder = native_quoting/check(builder, native_access/kind(builder, native_roots/ref(builder, "text"), "string"), 1)
+  let [parsed: map, ready: map] = native_json_read/call(builder, "read", native_gen/ref(builder, "zero"), native_gen/ref(builder, "zero"))
+  let [value: map, retained: map] = native_roots/retain(ready, "decoded", native_gen/field(ready, parsed, "value"))
+  let [position: map, positioned: map] = native_gen/bind(retained, "position", native_gen/field(retained, parsed, "next"))
+  let length: map = native_value/string_field(positioned, native_roots/ref(positioned, "text"), "length")
+  builder = native_json_read/space(positioned, position, length)
+  builder = native_read/check(builder, native_gen/equal(position, length))
+  let result: map = native_gen/finish(module, native_quoting/result(builder, 0, position, value))
+  return result
+end

@@ -144,6 +144,12 @@ verb native_read/number_value(builder: map, position: map, length: map) -> map
       return native_read/digits(marked, position, length)
     end)
   end
+  let result: map = native_read/convert_number(ready, first, position, floating)
+  return result
+end
+// Grammar validation belongs to each reader; conversion shares range checks.
+verb native_read/convert_number(builder: map, first: map, position: map, floating: map) -> map
+  let ready: map = builder
   let [text: map, copied: map] = native_read/span(ready, first, position)
   let [rooted: map, retained: map] = native_roots/retain(copied, "spelling", text)
   let [number: map, initialized: map] = native_gen/bind(retained, "number", native_gen/zero([:Record, string_concat(builder[:module][:source_prefix], "_ParsedNumber")]))

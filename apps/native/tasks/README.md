@@ -438,6 +438,22 @@ Catalogue fixtures replace loaded code on another worker, retain an older snapsh
 Method-call fixtures cover staged bindings, rollback, conflict retry, selector rights, normal and tail returns, cleanup, and replacement during suspension.
 Spawn fixtures cover rollback, conflict retry, delayed resolution, policy revocation, admission and reply failures, cancellation, and concurrent parent/child execution.
 
+Native `json_encode`, `json_decode`, `json_null`, and `json_is_null` use the language guide's JSON value mappings.
+Objects decode to symbol-keyed maps, and JSON null becomes `{:json -> :null}`.
+Integer tokens must fit signed 56-bit values. Decimal and exponent tokens must convert to finite binary32 values.
+The writer uses the native binary32 formatter, so float spellings can differ from Rust's binary64 JSON formatting while preserving Mica round trips.
+
+The JSON reader rejects comments, trailing commas, Mica escapes, and unpaired UTF-16 surrogates.
+Duplicate object keys keep their last input value.
+The writer accepts string and symbol keys. Equal spellings collapse to the last entry in Mica map order.
+Malformed input and unsupported values raise `E_INVARG`; a non-string decoder argument raises `E_TYPE`.
+
+Readers and writers share task budgets and a maximum value depth of 64, with the root at depth zero.
+Reaching depth 64 returns the resource-limit status.
+Cancellation and resource failures return no partial result.
+Object construction sorts positions into rooted pair storage before copying distinct entries into a map.
+Regression fixtures cover both bootstrap tiers, moving collection, limits, cancellation, duplicate keys, and Rust result comparisons.
+
 Native `lower(text)` uses locale-independent Unicode 15.1 lowercasing, including final sigma and the two-scalar mapping for `İ`.
 `string_equal_fold(left, right)` compares the resulting lowercase strings, as specified by the language guide.
 It does not normalize text or apply full case folding: `Straße` and `STRASSE` remain unequal.

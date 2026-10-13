@@ -2494,6 +2494,9 @@ fn load_native_source_compiler(runner: &mut SourceRunner) {
         include_str!("../../../apps/native/compiler/format_number.mica"),
         include_str!("../../../apps/native/compiler/literal_read.mica"),
         include_str!("../../../apps/native/compiler/literal_write.mica"),
+        include_str!("../../../apps/native/compiler/json.mica"),
+        include_str!("../../../apps/native/compiler/json_read.mica"),
+        include_str!("../../../apps/native/compiler/json_write.mica"),
         include_str!("../../../apps/native/compiler/numeric.mica"),
         include_str!("../../../apps/native/compiler/decimal.mica"),
         include_str!("../../../apps/native/compiler/functions.mica"),
@@ -4274,6 +4277,12 @@ fn native_builtin_definitions_ignore_unreachable_calls() {
                 "../../../apps/native/compiler/command_text.mica"
             ))
             .unwrap();
+        for source in [
+            include_str!("../../../apps/native/compiler/json.mica"),
+            include_str!("../../../apps/native/compiler/literal_write.mica"),
+        ] {
+            runner.run_filein(source).unwrap();
+        }
         assert_eq!(
             eval(
                 &mut runner,
@@ -4283,9 +4292,9 @@ let input = {:source_programs -> [{:analysis -> {
     [:BuiltinCall, 0, :to_symbol, []], [:BuiltinCall, 0, :sort, []],
     [:BuiltinCall, 0, :relation_from_rows, []], [:BuiltinCall, 0, :from_literal, []],
     [:BuiltinCall, 0, :subscribe_changes, []], [:BuiltinCall, 0, :words, []],
-    [:BuiltinCall, 0, :parse_ordinal, []]]},
+    [:BuiltinCall, 0, :parse_ordinal, []], [:BuiltinCall, 0, :json_encode, []], [:BuiltinCall, 0, :json_decode, []]]},
   :reachable -> {0 -> true}}}]}
-return native_builtins/definitions(input) == input && native_read/definitions(input) == input && native_source_subscriptions/definitions(input) == input && native_command_text/definitions(input) == input
+return native_builtins/definitions(input) == input && native_read/definitions(input) == input && native_source_subscriptions/definitions(input) == input && native_command_text/definitions(input) == input && native_json/definitions(input) == input && native_write/definitions(input) == input
 "#
             ),
             Value::bool(true)
@@ -4342,7 +4351,7 @@ static void source_body_checks(struct mica_MemoryWorker *worker, struct mica_Ker
     struct mica_MemoryRoot *code, struct mica_SymbolTable *symbols) {
     (void)kernel;
     // These exist in Rust's registry but have no native source lowering.
-    const char *unavailable[] = {"assemble", "make_identity", "json_encode"};
+    const char *unavailable[] = {"assemble", "make_identity", "to_xml"};
     for (size_t i = 0; i < sizeof(unavailable) / sizeof(unavailable[0]); ++i) {
         struct mica_IdResult interned = mica_value_symbol_intern(symbols,
             (const uint8_t *)unavailable[i], strlen(unavailable[i]), NULL);
@@ -4557,6 +4566,46 @@ fn native_source_constructs_errors_and_frobs() {
             ("other", "make_identity(:native_other)"),
             ("mode", "0"),
             ("message", "none"),
+        ],
+    );
+}
+
+#[test]
+fn native_source_encodes_and_decodes_json() {
+    let body = include_str!("../../../apps/native/compiler/json_tests.mica");
+    let arity_errors = r#"
+let arity_errors = []
+for arguments in [[], [1, 2]]
+  for convert in [fn(args) => json_encode(@args), fn(args) => json_decode(@args), fn(args) => json_is_null(@args)]
+    try
+      convert(arguments)
+    catch problem
+      arity_errors = [@arity_errors, problem.code]
+    end
+  end
+end
+try
+  json_null(@[1])
+catch problem
+  arity_errors = [@arity_errors, problem.code]
+end
+"#;
+    // Rust's arity errors leave the task; native errors are catchable.
+    let expected =
+        "let arity_errors = [E_INVARG, E_INVARG, E_INVARG, E_INVARG, E_INVARG, E_INVARG, E_INVARG]";
+    check_native_source_body_against(
+        &format!("{arity_errors}\n{body}"),
+        &format!("{expected}\n{body}"),
+        include_str!("../../../apps/native/compiler/json_tests.c"),
+        &[
+            (
+                "valid",
+                r#"["null", "true", "false", "0", "-0", "-36028797018963968", "36028797018963967", "0.0", "1e0", "-1.25E+2", "1e-9999", "3.4028235e38", "1.4012985e-45", "\"café🦊\"", "\"\\uD83E\\uDD8A\\u0000\\b\\f\\n\\r\\t\\/\\\"\\\\\"", "[]", "{}", "[true, null, 1, 1.0]", "{\"a\": [1], \"a\": [2]}", "{\"\\u0061\": 1, \"a\": 2}", "{\"json\": \"null\"}", " \t\r\n {\"x\": {\"y\": [1,2,3]}} \t", string_slice("x[1]y", 1, 4)]"#,
+            ),
+            (
+                "invalid",
+                r#"["", " ", "//comment\n1", "1;", "1 2", "01", "-01", "+1", ".1", "1.", "1e", "1e+", "1e+-1", "--1", "0x10", "1_0", "NaN", "Infinity", "36028797018963968", "-36028797018963969", "18446744073709551616", "1e9999", "3.4028236e38", "[1,]", "{\"a\":1,}", "[1 2]", "{a:1}", "{\"a\" 1}", "True", "none", "nullx", "'x'", "\"\\x41\"", "\"\\0\"", "\"\\u{41}\"", "\"\\uD800\"", "\"\\uDC00\"", "\"\\uD800\\u0041\"", "\"\\uD800x\"", "\"\\u12zz\"", "\"\\u123\"", "\"unterminated", "\"raw\nnewline\"", "\"raw\0zero\"", "\u{a0}null", "null\u{b}"]"#,
+            ),
         ],
     );
 }
