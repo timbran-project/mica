@@ -4709,3 +4709,69 @@ return true
         );
     }
 }
+
+#[test]
+fn native_layout_validation_scales_with_repeated_types() {
+    for tier in [true, false] {
+        let mut runner = runner(tier).with_task_limits(TaskLimits {
+            instruction_budget: 10_000_000,
+            ..TaskLimits::default()
+        });
+        assert_eq!(
+            eval(
+                &mut runner,
+                r#"
+let state = native/program()
+state[:locals] = [[i, 0, "value", [:Array, [:Array, :U64, i % 128 + 1], 2]] for i in 0..16383]
+let index = {:records -> {}, :function_types -> {}}
+let ordered = native/check_layouts(state, index)
+require len(ordered) == 256
+require ordered == native/check_layouts(state, index)
+let positions = {}
+for i, kind in ordered
+  positions[kind] = i
+end
+for kind in ordered
+  if is_kind(kind, :list) && is_kind(kind[1], :list)
+    require positions[kind[1]] < positions[kind]
+  end
+end
+return true
+"#
+            ),
+            Value::bool(true)
+        );
+    }
+}
+
+#[test]
+fn native_relocation_validation_scales_with_function_bindings() {
+    for tier in [true, false] {
+        let mut runner = runner(tier).with_task_limits(TaskLimits {
+            instruction_budget: 10_000_000,
+            ..TaskLimits::default()
+        });
+        assert_eq!(
+            eval(
+                &mut runner,
+                r#"
+let pointer = [:Pointer, :U64, :Mutable]
+let parameters = [[string_concat("argument_", to_literal(i)), pointer, :Gc] for i in 0..15]
+let module = native/module_context(native/program(), {})
+module = native/declare_function(module, "collect", :Void, [], [], [:Relocate], :Value, "")
+module[:state] = native/foreign(module[:state], module[:functions]["collect"])
+for i in 0..255
+  let name = string_concat("function_", to_literal(i))
+  module = native/declare_function(module, name, :Void, parameters, [], [:Relocate], :Value, "")
+  let builder = native_gen/context(module, name)
+  builder = native_gen/do_call(builder, "collect", [])
+  module = native_gen/finish(module, native_gen/return_void(builder))
+end
+native/check(module[:state])
+return true
+"#
+            ),
+            Value::bool(true)
+        );
+    }
+}

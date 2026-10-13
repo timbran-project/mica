@@ -3,13 +3,13 @@
 
 // Structural arrays are C structs containing an array. They retain value
 // semantics in assignments and calls instead of silently decaying to pointers.
-verb native/collect_type(input_types, type_id)
-  let types = input_types
-  if type_id == :Void || native/contains(types, type_id)
+verb native/collect_type(input_types: map, type_id) -> map
+  let types: map = input_types
+  if type_id == :Void || map_contains_key(types, type_id)
     return types
   end
   native/c_type(type_id)
-  types = [@types, type_id]
+  types[type_id] = len(types)
   if native/is_pointer(type_id) || native/is_array(type_id)
     types = native/collect_type(types, type_id[1])
   end
@@ -17,7 +17,7 @@ verb native/collect_type(input_types, type_id)
 end
 
 verb native/check_layouts(state, index)
-  let types = []
+  let types: map = {}
   for row in state[:function_types]
     types = native/collect_type(types, [:FunctionPointer, row[0]])
     types = native/collect_type(types, row[1])
@@ -55,7 +55,7 @@ verb native/check_layouts(state, index)
   end
   let names = {}
   let pending = []
-  for type_id in types
+  for type_id, ordinal in types
     if native/is_function_pointer(type_id)
       native/ensure(map_contains_key(index[:function_types], type_id[1]), "unknown function pointer type")
     end

@@ -112,7 +112,10 @@ end
 
 verb native_jit/data(state: map) -> map
   let index: map = native/check(state)
-  let types: list = [:Void, :U8, :U16, :U32, :U64, :I64, :F32, :Bool]
+  let types: map = {}
+  for type_id in [:Void, :U8, :U16, :U32, :U64, :I64, :F32, :Bool]
+    types[type_id] = len(types)
+  end
   for type_id in index[:type_order]
     types = native/collect_type(types, type_id)
   end
@@ -148,12 +151,8 @@ verb native_jit/data(state: map) -> map
       types = native/collect_type(types, row[5][0])
     end
   end
-  let type_ids: map = {}
-  let ordinal: int = 0
-  for type_id in types
-    type_ids[type_id] = ordinal
-    ordinal = ordinal + 1
-  end
+  let type_ids: map = types
+  let ordered_types: list = [row[1] for row in sort([[ordinal, type_id] for type_id, ordinal in types])]
   let pool: map = {:names -> {}, :text -> ""}
   let sections: list = []
   let rows: list = []
@@ -161,7 +160,7 @@ verb native_jit/data(state: map) -> map
   let field_count: int = 0
   // Type rows: id, kind, name offset, representation/element, access/extent,
   // followed by member type/name/field-ID triples (or heap tags).
-  for type_id in types
+  for type_id in ordered_types
     let kind = type_id
     let name: string = to_literal(type_id)
     let element: int = 0

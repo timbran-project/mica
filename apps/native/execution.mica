@@ -229,10 +229,6 @@ end
 // A forward may-analysis tracks managed locals invalidated on any incoming path.
 // A fresh assignment (normally RootLoad) re-establishes its current address.
 verb native/check_relocation_liveness(state: map, index: map, origins: map)
-  let managed: list = [id for id, sources in origins if native/gc_origins(sources)]
-  if len(managed) == 0
-    return
-  end
   for function in state[:functions]
     let graph: map = index[:function_graphs][function[0]]
     let blocks: list = graph[:blocks]
@@ -241,10 +237,15 @@ verb native/check_relocation_liveness(state: map, index: map, origins: map)
     end
     let universe: map = {}
     let empty: map = {}
-    for id in managed
-      if map_contains_key(index[:variables], id) && index[:variables][id][0] == function[0]
-        universe[id] = true
-        empty[id] = false
+    // The checked indexes partition bindings by function. Each origin is
+    // inspected once, instead of rescanning every managed value for each body.
+    for bindings in [index[:function_parameters][function[0]], index[:function_locals][function[0]]]
+      for binding in bindings
+        let id: int = binding[0]
+        if native/gc_origins(origins[id])
+          universe[id] = true
+          empty[id] = false
+        end
       end
     end
     if len(universe) == 0
