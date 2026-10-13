@@ -160,7 +160,7 @@ verb native_source/emit_boundary(builder: map, instruction: list, continuation: 
 end
 
 // A block owns temporary roots only while its instructions execute. Source
-// registers remain rooted in the region prologue and carry values across edges.
+// registers remain rooted in the program prologue and carry values across edges.
 verb native_source/block_body(builder: map, program: map, block: map, continuations: map) -> map
   let ready: map = native_source/checked(builder, "task_poll", [native_tasks/attempt(builder), native_source/number(builder, len(block[:pcs]))])
   let code: list = program[:description][:code]
@@ -196,13 +196,34 @@ verb native_source/block_body(builder: map, program: map, block: map, continuati
   let result: map = native_source/emit_boundary(ready, instruction, continuation, captures)
   return result
 end
-verb native_source/region_body(module: map, program: map, region: map, name: string, continuations: map) -> map
-  let builder: map = native_source/context(module, string_concat(name, "_body"))
-  builder[:source_registers] = {}
+// Continuations have distinct immutable environments, but execute one shared
+// graph. Restoring an entry does not introduce another task boundary or poll.
+verb native_source/program_body(module: map, program: map, continuations: map) -> map
+  let analysis: map = program[:analysis]
+  let pcs: list = sort([pc for pc, present in analysis[:reachable]])
+  let entries: list = [region[:start] for region in program[:regions]]
+  let layout: list = native_source/program_blocks(analysis, entries, pcs)
+  let name: string = string_concat(program[:name], "_body")
+  let builder: map = native_source/context(module, name)
   builder = native_tasks/check(builder, native_gen/negate(native_kernel/absent(native_tasks/attempt_field(builder, "runtime"))), "closed")
-  builder = native_source/restore_frame(builder, program, region)
-  let blocks: list = [[native_source/block_label(block[:start]), fn(body) => native_source/block_body(body, program, block, continuations)] for block in region[:blocks]]
-  builder = native_gen/graph(builder, native_source/block_label(region[:start]), blocks)
+  builder = native_source/allocate_frame(builder, analysis, pcs)
+  let cases: list = []
+  let index: int = 0
+  for region in program[:regions]
+    cases = [@cases, [native_source/number(builder, index), fn(body)
+      let restored: map = native_source/restore_frame(body, region)
+      return native_gen/jump_to(restored, native_source/block_label(region[:start]))
+    end]]
+    index = index + 1
+  end
+  let blocks: list = [["resume", fn(body) => native_gen/switch(body, native_gen/ref(body, "resume"), cases,
+    fn(failed) => native_tasks/attempt_status(failed, "schema"))],
+    @[[native_source/block_label(block[:start]), fn(body) => native_source/block_body(body, analysis, block, continuations)] for block in layout]]
+  builder = native_gen/graph(builder, "resume", blocks)
   let result: map = native_gen/finish(module, builder)
+  result[:state] = native/annotate(result[:state], result[:functions][name], :Source,
+    string_concat("Mica basic blocks ", to_literal([block[:pcs] for block in layout])))
+  result[:state] = native/annotate(result[:state], result[:functions][name], :Purpose,
+    string_concat("Suspension captures ", to_literal([[pc, analysis[:captures][pc]] for pc in pcs if map_contains_key(analysis[:captures], pc)])))
   return result
 end

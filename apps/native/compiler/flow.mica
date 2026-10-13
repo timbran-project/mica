@@ -5,36 +5,10 @@ verb native_source/block_label(pc: int) -> string
   return string_concat("pc_", to_literal(pc))
 end
 
-// Follow native control flow until a task boundary. Resumption can enter a
-// loop's interior, so regions may share instructions but have distinct frames.
-verb native_source/region_instructions(analysis: map, start: int) -> list
-  let seen: map = {}
-  let queue: map = {0 -> start}
-  let cursor: int = 0
-  let count: int = 1
-  while cursor < count
-    let pc: int = queue[cursor]
-    cursor = cursor + 1
-    if map_contains_key(seen, pc)
-      continue
-    end
-    seen[pc] = true
-    if analysis[:instructions][pc][:boundary]
-      continue
-    end
-    for target in analysis[:instructions][pc][:successors]
-      queue[count] = target
-      count = count + 1
-    end
-  end
-  let result: list = sort([pc for pc, present in seen])
-  return result
-end
-
 // Group straight-line instructions. Poll once per block; a backward edge can
 // never bypass the next budget/cancellation check or accumulate temporary roots.
-verb native_source/region_blocks(analysis: map, start: int, pcs: list) -> list
-  let leaders: map = {start -> true}
+verb native_source/program_blocks(analysis: map, entries: list, pcs: list) -> list
+  let leaders: map = native_source/set(entries)
   let code: list = analysis[:description][:code]
   for pc in pcs
     if code[pc][0] == :Branch || code[pc][0] == :Jump
@@ -87,9 +61,8 @@ verb native_source/regions(analysis: map) -> list
   end
   let regions: list = []
   for [start, resume, restore, input, error_target, pop_handler] in origins
-    let pcs: list = native_source/region_instructions(analysis, start)
     regions = [@regions, {:start -> start, :resume -> resume, :restore -> restore, :input -> input,
-      :pcs -> pcs, :blocks -> native_source/region_blocks(analysis, start, pcs), :error_target -> error_target, :pop_handler -> pop_handler}]
+      :error_target -> error_target, :pop_handler -> pop_handler}]
   end
   return regions
 end

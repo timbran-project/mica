@@ -2607,14 +2607,22 @@ let emitted = emit_program(parsed[:rows], parsed[:root])
 native/ensure(emitted[:errors] == [], to_literal(emitted[:errors]))
 for definition in emitted[:methods]
   let analysis = native_source/analyse(native_exceptions/lower(definition[:program]), len(definition[:parameters]))
-  for region in native_source/regions(analysis)
-    let starts = native_source/set([block[:start] for block in region[:blocks]])
-    native/ensure(map_contains_key(starts, region[:start]), "region entry requires a block")
-    for block in region[:blocks]
-      if !analysis[:instructions][block[:last]][:boundary]
-        for target in analysis[:instructions][block[:last]][:successors]
-          native/ensure(map_contains_key(starts, target), "native edge must reach a block start")
-        end
+  let regions = native_source/regions(analysis)
+  let pcs = sort([pc for pc, present in analysis[:reachable]])
+  let shared = native_source/program_blocks(analysis, [region[:start] for region in regions], pcs)
+  let lowered = []
+  for block in shared
+    lowered = [@lowered, @block[:pcs]]
+  end
+  native/ensure(lowered == pcs, "shared body emits each reachable instruction once")
+  let entries = native_source/set([block[:start] for block in shared])
+  for region in regions
+    native/ensure(map_contains_key(entries, region[:start]), "resumption enters a shared block")
+  end
+  for block in shared
+    if !analysis[:instructions][block[:last]][:boundary]
+      for target in analysis[:instructions][block[:last]][:successors]
+        native/ensure(map_contains_key(entries, target), "native edge must reach a shared block")
       end
     end
   end

@@ -34,6 +34,12 @@ Release requires exclusive ownership after worker and event activity stops.
 The image supplies a generated entry with the `TaskEntry` ABI.
 The entry advances the current image, stages effects, and requests completion, a wait, or continuation.
 
+The source compiler emits one shared native body per Mica program, with separate entry wrappers for its resumptions.
+Each wrapper selects the restoration of its captured environment and delivered input before entering the shared control-flow graph.
+The body roots source registers for the duration of that entry and unlinks them before the wrapper makes a tail transfer.
+All entry points allocate that complete frame, including registers needed only by other entry points.
+Shared blocks execute directly, without creating extra task images or transaction boundaries.
+
 Preparation orders the effects and publishes an immutable `TaskBoundary` before the kernel commit.
 The kernel memory control bounds preparation and checks cancellation during graph allocation and copying.
 A conflict discards that boundary and restores the retry image.
