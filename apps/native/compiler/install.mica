@@ -36,7 +36,7 @@ verb native_source/install_parameters(input: map, relation: map, identity: map, 
   let position: int = 0
   for parameter in parameters
     builder = native_source/install_row(builder, relation, [identity, native_source/literal(builder, parameter[:role]),
-      native_source/literal(builder, :dispatch/unrestricted), native_source/literal(builder, position),
+      native_source/literal(builder, parameter[:restriction]), native_source/literal(builder, position),
       native_source/literal(builder, parameter[:mode]), native_source/literal(builder, parameter[:default])])
     position = position + 1
   end

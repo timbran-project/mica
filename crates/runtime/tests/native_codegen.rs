@@ -3561,6 +3561,106 @@ fn source_value_check(expected: &Value, actual: &str) -> String {
 }
 
 #[test]
+fn native_source_links_prototype_restrictions_and_identity_constants() {
+    let source = r#"
+verb native_restriction_fixture(value)
+  let captured = fn() => native_restricted_pick(value)
+  return [captured(), native_restricted_pick(7), native_restricted_pick("é"),
+    native_restricted_default(), native_restricted_rest(1, 2), native_identity_default(),
+    native_restricted_pick(frob(#native_parent, [1]))]
+end
+verb native_restricted_pick(value)
+  return 0
+end
+verb native_restricted_pick(value @ #native_parent)
+  return 10
+end
+verb native_restricted_pick(value @ #native_child)
+  return 20
+end
+verb native_restricted_pick(value @ #integer)
+  return 30
+end
+verb native_restricted_pick(value @ #string)
+  return 40
+end
+verb native_restricted_default(?value @ #native_parent = #native_parent)
+  return native_restricted_pick(value)
+end
+verb native_restricted_rest(@values @ #list)
+  return len(values)
+end
+verb native_identity_default(?values = {#native_parent -> [#native_child]})
+  return values[#native_parent][0]
+end
+"#;
+    let ids = "[[10000, 20000], [10001, 20001], [10002, 20002], [10003, 20003], [10004, 20004], [10005, 20005], [10006, 20006], [10007, 20007], [10008, 20008]]";
+    let identities = [
+        ("native_parent", 11001),
+        ("native_child", 11002),
+        ("integer", 9002),
+        ("string", 9007),
+        ("list", 9009),
+    ];
+    let checks = r#"
+    (void)symbols; // This fixture does not construct symbols; suppress the unused-parameter warning.
+    struct mica_KernelTransaction graph = {0};
+    assert(mica_kernel_begin(kernel, worker, &graph, source_integer(7)) == 0);
+    for (uint64_t child = 11002; child <= 11003; ++child) {
+        mica_type_Value cells[] = {mica_value_identity(child).f_value,
+            mica_value_identity(child - 1).f_value, source_integer(0)};
+        struct mica_ValueResult edge = mica_value_list(worker, cells, 3);
+        assert(edge.f_ok && mica_kernel_write(&graph, 701, edge.f_value, true) == 0);
+    }
+    assert(mica_kernel_commit(&graph) == 0 && mica_kernel_end(&graph));
+    const int64_t expected[] = {10, 20, 20, 0, 30};
+    for (unsigned case_index = 0; case_index < 5; ++case_index) {
+        mica_value_root_set(&input, case_index == 4 ? source_integer(7) :
+            mica_value_identity(11001 + case_index).f_value);
+        for (unsigned collect = 0; collect < 2; ++collect) {
+            run_frontend(worker, kernel, code, runtime, &input, &output, collect);
+            mica_type_Value result = mica_value_root_get(&output);
+            assert(mica_value_list_length(result).f_number == 7);
+            const int64_t numbers[] = {expected[case_index], 30, 40, 10, 2};
+            for (unsigned position = 0; position < 5; ++position)
+                assert(mica_value_list_get(result, position).f_value == source_integer(numbers[position]));
+            assert(mica_value_list_get(result, 5).f_value == mica_value_identity(11002).f_value);
+            assert(mica_value_list_get(result, 6).f_value == source_integer(10));
+        }
+    }
+    // Selection must use the new snapshot after a delegation is retracted.
+    assert(mica_kernel_begin(kernel, worker, &graph, source_integer(7)) == 0);
+    mica_type_Value cells[] = {mica_value_identity(11003).f_value,
+        mica_value_identity(11002).f_value, source_integer(0)};
+    struct mica_ValueResult edge = mica_value_list(worker, cells, 3);
+    assert(edge.f_ok && mica_kernel_write(&graph, 701, edge.f_value, false) == 0);
+    assert(mica_kernel_commit(&graph) == 0 && mica_kernel_end(&graph));
+    mica_value_root_set(&input, mica_value_identity(11003).f_value);
+    run_frontend(worker, kernel, code, runtime, &input, &output, true);
+    assert(mica_value_list_get(mica_value_root_get(&output), 0).f_value == source_integer(0));
+"#;
+    let fixture = include_str!("../../../apps/native/compiler/frontend_tests.c")
+        .replace("/* FRONTEND_CONFORMANCE_CASES */", checks);
+    let (generated, memory, tasks) = thread::scope(|scope| {
+        let builds = [true, false].map(|tier| {
+            let identities = &identities;
+            scope.spawn(move || generate_native_source_example(tier, source, ids, identities))
+        });
+        let [first, second] = builds.map(|build| build.join().unwrap());
+        assert!(
+            first == second,
+            "identity linking differs between bootstrap tiers"
+        );
+        first
+    });
+    check_native_source_fixture(&format!(
+        "{generated}\n{memory}\n{tasks}\n{}\n{}\n{fixture}",
+        include_str!("../../../native/platform/allocation.c"),
+        include_str!("../../../native/platform/mutex.c"),
+    ));
+}
+
+#[test]
 fn native_source_composite_literals_preserve_ownership() {
     for interpreter_only in [true, false] {
         let mut runner = runner(interpreter_only);
@@ -3576,11 +3676,25 @@ fn native_source_composite_literals_preserve_ownership() {
             eval(
                 &mut runner,
                 r#"
+let prototype = make_identity(:literal_prototype)
+let bindings = {prototype -> 17001}
+native/ensure(native_source/literal_description(prototype, bindings) == {:kind -> :Identity, :value -> 17001}, "identity uses its explicit native binding")
+let nested = native_source/literal_description([prototype, {prototype -> prototype}], bindings)
+native/ensure(nested[:children][0][:value] == 17001 && nested[:children][1][:children][0][:value] == 17001 && nested[:children][1][:children][1][:value] == 17001, "identity bindings apply to nested values and keys")
+for invalid in [{}, {prototype -> -1}, {prototype -> "wrong"}]
+  let rejected = false
+  try
+    native_source/literal_description(prototype, invalid)
+  catch error
+    rejected = true
+  end
+  native/ensure(rejected, "missing or invalid identity binding must fail")
+end
 let module = native_value/definitions()
 module[:source_prefix] = "literal_fixture"
 module = native_source/length_body(module)
 module = native_access/definitions(module)
-let description = native_source/literal_description(some({:nested -> [1, none, {2 -> 3.5}], :bytes -> b"AP8="}))
+let description = native_source/literal_description(some({:nested -> [1, none, {2 -> 3.5}], :bytes -> b"AP8="}), {})
 let [literal, prepared] = native_literal/prepare(module, "composite", description)
 module = native_memory/declare(prepared, "literal_fixture", native_value/word(), [
   ["worker", native_memory/record_pointer("MemoryWorker"), :Borrow],
@@ -3726,13 +3840,14 @@ fn generate_native_source(
         "{}\n{conformance_source}",
         include_str!("../../../apps/native/compiler/examples/roundtrip.mica")
     );
-    generate_native_source_example(interpreter_only, &example, method_ids)
+    generate_native_source_example(interpreter_only, &example, method_ids, &[])
 }
 
 fn generate_native_source_example(
     interpreter_only: bool,
     example: &str,
     method_ids: &str,
+    identities: &[(&str, u64)],
 ) -> (String, String, String) {
     let generation_started = Instant::now();
     let mut runner = runner(interpreter_only).with_task_limits(TaskLimits {
@@ -3750,10 +3865,19 @@ fn generate_native_source_example(
         "return make_functional_relation(:NativeResult, 2, [0])",
     );
     eval(&mut runner, "return make_relation(:NativeQuery, 3)");
+    let mut identity_bindings = Vec::new();
+    for (name, target) in identities {
+        eval(
+            &mut runner,
+            &format!("return make_identity(to_symbol({name:?}))"),
+        );
+        identity_bindings.push(format!("make_identity(to_symbol({name:?})) -> {target}"));
+    }
+    let identity_bindings = format!("{{{}}}", identity_bindings.join(","));
     let module = eval(
         &mut runner,
         &format!(
-            "return native_source/compile(native_tasks/definitions(), \"source_roundtrip\", {example:?}, {{:NativeResult -> 705, :NativeQuery -> 706, :RelationName -> 707, :Arity -> 708, :FunctionalKey -> 709}}, {method_ids})"
+            "return native_source/compile(native_tasks/definitions(), \"source_roundtrip\", {example:?}, {{:NativeResult -> 705, :NativeQuery -> 706, :RelationName -> 707, :Arity -> 708, :FunctionalKey -> 709}}, {identity_bindings}, {method_ids})"
         ),
     );
     eprintln!(
@@ -3849,6 +3973,7 @@ fn native_source_commits_suspends_and_delays_tasks() {
                     tier,
                     example,
                     "[[602, 8003], [603, 8004], [610, 8010], [611, 8011]]",
+                    &[],
                 )
             })
         });
@@ -3899,6 +4024,7 @@ fn native_source_emissions_obey_target_authority_and_transactions() {
                     tier,
                     include_str!("../../../apps/native/compiler/effects_tests.mica"),
                     "[[610, 8010]]",
+                    &[],
                 )
             })
         });
@@ -4388,7 +4514,7 @@ fn native_source_executes_the_compiler_parser() {
         let [first, second] = [true, false].map(|tier| {
             let source = &source;
             let method_ids = &method_ids;
-            scope.spawn(move || generate_native_source_example(tier, source, method_ids))
+            scope.spawn(move || generate_native_source_example(tier, source, method_ids, &[]))
         });
         let first = first.join().unwrap();
         let second = second.join().unwrap();
@@ -4592,7 +4718,7 @@ end
         let [first, second] = [true, false].map(|tier| {
             let source = &source;
             let method_ids = &method_ids;
-            scope.spawn(move || generate_native_source_example(tier, source, method_ids))
+            scope.spawn(move || generate_native_source_example(tier, source, method_ids, &[]))
         });
         let first = first.join().unwrap();
         let second = second.join().unwrap();
@@ -4742,7 +4868,7 @@ end
         let [first, second] = [true, false].map(|tier| {
             let source = &source;
             let method_ids = &method_ids;
-            scope.spawn(move || generate_native_source_example(tier, source, method_ids))
+            scope.spawn(move || generate_native_source_example(tier, source, method_ids, &[]))
         });
         let first = first.join().unwrap();
         let second = second.join().unwrap();

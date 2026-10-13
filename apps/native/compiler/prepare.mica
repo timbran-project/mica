@@ -255,33 +255,39 @@ verb native_source/program_literals(analysis: map, initial: map) -> map
   end
   return pool
 end
-verb native_source/literal_description(value) -> map
+verb native_source/literal_description(value, identities: map) -> map
+  if is_kind(value, :identity)
+    native/ensure(map_contains_key(identities, value), string_concat("unlinked native identity: ", to_literal(value)))
+    let target = identities[value]
+    native/ensure(is_kind(target, :int) && target >= 0, "native identity binding must be a nonnegative integer")
+    return {:kind -> :Identity, :value -> target}
+  end
   if value == [] {[]}
     return {:kind -> :Unit}
   end
   if value == none
     return {:kind -> :Relation, :arity -> 1, :length -> 0,
-      :children -> [native_source/literal_description(:value)]}
+      :children -> [native_source/literal_description(:value, identities)]}
   end
   if value == [] {}
     return {:kind -> :Relation, :arity -> 0, :length -> 0, :children -> []}
   end
   if is_kind(value, :list)
-    return {:kind -> :List, :children -> [native_source/literal_description(item) for item in value]}
+    return {:kind -> :List, :children -> [native_source/literal_description(item, identities) for item in value]}
   end
   if is_kind(value, :map)
     let children: list = []
     for key, item in value
-      children = [@children, native_source/literal_description(key), native_source/literal_description(item)]
+      children = [@children, native_source/literal_description(key, identities), native_source/literal_description(item, identities)]
     end
     return {:kind -> :Map, :children -> children}
   end
   if is_kind(value, :relation) && len(value) > 0
     let heading: list = [key for key, item in value[0]]
-    let children: list = [native_source/literal_description(key) for key in heading]
+    let children: list = [native_source/literal_description(key, identities) for key in heading]
     for row in value
       for key in heading
-        children = [@children, native_source/literal_description(row[key])]
+        children = [@children, native_source/literal_description(row[key], identities)]
       end
     end
     return {:kind -> :Relation, :arity -> len(heading), :length -> len(value), :children -> children}
@@ -342,7 +348,7 @@ verb native_source/symbol_text(value: symbol) -> string
 end
 
 // Resolve the frontend output, collect literals, and plan continuation regions.
-verb native_source/prepare_module(input: map, prefix: string, emitted: map, relations: map, method_ids: list) -> map
+verb native_source/prepare_module(input: map, prefix: string, emitted: map, relations: map, identities: map, method_ids: list) -> map
   native/ensure(len(method_ids) == len(emitted[:methods]), "native module requires identities for every definition")
   let descriptions: list = [[emitted[:entry], 0, string_concat(prefix, "_entry")]]
   let pool: map = native_source/literal_pool([E_TYPE, E_RANGE, [] {[]}, :dispatch/unrestricted, :required, @[spec[0] for spec in native_value/kinds()]])
@@ -352,8 +358,9 @@ verb native_source/prepare_module(input: map, prefix: string, emitted: map, rela
     let position: int = 0
     pool = native_source/pool(pool, definition[:selector])
     for parameter in definition[:parameters]
-      native/ensure(parameter[:restriction] == :dispatch/unrestricted,
-        "native source parameter prototypes require identity linking")
+      native/ensure(parameter[:restriction] == :dispatch/unrestricted || is_kind(parameter[:restriction], :identity),
+        "native source parameter restriction must be a prototype identity")
+      pool = native_source/pool(pool, parameter[:restriction])
       pool = native_source/pool(pool, parameter[:mode])
       pool = native_source/pool(pool, parameter[:default])
       pool = native_source/pool(pool, parameter[:role])
@@ -434,7 +441,7 @@ verb native_source/prepare_module(input: map, prefix: string, emitted: map, rela
   let prepared: list = []
   index = 0
   for value in pool[:values]
-    let [literal: map, ready: map] = native_literal/prepare(module, string_concat(prefix, "_literal_", to_literal(index)), native_source/literal_description(value))
+    let [literal: map, ready: map] = native_literal/prepare(module, string_concat(prefix, "_literal_", to_literal(index)), native_source/literal_description(value, identities))
     prepared = [@prepared, literal]
     module = ready
     index = index + 1

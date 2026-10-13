@@ -1,8 +1,9 @@
 // Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-// The caller assigns catalogue identities. Installation stages publication;
-// compilation only constructs code, constants, and native entry points.
+// The caller assigns catalogue IDs and explicit bootstrap-to-native identity
+// bindings. Installation stages publication. Compilation constructs code,
+// constants, and native entry points.
 verb native_source/define_entries(input: map) -> map
   let module: map = input
   for program in module[:source_programs]
@@ -18,12 +19,12 @@ verb native_source/define_entries(input: map) -> map
   return module
 end
 
-verb native_source/compile(input: map, prefix: string, source: string, relations: map, method_ids: list) -> map
+verb native_source/compile(input: map, prefix: string, source: string, relations: map, identities: map, method_ids: list) -> map
   let parsed: map = parse_rows(source)
   native/ensure(parsed[:errors] == [], to_literal(parsed[:errors]))
   let emitted: map = emit_program(parsed[:rows], parsed[:root])
   native/ensure(emitted[:errors] == [], to_literal(emitted[:errors]))
-  let module: map = native_source/prepare_module(input, prefix, emitted, relations, method_ids)
+  let module: map = native_source/prepare_module(input, prefix, emitted, relations, identities, method_ids)
   module = native_source/truthy_body(module)
   module = native_source/length_body(module)
   module = native_source/kind_message_body(module)

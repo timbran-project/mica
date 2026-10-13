@@ -46,6 +46,13 @@ Values reload through these slots after collection. Success and failure both res
 Registers with disjoint live intervals share slots. Registers needed within the same instruction keep separate slots, including operands, destinations, and exception captures.
 Resumptions restore only registers live at their entry, so dead values cannot overwrite reused slots.
 
+`native_source/compile(module, prefix, source, relations, identities, method_ids)` accepts explicit identity bindings.
+The `identities` map binds bootstrap identity values to native-world numeric IDs.
+Prototype restrictions, identity constants, and identities nested in supported literal containers use those bindings.
+An unbound identity or an invalid target ID fails compilation. Bootstrap identity numbers are never copied implicitly.
+Installation preserves each parameter's prototype restriction alongside its position, mode, and default.
+The native dispatcher applies the current transaction's delegation graph and primitive-prototype configuration.
+
 Preparation orders the effects and publishes an immutable `TaskBoundary` before the kernel commit.
 The kernel memory control bounds preparation and checks cancellation during graph allocation and copying.
 A conflict discards that boundary and restores the retry image.
