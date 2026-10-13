@@ -105,6 +105,9 @@ static void source_roundtrip(bool force_conflict) {
     assert(!mica_kernel_program_get(&install, 8003).f_program);
     assert(mica_task_source_roundtrip_install(&install, &dispatch, (void *)code.f_pointer, source_integer(7)) == 0);
     assert(mica_kernel_commit(&install) == 0 && mica_kernel_end(&install));
+#ifdef MICA_SOURCE_TIME
+    source_time_checks(&worker, &kernel, &code, &runtime, &services);
+#endif
     list = mica_value_list(&worker, NULL, 0);
     assert(list.f_ok);
     image.f_pointer = (void *)mica_task_new_Image(&worker, mica_source_roundtrip_entry_0,
@@ -112,9 +115,11 @@ static void source_roundtrip(bool force_conflict) {
     assert(image.f_pointer);
     struct mica_TaskControl parent = {0};
     assert(mica_task_init(&parent, &worker, &kernel, &image, 100000, 3, 16, &runtime) == 0);
+#ifndef MICA_SOURCE_TIME
     // Run the initial region here. Final resumption runs on another thread.
     assert(mica_task_execute(&parent, &worker) == 0);
     assert(mica_task_dispatch(&parent, &worker, &services) == 0);
+#endif
     assert(mica_task_scheduler_submit(&scheduler, &worker, &parent, false, 0).f_status == 0);
     if (force_conflict) {
         // Hold the child until the parent has committed its receive request.
@@ -190,6 +195,12 @@ static void source_roundtrip(bool force_conflict) {
         assert(mica_memory_safepoint(&worker, true));
         assert(!clock_gettime(CLOCK_MONOTONIC, &now));
         assert(now.tv_sec - start.tv_sec < 30);
+        // Exercise collection between segments without monopolizing the heap
+        // rendezvous while workers must meet real receive deadlines.
+        assert(mica_memory_leave(&worker));
+        struct timespec pause = {.tv_nsec = 1000000};
+        assert(!nanosleep(&pause, NULL));
+        assert(mica_memory_enter(&worker));
     }
     assert(mica_memory_leave(&worker));
     mica_task_scheduler_stop(&scheduler);
@@ -268,7 +279,9 @@ int main(void) {
     source_conformance();
 #endif
     source_roundtrip(false);
+#ifndef MICA_SOURCE_TIME
     source_roundtrip(true);
+#endif
     assert(mica_task_resources_stop());
     return 0;
 }

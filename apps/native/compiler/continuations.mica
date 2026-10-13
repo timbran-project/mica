@@ -136,18 +136,30 @@ verb native_source/complete(builder: map, value: map) -> map
   let result: map = native_source/return_call(builder, "task_return", [native_roots/worker(builder), native_tasks/attempt(builder), value])
   return result
 end
-verb native_source/spawn_task(builder: map, selector: map, supplied: map, continuation: string, captures: list) -> map
+verb native_source/spawn_task(builder: map, selector: map, supplied: map, delay: map, continuation: string, captures: list) -> map
   let [retained: map, rooted: map] = native_roots/retain(builder, "arguments", supplied)
   let ready: map = native_source/capture(rooted, continuation, captures)
   let result: map = native_source/return_call(ready, "task_spawn_request", [native_roots/worker(ready), native_tasks/attempt(ready),
-    selector, retained, native_gen/ref(ready, "zero")])
+    selector, retained, delay])
   return result
 end
-verb native_source/receive(builder: map, receivers: map, continuation: string, captures: list) -> map
+verb native_source/receive(builder: map, receivers: map, timeout: map, continuation: string, captures: list) -> map
   // Source operands reload their frame roots after replacing the current image.
   let ready: map = native_source/capture(builder, continuation, captures)
   let result: map = native_source/return_call(ready, "task_mailbox_request", [native_source/service(ready, "mailboxes"),
-    native_roots/worker(ready), native_tasks/attempt(ready), receivers, native_gen/ref(ready, "kernel_unlimited")])
+    native_roots/worker(ready), native_tasks/attempt(ready), receivers, timeout])
+  return result
+end
+
+verb native_source/suspend_task(builder: map, timeout: map, continuation: string, captures: list) -> map
+  let ready: map = native_source/capture(builder, continuation, captures)
+  let result: map = native_source/return_call(ready, "task_suspend_request", [native_roots/worker(ready), native_tasks/attempt(ready), timeout])
+  return result
+end
+verb native_source/commit_task(builder: map, continuation: string, captures: list) -> map
+  let ready: map = native_source/capture(builder, continuation, captures)
+  ready = native_handlers/replace_current(ready, native_handlers/current(ready), {"input" -> native_source/literal(ready, [] {[]})})
+  let result: map = native_source/return_call(ready, "task_request", [native_tasks/attempt(ready), native_gen/ref(ready, "task_boundary_continue")])
   return result
 end
 

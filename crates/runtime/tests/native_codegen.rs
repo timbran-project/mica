@@ -2290,6 +2290,7 @@ fn load_native_source_compiler(runner: &mut SourceRunner) {
         include_str!("../../../apps/native/compiler/queries.mica"),
         include_str!("../../../apps/native/compiler/updates.mica"),
         include_str!("../../../apps/native/compiler/ordering.mica"),
+        include_str!("../../../apps/native/compiler/time.mica"),
         include_str!("../../../apps/native/compiler/functions.mica"),
         include_str!("../../../apps/native/compiler/collections.mica"),
         include_str!("../../../apps/native/compiler/access.mica"),
@@ -3343,6 +3344,18 @@ fn generate_native_source(
     conformance_source: &str,
     method_ids: &str,
 ) -> (String, String, String) {
+    let example = format!(
+        "{}\n{conformance_source}",
+        include_str!("../../../apps/native/compiler/examples/roundtrip.mica")
+    );
+    generate_native_source_example(interpreter_only, &example, method_ids)
+}
+
+fn generate_native_source_example(
+    interpreter_only: bool,
+    example: &str,
+    method_ids: &str,
+) -> (String, String, String) {
     let generation_started = Instant::now();
     let mut runner = runner(interpreter_only).with_task_limits(TaskLimits {
         // The conformance module includes lifted closure bodies and continuations.
@@ -3359,10 +3372,6 @@ fn generate_native_source(
         "return make_functional_relation(:NativeResult, 2, [0])",
     );
     eval(&mut runner, "return make_relation(:NativeQuery, 3)");
-    let example = format!(
-        "{}\n{conformance_source}",
-        include_str!("../../../apps/native/compiler/examples/roundtrip.mica")
-    );
     let module = eval(
         &mut runner,
         &format!(
@@ -3430,6 +3439,54 @@ fn native_source_program_executes_on_generated_runtime() {
                 include_str!("../../../native/platform/allocation.c"),
                 include_str!("../../../native/platform/mutex.c"),
                 include_str!("../../../apps/native/compiler/conformance.c"),
+                include_str!("../../../apps/native/compiler/tests.c")
+            );
+            check_native_source_fixture(&fixture);
+        }
+    });
+}
+
+#[test]
+fn native_source_commits_suspends_and_delays_tasks() {
+    let example = include_str!("../../../apps/native/compiler/examples/roundtrip.mica")
+        .replace(
+            "  let round = 0",
+            "  suspend(0)\n  commit()\n  let round = 0",
+        )
+        .replace("mailbox_recv(receivers)", "mailbox_recv(receivers, 5)")
+        .replace(
+            "let count = 0",
+            "let count = len(mailbox_recv([caps[0]], 0)) + len(mailbox_recv([caps[0]], 0.001))",
+        )
+        .replace("@[saved[1] + count])", "@[saved[1] + count]) after 0.002");
+    let example = format!(
+        "{example}\n{}",
+        include_str!("../../../apps/native/compiler/time_tests.mica")
+    );
+    thread::scope(|scope| {
+        let builds = [true, false].map(|tier| {
+            let example = &example;
+            scope.spawn(move || {
+                generate_native_source_example(
+                    tier,
+                    example,
+                    "[[602, 8003], [603, 8004], [610, 8010], [611, 8011]]",
+                )
+            })
+        });
+        let mut previous = None;
+        for build in builds {
+            let (generated, memory, tasks) = build.join().unwrap();
+            if let Some(previous) = &previous {
+                assert_eq!(&generated, previous);
+                continue;
+            }
+            previous = Some(generated.clone());
+            let fixture = format!(
+                "{generated}\n{memory}\n{tasks}\n{}\n{}\n#include <assert.h>\n{}\n#define MICA_SOURCE_TIME\n{}",
+                include_str!("../../../native/platform/allocation.c"),
+                include_str!("../../../native/platform/mutex.c"),
+                include_str!("../../../apps/native/compiler/time_tests.c"),
                 include_str!("../../../apps/native/compiler/tests.c")
             );
             check_native_source_fixture(&fixture);

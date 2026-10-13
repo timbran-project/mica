@@ -1,0 +1,77 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+// Source durations use seconds rounded to milliseconds. The scheduler uses
+// nanoseconds and reserves UINT64_MAX for an indefinite wait. Decode f32's
+// significand with integer arithmetic so millisecond rounding does not lose
+// precision through an intermediate f32 multiplication.
+verb native_time/name(module: map) -> string
+  return string_concat(module[:source_prefix], "_duration")
+end
+verb native_time/result(builder: map, nanos: map) -> map
+  let result: map = native_gen/return_value(builder, native_gen/record(builder, [:Record, "IdResult"], {
+    "ok" -> native_gen/ref(builder, "true"), "number" -> nanos}))
+  return result
+end
+verb native_time/definitions(input: map) -> map
+  let needed: bool = false
+  for program in input[:source_programs]
+    for instruction in program[:analysis][:description][:code]
+      needed = needed || native/contains([:SuspendValue, :MailboxRecv, :SpawnDispatch, :SpawnDispatchDynamic, :SpawnPositionalDispatch], instruction[0])
+    end
+  end
+  if !needed
+    return input
+  end
+  let module: map = input
+  for number in [116, 150, 161, 255, 1000, 1000000, 1000000000, 8388607, 8388608, 2147483647, 18446744073, 18446744073709]
+    let [name: string, prepared: map] = native_rules/source_number(module, number)
+    module = prepared
+  end
+  module = native/declare_function(module, native_time/name(module), [:Record, "IdResult"],
+    [["value", native_value/word(), :Gc]], [], [:ReadMemory], :Value, "")
+  let builder: map = native_gen/context(module, native_time/name(module))
+  builder[:source_prefix] = module[:source_prefix]
+  let value: map = native_gen/ref(builder, "value")
+  let failure = fn(failed) => native_gen/return_zero(failed)
+  let [integer: map, decoded: map] = native_gen/bind(builder, "integer", native_gen/call(builder, "value_as_int", [value]))
+  builder = native_gen/when(decoded, native_gen/field(decoded, integer, "ok"), fn(integral)
+    let seconds: map = native_gen/field(integral, integer, "number")
+    let checked: map = native_gen/when(integral, native_gen/less(seconds, native_gen/ref(integral, "int_zero")), failure)
+    let count: map = native_gen/bitcast(:U64, seconds)
+    checked = native_gen/when(checked, native_gen/less(native_source/number(checked, 18446744073), count), failure)
+    return native_time/result(checked, native_gen/multiply(count, native_source/number(checked, 1000000000)))
+  end)
+  let [floating: map, with_float: map] = native_gen/checked_bind(builder, "floating", native_gen/call(builder, "value_as_float", [value]), "ok", failure)
+  let [bits: map, with_bits: map] = native_gen/bind(with_float, "bits", native_gen/convert(:U64, native_gen/bitcast(:U32, native_gen/field(with_float, floating, "number"))))
+  let magnitude: map = native_gen/bit_and(bits, native_source/number(with_bits, 2147483647))
+  builder = native_gen/when(with_bits, native_kernel/absent(magnitude), fn(zero) => native_time/result(zero, native_gen/ref(zero, "zero")))
+  builder = native_gen/when(builder, native_gen/less(native_source/number(builder, 2147483647), bits), failure)
+  // A normal f32 is (2^23 + fraction) * 2^(exponent - 150).
+  // Below exponent 116 every duration rounds to zero milliseconds; above
+  // exponent 161 every duration exceeds the scheduler's representation.
+  let [exponent: map, with_exponent: map] = native_gen/bind(builder, "exponent", native_gen/bit_and(native_gen/shift_right(bits, native_source/number(builder, 23)), native_source/number(builder, 255)))
+  builder = native_gen/when(with_exponent, native_gen/less(native_source/number(with_exponent, 161), exponent), failure)
+  builder = native_gen/when(builder, native_gen/less(exponent, native_source/number(builder, 116)), fn(tiny) => native_time/result(tiny, native_gen/ref(tiny, "zero")))
+  let significand: map = native_gen/bit_or(native_gen/bit_and(bits, native_source/number(builder, 8388607)), native_source/number(builder, 8388608))
+  let [millis: map, scaled: map] = native_gen/bind(builder, "milliseconds", native_gen/multiply(significand, native_source/number(builder, 1000)))
+  builder = native_gen/branch(scaled, native_gen/less(exponent, native_source/number(scaled, 150)), fn(fractional)
+    let [shift: map, shifted: map] = native_gen/bind(fractional, "shift", native_gen/subtract(native_source/number(fractional, 150), exponent))
+    let half: map = native_gen/shift_left(native_gen/ref(shifted, "one"), native_gen/subtract(shift, native_gen/ref(shifted, "one")))
+    return native_gen/assign(shifted, millis, native_gen/shift_right(native_gen/add(millis, half), shift))
+  end, fn(integral)
+    return native_gen/assign(integral, millis, native_gen/shift_left(millis, native_gen/subtract(exponent, native_source/number(integral, 150))))
+  end)
+  builder = native_gen/when(builder, native_gen/less(native_source/number(builder, 18446744073709), millis), failure)
+  let result: map = native_gen/finish(module, native_time/result(builder, native_gen/multiply(millis, native_source/number(builder, 1000000))))
+  return result
+end
+verb native_time/duration(builder: map, operand, default: string) -> list
+  if operand == none
+    return [native_gen/ref(builder, default), builder]
+  end
+  let value: map = native_source/operand(builder, operand)
+  let [duration: map, checked: map] = native_gen/checked_bind(builder, "duration", native_gen/call(builder, native_time/name(builder), [value]), "ok",
+    fn(invalid) => native_source/value_error(invalid, E_INVARG, "invalid suspend duration", value))
+  return [native_gen/field(checked, duration, "number"), checked]
+end

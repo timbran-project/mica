@@ -171,9 +171,6 @@ verb native_source/program_literals(analysis: map, initial: list) -> list
         pool = native_source/pool(pool, role[0])
         pool = native_source/pool_operands(pool, [role[1]])
       end
-      if op == :SpawnDispatch && instruction[4] != none
-        pool = native_source/pool_operands(pool, [instruction[4]])
-      end
     elseif op == :MailboxRecv
       pool = native_source/pool_operands(pool, [instruction[2]])
       if instruction[3] != none
@@ -181,6 +178,18 @@ verb native_source/program_literals(analysis: map, initial: list) -> list
       end
     elseif op == :Return || op == :Abort || op == :Throw
       pool = native_source/pool_operands(pool, [instruction[1]])
+    end
+    if native/contains([:SuspendValue, :MailboxRecv, :SpawnDispatch, :SpawnDispatchDynamic, :SpawnPositionalDispatch], op)
+      pool = native_source/pool(native_source/pool(pool, E_INVARG), "invalid suspend duration")
+      let duration = instruction[2]
+      if op == :MailboxRecv
+        duration = instruction[3]
+      elseif op != :SuspendValue
+        duration = instruction[4]
+      end
+      if duration != none
+        pool = native_source/pool_operands(pool, [duration])
+      end
     end
     pc = pc + 1
   end

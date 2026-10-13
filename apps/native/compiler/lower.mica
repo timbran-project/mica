@@ -135,13 +135,23 @@ verb native_source/emit_boundary(builder: map, instruction: list, continuation: 
     return result
   end
   if native/contains([:SpawnDispatch, :SpawnDispatchDynamic, :SpawnPositionalDispatch], op)
-    native/ensure(instruction[4] == none, "native source delayed spawn lowering is not implemented")
-    let [arguments: map, ready: map] = native_source/call_arguments(builder, instruction)
-    let result: map = native_source/spawn_task(ready, native_source/operand(ready, instruction[2]), arguments, continuation, captures)
+    let [delay: map, timed: map] = native_time/duration(builder, instruction[4], "zero")
+    let [arguments: map, ready: map] = native_source/call_arguments(timed, instruction)
+    let result: map = native_source/spawn_task(ready, native_source/operand(ready, instruction[2]), arguments, delay, continuation, captures)
     return result
   end
-  native/ensure(op == :MailboxRecv && instruction[3] == none, "unsupported native source suspension")
-  let result: map = native_source/receive(builder, native_source/operand(builder, instruction[2]), continuation, captures)
+  if op == :CommitValue
+    let result: map = native_source/commit_task(builder, continuation, captures)
+    return result
+  end
+  if op == :SuspendValue
+    let [timeout: map, ready: map] = native_time/duration(builder, instruction[2], "kernel_unlimited")
+    let result: map = native_source/suspend_task(ready, timeout, continuation, captures)
+    return result
+  end
+  native/ensure(op == :MailboxRecv, "unsupported native source suspension")
+  let [timeout: map, ready: map] = native_time/duration(builder, instruction[3], "kernel_unlimited")
+  let result: map = native_source/receive(ready, native_source/operand(ready, instruction[2]), timeout, continuation, captures)
   return result
 end
 

@@ -1,0 +1,35 @@
+verb native_time_fixture()
+  let saved = ["survives suspension", 42]
+  assert NativeResult(10, 1)
+  let published = commit()
+  assert NativeResult(11, 1)
+  let timed = suspend(0.0015)
+  assert NativeResult(12, 1)
+  let delivered = suspend()
+  return [published, timed, delivered, saved]
+end
+
+verb native_time_errors()
+  let [rx, tx] = mailbox()
+  let errors = []
+  for duration in [-1, "bad", -0.5, 18446744074]
+    try
+      suspend(duration)
+      errors = [@errors, false]
+    catch error
+      errors = [@errors, error.code == E_INVARG && error.value[0][:value] == duration]
+    end
+  end
+  try
+    spawn :native_roundtrip_child(reply: tx, key: 99, value: 1) after -1
+  catch error
+    errors = [@errors, error.code == E_INVARG]
+  end
+  try
+    mailbox_recv([rx], -1)
+  catch error
+    errors = [@errors, error.code == E_INVARG]
+  end
+  mailbox_close(rx)
+  return errors
+end
