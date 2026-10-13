@@ -183,6 +183,7 @@ fn run() -> Result<()> {
         "compiler/text",
         "compiler/text_scan",
         "compiler/text_search",
+        "compiler/url",
         "compiler/numeric",
         "compiler/functions",
         "compiler/collections",

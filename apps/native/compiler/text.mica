@@ -61,6 +61,8 @@ verb native_text/definitions(input: map) -> map
   let scanning: bool = false
   let searching: bool = false
   let prefixes: bool = false
+  let url_encoding: bool = false
+  let url_decoding: bool = false
   for program in input[:source_programs]
     for instruction in program[:analysis][:description][:code]
       if instruction[0] == :BuiltinCall
@@ -69,6 +71,8 @@ verb native_text/definitions(input: map) -> map
         searching = searching || instruction[2] == :string_contains
         prefixes = prefixes || instruction[2] == :string_starts_with
         scanning = scanning || native/contains([:string_span, :string_find_any], instruction[2])
+        url_encoding = url_encoding || instruction[2] == :url_encode_component
+        url_decoding = url_decoding || instruction[2] == :url_decode_component
       end
     end
   end
@@ -94,6 +98,15 @@ verb native_text/definitions(input: map) -> map
   end
   if prefixes
     module = native_text/search_definition(module, "starts_with")
+  end
+  if url_encoding || url_decoding
+    module = native_url/constants(module)
+  end
+  if url_encoding
+    module = native_url/definition(module, "url_encode")
+  end
+  if url_decoding
+    module = native_url/definition(module, "url_decode")
   end
   return module
 end

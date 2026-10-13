@@ -1,0 +1,159 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+verb native_url/number(builder: map, number: int) -> map
+  let result: map = native_gen/ref(builder, string_concat("url_", to_literal(number)))
+  return result
+end
+verb native_url/in_range(builder: map, byte: map, first: int, limit: int) -> map
+  let result: map = native_gen/less(native_gen/subtract(byte, native_url/number(builder, first)), native_url/number(builder, limit - first))
+  return result
+end
+
+// A fixed stack buffer keeps validation and copying in small batches. The
+// accumulated string is rooted; no borrowed heap pointer crosses a checkpoint.
+verb native_text/byte_buffer(builder: map) -> list
+  let [bytes: map, allocated: map] = native_gen/bind(builder, "bytes", native_gen/zero([:Array, :U8, 256]))
+  let [used: map, counted: map] = native_gen/bind(allocated, "used", native_gen/ref(allocated, "zero"))
+  let [empty: map, initialized: map] = native_query/value(counted, "value_string", [native_roots/worker(counted),
+    native_gen/zero([:Pointer, :U8, :Const]), native_gen/ref(counted, "zero")])
+  let [text: map, ready: map] = native_roots/retain(initialized, "text_buffer", empty)
+  return [{:bytes -> bytes, :used -> used, :text -> text}, ready]
+end
+verb native_text/buffer_byte(builder: map, buffer: map, byte: map) -> map
+  let stored: map = native_gen/store(builder, native_gen/element(native_gen/address(buffer[:bytes]), buffer[:used]), native_gen/convert(:U8, byte))
+  let result: map = native_gen/assign(stored, buffer[:used], native_gen/add(buffer[:used], native_gen/ref(stored, "one")))
+  return result
+end
+verb native_text/flush_bytes(builder: map, buffer: map) -> map
+  let charged: map = native_query/charge(builder, buffer[:used], native_gen/ref(builder, "zero"))
+  let data: map = native_gen/freeze(native_gen/element(native_gen/address(buffer[:bytes]), native_gen/ref(charged, "zero")))
+  let [appended: map, copied: map] = native_query/value(charged, "value_string_append", [native_roots/worker(charged), buffer[:text], data, buffer[:used]])
+  let retained: map = native_roots/store(copied, buffer[:text], appended)
+  let result: map = native_gen/assign(retained, buffer[:used], native_gen/ref(retained, "zero"))
+  return result
+end
+verb native_url/hex_digit(builder: map, nibble: map) -> list
+  let [byte: map, ready: map] = native_gen/bind(builder, "hex_digit", native_gen/add(nibble, native_url/number(builder, 48)))
+  ready = native_gen/unless(ready, native_gen/less(nibble, native_url/number(ready, 10)),
+    fn(letter) => native_gen/assign(letter, byte, native_gen/add(nibble, native_url/number(letter, 55))))
+  return [byte, ready]
+end
+verb native_url/encode_byte(builder: map, buffer: map, byte: map) -> map
+  let [plain: map, ready: map] = native_gen/bind(builder, "unreserved", native_gen/ref(builder, "false"))
+  for range in [[48, 58], [65, 91], [97, 123]]
+    ready = native_gen/when(ready, native_url/in_range(ready, byte, range[0], range[1]),
+      fn(found) => native_gen/assign(found, plain, native_gen/ref(found, "true")))
+  end
+  for character in [45, 95, 46, 126]
+    ready = native_gen/when(ready, native_gen/equal(byte, native_url/number(ready, character)),
+      fn(found) => native_gen/assign(found, plain, native_gen/ref(found, "true")))
+  end
+  let result: map = native_gen/branch(ready, plain,
+    fn(literal) => native_text/buffer_byte(literal, buffer, byte), fn(escaped)
+      let prefix: map = native_text/buffer_byte(escaped, buffer, native_url/number(escaped, 37))
+      let [high: map, with_high: map] = native_url/hex_digit(prefix, native_gen/shift_right(byte, native_url/number(prefix, 4)))
+      let first: map = native_text/buffer_byte(with_high, buffer, high)
+      let [low: map, with_low: map] = native_url/hex_digit(first, native_gen/bit_and(byte, native_url/number(first, 15)))
+      return native_text/buffer_byte(with_low, buffer, low)
+    end)
+  return result
+end
+verb native_url/hex_value(builder: map, byte: map) -> list
+  let [digit: map, ready: map] = native_gen/bind(builder, "hex_value", native_url/number(builder, 16))
+  for range in [[48, 58, 0], [65, 71, 10], [97, 103, 10]]
+    ready = native_gen/when(ready, native_url/in_range(ready, byte, range[0], range[1]), fn(matched)
+      return native_gen/assign(matched, digit, native_gen/add(native_gen/subtract(byte, native_url/number(matched, range[0])), native_url/number(matched, range[2])))
+    end)
+  end
+  ready = native_tasks/check(ready, native_gen/less(digit, native_url/number(ready, 16)), "schema")
+  return [digit, ready]
+end
+
+// Percent escapes describe bytes, including pieces of UTF-8 scalars. A plus
+// in the input becomes a space; an escaped plus stays a plus.
+verb native_url/read_byte(builder: map, text: map, position: map, length: map) -> list
+  let [byte: map, loaded: map] = native_gen/bind(builder, "byte", native_gen/convert(:U64, native_value/string_byte(builder, text, position)))
+  let ready: map = native_gen/assign(loaded, position, native_gen/add(position, native_gen/ref(loaded, "one")))
+  ready = native_gen/branch(ready, native_gen/equal(byte, native_url/number(ready, 37)), fn(escape)
+    let checked: map = native_tasks/check(escape, native_gen/negate(native_gen/less(native_gen/subtract(length, position), native_url/number(escape, 2))), "schema")
+    let [high: map, with_high: map] = native_url/hex_value(checked, native_gen/convert(:U64, native_value/string_byte(checked, text, position)))
+    let [low: map, with_low: map] = native_url/hex_value(with_high, native_gen/convert(:U64, native_value/string_byte(with_high, text, native_gen/add(position, native_gen/ref(with_high, "one")))))
+    let decoded: map = native_gen/assign(with_low, byte, native_gen/add(native_gen/shift_left(high, native_url/number(with_low, 4)), low))
+    return native_gen/assign(decoded, position, native_gen/add(position, native_url/number(decoded, 2)))
+  end, fn(literal)
+    return native_gen/when(literal, native_gen/equal(byte, native_url/number(literal, 43)),
+      fn(space) => native_gen/assign(space, byte, native_url/number(space, 32)))
+  end)
+  return [byte, ready]
+end
+
+// Finish a scalar before flushing. utf8_decode checks continuation bytes,
+// overlong forms, surrogates, and the Unicode upper bound in at most four bytes.
+verb native_url/decode_byte(builder: map, buffer: map, byte: map, pending: map, start: map) -> map
+  let ready: map = native_gen/when(builder, native_kernel/absent(pending), fn(first)
+    let begun: map = native_gen/assign(first, start, buffer[:used])
+    begun = native_gen/assign(begun, pending, native_url/number(begun, 1))
+    for range in [[194, 224, 2], [224, 240, 3], [240, 245, 4]]
+      begun = native_gen/when(begun, native_url/in_range(begun, byte, range[0], range[1]),
+        fn(lead) => native_gen/assign(lead, pending, native_url/number(lead, range[2])))
+    end
+    return begun
+  end)
+  ready = native_text/buffer_byte(ready, buffer, byte)
+  ready = native_gen/assign(ready, pending, native_gen/subtract(pending, native_gen/ref(ready, "one")))
+  let result: map = native_gen/when(ready, native_kernel/absent(pending), fn(complete)
+    let data: map = native_gen/freeze(native_gen/element(native_gen/address(buffer[:bytes]), start))
+    let valid: map = native_gen/field(complete, native_gen/call(complete, "utf8_decode", [data, native_gen/subtract(buffer[:used], start)]), "ok")
+    return native_tasks/check(complete, valid, "schema")
+  end)
+  return result
+end
+verb native_url/body(module: map, operation: string) -> map
+  let builder: map = native_queries/budget_scope(native_gen/context(module, native_text/name(module, operation)))
+  let text: map = native_roots/ref(builder, "text")
+  builder = native_builtins/kind_check(builder, text, "string")
+  let [length: map, sized: map] = native_gen/bind(builder, "length", native_value/string_field(builder, text, "length"))
+  let [buffer: map, buffered: map] = native_text/byte_buffer(sized)
+  let [position: map, positioned: map] = native_gen/bind(buffered, "position", native_gen/ref(buffered, "zero"))
+  let [ticks: map, ticked: map] = native_gen/bind(positioned, "visited", native_gen/ref(positioned, "zero"))
+  let [pending: map, tracked: map] = native_gen/bind(ticked, "pending", native_gen/ref(ticked, "zero"))
+  let [start: map, ready: map] = native_gen/bind(tracked, "scalar_start", native_gen/ref(tracked, "zero"))
+  builder = native_gen/while_loop(ready, native_gen/less(position, length), fn(step)
+    let polled: map = native_query/poll_interval(step, ticks)
+    let advanced: map = native_gen/assign(polled, ticks, native_gen/add(ticks, native_gen/ref(polled, "one")))
+    if operation == "url_encode"
+      let byte: map = native_gen/convert(:U64, native_value/string_byte(advanced, text, position))
+      advanced = native_url/encode_byte(advanced, buffer, byte)
+      advanced = native_gen/assign(advanced, position, native_gen/add(position, native_gen/ref(advanced, "one")))
+    else
+      let [byte: map, decoded: map] = native_url/read_byte(advanced, text, position, length)
+      advanced = native_url/decode_byte(decoded, buffer, byte, pending, start)
+    end
+    return native_gen/when(advanced, native_kernel/absent(pending), fn(boundary)
+      return native_gen/unless(boundary, native_gen/less(buffer[:used], native_url/number(boundary, 252)),
+        fn(full) => native_text/flush_bytes(full, buffer))
+    end)
+  end)
+  builder = native_tasks/check(builder, native_kernel/absent(pending), "schema")
+  builder = native_text/flush_bytes(builder, buffer)
+  let target: map = native_roots/root_value(builder, native_gen/ref(builder, "output"), native_value/word())
+  builder = native_roots/store(builder, target, buffer[:text])
+  let result: map = native_gen/finish(module, native_tasks/attempt_status(builder, "ok"))
+  return result
+end
+verb native_url/constants(input: map) -> map
+  let module: map = input
+  for number in [0, 1, 2, 3, 4, 5, 6, 10, 15, 16, 26, 30, 32, 37, 43, 45, 46, 48, 55, 65, 95, 97, 126, 194, 224, 240, 252]
+    module = native_literal/constant(module, string_concat("url_", to_literal(number)), :U64, native_value/hex(number))
+  end
+  return module
+end
+verb native_url/definition(input: map, operation: string) -> map
+  let module: map = native_memory/declare(input, native_text/name(input, operation), :U64, [
+    ["worker", native_memory/record_pointer("MemoryWorker"), :Borrow], ["attempt", native_tasks/pointer("Attempt"), :Borrow],
+    ["transaction", native_kernel/pointer("Transaction"), :Borrow], ["text", native_value/word(), :Gc],
+    ["output", native_memory/record_pointer("MemoryRoot"), :Borrow]], native_tasks/effects(), :Value, "")
+  let result: map = native_url/body(module, operation)
+  return result
+end

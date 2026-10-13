@@ -2294,6 +2294,7 @@ fn load_native_source_compiler(runner: &mut SourceRunner) {
         include_str!("../../../apps/native/compiler/text.mica"),
         include_str!("../../../apps/native/compiler/text_scan.mica"),
         include_str!("../../../apps/native/compiler/text_search.mica"),
+        include_str!("../../../apps/native/compiler/url.mica"),
         include_str!("../../../apps/native/compiler/numeric.mica"),
         include_str!("../../../apps/native/compiler/functions.mica"),
         include_str!("../../../apps/native/compiler/collections.mica"),
@@ -3543,6 +3544,14 @@ fn native_source_emissions_obey_target_authority_and_transactions() {
             check_native_source_fixture(&fixture);
         }
     });
+}
+
+#[test]
+fn native_source_encodes_and_decodes_url_components() {
+    check_native_source_body(
+        include_str!("../../../apps/native/compiler/url_tests.mica"),
+        include_str!("../../../apps/native/compiler/url_tests.c"),
+    );
 }
 
 #[test]
