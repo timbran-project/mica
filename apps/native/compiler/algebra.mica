@@ -44,11 +44,16 @@ verb native_algebra/heading(builder: map, relation: map) -> list
   return result
 end
 verb native_algebra/each_row(builder: map, relation: map, visit) -> map
-  let result: map = native_gen/for_range(builder, "row", native_gen/ref(builder, "zero"), native_access/length(builder, relation, "relation"), fn(step, index)
-    let polled: map = native_query/poll_interval(step, index)
-    let [row: map, copied: map] = native_algebra/row(polled, relation, index)
-    let [retained: map, ready: map] = native_roots/retain(copied, "row", row)
-    return visit(ready, retained)
+  // Register one reusable row root outside the loop. Re-registering its
+  // stack slot on each iteration would link that root back to itself.
+  let result: map = native_roots/temporary(builder, fn(scoped)
+    let [row: map, rooted: map] = native_roots/retain(scoped, "row", native_gen/zero(native_value/word()))
+    return native_gen/for_range(rooted, "row", native_gen/ref(rooted, "zero"), native_access/length(rooted, relation, "relation"), fn(step, index)
+      let polled: map = native_query/poll_interval(step, index)
+      let [value: map, copied: map] = native_algebra/row(polled, relation, index)
+      let ready: map = native_roots/store(copied, row, value)
+      return visit(ready, row)
+    end)
   end)
   return result
 end

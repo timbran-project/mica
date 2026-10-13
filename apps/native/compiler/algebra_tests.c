@@ -18,6 +18,17 @@ struct AlgebraCancellation {
     struct mica_KernelTransaction *transaction;
     unsigned checks;
 };
+static bool algebra_roots_acyclic(uint8_t *context, uint64_t bytes, uint64_t steps) {
+    (void)bytes; (void)steps;
+    struct mica_MemoryWorker *worker = (void *)context;
+    struct mica_MemoryRoot *slow = worker->f_roots, *fast = slow;
+    while (fast && fast->f_next) {
+        slow = slow->f_next;
+        fast = fast->f_next->f_next;
+        assert(slow != fast);
+    }
+    return true;
+}
 static bool algebra_cancel(uint8_t *context, uint64_t bytes, uint64_t steps) {
     (void)bytes; (void)steps;
     struct AlgebraCancellation *state = (void *)context;
@@ -43,15 +54,17 @@ static void source_body_checks(struct mica_MemoryWorker *worker, struct mica_Ker
     struct mica_ValueResult value = mica_value_string(worker, (const uint8_t *)"retained", 8);
     assert(value.f_ok);
     mica_value_root_set(&text, value.f_value);
-    mica_type_Value cells[128][2];
-    struct mica_ValueTuple rows[128];
+    // Cross multiple collection-poll boundaries within each row loop.
+    enum { ROWS = 512, SHIFT = ROWS / 2 };
+    mica_type_Value cells[ROWS][2];
+    struct mica_ValueTuple rows[ROWS];
     for (unsigned side = 0; side < 2; ++side) {
-        for (unsigned i = 0; i < 128; ++i) {
-            cells[i][0] = source_integer(i + side * 64);
+        for (unsigned i = 0; i < ROWS; ++i) {
+            cells[i][0] = source_integer(i + side * SHIFT);
             cells[i][1] = mica_value_root_get(&text);
             rows[i] = (struct mica_ValueTuple){.f_data = cells[i], .f_arity = 2};
         }
-        value = mica_value_relation(worker, heading, 2, rows, 128);
+        value = mica_value_relation(worker, heading, 2, rows, ROWS);
         assert(value.f_ok);
         mica_value_root_set(side ? &right : &left, value.f_value);
     }
@@ -60,7 +73,7 @@ static void source_body_checks(struct mica_MemoryWorker *worker, struct mica_Ker
     assert(value.f_ok);
     mica_value_root_set(&arguments, value.f_value);
     uint64_t collection_limit = worker->f_heap->f_collection_limit;
-    const uint64_t lengths[] = {192, 64, 64, 128};
+    const uint64_t lengths[] = {ROWS + SHIFT, SHIFT, ROWS - SHIFT, ROWS};
     for (unsigned operation = 0; operation < 4; ++operation) {
         struct mica_KernelTransaction tx = {0};
         assert(mica_kernel_begin(kernel, worker, &tx, source_integer(7)) == 0);
@@ -68,7 +81,12 @@ static void source_body_checks(struct mica_MemoryWorker *worker, struct mica_Ker
         worker->f_heap->f_collection_limit = 0;
         uint64_t collections = worker->f_heap->f_collections;
         struct mica_MemoryRoot *roots = worker->f_roots;
+        // Fail immediately on a repeated stack-root registration, rather than
+        // hanging when the collector next walks that root chain.
+        struct mica_MemoryControl roots_check = {.f_context = (void *)worker, .f_check = algebra_roots_acyclic};
+        mica_memory_control_push(worker, &roots_check);
         assert(run_algebra(operation, worker, &attempt, &tx, &left, &right, &arguments, &output) == 0);
+        mica_memory_control_pop(worker);
         assert(worker->f_heap->f_collections > collections && worker->f_roots == roots);
         struct mica_IdResult length = mica_value_relation_length(mica_value_root_get(&output));
         assert(length.f_ok && length.f_number == lengths[operation]);
