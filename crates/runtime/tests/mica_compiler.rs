@@ -227,6 +227,47 @@ fn mica_emitter_typed_list_bindings_check_slots_and_later_assignments() {
 }
 
 #[test]
+fn mica_emitter_loop_bindings_are_mutable_and_preserve_annotations() {
+    let cases = [
+        "let source = [1, 2]\nlet result = []\nfor item in source\n item = item + 10\n result = [@result, item]\nend\nreturn [source, result]",
+        "let result = []\nfor key, item in {:a -> {:n -> 1}, :b -> {:n -> 2}}\n key = :changed\n item[:n] = item[:n] + 10\n result = [@result, [key, item]]\nend\nreturn result",
+        "let result = []\nfor index, item in [4, 5]\n index = index + 10\n item = item + index\n result = [@result, [index, item]]\nend\nreturn result",
+        "let result = []\nfor [head, @tail] in [[1, 2], [3, 4]]\n head = head + 10\n tail[0] = head\n result = [@result, [head, tail]]\nend\nreturn result",
+        "let result = []\nfor {n} in [{:n -> 1}, {:n -> 2}]\n n = n + 10\n result = [@result, n]\nend\nreturn result",
+        "let result = []\nfor {n} in [:n] {[1], [2]}\n n = n + 10\n result = [@result, n]\nend\nreturn result",
+        "return [(item = item + 10) for item in [1, 2]]",
+        "return [(item = 10 - item) for item in [1, 2] sort item]",
+        "return [item for item in [1, 2] if (item = item + 10) > 0]",
+        "return [(head = head + 10) for [head] in [[1], [2]]]",
+        "return [(n = n + 10) for {n} in [{:n -> 1}, {:n -> 2}]]",
+        "let callbacks = []\nfor item in [1, 2]\n let captured_before = fn() => item\n item = item + 10\n let captured_after = fn() => item\n callbacks = [@callbacks, captured_before, captured_after]\nend\nreturn [callback() for callback in callbacks]",
+        "let item = 99\nfor item in [1, 2]\n item = item + 10\nend\nreturn item",
+        "fn replacement() => [\"bad\"][0]\nfor item: int in [1]\n try\n  item = replacement()\n catch E_TYPE as problem\n  return [problem.code, item]\n end\nend\nreturn false",
+        "fn replacement() => [\"bad\"][0]\nfor index: int, item: int in [1]\n try\n  index = replacement()\n catch E_TYPE as problem\n  return [problem.code, index, item]\n end\nend\nreturn false",
+        "fn replacement() => [\"bad\"][0]\nfor [item: int] in [[1]]\n try\n  item = replacement()\n catch E_TYPE as problem\n  return [problem.code, item]\n end\nend\nreturn false",
+        "let result = []\nfor item: int in [1, 2]\n item = item + 10\n result = [@result, item]\nend\nreturn result",
+    ];
+    for interpreter_only in [true, false] {
+        let mut runner = compiler(interpreter_only);
+        for source in cases {
+            assert_emitted_agrees(&mut runner, source);
+        }
+        for source in [
+            "const item = 1\nitem = 2",
+            "let callback = fn(item)\n item = 2\n return item\nend",
+            "verb immutable_parameter(item)\n item = 2\n return item\nend",
+        ] {
+            let module = invoke(&mut runner, "emit_source", source);
+            assert_eq!(
+                module.map_get(&Value::symbol(Symbol::intern("ok"))),
+                Some(Value::bool(false)),
+                "{source}"
+            );
+        }
+    }
+}
+
+#[test]
 fn mica_emitter_nested_indexed_assignments_follow_moo_evaluation_order() {
     for interpreter_only in [true, false] {
         let mut runner = compiler(interpreter_only);

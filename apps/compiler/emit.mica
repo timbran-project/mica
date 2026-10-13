@@ -1028,13 +1028,13 @@ verb emit_iteration_bindings(rows, node, collection, index_reg, input_state)
   let state = input_state
   let [has_pattern, pattern] = ast_attr(rows, node, :pattern)
   if has_pattern && ast_kind(rows, pattern) == :Map_Pattern
-    let [_, bound] = emit_row_binding(rows, pattern, collection, index_reg, false, true, state)
+    let [_, bound] = emit_row_binding(rows, pattern, collection, index_reg, false, false, state)
     return bound
   end
   let [item_reg, allocated] = emit_register(state)
   state = emit_append(allocated, [:CollectionValueAt, item_reg, collection, index_reg])
   if has_pattern
-    let [_, bound] = emit_pattern(rows, pattern, item_reg, true, "", state)
+    let [_, bound] = emit_pattern(rows, pattern, item_reg, false, "", state)
     return bound
   end
   let names = ast_children(rows, node, :name)
@@ -1940,10 +1940,13 @@ verb emit_loop_binding(rows, node, reg, input_state)
   let [_, name_text] = ast_attr(rows, node, :name)
   let state = input_state
   if name_text != "_"
-    state = emit_declare(state, name_text, reg, true)
+    state = emit_declare(state, name_text, reg, false)
   end
   let [annotated, annotation] = ast_attr(rows, node, :annotation)
   if annotated
+    let types = state[:binding_types]
+    types[reg] = annotation
+    state[:binding_types] = types
     state = emit_annotation(state, reg, annotation, :Binding, name_text)
   end
   return state

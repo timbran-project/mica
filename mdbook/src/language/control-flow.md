@@ -133,9 +133,11 @@ end
 require total == 5
 ```
 
-Loop bindings are local to the loop. Bind a mutable accumulator before the loop when the result must
-be used afterward. The value of the `for` or `while` expression itself is `()`; it does not collect
-the values of its body automatically.
+Loop bindings are mutable and local to the loop. Reassignment changes the local value, without changing the collection or iteration order.
+Kind annotations also constrain later assignments to loop bindings.
+
+Bind a mutable accumulator before the loop when the result must be used afterward.
+The value of the `for` or `while` expression itself is `()`. It does not collect the values of its body automatically.
 
 The loop keeps its evaluated collection value. Replacing the original local binding does not change
 which elements the loop visits:

@@ -3777,13 +3777,81 @@ fn native_source_supports_compiler_frontend_dependencies() {
         include_str!("../../../apps/compiler/ast.mica"),
         include_str!("../../../apps/compiler/emit.mica"),
     ];
-    let mut runner = runner(true);
-    for source in &sources[..3] {
+    // Native lowering consumes register descriptions, not Rust bytecode.
+    let inventory = native_source_dependency_inventory(&sources, &["emit_source"]);
+    assert!(
+        inventory
+            .map_get(&Value::symbol(Symbol::intern("programs")))
+            .unwrap()
+            .as_int()
+            .unwrap()
+            > 100
+    );
+    let builtins = inventory
+        .map_get(&Value::symbol(Symbol::intern("builtins")))
+        .unwrap();
+    for name in ["from_literal", "to_literal"] {
+        assert_eq!(
+            builtins.map_get(&Value::symbol(Symbol::intern(name))),
+            Some(Value::bool(true))
+        );
+    }
+    let catalogues = inventory
+        .map_get(&Value::symbol(Symbol::intern("catalogues")))
+        .unwrap();
+    assert_eq!(catalogues.list_len(), Some(3));
+    for name in ["Arity", "FunctionalKey", "RelationName"] {
+        assert!(
+            catalogues
+                .with_list(|items| items
+                    .iter()
+                    .any(|item| item == &Value::symbol(Symbol::intern(name))))
+                .unwrap()
+        );
+    }
+}
+
+#[test]
+fn native_source_supports_c_generator_dependencies() {
+    let inventory = native_source_dependency_inventory(SOURCES, &[]);
+    assert!(
+        inventory
+            .map_get(&Value::symbol(Symbol::intern("programs")))
+            .unwrap()
+            .as_int()
+            .unwrap()
+            > 300
+    );
+    assert_eq!(
+        inventory.map_get(&Value::symbol(Symbol::intern("catalogues"))),
+        Some(Value::list([]))
+    );
+}
+
+fn native_source_dependency_inventory(sources: &[&str], excluded: &[&str]) -> Value {
+    let mut runner = runner(true).with_task_limits(TaskLimits {
+        instruction_budget: 500_000_000,
+        max_call_depth: 256,
+        ..TaskLimits::default()
+    });
+    for source in [
+        include_str!("../../../apps/compiler/lex.mica"),
+        include_str!("../../../apps/compiler/parse.mica"),
+        include_str!("../../../apps/compiler/ast.mica"),
+    ] {
         runner.run_filein(source).unwrap();
     }
     load_native_source_compiler(&mut runner);
     let source = sources.join("\n");
-    let inventory = eval(
+    let excluded = format!(
+        "[{}]",
+        excluded
+            .iter()
+            .map(|name| format!(":{name}"))
+            .collect::<Vec<_>>()
+            .join(",")
+    );
+    eval(
         &mut runner,
         &format!(
             r#"
@@ -3791,13 +3859,12 @@ let parsed = parse_rows({source:?})
 native/ensure(parsed[:errors] == [], to_literal(parsed[:errors]))
 let emitted = emit_program(parsed[:rows], parsed[:root])
 native/ensure(emitted[:errors] == [], to_literal(emitted[:errors]))
+let excluded = {excluded}
 let definitions = {{}}
 let pending = []
 for definition in emitted[:methods]
-  definitions[definition[:selector]] = true
-  // emit_source serializes Rust bytecode. Native compilation consumes the
-  // register descriptions from emit_program before that host-specific step.
-  if definition[:selector] != :emit_source
+  if !native/contains(excluded, definition[:selector])
+    definitions[definition[:selector]] = true
     pending = [@pending, [definition[:selector], definition[:program]]]
   end
 end
@@ -3810,21 +3877,20 @@ while position < len(pending)
   let [owner, program] = pending[position]
   position = position + 1
   program = native_exceptions/lower(program)
-  for pc in [i for i in 0..(len(program[:code]) - 1)]
+  for pc in 0..(len(program[:code]) - 1)
     native_source/instruction(program[:code], pc)
     let instruction = program[:code][pc]
     let op = instruction[0]
     if op == :LoadFunction
       pending = [@pending, [owner, instruction[2]]]
     elseif op == :BuiltinCall
-      let name = instruction[2]
-      builtins[name] = true
-      if !native/contains(supported, name)
-        missing = [@missing, [owner, :builtin, name]]
+      builtins[instruction[2]] = true
+      if !native/contains(supported, instruction[2])
+        missing = [@missing, [owner, :builtin, instruction[2]]]
       end
     elseif op == :PositionalDispatch || op == :Dispatch
       let selector = instruction[2]
-      if selector[0] != :Constant || !map_contains_key(definitions, selector[1]) || selector[1] == :emit_source
+      if selector[0] != :Constant || !map_contains_key(definitions, selector[1])
         missing = [@missing, [owner, :dispatch, selector]]
       end
     elseif op == :DynamicDispatch
@@ -3836,13 +3902,14 @@ while position < len(pending)
 end
 native/ensure(missing == [], to_literal(missing))
 let catalogues = sort([row[:name] for row in RelationName(?id, ?name) if map_contains_key(relations, row[:id])])
-native/ensure(catalogues == sort([:RelationName, :Arity, :FunctionalKey]), to_literal(catalogues))
-native/ensure(map_contains_key(builtins, :from_literal) && map_contains_key(builtins, :to_literal), "literal codec required by frontend")
-return position
+for catalogue in catalogues
+  native/ensure(native/contains([:RelationName, :Arity, :FunctionalKey], catalogue), to_literal(catalogue))
+end
+native/ensure(len(catalogues) == len(relations), "unresolved catalogue dependency")
+return {{:programs -> position, :builtins -> builtins, :catalogues -> catalogues}}
 "#
         ),
-    );
-    assert!(inventory.as_int().unwrap() > 100);
+    )
 }
 
 #[test]
