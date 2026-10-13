@@ -102,13 +102,8 @@ verb native_source/emit_instruction(builder: map, instruction: list) -> map
     let result: map = native_source/check_kind(builder, native_source/register(builder, instruction[1]), instruction[2], instruction[3], instruction[4])
     return result
   end
-  if op == :AssertDynamic || op == :RetractDynamic
-    let present: string = "true"
-    if op == :RetractDynamic
-      present = "false"
-    end
-    let result: map = native_source/write_fact(builder, native_tasks/slot(builder, "transaction"),
-      native_source/number(builder, instruction[1]), native_source/operands(builder, instruction[2]), native_gen/ref(builder, present))
+  if native/contains([:AssertDynamic, :RetractDynamic, :ReplaceFunctional], op)
+    let result: map = native_updates/write(builder, instruction)
     return result
   end
   let [value: map, ready: map] = native_source/value_instruction(builder, instruction)

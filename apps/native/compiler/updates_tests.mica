@@ -1,0 +1,26 @@
+// Functional replacement preserves expression evaluation order and draft reads.
+(1).nativeResult = "first"
+let first = (1).nativeResult
+(1).nativeResult = "second"
+let order = 0
+let assigned = (order = order * 10 + 2).nativeResult = (order = order * 10 + 1)
+let replace = fn(value) => (1).nativeResult = value
+replace("third")
+let field = (1).nativeResult
+let missing = false
+try
+  let absent = (999).nativeResult
+catch E_CARDINALITY
+  missing = true
+end
+assert NativeQuery(@[1, 2], @[3])
+assert NativeQuery(1, 2, 4)
+assert NativeQuery(9, 8, 7)
+retract NativeQuery(@[1], _, _)
+let partial = NativeQuery(?a, ?b, ?c)
+retract NativeQuery(@[9, 8, 7])
+let empty = !NativeQuery(_, _, _)
+assert NativeQuery(@[], 4, @[5, 6])
+retract NativeQuery(_, @[], _, _)
+let all_removed = !NativeQuery(_, _, _)
+return [first, field, assigned, order, missing, partial, empty, all_removed, (12).nativeResult]

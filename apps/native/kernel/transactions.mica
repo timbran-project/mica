@@ -188,35 +188,70 @@ verb native_kernel/create_change(builder: map, worker: map, change: map, work: m
   return result
 end
 
-verb native_kernel/write_body(module: map) -> map
-  let builder = native_gen/context(module, "kernel_write")
-  let transaction = native_gen/ref(builder, "transaction")
-  let row = native_gen/ref(builder, "row")
-  let asserted = native_gen/ref(builder, "asserted")
-  let [work, opened] = native_kernel/open_transaction(builder, fn(arm) => native_kernel/status(arm, "kernel_closed"))
+// Build candidate relation and write trees without changing the draft. Allocation
+// failure leaves the previous operation intact; publish only complete trees.
+verb native_kernel/stage_row(builder: map, relation: map, writes: map, row: map, asserted: map) -> list
+  let [updated: map, applied: map] = native_gen/bind(builder, "updated", native_gen/call(builder, "kernel_apply", [native_roots/worker(builder), relation, row, asserted]))
+  let ready: map = native_gen/when(applied, native_kernel/absent(updated), fn(failed) => native_kernel/status(failed, "kernel_oom"))
+  let [written: map, recorded: map] = native_gen/checked_bind(ready, "written", native_gen/call(ready, "kernel_set", [
+    native_roots/worker(ready), writes, row, native_gen/ref(ready, "zero"), native_gen/ref(ready, "false"), asserted]),
+    "ok", fn(failed) => native_kernel/status(failed, "kernel_oom"))
+  return [updated, native_gen/field(recorded, written, "node"), recorded]
+end
+verb native_kernel/publish_change(builder: map, work: map, before: map, updated_view: map, writes: map) -> map
+  let id: map = native_kernel/load_field(builder, before, "id")
+  let [change: map, found: map] = native_gen/bind(builder, "change", native_gen/call(builder, "kernel_change", [work, id]))
+  let ready: map = native_gen/when(found, native_kernel/absent(change), fn(absent) => native_kernel/create_change(absent, native_roots/worker(absent), change, work, before))
+  ready = native_kernel/store_field(ready, change, "after", updated_view)
+  ready = native_kernel/store_field(ready, change, "writes", writes)
+  let result: map = native_kernel/store_field(ready, work, "dirty", native_gen/ref(ready, "true"))
+  return result
+end
+verb native_kernel/draft_writes(builder: map, work: map, id: map) -> list
+  let [writes: map, ready: map] = native_gen/bind(builder, "writes", native_gen/zero(native_kernel/pointer("Node")))
+  let [change: map, found: map] = native_gen/bind(ready, "change", native_gen/call(ready, "kernel_change", [work, id]))
+  ready = native_gen/unless(found, native_kernel/absent(change), fn(existing) => native_gen/assign(existing, writes, native_kernel/load_field(existing, change, "writes")))
+  return [writes, ready]
+end
+verb native_kernel/write_body(module: map, replace: bool) -> map
+  let name: string = "kernel_write"
+  if replace
+    name = "kernel_replace"
+  end
+  let builder: map = native_gen/context(module, name)
+  let transaction: map = native_gen/ref(builder, "transaction")
+  let row: map = native_gen/ref(builder, "row")
+  let asserted: map = native_gen/ref(builder, "true")
+  if !replace
+    asserted = native_gen/ref(builder, "asserted")
+  end
+  let [work: map, opened: map] = native_kernel/open_transaction(builder, fn(arm) => native_kernel/status(arm, "kernel_closed"))
   let permitted: map = native_authority/check_permission(opened, work, "write", native_gen/ref(opened, "id"))
   let bounded: map = native_execution/local_budget(permitted, native_kernel/load_field(permitted, work, "rule_limit"))
-  let [worker, ready] = native_gen/bind(bounded, "worker", native_kernel/load_field(bounded, transaction, "worker"))
-  let [relation, with_relation] = native_gen/bind(ready, "relation", native_gen/call(ready, "kernel_view", [transaction, native_gen/ref(ready, "id")]))
-  builder = native_gen/when(with_relation, native_kernel/absent(relation), fn(arm) => native_kernel/status(arm, "kernel_unknown"))
+  let [worker: map, ready: map] = native_gen/bind(bounded, "worker", native_kernel/load_field(bounded, transaction, "worker"))
+  let [relation: map, found: map] = native_gen/bind(ready, "relation", native_gen/call(ready, "kernel_view", [transaction, native_gen/ref(ready, "id")]))
+  found[:scope_worker] = worker
+  builder = native_gen/when(found, native_kernel/absent(relation), fn(arm) => native_kernel/status(arm, "kernel_unknown"))
   builder = native_kernel/check_tuple(builder, row, relation, fn(arm) => native_kernel/status(arm, "kernel_arity"))
   builder = native_gen/unless(builder, native_gen/call(builder, "value_is_persistable", [row]), fn(arm) => native_kernel/status(arm, "kernel_nonpersistent"))
-  builder = native_gen/when(builder, asserted, fn(arm) => native_gen/when(arm,
-    native_gen/equal(native_kernel/load_field(arm, relation, "policy"), native_gen/ref(arm, "kernel_policy_functional")),
-    fn(functional) => native_kernel/check_functional_key(functional, relation, row)))
-  let [change, with_change] = native_gen/bind(builder, "change", native_gen/call(builder, "kernel_change", [work, native_gen/ref(builder, "id")]))
-  builder = native_gen/when(with_change, native_kernel/absent(change), fn(arm) => native_kernel/create_change(arm, worker, change, work, relation))
-  let [updated, with_after] = native_gen/bind(builder, "after", native_gen/call(builder, "kernel_apply", [worker, relation, row, asserted]))
-  builder = native_gen/when(with_after, native_kernel/absent(updated), fn(arm) => native_kernel/status(arm, "kernel_oom"))
-  let [written, with_written] = native_gen/checked_bind(builder, "written", native_gen/call(builder, "kernel_set",
-    [worker, native_kernel/load_field(builder, change, "writes"), row, native_gen/ref(builder, "zero"), native_gen/ref(builder, "false"), asserted]),
-    "ok", fn(arm) => native_kernel/status(arm, "kernel_oom"))
-  builder = with_written
-  builder = native_kernel/store_field(builder, change, "after", updated)
-  builder = native_kernel/store_field(builder, change, "writes", native_gen/field(builder, written, "node"))
-  builder = native_kernel/store_field(builder, work, "dirty", native_gen/ref(builder, "true"))
-  builder = native_kernel/status(builder, "kernel_ok")
-  let result: map = native_gen/finish(module, builder)
+  let [writes: map, tracked: map] = native_kernel/draft_writes(builder, work, native_gen/ref(builder, "id"))
+  let [candidate: map, staged: map] = native_gen/bind(tracked, "candidate", relation)
+  builder = staged
+  let functional: map = native_gen/equal(native_kernel/load_field(builder, relation, "policy"), native_gen/ref(builder, "kernel_policy_functional"))
+  if replace
+    builder = native_gen/when(builder, functional, fn(keyed)
+      let [previous: map, located: map] = native_gen/bind(keyed, "previous", native_kernel/find_row(keyed, relation, row, native_kernel/tuple_projection(native_kernel/load_field(keyed, relation, "keys"))))
+      return native_gen/unless(located, native_kernel/absent(previous), fn(present)
+        let [updated_view: map, removed: map, applied: map] = native_kernel/stage_row(present, candidate, writes, native_kernel/load_field(present, previous, "row"), native_gen/ref(present, "false"))
+        return native_gen/assign(native_gen/assign(applied, candidate, updated_view), writes, removed)
+      end)
+    end)
+  else
+    builder = native_gen/when(builder, asserted, fn(arm) => native_gen/when(arm, functional, fn(keyed) => native_kernel/check_functional_key(keyed, relation, row)))
+  end
+  let [updated_view: map, written: map, applied: map] = native_kernel/stage_row(builder, candidate, writes, row, asserted)
+  builder = native_kernel/publish_change(applied, work, relation, updated_view, written)
+  let result: map = native_gen/finish(module, native_kernel/status(builder, "kernel_ok"))
   return result
 end
 
@@ -325,6 +360,7 @@ verb native_kernel/transactions(input: map) -> map
     ["change", change, [["work", work, :Gc], ["id", :U64, :Value]]],
     ["view", relation, [tx, ["id", :U64, :Value]]],
     ["declare", :U64, [tx, ["id", :U64, :Value], ["name", :U64, :Value], ["arity", :U64, :Value], ["policy", :U64, :Value], ["keys", :U64, :Value], ["indexes", :U64, :Value]]],
+    ["replace", :U64, [tx, ["id", :U64, :Value], ["row", word, :Gc]]],
     ["write", :U64, [tx, ["id", :U64, :Value], ["row", word, :Gc], ["asserted", :Bool, :Value]]],
     ["scan", [:Record, "KernelScanResult"], [tx, ["id", :U64, :Value], ["pattern", word, :Gc], ["mask", :U64, :Value], ["after", word, :Gc], ["output", native_memory/pointer(word), :Borrow], ["capacity", :U64, :Value]]],
     ["validate", :U64, [worker, ["work", work, :Gc], ["writes", node, :Gc], ["before", relation, :Gc], ["current", relation, :Gc], ["budget", native_kernel/pointer("Budget"), :Borrow]]],
@@ -346,7 +382,8 @@ verb native_kernel/transactions(input: map) -> map
     native/unless_statement(native_kernel/is_null("Change", "change"), [native/return_value(native_kernel/read("Change", "change", "after"))]),
     native/return_value(native/call_expression("kernel_relation", [native_kernel/read("Snapshot", native_kernel/read("Work", "work", "base"), "relations"), "id"]))])
   context = native_kernel/declare_body(context)
-  context = native_kernel/write_body(context)
+  context = native_kernel/write_body(context, false)
+  context = native_kernel/write_body(context, true)
   context = native_kernel/define(context, "version", [@load_work,
     native/when_statement(native_kernel/is_null("Work", "work"), [native/return_value("zero")]),
     native/let_statement("snapshot", snapshot, native_kernel/read("Work", "work", "candidate")),

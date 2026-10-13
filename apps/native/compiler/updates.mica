@@ -1,0 +1,114 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+verb native_updates/has_holes(items: list) -> bool
+  for item in items
+    if item[0] == :Hole
+      return true
+    end
+  end
+  return false
+end
+
+// Scan one immutable visible view while constructing private stored-row and
+// write trees. Publishing them once prevents partial retraction on failure.
+verb native_updates/retract_body(module: map) -> map
+  let builder: map = native_queries/budget_scope(native_gen/context(module, native_queries/name(module, "retract")))
+  let [work: map, opened: map] = native_roots/retain(builder, "work", native_gen/call(builder, "kernel_work", [native_gen/ref(builder, "transaction")]))
+  builder = native_authority/check_permission(opened, work, "write", native_gen/ref(opened, "id"))
+  let [visible: map, read: map] = native_rules/checked_call(builder, "read", [native_gen/ref(builder, "transaction"), native_gen/ref(builder, "id"), native_roots/ref(builder, "budget")], "relation")
+  builder = native_query/check(read, native_gen/negate(native_kernel/absent(visible)), "unknown")
+  let pattern: map = native_roots/ref(builder, "pattern")
+  builder = native_kernel/check_tuple(builder, pattern, visible, fn(failed) => native_query/error(failed, "arity"))
+  builder = native_kernel/check_column_mask(builder, native_kernel/load_field(builder, visible, "arity"), native_gen/ref(builder, "mask"), fn(failed) => native_query/error(failed, "schema"))
+  let [view: map, held: map] = native_roots/retain(builder, "visible", visible)
+  let [stored: map, with_stored: map] = native_roots/retain(held, "stored", native_gen/call(held, "kernel_view", [native_gen/ref(held, "transaction"), native_gen/ref(held, "id")]))
+  let [original: map, tracked: map] = native_kernel/draft_writes(with_stored, work, native_gen/ref(with_stored, "id"))
+  let [writes: map, with_writes: map] = native_roots/retain(tracked, "writes", original)
+  let [candidate: map, prepared: map] = native_roots/retain(with_writes, "candidate", stored)
+  let [ticks: map, ready: map] = native_gen/bind(prepared, "visited", native_gen/ref(prepared, "zero"))
+  builder = native_query/scan_rows(ready, view, pattern, native_gen/ref(ready, "mask"), native_gen/address(ticks), fn(step, row)
+    let charged: map = native_query/charge(step, native_gen/ref(step, "zero"), native_gen/ref(step, "one"))
+    let existing: map = native_kernel/find_row(charged, candidate, row, native_kernel/tuple_order(native_gen/ref(charged, "zero")))
+    return native_gen/unless(charged, native_kernel/absent(existing), fn(stored_row)
+      let [updated_view: map, changed: map, applied: map] = native_kernel/stage_row(stored_row, candidate, writes, row, native_gen/ref(stored_row, "false"))
+      let saved: map = native_roots/store(applied, candidate, updated_view)
+      return native_roots/store(saved, writes, changed)
+    end)
+  end)
+  builder = native_gen/when(builder, native_gen/equal(candidate, stored), fn(unchanged) => native_tasks/attempt_status(unchanged, "ok"))
+  builder = native_kernel/publish_change(builder, work, stored, candidate, writes)
+  let result: map = native_gen/finish(module, native_tasks/attempt_status(builder, "ok"))
+  return result
+end
+// Charge fact changes to the executing task as well as the transaction budget.
+verb native_updates/exact_body(module: map, replace: bool) -> map
+  let operation: string = "write"
+  if replace
+    operation = "replace"
+  end
+  let builder: map = native_queries/budget_scope(native_gen/context(module, native_queries/name(module, operation)))
+  let arguments: list = [native_gen/ref(builder, "transaction"), native_gen/ref(builder, "id"), native_roots/ref(builder, "row")]
+  if !replace
+    arguments = [@arguments, native_gen/ref(builder, "asserted")]
+  end
+  let completed: map = native_roots/return_value(builder, native_gen/call(builder, string_concat("kernel_", operation), arguments))
+  let result: map = native_gen/finish(module, completed)
+  return result
+end
+verb native_updates/definitions(input: map) -> map
+  let operations: map = {}
+  for program in input[:source_programs]
+    for instruction in program[:analysis][:description][:code]
+      let op: symbol = instruction[0]
+      if op == :ReplaceFunctional
+        operations["replace"] = true
+      elseif op == :RetractDynamic && native_updates/has_holes(instruction[2])
+        operations["retract"] = true
+      elseif op == :AssertDynamic || op == :RetractDynamic
+        operations["write"] = true
+      end
+    end
+  end
+  let module: map = input
+  for operation, used in operations
+    let parameters: list = [
+      ["worker", native_memory/record_pointer("MemoryWorker"), :Borrow], ["attempt", native_tasks/pointer("Attempt"), :Borrow],
+      ["transaction", native_kernel/pointer("Transaction"), :Borrow], ["id", :U64, :Value]]
+    if operation == "retract"
+      parameters = [@parameters, ["pattern", native_value/word(), :Gc], ["mask", :U64, :Value]]
+    else
+      parameters = [@parameters, ["row", native_value/word(), :Gc]]
+      if operation == "write"
+        parameters = [@parameters, ["asserted", :Bool, :Value]]
+      end
+    end
+    module = native_memory/declare(module, native_queries/name(module, operation), :U64, parameters, native_tasks/effects(), :Value, "")
+    if operation == "retract"
+      module = native_updates/retract_body(module)
+    else
+      module = native_updates/exact_body(module, operation == "replace")
+    end
+  end
+  return module
+end
+verb native_updates/write(builder: map, instruction: list) -> map
+  let op: symbol = instruction[0]
+  let id: map = native_source/number(builder, instruction[1])
+  if op == :RetractDynamic && native_updates/has_holes(instruction[2])
+    let [pattern: map, mask: map, heading: list, positions: map, equalities: map, ready: map] = native_queries/arguments(builder, instruction[2], false)
+    let result: map = native_source/checked(ready, native_queries/name(ready, "retract"), [native_roots/worker(ready), native_tasks/attempt(ready), native_tasks/slot(ready, "transaction"), id, pattern, mask])
+    return result
+  end
+  let [row: map, prepared: map] = native_source/list_items(builder, instruction[2], false)
+  if op == :ReplaceFunctional
+    let result: map = native_source/checked(prepared, native_queries/name(prepared, "replace"), [native_roots/worker(prepared), native_tasks/attempt(prepared), native_tasks/slot(prepared, "transaction"), id, row])
+    return result
+  end
+  let asserted: string = "true"
+  if op == :RetractDynamic
+    asserted = "false"
+  end
+  let result: map = native_source/checked(prepared, native_queries/name(prepared, "write"), [native_roots/worker(prepared), native_tasks/attempt(prepared), native_tasks/slot(prepared, "transaction"), id, row, native_gen/ref(prepared, asserted)])
+  return result
+end

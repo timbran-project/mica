@@ -17,7 +17,7 @@ verb native_queries/bind_cell(builder: map, buffer: map, mask: map, value: map) 
   let result: map = native_source/append_item(ready, buffer, value)
   return result
 end
-verb native_queries/arguments(builder: map, items: list) -> list
+verb native_queries/arguments(builder: map, items: list, ?project: bool = true) -> list
   let dynamic: bool = native_source/spliced(items)
   let ready: map = builder
   let buffer: map = {}
@@ -75,6 +75,9 @@ verb native_queries/arguments(builder: map, items: list) -> list
     buffer = row
     ready = rooted
   end
+  if !project
+    return [buffer, mask, [], native_gen/zero(native_value/word()), native_gen/zero(native_value/word()), ready]
+  end
   let [projection: map, projected: map] = native_source/rooted_list(ready, "projection", positions)
   let [constraints: map, constrained: map] = native_source/rooted_list(projected, "equalities", equalities)
   return [buffer, mask, heading, projection, constraints, constrained]
@@ -119,8 +122,8 @@ verb native_queries/matches(builder: map, row: map, equalities: map) -> list
   return [matches, ready]
 end
 
-verb native_queries/scan_body(module: map) -> map
-  let builder: map = native_gen/context(module, native_queries/name(module, "scan"))
+verb native_queries/budget_scope(input: map) -> map
+  let builder: map = input
   let [work: map, opened: map] = native_kernel/open_transaction(builder, fn(failed) => native_query/error(failed, "closed"))
   builder = native_query/begin_roots(opened)
   let [allowance: map, bounded: map] = native_gen/bind(builder, "query_allowance", native_kernel/load_field(builder, work, "rule_limit"))
@@ -132,6 +135,10 @@ verb native_queries/scan_body(module: map) -> map
     let spent: map = native_gen/subtract(allowance, native_kernel/load_field(leaving, budget, "steps"))
     return native_kernel/store_field(leaving, native_tasks/attempt(leaving), "remaining", native_gen/subtract(native_tasks/attempt_field(leaving, "remaining"), spent))
   end)
+  return builder
+end
+verb native_queries/scan_body(module: map) -> map
+  let builder: map = native_queries/budget_scope(native_gen/context(module, native_queries/name(module, "scan")))
   let pattern: map = native_roots/ref(builder, "pattern")
   let heading: map = native_roots/ref(builder, "heading")
   let output: map = native_roots/root_value(builder, native_gen/ref(builder, "output"), native_value/word())

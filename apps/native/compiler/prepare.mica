@@ -14,6 +14,9 @@ end
 verb native_source/pool_operands(values: list, operands: list) -> list
   let pool: list = values
   for operand in operands
+    if operand[0] == :Hole
+      continue
+    end
     if operand[0] == :Splice
       pool = native_source/pool_operands(pool, [operand[1]])
     elseif operand[0] == :Constant
@@ -96,7 +99,7 @@ verb native_source/program_literals(analysis: map, initial: list) -> list
         end
       end
       pool = native_source/pool(pool, heading)
-    elseif op == :BuildList || op == :AssertDynamic || op == :RetractDynamic
+    elseif op == :BuildList || op == :AssertDynamic || op == :RetractDynamic || op == :ReplaceFunctional
       pool = native_source/pool_operands(pool, instruction[2])
       if op == :BuildList
         pool = native_source/pool(pool, "list splice requires a list")
@@ -232,7 +235,7 @@ verb native_source/link_relations(description: map, relations: map) -> map
   end
   let code: list = []
   for instruction in description[:code]
-    if native/contains([:ScanDynamic, :AssertDynamic, :RetractDynamic], instruction[0])
+    if native/contains([:ScanDynamic, :AssertDynamic, :RetractDynamic, :ReplaceFunctional], instruction[0])
       let position: int = 1
       if instruction[0] == :ScanDynamic
         position = 2

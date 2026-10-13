@@ -2269,6 +2269,7 @@ fn load_native_source_compiler(runner: &mut SourceRunner) {
         include_str!("../../../apps/native/compiler/builtins.mica"),
         include_str!("../../../apps/native/compiler/patterns.mica"),
         include_str!("../../../apps/native/compiler/queries.mica"),
+        include_str!("../../../apps/native/compiler/updates.mica"),
         include_str!("../../../apps/native/compiler/functions.mica"),
         include_str!("../../../apps/native/compiler/collections.mica"),
         include_str!("../../../apps/native/compiler/access.mica"),
@@ -3333,7 +3334,10 @@ fn generate_native_source(
     load_native_source_compiler(&mut runner);
     // Bootstrap catalogue lookup uses a committed setup transaction. Native
     // catalogue installation and rollback are exercised by the C fixture.
-    eval(&mut runner, "return make_relation(:NativeResult, 2)");
+    eval(
+        &mut runner,
+        "return make_functional_relation(:NativeResult, 2, [0])",
+    );
     eval(&mut runner, "return make_relation(:NativeQuery, 3)");
     let example = format!(
         "{}\n{conformance_source}",
@@ -3401,9 +3405,6 @@ fn native_source_program_executes_on_generated_runtime() {
                 continue;
             }
             previous = Some(generated.clone());
-            let scratch = Scratch::new();
-            let source = scratch.0.join("source.c");
-            let binary = scratch.0.join("source");
             let fixture = format!(
                 "{generated}\n{memory}\n{tasks}\n{}\n{}\n#include <assert.h>\n{checks}\n{}\n#define MICA_SOURCE_CONFORMANCE\n{}",
                 include_str!("../../../native/platform/allocation.c"),
@@ -3411,49 +3412,97 @@ fn native_source_program_executes_on_generated_runtime() {
                 include_str!("../../../apps/native/compiler/conformance.c"),
                 include_str!("../../../apps/native/compiler/tests.c")
             );
-            fs::write(&source, fixture).unwrap();
-            let sanitizer = if std::env::var_os("MICA_NATIVE_THREAD_SANITIZER").is_some() {
-                "-fsanitize=thread"
-            } else {
-                "-fsanitize=address,undefined,float-cast-overflow"
-            };
-            let compiled = Command::new("clang")
-                .args([
-                    "-std=c11",
-                    "-pthread",
-                    "-O2",
-                    "-g",
-                    "-Wall",
-                    "-Wextra",
-                    "-Werror",
-                    "-pedantic",
-                    "-ffp-contract=off",
-                    "-fno-fast-math",
-                    sanitizer,
-                    "-fno-sanitize-recover=all",
-                    "-fno-omit-frame-pointer",
-                ])
-                .arg(&source)
-                .args(["-lm", "-ldl", "-o"])
-                .arg(&binary)
-                .output()
-                .unwrap();
-            assert!(
-                compiled.status.success(),
-                "{}",
-                String::from_utf8_lossy(&compiled.stderr)
-            );
-            let executed = Command::new(binary)
-                .current_dir(&scratch.0)
-                .env("ASAN_OPTIONS", "detect_leaks=1:halt_on_error=1")
-                .env("TSAN_OPTIONS", "halt_on_error=1")
-                .output()
-                .unwrap();
-            assert!(executed.status.success(), "{executed:?}");
-            assert!(executed.stderr.is_empty(), "{executed:?}");
-            eprintln!("native source: sanitizer execution passed");
+            check_native_source_fixture(&fixture);
         }
     });
+}
+
+#[test]
+fn native_source_updates_preserve_atomicity_and_authority() {
+    let body = include_str!("../../../apps/native/compiler/updates_tests.mica");
+    let mut oracle = SourceRunner::new_empty().with_interpreter_only(true);
+    oracle
+        .run_filein(
+            "make_functional_relation(:NativeResult, 2, [0])\nmake_relation(:NativeQuery, 3)",
+        )
+        .unwrap();
+    let expected = eval(&mut oracle, body);
+    let checks = format!(
+        "static void check_update_value(mica_type_Value actual, struct mica_SymbolTable *symbols, struct mica_MemoryWorker *worker) {{ (void)symbols; (void)worker; {} }}",
+        source_value_check(&expected, "actual")
+    );
+    let source = format!("verb native_update_fixture()\n{body}\nend");
+    thread::scope(|scope| {
+        let builds = [true, false].map(|tier| {
+            let source = &source;
+            scope.spawn(move || {
+                generate_native_source(tier, source, "[[602, 8003], [603, 8004], [610, 8010]]")
+            })
+        });
+        let mut previous = None;
+        for build in builds {
+            let (generated, memory, tasks) = build.join().unwrap();
+            if let Some(previous) = &previous {
+                assert_eq!(&generated, previous);
+                continue;
+            }
+            previous = Some(generated.clone());
+            let fixture = format!(
+                "{generated}\n{memory}\n{tasks}\n{}\n{}\n#include <assert.h>\n{checks}\n{}",
+                include_str!("../../../native/platform/allocation.c"),
+                include_str!("../../../native/platform/mutex.c"),
+                include_str!("../../../apps/native/compiler/updates_tests.c")
+            );
+            check_native_source_fixture(&fixture);
+        }
+    });
+}
+
+fn check_native_source_fixture(fixture: &str) {
+    let scratch = Scratch::new();
+    let source = scratch.0.join("source.c");
+    let binary = scratch.0.join("source");
+    fs::write(&source, fixture).unwrap();
+    let sanitizer = if std::env::var_os("MICA_NATIVE_THREAD_SANITIZER").is_some() {
+        "-fsanitize=thread"
+    } else {
+        "-fsanitize=address,undefined,float-cast-overflow"
+    };
+    let compiled = Command::new("clang")
+        .args([
+            "-std=c11",
+            "-pthread",
+            "-O2",
+            "-g",
+            "-Wall",
+            "-Wextra",
+            "-Werror",
+            "-pedantic",
+            "-ffp-contract=off",
+            "-fno-fast-math",
+            sanitizer,
+            "-fno-sanitize-recover=all",
+            "-fno-omit-frame-pointer",
+        ])
+        .arg(&source)
+        .args(["-lm", "-ldl", "-o"])
+        .arg(&binary)
+        .output()
+        .unwrap();
+    assert!(
+        compiled.status.success(),
+        "{}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+    let executed = Command::new(binary)
+        .current_dir(&scratch.0)
+        .env("ASAN_OPTIONS", "detect_leaks=1:halt_on_error=1")
+        .env("TSAN_OPTIONS", "halt_on_error=1")
+        .output()
+        .unwrap();
+    assert!(executed.status.success(), "{executed:?}");
+    assert!(executed.stderr.is_empty(), "{executed:?}");
+    eprintln!("native source: sanitizer execution passed");
 }
 
 fn load_native_kernel(runner: &mut SourceRunner, tasks: bool) {
