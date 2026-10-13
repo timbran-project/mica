@@ -3922,6 +3922,8 @@ static void catalogue_projections(void) {
     struct mica_KernelTransaction tx, other;
     begin(&f, &tx);
     assert(mica_kernel_declare(&tx, 1, 1001, 3, FUNCTIONAL, 5, 0) == OK);
+    assert(mica_kernel_commit(&tx) == OK && mica_kernel_end(&tx));
+    begin(&f, &tx); // Adding a projection must populate all existing metadata.
     for (unsigned source = 1; source <= 3; ++source)
         assert(mica_kernel_declare_catalogue(&tx, 100 + source, 100 + source, source) == OK);
     assert(mica_kernel_declare_catalogue(&tx, 104, 104, 0) == SCHEMA);
@@ -4047,6 +4049,7 @@ static void catalogue_projection_authority(void) {
 
 int main(int argc, char **argv) {
     if (argc == 2 && !strcmp(argv[1], "trace")) return trace(false);
+    if (argc == 4 && !strcmp(argv[1], "catalogue-bench")) return catalogue_measurements((unsigned)strtoul(argv[2], NULL, 10), (unsigned)strtoul(argv[3], NULL, 10));
     if (argc == 3 && !strcmp(argv[1], "rule-bench")) return rule_measurements((unsigned)strtoul(argv[2], NULL, 10));
     if (argc == 2 && !strcmp(argv[1], "rules")) return trace(true);
     if (argc == 5 && !strcmp(argv[1], "bench")) return benchmark(argv[2], (unsigned)strtoul(argv[3], NULL, 10), (unsigned)strtoul(argv[4], NULL, 10));

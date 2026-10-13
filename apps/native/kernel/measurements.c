@@ -299,6 +299,51 @@ static void measurement_retention(void) {
     assert(count(&tx, 2) == 256 && mica_kernel_end(&tx));
     destroy(&f);
 }
+// A fact update must not rebuild catalogue rows in a retained world. Keep the
+// schema count fixed within each sample and report the whole refresh cost.
+static int catalogue_measurements(unsigned relations, unsigned samples) {
+    assert(relations >= 1 && relations <= 4096 && samples >= 1 && samples <= 100);
+    struct fixture f;
+    init_with_history(&f, 1);
+    struct mica_KernelTransaction tx;
+    begin(&f, &tx);
+    for (uint64_t id = 1; id <= relations; ++id)
+        assert(mica_kernel_declare(&tx, id, id, 2, SET, 0, 0) == OK);
+    for (uint64_t source = 1; source <= 3; ++source)
+        assert(mica_kernel_declare_catalogue(&tx, relations + source, relations + source, source) == OK);
+    assert(mica_kernel_commit(&tx) == OK && mica_kernel_end(&tx));
+    for (unsigned sample = 0; sample < samples; ++sample) {
+        uint64_t elapsed = 0, steps = 0, bytes = 0;
+        const unsigned rounds = 16;
+        for (unsigned round = 0; round < rounds; ++round) {
+            begin(&f, &tx);
+            assert(write_pair(&tx, 1, sample, round, true) == OK);
+            assert(mica_memory_safepoint(&f.worker, true));
+            struct mica_KernelBudget budget = operation_budget(&tx);
+            uint64_t allowance = budget.f_bytes;
+            struct mica_MemoryControl control = {.f_context = (void *)&budget, .f_check = mica_kernel_memory_check};
+            mica_memory_control_push(&f.worker, &control);
+            uint64_t start = nanos();
+            assert(mica_kernel_rule_refresh(&tx, &budget) == OK);
+            elapsed += nanos() - start;
+            mica_memory_control_pop(&f.worker);
+            bytes += allowance - budget.f_bytes;
+            struct mica_KernelWork *work = mica_kernel_work(&tx);
+            steps += work->f_evaluation->f_steps;
+            for (uint64_t source = 1; source <= 3; ++source)
+                assert(mica_kernel_rule_stored(work->f_evaluation, relations + source) ==
+                    mica_kernel_rule_stored(work->f_base->f_evaluation, relations + source));
+            assert(measurement_tree_count(mica_kernel_rule_stored(work->f_evaluation, relations + 1)) == relations + 3);
+            assert(mica_kernel_end(&tx));
+        }
+        printf("{\"workload\":\"catalogue-fact-refresh\",\"relations\":%u,\"sample\":%u,\"rounds\":%u,\"elapsed_ns\":%llu,\"steps\":%llu,\"allocated_bytes\":%llu}\n",
+            relations, sample, rounds, (unsigned long long)elapsed,
+            (unsigned long long)steps, (unsigned long long)bytes);
+    }
+    destroy(&f);
+    return 0;
+}
+
 static int rule_measurements(unsigned samples) {
     assert(samples > 0 && samples <= 100);
     for (unsigned n = 32; n <= 128; n *= 2) measurement_updates(n, samples);

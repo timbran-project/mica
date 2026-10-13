@@ -169,6 +169,8 @@ Concurrent declarations therefore conflict even when a rule query returned no ro
 
 Metadata input trees are immutable. Fact-only updates share them; declarations add
 rows to persistent trees and feed the ordinary rule-maintenance delta path.
+Each evaluation records its schema count. Schemas are immutable and add-only, so
+fact-only refreshes can skip metadata membership scans when that count is unchanged.
 Rollback discards private metadata rows and derived results together.
 The reference evaluator builds metadata inputs independently.
 `native_source_queries_relation_catalogue` compares generated source execution
@@ -649,6 +651,32 @@ Retractions clear the affected closure; additions extend it. Results include vis
 Bulk loading stages both graphs in one transaction. Retained readers must see the previous complete closure throughout loading.
 Additional workloads measure four-worker fact/catalogue contention and storage retained by historical snapshots, cancelled work, and superseded candidates.
 Root release and collection are separate measurement points.
+
+The kernel fixture also accepts `catalogue-bench <relations> <samples>`.
+It stages one fact in a world with three catalogue projections, then measures
+refresh without publication. Each sample performs 16 refreshes in separate
+transactions and checks that metadata input trees remain shared.
+Output includes elapsed time, charged evaluator steps, and allocation bytes.
+
+To measure the generated C after building the kernel fixture:
+
+```sh
+cd target/native-gccjit/kernel
+clang -std=c11 -O2 -pthread -ffp-contract=off -fno-fast-math check.c module.c -lm -ldl -o catalogue-check
+./catalogue-check catalogue-bench 1024 5
+```
+
+On the development host, matched Clang 18.1.3 `-O2` builds pinned to CPU 8
+produced these medians across ten samples, with before/after order reversed
+halfway through. The baseline is `10ecb01` with the same measurement fixture.
+
+| Stored relations | Refresh before | Refresh after | Charged steps before → after |
+| --- | ---: | ---: | ---: |
+| 256 | 74.7 µs | 57.3 µs | 4,671 → 3,894 |
+| 1,024 | 369 µs | 283 µs | 20,547 → 17,466 |
+
+The cached schema count adds eight allocated bytes per refresh. These results
+measure native refresh cost, not whole-commit latency or Rust performance parity.
 
 `--rule-profile` builds a separate diagnostic executable from `module.c`, `module.h`, and `check.c` in the supplied directory.
 It requires GCC (`GCC` selects the executable) and GNU-compatible linker wrapping.
