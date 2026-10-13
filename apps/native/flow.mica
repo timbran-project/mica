@@ -79,11 +79,8 @@ end
 
 // Both analyses use a fixed point over the checked graph. Postdominators have
 // a virtual exit; non-returning regions have no common return continuation.
-verb native/flow_sets(order: list, incoming: map, root, live: list) -> map
-  let universe: map = {}
-  for id in live
-    universe[id] = true
-  end
+verb native/flow_sets(order: list, incoming: map, root, live: map) -> map
+  let universe: map = live
   let sets: map = {root -> {root -> true}}
   for id in order
     sets[id] = {id -> true}
@@ -147,6 +144,24 @@ verb native/flow_postorder(terms: map, entry: int) -> list
   return order
 end
 
+// Graph membership is indexed; each reached vertex is expanded once. Seeded
+// boundaries belong to the result but their edges are not followed.
+verb native/flow_closure(edges: map, origins: list, boundaries: map) -> map
+  let seen: map = boundaries
+  let pending: list = origins
+  let cursor: int = 0
+  while cursor < len(pending)
+    let id: int = pending[cursor]
+    cursor = cursor + 1
+    if map_contains_key(seen, id)
+      continue
+    end
+    seen[id] = true
+    pending = [@pending, @edges[id]]
+  end
+  return seen
+end
+
 verb native/flow_analysis(index: map, fn_id: int) -> map
   let graph: map = index[:function_graphs][fn_id]
   let entry: int = graph[:entry]
@@ -183,18 +198,14 @@ verb native/flow_analysis(index: map, fn_id: int) -> map
       end
     end
   end
-  let live: list = exits
-  let cursor: int = 0
-  while cursor < len(live)
-    for predecessor in predecessors[live[cursor]]
-      if !native/contains(live, predecessor)
-        live = [@live, predecessor]
-      end
-    end
-    cursor = cursor + 1
+  let reachable: map = {}
+  for id in order
+    reachable[id] = true
   end
-  let dominators: map = native/flow_sets(order, predecessors, entry, order)
-  let postdominators: map = native/flow_sets(postorder, successors, :Exit, [@live, :Exit])
+  let live: map = native/flow_closure(predecessors, exits, {})
+  live[:Exit] = true
+  let dominators: map = native/flow_sets(order, predecessors, entry, reachable)
+  let postdominators: map = native/flow_sets(postorder, successors, :Exit, live)
   let joins: map = {}
   for id in order
     let join = :Exit
@@ -213,30 +224,21 @@ verb native/flow_analysis(index: map, fn_id: int) -> map
       if !map_contains_key(dominators[tail], header)
         continue
       end
-      let members: list = [header]
-      let pending: list = [tail]
-      let position: int = 0
-      while position < len(pending)
-        let id: int = pending[position]
-        position = position + 1
-        if native/contains(members, id)
-          continue
-        end
-        members = [@members, id]
-        pending = [@pending, @predecessors[id]]
-      end
+      let members: map = native/flow_closure(predecessors, [tail], {header -> true})
       if map_contains_key(loops, header)
-        members = [@members, @[id for id in loops[header][:members] if !native/contains(members, id)]]
+        for id, present in loops[header][:members]
+          members[id] = true
+        end
       end
       loops[header] = {:members -> members, :exit -> :Exit}
     end
   end
   for header, loop in loops
-    let outside: list = [id for id in native/targets(index[:terms][header]) if !native/contains(loop[:members], id)]
+    let outside: list = [id for id in native/targets(index[:terms][header]) if !map_contains_key(loop[:members], id)]
     if len(outside) == 1
       loop[:exit] = outside[0]
     else
-      if !native/contains(loop[:members], joins[header])
+      if !map_contains_key(loop[:members], joins[header])
         loop[:exit] = joins[header]
       end
     end

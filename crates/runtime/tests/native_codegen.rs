@@ -4775,3 +4775,105 @@ return true
         );
     }
 }
+
+#[test]
+fn definite_assignment_keeps_block_temporaries_out_of_join_sets() {
+    for tier in [true, false] {
+        let mut runner = runner(tier).with_task_limits(TaskLimits {
+            instruction_budget: 25_000_000,
+            ..TaskLimits::default()
+        });
+        assert_eq!(
+            eval(
+                &mut runner,
+                r#"
+let state = native/program()
+state[:functions] = [[0, "diamonds", :Void]]
+state[:parameters] = [[1, 0, 0, "condition", :Bool]]
+state[:constants] = [[2, :U64, "0000000000000001"]]
+for position in 0..255
+  let entry = 10 + position * 1000
+  for offset, name in ["entry", "yes", "no", "join"]
+    state[:blocks] = [@state[:blocks], [entry + offset, 0, string_concat(name, "_", to_literal(position)), position == 0 && offset == 0]]
+  end
+  state[:locals] = [@state[:locals], [entry + 4, 0, string_concat("branch_", to_literal(position)), :Bool]]
+  state[:instructions] = [@state[:instructions], [entry + 5, entry + 1, 0, :Copy, entry + 4, [1]]]
+  let source = 2
+  for ordinal in 0..31
+    let local = entry + 10 + ordinal * 2
+    state[:locals] = [@state[:locals], [local, 0, string_concat("temporary_", to_literal(local)), :U64]]
+    state[:instructions] = [@state[:instructions], [local + 1, entry, ordinal, :Copy, local, [source]]]
+    source = local
+  end
+  state[:terminators] = [@state[:terminators], [entry, :Branch, [1, entry + 1, entry + 2]], [entry + 1, :Jump, [entry + 3]], [entry + 2, :Jump, [entry + 3]]]
+  let term = [entry + 3, :Jump, [entry + 1000]]
+  if position == 255
+    term = [entry + 3, :Return, []]
+  end
+  state[:terminators] = [@state[:terminators], term]
+end
+native/check(state)
+return true
+"#
+            ),
+            Value::bool(true)
+        );
+        let invalid = runner
+            .run_source(
+                r#"
+let state = native/program()
+state[:functions] = [[0, "local_order", :U64]]
+state[:locals] = [[1, 0, "value", :U64]]
+state[:constants] = [[2, :U64, "0000000000000001"]]
+state[:blocks] = [[3, 0, "entry", true]]
+state[:instructions] = [[4, 3, 0, :Copy, 1, [1]], [5, 3, 1, :Copy, 1, [2]]]
+state[:terminators] = [[3, :Return, [1]]]
+native/check(state)
+"#,
+            )
+            .unwrap();
+        assert!(matches!(invalid.outcome, TaskOutcome::Aborted { .. }));
+        assert!(
+            invalid.render().contains("read before definite assignment"),
+            "{}",
+            invalid.render()
+        );
+    }
+}
+
+#[test]
+fn flow_analysis_indexes_membership_in_large_branching_graphs() {
+    for tier in [true, false] {
+        let mut runner = runner(tier).with_task_limits(TaskLimits {
+            instruction_budget: 30_000_000,
+            ..TaskLimits::default()
+        });
+        assert_eq!(
+            eval(
+                &mut runner,
+                r#"
+let state = native/program()
+state[:functions] = [[0, "branches", :Void]]
+state[:parameters] = [[1, 0, 0, "condition", :Bool]]
+for position in 0..4094
+  let block = position + 2
+  state[:blocks] = [@state[:blocks], [block, 0, string_concat("node_", to_literal(position)), position == 0]]
+  let term = [block, :Return, []]
+  if position < 2047
+    term = [block, :Branch, [1, position * 2 + 3, position * 2 + 4]]
+  end
+  state[:terminators] = [@state[:terminators], term]
+end
+let flow = native/flow_analysis(native/check(state), 0)
+require len(flow[:order]) == 4095 && len(flow[:loops]) == 0
+for block in flow[:order]
+  require flow[:joins][block] == :Exit
+  require map_contains_key(flow[:dominators][block], 2)
+end
+return true
+"#
+            ),
+            Value::bool(true)
+        );
+    }
+}

@@ -215,6 +215,31 @@ verb native/reads(row)
   return row[5]
 end
 
+// Only locals accessed from multiple blocks need facts carried across edges.
+// Block-local temporaries are still checked in instruction order below.
+verb native/cross_block_locals(index: map, blocks: list, instructions: map) -> map
+  let owners: map = {}
+  let shared: map = {}
+  for block in blocks
+    let id: int = block[0]
+    let accesses: list = [[@native/reads(row), row[4]] for row in instructions[id]]
+    accesses = [@accesses, native/term_reads(index[:terms][id])]
+    for operands in accesses
+      for operand in operands
+        if !map_contains_key(index[:variables], operand) || index[:variables][operand][3] != :Local || map_contains_key(shared, operand)
+          continue
+        end
+        if !map_contains_key(owners, operand)
+          owners[operand] = id
+        elseif owners[operand] != id
+          shared[operand] = true
+        end
+      end
+    end
+  end
+  return shared
+end
+
 verb native/check_function(state, index, fn_row)
   let fn_id = fn_row[0]
   let parameters = index[:function_parameters][fn_id]
@@ -293,12 +318,9 @@ verb native/check_function(state, index, fn_row)
   // Forward must-analysis. Start non-entry blocks at the universe, then
   // intersect predecessor outputs until the sets stop shrinking.
   let initial: map = {}
-  let universe: map = {}
+  let universe: map = native/cross_block_locals(index, blocks, instructions)
   for row in parameters
     initial[row[0]] = true
-    universe[row[0]] = true
-  end
-  for row in index[:function_locals][fn_id]
     universe[row[0]] = true
   end
   let incoming = {}
@@ -331,7 +353,7 @@ verb native/check_function(state, index, fn_row)
       end
       incoming[id] = assigned
       for row in instructions[id]
-        if row[4] != :Discard
+        if map_contains_key(universe, row[4])
           assigned[row[4]] = true
         end
       end

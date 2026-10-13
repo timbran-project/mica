@@ -252,7 +252,7 @@ verb native/c_region_body(index: map, flow: map, input: map, start, stop, enter_
         if len(context[:loops]) > 0
           // A target outside this loop is rendered as break, not return.
           let loop: map = context[:loops][len(context[:loops]) - 1]
-          local_guard = local_guard && native/contains(loop[:members], guard)
+          local_guard = local_guard && map_contains_key(loop[:members], guard)
         end
         if local_guard
           let [body: list, after_guard: map] = native/c_region(index, flow, context, guard, stop, false)
@@ -272,7 +272,7 @@ verb native/c_region_body(index: map, flow: map, input: map, start, stop, enter_
     end
     if len(context[:loops]) > 0
       let loop: map = context[:loops][len(context[:loops]) - 1]
-      if !native/contains(loop[:members], join)
+      if !map_contains_key(loop[:members], join)
         join = :Exit
       end
     end
