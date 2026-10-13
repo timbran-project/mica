@@ -476,7 +476,8 @@ cargo test --release -p mica-runtime --test native_codegen \
 The full parser check compiles the lexer and every verb in `apps/compiler/parse.mica`.
 It compares complete `parse` and `parse_rows` results with Rust-hosted Mica, including diagnostics for malformed inputs.
 Each input also runs with forced collection. Both bootstrap tiers must produce identical C output.
-Code generation and C compilation take several minutes, so ordinary test runs exclude this integration test.
+The large fixture uses `-O0` with ASan and UBSan; smaller source tests exercise optimized C.
+Generation and compilation take several minutes, so ordinary test runs exclude this integration test.
 
 ```sh
 CC=clang cargo test --release -p mica-runtime --test native_codegen \

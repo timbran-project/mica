@@ -4112,11 +4112,16 @@ fn native_source_executes_the_compiler_parser() {
         );
         first
     });
-    check_native_source_fixture(&format!(
-        "{generated}\n{memory}\n{tasks}\n{}\n{}\n{fixture}",
-        include_str!("../../../native/platform/allocation.c"),
-        include_str!("../../../native/platform/mutex.c"),
-    ));
+    // Keep this complete-frontend correctness gate comparable to the emitter
+    // gate. Smaller source fixtures separately exercise optimized C.
+    check_native_source_fixture_with_flags(
+        &format!(
+            "{generated}\n{memory}\n{tasks}\n{}\n{}\n{fixture}",
+            include_str!("../../../native/platform/allocation.c"),
+            include_str!("../../../native/platform/mutex.c"),
+        ),
+        &["-O0", "-g0"],
+    );
 }
 
 #[test]
