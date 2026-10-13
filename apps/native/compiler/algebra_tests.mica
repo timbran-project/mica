@@ -1,0 +1,30 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+let left = relation_from_rows([:b, :a], [["two", 2], ["one", 1], ["one", 1], ["float", 1.0]])
+let right = relation_from_rows([:a, :b], [[3, "three"], [1, "one"], [1.0, "float"]])
+let empty = relation_from_rows([:a, :b], [])
+let unit = relation_from_rows([], [[]])
+let zero = relation_from_rows([], [])
+let related = relation_from_rows([:c, :a], [["first", 1], ["again", 1], ["third", 3], ["float", 1.0]])
+let disjoint = relation_from_rows([:c], [["x"], ["y"]])
+let nested = relation_from_rows([:a], [[[1]], [{:key -> "value"}], ["text"], [1], [1.0]])
+let results = [union(left, right), difference(left, right), difference(right, left),
+  union(empty, left), difference(left, empty), difference(empty, left),
+  union(@[left, left]), difference(@[left, left]),
+  project(left, :a), project(@[left, :b, :a]), project(left), project(empty),
+  natural_join(left, related), natural_join(@[related, left]), natural_join(left, disjoint),
+  natural_join(left, right), natural_join(left, empty), natural_join(unit, left),
+  natural_join(left, unit), natural_join(zero, left), natural_join(left, zero),
+  natural_join(nested, nested),
+  natural_join(relation_from_rows([:a], [[1]]), relation_from_rows([:a], [[1.0]]))]
+for a in [zero, unit]
+  for b in [zero, unit]
+    results = [@results, union(a, b), difference(a, b), natural_join(a, b), project(a)]
+  end
+end
+let wide_relation = relation_from_rows(wide, [[i for i in 0..69], [70 - i for i in 0..69]])
+let wide_subset = project(wide_relation, @[wide[i] for i in 0..64])
+return [results, project(wide_relation, @wide), wide_subset,
+  union(wide_relation, wide_relation), difference(wide_relation, wide_relation),
+  natural_join(wide_relation, wide_subset), natural_join(wide_subset, wide_relation),
+  natural_join(wide_relation, disjoint)]

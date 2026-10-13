@@ -4,16 +4,16 @@
 // Fixed signatures share argument expansion; ordinary calls retain direct
 // operands rather than constructing an argument list at runtime.
 verb native_builtins/arities() -> map
-  return {:edit_distance -> 2, :is_builtin -> 1, :to_symbol -> 1, :error_code -> 1, :frob -> 2, :frob_delegate -> 1, :frob_value -> 1, :is_frob -> 1,
+  return {:union -> 2, :difference -> 2, :natural_join -> 2, :edit_distance -> 2, :is_builtin -> 1, :to_symbol -> 1, :error_code -> 1, :frob -> 2, :frob_delegate -> 1, :frob_value -> 1, :is_frob -> 1,
     :url_encode_component -> 1, :url_decode_component -> 1, :to_int -> 1, :to_float -> 1, :parse_int -> 1, :emit -> 2, :mailbox -> 0, :mailbox_send -> 2, :mailbox_close -> 1,
     :len -> 1, :string_len -> 1, :string_append -> 2, :string_contains -> 2, :string_starts_with -> 2,
     :string_span -> 3, :string_find_any -> 3, :string_slice -> 3, :string_chars -> 1, :string_from_chars -> 1, :string_join -> 2,
     :sort -> 1, :relation_from_rows -> 2, :map_contains_key -> 2, :map_pairs -> 1, :index_or -> 3, :is_kind -> 2}
 end
-// The generated runtime exposes these fixed-arity calls and two variadic
+// The generated runtime exposes these fixed-arity calls and three variadic
 // calls. Compiler forms such as commit and suspend are not registry entries.
 verb native_builtins/names() -> list
-  return sort([@[name for name, arity in native_builtins/arities()], :error, :string_concat])
+  return sort([@[name for name, arity in native_builtins/arities()], :error, :string_concat, :project])
 end
 verb native_builtins/lookup_name(module: map) -> string
   return string_concat(module[:source_prefix], "_is_builtin")
@@ -197,6 +197,10 @@ verb native_builtins/call(builder: map, name: symbol, args: list) -> list
   end
   if name == :emit
     return [args[1], native_source/emit(builder, args[0], args[1])]
+  end
+  if native/contains([:union, :difference, :natural_join], name)
+    let result: list = native_algebra/call(builder, native_source/symbol_text(name), args)
+    return result
   end
   if name == :edit_distance
     let result: list = native_text/construct(builder, "edit_distance", args)

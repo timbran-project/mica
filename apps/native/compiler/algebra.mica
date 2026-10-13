@@ -1,0 +1,260 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+// Relation values use their complete heading, independently of query masks.
+// Rooted lists bridge their packed tuples to the shared query row builders.
+verb native_algebra/name(module: map, operation: string) -> string
+  return string_concat(module[:source_prefix], "_algebra_", operation)
+end
+verb native_algebra/arity(builder: map, relation: map) -> map
+  let result: map = native_gen/field(builder, native_gen/call(builder, "value_relation_arity", [relation]), "number")
+  return result
+end
+verb native_algebra/column(builder: map, relation: map, index: map) -> map
+  let result: map = native_gen/convert(:U32, native_gen/field(builder,
+    native_gen/call(builder, "value_relation_column_at", [relation, index]), "number"))
+  return result
+end
+verb native_algebra/tuple(builder: map, relation: map, index: map) -> map
+  let result: map = native_gen/field(builder, native_gen/call(builder, "value_relation_row", [relation, index]), "tuple")
+  return result
+end
+verb native_algebra/row(builder: map, relation: map, index: map) -> list
+  let tuple: map = native_algebra/tuple(builder, relation, index)
+  let ready: map = native_query/charge(builder, native_gen/field(builder, tuple, "arity"), native_gen/ref(builder, "zero"))
+  let result: list = native_query/value(ready, "value_list", [native_roots/worker(ready),
+    native_gen/freeze(native_gen/field(ready, tuple, "data")), native_gen/field(ready, tuple, "arity")])
+  return result
+end
+verb native_algebra/buffer(builder: map, name: string) -> list
+  let [empty: map, ready: map] = native_query/tuple(builder, [])
+  let result: list = native_roots/retain(ready, name, empty)
+  return result
+end
+verb native_algebra/append(builder: map, buffer: map, value: map) -> map
+  let [updated: map, ready: map] = native_query/value(builder, "kernel_query_append", [native_roots/worker(builder), buffer, value])
+  let result: map = native_roots/store(ready, buffer, updated)
+  return result
+end
+verb native_algebra/heading(builder: map, relation: map) -> list
+  let [heading: map, allocated: map] = native_query/build_row(builder, native_algebra/arity(builder, relation), fn(step, index)
+    return native_gen/field(step, native_gen/call(step, "value_symbol", [native_algebra/column(step, relation, index)]), "value")
+  end)
+  let result: list = native_roots/retain(allocated, "heading", heading)
+  return result
+end
+verb native_algebra/each_row(builder: map, relation: map, visit) -> map
+  let result: map = native_gen/for_range(builder, "row", native_gen/ref(builder, "zero"), native_access/length(builder, relation, "relation"), fn(step, index)
+    let polled: map = native_query/poll_interval(step, index)
+    let [row: map, copied: map] = native_algebra/row(polled, relation, index)
+    let [retained: map, ready: map] = native_roots/retain(copied, "row", row)
+    return visit(ready, retained)
+  end)
+  return result
+end
+verb native_algebra/finish(builder: map, heading: map, rows: map) -> map
+  // The constructor borrows tuple storage: charge work without relocating.
+  let controls: map = {:checkpoint -> fn(step, index) => native_query/charge(step, native_gen/ref(step, "one"), native_gen/ref(step, "zero"))}
+  let [value: map, ready: map] = native_queries/relation_value(builder, heading, rows, controls)
+  let output: map = native_roots/root_value(ready, native_gen/ref(ready, "output"), native_value/word())
+  let result: map = native_tasks/attempt_status(native_roots/store(ready, output, value), "ok")
+  return result
+end
+verb native_algebra/finish_set(builder: map, heading: map, tree: map) -> map
+  let [empty: map, allocated: map] = native_query/tuple(builder, [])
+  let [rows: map, gathered: map] = native_query/value(allocated, "kernel_query_gather", [native_roots/worker(allocated), tree, empty])
+  let [retained: map, ready: map] = native_roots/retain(gathered, "rows", rows)
+  let result: map = native_algebra/finish(ready, heading, retained)
+  return result
+end
+
+// Canonical tuple order permits a linear merge with no temporary index.
+verb native_algebra/set_body(module: map, kind: string) -> map
+  let builder: map = native_queries/budget_scope(native_gen/context(module, native_algebra/name(module, kind)))
+  builder = native_query/charge(builder, native_gen/ref(builder, "one"), native_gen/ref(builder, "zero"))
+  let left: map = native_roots/ref(builder, "left")
+  let right: map = native_roots/ref(builder, "right")
+  builder = native_builtins/kind_check(native_builtins/kind_check(builder, left, "relation"), right, "relation")
+  builder = native_query/check(builder, native_gen/equal(native_algebra/arity(builder, left), native_algebra/arity(builder, right)), "schema")
+  builder = native_gen/for_range(builder, "column", native_gen/ref(builder, "zero"), native_algebra/arity(builder, left), fn(step, index)
+    let polled: map = native_query/poll_interval(step, index)
+    return native_query/check(polled, native_gen/equal(native_algebra/column(polled, left, index), native_algebra/column(polled, right, index)), "schema")
+  end)
+  let [heading: map, with_heading: map] = native_algebra/heading(builder, left)
+  let [rows: map, with_rows: map] = native_algebra/buffer(with_heading, "rows")
+  let [a: map, with_a: map] = native_gen/bind(with_rows, "left_index", native_gen/ref(with_rows, "zero"))
+  let [b: map, ready: map] = native_gen/bind(with_a, "right_index", native_gen/ref(with_a, "zero"))
+  let advance = fn(step, index) => native_gen/assign(step, index, native_gen/add(index, native_gen/ref(step, "one")))
+  let keep = fn(step, relation, index)
+    let [row: map, copied: map] = native_algebra/row(step, relation, index)
+    return native_algebra/append(copied, rows, row)
+  end
+  builder = native_gen/while_loop(ready, native_gen/less(a, native_access/length(ready, left, "relation")), fn(step)
+    let polled: map = native_query/poll_interval(step, native_gen/add(a, b))
+    polled = native_gen/unless(polled, native_gen/less(b, native_access/length(polled, right, "relation")), fn(exhausted)
+      return native_gen/continue_loop(advance(keep(exhausted, left, a), a))
+    end)
+    let charged: map = native_query/charge(polled, native_algebra/arity(polled, left), native_gen/ref(polled, "zero"))
+    let [compared: map, checked: map] = native_gen/checked_bind(charged, "order", native_gen/call(charged, "value_tuple_compare",
+      [native_algebra/tuple(charged, left, a), native_algebra/tuple(charged, right, b)]), "ok", fn(failed) => native_query/error(failed, "schema"))
+    let order: map = native_gen/field(checked, compared, "number")
+    checked = native_gen/when(checked, native_gen/less(order, native_gen/ref(checked, "int_zero")), fn(before)
+      return native_gen/continue_loop(advance(keep(before, left, a), a))
+    end)
+    checked = native_gen/when(checked, native_kernel/absent(order), fn(equal)
+      let selected: map = equal
+      if kind == "union"
+        selected = keep(selected, left, a)
+      end
+      return native_gen/continue_loop(advance(advance(selected, a), b))
+    end)
+    if kind == "union"
+      checked = keep(checked, right, b)
+    end
+    return advance(checked, b)
+  end)
+  if kind == "union"
+    builder = native_gen/while_loop(builder, native_gen/less(b, native_access/length(builder, right, "relation")), fn(step)
+      return advance(keep(native_query/poll_interval(step, b), right, b), b)
+    end)
+  end
+  let result: map = native_gen/finish(module, native_algebra/finish(builder, heading, rows))
+  return result
+end
+
+verb native_algebra/project_body(module: map) -> map
+  let builder: map = native_queries/budget_scope(native_gen/context(module, native_algebra/name(module, "project")))
+  builder = native_query/charge(builder, native_gen/ref(builder, "one"), native_gen/ref(builder, "zero"))
+  let arguments: map = native_roots/ref(builder, "arguments")
+  builder = native_query/check(builder, native_gen/less(native_gen/ref(builder, "zero"), native_query/width(builder, arguments)), "schema")
+  let [relation: map, rooted: map] = native_roots/retain(builder, "relation", native_query/cell(builder, arguments, native_gen/ref(builder, "zero")))
+  builder = native_builtins/kind_check(rooted, relation, "relation")
+  let width: map = native_gen/subtract(native_query/width(builder, arguments), native_gen/ref(builder, "one"))
+  builder = native_query/check(builder, native_gen/negate(native_gen/less(native_gen/ref(builder, "relation_max_arity"), width)), "schema")
+  let [heading: map, allocated: map] = native_query/build_row(builder, width, fn(step, index)
+    return native_query/cell(step, arguments, native_gen/add(index, native_gen/ref(step, "one")))
+  end)
+  let [columns: map, with_columns: map] = native_roots/retain(allocated, "heading", heading)
+  let [positions: map, with_positions: map] = native_algebra/buffer(with_columns, "positions")
+  let [flags: map, reserved: map] = native_memory/array_storage(with_positions, native_roots/worker(with_positions), :U8,
+    native_algebra/arity(with_positions, relation), "layout_opaque", fn(failed) => native_query/error(failed, "oom"))
+  let [seen: map, retained: map] = native_roots/retain(reserved, "seen", flags)
+  builder = native_gen/for_range(retained, "column", native_gen/ref(retained, "zero"), native_algebra/arity(retained, relation), fn(step, index)
+    return native_gen/store(native_query/poll_interval(step, index), native_gen/offset(seen, index), native_gen/zero(:U8))
+  end)
+  builder = native_query/each_row(builder, columns, fn(step, column)
+    let checked: map = native_builtins/kind_check(step, column, "symbol")
+    let [found: map, resolved: map] = native_gen/checked_bind(checked, "position", native_gen/call(checked, "value_relation_column", [relation,
+      native_gen/convert(:U32, native_gen/expression(:U64, :Payload, [column]))]), "ok", fn(failed) => native_query/error(failed, "schema"))
+    let index: map = native_gen/field(resolved, found, "number")
+    resolved = native_query/check(resolved, native_kernel/absent(native_gen/load(native_gen/offset(seen, index))), "schema")
+    resolved = native_gen/store(resolved, native_gen/offset(seen, index), native_gen/convert(:U8, native_gen/ref(resolved, "one")))
+    return native_algebra/append(resolved, positions, native_access/integer(resolved, native_gen/bitcast(:I64, index)))
+  end)
+  let [rows: map, ready: map] = native_query/row_set(builder)
+  builder = native_algebra/each_row(ready, relation, fn(step, row)
+    let [projected: map, projected_builder: map] = native_query/project_row(step, row, positions)
+    return native_query/offer(projected_builder, rows, projected)
+  end)
+  let result: map = native_gen/finish(module, native_algebra/finish_set(builder, columns, rows))
+  return result
+end
+
+// Key positions and right-only columns are computed once per join. Index
+// entries retain complete rows; matching rows copy each shared column once.
+verb native_algebra/join_body(module: map) -> map
+  let builder: map = native_queries/budget_scope(native_gen/context(module, native_algebra/name(module, "natural_join")))
+  builder = native_query/charge(builder, native_gen/ref(builder, "one"), native_gen/ref(builder, "zero"))
+  let left: map = native_roots/ref(builder, "left")
+  let right: map = native_roots/ref(builder, "right")
+  builder = native_builtins/kind_check(native_builtins/kind_check(builder, left, "relation"), right, "relation")
+  let [heading: map, with_heading: map] = native_algebra/heading(builder, left)
+  let [left_keys: map, with_left: map] = native_algebra/buffer(with_heading, "left_keys")
+  let [right_keys: map, with_right: map] = native_algebra/buffer(with_left, "right_keys")
+  let [extras: map, with_extras: map] = native_algebra/buffer(with_right, "right_columns")
+  builder = native_gen/for_range(with_extras, "column", native_gen/ref(with_extras, "zero"), native_algebra/arity(with_extras, right), fn(step, index)
+    let polled: map = native_query/poll_interval(step, index)
+    let [column: map, named: map] = native_gen/bind(polled, "column", native_algebra/column(polled, right, index))
+    let [found: map, resolved: map] = native_gen/bind(named, "left_column", native_gen/call(named, "value_relation_column", [left, column]))
+    let position: map = native_access/integer(resolved, native_gen/bitcast(:I64, index))
+    return native_gen/branch(resolved, native_gen/field(resolved, found, "ok"), fn(shared)
+      let left_position: map = native_access/integer(shared, native_gen/bitcast(:I64, native_gen/field(shared, found, "number")))
+      return native_algebra/append(native_algebra/append(shared, left_keys, left_position), right_keys, position)
+    end, fn(unique)
+      let symbol: map = native_gen/field(unique, native_gen/call(unique, "value_symbol", [column]), "value")
+      let appended: map = native_algebra/append(native_algebra/append(unique, heading, symbol), extras, position)
+      return native_query/check(appended, native_gen/negate(native_gen/less(native_gen/ref(appended, "relation_max_arity"), native_query/width(appended, heading))), "schema")
+    end)
+  end)
+  let [index: map, indexed: map] = native_query/row_set(builder)
+  builder = native_algebra/each_row(indexed, right, fn(step, row)
+    let [key: map, projected: map] = native_query/project_row(step, row, right_keys)
+    let [entry: map, paired: map] = native_query/index_entry(projected, key, row)
+    return native_query/offer(paired, index, entry)
+  end)
+  let [rows: map, with_rows: map] = native_query/row_set(builder)
+  let [ticks: map, ready: map] = native_gen/bind(with_rows, "ticks", native_gen/ref(with_rows, "zero"))
+  builder = native_algebra/each_row(ready, left, fn(step, row)
+    let [key: map, projected: map] = native_query/project_row(step, row, left_keys)
+    return native_query/status_call(projected, native_algebra/name(module, "matches"),
+      [native_roots/worker(projected), index, key, row, extras, rows[:scope_root], native_gen/address(ticks)])
+  end)
+  let result: map = native_gen/finish(module, native_algebra/finish_set(builder, heading, rows))
+  return result
+end
+verb native_algebra/matches_body(module: map) -> map
+  let result: map = native_query/matches_body(module, native_algebra/name(module, "matches"),
+    ["worker", "node", "key", "left", "positions", "output", "ticks"], fn(step, entry)
+      let [extra: map, projected: map] = native_query/project_row(step, native_query/cell(step, entry, native_gen/ref(step, "one")), native_roots/ref(step, "positions"))
+      let [joined: map, ready: map] = native_query/concat_rows(projected, native_roots/ref(projected, "left"), extra)
+      let output: map = native_roots/root_value(ready, native_roots/ref(ready, "output"), native_kernel/pointer("Node"))
+      return native_query/offer(ready, output, joined)
+    end)
+  return result
+end
+verb native_algebra/definitions(input: map) -> map
+  let used: map = {}
+  for program in input[:source_programs]
+    let pc: int = 0
+    for instruction in program[:analysis][:description][:code]
+      if map_contains_key(program[:analysis][:reachable], pc) && instruction[0] == :BuiltinCall && native/contains([:project, :union, :difference, :natural_join], instruction[2])
+        used[instruction[2]] = true
+      end
+      pc = pc + 1
+    end
+  end
+  let module: map = input
+  let worker: list = ["worker", native_memory/record_pointer("MemoryWorker"), :Borrow]
+  let output: list = ["output", native_memory/record_pointer("MemoryRoot"), :Borrow]
+  if map_contains_key(used, :natural_join)
+    module = native_memory/declare(module, native_algebra/name(module, "matches"), :U64, [worker,
+      ["node", native_kernel/pointer("Node"), :Gc], ["key", native_value/word(), :Gc], ["left", native_value/word(), :Gc],
+      ["positions", native_value/word(), :Gc], output, ["ticks", native_memory/pointer(:U64), :Borrow],
+      ["budget", native_kernel/pointer("Budget"), :Borrow]], native_tasks/effects(), :Value, "")
+    module = native_algebra/matches_body(module)
+  end
+  for operation, present in used
+    let name: string = native_source/symbol_text(operation)
+    let arguments: list = [["left", native_value/word(), :Gc], ["right", native_value/word(), :Gc]]
+    if operation == :project
+      arguments = [["arguments", native_value/word(), :Gc]]
+    end
+    module = native_memory/declare(module, native_algebra/name(module, name), :U64, [worker,
+      ["attempt", native_tasks/pointer("Attempt"), :Borrow], ["transaction", native_kernel/pointer("Transaction"), :Borrow],
+      @arguments, output], native_tasks/effects(), :Value, "")
+    if operation == :project
+      module = native_algebra/project_body(module)
+    elseif operation == :natural_join
+      module = native_algebra/join_body(module)
+    else
+      module = native_algebra/set_body(module, name)
+    end
+  end
+  return module
+end
+verb native_algebra/call(builder: map, name: string, arguments: list) -> list
+  let [output: map, ready: map] = native_roots/retain(builder, name, native_gen/zero(native_value/word()))
+  ready = native_source/checked(ready, native_algebra/name(ready, name), [native_roots/worker(ready), native_tasks/attempt(ready),
+    native_tasks/slot(ready, "transaction"), @arguments, output[:scope_root]])
+  return [output, ready]
+end

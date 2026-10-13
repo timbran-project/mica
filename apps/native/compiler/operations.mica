@@ -112,6 +112,12 @@ verb native_source/builtin_items(builder: map, name: symbol, items: list) -> lis
     let result: list = native_text/concatenate(builder, items)
     return result
   end
+  if name == :project
+    let [arguments: map, expanded: map] = native_source/list_items(builder, items, false)
+    let [retained: map, ready: map] = native_roots/retain(expanded, "arguments", arguments)
+    let result: list = native_algebra/call(ready, "project", [retained])
+    return result
+  end
   let arities: map = native_builtins/arities()
   native/ensure(map_contains_key(arities, name), string_concat("unsupported native source builtin: ", to_literal(name)))
   if !native_source/spliced(items)

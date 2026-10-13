@@ -90,12 +90,11 @@ verb native_query/join_index(builder: map, rows: map, positions: map) -> list
   return [tree, ready]
 end
 
-verb native_query/join_matches_body(module: map) -> map
-  let builder: map = native_query/context(module, "kernel_query_join_matches")
+// Specialize an indexed key walk without changing its pruning or polling.
+verb native_query/matches_body(module: map, name: string, parameters: list, visit) -> map
+  let builder: map = native_query/context(module, name)
   let node: map = native_roots/ref(builder, "node")
   let key: map = native_roots/ref(builder, "key")
-  let left: map = native_roots/ref(builder, "left")
-  let output: map = native_roots/ref(builder, "output")
   let ticks: map = native_roots/ref(builder, "ticks")
   builder = native_gen/store(builder, ticks, native_gen/add(native_gen/load(ticks), native_roots/ref(builder, "one")))
   builder = native_query/poll_interval(builder, native_gen/load(ticks))
@@ -111,18 +110,31 @@ verb native_query/join_matches_body(module: map) -> map
     if side == "right"
       descend = native_gen/negate(native_gen/less(native_roots/ref(ready, "int_zero"), order))
     end
-    ready = native_gen/when(ready, descend, fn(branch) => native_query/status_call(branch, "kernel_query_join_matches",
-      [native_roots/ref(branch, "worker"), native_kernel/load_field(branch, node, side), key, left, output, ticks]))
+    ready = native_gen/when(ready, descend, fn(branch)
+      let arguments: list = []
+      for parameter in parameters
+        let argument: map = native_roots/ref(branch, parameter)
+        if parameter == "node"
+          argument = native_kernel/load_field(branch, node, side)
+        end
+        arguments = [@arguments, argument]
+      end
+      return native_query/status_call(branch, name, arguments)
+    end)
   end
-  ready = native_gen/when(ready, native_kernel/absent(order), fn(matched)
-    let [joined: map, with_joined: map] = native_query/concat_rows(matched, left, native_query/cell(matched, entry, native_roots/ref(matched, "one")))
-    let tree: map = native_roots/root_value(with_joined, output, native_kernel/pointer("Node"))
-    let with_tree: map = with_joined
-    let inserted: map = native_query/offer(with_tree, tree, joined)
-    let generated_result: map = native_gen/unchanged(inserted)
-    return generated_result
-  end)
+  ready = native_gen/when(ready, native_kernel/absent(order), fn(matched) => visit(matched, entry))
   ready = native_roots/return_value(ready, native_roots/ref(ready, "kernel_ok"))
   let generated_result: map = native_gen/finish(module, ready)
   return generated_result
+end
+
+verb native_query/join_matches_body(module: map) -> map
+  let result: map = native_query/matches_body(module, "kernel_query_join_matches",
+    ["worker", "node", "key", "left", "output", "ticks"], fn(matched, entry)
+      let [joined: map, ready: map] = native_query/concat_rows(matched, native_roots/ref(matched, "left"),
+        native_query/cell(matched, entry, native_roots/ref(matched, "one")))
+      let tree: map = native_roots/root_value(ready, native_roots/ref(ready, "output"), native_kernel/pointer("Node"))
+      return native_query/offer(ready, tree, joined)
+    end)
+  return result
 end

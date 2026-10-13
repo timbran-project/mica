@@ -412,6 +412,12 @@ Its rooted scratch arrays scale with the shorter input. Inner-loop checks charge
 Native `is_builtin(symbol)` reports the source backend's supported builtin inventory, including its variadic calls.
 Compiler forms and Rust-only builtins return false. Invalid arguments raise catchable `E_TYPE` or `E_INVARG` errors.
 
+Relation-value builtins include `project`, `union`, `difference`, and `natural_join`, with spliced arguments and headings wider than query masks.
+Union and difference merge ordered rows. Natural joins index shared columns and retain each shared column once.
+Join keys use canonical value equality: integer `1` and float `1.0` remain distinct.
+These operations charge work and allocation budgets, poll for collection, and preserve the output on cancellation or failure.
+The algebra fixture compares results with Rust-hosted Mica and checks resource failures under ASan and UBSan.
+
 The source-backend lexer check compiles the `lex` verb directly from `apps/compiler/lex.mica`.
 It compares complete tokens and diagnostics with Rust-hosted Mica and repeats each input with forced collection.
 The fixture supplies catalogue identities; it does not execute the filein identity declaration or bootstrap the parser and emitter.
