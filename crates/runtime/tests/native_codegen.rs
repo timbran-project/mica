@@ -3870,6 +3870,108 @@ fn native_source_executes_the_compiler_lexer() {
 }
 
 #[test]
+#[ignore = "full parser bootstrap generates and compiles a large native module"]
+fn native_source_executes_the_compiler_parser() {
+    let lexer = include_str!("../../../apps/compiler/lex.mica");
+    let parser = include_str!("../../../apps/compiler/parse.mica");
+    let entry =
+        "verb native_parse_fixture(source)\nreturn [parse(source), parse_rows(source)]\nend";
+    // Use the complete existing frontend. Only filein identity declarations
+    // are omitted: the native fixture supplies and installs catalogue IDs.
+    let source = format!(
+        "{entry}\n{}\n{}",
+        &lexer[lexer.find("verb lex(").unwrap()..],
+        &parser[parser.find("verb parse(").unwrap()..],
+    );
+    let method_ids = format!(
+        "[{}]",
+        source
+            .lines()
+            .filter(|line| line.starts_with("verb "))
+            .enumerate()
+            .map(|(index, _)| format!("[{}, {}]", 10000 + index, 20000 + index))
+            .collect::<Vec<_>>()
+            .join(",")
+    );
+    let cases = [
+        "",
+        "// comment\nreturn 42",
+        "let label = \"Montréal 🦀\"\nreturn [label, 1.25, true, none]",
+        "verb choose(value, ?fallback = 0, @rest)\nreturn fallback\nend",
+        "let total = 0\nfor x in 1..3\nif x > 1\ntotal = total + x\nend\nend\nreturn total",
+        "let f = fn(x) => x + 1\nreturn [f(x) for x in [1, 2] if x > 0]",
+        "try\nreturn 1 / 0\ncatch E_DIV as problem\nreturn problem.message\nfinally\nlet cleaned = true\nend",
+        "let subject = [1, 2]\nreturn match subject\ncase [first, @rest]\nfirst\ncase _\n0\nend",
+        "verb echo(text: string) -> string\nreturn text\nend\nreturn echo(\"hello\")",
+        "assert Edge(#a, #b)\nreturn Edge(?from, ?to)",
+        "Reach(x, y) :- Edge(x, y)\nReach(x, z) :- Reach(x, y), Edge(y, z)",
+        "return (1 + )\nlet x = ",
+        "verb broken(\nreturn \"unterminated",
+    ];
+    let mut oracle = SourceRunner::new_empty().with_task_limits(TaskLimits {
+        instruction_budget: 20_000_000,
+        max_call_depth: 256,
+        ..TaskLimits::default()
+    });
+    for filein in [lexer, parser, entry] {
+        oracle.run_filein(filein).unwrap();
+    }
+    let mut checks = String::new();
+    for (index, text) in cases.iter().enumerate() {
+        let input = Value::string(*text);
+        let mut request = SourceRunner::root_source_request("");
+        request.input = TaskInput::Invocation {
+            selector: Symbol::intern("native_parse_fixture"),
+            roles: vec![(Symbol::intern("source"), input.clone())],
+        };
+        let submitted = oracle.submit_invocation(request).unwrap();
+        let TaskOutcome::Complete {
+            value: expected, ..
+        } = submitted.outcome
+        else {
+            panic!("parser oracle for case {index}: {:?}", submitted.outcome);
+        };
+        for parsed in expected.with_list(|items| items.to_vec()).unwrap() {
+            let errors = parsed
+                .map_get(&Value::symbol(Symbol::intern("errors")))
+                .unwrap();
+            assert_eq!(
+                errors == Value::list([]),
+                index < cases.len() - 2,
+                "unexpected parser diagnostics for case {index}: {errors:?}"
+            );
+        }
+        let (input, construction) = source_value_literal(&input, &mut 0);
+        checks.push_str(&format!(
+            "{{ {construction}\nmica_value_root_set(&input, {input});\nrun_parser(worker, kernel, code, runtime, &input, &output, false);\n{}\nrun_parser(worker, kernel, code, runtime, &input, &output, true);\n{}\n}}\n",
+            source_value_check(&expected, "mica_value_root_get(&output)"),
+            source_value_check(&expected, "mica_value_root_get(&output)"),
+        ));
+    }
+    let fixture = include_str!("../../../apps/native/compiler/parser_tests.c")
+        .replace("/* PARSER_CONFORMANCE_CASES */", &checks);
+    let (generated, memory, tasks) = thread::scope(|scope| {
+        let [first, second] = [true, false].map(|tier| {
+            let source = &source;
+            let method_ids = &method_ids;
+            scope.spawn(move || generate_native_source_example(tier, source, method_ids))
+        });
+        let first = first.join().unwrap();
+        let second = second.join().unwrap();
+        assert!(
+            first == second,
+            "parser emission differs between bootstrap tiers"
+        );
+        first
+    });
+    check_native_source_fixture(&format!(
+        "{generated}\n{memory}\n{tasks}\n{}\n{}\n{fixture}",
+        include_str!("../../../native/platform/allocation.c"),
+        include_str!("../../../native/platform/mutex.c"),
+    ));
+}
+
+#[test]
 fn native_source_interns_symbols_with_resource_controls() {
     check_native_source_body(
         include_str!("../../../apps/native/compiler/symbols_tests.mica"),
@@ -4004,6 +4106,8 @@ fn check_native_source_fixture(fixture: &str) {
     } else {
         "-fsanitize=address,undefined,float-cast-overflow"
     };
+    let compilation_started = Instant::now();
+    eprintln!("native source: compiling {} C bytes", fixture.len());
     let compiled = Command::new("clang")
         .args([
             "-std=c11",
@@ -4030,6 +4134,11 @@ fn check_native_source_fixture(fixture: &str) {
         "{}",
         String::from_utf8_lossy(&compiled.stderr)
     );
+    eprintln!(
+        "native source: C compilation={:?}",
+        compilation_started.elapsed()
+    );
+    let execution_started = Instant::now();
     let executed = Command::new(binary)
         .current_dir(&scratch.0)
         .env("ASAN_OPTIONS", "detect_leaks=1:halt_on_error=1")
@@ -4038,7 +4147,10 @@ fn check_native_source_fixture(fixture: &str) {
         .unwrap();
     assert!(executed.status.success(), "{executed:?}");
     assert!(executed.stderr.is_empty(), "{executed:?}");
-    eprintln!("native source: sanitizer execution passed");
+    eprintln!(
+        "native source: sanitizer execution passed in {:?}",
+        execution_started.elapsed()
+    );
 }
 
 fn load_native_kernel(runner: &mut SourceRunner, tasks: bool) {

@@ -427,6 +427,16 @@ CC=clang cargo test --release -p mica-runtime --test native_codegen \
   native_source_executes_the_compiler_lexer -- --nocapture
 ```
 
+The full parser check compiles the lexer and every verb in `apps/compiler/parse.mica`.
+It compares complete `parse` and `parse_rows` results with Rust-hosted Mica, including diagnostics for malformed inputs.
+Each input also runs with forced collection. Both bootstrap tiers must produce identical C output.
+Code generation and C compilation take several minutes, so ordinary test runs exclude this integration test.
+
+```sh
+CC=clang cargo test --release -p mica-runtime --test native_codegen \
+  native_source_executes_the_compiler_parser -- --ignored --nocapture
+```
+
 ## Remaining integration
 
 The broader integration gate is in `sketches/NATIVE_TASKS_AND_MEMORY_DESIGN.md`, section 16.1.
