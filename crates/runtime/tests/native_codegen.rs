@@ -856,6 +856,37 @@ state[:terminators] = [[4, :Branch, [1, 5, 6]], [5, :Jump, [7]],
 }
 
 #[test]
+fn reachability_validation_scales_with_large_control_flow_graphs() {
+    for interpreter_only in [true, false] {
+        let mut runner = runner(interpreter_only).with_task_limits(TaskLimits {
+            instruction_budget: 10_000_000,
+            ..TaskLimits::default()
+        });
+        assert_eq!(
+            eval(
+                &mut runner,
+                r#"
+let state = native/program()
+state[:functions] = [[0, "chain", :Void]]
+for position in 0..1999
+  let block = position + 1
+  state[:blocks] = [[block, 0, string_concat("step_", to_literal(position)), position == 0], @state[:blocks]]
+  if position == 1999
+    state[:terminators] = [@state[:terminators], [block, :Return, []]]
+  else
+    state[:terminators] = [@state[:terminators], [block, :Jump, [block + 1]]]
+  end
+end
+let index = native/check(state)
+return len(index[:function_graphs][0][:blocks])
+"#
+            ),
+            Value::int(2000).unwrap()
+        );
+    }
+}
+
+#[test]
 fn definite_assignment_handles_backwards_construction_and_loop_backedges() {
     for interpreter_only in [true, false] {
         let mut runner = runner(interpreter_only).with_task_limits(TaskLimits {
@@ -3554,6 +3585,79 @@ fn native_source_emissions_obey_target_authority_and_transactions() {
                 include_str!("../../../apps/native/compiler/effects_tests.c"),
             );
             check_native_source_fixture(&fixture);
+        }
+    });
+}
+
+#[test]
+fn native_source_executes_the_compiler_lexer() {
+    let source = include_str!("../../../apps/compiler/lex.mica");
+    // Compile the actual verb without its filein identity declaration. The
+    // native fixture supplies catalogue identities, as other source tests do.
+    let definition = &source[source.find("verb lex(").unwrap()..];
+    let cases = [
+        "",
+        " \t\r\n// comment\rreturn true",
+        "let label = \"é🦀\"\nreturn [label, 12.5]",
+        "verb choose(value, ?fallback = 0, @rest)\nreturn value ?? fallback\nend",
+        "0 42 -12 1.25 1e3 1.5e-2 0xff 0b101 0o77 1..4",
+        ":name #identity foo/bar alpha.beta ?query @splice",
+        "== != <= >= && || -> => := :: + - * / % ∈ & |",
+        "\"line\\nquote\\\"\" '\u{00e9}' \"a\0b\"",
+        "\"unterminated",
+        "'unterminated",
+        "/* not a block comment */ \\ $ \0",
+        "let é = \"é\"\r\nreturn 🙂",
+    ];
+    let mut oracle = SourceRunner::new_empty().with_task_limits(TaskLimits {
+        instruction_budget: 20_000_000,
+        ..TaskLimits::default()
+    });
+    oracle.run_filein(source).unwrap();
+    let mut checks = String::new();
+    for (index, text) in cases.iter().enumerate() {
+        let input = Value::string(*text);
+        let mut request = SourceRunner::root_source_request("");
+        request.input = TaskInput::Invocation {
+            selector: Symbol::intern("lex"),
+            roles: vec![(Symbol::intern("source"), input.clone())],
+        };
+        let submitted = oracle.submit_invocation(request).unwrap();
+        let TaskOutcome::Complete {
+            value: expected, ..
+        } = submitted.outcome
+        else {
+            panic!("lexer oracle for case {index}: {:?}", submitted.outcome);
+        };
+        let (input, construction) = source_value_literal(&input, &mut 0);
+        checks.push_str(&format!(
+            "{{ {construction}\nmica_value_root_set(&input, {input});\nrun_lexer(worker, kernel, code, symbols, &input, &output, false);\n{}\nrun_lexer(worker, kernel, code, symbols, &input, &output, true);\n{}\n}}\n",
+            source_value_check(&expected, "mica_value_root_get(&output)"),
+            source_value_check(&expected, "mica_value_root_get(&output)"),
+        ));
+    }
+    let fixture = include_str!("../../../apps/native/compiler/lexer_tests.c")
+        .replace("/* LEXER_CONFORMANCE_CASES */", &checks);
+    thread::scope(|scope| {
+        let builds = [true, false].map(|tier| {
+            scope.spawn(move || {
+                generate_native_source(tier, definition, "[[602, 8003], [603, 8004], [610, 8010]]")
+            })
+        });
+        let mut previous = None;
+        for build in builds {
+            let (generated, memory, tasks) = build.join().unwrap();
+            if let Some(previous) = &previous {
+                assert_eq!(&generated, previous);
+                continue;
+            }
+            previous = Some(generated.clone());
+            check_native_source_fixture(&format!(
+                "{generated}\n{memory}\n{tasks}\n{}\n{}\n{fixture}\n{}",
+                include_str!("../../../native/platform/allocation.c"),
+                include_str!("../../../native/platform/mutex.c"),
+                include_str!("../../../apps/native/compiler/body_tests.c"),
+            ));
         }
     });
 }

@@ -207,9 +207,17 @@ end
 // Each map has the same managed-local keys. False entries keep equality
 // independent of traversal order; joins set only references stale on a path.
 verb native/relocation_inputs(predecessors: list, invalid: map, empty: map) -> map
-  let dead: map = empty
+  if len(predecessors) == 0
+    return empty
+  end
+  // Share straight-line state; only differing join inputs require a union.
+  let dead: map = invalid[predecessors[0]]
   for previous in predecessors
-    for id, stale in invalid[previous]
+    let incoming: map = invalid[previous]
+    if incoming == dead
+      continue
+    end
+    for id, stale in incoming
       if stale && !dead[id]
         dead[id] = true
       end
@@ -251,9 +259,9 @@ verb native/check_relocation_liveness(state: map, index: map, origins: map)
     let changed: bool = true
     while changed
       changed = false
-      for block in blocks
-        let dead: map = native/relocation_inputs(predecessors[block[0]], invalid, empty)
-        for row in instructions[block[0]]
+      for id in graph[:order]
+        let dead: map = native/relocation_inputs(predecessors[id], invalid, empty)
+        for row in instructions[id]
           if native/relocates(index, row)
             dead = universe
           end
@@ -261,8 +269,8 @@ verb native/check_relocation_liveness(state: map, index: map, origins: map)
             dead[row[4]] = false
           end
         end
-        if dead != invalid[block[0]]
-          invalid[block[0]] = dead
+        if dead != invalid[id]
+          invalid[id] = dead
           changed = true
         end
       end

@@ -229,7 +229,7 @@ verb native/check_function(state, index, fn_row)
   end
   if map_contains_key(index[:foreign], fn_id)
     native/ensure(len(blocks) == 0, "foreign function has a body")
-    return {:blocks -> [], :entry -> :None, :instructions -> {}, :predecessors -> {}}
+    return {:blocks -> [], :entry -> :None, :instructions -> {}, :predecessors -> {}, :order -> []}
   end
   let entries = [row[0] for row in blocks if row[3]]
   native/ensure(len(entries) == 1, "function requires exactly one entry block")
@@ -288,17 +288,8 @@ verb native/check_function(state, index, fn_row)
     instructions[id] = ordered
   end
   // Reject dead blocks: they otherwise have no meaningful definite-assignment input.
-  let reachable = entries
-  let cursor = 0
-  while cursor < len(reachable)
-    for target in native/targets(index[:terms][reachable[cursor]])
-      if !native/contains(reachable, target)
-        reachable = [@reachable, target]
-      end
-    end
-    cursor = cursor + 1
-  end
-  native/ensure(len(reachable) == len(blocks), "unreachable block")
+  let postorder: list = native/flow_postorder(index[:terms], entries[0])
+  native/ensure(len(postorder) == len(blocks), "unreachable block")
   // Forward must-analysis. Start non-entry blocks at the universe, then
   // intersect predecessor outputs until the sets stop shrinking.
   let initial: map = {}
@@ -319,7 +310,7 @@ verb native/check_function(state, index, fn_row)
   // Visit predecessors before successors where possible. Construction order
   // can run backwards through cleanup paths and require a pass per block.
   let order: list = []
-  for id in native/flow_postorder(index[:terms], entries[0])
+  for id in postorder
     order = [id, @order]
   end
   let changed = true
@@ -365,7 +356,7 @@ verb native/check_function(state, index, fn_row)
       native/assigned(index, assigned, operand)
     end
   end
-  return {:blocks -> blocks, :entry -> entries[0], :instructions -> instructions, :predecessors -> predecessors}
+  return {:blocks -> blocks, :entry -> entries[0], :instructions -> instructions, :predecessors -> predecessors, :order -> order}
 end
 
 verb native/assigned(index, assigned, id)
