@@ -25,6 +25,35 @@ pub struct ListValue {
     contiguous: OnceLock<Box<[Value]>>,
 }
 
+/// Builds a list from elements and structurally shared list splices.
+#[derive(Default)]
+pub struct ListBuilder {
+    values: Vector<Value>,
+}
+
+impl ListBuilder {
+    pub fn push(&mut self, value: Value) {
+        self.values.push_back(value);
+    }
+
+    pub fn splice(&mut self, list: &ListValue) {
+        if self.values.is_empty() {
+            self.values = list.values.clone();
+            return;
+        }
+        // Small suffixes fit in a vector leaf; pushing avoids rebalancing a tree join.
+        if list.len() <= 64 {
+            self.values.extend(list.iter().cloned());
+            return;
+        }
+        self.values.append(list.values.clone());
+    }
+
+    pub fn finish(self) -> ListValue {
+        ListValue::from_vector(self.values)
+    }
+}
+
 impl ListValue {
     pub(crate) fn new(values: impl IntoIterator<Item = Value>) -> Self {
         Self::from_vector(values.into_iter().collect())
@@ -152,6 +181,69 @@ mod tests {
 
     fn integer(n: usize) -> Value {
         Value::int(n as i64).unwrap()
+    }
+
+    #[test]
+    fn splices_share_large_inputs_and_release_nested_values() {
+        let marker = Value::string("shared leaf");
+        {
+            let left_len = 65537;
+            let right_len = 65539;
+            let left = Value::list((0..left_len).map(|_| marker.clone()));
+            let right = Value::list((0..right_len).map(|_| marker.clone()));
+            let references = marker.heap_strong_count().unwrap();
+            let mut builder = ListBuilder::default();
+            builder.push(integer(1));
+            left.with_list(|list| builder.splice(list)).unwrap();
+            builder.push(left.clone());
+            right.with_list(|list| builder.splice(list)).unwrap();
+            left.with_list(|list| builder.splice(list)).unwrap();
+            builder.push(integer(2));
+            let joined = Value::from(builder.finish());
+
+            let joined_len = left_len * 2 + right_len + 3;
+            assert_eq!(joined.list_len(), Some(joined_len));
+            assert_eq!(joined.list_get(0), Some(integer(1)));
+            assert_eq!(joined.list_get(left_len + 1), Some(left.clone()));
+            assert_eq!(joined.list_get(joined_len - 1), Some(integer(2)));
+            // Concatenation copies boundary nodes, not every element of each splice.
+            let retained = marker.heap_strong_count().unwrap() - references;
+            assert!(
+                retained < 16384,
+                "splice retained {retained} element references"
+            );
+            for list in [&left, &right, &joined] {
+                list.with_list(|list| assert!(list.contiguous.get().is_none()));
+            }
+            let branch = joined.list_set(left_len + 2, integer(3)).unwrap();
+            assert_eq!(branch.list_get(left_len + 2), Some(integer(3)));
+            assert_eq!(joined.list_get(left_len + 2), Some(marker.clone()));
+            assert_eq!(right.list_get(0), Some(marker.clone()));
+        }
+        assert_eq!(marker.heap_strong_count(), Some(1));
+    }
+
+    #[test]
+    fn splices_match_flat_lists_across_vector_boundaries() {
+        for size in [0, 1, 3, 31, 32, 63, 64, 65, 127, 128, 129, 4096] {
+            let prefix = Value::list((0..size).map(integer));
+            let mut builder = ListBuilder::default();
+            prefix.with_list(|list| builder.splice(list)).unwrap();
+            builder.push(prefix.clone());
+            prefix.with_list(|list| builder.splice(list)).unwrap();
+            let joined = Value::from(builder.finish());
+            let expected = Value::list(
+                (0..size)
+                    .map(integer)
+                    .chain([prefix.clone()])
+                    .chain((0..size).map(integer)),
+            );
+            assert_eq!(joined, expected);
+            assert_eq!(joined.ordered_key_bytes(), expected.ordered_key_bytes());
+            let mut encoded = Vec::new();
+            encode_value(&joined, &mut encoded).unwrap();
+            assert_eq!(decode_value_exact(&encoded).unwrap(), expected);
+        }
     }
 
     #[test]

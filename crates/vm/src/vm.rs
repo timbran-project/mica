@@ -34,7 +34,7 @@ use mica_var::ValueRef;
 use mica_var::abi::{
     borrowed_value_bits, clone_value_bits, from_owned_value_bits, value_is_immediate,
 };
-use mica_var::{FunctionId, Identity, RelationValue, Symbol, Value, ValueKind};
+use mica_var::{FunctionId, Identity, ListBuilder, RelationValue, Symbol, Value, ValueKind};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, OnceLock};
@@ -2974,22 +2974,7 @@ impl RegisterVm {
 
     #[inline]
     fn build_list(&self, program: &Program, items: &[CompactListItem]) -> Result<Value, Value> {
-        if let [
-            CompactListItem::Splice(prefix),
-            CompactListItem::Value(value),
-        ] = items
-        {
-            let prefix = self.resolve_operand_ref(program, *prefix);
-            let value = self.resolve_operand_ref(program, *value);
-            return prefix.list_append(value).ok_or_else(|| {
-                Value::error(
-                    Symbol::intern("E_TYPE"),
-                    Some("list splice requires a list"),
-                    Some(prefix),
-                )
-            });
-        }
-        let mut values = Vec::new();
+        let mut values = ListBuilder::default();
         for item in items {
             match item {
                 CompactListItem::Value(operand) => {
@@ -2998,7 +2983,7 @@ impl RegisterVm {
                 CompactListItem::Splice(operand) => {
                     let splice = self.resolve_operand_ref(program, *operand);
                     let Some(()) = splice.with_list(|items| {
-                        values.extend(items.iter().cloned());
+                        values.splice(items);
                     }) else {
                         return Err(Value::error(
                             Symbol::intern("E_TYPE"),
@@ -3009,7 +2994,7 @@ impl RegisterVm {
                 }
             }
         }
-        Ok(Value::list(values))
+        Ok(Value::from(values.finish()))
     }
 
     fn resolve_list_items(

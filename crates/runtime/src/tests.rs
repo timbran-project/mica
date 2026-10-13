@@ -8434,6 +8434,65 @@ fn repeated_calls_preserve_closure_captures_and_unwind_after_suspension() {
 }
 
 #[test]
+fn list_splices_preserve_order_aliases_and_type_errors() {
+    for interpreter_only in [true, false] {
+        let mut runner = SourceRunner::new_empty().with_interpreter_only(interpreter_only);
+        let report = runner
+            .run_source(
+                r#"
+let empty = []
+let base = [1, 2]
+require [@empty] == []
+require [@base] == base
+require [@empty, 0, @base, 3, @base, 4, @empty] == [0, 1, 2, 3, 1, 2, 4]
+require [base, @base] == [[1, 2], 1, 2]
+require [@base, base] == [1, 2, [1, 2]]
+let saved = base
+base = [@base, @base, base]
+base[0] = 9
+require saved == [1, 2]
+require base == [9, 2, 1, 2, [1, 2]]
+let failures = 0
+for invalid in [1, "text", {}]
+  try
+    base = [@base, @invalid, @saved]
+  catch problem
+    require problem.code == E_TYPE
+    require problem.value == some(invalid)
+    failures = failures + 1
+  end
+end
+require base == [9, 2, 1, 2, [1, 2]]
+require failures == 3
+suspend()
+return [@saved, @base, @empty]
+"#,
+            )
+            .unwrap();
+        assert!(
+            matches!(report.outcome, TaskOutcome::Suspended { .. }),
+            "{}",
+            report.render()
+        );
+        let outcome = runner
+            .resume_task(TaskRequest {
+                input: TaskInput::Continuation {
+                    task_id: report.task_id,
+                    value: Value::unit(),
+                },
+                ..SourceRunner::root_source_request("")
+            })
+            .unwrap();
+        let int = |value| Value::int(value).unwrap();
+        assert!(matches!(outcome, TaskOutcome::Complete { value, .. }
+        if value == Value::list([
+            int(1), int(2), int(9), int(2), int(1), int(2),
+            Value::list([int(1), int(2)]),
+        ])));
+    }
+}
+
+#[test]
 fn list_append_keeps_nested_aliases_across_errors_and_suspension() {
     let mut runner = SourceRunner::new_empty();
     let report = runner

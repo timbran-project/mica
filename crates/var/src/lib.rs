@@ -40,7 +40,7 @@ pub use codec::{
     encode_value, encode_value_segments, encode_value_segments_with_options, encode_value_to_sink,
     encode_value_with_options,
 };
-pub use list::ListValue;
+pub use list::{ListBuilder, ListValue};
 pub use map::MapValue;
 pub use symbol::{Symbol, SymbolMetadata};
 pub use traits::OrderedKeySink;

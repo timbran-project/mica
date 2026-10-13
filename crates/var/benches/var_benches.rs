@@ -11,7 +11,7 @@
 // You should have received a copy of the GNU Affero General Public License along
 // with this program. If not, see <https://www.gnu.org/licenses/>.
 
-use mica_var::{Identity, Symbol, Value};
+use mica_var::{Identity, ListBuilder, Symbol, Value};
 use micromeasure::{
     BenchContext, BenchmarkMainOptions, NoContext, Throughput, benchmark_main, black_box,
 };
@@ -153,6 +153,22 @@ fn list_append<const N: usize, const NESTED: bool>(
     }
 }
 
+fn list_splice<const N: usize>(_ctx: &mut NoContext, chunk_size: usize, _chunk_num: usize) {
+    let suffix = Value::list((0..8).map(|_| Value::string("line")));
+    for _ in 0..chunk_size {
+        let mut list = Value::list([]);
+        for _ in 0..N {
+            let mut builder = ListBuilder::default();
+            list.with_list(|list| builder.splice(list)).unwrap();
+            builder.push(Value::int(0).unwrap());
+            suffix.with_list(|list| builder.splice(list)).unwrap();
+            builder.push(Value::int(1).unwrap());
+            list = Value::from(builder.finish());
+        }
+        black_box(list);
+    }
+}
+
 benchmark_main!(
     BenchmarkMainOptions {
         filter_help: Some(
@@ -209,6 +225,12 @@ benchmark_main!(
                 .bench("list_append_nested_16000", list_append::<16000, true>);
             g.throughput(Throughput::per_operation(16000, "element"))
                 .bench("list_append_scalar_16000", list_append::<16000, false>);
+            g.throughput(Throughput::per_operation(20000, "element"))
+                .bench("list_splice_2000", list_splice::<2000>);
+            g.throughput(Throughput::per_operation(40000, "element"))
+                .bench("list_splice_4000", list_splice::<4000>);
+            g.throughput(Throughput::per_operation(80000, "element"))
+                .bench("list_splice_8000", list_splice::<8000>);
         });
 
         runner.group::<NoContext>("map", |g| {

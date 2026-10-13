@@ -1057,6 +1057,12 @@ impl From<RelationValue> for Value {
     }
 }
 
+impl From<ListValue> for Value {
+    fn from(value: ListValue) -> Self {
+        Self::heap(HeapValue::List(value))
+    }
+}
+
 /// Language numeric comparison helpers.
 ///
 /// These provide the numeric comparison semantics used by VM operators and
