@@ -2286,6 +2286,7 @@ fn load_native_source_compiler(runner: &mut SourceRunner) {
         include_str!("../../../apps/native/compiler/errors.mica"),
         include_str!("../../../apps/native/compiler/operations.mica"),
         include_str!("../../../apps/native/compiler/builtins.mica"),
+        include_str!("../../../apps/native/compiler/constructors.mica"),
         include_str!("../../../apps/native/compiler/patterns.mica"),
         include_str!("../../../apps/native/compiler/queries.mica"),
         include_str!("../../../apps/native/compiler/updates.mica"),
@@ -3099,6 +3100,10 @@ fn source_value_literal(value: &Value, serial: &mut usize) -> (String, String) {
             );
         }
         ValueKind::Int => format!("mica_value_int(INT64_C({}))", value.as_int().unwrap()),
+        ValueKind::Identity => format!(
+            "mica_value_identity(UINT64_C({}))",
+            value.as_identity().unwrap().raw()
+        ),
         ValueKind::Float => format!(
             "mica_value_float_from_bits(UINT32_C({}))",
             value.as_float().unwrap().to_bits()
@@ -3297,7 +3302,7 @@ fn source_value_check(expected: &Value, actual: &str) -> String {
             }
             checks
         }).unwrap(),
-        ValueKind::Map | ValueKind::Relation | ValueKind::Bytes | ValueKind::Range | ValueKind::Symbol | ValueKind::ErrorCode | ValueKind::Error => {
+        ValueKind::Map | ValueKind::Relation | ValueKind::Bytes | ValueKind::Range | ValueKind::Identity | ValueKind::Symbol | ValueKind::ErrorCode | ValueKind::Error => {
             let (value, construction) = source_value_literal(expected, &mut 0);
             format!("{{ {construction}\n struct mica_IntResult compared = mica_value_compare({actual}, {value}); assert(compared.f_ok && compared.f_number == 0); }}")
         }
@@ -3504,6 +3509,7 @@ fn native_source_updates_preserve_atomicity_and_authority() {
     check_native_source_body(
         include_str!("../../../apps/native/compiler/updates_tests.mica"),
         include_str!("../../../apps/native/compiler/updates_tests.c"),
+        &[],
     );
 }
 
@@ -3512,6 +3518,7 @@ fn native_source_sorts_and_constructs_relations() {
     check_native_source_body(
         include_str!("../../../apps/native/compiler/ordering_tests.mica"),
         include_str!("../../../apps/native/compiler/ordering_tests.c"),
+        &[],
     );
 }
 
@@ -3547,10 +3554,25 @@ fn native_source_emissions_obey_target_authority_and_transactions() {
 }
 
 #[test]
+fn native_source_constructs_errors_and_frobs() {
+    check_native_source_body(
+        include_str!("../../../apps/native/compiler/constructors_tests.mica"),
+        include_str!("../../../apps/native/compiler/constructors_tests.c"),
+        &[
+            ("delegate", "make_identity(:native_delegate)"),
+            ("other", "make_identity(:native_other)"),
+            ("mode", "0"),
+            ("message", "none"),
+        ],
+    );
+}
+
+#[test]
 fn native_source_encodes_and_decodes_url_components() {
     check_native_source_body(
         include_str!("../../../apps/native/compiler/url_tests.mica"),
         include_str!("../../../apps/native/compiler/url_tests.c"),
+        &[],
     );
 }
 
@@ -3559,6 +3581,7 @@ fn native_source_converts_numbers_and_parses_decimal_integers() {
     check_native_source_body(
         include_str!("../../../apps/native/compiler/numeric_tests.mica"),
         include_str!("../../../apps/native/compiler/numeric_tests.c"),
+        &[],
     );
 }
 
@@ -3567,22 +3590,38 @@ fn native_source_constructs_and_slices_unicode_text() {
     check_native_source_body(
         include_str!("../../../apps/native/compiler/text_tests.mica"),
         include_str!("../../../apps/native/compiler/text_tests.c"),
+        &[],
     );
 }
 
-fn check_native_source_body(body: &str, extra_checks: &str) {
+fn check_native_source_body(body: &str, extra_checks: &str, arguments: &[(&str, &str)]) {
     let mut oracle = SourceRunner::new_empty().with_interpreter_only(true);
     oracle
         .run_filein(
             "make_functional_relation(:NativeResult, 2, [0])\nmake_relation(:NativeQuery, 3)",
         )
         .unwrap();
-    let expected = eval(&mut oracle, body);
+    let bindings = arguments
+        .iter()
+        .map(|(name, value)| format!("let {name} = {value}\n"))
+        .collect::<String>();
+    let parameters = arguments
+        .iter()
+        .map(|(name, _)| *name)
+        .collect::<Vec<_>>()
+        .join(",");
+    let evaluated = eval(
+        &mut oracle,
+        &format!("{bindings}\nlet fixture = fn()\n{body}\nend\nreturn [[{parameters}], fixture()]"),
+    );
+    let values = evaluated.list_get(0).unwrap();
+    let expected = evaluated.list_get(1).unwrap();
+    let (value, construction) = source_value_literal(&values, &mut 0);
     let checks = format!(
-        "static void check_source_value(mica_type_Value actual, struct mica_SymbolTable *symbols, struct mica_MemoryWorker *worker) {{ (void)symbols; (void)worker; {} }}",
+        "static mica_type_Value source_body_arguments(struct mica_MemoryWorker *worker, struct mica_SymbolTable *symbols) {{ (void)symbols; {construction} return {value}; }}\nstatic void check_source_value(mica_type_Value actual, struct mica_SymbolTable *symbols, struct mica_MemoryWorker *worker) {{ (void)symbols; (void)worker; {} }}",
         source_value_check(&expected, "actual")
     );
-    let source = format!("verb native_body_fixture()\n{body}\nend");
+    let source = format!("verb native_body_fixture({parameters})\n{body}\nend");
     thread::scope(|scope| {
         let builds = [true, false].map(|tier| {
             let source = &source;

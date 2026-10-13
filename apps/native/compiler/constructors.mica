@@ -1,0 +1,81 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+// Only the standard empty option omits a message. An empty relation with a
+// different heading is still a type error.
+verb native_source/optional_message(builder: map, supplied: map) -> list
+  let absent: map = native_gen/field(builder, native_gen/call(builder, "value_equal", [supplied, native_source/literal(builder, none)]), "value")
+  let [present: map, ready: map] = native_gen/bind(builder, "has_message", native_gen/negate(absent))
+  ready = native_gen/when(ready, present, fn(message) => native_builtins/kind_check(message, supplied, "string"))
+  return [present, ready]
+end
+verb native_source/construct_error(builder: map, args: list) -> list
+  let ready: map = native_builtins/kind_check(builder, args[0], "error_code")
+  let code: map = native_gen/convert(:U32, native_gen/expression(:U64, :Payload, [args[0]]))
+  let present: map = native_gen/ref(ready, "false")
+  let message: map = native_gen/zero(native_value/word())
+  let payload: map = native_gen/zero(native_value/word())
+  let has_payload: map = native_gen/ref(ready, "false")
+  if len(args) >= 2
+    let [has_message: map, checked: map] = native_source/optional_message(ready, args[1])
+    ready = checked
+    present = has_message
+    message = args[1]
+  end
+  if len(args) == 3
+    has_payload = native_gen/ref(ready, "true")
+    payload = args[2]
+  end
+  let result: list = native_source/result(ready, "value_error", [native_roots/worker(ready), code, present, message, has_payload, payload], "oom")
+  return result
+end
+verb native_source/error_items(builder: map, items: list) -> list
+  if !native_source/spliced(items)
+    if len(items) < 1 || len(items) > 3
+      let failed: map = native_gen/unless(builder, native_gen/ref(builder, "false"),
+        fn(invalid) => native_builtins/arity_failure(invalid, :error))
+      return [native_gen/zero(native_value/word()), failed]
+    end
+    let result: list = native_source/construct_error(builder, native_source/operands(builder, items))
+    return result
+  end
+  let [expanded: map, built: map] = native_source/list_items(builder, items, false)
+  let [arguments: map, rooted: map] = native_roots/retain(built, "error_arguments", expanded)
+  let count: map = native_query/width(rooted, arguments)
+  let ready: map = native_tasks/check(rooted, native_gen/less(native_gen/ref(rooted, "zero"), count), "schema")
+  ready = native_tasks/check(ready, native_gen/less(count, native_source/number(ready, 4)), "schema")
+  let [output: map, retained: map] = native_roots/retain(ready, "constructed_error", native_gen/zero(native_value/word()))
+  ready = retained
+  for arity in [1, 2, 3]
+    ready = native_gen/when(ready, native_gen/equal(count, native_source/number(ready, arity)), fn(selected)
+      let args: list = [native_query/cell(selected, arguments, native_source/number(selected, index)) for index in 0..(arity - 1)]
+      let [error: map, constructed: map] = native_source/construct_error(selected, args)
+      return native_roots/store(constructed, output, error)
+    end)
+  end
+  return [output, ready]
+end
+verb native_builtins/frob(builder: map, name: symbol, args: list) -> list
+  let value: map = args[0]
+  if name == :is_frob
+    return [native_gen/call(builder, "value_bool", [native_access/kind(builder, value, "frob")]), builder]
+  end
+  if name == :frob
+    let ready: map = native_builtins/kind_check(builder, value, "identity")
+    let result: list = native_source/result(ready, "value_frob", [native_roots/worker(ready), native_gen/expression(:U64, :Payload, [value]), args[1]], "oom")
+    return result
+  end
+  let ready: map = builder
+  if name == :frob_delegate
+    ready = native_gen/unless(ready, native_access/kind(ready, value, "frob"),
+      fn(invalid) => native_source/value_error(invalid, E_TYPE, "frob_delegate expected a frob", value))
+  else
+    ready = native_builtins/kind_check(ready, value, "frob")
+  end
+  let header: map = native_gen/expression(native_memory/record_pointer("HeapFrob"), :UnpackPointer, [value])
+  if name == :frob_value
+    return [native_kernel/load_field(ready, header, "value"), ready]
+  end
+  let result: list = native_source/result(ready, "value_identity", [native_kernel/load_field(ready, header, "delegate")], "schema")
+  return result
+end

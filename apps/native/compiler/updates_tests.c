@@ -15,7 +15,9 @@ static mica_type_Value update_row(struct mica_MemoryWorker *worker, int64_t a, i
 static bool update_present(struct mica_KernelTransaction *tx, uint64_t id, mica_type_Value row) {
     return mica_kernel_find(mica_kernel_index(mica_kernel_view(tx, id), 0), row, 0, false) != NULL;
 }
-static void source_body_checks(struct mica_MemoryWorker *worker, struct mica_Kernel *kernel) {
+static void source_body_checks(struct mica_MemoryWorker *worker, struct mica_Kernel *kernel,
+    struct mica_MemoryRoot *code, struct mica_SymbolTable *symbols) {
+    (void)code; (void)symbols;
     struct mica_KernelTransaction tx = {0}, rival = {0};
     struct mica_MemoryRoot pattern = {0};
     assert(mica_memory_root_push(worker, &pattern));

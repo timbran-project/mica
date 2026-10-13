@@ -6,7 +6,8 @@ static mica_type_Value source_integer(int64_t number) {
     assert(value.f_ok);
     return value.f_value;
 }
-static void source_body_checks(struct mica_MemoryWorker *worker, struct mica_Kernel *kernel);
+static void source_body_checks(struct mica_MemoryWorker *worker, struct mica_Kernel *kernel,
+    struct mica_MemoryRoot *code, struct mica_SymbolTable *symbols);
 int main(void) {
     struct mica_MemoryHeap heap = {0};
     struct mica_MemoryWorker worker = {0};
@@ -32,10 +33,9 @@ int main(void) {
     assert(mica_kernel_declare(&tx, 706, 706, 3, 0, 0, 0) == 0);
     assert(mica_kernel_commit(&tx) == 0);
     assert(mica_kernel_end(&tx));
-    struct mica_ValueResult empty = mica_value_list(&worker, NULL, 0);
-    assert(empty.f_ok);
+    mica_type_Value arguments = source_body_arguments(&worker, &symbols);
     image.f_pointer = (void *)mica_task_new_Image(&worker, mica_source_roundtrip_method_2_0,
-        (void *)code.f_pointer, source_integer(7), empty.f_value, 0, NULL, NULL, 0, NULL, NULL);
+        (void *)code.f_pointer, source_integer(7), arguments, 0, NULL, NULL, 0, NULL, NULL);
     assert(image.f_pointer);
     struct mica_TaskControl task = {0};
     struct mica_TaskRuntime runtime = {.f_symbols = &symbols};
@@ -50,7 +50,7 @@ int main(void) {
     assert(mica_task_release(&task, &worker));
     assert(mica_memory_safepoint(&worker, true));
     check_source_value(mica_value_root_get(&result), &symbols, &worker);
-    source_body_checks(&worker, &kernel);
+    source_body_checks(&worker, &kernel, &code, &symbols);
     assert(mica_kernel_release(&kernel, &worker));
     assert(mica_memory_root_pop(&worker, &result));
     assert(mica_memory_root_pop(&worker, &image));

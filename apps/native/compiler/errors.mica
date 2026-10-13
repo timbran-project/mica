@@ -63,12 +63,9 @@ verb native_source/normalize_error(builder: map, instruction: list) -> list
   end)
   if instruction[3] != none
     let supplied: map = native_source/operand(ready, instruction[3])
-    ready = native_gen/branch(ready, native_access/kind(ready, supplied, "relation"), fn(absent)
-      let result: map = native_tasks/check(absent, native_kernel/absent(native_access/length(absent, supplied, "relation")), "schema")
-      return result
-    end, fn(present)
-      let checked: map = native_tasks/check(present, native_access/kind(present, supplied, "string"), "schema")
-      checked = native_gen/assign(checked, has_message, native_gen/ref(checked, "true"))
+    let [present: map, validated: map] = native_source/optional_message(ready, supplied)
+    ready = native_gen/when(validated, present, fn(message_present)
+      let checked: map = native_gen/assign(message_present, has_message, native_gen/ref(message_present, "true"))
       let result: map = native_gen/assign(checked, message, supplied)
       return result
     end)

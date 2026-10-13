@@ -1,7 +1,9 @@
 // Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-static void source_body_checks(struct mica_MemoryWorker *worker, struct mica_Kernel *kernel) {
+static void source_body_checks(struct mica_MemoryWorker *worker, struct mica_Kernel *kernel,
+    struct mica_MemoryRoot *code, struct mica_SymbolTable *symbols) {
+    (void)code; (void)symbols;
     struct mica_MemoryRoot input = {0}, text = {0}, separator = {0}, output = {0};
     assert(mica_memory_root_push(worker, &input) && mica_memory_root_push(worker, &text));
     assert(mica_memory_root_push(worker, &separator) && mica_memory_root_push(worker, &output));

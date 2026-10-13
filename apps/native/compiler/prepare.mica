@@ -111,6 +111,11 @@ verb native_source/program_literals(analysis: map, initial: list) -> list
     elseif op == :BuiltinCall
       pool = native_source/pool_operands(pool, instruction[3])
       pool = native_source/pool(pool, "list splice requires a list")
+      if instruction[2] == :error
+        pool = native_source/pool(pool, none)
+      elseif instruction[2] == :frob_delegate
+        pool = native_source/pool(native_source/pool(pool, E_TYPE), "frob_delegate expected a frob")
+      end
       if instruction[2] == :index_or || instruction[2] == :map_pairs
         pool = native_source/pool(pool, E_INDEX)
         pool = native_source/pool(pool, "collection index is missing or invalid")
@@ -143,6 +148,9 @@ verb native_source/program_literals(analysis: map, initial: list) -> list
         pool = native_source/pool(pool, literal)
       end
     elseif op == :NormalizeError
+      if instruction[3] != none
+        pool = native_source/pool(pool, none)
+      end
       for operand in [instruction[2], instruction[3], instruction[4]]
         if operand != none
           pool = native_source/pool_operands(pool, [operand])

@@ -104,6 +104,10 @@ verb native_source/mailbox_builtin(builder: map, name: symbol, args: list) -> li
 end
 
 verb native_source/builtin_items(builder: map, name: symbol, items: list) -> list
+  if name == :error
+    let result: list = native_source/error_items(builder, items)
+    return result
+  end
   if name == :string_concat
     let result: list = native_text/concatenate(builder, items)
     return result

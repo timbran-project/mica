@@ -1,0 +1,44 @@
+let code = error_code(:custom_error)
+if mode == 1
+  return error(code, message)
+elseif mode == 2
+  raise error(code, "original"), message
+elseif mode == 3
+  return error(@message)
+end
+let errors = [error(code), error(code, none), error(code, ""), error(code, "message"),
+  error(code, none, none), error(code, "message", [1, {:x -> 2}])]
+for args in [[code], [code, none], [code, ""], [code, "message", [42]]]
+  errors = [@errors, error(@args)]
+end
+let caught = []
+for value in [none, "not a frob", 0, [], {}]
+  try
+    frob_delegate(value)
+  catch problem
+    caught = [@caught, [problem.code, problem.message, problem.value]]
+  end
+end
+let fields = [[value.code, value.message, value.value] for value in errors]
+let boxes = []
+for value in [0, "é", [1, 2], {:x -> 3}, none]
+  let box = frob(delegate, value)
+  let nested = frob(other, box)
+  boxes = [@boxes, [is_frob(box), frob_delegate(box), frob_value(box),
+    frob_delegate(frob_value(nested)), frob_value(frob_value(nested)), is_frob(value)]]
+end
+let raised = none
+try
+  raise error(code, "raised", [42])
+catch problem
+  raised = [problem.code, problem.message, problem.value]
+end
+let spliced = frob(@[other, "splice"])
+let preserved = none
+try
+  raise error(code, "preserved", 10), none, [20]
+catch problem
+  preserved = [problem.code, problem.message, problem.value]
+end
+return [errors, fields, boxes, caught, raised, preserved, error_code(@[:spliced]),
+  is_frob(@[spliced]), frob_delegate(@[spliced]), frob_value(@[spliced])]

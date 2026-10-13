@@ -3,7 +3,9 @@
 
 #include <stdio.h>
 
-static void source_body_checks(struct mica_MemoryWorker *worker, struct mica_Kernel *kernel) {
+static void source_body_checks(struct mica_MemoryWorker *worker, struct mica_Kernel *kernel,
+    struct mica_MemoryRoot *code, struct mica_SymbolTable *symbols) {
+    (void)code; (void)symbols;
     struct mica_MemoryRoot text = {0};
     assert(mica_memory_root_push(worker, &text));
     struct mica_KernelTransaction tx = {0};
