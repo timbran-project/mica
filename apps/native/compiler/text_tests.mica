@@ -25,6 +25,12 @@ for subject in ["", "abc", saved, slice, "ééab🦀c", "\0a\0"]
     end
   end
 end
+let searches = []
+for subject in ["", "abc", saved, slice, "aaaaaaaab", "ééab🦀c"]
+  for pattern in ["", "a", "ab", "abc", "b", "aaaaab", "é", "🦀", "é🦀", "é", "\0", "long missing pattern"]
+    searches = [@searches, [string_starts_with(subject, pattern), string_contains(subject, pattern)]]
+  end
+end
 let scan_errors = []
 try
   string_span("abc", -1, "a")
@@ -36,7 +42,8 @@ try
 catch E_INDEX as error
   scan_errors = [@scan_errors, [error.code, error.message, error.value]]
 end
-return [scans, scan_errors, string_span(@["abc", 0, "ab"]), string_find_any(@["éabc", 0, "b"]),
+return [searches, string_contains(@[saved, "é🦀"]), string_starts_with(@[slice, "é"]),
+  scans, scan_errors, string_span(@["abc", 0, "ab"]), string_find_any(@["éabc", 0, "b"]),
   saved, original, chars, rebuilt, joined, concatenated, slice, errors,
   string_concat(), string_concat(@[]), string_concat("x"), string_concat(@["x", "é"]),
   string_join([], ","), string_join([""], ","), string_join(["", "x", ""], ","),

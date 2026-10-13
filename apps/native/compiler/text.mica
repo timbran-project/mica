@@ -59,11 +59,15 @@ verb native_text/definitions(input: map) -> map
   let assembly: bool = false
   let characters: bool = false
   let scanning: bool = false
+  let searching: bool = false
+  let prefixes: bool = false
   for program in input[:source_programs]
     for instruction in program[:analysis][:description][:code]
       if instruction[0] == :BuiltinCall
         assembly = assembly || native/contains([:string_concat, :string_join, :string_from_chars], instruction[2])
         characters = characters || instruction[2] == :string_chars
+        searching = searching || instruction[2] == :string_contains
+        prefixes = prefixes || instruction[2] == :string_starts_with
         scanning = scanning || native/contains([:string_span, :string_find_any], instruction[2])
       end
     end
@@ -84,6 +88,12 @@ verb native_text/definitions(input: map) -> map
   end
   if scanning
     module = native_text/scan_definitions(module)
+  end
+  if searching
+    module = native_text/search_definition(module, "contains")
+  end
+  if prefixes
+    module = native_text/search_definition(module, "starts_with")
   end
   return module
 end

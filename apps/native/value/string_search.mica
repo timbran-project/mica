@@ -1,119 +1,98 @@
 // Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-// Search valid UTF-8 by bytes, then return a scalar position. A complete match
-// starts at a scalar boundary because a valid needle cannot start with a
-// continuation byte. Longer needles use a stack-resident Horspool skip table.
+verb native_value/string_field(builder: map, value: map, field: string) -> map
+  let header: map = native_gen/expression(native_memory/record_pointer("HeapString"), :UnpackPointer, [value])
+  let result: map = native_gen/read(native_gen/field(builder, header, field))
+  return result
+end
+verb native_value/string_byte(builder: map, value: map, position: map) -> map
+  let result: map = native_gen/load(native_gen/offset(native_value/string_field(builder, value, "data"), position))
+  return result
+end
+
+// Callers establish the extents. Read bytes after each checkpoint so rooted
+// strings can move; no borrowed data pointer survives the callback.
+verb native_value/bytes_equal(builder: map, text: map, pattern: map, offset: map, length: map, checkpoint) -> list
+  let [equal: map, ready: map] = native_gen/bind(builder, "equal", native_gen/ref(builder, "true"))
+  ready = native_gen/for_range(ready, "byte", native_gen/ref(ready, "zero"), length, fn(step, index)
+    let checked: map = checkpoint(step)
+    let left: map = native_value/string_byte(checked, text, native_gen/add(offset, index))
+    let right: map = native_value/string_byte(checked, pattern, index)
+    return native_gen/unless(checked, native_gen/equal(left, right), fn(different)
+      return native_gen/break_loop(native_gen/assign(different, equal, native_gen/ref(different, "false")))
+    end)
+  end)
+  return [equal, ready]
+end
+
+// Shared Horspool search. A valid UTF-8 needle can match only at a scalar
+// boundary. Callbacks supply execution controls and the caller's result shape.
+verb native_value/find_bytes(builder: map, text: map, pattern: map, start: map, checkpoint, found, missing) -> map
+  let [candidate: map, ready: map] = native_gen/bind(builder, "candidate", start)
+  let [length: map, with_length: map] = native_gen/bind(ready, "needle_length", native_value/string_field(ready, pattern, "length"))
+  ready = native_gen/when(with_length, native_gen/equal(length, native_gen/ref(with_length, "zero")), fn(empty) => found(empty, candidate))
+  let available: map = native_gen/subtract(native_value/string_field(ready, text, "length"), candidate)
+  ready = native_gen/when(ready, native_gen/less(available, length), missing)
+  let [limit: map, bounded: map] = native_gen/bind(ready, "limit", native_gen/subtract(native_value/string_field(ready, text, "length"), length))
+  let [last: map, with_last: map] = native_gen/bind(bounded, "last", native_gen/subtract(length, native_gen/ref(bounded, "one")))
+  let [table: map, with_table: map] = native_gen/bind(with_last, "skip", native_gen/zero([:Array, :U64, 256]))
+  let skip: map = native_gen/negate(native_gen/less(length, native_gen/ref(with_table, "utf64_4")))
+  ready = native_gen/when(with_table, skip, fn(prepare)
+    let initialized: map = native_gen/for_range(prepare, "byte", native_gen/ref(prepare, "zero"), native_gen/ref(prepare, "byte_domain"), fn(step, index)
+      return native_gen/store(step, native_gen/element(native_gen/address(table), index), length)
+    end)
+    return native_gen/for_range(initialized, "byte", native_gen/ref(initialized, "zero"), last, fn(step, index)
+      let checked: map = checkpoint(step)
+      let byte: map = native_gen/convert(:U64, native_value/string_byte(checked, pattern, index))
+      return native_gen/store(checked, native_gen/element(native_gen/address(table), byte), native_gen/subtract(last, index))
+    end)
+  end)
+  ready = native_gen/while_loop(ready, native_gen/ref(ready, "true"), fn(search)
+    let polled: map = checkpoint(search)
+    let [equal: map, compared: map] = native_value/bytes_equal(polled, text, pattern, candidate, length, checkpoint)
+    let checked: map = native_gen/when(compared, equal, fn(matched) => found(matched, candidate))
+    let [stride: map, with_stride: map] = native_gen/bind(checked, "stride", native_gen/ref(checked, "one"))
+    checked = native_gen/when(with_stride, skip, fn(skipped)
+      let byte: map = native_gen/convert(:U64, native_value/string_byte(skipped, text, native_gen/add(candidate, last)))
+      return native_gen/assign(skipped, stride, native_gen/load(native_gen/element(native_gen/address(table), byte)))
+    end)
+    checked = native_gen/when(checked, native_gen/less(native_gen/subtract(limit, candidate), stride), missing)
+    return native_gen/assign(checked, candidate, native_gen/add(candidate, stride))
+  end)
+  let result: map = missing(ready)
+  return result
+end
+
 verb native_value/string_search(input: map) -> map
   let context: map = input
-  let name: string = "value_string_find"
-  let word: list = native_value/word()
-  let header: list = [:Record, "HeapString"]
-  let result: list = [:Record, "IdResult"]
-  let table: list = [:Array, :U64, 256]
   let [constant, state] = native/add_constant(context[:state], :U64, "0000000000000100")
   context[:state] = state
   let constants: map = context[:constants]
   constants["byte_domain"] = constant
   context[:constants] = constants
-  context = native/declare_function(context, name, result, [["value", word, :Gc], ["needle", word, :Gc], ["start", :U64, :Value]],
+  context = native/declare_function(context, "value_string_find", [:Record, "IdResult"], [
+    ["value", native_value/word(), :Gc], ["needle", native_value/word(), :Gc], ["start", :U64, :Value]],
     [], [:ReadMemory, :WriteMemory], :Value, "")
-  context = native/define_function(context, name, [
-    native/let_call("offset_result", result, "value_string_byte_offset", ["value", "start"]),
-    native/let_field("condition", :Bool, "offset_result", "ok"),
-    native/let_field("candidate", :U64, "offset_result", "number"),
-    native/unless_statement("condition", [native/return_zero()]),
-    native/let_statement("search_start", :U64, "candidate"),
-    @native/try_call("checked", [:Record, "HeapStringResult"], "value_as_string", ["needle"], [native/return_zero()]),
-    native/let_field("needle_pointer", [:Pointer, header, :Const], "checked", "header"),
-    native/let_load("pattern", header, "needle_pointer"),
-    native/let_statement("hay_pointer", [:Pointer, header, :Const], native/unary_expression(:UnpackPointer, "value")),
-    native/let_load("hay", header, "hay_pointer"),
-    native/let_field("hay_data", [:Pointer, :U8, :Mutable], "hay", "data"),
-    native/let_field("hay_length", :U64, "hay", "length"),
-    native/let_field("needle_data", [:Pointer, :U8, :Mutable], "pattern", "data"),
-    native/let_field("needle_length", :U64, "pattern", "length"),
-    native/when_statement(native/binary_expression(:Equal, "needle_length", "zero"), [
-      native/let_statement("result", result, native/record_expression(["true", "start"])),
-      native/return_value("result")
-    ]),
-    native/let_statement("remaining", :U64, native/binary_expression(:Subtract, "hay_length", "candidate")),
-    native/when_statement(native/binary_expression(:Less, "remaining", "needle_length"), [native/return_zero()]),
-    native/let_statement("limit", :U64, native/binary_expression(:Subtract, "hay_length", "needle_length")),
-    native/let_statement("last", :U64, native/binary_expression(:Subtract, "needle_length", "one")),
-    native/set_statement("condition", native/binary_expression(:Less, "needle_length", "utf64_4")),
-    native/let_statement("skip", :Bool, "false"),
-    native/let_statement("table", table, native/zero_expression()),
-    native/let_statement("table_address", [:Pointer, table, :Mutable], native/unary_expression(:Address, "table")),
-    native/unless_statement("condition", [
-      native/set_statement("skip", "true"),
-      @native/for_range("index", "zero", "byte_domain", [
-        native/let_statement(
-          "table_slot",
-          [:Pointer, :U64, :Mutable],
-          native/binary_expression(:ElementPointer, "table_address", "index")
-        ),
-        native/store_statement("table_slot", "needle_length")]),
-      native/set_statement("index", "zero"),
-      native/while_statement(native/binary_expression(:Less, "index", "last"), [
-        native/let_offset("needle_slot", [:Pointer, :U8, :Mutable], "needle_data", "index"),
-        native/let_load("needle_byte", :U8, "needle_slot"),
-        native/let_statement("byte", :U64, native/unary_expression(:Convert, "needle_byte")),
-        native/set_statement("table_slot", native/binary_expression(:ElementPointer, "table_address", "byte")),
-        native/let_statement("step", :U64, native/binary_expression(:Subtract, "last", "index")),
-        native/store_statement("table_slot", "step"),
-        native/set_statement("index", native/binary_expression(:Add, "index", "one"))
-      ])
-    ]),
-    native/note_statement(:Invariant, "A valid UTF-8 needle can match only at a scalar boundary."),
-    native/while_statement("true", [
-      native/set_statement("index", "zero"),
-      native/while_statement(
-        native/binary_expression(:Less, "index", "needle_length"),
-        [
-          native/set_statement("byte", native/binary_expression(:Add, "candidate", "index")),
-          native/let_offset("hay_slot", [:Pointer, :U8, :Mutable], "hay_data", "byte"),
-          native/let_load("hay_byte", :U8, "hay_slot"),
-          native/set_statement("needle_slot", native/offset_expression("needle_data", "index")),
-          native/set_statement("needle_byte", native/load_expression("needle_slot")),
-          native/unless_statement(
-            native/binary_expression(:Equal, "hay_byte", "needle_byte"),
-            [native/break_statement()]
-          ),
-          native/set_statement("index", native/binary_expression(:Add, "index", "one"))
-        ]
-      ),
-      native/when_statement(native/binary_expression(:Equal, "index", "needle_length"), [
-        native/when_statement(native/field_expression("hay", "ascii"), [
-          native/set_statement("result", native/record_expression(["true", "candidate"])),
-          native/return_value("result")
-        ]),
-        native/note_statement(:Invariant, "Both search_start and a complete match are scalar boundaries in validated UTF-8."),
-        native/let_statement("offset", :U64, "search_start"),
-        native/let_statement("position", :U64, "start"),
-        native/while_statement(native/binary_expression(:Less, "offset", "candidate"), [
-          native/let_offset("source", [:Pointer, :U8, :Mutable], "hay_data", "offset"),
-          native/let_load("lead", :U8, "source"),
-          native/let_statement("first", :U32, native/unary_expression(:Convert, "lead")),
-          @native_value/utf8_width("first", "width"),
-          native/set_statement("offset", native/binary_expression(:Add, "offset", "width")),
-          native/set_statement("position", native/binary_expression(:Add, "position", "one"))]),
-        native/set_statement("result", native/record_expression(["true", "position"])),
-        native/return_value("result")
-      ]),
-      native/if_statement("skip", [
-        native/set_statement("byte", native/binary_expression(:Add, "candidate", "last")),
-        native/set_statement("hay_slot", native/offset_expression("hay_data", "byte")),
-        native/set_statement("hay_byte", native/load_expression("hay_slot")),
-        native/set_statement("byte", native/unary_expression(:Convert, "hay_byte")),
-        native/set_statement("table_slot", native/binary_expression(:ElementPointer, "table_address", "byte")),
-        native/set_statement("step", native/load_expression("table_slot"))
-      ], [native/set_statement("step", "one")]),
-      native/set_statement("remaining", native/binary_expression(:Subtract, "limit", "candidate")),
-      native/when_statement(native/binary_expression(:Less, "remaining", "step"), [native/return_zero()]),
-      native/set_statement("candidate", native/binary_expression(:Add, "candidate", "step"))
-    ]),
-    native/return_zero()
-  ])
-  return context
+  let builder: map = native_gen/context(context, "value_string_find")
+  let text: map = native_gen/ref(builder, "value")
+  let pattern: map = native_gen/ref(builder, "needle")
+  let start: map = native_gen/ref(builder, "start")
+  let missing = fn(failed) => native_gen/return_zero(failed)
+  let [offset: map, checked: map] = native_gen/checked_bind(builder, "offset", native_gen/call(builder, "value_string_byte_offset", [text, start]), "ok", missing)
+  let [needle: map, ready: map] = native_gen/checked_bind(checked, "needle", native_gen/call(checked, "value_as_string", [pattern]), "ok", missing)
+  let success = fn(body, position) => native_gen/return_value(body, native_gen/record(body, [:Record, "IdResult"], {
+    "ok" -> native_gen/ref(body, "true"), "number" -> position}))
+  let found = fn(body, candidate)
+    let ascii: map = native_gen/when(body, native_value/string_field(body, text, "ascii"), fn(done) => success(done, candidate))
+    let [byte: map, with_byte: map] = native_gen/bind(ascii, "byte", native_gen/field(ascii, offset, "number"))
+    let [position: map, with_position: map] = native_gen/bind(with_byte, "position", start)
+    let counted: map = native_gen/while_loop(with_position, native_gen/less(byte, candidate), fn(step)
+      return native_value/advance_utf8(step, native_value/string_field(step, text, "data"), byte, position)
+    end)
+    return success(counted, position)
+  end
+  builder = native_value/find_bytes(ready, text, pattern, native_gen/field(ready, offset, "number"), fn(step) => step, found, missing)
+  let result: map = native_gen/finish(context, builder)
+  return result
 end

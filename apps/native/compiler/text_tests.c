@@ -66,7 +66,54 @@ static void source_body_checks(struct mica_MemoryWorker *worker, struct mica_Ker
     assert(mica_source_roundtrip_text_scan(worker, &attempt, &tx, mica_value_root_get(&text), 9999,
         mica_value_root_get(&separator), false, &output) == 0);
     assert(mica_value_root_get(&output) == source_integer(1024));
+    // Long comparisons and skip-table preparation both consume budget.
+    attempt.f_remaining = 10;
+    mica_value_root_set(&output, source_integer(99));
+    assert(mica_source_roundtrip_text_contains(worker, &attempt, &tx, mica_value_root_get(&text),
+        mica_value_root_get(&text), &output) == 10);
+    assert(mica_value_root_get(&output) == source_integer(99));
+    attempt.f_remaining = 10;
+    assert(mica_source_roundtrip_text_starts_with(worker, &attempt, &tx, mica_value_root_get(&text),
+        mica_value_root_get(&text), &output) == 10);
+    assert(mica_value_root_get(&output) == source_integer(99));
+    // Request a collection at the helper's first poll and verify rooted inputs survive it.
+    uint64_t collections = worker->f_heap->f_collections;
+    worker->f_heap->f_collection_limit = 0;
+    attempt.f_remaining = 1000000;
+    assert(mica_source_roundtrip_text_contains(worker, &attempt, &tx, mica_value_root_get(&text),
+        mica_value_root_get(&text), &output) == 0);
+    assert(worker->f_heap->f_collections > collections);
+    assert(mica_value_root_get(&output) == mica_value_bool(true));
+    assert(mica_source_roundtrip_text_starts_with(worker, &attempt, &tx, mica_value_root_get(&text),
+        mica_value_root_get(&text), &output) == 0);
+    assert(mica_value_root_get(&output) == mica_value_bool(true));
+    // Repeated prefixes make comparison work large even when the skip is one byte.
+    uint8_t haystack[1024], needle[256];
+    memset(haystack, 'a', sizeof(haystack));
+    memset(needle, 'a', sizeof(needle));
+    needle[255] = 'b';
+    scalar = mica_value_string(worker, haystack, sizeof(haystack));
+    assert(scalar.f_ok);
+    mica_value_root_set(&text, scalar.f_value);
+    scalar = mica_value_string(worker, needle, sizeof(needle));
+    assert(scalar.f_ok);
+    mica_value_root_set(&separator, scalar.f_value);
+    attempt.f_remaining = 10000;
+    mica_value_root_set(&output, source_integer(99));
+    assert(mica_source_roundtrip_text_contains(worker, &attempt, &tx, mica_value_root_get(&text),
+        mica_value_root_get(&separator), &output) == 10);
+    assert(mica_value_root_get(&output) == source_integer(99));
+    attempt.f_remaining = 1000000;
+    assert(mica_source_roundtrip_text_contains(worker, &attempt, &tx, mica_value_root_get(&text),
+        mica_value_root_get(&separator), &output) == 0);
+    assert(mica_value_root_get(&output) == mica_value_bool(false));
     assert(mica_kernel_cancel(&tx));
+    mica_value_root_set(&output, source_integer(99));
+    assert(mica_source_roundtrip_text_contains(worker, &attempt, &tx, mica_value_root_get(&text),
+        mica_value_root_get(&separator), &output) == 11);
+    assert(mica_source_roundtrip_text_starts_with(worker, &attempt, &tx, mica_value_root_get(&text),
+        mica_value_root_get(&separator), &output) == 11);
+    assert(mica_value_root_get(&output) == source_integer(99));
     mica_value_root_set(&output, source_integer(99));
     assert(mica_source_roundtrip_text_scan(worker, &attempt, &tx, mica_value_root_get(&text), 0,
         mica_value_root_get(&separator), false, &output) == 11);

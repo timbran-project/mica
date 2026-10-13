@@ -2293,6 +2293,7 @@ fn load_native_source_compiler(runner: &mut SourceRunner) {
         include_str!("../../../apps/native/compiler/time.mica"),
         include_str!("../../../apps/native/compiler/text.mica"),
         include_str!("../../../apps/native/compiler/text_scan.mica"),
+        include_str!("../../../apps/native/compiler/text_search.mica"),
         include_str!("../../../apps/native/compiler/functions.mica"),
         include_str!("../../../apps/native/compiler/collections.mica"),
         include_str!("../../../apps/native/compiler/access.mica"),

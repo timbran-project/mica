@@ -1,0 +1,47 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+verb native_text/predicate_result(builder: map, found: bool) -> map
+  let name: string = "false"
+  if found
+    name = "true"
+  end
+  let value: map = native_gen/call(builder, "value_bool", [native_gen/ref(builder, name)])
+  let target: map = native_roots/root_value(builder, native_gen/ref(builder, "output"), native_value/word())
+  let stored: map = native_roots/store(builder, target, value)
+  let result: map = native_tasks/attempt_status(stored, "ok")
+  return result
+end
+verb native_text/search_body(module: map, operation: string) -> map
+  let builder: map = native_queries/budget_scope(native_gen/context(module, native_text/name(module, operation)))
+  let text: map = native_roots/ref(builder, "text")
+  let pattern: map = native_roots/ref(builder, "pattern")
+  builder = native_builtins/kind_check(builder, text, "string")
+  builder = native_builtins/kind_check(builder, pattern, "string")
+  let [ticks: map, ready: map] = native_gen/bind(builder, "visited", native_gen/ref(builder, "zero"))
+  let checkpoint = fn(step)
+    let polled: map = native_query/poll_interval(step, ticks)
+    return native_gen/assign(polled, ticks, native_gen/add(ticks, native_gen/ref(polled, "one")))
+  end
+  let missing = fn(absent) => native_text/predicate_result(absent, false)
+  if operation == "contains"
+    builder = native_value/find_bytes(ready, text, pattern, native_gen/ref(ready, "zero"), checkpoint,
+      fn(found, position) => native_text/predicate_result(found, true), missing)
+  else
+    let [length: map, sized: map] = native_gen/bind(ready, "length", native_value/string_field(ready, pattern, "length"))
+    ready = native_gen/when(sized, native_gen/less(native_value/string_field(sized, text, "length"), length), missing)
+    let [equal: map, checked: map] = native_value/bytes_equal(ready, text, pattern, native_gen/ref(ready, "zero"), length, checkpoint)
+    builder = native_gen/unless(checked, equal, missing)
+    builder = native_text/predicate_result(builder, true)
+  end
+  let result: map = native_gen/finish(module, builder)
+  return result
+end
+verb native_text/search_definition(input: map, operation: string) -> map
+  let module: map = native_memory/declare(input, native_text/name(input, operation), :U64, [
+    ["worker", native_memory/record_pointer("MemoryWorker"), :Borrow], ["attempt", native_tasks/pointer("Attempt"), :Borrow],
+    ["transaction", native_kernel/pointer("Transaction"), :Borrow], ["text", native_value/word(), :Gc],
+    ["pattern", native_value/word(), :Gc], ["output", native_memory/record_pointer("MemoryRoot"), :Borrow]], native_tasks/effects(), :Value, "")
+  let result: map = native_text/search_body(module, operation)
+  return result
+end
