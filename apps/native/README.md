@@ -134,6 +134,7 @@ The heap uses `kernel_heap_init`, which installs both kernel and value descripto
 | `kernel_begin(kernel, worker, transaction, tenant)` | Capture the snapshot and compile permissions for the authenticated tenant |
 | `kernel_set_retention_limit(kernel, worker, limit)` | Set the maximum number of transactions that retain snapshot roots |
 | `kernel_declare(transaction, id, name, arity, policy, keys, indexes)` | Stage a relation declaration with caller-assigned identity and symbol IDs |
+| `kernel_catalogue(transaction, budget)` | Read immutable relation metadata, including staged declarations, with catalogue authority |
 | `kernel_set_authority_policy(transaction, root, catalogue, grant, read, write, export)` | Stage effective-policy relation IDs; zero means no permission source |
 | `kernel_write(transaction, id, tuple, asserted)` | Stage an assertion or retraction of a list-valued tuple |
 | `kernel_scan(transaction, id, pattern, mask, after, output, capacity)` | Read a bounded batch into a caller-owned array of value words |
@@ -143,6 +144,13 @@ The heap uses `kernel_heap_init`, which installs both kernel and value descripto
 | `kernel_history_next(kernel, worker, cursor)` | Read the next retained commit, or report that the cursor requires resynchronization |
 | `kernel_end(transaction)` | Release transaction roots and discard any uncommitted changes |
 | `kernel_release(kernel, worker)` | Remove the snapshot and history roots under exclusive ownership of the kernel control |
+
+`kernel_catalogue` returns a status and a managed `RelationSchemaIndex`, ordered by relation ID.
+Each entry contains the identity, name symbol ID, arity, conflict policy, key-column mask, and schema revision.
+Root the returned index before a safepoint. The index retains metadata without retaining fact rows, and later declarations cannot change a captured index.
+Enumeration records a whole-catalogue dependency, including when the catalogue is empty.
+A concurrent declaration makes commit return a conflict; ordinary fact updates preserve the shared schema index and do not cause this conflict.
+Draft declarations disappear on rollback. Budget exhaustion, cancellation, and permission failures return distinct statuses without a partial result.
 
 The history capacity must be positive. Each changing commit retains its before/after snapshots and net stored-fact deltas.
 Preparation freezes this record outside the publication mutex. Publication updates one ring slot and the current snapshot together.

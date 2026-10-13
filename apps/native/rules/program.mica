@@ -14,7 +14,7 @@ verb native_rules/declarations(input: map) -> map
   module[:constants] = names
   let worker: list = ["worker", native_memory/record_pointer("MemoryWorker"), :Borrow]
   let work: list = ["work", native_kernel/pointer("Work"), :Gc]
-  let schemas: list = ["schemas", native_kernel/pointer("RuleSchemaIndex"), :Gc]
+  let schemas: list = ["schemas", native_kernel/pointer("RelationSchemaIndex"), :Gc]
   let draft: list = ["draft", :Bool, :Value]
   let budget: list = ["budget", native_kernel/pointer("Budget"), :Borrow]
   let plan: list = ["plan", native_kernel/pointer("RulePlan"), :Gc]
@@ -25,7 +25,7 @@ verb native_rules/declarations(input: map) -> map
   let definition: list = ["definition", native_kernel/pointer("RuleDef"), :Gc]
   let tx: list = ["transaction", native_kernel/pointer("Transaction"), :Borrow]
   for spec in [
-    ["rule_schemas", [:Record, "KernelRuleSchemasResult"], [worker, work, draft, budget], true],
+    ["schemas", [:Record, "KernelSchemasResult"], [worker, work, draft, budget], true],
     ["rule_terms_validate", :U64, [worker, ["terms", term, :Gc], ["bound", root, :Borrow], ["arity", :U64, :Value], ["collect", :Bool, :Value], ["holes", :Bool, :Value], budget], true],
     ["rule_def_validate", :U64, [worker, work, schemas, draft, definition, budget], true],
     ["rule_vertex", [:Record, "KernelRuleVertexResult"], [worker, plan, schemas, id], false],

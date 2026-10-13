@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 verb native_subscriptions/catalogue_specs() -> list
-  return [["relations", "RuleSchemaIndex"], ["rules", "RuleIndex"]]
+  return [["relations", "RelationSchemaIndex"], ["rules", "RuleIndex"]]
 end
 verb native_subscriptions/identity(builder: map, number: map) -> list
   let [identity: map, ready: map] = native_gen/checked_bind(builder, "identity", native_gen/call(builder, "value_identity", [number]), "ok",
@@ -15,11 +15,7 @@ verb native_subscriptions/catalogue_entry(builder: map, spec: list, entry: map) 
   ready = with_kind
   let fields: list = []
   if spec[0] == "relations"
-    let evaluation: map = native_kernel/load_field(ready, native_roots/ref(ready, "view"), "evaluation")
-    ready = native_rules/check(ready, native_gen/negate(native_kernel/absent(evaluation)), "schema")
-    let [rows: map, found: map] = native_gen/bind(ready, "metadata", native_rules/rows_lookup(ready, evaluation, native_kernel/load_field(ready, entry, "id")))
-    ready = native_rules/check(found, native_gen/negate(native_kernel/absent(rows)), "schema")
-    let name: map = native_kernel/load_field(ready, native_kernel/load_field(ready, rows, "relation"), "name")
+    let name: map = native_kernel/load_field(ready, entry, "name")
     ready = native_rules/check(ready, native_gen/less(name, native_gen/ref(ready, "symbol_id_limit")), "limit")
     let symbol: map = native_gen/field(ready, native_gen/call(ready, "value_symbol", [native_gen/convert(:U32, name)]), "value")
     fields = [[native_subscriptions/symbol(ready, "relation"), identity], [native_subscriptions/symbol(ready, "name"), symbol]]

@@ -5,7 +5,7 @@
 // publication candidate overlays its new declarations onto the shared index.
 // Existing schemas are immutable in the current kernel.
 verb native_rules/schemas_body(module: map) -> map
-  let builder: map = native_rules/context(module, "rule_schemas")
+  let builder: map = native_rules/context(module, "schemas")
   let work: map = native_rules/ref(builder, "work")
   let [base: map, with_base: map] = native_roots/retain(builder, "base", native_rules/read(builder, work, "checked"))
   builder = native_gen/when(with_base, native_rules/ref(with_base, "draft"), fn(draft) => native_roots/store(draft, base, native_rules/read(draft, work, "base")))
@@ -16,9 +16,10 @@ verb native_rules/schemas_body(module: map) -> map
       let [revision: map, with_revision: map] = native_gen/bind(declared, "revision", native_rules/ref(declared, "zero"))
       let ready: map = native_gen/unless(with_revision, native_rules/ref(with_revision, "draft"), fn(committing) => native_gen/assign(committing, revision,
         native_gen/add(native_rules/read(committing, base, "version"), native_rules/ref(committing, "one"))))
-      let [schema: map, allocated: map] = native_rules/allocate(ready, "RuleSchema", {
-        "id" -> native_rules/read(ready, relation, "id"), "arity" -> native_rules/read(ready, relation, "arity"), "schema_revision" -> revision})
-      let [updated: map, indexed: map] = native_rules/index_put(allocated, "rule_schema_index", index, schema)
+      let [schema: map, allocated: map] = native_rules/allocate(ready, "RelationSchema", {
+        "id" -> native_rules/read(ready, relation, "id"), "name" -> native_rules/read(ready, relation, "name"),
+        "policy" -> native_rules/read(ready, relation, "policy"), "keys" -> native_rules/read(ready, relation, "keys"), "arity" -> native_rules/read(ready, relation, "arity"), "schema_revision" -> revision})
+      let [updated: map, indexed: map] = native_rules/index_put(allocated, "schema_index", index, schema)
       return native_roots/store(indexed, index, updated)
     end)
   end)
@@ -27,7 +28,7 @@ verb native_rules/schemas_body(module: map) -> map
   return result
 end
 verb native_rules/schema_lookup(builder: map, id: map) -> map
-  let result: map = native_gen/call(builder, "kernel_rule_schema_index_lookup", [native_rules/ref(builder, "schemas"), id])
+  let result: map = native_gen/call(builder, "kernel_schema_index_lookup", [native_rules/ref(builder, "schemas"), id])
   return result
 end
 verb native_rules/validate_term(builder: map, term: map, bound: map) -> map

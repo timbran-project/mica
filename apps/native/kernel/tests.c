@@ -3802,6 +3802,97 @@ static void program_catalogue_authority(void) {
     destroy(&f);
 }
 
+static struct mica_KernelSchemasResult catalogue(struct mica_KernelTransaction *tx) {
+    struct mica_KernelBudget budget = operation_budget(tx);
+    return mica_kernel_catalogue(tx, &budget);
+}
+
+static void relation_catalogue(void) {
+    struct fixture f;
+    init(&f);
+    struct mica_KernelTransaction reader, writer;
+    begin(&f, &reader);
+    struct mica_KernelSchemasResult result = catalogue(&reader);
+    assert(result.f_status == OK && !result.f_schemas);
+    declare(&f, 1, SET);
+    // Empty enumeration observes absence, including concurrent declarations.
+    result = catalogue(&reader);
+    assert(result.f_status == OK && !result.f_schemas);
+    assert(mica_kernel_commit(&reader) == CONFLICT);
+    assert(mica_kernel_end(&reader));
+
+    begin(&f, &reader);
+    assert(mica_kernel_declare(&reader, 2, 200, 3, FUNCTIONAL, 5, 0) == OK);
+    result = catalogue(&reader);
+    assert(result.f_status == OK);
+    struct mica_MemoryRoot retained = {0};
+    assert(mica_memory_root_push(&f.worker, &retained));
+    retained.f_pointer = (uint8_t *)result.f_schemas;
+    struct mica_KernelRelationSchema *schema = mica_kernel_schema_index_lookup(result.f_schemas, 2);
+    assert(schema && schema->f_id == 2 && schema->f_name == 200 && schema->f_arity == 3);
+    assert(schema->f_policy == FUNCTIONAL && schema->f_keys == 5 && schema->f_schema_revision == 0);
+    assert(mica_kernel_schema_index_lookup(result.f_schemas, 1));
+    assert(mica_memory_safepoint(&f.worker, true));
+    result.f_schemas = (struct mica_KernelRelationSchemaIndex *)retained.f_pointer;
+    assert(mica_kernel_schema_index_lookup(result.f_schemas, 2)->f_name == 200);
+    // A later declaration cannot mutate an earlier captured catalogue.
+    assert(mica_kernel_declare(&reader, 3, 300, 0, SET, 0, 0) == OK);
+    result = catalogue(&reader);
+    assert(result.f_status == OK && mica_kernel_schema_index_lookup(result.f_schemas, 3));
+    assert(!mica_kernel_schema_index_lookup((struct mica_KernelRelationSchemaIndex *)retained.f_pointer, 3));
+    assert(mica_memory_root_pop(&f.worker, &retained));
+    assert(mica_kernel_end(&reader)); // Roll back both draft declarations.
+
+    begin(&f, &reader);
+    result = catalogue(&reader);
+    assert(result.f_status == OK && !mica_kernel_schema_index_lookup(result.f_schemas, 2));
+    begin(&f, &writer);
+    assert(write_pair(&writer, 1, 10, 20, true) == OK);
+    assert(mica_kernel_commit(&writer) == OK && mica_kernel_end(&writer));
+    assert(mica_kernel_commit(&reader) == OK); // Fact writes do not change metadata.
+    assert(mica_kernel_end(&reader));
+
+    begin(&f, &reader);
+    assert(catalogue(&reader).f_status == OK);
+    assert(mica_kernel_declare(&reader, 2, 200, 3, FUNCTIONAL, 5, 0) == OK);
+    declare(&f, 3, SET);
+    assert(mica_kernel_commit(&reader) == CONFLICT); // Also rejects a writing reader.
+    assert(mica_kernel_end(&reader));
+    begin(&f, &reader);
+    assert(mica_kernel_declare(&reader, 2, 200, 3, FUNCTIONAL, 5, 0) == OK);
+    assert(catalogue(&reader).f_status == OK);
+    assert(mica_kernel_commit(&reader) == OK && mica_kernel_end(&reader));
+    begin(&f, &reader);
+    result = catalogue(&reader);
+    schema = mica_kernel_schema_index_lookup(result.f_schemas, 2);
+    assert(result.f_status == OK && schema && schema->f_name == 200 && schema->f_schema_revision > 0);
+    assert(mica_kernel_declare(&reader, 4, 400, 2, SET, 0, 0) == OK);
+    struct mica_KernelBudget limited = operation_budget(&reader);
+    limited.f_steps = 0;
+    result = mica_kernel_catalogue(&reader, &limited);
+    assert(result.f_status == LIMIT && !result.f_schemas);
+    assert(mica_kernel_cancel(&reader));
+    result = catalogue(&reader);
+    assert(result.f_status == CANCELLED && !result.f_schemas);
+    assert(mica_kernel_end(&reader));
+    struct mica_KernelBudget budget = {0};
+    result = mica_kernel_catalogue(&reader, &budget);
+    assert(result.f_status == CLOSED && !result.f_schemas);
+    destroy(&f);
+
+    init(&f);
+    configure_policy(&f);
+    begin_tenant(&f, &reader, 8); // Catalogue grant, without global fact access.
+    result = catalogue(&reader);
+    assert(result.f_status == OK && mica_kernel_schema_index_lookup(result.f_schemas, 10));
+    assert(mica_kernel_end(&reader));
+    begin_tenant(&f, &reader, 9); // Fact grants alone do not authorize catalogue reads.
+    result = catalogue(&reader);
+    assert(result.f_status == PERMISSION && !result.f_schemas);
+    assert(mica_kernel_end(&reader));
+    destroy(&f);
+}
+
 int main(int argc, char **argv) {
     if (argc == 2 && !strcmp(argv[1], "trace")) return trace(false);
     if (argc == 3 && !strcmp(argv[1], "rule-bench")) return rule_measurements((unsigned)strtoul(argv[2], NULL, 10));
@@ -3826,6 +3917,7 @@ int main(int argc, char **argv) {
     concurrent_snapshot_admission();
     allocation_controls();
     publication_cancellation();
+    relation_catalogue();
     rule_catalogue();
     rule_definition_validation();
     rule_dependency_planning();

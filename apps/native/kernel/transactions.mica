@@ -342,6 +342,28 @@ verb native_kernel/apply_writes_body(module: map) -> map
   return completed
 end
 
+// Catalogue reads expose immutable schema metadata, without retaining fact rows.
+// A whole-catalogue dependency also observes the absence of future declarations.
+verb native_kernel/catalogue_body(module: map) -> map
+  let [work: map, opened: map] = native_kernel/rule_transaction(module, "kernel_catalogue")
+  let permitted: map = native_authority/check_permission(opened, work, "catalogue")
+  let [schemas: map, gathered: map] = native_rules/checked_call(permitted, "schemas", [
+    native_roots/worker(permitted), work, native_gen/ref(permitted, "true"), native_roots/ref(permitted, "budget")], "schemas")
+  let observed: map = native_kernel/store_field(gathered, work, "catalogue_read", native_gen/ref(gathered, "true"))
+  let result: map = native_gen/finish(module, native_rules/result(observed, native_gen/ref(observed, "kernel_ok"), {"schemas" -> schemas}))
+  return result
+end
+
+// Fact commits share their schema index. Identity changes only when declarations
+// change; the retained base and current roots remain comparable across collection.
+verb native_kernel/check_catalogue(builder: map, work: map, current: map, failed) -> map
+  let result: map = native_gen/when(builder, native_kernel/load_field(builder, work, "catalogue_read"), fn(observed)
+    let base: map = native_kernel/load_field(observed, work, "base")
+    return native_gen/unless(observed, native_gen/equal(native_kernel/load_field(observed, base, "schemas"), native_kernel/load_field(observed, current, "schemas")), failed)
+  end)
+  return result
+end
+
 verb native_kernel/transactions(input: map) -> map
   let context: map = input
   let transaction: list = native_kernel/pointer("Transaction")
@@ -359,6 +381,7 @@ verb native_kernel/transactions(input: map) -> map
     ["work", work, [tx]],
     ["change", change, [["work", work, :Gc], ["id", :U64, :Value]]],
     ["view", relation, [tx, ["id", :U64, :Value]]],
+    ["catalogue", [:Record, "KernelSchemasResult"], [tx, ["budget", native_kernel/pointer("Budget"), :Borrow]]],
     ["declare", :U64, [tx, ["id", :U64, :Value], ["name", :U64, :Value], ["arity", :U64, :Value], ["policy", :U64, :Value], ["keys", :U64, :Value], ["indexes", :U64, :Value]]],
     ["replace", :U64, [tx, ["id", :U64, :Value], ["row", word, :Gc]]],
     ["write", :U64, [tx, ["id", :U64, :Value], ["row", word, :Gc], ["asserted", :Bool, :Value]]],
@@ -366,7 +389,7 @@ verb native_kernel/transactions(input: map) -> map
     ["validate", :U64, [worker, ["work", work, :Gc], ["writes", node, :Gc], ["before", relation, :Gc], ["current", relation, :Gc], ["budget", native_kernel/pointer("Budget"), :Borrow]]],
     ["apply_writes", [:Record, "KernelRelationResult"], [worker, ["work", work, :Gc], ["writes", node, :Gc], ["before", relation, :Gc], ["current", relation, :Gc], ["asserted", :Bool, :Value], ["budget", native_kernel/pointer("Budget"), :Borrow]]],
     ["version", :U64, [tx]], ["deltas", delta, [tx]]]
-    context = native_kernel/declare(context, spec[0], spec[1], spec[2], native/contains(["scan", "validate", "apply_writes"], spec[0]))
+    context = native_kernel/declare(context, spec[0], spec[1], spec[2], native/contains(["catalogue", "scan", "validate", "apply_writes"], spec[0]))
   end
   context = native_kernel/define(context, "work", [
     native/let_statement("pointer", native_memory/pointer(:U8), native_memory/root(native_memory/pointer(:U8), native_kernel/transaction_root(), "pointer")),

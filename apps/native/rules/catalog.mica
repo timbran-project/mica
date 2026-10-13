@@ -45,7 +45,7 @@ verb native_rules/dependencies_body(module: map) -> map
       end)
       return result
     end)
-    let [relation: map, found: map] = native_gen/bind(checked, "relation", native_gen/call(checked, "kernel_rule_schema_index_lookup", [schemas, id]))
+    let [relation: map, found: map] = native_gen/bind(checked, "relation", native_gen/call(checked, "kernel_schema_index_lookup", [schemas, id]))
     let [schema: map, ready: map] = native_gen/bind(found, "schema", native_rules/ref(found, "zero"))
     ready = native_gen/unless(ready, native_kernel/absent(relation), fn(present) => native_gen/assign(present, schema, native_rules/read(present, relation, "schema_revision")))
     return native_gen/unless(ready, native_gen/equal(schema, native_rules/read(ready, dependency, "schema")), fn(conflict)
@@ -63,7 +63,7 @@ verb native_rules/depend_body(module: map) -> map
   let [work: map, opened: map] = native_kernel/rule_transaction(module, "kernel_rule_depend")
   let builder: map = opened
   let id: map = native_rules/ref(builder, "id")
-  let [relation: map, found_relation: map] = native_gen/bind(builder, "relation", native_gen/call(builder, "kernel_rule_schema_index_lookup", [native_rules/read(builder, native_rules/read(builder, work, "base"), "schemas"), id]))
+  let [relation: map, found_relation: map] = native_gen/bind(builder, "relation", native_gen/call(builder, "kernel_schema_index_lookup", [native_rules/read(builder, native_rules/read(builder, work, "base"), "schemas"), id]))
   let [schema: map, with_schema: map] = native_gen/bind(found_relation, "schema", native_rules/ref(found_relation, "zero"))
   builder = native_gen/unless(with_schema, native_kernel/absent(relation), fn(present) => native_gen/assign(present, schema, native_rules/read(present, relation, "schema_revision")))
   builder = native_rules/status_call(builder, "rule_head_observe", [native_roots/worker(builder), work, id, schema, native_rules/ref(builder, "true")])

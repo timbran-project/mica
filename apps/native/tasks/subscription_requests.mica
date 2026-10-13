@@ -42,7 +42,7 @@ verb native_subscriptions/validate_relation(builder: map, work: map) -> map
   // Observe the base schema even when the relation was declared in this draft.
   // A concurrent creation or schema change must invalidate this validation.
   let base: map = native_kernel/load_field(ready, work, "base")
-  let [original: map, captured: map] = native_gen/bind(ready, "base_relation", native_gen/call(ready, "kernel_rule_schema_index_lookup", [native_kernel/load_field(ready, base, "schemas"), id]))
+  let [original: map, captured: map] = native_gen/bind(ready, "base_relation", native_gen/call(ready, "kernel_schema_index_lookup", [native_kernel/load_field(ready, base, "schemas"), id]))
   let [revision: map, with_revision: map] = native_gen/bind(captured, "schema_revision", native_gen/ref(captured, "zero"))
   ready = native_gen/unless(with_revision, native_kernel/absent(original), fn(present)
     return native_gen/assign(present, revision, native_kernel/load_field(present, original, "schema_revision"))

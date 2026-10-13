@@ -7,7 +7,7 @@
 verb native_kernel/rule_result(builder: map, status: map, rule: map, ?extra: map = {}) -> map
   let fields: map = {"status" -> status, "rule" -> rule}
   if builder[:result] == [:Record, "KernelRuleTreeResult"]
-    fields["schemas"] = native_gen/zero(native_kernel/pointer("RuleSchemaIndex"))
+    fields["schemas"] = native_gen/zero(native_kernel/pointer("RelationSchemaIndex"))
     fields["heads"] = native_gen/zero(native_kernel/pointer("RuleGenerationIndex"))
     fields["plan"] = native_gen/zero(native_kernel/pointer("RulePlan"))
   end
@@ -175,7 +175,7 @@ verb native_kernel/rule_stage_body(module: map, operation: string) -> map
   let [candidate: map, rooted: map] = native_roots/retain(staged, "candidate", rules)
   let with_budget: map = rooted
   let budget: map = native_roots/ref(with_budget, "budget")
-  let [metadata: map, indexed: map] = native_rules/checked_call(with_budget, "rule_schemas", [worker, work, native_gen/ref(with_budget, "true"), budget], "schemas")
+  let [metadata: map, indexed: map] = native_rules/checked_call(with_budget, "schemas", [worker, work, native_gen/ref(with_budget, "true"), budget], "schemas")
   let [schemas: map, with_schemas: map] = native_roots/retain(indexed, "schemas", metadata)
   let [plan: map, planned: map] = native_rules/checked_call(with_schemas, "rules_compile", [worker, work, candidate, schemas, native_gen/ref(with_schemas, "true"), budget], "plan")
   // All allocation and validation completes before publishing the draft edit.
@@ -276,7 +276,7 @@ verb native_kernel/rules_rebase_body(module: map) -> map
   end)
   let [heads: map, with_heads: map] = native_roots/retain(builder, "heads", native_kernel/load_field(builder, current, "rule_heads"))
   let budget: map = native_rules/ref(with_heads, "budget")
-  let [metadata: map, with_metadata: map] = native_gen/bind(with_heads, "metadata", native_gen/call(with_heads, "kernel_rule_schemas", [native_roots/worker(with_heads), work, native_gen/ref(with_heads, "false"), budget]))
+  let [metadata: map, with_metadata: map] = native_gen/bind(with_heads, "metadata", native_gen/call(with_heads, "kernel_schemas", [native_roots/worker(with_heads), work, native_gen/ref(with_heads, "false"), budget]))
   let schema_status: map = native_gen/field(with_metadata, metadata, "status")
   let ready_schemas: map = native_gen/unless(with_metadata, native_kernel/absent(schema_status), fn(failed) => native_kernel/rule_result(failed, schema_status, native_gen/zero(native_kernel/pointer("RuleIndex"))))
   let [schemas: map, with_schemas: map] = native_roots/retain(ready_schemas, "schemas", native_gen/field(ready_schemas, metadata, "schemas"))

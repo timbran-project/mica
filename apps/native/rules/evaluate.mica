@@ -109,7 +109,7 @@ verb native_rules/evaluate_body(module: map) -> map
   builder = native_rules/each(ready, "captured_rows", native_rules/read(ready, evaluation, "first"), fn(step, rows)
     let id: map = native_rules/read(step, rows, "id")
     let base: map = native_rules/read(step, work, "base")
-    let [relation: map, found: map] = native_gen/bind(step, "observed_schema", native_gen/call(step, "kernel_rule_schema_index_lookup", [native_rules/read(step, base, "schemas"), id]))
+    let [relation: map, found: map] = native_gen/bind(step, "observed_schema", native_gen/call(step, "kernel_schema_index_lookup", [native_rules/read(step, base, "schemas"), id]))
     let [schema: map, checked: map] = native_gen/bind(found, "schema_revision", native_rules/ref(found, "zero"))
     checked = native_gen/unless(checked, native_kernel/absent(relation), fn(present) => native_gen/assign(present, schema, native_rules/read(present, relation, "schema_revision")))
     let result: map = native_rules/status_call(checked, "rule_head_observe", [native_roots/worker(checked), work, id, schema, native_rules/ref(checked, "true")])

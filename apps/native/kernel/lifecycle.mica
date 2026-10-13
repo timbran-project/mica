@@ -145,7 +145,9 @@ verb native_kernel/prepare_body(module: map) -> map
     return native_roots/return_value(ready, status)
   end)
   let [current: map, with_current: map] = native_roots/retain(builder, "current", native_kernel/load_field(builder, work, "checked"))
-  let [prepared: map, with_prepared: map] = native_gen/bind(with_current, "catalog_result", native_gen/call(with_current, "kernel_prepare_catalog", [worker, work, current, native_roots/ref(with_current, "budget")]))
+  let observed: map = native_kernel/check_catalogue(with_current, work, current,
+    fn(conflict) => native_kernel/prepare_failed(conflict, work, native_gen/ref(conflict, "kernel_conflict")))
+  let [prepared: map, with_prepared: map] = native_gen/bind(observed, "catalog_result", native_gen/call(observed, "kernel_prepare_catalog", [worker, work, current, native_roots/ref(observed, "budget")]))
   builder = native_gen/unless(with_prepared, native_kernel/absent(native_gen/field(with_prepared, prepared, "status")), fn(failed) => native_kernel/prepare_failed(failed, work, native_gen/field(failed, prepared, "status")))
   let [catalog: map, with_catalog: map] = native_roots/retain(builder, "catalog", native_gen/field(builder, prepared, "relation"))
   builder = with_catalog
@@ -221,6 +223,10 @@ verb native_kernel/capture_commit_snapshot(builder: map, transaction: map, worke
   let [raw: map, with_raw: map] = native_gen/bind(ready, "raw", native_gen/root_read(native_kernel/snapshot_slot(ready, kernel)))
   let [current: map, with_current: map] = native_gen/bind(with_raw, "current", native_gen/cast(native_kernel/pointer("Snapshot"), raw))
   ready = native_kernel/store_field(with_current, work, "checked", current)
+  ready = native_kernel/check_catalogue(ready, work, current, fn(conflict)
+    let failed: map = native_kernel/store_field(conflict, work, "status", native_gen/ref(conflict, "kernel_conflict"))
+    return native_kernel/status(native_kernel/unlock_kernel(failed, kernel), "kernel_conflict")
+  end)
   ready = native_gen/when(ready, native_kernel/load_field(ready, work, "policy_used"), fn(observed)
     let base: map = native_kernel/load_field(observed, work, "base")
     return native_gen/unless(observed, native_gen/equal(native_kernel/load_field(observed, base, "policy_revision"), native_kernel/load_field(observed, current, "policy_revision")), fn(conflict)

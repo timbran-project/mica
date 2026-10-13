@@ -10,7 +10,7 @@ verb native_subscriptions/tree_body(module: map) -> map
   let empty = fn(absent) => native_execution/fail(absent, native_gen/ref(absent, "kernel_ok"))
   builder = native_rules/check(builder, native_gen/negate(native_kernel/absent(request)), "schema")
   builder = native_gen/when(builder, native_kernel/absent(snapshot), empty)
-  let [schema: map, found: map] = native_gen/bind(builder, "schema", native_gen/call(builder, "kernel_rule_schema_index_lookup", [
+  let [schema: map, found: map] = native_gen/bind(builder, "schema", native_gen/call(builder, "kernel_schema_index_lookup", [
     native_kernel/load_field(builder, snapshot, "schemas"), native_kernel/load_field(builder, request, "relation")]))
   builder = native_gen/when(found, native_kernel/absent(schema), empty)
   let [pattern: map, decoded: map] = native_gen/bind(builder, "pattern", native_gen/call(builder, "value_as_list", [native_kernel/load_field(builder, request, "pattern")]))
