@@ -62,7 +62,8 @@ Generated source, binaries, and measurement output stay outside source control.
 
 Native source lowering supports `parse_int` and `parse_float` with the language's decimal syntax and error results.
 Float parsing rounds directly to binary32, with ties to even, finite overflow checks, and underflow to canonical zero.
-The Mica generator builds exact rounding-boundary tables. Parsing uses bounded stack storage and integer comparisons, without a host parser or locale dependency.
+The Mica generator builds exact rounding-boundary tables. Parsing checks a floating-point estimate with exact integer comparisons and falls back to binary search when needed.
+It uses bounded stack storage, without a host parser or locale dependency.
 Input scans and rounding searches charge task budgets and check cancellation. Rooted inputs survive collection during parsing.
 
 Run the source oracle, rounding-boundary, and resource-control checks with:
