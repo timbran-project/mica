@@ -75,12 +75,24 @@ verb native/define_function(input: map, name: string, statements: list) -> map
   let declarations: list = index_or(bodies[:functions], function, [])
   native/ensure(len(declarations) == 1, "body requires a declared function")
   native/ensure(!map_contains_key(bodies[:owners], function), "function already has a body")
-  let bindings: map = context[:constants]
-  for group in [context[:functions], context[:bindings][name]]
-    for spelling, id in group
-      native/ensure(!map_contains_key(bindings, spelling), "duplicate structured binding")
-      bindings[spelling] = id
+  // All functions share the module namespace. Persistent maps let each body
+  // add its own parameters and locals without rebuilding that namespace.
+  if !map_contains_key(bodies, :function_names) || bodies[:function_names] != context[:functions] || bodies[:constant_names] != context[:constants]
+    let globals: map = context[:constants]
+    for spelling, id in context[:functions]
+      native/ensure(!map_contains_key(globals, spelling), "duplicate structured binding")
+      globals[spelling] = id
     end
+    native/check_body_bindings(globals)
+    bodies[:globals] = globals
+    bodies[:function_names] = context[:functions]
+    bodies[:constant_names] = context[:constants]
+  end
+  let bindings: map = bodies[:globals]
+  native/check_body_bindings(context[:bindings][name])
+  for spelling, id in context[:bindings][name]
+    native/ensure(!map_contains_key(bindings, spelling), "duplicate structured binding")
+    bindings[spelling] = id
   end
   context[:state] = native/build_function_body(context[:state], function, declarations[0][2], bindings, statements)
   bodies[:owners][function] = true
@@ -459,16 +471,20 @@ verb native/function_body(state: map, fn_id: int, bindings: map, statements: lis
   let functions = native/owned(state[:functions], 0, fn_id)
   native/ensure(len(functions) == 1, "body requires a declared function")
   native/ensure(len(native/owned(state[:blocks], 1, fn_id)) == 0, "function already has a body")
+  native/check_body_bindings(bindings)
   let result: map = native/build_function_body(state, fn_id, functions[0][2], bindings, statements)
   return result
 end
 
-// Module builders supply their checked declaration and body ownership index.
-// Raw-state callers validate those preconditions through function_body.
-verb native/build_function_body(state: map, fn_id: int, result_type, bindings: map, statements: list) -> map
+verb native/check_body_bindings(bindings: map)
   for spelling, id in bindings
     native/ensure(!(string_len(spelling) >= 5 && string_slice(spelling, 0, 5) == "body_"), "body_ names are reserved by structured builders")
   end
+end
+
+// Module builders supply their checked declaration, namespace, and body index.
+// Raw-state callers validate those preconditions through function_body.
+verb native/build_function_body(state: map, fn_id: int, result_type, bindings: map, statements: list) -> map
   let context: map = {:state -> state, :function -> fn_id, :result -> result_type, :bindings -> bindings,
     :serial -> 0, :block -> :Closed, :position -> 0, :loops -> []}
   let [entry, opened] = native/body_block(context, "entry", true)

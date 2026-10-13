@@ -186,6 +186,32 @@ return len(module[:state][:functions])
 }
 
 #[test]
+fn native_module_body_bindings_scale_with_function_count() {
+    for tier in [true, false] {
+        let mut host = runner(tier).with_task_limits(TaskLimits {
+            instruction_budget: 20_000_000,
+            ..TaskLimits::default()
+        });
+        assert_eq!(
+            eval(
+                &mut host,
+                r#"
+let module = native/module_context(native/program(), {})
+for i in 0..1023
+  module = native/declare_function(module, string_concat("function_", to_literal(i)), :Void, [], [], [], :Value, "")
+end
+for i in 0..1023
+  module = native/define_function(module, string_concat("function_", to_literal(i)), [[:Return]])
+end
+return len(module[:state][:blocks])
+"#
+            ),
+            Value::int(1024).unwrap()
+        );
+    }
+}
+
+#[test]
 fn native_module_body_index_preserves_raw_state_checks() {
     for tier in [true, false] {
         let mut runner = runner(tier);
@@ -214,6 +240,31 @@ native/ensure(raw == module[:state], "module lowering differs from raw-state low
                 "module[:state][:functions] = []",
                 "second",
                 "body requires a declared function",
+            ),
+            (
+                "module[:constants] = {\"second\" -> 0}",
+                "second",
+                "duplicate structured binding",
+            ),
+            (
+                "module[:bindings][\"second\"] = {\"first\" -> 0}",
+                "second",
+                "duplicate structured binding",
+            ),
+            (
+                "module[:functions][\"extra\"] = module[:functions][\"first\"]\nmodule[:bindings][\"second\"] = {\"extra\" -> 0}",
+                "second",
+                "duplicate structured binding",
+            ),
+            (
+                "module[:constants] = {\"body_reserved\" -> 0}",
+                "second",
+                "body_ names are reserved",
+            ),
+            (
+                "module[:bindings][\"second\"] = {\"body_reserved\" -> 0}",
+                "second",
+                "body_ names are reserved",
             ),
         ] {
             let result = eval(
