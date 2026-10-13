@@ -269,6 +269,46 @@ return expected
 }
 
 #[test]
+fn effect_validation_handles_long_recursive_call_chains() {
+    let mut runner = runner(true);
+    assert_eq!(
+        eval(
+            &mut runner,
+            r#"
+let module = native/module_context(native/program(), {})
+let pointer = [:Pointer, :U64, :Const]
+for i in 0..299
+  module = native/declare_function(module, string_concat("effect_", to_literal(i)), :U64,
+    [["data", pointer, :Borrow]], [], [:ReadMemory], :Value, "")
+end
+for i in 0..299
+  let builder = native_gen/context(module, string_concat("effect_", to_literal(i)))
+  let data = native_gen/ref(builder, "data")
+  let next = string_concat("effect_", to_literal((i + 1) % 300))
+  let call = native_gen/call(builder, next, [data])
+  if i == 299
+    let [loaded, read] = native_gen/bind(builder, "read", native_gen/load(data))
+    builder = read
+  end
+  module = native_gen/finish(module, native_gen/return_value(builder, call))
+end
+let checked = native/check(module[:state])
+native/ensure(len(checked[:contracts]) == 300, "every recursive contract checked")
+let denied = module[:state]
+denied[:contracts][0][1] = []
+try
+  native/check(denied)
+catch E_INVARG as problem
+  return string_contains(native/error_message(problem), "effect :ReadMemory exceeds contract of effect_0")
+end
+return false
+"#
+        ),
+        Value::bool(true)
+    );
+}
+
+#[test]
 fn typed_callables_check_effects_types_and_borrow_regions() {
     let cases = [
         (

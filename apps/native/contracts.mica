@@ -236,20 +236,20 @@ verb native/check_contracts(state, input_index)
   index[:contracts] = contracts
   index[:parameter_modes] = modes
   index[:parameter_owners] = owners_by_id
-  let c_names = []
+  let c_names = {}
   for fn_row in state[:functions]
     let spelling = native/c_function(index, fn_row[0])
     native/ensure(!native/contains(["mica_internal_f32_bits", "mica_internal_word_payload", "mica_internal_word_tag"], spelling), "reserved C helper name")
-    native/ensure(!native/contains(c_names, spelling), "duplicate emitted function name")
-    c_names = [@c_names, spelling]
+    native/ensure(!map_contains_key(c_names, spelling), "duplicate emitted function name")
+    c_names[spelling] = true
   end
   for type_id in index[:type_order]
     if native/is_scalar(type_id) || native/is_tagged(type_id) || native/is_function_pointer(type_id)
-      native/ensure(!native/contains(c_names, native/c_type(type_id)), "function conflicts with C typedef")
+      native/ensure(!map_contains_key(c_names, native/c_type(type_id)), "function conflicts with C typedef")
     end
   end
   for row in state[:globals]
-    native/ensure(!native/contains(c_names, string_concat("mica_global_", row[1])), "global conflicts with function C name")
+    native/ensure(!map_contains_key(c_names, string_concat("mica_global_", row[1])), "global conflicts with function C name")
   end
   return index
 end
@@ -299,33 +299,66 @@ verb native/check_effects(state, index)
       summaries[fn_id] = summary
     end
   end
-  let changed = true
-  while changed
-    changed = false
-    for row in state[:instructions]
-      let fn_id = index[:blocks][row[1]][1]
-      let summary = summaries[fn_id]
-      let effects = {}
-      for effect in native/direct_effects(row[3])
-        effects[effect] = native/instruction_location(index, row)
-      end
-      if row[3] == :Call
-        for effect, path in summaries[row[5][0]]
-          effects[effect] = string_concat(native/instruction_location(index, row), " -> ", path)
+  // Visit instructions once. Only direct call edges participate in propagation;
+  // indirect calls and execution transfers use their declared signatures.
+  let callers = {}
+  for fn_row in state[:functions]
+    callers[fn_row[0]] = []
+  end
+  for row in state[:instructions]
+    let fn_id = index[:blocks][row[1]][1]
+    if row[3] == :Call
+      let callee = row[5][0]
+      callers[callee] = [@callers[callee], [fn_id, row]]
+    end
+    let effects = native/direct_effects(row[3])
+    if row[3] == :CallIndirect
+      effects = native/indirect_signature(index, fn_id, row)[2]
+    end
+    if len(effects) == 0
+      continue
+    end
+    let summary = summaries[fn_id]
+    for effect in effects
+      if !map_contains_key(summary, effect)
+        let path = native/instruction_location(index, row)
+        if row[3] == :CallIndirect
+          path = string_concat(path, " -> indirect call")
         end
+        summary[effect] = path
       end
-      if row[3] == :CallIndirect
-        for effect in native/indirect_signature(index, fn_id, row)[2]
-          effects[effect] = string_concat(native/instruction_location(index, row), " -> indirect call")
-        end
-      end
-      for effect, path in effects
+    end
+    summaries[fn_id] = summary
+  end
+  let pending = []
+  let queued = {}
+  for fn_row in state[:functions]
+    if len(summaries[fn_row[0]]) > 0
+      pending = [@pending, fn_row[0]]
+      queued[fn_row[0]] = true
+    end
+  end
+  let position = 0
+  while position < len(pending)
+    let callee = pending[position]
+    position = position + 1
+    queued[callee] = false
+    for [caller, row] in callers[callee]
+      let summary = summaries[caller]
+      let changed = false
+      for effect, path in summaries[callee]
         if !map_contains_key(summary, effect)
-          summary[effect] = path
+          summary[effect] = string_concat(native/instruction_location(index, row), " -> ", path)
           changed = true
         end
       end
-      summaries[fn_id] = summary
+      if changed
+        summaries[caller] = summary
+        if !index_or(queued, caller, false)
+          queued[caller] = true
+          pending = [@pending, caller]
+        end
+      end
     end
   end
   for fn_row in state[:functions]
