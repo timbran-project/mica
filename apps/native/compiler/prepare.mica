@@ -126,6 +126,10 @@ verb native_source/program_literals(analysis: map, initial: list) -> list
         for [code, message] in native_builtins/relation_errors()
           pool = native_source/pool(native_source/pool(pool, code), message)
         end
+      elseif instruction[2] == :is_builtin
+        for value in [E_INVARG, E_TYPE, "is_builtin expects one symbol", "is_builtin expects a symbol", @native_builtins/names()]
+          pool = native_source/pool(pool, value)
+        end
       elseif instruction[2] == :is_kind
         for value in [E_INVARG, "is_kind expects a value and kind symbol", "expected a symbol", "unknown value kind"]
           pool = native_source/pool(pool, value)

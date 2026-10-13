@@ -406,6 +406,9 @@ Catalogue fixtures replace loaded code on another worker, retain an older snapsh
 Method-call fixtures cover staged bindings, rollback, conflict retry, selector rights, normal and tail returns, cleanup, and replacement during suspension.
 Spawn fixtures cover rollback, conflict retry, delayed resolution, policy revocation, admission and reply failures, cancellation, and concurrent parent/child execution.
 
+Native `is_builtin(symbol)` reports the source backend's supported builtin inventory, including its variadic calls.
+Compiler forms and Rust-only builtins return false. Invalid arguments raise catchable `E_TYPE` or `E_INVARG` errors.
+
 The source-backend lexer check compiles the `lex` verb directly from `apps/compiler/lex.mica`.
 It compares complete tokens and diagnostics with Rust-hosted Mica and repeats each input with forced collection.
 The fixture supplies catalogue identities; it does not execute the filein identity declaration or bootstrap the parser and emitter.

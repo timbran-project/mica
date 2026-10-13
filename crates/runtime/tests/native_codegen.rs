@@ -3590,6 +3590,95 @@ fn native_source_emissions_obey_target_authority_and_transactions() {
 }
 
 #[test]
+fn native_builtin_definitions_ignore_unreachable_calls() {
+    for tier in [true, false] {
+        let mut runner = runner(tier);
+        runner
+            .run_filein(include_str!("../../../apps/native/compiler/builtins.mica"))
+            .unwrap();
+        assert_eq!(
+            eval(
+                &mut runner,
+                r#"
+let input = {:source_programs -> [{:analysis -> {
+  :description -> {:code -> [[:Return, 0], [:BuiltinCall, 0, :is_builtin, []],
+    [:BuiltinCall, 0, :to_symbol, []], [:BuiltinCall, 0, :sort, []],
+    [:BuiltinCall, 0, :relation_from_rows, []]]},
+  :reachable -> {0 -> true}}}]}
+return native_builtins/definitions(input) == input
+"#
+            ),
+            Value::bool(true)
+        );
+    }
+}
+
+#[test]
+fn native_source_reports_available_builtins() {
+    let mut inventory = runner(true);
+    inventory
+        .run_filein(include_str!("../../../apps/native/compiler/builtins.mica"))
+        .unwrap();
+    let names = eval(&mut inventory, "return native_builtins/names()");
+    let names = names
+        .with_list(|values| {
+            format!(
+                "[{}]",
+                values
+                    .iter()
+                    .map(|value| format!(":{}", value.as_symbol().unwrap().name().unwrap()))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            )
+        })
+        .unwrap();
+    check_native_source_body(
+        r#"
+let found = [[name, is_builtin(name), is_builtin(@[name])] for name in names]
+let missing = [is_builtin(:not_a_registered_builtin), is_builtin(to_symbol("commit")),
+  is_builtin(to_symbol("suspend")), is_builtin(to_symbol("IS_BUILTIN"))]
+let errors = []
+for arguments in [[], [:len, :sort], [1], ["len"], [none], [{}]]
+  try
+    is_builtin(@arguments)
+  catch problem
+    errors = [@errors, [problem.code, problem.message, problem.value]]
+  end
+end
+try
+  is_builtin()
+catch problem
+  errors = [@errors, [problem.code, problem.message, problem.value]]
+end
+try
+  is_builtin("len")
+catch problem
+  errors = [@errors, [problem.code, problem.message, problem.value]]
+end
+return [found, missing, errors]
+"#,
+        r#"
+static void source_body_checks(struct mica_MemoryWorker *worker, struct mica_Kernel *kernel,
+    struct mica_MemoryRoot *code, struct mica_SymbolTable *symbols) {
+    (void)kernel;
+    // These exist in Rust's registry but have no native source lowering.
+    const char *unavailable[] = {"assemble", "make_identity", "from_literal"};
+    for (size_t i = 0; i < sizeof(unavailable) / sizeof(unavailable[0]); ++i) {
+        struct mica_IdResult interned = mica_value_symbol_intern(symbols,
+            (const uint8_t *)unavailable[i], strlen(unavailable[i]), NULL);
+        assert(interned.f_ok);
+        struct mica_ValueResult symbol = mica_value_symbol((uint32_t)interned.f_number);
+        assert(symbol.f_ok);
+        assert(mica_memory_safepoint(worker, true));
+        assert(!mica_source_roundtrip_is_builtin((void *)code->f_pointer, symbol.f_value));
+    }
+}
+"#,
+        &[("names", &names)],
+    );
+}
+
+#[test]
 fn native_source_executes_the_compiler_lexer() {
     let source = include_str!("../../../apps/compiler/lex.mica");
     // Compile the actual verb without its filein identity declaration. The

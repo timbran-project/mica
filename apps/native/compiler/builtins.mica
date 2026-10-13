@@ -4,11 +4,42 @@
 // Fixed signatures share argument expansion; ordinary calls retain direct
 // operands rather than constructing an argument list at runtime.
 verb native_builtins/arities() -> map
-  return {:to_symbol -> 1, :error_code -> 1, :frob -> 2, :frob_delegate -> 1, :frob_value -> 1, :is_frob -> 1,
+  return {:is_builtin -> 1, :to_symbol -> 1, :error_code -> 1, :frob -> 2, :frob_delegate -> 1, :frob_value -> 1, :is_frob -> 1,
     :url_encode_component -> 1, :url_decode_component -> 1, :to_int -> 1, :to_float -> 1, :parse_int -> 1, :emit -> 2, :mailbox -> 0, :mailbox_send -> 2, :mailbox_close -> 1,
     :len -> 1, :string_len -> 1, :string_append -> 2, :string_contains -> 2, :string_starts_with -> 2,
     :string_span -> 3, :string_find_any -> 3, :string_slice -> 3, :string_chars -> 1, :string_from_chars -> 1, :string_join -> 2,
     :sort -> 1, :relation_from_rows -> 2, :map_contains_key -> 2, :map_pairs -> 1, :index_or -> 3, :is_kind -> 2}
+end
+// The generated runtime exposes these fixed-arity calls and two variadic
+// calls. Compiler forms such as commit and suspend are not registry entries.
+verb native_builtins/names() -> list
+  return sort([@[name for name, arity in native_builtins/arities()], :error, :string_concat])
+end
+verb native_builtins/lookup_name(module: map) -> string
+  return string_concat(module[:source_prefix], "_is_builtin")
+end
+verb native_builtins/lookup_definition(input: map) -> map
+  let module: map = native/declare_function(input, native_builtins/lookup_name(input), :Bool,
+    [["code", native_tasks/pointer("CodeRef"), :Gc], ["name", native_value/word(), :Gc]],
+    [], [:ReadMemory], :Value, "")
+  let builder: map = native_gen/context(module, native_builtins/lookup_name(module))
+  builder[:source_literals] = module[:source_literals]
+  builder[:source_prefix] = module[:source_prefix]
+  builder[:source_code] = native_gen/ref(builder, "code")
+  let name: map = native_gen/ref(builder, "name")
+  for registered in native_builtins/names()
+    builder = native_gen/when(builder, native_gen/equal(name, native_source/literal(builder, registered)),
+      fn(found) => native_gen/return_value(found, native_gen/ref(found, "true")))
+  end
+  let result: map = native_gen/finish(module, native_gen/return_value(builder, native_gen/ref(builder, "false")))
+  return result
+end
+verb native_builtins/lookup(builder: map, value: map) -> list
+  let ready: map = native_gen/unless(builder, native_access/kind(builder, value, "symbol"),
+    fn(invalid) => native_builtins/error(invalid, "is_builtin expects a symbol", E_TYPE))
+  let code: map = native_kernel/load_field(ready, native_handlers/current(ready), "code")
+  let found: map = native_gen/call(ready, native_builtins/lookup_name(ready), [code, value])
+  return [native_gen/call(ready, "value_bool", [found]), ready]
 end
 verb native_builtins/kind_check(builder: map, value: map, kind: string) -> map
   let result: map = native_tasks/check(builder, native_access/kind(builder, value, kind), "schema")
@@ -32,6 +63,10 @@ verb native_builtins/error(builder: map, message: string, ?error_code = E_INVARG
   return result
 end
 verb native_builtins/arity_failure(builder: map, name: symbol) -> map
+  if name == :is_builtin
+    let result: map = native_builtins/error(builder, "is_builtin expects one symbol")
+    return result
+  end
   if name == :relation_from_rows
     let result: map = native_builtins/error(builder, "relation_from_rows expects a heading and a list of rows")
     return result
@@ -127,6 +162,10 @@ verb native_builtins/is_kind(builder: map, value: map, kind: map) -> list
   return [native_gen/call(ready, "value_bool", [matched]), ready]
 end
 verb native_builtins/call(builder: map, name: symbol, args: list) -> list
+  if name == :is_builtin
+    let result: list = native_builtins/lookup(builder, args[0])
+    return result
+  end
   if name == :to_symbol
     let result: list = native_builtins/symbol(builder, args[0])
     return result
@@ -315,16 +354,23 @@ verb native_builtins/definitions(input: map) -> map
   let sorting: bool = false
   let relations: bool = false
   let symbols: bool = false
+  let lookup: bool = false
   for program in input[:source_programs]
+    let pc: int = 0
     for instruction in program[:analysis][:description][:code]
-      if instruction[0] == :BuiltinCall
+      if map_contains_key(program[:analysis][:reachable], pc) && instruction[0] == :BuiltinCall
+        lookup = lookup || instruction[2] == :is_builtin
         symbols = symbols || instruction[2] == :to_symbol
         sorting = sorting || instruction[2] == :sort
         relations = relations || instruction[2] == :relation_from_rows
       end
+      pc = pc + 1
     end
   end
   let module: map = input
+  if lookup
+    module = native_builtins/lookup_definition(module)
+  end
   if symbols
     module = native_builtins/symbol_definition(module)
   end
