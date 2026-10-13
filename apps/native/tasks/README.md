@@ -423,7 +423,11 @@ Native `from_literal(text)` uses a dedicated value reader, independent of the fu
 It reads strings, numbers, booleans, symbols, bytes, lists, maps, relations, ranges, errors, options, results, and raw identities with optional frob payloads.
 Rejected text returns `err(error(E_PARSE, "invalid literal", text))`; a non-string argument raises `E_TYPE`.
 Resource limits and cancellation remain runtime outcomes. Nested helpers share one budget, and nesting depth is bounded at 64.
-Named identity lookup and the general native `to_literal` builtin remain unfinished.
+Native `to_literal(value)` writes these value kinds using one shared output buffer across recursive calls.
+Strings and quoted symbol names follow the Unicode quoting policy above; bytes use padded URL-safe Base64.
+Capabilities, functions, and containers holding them raise `E_INVARG`.
+The writer shares the caller's budget and bounds nesting at 64. Limit and cancellation outcomes remain distinct.
+Identity literals use raw numeric IDs; named identity lookup remains unfinished.
 
 The internal numeric literal writer emits decimal integers and shortest scientific binary32 text.
 It uses six stack limbs for exact rounding intervals and shares the caller's allocation and work budgets.

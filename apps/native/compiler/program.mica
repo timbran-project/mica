@@ -38,6 +38,7 @@ verb native_source/compile(input: map, prefix: string, source: string, relations
   module = native_format/definitions(module)
   module = native_numeric/definitions(module)
   module = native_read/definitions(module)
+  module = native_write/definitions(module)
   module = native_source/declare_entries(module)
   module = native_source/constants_body(module)
   module = native_source/install_body(module, emitted[:methods])

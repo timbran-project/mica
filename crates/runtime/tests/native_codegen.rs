@@ -2448,6 +2448,7 @@ fn load_native_source_compiler(runner: &mut SourceRunner) {
         include_str!("../../../apps/native/compiler/quoting.mica"),
         include_str!("../../../apps/native/compiler/format_number.mica"),
         include_str!("../../../apps/native/compiler/literal_read.mica"),
+        include_str!("../../../apps/native/compiler/literal_write.mica"),
         include_str!("../../../apps/native/compiler/numeric.mica"),
         include_str!("../../../apps/native/compiler/decimal.mica"),
         include_str!("../../../apps/native/compiler/functions.mica"),
@@ -3804,7 +3805,7 @@ static void source_body_checks(struct mica_MemoryWorker *worker, struct mica_Ker
     struct mica_MemoryRoot *code, struct mica_SymbolTable *symbols) {
     (void)kernel;
     // These exist in Rust's registry but have no native source lowering.
-    const char *unavailable[] = {"assemble", "make_identity", "to_literal"};
+    const char *unavailable[] = {"assemble", "make_identity", "json_encode"};
     for (size_t i = 0; i < sizeof(unavailable) / sizeof(unavailable[0]); ++i) {
         struct mica_IdResult interned = mica_value_symbol_intern(symbols,
             (const uint8_t *)unavailable[i], strlen(unavailable[i]), NULL);
@@ -4063,6 +4064,47 @@ fn native_source_formats_number_literals() {
     let fixture = include_str!("../../../apps/native/compiler/format_number_tests.c")
         .replace("/* FLOAT_LITERAL_CASES */", &cases);
     check_native_source_body("return parse_float(\"1.0\")", &fixture, &[]);
+}
+
+#[test]
+fn native_source_writes_literal_values() {
+    let body = r##"
+let values = [(), [] {}, none, true, false, 0, -36028797018963968, 36028797018963967,
+  0.0, 1.0, -1.25e-3, 1e-45, 3.4028235e38, "", "café 🦊", "\0\t\n\r\"\\",
+  :name, :a/b, :"a/if", :"_", :"E_CODE", :"", :"12", :"line\nbreak", :"é",
+  E_FAIL, error_code(:"strange code"), error(E_FAIL), error(E_FAIL, "bad", [1, 2]),
+  error(E_FAIL, none, []), b"", b"AAH-_w==", [1, :two, [false]], {},
+  {:a -> 1, :b -> [2, 3]}, [:b, :a] {[2, 1], [3, 4]}, 1..3, 1.._, from_literal("#123")[0][:value], from_literal("#123<[1]>")[0][:value]]
+let texts = [to_literal(value) for value in values]
+let roundtrips = [from_literal(to_literal(value)) == ok(value) for value in values]
+let failures = []
+for candidate in [fn() => 0, [fn() => 1]]
+  try
+    to_literal(candidate)
+  catch problem
+    failures = [@failures, problem.code]
+  end
+end
+for arguments in [[], [1, 2]]
+  try
+    to_literal(@arguments)
+  catch problem
+    failures = [@failures, problem.code]
+  end
+end
+return [texts, roundtrips, to_literal(@[42]), failures]
+"##;
+    // Rust reports these builtin failures at the task boundary. Check the
+    // native catchable errors against explicit codes instead.
+    let oracle = body
+        .replace("to_literal(candidate)", "raise error(E_INVARG)")
+        .replace("to_literal(@arguments)", "raise error(E_INVARG)");
+    check_native_source_body_against(
+        body,
+        &oracle,
+        include_str!("../../../apps/native/compiler/literal_write_tests.c"),
+        &[],
+    );
 }
 
 #[test]

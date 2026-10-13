@@ -191,6 +191,7 @@ fn run() -> Result<()> {
         "compiler/quoting",
         "compiler/format_number",
         "compiler/literal_read",
+        "compiler/literal_write",
         "compiler/numeric",
         "compiler/decimal",
         "compiler/functions",

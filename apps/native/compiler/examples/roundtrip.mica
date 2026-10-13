@@ -21,7 +21,7 @@ verb native_roundtrip_receive(receivers)
   end
 end
 
-let saved = from_literal("[\"parent continuation\", 42]")[0][:value]
+let saved = from_literal(to_literal(["parent continuation", 42]))[0][:value]
 let caps = mailbox()
 let child = 0
 let messages = []

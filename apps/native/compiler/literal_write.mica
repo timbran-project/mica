@@ -1,0 +1,433 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+// Recursive writers share one rooted result and one ASCII token buffer.
+// Quoted UTF-8 fragments bypass the token buffer at complete scalar boundaries.
+verb native_write/name(module: map, operation: string) -> string
+  return string_concat(module[:source_prefix], "_literal_write_", operation)
+end
+verb native_write/number(builder: map, value: int) -> map
+  let result: map = native_gen/ref(builder, string_concat("writer_", to_literal(value)))
+  return result
+end
+verb native_write/context(module: map, operation: string) -> map
+  let result: map = native_queries/borrow_budget(native_gen/context(module, native_write/name(module, operation)))
+  return result
+end
+verb native_write/writer(builder: map) -> map
+  if map_contains_key(builder, :literal_writer)
+    let writer: map = builder[:literal_writer]
+    return writer
+  end
+  let result: map = native_gen/ref(builder, "writer")
+  return result
+end
+verb native_write/field(builder: map, name: string) -> map
+  let result: map = native_kernel/load_field(builder, native_write/writer(builder), name)
+  return result
+end
+verb native_write/output(builder: map) -> map
+  let result: map = native_roots/root_value(builder, native_write/field(builder, "output"), native_value/word())
+  return result
+end
+verb native_write/done(builder: map, ?shape: int = 0) -> map
+  let value: map = native_gen/zero(native_value/word())
+  if shape == 0
+    value = native_write/output(builder)
+  end
+  let result: map = native_quoting/result(builder, shape, native_gen/ref(builder, "zero"), value)
+  return result
+end
+verb native_write/flush(builder: map) -> map
+  let result: map = native_query/status_call(builder, native_write/name(builder[:module], "flush"), [
+    native_roots/worker(builder), native_roots/ref(builder, "transaction"), native_write/writer(builder)])
+  return result
+end
+verb native_write/put(builder: map, byte: map) -> map
+  let ready: map = native_gen/when(builder, native_gen/equal(native_write/field(builder, "used"), native_write/number(builder, 256)), fn(full) => native_write/flush(full))
+  let bytes: map = native_gen/field(ready, native_write/writer(ready), "bytes")[:pointer]
+  ready = native_gen/store(ready, native_gen/element(bytes, native_write/field(ready, "used")), native_gen/convert(:U8, byte))
+  let result: map = native_kernel/store_field(ready, native_write/writer(ready), "used", native_gen/add(native_write/field(ready, "used"), native_gen/ref(ready, "one")))
+  return result
+end
+verb native_write/text(builder: map, text: string) -> map
+  let ready: map = builder
+  for byte in native_literal/utf8(text)
+    ready = native_write/put(ready, native_write/number(ready, byte))
+  end
+  return ready
+end
+verb native_write/fragment(builder: map, text: map) -> map
+  let result: map = native_roots/temporary(builder, fn(scope)
+    let [fragment: map, retained: map] = native_roots/retain(scope, "fragment", text)
+    let ready: map = native_write/flush(retained)
+    ready = native_query/charge(ready, native_value/string_field(ready, fragment, "length"), native_gen/ref(ready, "zero"))
+    let [appended: map, copied: map] = native_query/value(ready, "value_string_concat", [native_roots/worker(ready), native_write/output(ready), fragment])
+    return native_roots/store(copied, native_write/output(copied), appended)
+  end)
+  return result
+end
+verb native_write/call(builder: map, operation: string, value: map, depth: map) -> map
+  let [result: map, called: map] = native_gen/bind(builder, "written", native_gen/call(builder, native_write/name(builder[:module], operation), [
+    native_roots/worker(builder), native_roots/ref(builder, "transaction"), native_gen/ref(builder, "symbols"), native_write/writer(builder), value, depth, native_roots/ref(builder, "budget")]))
+  let ready: map = native_gen/unless(called, native_kernel/absent(native_gen/field(called, result, "status")), fn(failed) => native_roots/return_value(failed, result))
+  ready = native_gen/unless(ready, native_kernel/absent(native_gen/field(ready, result, "shape")), fn(failed) => native_roots/return_value(failed, result))
+  return ready
+end
+verb native_write/child(builder: map, value: map) -> map
+  let result: map = native_write/call(builder, "value", value, native_gen/add(native_gen/ref(builder, "depth"), native_gen/ref(builder, "one")))
+  return result
+end
+verb native_write/quote(builder: map, text: map) -> map
+  let [result: map, called: map] = native_gen/bind(builder, "quoted", native_gen/call(builder,
+    string_concat(native_quoting/name(builder[:module], "quote"), "_value"), [native_roots/worker(builder), native_roots/ref(builder, "transaction"), text, native_roots/ref(builder, "budget")]))
+  let ready: map = native_gen/unless(called, native_kernel/absent(native_gen/field(called, result, "status")), fn(failed) => native_roots/return_value(failed, result))
+  let output: map = native_write/fragment(ready, native_gen/field(ready, result, "value"))
+  return output
+end
+verb native_write/header(builder: map, kind: string, value: map, field: string) -> map
+  let pointer: map = native_gen/expression(native_memory/record_pointer(string_concat("Heap", kind)), :UnpackPointer, [value])
+  let result: map = native_kernel/load_field(builder, pointer, field)
+  return result
+end
+verb native_write/separator(builder: map, index: map) -> map
+  let result: map = native_gen/unless(builder, native_kernel/absent(index), fn(more) => native_write/text(more, ", "))
+  return result
+end
+verb native_write/unsigned(builder: map, number: map) -> map
+  let [remaining: map, initialized: map] = native_gen/bind(builder, "remaining", number)
+  let [divisor: map, with_divisor: map] = native_gen/bind(initialized, "divisor", native_gen/ref(initialized, "one"))
+  let ready: map = native_gen/while_loop(with_divisor, native_gen/less(native_gen/ref(with_divisor, "zero"), native_gen/divide(remaining, native_gen/multiply(divisor, native_write/number(with_divisor, 10)))), fn(step)
+    return native_gen/assign(step, divisor, native_gen/multiply(divisor, native_write/number(step, 10)))
+  end)
+  ready = native_gen/while_loop(ready, native_gen/less(native_gen/ref(ready, "zero"), divisor), fn(step)
+    let written: map = native_write/put(step, native_gen/add(native_gen/divide(remaining, divisor), native_write/number(step, 48)))
+    written = native_gen/assign(written, remaining, native_gen/remainder(remaining, divisor))
+    return native_gen/assign(written, divisor, native_gen/divide(divisor, native_write/number(written, 10)))
+  end)
+  return ready
+end
+verb native_write/flush_body(module: map) -> map
+  let builder: map = native_write/context(module, "flush")
+  let length: map = native_write/field(builder, "used")
+  builder = native_gen/when(builder, native_kernel/absent(length), fn(empty) => native_roots/return_value(empty, native_gen/ref(empty, "kernel_ok")))
+  builder = native_query/charge(builder, length, native_gen/ref(builder, "zero"))
+  let bytes: map = native_gen/field(builder, native_write/writer(builder), "bytes")[:pointer]
+  let [appended: map, copied: map] = native_query/value(builder, "value_string_append", [native_roots/worker(builder), native_write/output(builder), native_gen/freeze(native_gen/element(bytes, native_gen/ref(builder, "zero"))), length])
+  builder = native_roots/store(copied, native_write/output(copied), appended)
+  builder = native_kernel/store_field(builder, native_write/writer(builder), "used", native_gen/ref(builder, "zero"))
+  let result: map = native_gen/finish(module, native_roots/return_value(builder, native_gen/ref(builder, "kernel_ok")))
+  return result
+end
+
+// A symbol table's spelling storage is immutable and nonmoving until table
+// shutdown. Release the lock before allocating its managed string copy.
+verb native_write/symbol_text(builder: map, id: map) -> list
+  let symbols: map = native_gen/ref(builder, "symbols")
+  let ready: map = native_query/check(builder, native_gen/negate(native_kernel/absent(symbols)), "closed")
+  let [mutex: map, loaded: map] = native_gen/bind(ready, "mutex", native_kernel/load_field(ready, symbols, "mutex"))
+  ready = native_query/check(loaded, native_gen/negate(native_kernel/absent(mutex)), "closed")
+  ready = native_gen/while_loop(ready, native_gen/negate(native_gen/call(ready, "mutex_try_lock", [mutex])), fn(waiting)
+    return native_roots/poll(native_query/charge(waiting, native_gen/ref(waiting, "one"), native_gen/ref(waiting, "zero")))
+  end)
+  let [spelling: map, found: map] = native_gen/bind(ready, "spelling", native_gen/call(ready, "symbol_text_locked", [symbols, id]))
+  ready = native_gen/do_call(found, "mutex_unlock", [mutex])
+  ready = native_query/check(ready, native_gen/field(ready, spelling, "ok"), "schema")
+  ready = native_query/charge(ready, native_gen/field(ready, spelling, "length"), native_gen/ref(ready, "zero"))
+  let [text: map, copied: map] = native_query/value(ready, "value_string", [native_roots/worker(ready), native_gen/field(ready, spelling, "data"), native_gen/field(ready, spelling, "length")])
+  let result: list = native_roots/retain(copied, "name", text)
+  return result
+end
+verb native_write/name_byte(builder: map, name: map, index: map) -> map
+  let result: map = native_gen/convert(:U64, native_value/string_byte(builder, name, index))
+  return result
+end
+verb native_write/name_matches(builder: map, name: map, first: map, limit: map, spelling: string) -> list
+  let bytes: list = native_literal/utf8(spelling)
+  let [matches: map, initialized: map] = native_gen/bind(builder, "matches", native_gen/equal(native_gen/subtract(limit, first), native_write/number(builder, len(bytes))))
+  let ready: map = native_gen/when(initialized, matches, fn(candidate)
+    let checked: map = candidate
+    let index: int = 0
+    for byte in bytes
+      let offset: map = native_gen/add(first, native_write/number(checked, index))
+      checked = native_gen/unless(checked, native_gen/equal(native_write/name_byte(checked, name, offset), native_write/number(checked, byte)), fn(different) => native_gen/assign(different, matches, native_gen/ref(different, "false")))
+      index = index + 1
+    end
+    return checked
+  end)
+  return [matches, ready]
+end
+verb native_write/name_component(builder: map, name: map, first: map, limit: map, plain: map) -> map
+  let ready: map = native_gen/when(builder, native_gen/equal(first, limit), fn(empty) => native_gen/assign(empty, plain, native_gen/ref(empty, "false")))
+  for keyword in native_read/keywords()
+    let [matches: map, checked: map] = native_write/name_matches(ready, name, first, limit, keyword)
+    ready = native_gen/when(checked, matches, fn(reserved) => native_gen/assign(reserved, plain, native_gen/ref(reserved, "false")))
+  end
+  ready = native_gen/when(ready, native_gen/less(native_write/number(ready, 2), native_gen/subtract(limit, first)), fn(code)
+    return native_gen/when(code, native_gen/equal(native_write/name_byte(code, name, first), native_write/number(code, 69)), fn(prefix)
+      return native_gen/when(prefix, native_gen/equal(native_write/name_byte(prefix, name, native_gen/add(first, native_gen/ref(prefix, "one"))), native_write/number(prefix, 95)),
+        fn(error) => native_gen/assign(error, plain, native_gen/ref(error, "false")))
+    end)
+  end)
+  return ready
+end
+verb native_write/name_shape(builder: map, name: map) -> list
+  let length: map = native_value/string_field(builder, name, "length")
+  let [plain: map, with_plain: map] = native_gen/bind(builder, "plain", native_gen/ref(builder, "true"))
+  let [code: map, with_code: map] = native_gen/bind(with_plain, "error_code", native_gen/ref(with_plain, "false"))
+  let ready: map = native_gen/when(with_code, native_gen/less(native_write/number(with_code, 2), length), fn(long)
+    return native_gen/when(long, native_gen/equal(native_write/name_byte(long, name, native_gen/ref(long, "zero")), native_write/number(long, 69)), fn(prefix)
+      return native_gen/assign(prefix, code, native_gen/equal(native_write/name_byte(prefix, name, native_gen/ref(prefix, "one")), native_write/number(prefix, 95)))
+    end)
+  end)
+  let [first: map, initialized: map] = native_gen/bind(ready, "component_start", native_gen/ref(ready, "zero"))
+  ready = native_gen/for_range(initialized, "name_byte", native_gen/ref(initialized, "zero"), length, fn(step, index)
+    let polled: map = native_query/poll_interval(step, index)
+    let [byte: map, loaded: map] = native_gen/bind(polled, "byte", native_write/name_byte(polled, name, index))
+    let [letter: map, checked: map] = native_gen/bind(loaded, "letter", native_gen/equal(byte, native_write/number(loaded, 95)))
+    for low in [65, 97]
+      checked = native_gen/when(checked, native_gen/less(native_gen/subtract(byte, native_write/number(checked, low)), native_write/number(checked, 26)), fn(found) => native_gen/assign(found, letter, native_gen/ref(found, "true")))
+    end
+    let digit: map = native_gen/less(native_gen/subtract(byte, native_write/number(checked, 48)), native_write/number(checked, 10))
+    checked = native_gen/unless(checked, letter, fn(nonletter)
+      let ready: map = native_gen/unless(nonletter, digit, fn(other) => native_gen/assign(other, code, native_gen/ref(other, "false")))
+      ready = native_gen/when(ready, native_gen/equal(first, index), fn(initial) => native_gen/assign(initial, plain, native_gen/ref(initial, "false")))
+      return native_gen/unless(ready, digit, fn(other)
+        return native_gen/unless(other, native_gen/equal(byte, native_write/number(other, 47)), fn(invalid) => native_gen/assign(invalid, plain, native_gen/ref(invalid, "false")))
+      end)
+    end)
+    return native_gen/when(checked, native_gen/equal(byte, native_write/number(checked, 47)), fn(separator)
+      let part: map = native_write/name_component(separator, name, first, index, plain)
+      return native_gen/assign(part, first, native_gen/add(index, native_gen/ref(part, "one")))
+    end)
+  end)
+  ready = native_write/name_component(ready, name, first, length, plain)
+  return [plain, code, ready]
+end
+verb native_write/symbol(builder: map, id: map, error: bool) -> map
+  let [name: map, loaded: map] = native_write/symbol_text(builder, id)
+  let [plain: map, code: map, ready: map] = native_write/name_shape(loaded, name)
+  if error
+    ready = native_gen/when(ready, code, fn(bare) => native_write/done(native_write/fragment(bare, name)))
+    ready = native_write/text(ready, "error_code(")
+  end
+  ready = native_write/text(ready, ":")
+  ready = native_gen/branch(ready, plain,
+    fn(identifier) => native_write/fragment(identifier, name), fn(quoted) => native_write/quote(quoted, name))
+  if error
+    ready = native_write/text(ready, ")")
+  end
+  return ready
+end
+
+verb native_write/variant(builder: map, kind: string) -> map
+  let value: map = native_roots/ref(builder, "value")
+  let ready: map = builder
+  if kind == "symbol" || kind == "error_code"
+    ready = native_write/symbol(ready, native_gen/convert(:U32, native_gen/expression(:U64, :Payload, [value])), kind == "error_code")
+  elseif kind == "list" || kind == "map"
+    let opening: string = "["
+    let closing: string = "]"
+    if kind == "map"
+      opening = "{"
+      closing = "}"
+    end
+    ready = native_write/text(ready, opening)
+    let length: map = native_access/length(ready, value, kind)
+    ready = native_gen/for_range(ready, "item", native_gen/ref(ready, "zero"), length, fn(step, index)
+      let polled: map = native_query/poll_interval(step, index)
+      polled = native_write/separator(polled, index)
+      if kind == "list"
+        return native_write/child(polled, native_query/cell(polled, value, index))
+      end
+      let entries: map = native_write/header(polled, "Map", value, "data")
+      let entry: map = native_gen/offset(entries, index)
+      let key: map = native_kernel/load_field(polled, entry, "key")
+      let written: map = native_write/child(polled, key)
+      written = native_write/text(written, " -> ")
+      let element: map = native_kernel/load_field(written, entry, "value")
+      return native_write/child(written, element)
+    end)
+    ready = native_write/text(ready, closing)
+  elseif kind == "relation"
+    let arity: map = native_algebra/arity(ready, value)
+    let length: map = native_access/length(ready, value, "relation")
+    ready = native_gen/when(ready, native_kernel/absent(arity), fn(empty_heading)
+      return native_gen/when(empty_heading, native_gen/equal(length, native_gen/ref(empty_heading, "one")), fn(unit) => native_write/done(native_write/text(unit, "()")))
+    end)
+    ready = native_write/text(ready, "[")
+    ready = native_gen/for_range(ready, "column", native_gen/ref(ready, "zero"), arity, fn(step, index)
+      let polled: map = native_write/separator(native_query/poll_interval(step, index), index)
+      let symbol: map = native_gen/field(polled, native_gen/call(polled, "value_symbol", [native_algebra/column(polled, value, index)]), "value")
+      return native_write/child(polled, symbol)
+    end)
+    ready = native_write/text(ready, "] {")
+    ready = native_gen/for_range(ready, "row", native_gen/ref(ready, "zero"), length, fn(step, row)
+      let polled: map = native_write/separator(native_query/poll_interval(step, row), row)
+      polled = native_write/text(polled, "[")
+      polled = native_gen/for_range(polled, "column", native_gen/ref(polled, "zero"), arity, fn(cell, column)
+        let separated: map = native_write/separator(native_query/poll_interval(cell, column), column)
+        let tuple: map = native_algebra/tuple(separated, value, row)
+        let element: map = native_gen/load(native_gen/offset(native_gen/field(separated, tuple, "data"), column))
+        return native_write/child(separated, element)
+      end)
+      return native_write/text(polled, "]")
+    end)
+    ready = native_write/text(ready, "}")
+  elseif kind == "range"
+    ready = native_write/child(ready, native_write/header(ready, "Range", value, "start"))
+    ready = native_write/text(ready, "..")
+    ready = native_gen/branch(ready, native_write/header(ready, "Range", value, "has_end"), fn(closed)
+      let endpoint: map = native_write/header(closed, "Range", value, "end")
+      let nested: map = native_access/kind(closed, endpoint, "range")
+      let grouped: map = native_gen/when(closed, nested, fn(group) => native_write/text(group, "("))
+      grouped = native_write/child(grouped, endpoint)
+      return native_gen/when(grouped, nested, fn(group) => native_write/text(group, ")"))
+    end, fn(open) => native_write/text(open, "_"))
+  elseif kind == "frob"
+    ready = native_write/text(ready, "#")
+    ready = native_write/unsigned(ready, native_write/header(ready, "Frob", value, "delegate"))
+    ready = native_write/text(ready, "<")
+    ready = native_write/child(ready, native_write/header(ready, "Frob", value, "value"))
+    ready = native_write/text(ready, ">")
+  elseif kind == "error"
+    ready = native_write/text(ready, "error(")
+    let code: map = native_gen/field(ready, native_gen/call(ready, "value_error_code", [native_write/header(ready, "Error", value, "code")]), "value")
+    ready = native_write/child(ready, code)
+    ready = native_gen/when(ready, native_write/header(ready, "Error", value, "has_message"), fn(message)
+      let prefix: map = native_write/text(message, ", ")
+      return native_write/quote(prefix, native_write/header(prefix, "Error", value, "message"))
+    end)
+    ready = native_gen/when(ready, native_write/header(ready, "Error", value, "has_value"), fn(payload)
+      let prefix: map = native_gen/unless(payload, native_write/header(payload, "Error", value, "has_message"), fn(absent) => native_write/text(absent, ", none"))
+      prefix = native_write/text(prefix, ", ")
+      return native_write/child(prefix, native_write/header(prefix, "Error", value, "value"))
+    end)
+    ready = native_write/text(ready, ")")
+  elseif kind == "bytes"
+    ready = native_write/text(ready, "b\"")
+    let length: map = native_write/header(ready, "Bytes", value, "length")
+    let [position: map, initialized: map] = native_gen/bind(ready, "position", native_gen/ref(ready, "zero"))
+    ready = native_gen/while_loop(initialized, native_gen/less(position, length), fn(step)
+      let polled: map = native_query/poll_interval(step, position)
+      let remaining: map = native_gen/subtract(length, position)
+      let [bits: map, with_bits: map] = native_gen/bind(polled, "bits", native_gen/ref(polled, "zero"))
+      let packed: map = native_gen/for_range(with_bits, "byte", native_gen/ref(with_bits, "zero"), native_write/number(with_bits, 3), fn(pack, index)
+        let shifted: map = native_gen/assign(pack, bits, native_gen/shift_left(bits, native_write/number(pack, 8)))
+        return native_gen/when(shifted, native_gen/less(index, remaining), fn(present)
+          let data: map = native_write/header(present, "Bytes", value, "data")
+          let byte: map = native_gen/convert(:U64, native_gen/load(native_gen/offset(data, native_gen/add(position, index))))
+          return native_gen/assign(present, bits, native_gen/bit_or(bits, byte))
+        end)
+      end)
+      let written: map = packed
+      for index in 0..3
+        written = native_gen/branch(written, native_gen/less(native_write/number(written, index), native_gen/add(remaining, native_gen/ref(written, "one"))), fn(digit)
+          let ordinal: map = native_gen/bit_and(native_gen/shift_right(bits, native_write/number(digit, 18 - index * 6)), native_write/number(digit, 63))
+          let alphabet: map = native_gen/expression([:Pointer, [:Array, :U8, 64], :Const], :GlobalAddress, [native_write/name(digit[:module], "base64")])
+          return native_write/put(digit, native_gen/load(native_gen/element(alphabet, ordinal)))
+        end, fn(padding) => native_write/text(padding, "="))
+      end
+      return native_gen/assign(written, position, native_gen/add(position, native_write/number(written, 3)))
+    end)
+    ready = native_write/text(ready, "\"")
+  end
+  let result: map = native_write/done(ready)
+  return result
+end
+verb native_write/value_body(module: map) -> map
+  let builder: map = native_write/context(module, "value")
+  builder = native_query/check(builder, native_gen/less(native_gen/ref(builder, "depth"), native_write/number(builder, 64)), "limit")
+  builder = native_roots/poll(native_query/charge(builder, native_gen/ref(builder, "one"), native_gen/ref(builder, "zero")))
+  let value: map = native_roots/ref(builder, "value")
+  let cases: list = [[native_gen/ref(builder, "zero_tag"), fn(empty) => native_write/done(native_write/text(empty, "[] {}"))]]
+  for kind in ["symbol", "error_code", "list", "map", "relation", "range", "frob", "error", "bytes"]
+    cases = [@cases, [native_gen/ref(builder, string_concat("tag_", kind)), fn(selected)
+      return native_write/done(native_write/call(selected, kind, value, native_gen/ref(selected, "depth")))
+    end]]
+  end
+  cases = [@cases, [native_gen/ref(builder, "tag_bool"), fn(boolean)
+    let bit: map = native_gen/field(boolean, native_gen/call(boolean, "value_as_bool", [value]), "value")
+    let written: map = native_gen/branch(boolean, bit, fn(yes) => native_write/text(yes, "true"), fn(no) => native_write/text(no, "false"))
+    return native_write/done(written)
+  end], [native_gen/ref(builder, "tag_identity"), fn(identity)
+    return native_write/done(native_write/unsigned(native_write/text(identity, "#"), native_gen/expression(:U64, :Payload, [value])))
+  end], [native_gen/ref(builder, "tag_string"), fn(string) => native_write/done(native_write/quote(string, value))]]
+  for kind in ["int", "float"]
+    cases = [@cases, [native_gen/ref(builder, string_concat("tag_", kind)), fn(number)
+      let [result: map, called: map] = native_gen/bind(number, "number", native_gen/call(number, string_concat(native_format/name(number[:module], "number"), "_value"), [
+        native_roots/worker(number), native_roots/ref(number, "transaction"), value, native_roots/ref(number, "budget")]))
+      let ready: map = native_gen/unless(called, native_kernel/absent(native_gen/field(called, result, "status")), fn(failed) => native_roots/return_value(failed, result))
+      return native_write/done(native_write/fragment(ready, native_gen/field(ready, result, "value")))
+    end]]
+  end
+  let selected: map = native_gen/switch(builder, native_gen/expression(:U8, :Tag, [value]), cases, fn(unsupported) => native_write/done(unsupported, 2))
+  let result: map = native_gen/finish(module, selected)
+  return result
+end
+verb native_write/entry_body(module: map) -> map
+  let builder: map = native_write/context(module, "text_value")
+  let [empty: map, allocated: map] = native_query/value(builder, "value_string", [native_roots/worker(builder), native_gen/zero([:Pointer, :U8, :Const]), native_gen/ref(builder, "zero")])
+  let [output: map, retained: map] = native_roots/retain(allocated, "output", empty)
+  let type_id: list = [:Record, string_concat(module[:source_prefix], "_LiteralWriter")]
+  let [storage: map, initialized: map] = native_gen/bind(retained, "storage", native_gen/record(retained, type_id, {
+    "bytes" -> native_gen/zero([:Array, :U8, 256]), "used" -> native_gen/ref(retained, "zero"), "output" -> output[:scope_root]}))
+  let [writer: map, with_writer: map] = native_gen/bind(initialized, "writer", native_gen/address(storage))
+  with_writer[:literal_writer] = writer
+  let [written: map, called: map] = native_gen/bind(with_writer, "written", native_gen/call(with_writer, native_write/name(module, "value"), [
+    native_roots/worker(with_writer), native_roots/ref(with_writer, "transaction"), native_gen/ref(with_writer, "symbols"), writer, native_roots/ref(with_writer, "value"), native_gen/ref(with_writer, "zero"), native_roots/ref(with_writer, "budget")]))
+  builder = native_gen/unless(called, native_kernel/absent(native_gen/field(called, written, "status")), fn(failed) => native_roots/return_value(failed, written))
+  builder = native_gen/unless(builder, native_kernel/absent(native_gen/field(builder, written, "shape")), fn(failed) => native_roots/return_value(failed, written))
+  builder = native_write/flush(builder)
+  let result: map = native_gen/finish(module, native_write/done(builder))
+  return result
+end
+verb native_write/definitions(input: map) -> map
+  let required: bool = false
+  for program in input[:source_programs]
+    let pc: int = 0
+    for instruction in program[:analysis][:description][:code]
+      required = required || (map_contains_key(program[:analysis][:reachable], pc) && instruction[0] == :BuiltinCall && instruction[2] == :to_literal)
+      pc = pc + 1
+    end
+  end
+  if !required
+    return input
+  end
+  let module: map = input
+  for number in 0..256
+    module = native_literal/constant(module, string_concat("writer_", to_literal(number)), :U64, native_value/hex(number))
+  end
+  let [global: int, state: map] = native/add_global(module[:state], native_write/name(module, "base64"), [:Array, :U8, 64], :Constant,
+    native_literal/utf8("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"))
+  module[:state] = state
+  module[:constants][native_write/name(module, "base64")] = global
+  let writer: list = [:Record, string_concat(module[:source_prefix], "_LiteralWriter")]
+  module[:state] = native/record_type(module[:state], writer[1], [["bytes", [:Array, :U8, 256]], ["used", :U64], ["output", native_memory/record_pointer("MemoryRoot")]])[1]
+  let common: list = [["worker", native_memory/record_pointer("MemoryWorker"), :Borrow], ["transaction", native_kernel/pointer("Transaction"), :Borrow]]
+  let parameters: list = [["symbols", native_memory/record_pointer("SymbolTable"), :Borrow], ["writer", [:Pointer, writer, :Mutable], :Borrow], ["value", native_value/word(), :Gc], ["depth", :U64, :Value], ["budget", native_kernel/pointer("Budget"), :Borrow]]
+  let result_type: list = [:Record, string_concat(module[:source_prefix], "_LiteralTextResult")]
+  let variants: list = ["symbol", "error_code", "list", "map", "relation", "range", "frob", "error", "bytes"]
+  for operation in ["value", @variants]
+    module = native_memory/declare(module, native_write/name(module, operation), result_type, [@common, @parameters], native_tasks/effects(), :Gc, "")
+  end
+  module = native_memory/declare(module, native_write/name(module, "flush"), :U64, [@common, ["writer", [:Pointer, writer, :Mutable], :Borrow], ["budget", native_kernel/pointer("Budget"), :Borrow]], native_tasks/effects(), :Value, "")
+  module = native_queries/operation(module, native_write/name(module, "text"), result_type, [["symbols", native_memory/record_pointer("SymbolTable"), :Borrow], ["value", native_value/word(), :Gc]])
+  module = native_write/flush_body(module)
+  for kind in variants
+    let builder: map = native_write/context(module, kind)
+    module = native_gen/finish(module, native_write/variant(builder, kind))
+  end
+  module = native_write/value_body(module)
+  let result: map = native_write/entry_body(module)
+  return result
+end
+verb native_write/builtin(builder: map, value: map) -> list
+  let [symbols: map, initialized: map] = native_gen/bind(builder, "symbols", native_gen/zero(native_memory/record_pointer("SymbolTable")))
+  let ready: map = native_gen/when(initialized, native_gen/negate(native_kernel/absent(native_tasks/attempt_field(initialized, "runtime"))), fn(attached) => native_gen/assign(attached, symbols, native_source/service(attached, "symbols")))
+  let [written: map, called: map] = native_gen/bind(ready, "literal", native_gen/call(ready, native_write/name(ready[:module], "text"), [
+    native_roots/worker(ready), native_tasks/attempt(ready), native_tasks/slot(ready, "transaction"), symbols, value]))
+  ready = native_gen/unless(called, native_kernel/absent(native_gen/field(called, written, "status")), fn(failed) => native_roots/return_value(failed, native_gen/field(failed, written, "status")))
+  ready = native_gen/unless(ready, native_kernel/absent(native_gen/field(ready, written, "shape")), fn(unsupported) => native_builtins/error(unsupported, "this value does not have a source literal", E_INVARG))
+  return [native_gen/field(ready, written, "value"), ready]
+end
