@@ -425,6 +425,9 @@ Rejected text returns `err(error(E_PARSE, "invalid literal", text))`; a non-stri
 Resource limits and cancellation remain runtime outcomes. Nested helpers share one budget, and nesting depth is bounded at 64.
 Named identity lookup and the general native `to_literal` builtin remain unfinished.
 
+The internal numeric literal writer emits decimal integers and shortest scientific binary32 text.
+It uses six stack limbs for exact rounding intervals and shares the caller's allocation and work budgets.
+
 Native `is_builtin(symbol)` reports the source backend's supported builtin inventory, including its variadic calls.
 Compiler forms and Rust-only builtins return false. Invalid arguments raise catchable `E_TYPE` or `E_INVARG` errors.
 

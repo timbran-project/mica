@@ -1,0 +1,301 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+// Exact binary32 rounding intervals fit in six stack limbs. Arithmetic here
+// has fixed storage and bounded work; it needs neither a heap bigint nor libc
+// formatting. The decimal point is the scientific exponent biased by 64.
+verb native_format/name(module: map, operation: string) -> string
+  return string_concat(module[:source_prefix], "_format_", operation)
+end
+verb native_format/number(builder: map, value: int) -> map
+  let result: map = native_gen/ref(builder, string_concat("format_", to_literal(value)))
+  return result
+end
+verb native_format/big() -> list
+  return [:Array, :U32, 6]
+end
+verb native_format/call(builder: map, operation: string, arguments: list) -> map
+  let result: map = native_gen/call(builder, native_format/name(builder[:module], operation), arguments)
+  return result
+end
+verb native_format/limb(array: map, index: map) -> map
+  let result: map = native_gen/convert(:U64, native_gen/load(native_gen/element(native_gen/address(array), index)))
+  return result
+end
+verb native_format/set_limb(builder: map, array: map, index: map, value: map) -> map
+  let result: map = native_gen/store(builder, native_gen/element(native_gen/address(array), index), native_gen/convert(:U32, value))
+  return result
+end
+verb native_format/arithmetic_body(module: map, operation: string) -> map
+  let builder: map = native_gen/context(module, native_format/name(module, operation))
+  let [output: map, ready: map] = native_gen/bind(builder, "limbs", native_gen/zero(native_format/big()))
+  if operation == "integer"
+    let number: map = native_gen/ref(ready, "number")
+    ready = native_format/set_limb(ready, output, native_gen/ref(ready, "zero"), number)
+    ready = native_format/set_limb(ready, output, native_gen/ref(ready, "one"), native_gen/shift_right(number, native_format/number(ready, 32)))
+    let result: map = native_gen/finish(module, native_gen/return_value(ready, output))
+    return result
+  end
+  let [carry: map, with_carry: map] = native_gen/bind(ready, "carry", native_gen/ref(ready, "zero"))
+  ready = native_gen/for_range(with_carry, "limb", native_gen/ref(with_carry, "zero"), native_format/number(with_carry, 6), fn(step, index)
+    let left: map = native_format/limb(native_gen/ref(step, "left"), index)
+    let number: map = {}
+    let computed: map = step
+    if operation == "multiply"
+      let [product: map, multiplied: map] = native_gen/bind(step, "product", native_gen/add(native_gen/multiply(left, native_gen/ref(step, "factor")), carry))
+      number = product
+      computed = native_gen/assign(multiplied, carry, native_gen/shift_right(product, native_format/number(multiplied, 32)))
+    else
+      let right: map = native_format/limb(native_gen/ref(step, "right"), index)
+      let [sum: map, added: map] = native_gen/bind(step, "right_with_carry", native_gen/add(right, carry))
+      if operation == "add"
+        let [total: map, counted: map] = native_gen/bind(added, "sum", native_gen/add(left, sum))
+        number = total
+        computed = native_gen/assign(counted, carry, native_gen/shift_right(total, native_format/number(counted, 32)))
+      else
+        number = native_gen/subtract(left, sum)
+        // Store the difference before updating carry: sum borrows its old value.
+        let [difference: map, subtracted: map] = native_gen/bind(added, "difference", number)
+        number = difference
+        computed = native_gen/branch(subtracted, native_gen/less(left, sum),
+          fn(borrow) => native_gen/assign(borrow, carry, native_gen/ref(borrow, "one")),
+          fn(exact) => native_gen/assign(exact, carry, native_gen/ref(exact, "zero")))
+      end
+    end
+    return native_format/set_limb(computed, output, index, number)
+  end)
+  let result: map = native_gen/finish(module, native_gen/return_value(ready, output))
+  return result
+end
+verb native_format/compare_body(module: map) -> map
+  let builder: map = native_gen/context(module, native_format/name(module, "compare"))
+  let [index: map, initialized: map] = native_gen/bind(builder, "index", native_format/number(builder, 6))
+  let ready: map = native_gen/while_loop(initialized, native_gen/less(native_gen/ref(initialized, "zero"), index), fn(step)
+    let advanced: map = native_gen/assign(step, index, native_gen/subtract(index, native_gen/ref(step, "one")))
+    let left: map = native_format/limb(native_gen/ref(advanced, "left"), index)
+    let right: map = native_format/limb(native_gen/ref(advanced, "right"), index)
+    let compared: map = native_gen/when(advanced, native_gen/less(left, right), fn(less) => native_gen/return_value(less, native_gen/ref(less, "int_minus_one")))
+    return native_gen/when(compared, native_gen/less(right, left), fn(more) => native_gen/return_value(more, native_gen/ref(more, "int_one")))
+  end)
+  let result: map = native_gen/finish(module, native_gen/return_value(ready, native_gen/ref(ready, "int_zero")))
+  return result
+end
+verb native_format/shift_body(module: map) -> map
+  let builder: map = native_gen/context(module, native_format/name(module, "shift"))
+  let [output: map, initialized: map] = native_gen/bind(builder, "limbs", native_gen/zero(native_format/big()))
+  let shift: map = native_gen/ref(initialized, "shift")
+  let [words: map, with_words: map] = native_gen/bind(initialized, "words", native_gen/divide(shift, native_format/number(initialized, 32)))
+  let [bits: map, with_bits: map] = native_gen/bind(with_words, "bits", native_gen/remainder(shift, native_format/number(with_words, 32)))
+  let [carry: map, with_carry: map] = native_gen/bind(with_bits, "carry", native_gen/ref(with_bits, "zero"))
+  let ready: map = native_gen/for_range(with_carry, "limb", native_gen/ref(with_carry, "zero"), native_gen/subtract(native_format/number(with_carry, 6), words), fn(step, index)
+    let limb: map = native_format/limb(native_gen/ref(step, "value"), index)
+    let [number: map, shifted: map] = native_gen/bind(step, "shifted", native_gen/bit_or(native_gen/shift_left(limb, bits), carry))
+    let stored: map = native_format/set_limb(shifted, output, native_gen/add(index, words), number)
+    return native_gen/assign(stored, carry, native_gen/shift_right(number, native_format/number(stored, 32)))
+  end)
+  let result: map = native_gen/finish(module, native_gen/return_value(ready, output))
+  return result
+end
+verb native_format/less(builder: map, left: map, right: map) -> map
+  let result: map = native_gen/less(native_format/call(builder, "compare", [left, right]), native_gen/ref(builder, "int_zero"))
+  return result
+end
+verb native_format/scale(builder: map, values: list) -> map
+  let ready: map = builder
+  for value in values
+    ready = native_gen/assign(ready, value, native_format/call(ready, "multiply", [value, native_format/number(ready, 10)]))
+  end
+  return ready
+end
+
+// Scale the value and its unequal lower/upper margins together. Generate
+// digits until a decimal enters the interval that rounds to the input bits.
+verb native_format/digits_body(module: map) -> map
+  let builder: map = native_gen/context(module, native_format/name(module, "digits"))
+  let bits: map = native_gen/ref(builder, "bits")
+  builder = native_gen/when(builder, native_kernel/absent(bits), fn(zero) => native_gen/return_value(zero,
+    native_gen/record(zero, zero[:result], {"digits" -> native_gen/ref(zero, "zero"), "point" -> native_format/number(zero, 64)})))
+  let [exponent: map, with_exponent: map] = native_gen/bind(builder, "exponent", native_gen/shift_right(bits, native_format/number(builder, 23)))
+  let [mantissa: map, with_mantissa: map] = native_gen/bind(with_exponent, "mantissa", native_gen/bit_and(bits, native_format/number(with_exponent, 8388607)))
+  let [low: map, with_low: map] = native_gen/bind(with_mantissa, "lower_margin", native_gen/ref(with_mantissa, "two"))
+  builder = native_gen/when(with_low, native_gen/less(native_gen/ref(with_low, "one"), exponent), fn(normal)
+    return native_gen/when(normal, native_kernel/absent(mantissa), fn(power) => native_gen/assign(power, low, native_gen/ref(power, "one")))
+  end)
+  builder = native_gen/branch(builder, native_kernel/absent(exponent),
+    fn(subnormal) => native_gen/assign(subnormal, exponent, native_gen/ref(subnormal, "one")),
+    fn(normal) => native_gen/assign(normal, mantissa, native_gen/bit_or(mantissa, native_format/number(normal, 8388608))))
+  let [inclusive: map, with_inclusive: map] = native_gen/bind(builder, "inclusive", native_kernel/absent(native_gen/bit_and(mantissa, native_gen/ref(builder, "one"))))
+  let [remainder: map, with_remainder: map] = native_gen/bind(with_inclusive, "remainder", native_format/call(with_inclusive, "integer", [native_gen/multiply(mantissa, native_format/number(with_inclusive, 4))]))
+  let [divisor: map, with_divisor: map] = native_gen/bind(with_remainder, "divisor", native_format/call(with_remainder, "integer", [native_gen/ref(with_remainder, "one")]))
+  let [lower: map, with_lower: map] = native_gen/bind(with_divisor, "lower", native_format/call(with_divisor, "integer", [low]))
+  let [upper: map, with_upper: map] = native_gen/bind(with_lower, "upper", native_format/call(with_lower, "integer", [native_gen/ref(with_lower, "two")]))
+  builder = native_gen/branch(with_upper, native_gen/less(exponent, native_format/number(with_upper, 152)), fn(fraction)
+    return native_gen/assign(fraction, divisor, native_format/call(fraction, "shift", [divisor, native_gen/subtract(native_format/number(fraction, 152), exponent)]))
+  end, fn(integer)
+    let shift: map = native_gen/subtract(exponent, native_format/number(integer, 152))
+    let ready: map = integer
+    for value in [remainder, lower, upper]
+      ready = native_gen/assign(ready, value, native_format/call(ready, "shift", [value, shift]))
+    end
+    return ready
+  end)
+  let [point: map, with_point: map] = native_gen/bind(builder, "point", native_format/number(builder, 64))
+  builder = native_gen/while_loop(with_point, native_format/less(with_point, remainder, divisor), fn(step)
+    let scaled: map = native_format/scale(step, [remainder, lower, upper])
+    return native_gen/assign(scaled, point, native_gen/subtract(point, native_gen/ref(scaled, "one")))
+  end)
+  let [scaled: map, with_scaled: map] = native_gen/bind(builder, "scaled_divisor", native_format/call(builder, "multiply", [divisor, native_format/number(builder, 10)]))
+  builder = native_gen/while_loop(with_scaled, native_gen/negate(native_format/less(with_scaled, remainder, scaled)), fn(step)
+    let advanced: map = native_gen/assign(step, divisor, scaled)
+    advanced = native_gen/assign(advanced, scaled, native_format/call(advanced, "multiply", [divisor, native_format/number(advanced, 10)]))
+    return native_gen/assign(advanced, point, native_gen/add(point, native_gen/ref(advanced, "one")))
+  end)
+  let [digits: map, with_digits: map] = native_gen/bind(builder, "digits", native_gen/ref(builder, "zero"))
+  let [power: map, with_power: map] = native_gen/bind(with_digits, "power", native_gen/ref(with_digits, "one"))
+  builder = native_gen/while_loop(with_power, native_gen/ref(with_power, "true"), fn(step)
+    let [digit: map, initialized: map] = native_gen/bind(step, "digit", native_gen/ref(step, "zero"))
+    let ready: map = native_gen/while_loop(initialized, native_gen/negate(native_format/less(initialized, remainder, divisor)), fn(subtract)
+      let reduced: map = native_gen/assign(subtract, remainder, native_format/call(subtract, "subtract", [remainder, divisor]))
+      return native_gen/assign(reduced, digit, native_gen/add(digit, native_gen/ref(reduced, "one")))
+    end)
+    ready = native_gen/assign(ready, digits, native_gen/add(native_gen/multiply(digits, native_format/number(ready, 10)), digit))
+    ready = native_gen/assign(ready, power, native_gen/multiply(power, native_format/number(ready, 10)))
+    let [low_order: map, with_low: map] = native_gen/bind(ready, "lower_order", native_format/call(ready, "compare", [remainder, lower]))
+    let [high_order: map, with_high: map] = native_gen/bind(with_low, "upper_order", native_format/call(with_low, "compare", [divisor, native_format/call(with_low, "add", [remainder, upper])]))
+    let [down: map, with_down: map] = native_gen/bind(with_high, "round_down", native_gen/less(low_order, native_gen/ref(with_high, "int_zero")))
+    let [up: map, with_up: map] = native_gen/bind(with_down, "round_up", native_gen/less(high_order, native_gen/ref(with_down, "int_zero")))
+    ready = native_gen/when(with_up, inclusive, fn(even)
+      let low: map = native_gen/when(even, native_gen/equal(low_order, native_gen/ref(even, "int_zero")), fn(tie) => native_gen/assign(tie, down, native_gen/ref(tie, "true")))
+      return native_gen/when(low, native_gen/equal(high_order, native_gen/ref(low, "int_zero")), fn(tie) => native_gen/assign(tie, up, native_gen/ref(tie, "true")))
+    end)
+    ready = native_gen/when(ready, up, fn(upper)
+      // When both endpoints are valid, choose the closest decimal. Exact
+      // decimal ties round upward, as in Rust's shortest scientific formatter.
+      let [round: map, initialized: map] = native_gen/bind(upper, "round", native_gen/ref(upper, "true"))
+      let selected: map = native_gen/when(initialized, down, fn(both)
+        return native_gen/assign(both, round, native_gen/negate(native_format/less(both, native_format/call(both, "multiply", [remainder, native_gen/ref(both, "two")]), divisor)))
+      end)
+      selected = native_gen/when(selected, round, fn(up) => native_gen/assign(up, digits, native_gen/add(digits, native_gen/ref(up, "one"))))
+      return native_gen/break_loop(selected)
+    end)
+    ready = native_gen/when(ready, down, fn(lower) => native_gen/break_loop(lower))
+    return native_format/scale(ready, [remainder, lower, upper])
+  end)
+  builder = native_gen/when(builder, native_gen/equal(digits, power), fn(carry) => native_gen/assign(carry, point, native_gen/add(point, native_gen/ref(carry, "one"))))
+  builder = native_gen/while_loop(builder, native_kernel/absent(native_gen/remainder(digits, native_format/number(builder, 10))), fn(zero)
+    return native_gen/assign(zero, digits, native_gen/divide(digits, native_format/number(zero, 10)))
+  end)
+  let result: map = native_gen/finish(module, native_gen/return_value(builder, native_gen/record(builder, builder[:result], {"digits" -> digits, "point" -> point})))
+  return result
+end
+
+// Emit digits from the highest decimal place. The buffer has room for every
+// signed 56-bit integer or finite binary32 scientific literal without flushing.
+verb native_format/unsigned(builder: map, buffer: map, number: map) -> map
+  let [remaining: map, initialized: map] = native_gen/bind(builder, "remaining", number)
+  let [divisor: map, with_divisor: map] = native_gen/bind(initialized, "divisor", native_gen/ref(initialized, "one"))
+  let ready: map = native_gen/while_loop(with_divisor, native_gen/less(native_gen/ref(with_divisor, "zero"), native_gen/divide(remaining, native_gen/multiply(divisor, native_format/number(with_divisor, 10)))), fn(step)
+    return native_gen/assign(step, divisor, native_gen/multiply(divisor, native_format/number(step, 10)))
+  end)
+  ready = native_gen/while_loop(ready, native_gen/less(native_gen/ref(ready, "zero"), divisor), fn(step)
+    let digit: map = native_gen/add(native_gen/divide(remaining, divisor), native_format/number(step, 48))
+    let stored: map = native_text/buffer_byte(step, buffer, digit)
+    stored = native_gen/assign(stored, remaining, native_gen/remainder(remaining, divisor))
+    return native_gen/assign(stored, divisor, native_gen/divide(divisor, native_format/number(stored, 10)))
+  end)
+  return ready
+end
+verb native_format/float(builder: map, buffer: map, bits: map) -> map
+  let [magnitude: map, initialized: map] = native_gen/bind(builder, "magnitude", native_gen/bit_and(bits, native_format/number(builder, 2147483647)))
+  let ready: map = native_gen/when(initialized, native_kernel/absent(magnitude), fn(zero)
+    let written: map = zero
+    for byte in [48, 46, 48]
+      written = native_text/buffer_byte(written, buffer, native_format/number(written, byte))
+    end
+    let flushed: map = native_text/flush_bytes(written, buffer)
+    return native_quoting/result(flushed, 0, native_gen/ref(flushed, "zero"), buffer[:text])
+  end)
+  ready = native_gen/unless(ready, native_kernel/absent(native_gen/bit_and(bits, native_format/number(ready, 2147483648))),
+    fn(negative) => native_text/buffer_byte(negative, buffer, native_format/number(negative, 45)))
+  let [decimal: map, converted: map] = native_gen/bind(ready, "decimal", native_format/call(ready, "digits", [magnitude]))
+  let [digits: map, with_digits: map] = native_gen/bind(converted, "digits", native_gen/field(converted, decimal, "digits"))
+  let [divisor: map, with_divisor: map] = native_gen/bind(with_digits, "divisor", native_gen/ref(with_digits, "one"))
+  ready = native_gen/while_loop(with_divisor, native_gen/less(native_gen/ref(with_divisor, "zero"), native_gen/divide(digits, native_gen/multiply(divisor, native_format/number(with_divisor, 10)))), fn(step)
+    return native_gen/assign(step, divisor, native_gen/multiply(divisor, native_format/number(step, 10)))
+  end)
+  ready = native_text/buffer_byte(ready, buffer, native_gen/add(native_gen/divide(digits, divisor), native_format/number(ready, 48)))
+  ready = native_gen/when(ready, native_gen/less(native_gen/ref(ready, "one"), divisor), fn(fraction)
+    let marked: map = native_text/buffer_byte(fraction, buffer, native_format/number(fraction, 46))
+    marked = native_gen/assign(marked, digits, native_gen/remainder(digits, divisor))
+    marked = native_gen/assign(marked, divisor, native_gen/divide(divisor, native_format/number(marked, 10)))
+    return native_gen/while_loop(marked, native_gen/less(native_gen/ref(marked, "zero"), divisor), fn(step)
+      let written: map = native_text/buffer_byte(step, buffer, native_gen/add(native_gen/divide(digits, divisor), native_format/number(step, 48)))
+      written = native_gen/assign(written, digits, native_gen/remainder(digits, divisor))
+      return native_gen/assign(written, divisor, native_gen/divide(divisor, native_format/number(written, 10)))
+    end)
+  end)
+  ready = native_text/buffer_byte(ready, buffer, native_format/number(ready, 101))
+  let [exponent: map, with_exponent: map] = native_gen/bind(ready, "exponent", native_gen/field(ready, decimal, "point"))
+  ready = native_gen/branch(with_exponent, native_gen/less(exponent, native_format/number(with_exponent, 64)), fn(negative)
+    let signed: map = native_text/buffer_byte(negative, buffer, native_format/number(negative, 45))
+    return native_gen/assign(signed, exponent, native_gen/subtract(native_format/number(signed, 64), exponent))
+  end, fn(positive) => native_gen/assign(positive, exponent, native_gen/subtract(exponent, native_format/number(positive, 64))))
+  let result: map = native_format/unsigned(ready, buffer, exponent)
+  return result
+end
+verb native_format/number_body(module: map) -> map
+  let builder: map = native_queries/borrow_budget(native_gen/context(module, string_concat(native_format/name(module, "number"), "_value")))
+  builder = native_roots/poll(builder)
+  let value: map = native_roots/ref(builder, "value")
+  let [buffer: map, initialized: map] = native_text/byte_buffer(builder)
+  // Conversion has a fixed upper bound: at most 45 scaling rounds and nine
+  // digits, each using six limbs. Charge before entering this bounded section.
+  builder = initialized
+  builder = native_gen/when(builder, native_access/kind(builder, value, "int"), fn(integer)
+    let charged: map = native_query/charge(integer, native_format/number(integer, 32), native_gen/ref(integer, "zero"))
+    let number: map = native_gen/field(charged, native_gen/call(charged, "value_as_int", [value]), "number")
+    let [magnitude: map, with_magnitude: map] = native_gen/bind(charged, "magnitude", native_gen/bitcast(:U64, number))
+    let ready: map = native_gen/when(with_magnitude, native_gen/less(number, native_gen/ref(with_magnitude, "int_zero")), fn(negative)
+      let sign: map = native_text/buffer_byte(negative, buffer, native_format/number(negative, 45))
+      return native_gen/assign(sign, magnitude, native_gen/subtract(native_gen/ref(sign, "zero"), magnitude))
+    end)
+    ready = native_format/unsigned(ready, buffer, magnitude)
+    ready = native_text/flush_bytes(ready, buffer)
+    return native_quoting/result(ready, 0, native_gen/ref(ready, "zero"), buffer[:text])
+  end)
+  builder = native_quoting/check(builder, native_access/kind(builder, value, "float"), 1)
+  builder = native_query/charge(builder, native_format/number(builder, 1024), native_gen/ref(builder, "zero"))
+  let number: map = native_gen/field(builder, native_gen/call(builder, "value_as_float", [value]), "number")
+  let bits: map = native_gen/convert(:U64, native_gen/bitcast(:U32, number))
+  builder = native_format/float(builder, buffer, bits)
+  builder = native_text/flush_bytes(builder, buffer)
+  let result: map = native_gen/finish(module, native_quoting/result(builder, 0, native_gen/ref(builder, "zero"), buffer[:text]))
+  return result
+end
+verb native_format/definitions(input: map) -> map
+  let module: map = input
+  for number in [4, 6, 10, 23, 32, 45, 46, 48, 64, 101, 152, 1024, 8388607, 8388608, 2147483647, 2147483648]
+    module = native_literal/constant(module, string_concat("format_", to_literal(number)), :U64, native_value/hex(number))
+  end
+  let big: list = native_format/big()
+  let pair: list = [["left", big, :Value], ["right", big, :Value]]
+  let digits: list = [:Record, string_concat(module[:source_prefix], "_DecimalDigits")]
+  module[:state] = native/record_type(module[:state], digits[1], [["digits", :U64], ["point", :U64]])[1]
+  for [operation, result, parameters] in [
+    ["integer", big, [["number", :U64, :Value]]],
+    ["add", big, pair], ["subtract", big, pair],
+    ["multiply", big, [["left", big, :Value], ["factor", :U64, :Value]]],
+    ["compare", :I64, pair], ["shift", big, [["value", big, :Value], ["shift", :U64, :Value]]],
+    ["digits", digits, [["bits", :U64, :Value]]]]
+    module = native_memory/declare(module, native_format/name(module, operation), result, parameters, [:ReadMemory, :WriteMemory], :Value, "")
+  end
+  for operation in ["integer", "add", "subtract", "multiply"]
+    module = native_format/arithmetic_body(module, operation)
+  end
+  module = native_format/compare_body(module)
+  module = native_format/shift_body(module)
+  module = native_format/digits_body(module)
+  module = native_queries/operation(module, native_format/name(module, "number"), [:Record, string_concat(module[:source_prefix], "_LiteralTextResult")], [["value", native_value/word(), :Gc]])
+  let result: map = native_format/number_body(module)
+  return result
+end

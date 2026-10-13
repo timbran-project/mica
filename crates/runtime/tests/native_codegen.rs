@@ -2446,6 +2446,7 @@ fn load_native_source_compiler(runner: &mut SourceRunner) {
         include_str!("../../../apps/native/compiler/algebra.mica"),
         include_str!("../../../apps/native/compiler/url.mica"),
         include_str!("../../../apps/native/compiler/quoting.mica"),
+        include_str!("../../../apps/native/compiler/format_number.mica"),
         include_str!("../../../apps/native/compiler/literal_read.mica"),
         include_str!("../../../apps/native/compiler/numeric.mica"),
         include_str!("../../../apps/native/compiler/decimal.mica"),
@@ -4033,6 +4034,35 @@ fn native_source_converts_numbers_and_parses_decimals() {
         include_str!("../../../apps/native/compiler/numeric_tests.c"),
         &[],
     );
+}
+
+#[test]
+fn native_source_formats_number_literals() {
+    let mut bits = vec![0, 0x80000000, 1, 0x007fffff, 0x00800000, 0x7f7fffff];
+    for exponent in 0..255u32 {
+        for fraction in [0, 1, 2, 0x3fffff, 0x7ffffd, 0x7ffffe, 0x7fffff] {
+            let value = exponent << 23 | fraction;
+            bits.extend([value, value | 0x80000000]);
+        }
+    }
+    let mut random = 17u32;
+    for _ in 0..4096 {
+        random = random.wrapping_mul(1664525).wrapping_add(1013904223);
+        if f32::from_bits(random).is_finite() {
+            bits.push(random);
+        }
+    }
+    let cases = bits
+        .iter()
+        .map(|bits| {
+            let expected = mica_runtime::float_to_literal(f32::from_bits(*bits));
+            format!("{{UINT32_C(0x{bits:08x}), {expected:?}}},")
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let fixture = include_str!("../../../apps/native/compiler/format_number_tests.c")
+        .replace("/* FLOAT_LITERAL_CASES */", &cases);
+    check_native_source_body("return parse_float(\"1.0\")", &fixture, &[]);
 }
 
 #[test]
