@@ -31,6 +31,7 @@ static void arithmetic(int64_t a, int64_t b) {
 }
 
 int main(int argc, char **argv) {
+    assert(mica_parameter_address(UINT64_MAX) == UINT64_MAX);
     uint8_t offset_bytes[8] = {0};
     assert(mica_signed_offset(offset_bytes + 4, -4) == offset_bytes);
     assert(mica_signed_offset(offset_bytes, 8) == offset_bytes + 8);

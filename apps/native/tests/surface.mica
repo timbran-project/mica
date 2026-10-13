@@ -159,6 +159,11 @@ verb native/surface_program()
     context = native/define_function(context, spec[0], [
       native/return_value(native/unary_expression(spec[1], layout_pointer))])
   end
+  context = native/declare_function(context, "parameter_address", :U64,
+    [["value", :U64, :Value]], [], [:ReadMemory], :Value, "")
+  let builder: map = native_gen/context(context, "parameter_address")
+  context = native_gen/finish(context, native_gen/return_value(builder,
+    native_gen/load(native_gen/address(native_gen/ref(builder, "value")))))
   state = context[:state]
   return state
 end

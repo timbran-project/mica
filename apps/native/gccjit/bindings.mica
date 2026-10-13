@@ -23,6 +23,7 @@ verb native_jit/api() -> list
     ["j_function_type", h, [["ctx", h, "gcc_jit_context *"], ["result", h, "gcc_jit_type *"], ["count", :U64, "int"], ["types", handles, "gcc_jit_type **"]], "gcc_jit_context_new_function_ptr_type", ["ctx", "NULL", "result", "count", "types", "0"]],
     ["j_parameter", h, [["ctx", h, "gcc_jit_context *"], ["type", h, "gcc_jit_type *"], ["name", text, "const char *"]], "gcc_jit_context_new_param", ["ctx", "NULL", "type", "name"]],
     ["j_parameter_value", h, [["parameter", h, "gcc_jit_param *"]], "gcc_jit_param_as_rvalue", ["parameter"]],
+    ["j_parameter_local", h, [["parameter", h, "gcc_jit_param *"]], "gcc_jit_param_as_lvalue", ["parameter"]],
     ["j_function", h, [["ctx", h, "gcc_jit_context *"], ["result", h, "gcc_jit_type *"], ["name", text, "const char *"], ["imported", :Bool, "bool"], ["count", :U64, "int"], ["params", handles, "gcc_jit_param **"]], "gcc_jit_context_new_function", ["ctx", "NULL", "imported ? GCC_JIT_FUNCTION_IMPORTED : GCC_JIT_FUNCTION_EXPORTED", "result", "name", "count", "params", "0"]],
     ["j_local", h, [["function", h, "gcc_jit_function *"], ["type", h, "gcc_jit_type *"], ["name", text, "const char *"]], "gcc_jit_function_new_local", ["function", "NULL", "type", "name"]],
     ["j_block", h, [["function", h, "gcc_jit_function *"], ["name", text, "const char *"]], "gcc_jit_function_new_block", ["function", "name"]],

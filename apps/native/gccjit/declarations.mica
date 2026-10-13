@@ -129,7 +129,7 @@ verb native_jit/define_declarations(input: map) -> map
       native/let_statement("parameter_id", :U64, native_jit/at("row", "position", :U64)),
       native/let_statement("parameter_type", :U64, native_jit/at("row", native_jit/binary(:Add, "position", "n1"), :U64)),
       native/let_statement("parameter", h, native_jit/j("parameter", ["ctx", native_jit/cache(:Type, "parameter_type"), native_jit/text(native_jit/at("row", native_jit/binary(:Add, "position", "n2"), :U64))])),
-      native_jit/publish(:Arguments, "count", "parameter"), native_jit/publish(:Rvalue, "parameter_id", native_jit/j("parameter_value", ["parameter"])), native_jit/publish_metadata(:NodeType, "parameter_id", "parameter_type"),
+      native_jit/publish(:Arguments, "count", "parameter"), native_jit/publish(:Lvalue, "parameter_id", native_jit/j("parameter_local", ["parameter"])), native_jit/publish(:Rvalue, "parameter_id", native_jit/j("parameter_value", ["parameter"])), native_jit/publish_metadata(:NodeType, "parameter_id", "parameter_type"),
       native/set_statement("position", native_jit/binary(:Add, "position", "n3")), native/set_statement("count", native_jit/binary(:Add, "count", "n1"))])]
   context = native_jit/define(context, "functions", [
     @native_jit/scan(native_jit/section(:Function), native_jit/consume_prepared_arguments(parameters, "function", [
