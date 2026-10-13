@@ -3728,6 +3728,82 @@ fn native_source_emissions_obey_target_authority_and_transactions() {
 }
 
 #[test]
+fn native_source_supports_compiler_frontend_dependencies() {
+    let sources = [
+        include_str!("../../../apps/compiler/lex.mica"),
+        include_str!("../../../apps/compiler/parse.mica"),
+        include_str!("../../../apps/compiler/ast.mica"),
+        include_str!("../../../apps/compiler/emit.mica"),
+    ];
+    let mut runner = runner(true);
+    for source in &sources[..3] {
+        runner.run_filein(source).unwrap();
+    }
+    load_native_source_compiler(&mut runner);
+    let source = sources.join("\n");
+    let inventory = eval(
+        &mut runner,
+        &format!(
+            r#"
+let parsed = parse_rows({source:?})
+native/ensure(parsed[:errors] == [], to_literal(parsed[:errors]))
+let emitted = emit_program(parsed[:rows], parsed[:root])
+native/ensure(emitted[:errors] == [], to_literal(emitted[:errors]))
+let definitions = {{}}
+let pending = []
+for definition in emitted[:methods]
+  definitions[definition[:selector]] = true
+  // emit_source serializes Rust bytecode. Native compilation consumes the
+  // register descriptions from emit_program before that host-specific step.
+  if definition[:selector] != :emit_source
+    pending = [@pending, [definition[:selector], definition[:program]]]
+  end
+end
+let supported = native_builtins/names()
+let builtins = {{}}
+let relations = {{}}
+let missing = []
+let position = 0
+while position < len(pending)
+  let [owner, program] = pending[position]
+  position = position + 1
+  program = native_exceptions/lower(program)
+  for pc in [i for i in 0..(len(program[:code]) - 1)]
+    native_source/instruction(program[:code], pc)
+    let instruction = program[:code][pc]
+    let op = instruction[0]
+    if op == :LoadFunction
+      pending = [@pending, [owner, instruction[2]]]
+    elseif op == :BuiltinCall
+      let name = instruction[2]
+      builtins[name] = true
+      if !native/contains(supported, name)
+        missing = [@missing, [owner, :builtin, name]]
+      end
+    elseif op == :PositionalDispatch || op == :Dispatch
+      let selector = instruction[2]
+      if selector[0] != :Constant || !map_contains_key(definitions, selector[1]) || selector[1] == :emit_source
+        missing = [@missing, [owner, :dispatch, selector]]
+      end
+    elseif op == :DynamicDispatch
+      missing = [@missing, [owner, :dynamic_dispatch]]
+    elseif op == :ScanDynamic
+      relations[instruction[2]] = true
+    end
+  end
+end
+native/ensure(missing == [], to_literal(missing))
+let catalogues = sort([row[:name] for row in RelationName(?id, ?name) if map_contains_key(relations, row[:id])])
+native/ensure(catalogues == sort([:RelationName, :Arity, :FunctionalKey]), to_literal(catalogues))
+native/ensure(map_contains_key(builtins, :from_literal) && map_contains_key(builtins, :to_literal), "literal codec required by frontend")
+return position
+"#
+        ),
+    );
+    assert!(inventory.as_int().unwrap() > 100);
+}
+
+#[test]
 fn native_builtin_definitions_ignore_unreachable_calls() {
     for tier in [true, false] {
         let mut runner = runner(tier);
