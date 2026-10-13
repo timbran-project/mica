@@ -466,7 +466,7 @@ CC=clang cargo test --release -p mica-runtime --test native_codegen \
 The frontend dependency check covers the lexer, parser, AST readers, emitter, and their nested functions.
 It validates the emitted instruction forms and resolves builtin, method, and catalogue dependencies.
 It excludes `emit_source`, which serializes Rust bytecode; native compilation consumes `emit_program` descriptions.
-This is a dependency gate, not proof that the complete frontend executes natively.
+This gate checks dependencies. The frontend execution gate below checks the complete source-to-register-description path.
 
 ```sh
 cargo test --release -p mica-runtime --test native_codegen \
@@ -484,18 +484,24 @@ CC=clang cargo test --release -p mica-runtime --test native_codegen \
   native_source_executes_the_compiler_parser -- --ignored --nocapture
 ```
 
-The emitter check compiles `emit_program` and the AST helpers to native C.
-It compares complete register descriptions and diagnostics with Rust-hosted Mica, including nested functions, patterns, loops, and exception handlers.
-The bootstrap host parses inputs. This check does not compile source text through a fully native frontend.
+The complete frontend check compiles the existing lexer, parser, AST helpers, and emitter together.
+The generated runtime receives source text and returns register descriptions or diagnostics from the failing stage.
+It compares complete results with the same compiler sources on Rust-hosted Mica.
+The corpus includes nested functions, patterns, loops, handlers, type annotations, and syntax and semantic errors.
+Unknown escapes and malformed Unicode escapes retain their literal contents under the agreed quoting contract.
 
 Each case also runs with forced collection, and both bootstrap tiers must produce identical C.
 The large fixture uses `-O0` with ASan and UBSan. Smaller source tests exercise optimized C.
-Ordinary test runs exclude this integration test because generation takes several minutes.
+Ordinary test runs exclude this integration test because generation and C compilation take several minutes.
 
 ```sh
 CC=clang cargo test --release -p mica-runtime --test native_codegen \
-  native_source_executes_the_compiler_emitter -- --ignored --nocapture
+  native_source_executes_the_compiler_frontend -- --ignored --nocapture
 ```
+
+This gate ends at `emit_program` register descriptions.
+Native lowering of those descriptions, live installation, and the complete self-hosting rebuild remain separate acceptance gates.
+The fixture supplies catalogue identities and excludes `emit_source`, which calls the Rust bytecode assembler.
 
 ## Remaining integration
 

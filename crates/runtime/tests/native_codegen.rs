@@ -4229,16 +4229,29 @@ fn native_source_converts_numbers_and_parses_decimals() {
 }
 
 #[test]
-#[ignore = "full emitter bootstrap generates and compiles a large native module"]
-fn native_source_executes_the_compiler_emitter() {
+#[ignore = "full frontend bootstrap generates and compiles a large native module"]
+fn native_source_executes_the_compiler_frontend() {
+    let lexer = include_str!("../../../apps/compiler/lex.mica");
+    let parser = include_str!("../../../apps/compiler/parse.mica");
     let ast = include_str!("../../../apps/compiler/ast.mica");
     let emitter = include_str!("../../../apps/compiler/emit.mica");
-    let entry =
-        "verb native_emit_fixture(parsed)\nreturn emit_program(parsed[:rows], parsed[:root])\nend";
-    // Compile the existing emitter and AST helpers. emit_source is the Rust
-    // bytecode serializer; this entry returns the neutral register descriptions.
+    let entry = r#"
+verb native_frontend_fixture(source) -> map
+  let parsed = parse_rows(source)
+  if len(parsed[:errors]) > 0
+    return {:stage -> :parse, :errors -> parsed[:errors]}
+  end
+  let module = emit_program(parsed[:rows], parsed[:root])
+  return {:stage -> :emit, :module -> module}
+end
+"#;
+    // Execute the existing lexer, parser, AST helpers, and emitter together.
+    // Omit filein identity declarations and emit_source's Rust assembler call;
+    // this gate ends at neutral register descriptions, before native lowering.
     let source = format!(
-        "{entry}\n{ast}\n{}",
+        "{entry}\n{}\n{}\n{ast}\n{}",
+        &lexer[lexer.find("verb lex(").unwrap()..],
+        &parser[parser.find("verb parse(").unwrap()..],
         &emitter[emitter.find("verb emit_state(").unwrap()..]
     );
     let method_ids = format!(
@@ -4256,15 +4269,11 @@ fn native_source_executes_the_compiler_emitter() {
         max_call_depth: 256,
         ..TaskLimits::default()
     });
-    for filein in [
-        include_str!("../../../apps/compiler/lex.mica"),
-        include_str!("../../../apps/compiler/parse.mica"),
-        ast,
-        emitter,
-    ] {
+    for filein in [lexer, parser, ast, emitter, entry] {
         oracle.run_filein(filein).unwrap();
     }
     let cases = [
+        "",
         "return [(), none, 42, 1.25, \"Montréal 🦊\", :name, b\"AAH-_w==\"]",
         "verb choose(value: int, ?fallback = (), @rest) -> list\nreturn [value, fallback, rest]\nend\nreturn choose(7)",
         "let total = 0\nfor x in 1..3\nif x > 1\ntotal = total + x\nend\nend\nreturn total",
@@ -4273,25 +4282,49 @@ fn native_source_executes_the_compiler_emitter() {
         "let subject = [1, 2]\nreturn match subject\ncase [first, @rest] if first > 0\nfirst\ncase _\n0\nend",
         "return [error(E_FAIL, \"bad\", [1]), some(3), ok(false), {:a -> 2}]",
         "let x: int = 1\nx = 2\nreturn x",
+        r#"return ["bad\q", "bad\u{}"]"#,
         "return missing_name",
         "verb invalid(?first = 1, second)\nreturn second\nend",
+        "return (1 + )\nlet x = ",
+        "verb broken(\nreturn \"unterminated",
+        "return [1, 2",
     ];
     let mut checks = String::new();
     for (index, text) in cases.iter().enumerate() {
-        let input = eval(&mut oracle, &format!("return parse_rows({text:?})"));
+        let input = Value::string(*text);
+        let mut request = SourceRunner::root_source_request("");
+        request.input = TaskInput::Invocation {
+            selector: Symbol::intern("native_frontend_fixture"),
+            roles: vec![(Symbol::intern("source"), input.clone())],
+        };
+        let submitted = oracle.submit_invocation(request).unwrap();
+        let TaskOutcome::Complete {
+            value: expected, ..
+        } = submitted.outcome
+        else {
+            panic!("frontend oracle for case {index}: {:?}", submitted.outcome);
+        };
+        let parse_failure = index >= cases.len() - 3;
         assert_eq!(
-            input.map_get(&Value::symbol(Symbol::intern("errors"))),
-            Some(Value::list([]))
+            expected.map_get(&Value::symbol(Symbol::intern("stage"))),
+            Some(Value::symbol(Symbol::intern(if parse_failure {
+                "parse"
+            } else {
+                "emit"
+            }))),
+            "unexpected frontend stage for case {index}"
         );
-        let expected = eval(
-            &mut oracle,
-            &format!(
-                "let parsed = parse_rows({text:?})\nreturn emit_program(parsed[:rows], parsed[:root])"
-            ),
-        );
+        let diagnostics = if parse_failure {
+            expected.clone()
+        } else {
+            expected
+                .map_get(&Value::symbol(Symbol::intern("module")))
+                .unwrap()
+        };
         assert_eq!(
-            expected.map_get(&Value::symbol(Symbol::intern("errors"))) == Some(Value::list([])),
-            index < cases.len() - 2
+            diagnostics.map_get(&Value::symbol(Symbol::intern("errors"))) == Some(Value::list([])),
+            index < cases.len() - 5,
+            "unexpected frontend diagnostics for case {index}"
         );
         let (input, construction) = source_value_literal(&input, &mut 0);
         checks.push_str(&format!(
@@ -4312,7 +4345,7 @@ fn native_source_executes_the_compiler_emitter() {
         let second = second.join().unwrap();
         assert!(
             first == second,
-            "emitter output differs between bootstrap tiers"
+            "frontend output differs between bootstrap tiers"
         );
         first
     });
