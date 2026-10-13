@@ -85,6 +85,7 @@ verb native_rules/depend_body(module: map) -> map
     step = native_gen/when(step, native_kernel/absent(found), fn(unseen)
       let [index: map, indexed: map] = native_rules/index_put(unseen, "rule_vertex_index", visited, current)
       let ready: map = native_roots/store(indexed, visited, index)
+      ready = native_gen/unless(ready, native_kernel/absent(native_rules/read(ready, current, "source")), fn(catalogue) => native_kernel/store_field(catalogue, work, "catalogue_read", native_gen/ref(catalogue, "true")))
       ready = native_rules/status_call(ready, "rule_head_observe", [native_roots/worker(ready), work, native_rules/read(ready, current, "id"), native_rules/read(ready, current, "schema"), native_rules/ref(ready, "true")])
       return native_rules/each(ready, "edge", native_rules/read(ready, current, "edges"), fn(edge_step, edge)
         let [entry: map, allocated: map] = native_rules/allocate(edge_step, "RuleMember", {"next" -> stack, "vertex" -> native_rules/read(edge_step, edge, "target")})

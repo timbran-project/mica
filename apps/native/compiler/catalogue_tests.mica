@@ -1,0 +1,30 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+// Use the same catalogue queries as apps/compiler/emit.mica. Compare logical
+// metadata: relation identities belong to different worlds in the two hosts.
+let names = {}
+for entry in RelationName(?relation, ?name)
+  if entry[:name] == :NativeResult || entry[:name] == :NativeQuery
+    names[entry[:relation]] = entry[:name]
+  end
+end
+let widths = {}
+for entry in Arity(?relation, ?arity)
+  if map_contains_key(names, entry[:relation])
+    widths[names[entry[:relation]]] = entry[:arity]
+  end
+end
+let keys = []
+for entry in FunctionalKey(?relation, ?slot, ?position)
+  if map_contains_key(names, entry[:relation])
+    keys = [@keys, [names[entry[:relation]], entry[:slot], entry[:position]]]
+  end
+end
+let binary = []
+for entry in Arity(?relation, 2)
+  if map_contains_key(names, entry[:relation])
+    binary = [@binary, names[entry[:relation]]]
+  end
+end
+return [widths, keys, binary]

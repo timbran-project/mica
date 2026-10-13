@@ -1767,7 +1767,7 @@ static void rule_deep_planning(void) {
             edge = mica_kernel_new_RuleEdge(&f.worker, NULL, vertices, i % 2 != 0);
             assert(edge);
         }
-        vertices = mica_kernel_new_RuleVertex(&f.worker, vertices, i, 0, edge, NULL, 0, 0, false, 0);
+        vertices = mica_kernel_new_RuleVertex(&f.worker, vertices, i, 0, 0, edge, NULL, 0, 0, false, 0);
         assert(vertices);
     }
     struct mica_KernelRulePlan *plan = mica_kernel_new_RulePlan(&f.worker, vertices, NULL, NULL, NULL, 0);
@@ -1816,7 +1816,7 @@ static void rule_graph_oracle(void) {
         struct mica_KernelRuleVertex *vertices[N];
         struct mica_KernelRuleVertex *head = NULL;
         for (unsigned i = 0; i < N; ++i) {
-            vertices[i] = mica_kernel_new_RuleVertex(&f.worker, head, i, 0, NULL, NULL, 0, 0, false, 0);
+            vertices[i] = mica_kernel_new_RuleVertex(&f.worker, head, i, 0, 0, NULL, NULL, 0, 0, false, 0);
             assert(vertices[i]);
             head = vertices[i];
         }
@@ -2787,7 +2787,7 @@ static void fixpoint_cancellation(void) {
     struct mica_KernelBudget budget = operation_budget(&tx);
     struct mica_KernelWork *work = mica_kernel_work(&tx);
     struct mica_KernelRuleEvaluationResult captured = mica_kernel_rule_capture(&f.worker,
-        work->f_base->f_relations, work->f_changes, work->f_rule_plan, &budget);
+        work->f_base->f_relations, work->f_changes, work->f_rule_plan, NULL, &budget);
     assert(captured.f_status == OK);
     struct mica_MemoryRoot evaluation = {.f_pointer = (uint8_t *)captured.f_evaluation};
     assert(mica_memory_root_push(&f.worker, &evaluation));
@@ -3893,6 +3893,158 @@ static void relation_catalogue(void) {
     destroy(&f);
 }
 
+static void catalogue_projection_reference(struct mica_KernelTransaction *tx) {
+    assert(refresh(tx) == OK);
+    struct mica_KernelRuleEvaluationResult reference = mica_kernel_rule_evaluate(tx);
+    assert(reference.f_status == OK);
+    struct mica_MemoryRoot evaluation = {.f_pointer = (void *)reference.f_evaluation}, rows = {0};
+    assert(mica_memory_root_push(tx->f_worker, &evaluation));
+    assert(mica_memory_root_push(tx->f_worker, &rows));
+    const uint64_t ids[] = {101, 102, 103, 200, 201};
+    for (unsigned i = 0; i < sizeof(ids) / sizeof(*ids); ++i) {
+        struct mica_KernelQueryResult expected = derived_rows(tx->f_worker,
+            (void *)evaluation.f_pointer, ids[i], false, 10000);
+        assert(expected.f_status == OK);
+        mica_value_root_set(&rows, expected.f_rows);
+        struct mica_KernelQueryResult actual = derived_rows(tx->f_worker,
+            mica_kernel_work(tx)->f_evaluation, ids[i], false, 10000);
+        assert(actual.f_status == OK);
+        struct mica_BoolResult equal = mica_value_equal(mica_value_root_get(&rows), actual.f_rows);
+        assert(equal.f_ok && equal.f_value);
+    }
+    assert(mica_memory_root_pop(tx->f_worker, &rows));
+    assert(mica_memory_root_pop(tx->f_worker, &evaluation));
+}
+
+static void catalogue_projections(void) {
+    struct fixture f;
+    init(&f);
+    struct mica_KernelTransaction tx, other;
+    begin(&f, &tx);
+    assert(mica_kernel_declare(&tx, 1, 1001, 3, FUNCTIONAL, 5, 0) == OK);
+    for (unsigned source = 1; source <= 3; ++source)
+        assert(mica_kernel_declare_catalogue(&tx, 100 + source, 100 + source, source) == OK);
+    assert(mica_kernel_declare_catalogue(&tx, 104, 104, 0) == SCHEMA);
+    assert(mica_kernel_declare_catalogue(&tx, 104, 104, 4) == SCHEMA);
+    for (unsigned id = 200; id <= 201; ++id)
+        assert(mica_kernel_declare(&tx, id, id, 2, SET, 0, 0) == OK);
+    assert(mica_kernel_declare(&tx, 2, 2, 2, SET, 0, 0) == OK);
+    mica_type_Value cells[] = {relation_identity(99), mica_value_symbol(99).f_value};
+    struct mica_ValueResult missing = mica_value_list(&f.worker, cells, 2);
+    assert(missing.f_ok && mica_kernel_write(&tx, 2, missing.f_value, true) == OK);
+    assert(install_edge(&tx, 1, 200, 101, false) == OK);
+    assert(install_edge(&tx, 2, 201, 101, true) == OK);
+    assert(install_edge(&tx, 3, 101, 200, false) == SCHEMA);
+    assert(write_pair(&tx, 101, 1, 2, true) == SCHEMA);
+    assert(write_pair(&tx, 101, 1, 2, false) == SCHEMA);
+    assert(mica_kernel_replace(&tx, 101, tuple(&f.worker, 1, 2)) == SCHEMA);
+    assert(count(&tx, 101) == 7 && count(&tx, 102) == 7);
+    assert(count(&tx, 200) == 7 && count(&tx, 201) == 1);
+    struct mica_KernelBudget budget = operation_budget(&tx);
+    struct mica_KernelQueryResult keys = derived_rows(&f.worker,
+        mica_kernel_work(&tx)->f_evaluation, 103, false, 10000);
+    assert(keys.f_status == OK && mica_kernel_width(keys.f_rows) == 2);
+    for (uint64_t slot = 0; slot < 2; ++slot) {
+        mica_type_Value row = mica_kernel_cell(keys.f_rows, slot);
+        assert(mica_value_as_identity(mica_kernel_cell(row, 0)).f_number == 1);
+        assert(cell(row, 1) == (int64_t)slot && cell(row, 2) == (int64_t)(slot * 2));
+    }
+    catalogue_projection_reference(&tx);
+    assert(mica_kernel_commit(&tx) == OK && mica_kernel_end(&tx));
+
+    begin(&f, &tx);
+    assert(count(&tx, 101) == 7);
+    begin(&f, &other);
+    assert(write_pair(&other, 2, 3, 4, true) == OK);
+    assert(mica_kernel_commit(&other) == OK && mica_kernel_end(&other));
+    // Fact commits reuse the immutable metadata input tree.
+    struct mica_KernelWork *work = mica_kernel_work(&tx);
+    struct mica_KernelSnapshot *current = (void *)f.kernel.f_current.f_pointer;
+    assert(mica_kernel_rule_stored(work->f_base->f_evaluation, 101) ==
+        mica_kernel_rule_stored(current->f_evaluation, 101));
+    assert(mica_kernel_commit(&tx) == OK && mica_kernel_end(&tx));
+
+    begin(&f, &tx);
+    assert(count(&tx, 200) == 7); // A derived read observes its catalogue dependency.
+    begin(&f, &other);
+    assert(mica_kernel_declare(&other, 99, 99, 2, SET, 0, 0) == OK);
+    assert(count(&other, 101) == 8 && count(&other, 200) == 8);
+    assert(count(&other, 201) == 1); // Only the unrelated stored pair remains.
+    catalogue_projection_reference(&other);
+    assert(mica_kernel_commit(&other) == OK && mica_kernel_end(&other));
+    assert(count(&tx, 200) == 7); // Retained snapshot stays consistent.
+    assert(mica_kernel_commit(&tx) == CONFLICT && mica_kernel_end(&tx));
+
+    begin(&f, &tx);
+    assert(mica_kernel_declare(&tx, 98, 98, 2, SET, 0, 0) == OK);
+    assert(count(&tx, 101) == 9);
+    assert(mica_memory_safepoint(&f.worker, true));
+    assert(count(&tx, 101) == 9);
+    catalogue_projection_reference(&tx);
+    assert(mica_kernel_end(&tx)); // Discard the metadata and derived additions together.
+    begin(&f, &tx);
+    assert(count(&tx, 101) == 8);
+    assert(mica_kernel_declare(&tx, 98, 98, 2, SET, 0, 0) == OK);
+    budget = operation_budget(&tx);
+    budget.f_steps = 0;
+    assert(mica_kernel_read(&tx, 101, &budget).f_status == LIMIT);
+    assert(mica_kernel_cancel(&tx));
+    assert(read_status(&tx, 101) == CANCELLED);
+    assert(mica_kernel_end(&tx));
+    destroy(&f);
+}
+
+static void catalogue_projection_authority(void) {
+    struct fixture f;
+    init(&f);
+    configure_policy(&f);
+    struct mica_KernelTransaction tx, reader;
+    begin(&f, &tx);
+    assert(mica_kernel_declare_catalogue(&tx, 101, 101, 1) == OK);
+    policy_fact(&tx, 1, 9, 101, true); // CanRead alone cannot read catalogue metadata.
+    assert(mica_kernel_commit(&tx) == OK && mica_kernel_end(&tx));
+    begin_tenant(&f, &tx, 9);
+    assert(read_status(&tx, 101) == PERMISSION);
+    assert(mica_kernel_end(&tx));
+    begin_tenant(&f, &tx, 8);
+    assert(read_status(&tx, 101) == OK); // Catalogue alone permits a direct scan.
+    assert(tenant_edge(&tx, 1, 8, 12, 101, false) == PERMISSION); // Rules also need source read.
+    assert(mica_kernel_end(&tx));
+    begin(&f, &tx);
+    for (int64_t tenant = 8; tenant <= 10; ++tenant)
+        policy_fact(&tx, 1, tenant, 101, true);
+    policy_fact(&tx, 3, 9, 12, true);
+    assert(mica_kernel_commit(&tx) == OK && mica_kernel_end(&tx));
+    // Root administration still validates the defining tenant's complete rights.
+    begin(&f, &tx);
+    assert(tenant_edge(&tx, 1, 9, 12, 101, false) == PERMISSION); // No catalogue.
+    assert(tenant_edge(&tx, 1, 10, 12, 101, false) == PERMISSION); // No head export.
+    assert(mica_kernel_end(&tx));
+    begin_tenant(&f, &tx, 8);
+    assert(tenant_edge(&tx, 1, 8, 12, 101, false) == OK);
+    assert(mica_kernel_commit(&tx) == OK && mica_kernel_end(&tx));
+    begin_tenant(&f, &reader, 9);
+    assert(count(&reader, 12) > 0); // Explicit export permits public derived rows.
+    assert(mica_kernel_work(&reader)->f_catalogue_read);
+    begin(&f, &tx);
+    assert(mica_kernel_declare(&tx, 102, 102, 2, SET, 0, 0) == OK);
+    assert(mica_kernel_commit(&tx) == OK && mica_kernel_end(&tx));
+    assert(mica_kernel_commit(&reader) == CONFLICT && mica_kernel_end(&reader));
+    // Each required right is revalidated against the candidate's final policy.
+    for (uint64_t policy = 1; policy <= 4; ++policy) {
+        if (policy == 2) continue;
+        begin(&f, &tx);
+        policy_fact(&tx, policy, 8, policy == 1 ? 101 : policy == 3 ? 12 : 0, false);
+        assert(mica_kernel_commit(&tx) == PERMISSION);
+        assert(mica_kernel_end(&tx));
+    }
+    begin(&f, &tx);
+    policy_fact(&tx, 4, 8, 0, false);
+    assert(mica_kernel_rule_update(&tx, 1, mica_kernel_rule(&tx, 1).f_rule->f_definition, false) == OK);
+    assert(mica_kernel_commit(&tx) == OK && mica_kernel_end(&tx));
+    destroy(&f);
+}
+
 int main(int argc, char **argv) {
     if (argc == 2 && !strcmp(argv[1], "trace")) return trace(false);
     if (argc == 3 && !strcmp(argv[1], "rule-bench")) return rule_measurements((unsigned)strtoul(argv[2], NULL, 10));
@@ -3918,6 +4070,8 @@ int main(int argc, char **argv) {
     allocation_controls();
     publication_cancellation();
     relation_catalogue();
+    catalogue_projections();
+    catalogue_projection_authority();
     rule_catalogue();
     rule_definition_validation();
     rule_dependency_planning();

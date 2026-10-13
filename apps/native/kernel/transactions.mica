@@ -121,17 +121,38 @@ verb native_kernel/check_declaration_mask(builder: map, arity: map, keys: map, i
   return result
 end
 
-verb native_kernel/declare_body(module: map) -> map
-  let builder = native_gen/context(module, "kernel_declare")
+verb native_kernel/declare_body(module: map, ?catalogue: bool = false) -> map
+  let function: string = "kernel_declare"
+  if catalogue
+    function = "kernel_declare_catalogue"
+  end
+  let builder = native_gen/context(module, function)
   let transaction = native_gen/ref(builder, "transaction")
   let id = native_gen/ref(builder, "id")
   let name = native_gen/ref(builder, "name")
-  let arity = native_gen/ref(builder, "arity")
-  let policy = native_gen/ref(builder, "policy")
-  let keys = native_gen/ref(builder, "keys")
-  let indexes = native_gen/ref(builder, "indexes")
+  let source: map = native_gen/ref(builder, "kernel_source_stored")
+  let arity: map = native_gen/ref(builder, "two")
+  let policy: map = native_gen/ref(builder, "zero")
+  let keys: map = native_gen/ref(builder, "zero")
+  let indexes: map = native_gen/ref(builder, "zero")
+  if catalogue
+    source = native_gen/ref(builder, "source")
+    let [width: map, sized: map] = native_gen/bind(builder, "arity", arity)
+    builder = native_gen/when(sized, native_gen/equal(source, native_gen/ref(sized, "kernel_source_keys")),
+      fn(keyed) => native_gen/assign(keyed, width, native_gen/add(native_gen/ref(keyed, "two"), native_gen/ref(keyed, "one"))))
+    arity = width
+  else
+    arity = native_gen/ref(builder, "arity")
+    policy = native_gen/ref(builder, "policy")
+    keys = native_gen/ref(builder, "keys")
+    indexes = native_gen/ref(builder, "indexes")
+  end
   let [work, opened] = native_kernel/open_transaction(builder, fn(arm) => native_kernel/status(arm, "kernel_closed"))
   let permitted: map = native_authority/check_permission(opened, work, "grant")
+  if catalogue
+    permitted = native_gen/when(permitted, native_kernel/absent(source), fn(invalid) => native_kernel/status(invalid, "kernel_schema"))
+    permitted = native_gen/when(permitted, native_gen/less(native_gen/ref(permitted, "kernel_source_keys"), source), fn(invalid) => native_kernel/status(invalid, "kernel_schema"))
+  end
   let bounded: map = native_execution/local_budget(permitted, native_kernel/load_field(permitted, work, "rule_limit"))
   let [worker, ready] = native_gen/bind(bounded, "worker", native_kernel/load_field(bounded, transaction, "worker"))
   builder = native_gen/when(ready, native_kernel/absent(id), fn(arm) => native_kernel/status(arm, "kernel_schema"))
@@ -155,7 +176,7 @@ verb native_kernel/declare_body(module: map) -> map
     fn(arm) => native_gen/unless(arm, native_kernel/absent(keys), fn(keyed) => native_kernel/add_index(keyed, worker, head, keys)))
   builder = native_kernel/columns(builder, arity, fn(iteration, position, bit) => native_kernel/add_secondary_index(iteration, worker, head, indexes, keys, bit))
   let [relation, with_relation] = native_gen/bind(builder, "relation", native_kernel/allocate_record(builder, worker, "Relation",
-    {"next" -> native_gen/zero(native_kernel/pointer("Relation")), "id" -> id, "name" -> name, "arity" -> arity,
+    {"next" -> native_gen/zero(native_kernel/pointer("Relation")), "id" -> id, "name" -> name, "source" -> source, "arity" -> arity,
       "policy" -> policy, "keys" -> keys, "schema_revision" -> native_gen/ref(builder, "zero"), "indexes" -> head}))
   builder = native_gen/when(with_relation, native_kernel/absent(relation), fn(arm) => native_kernel/status(arm, "kernel_oom"))
   let [created, with_created] = native_gen/bind(builder, "created", native_kernel/allocate_record(builder, worker, "Change",
@@ -232,6 +253,7 @@ verb native_kernel/write_body(module: map, replace: bool) -> map
   let [relation: map, found: map] = native_gen/bind(ready, "relation", native_gen/call(ready, "kernel_view", [transaction, native_gen/ref(ready, "id")]))
   found[:scope_worker] = worker
   builder = native_gen/when(found, native_kernel/absent(relation), fn(arm) => native_kernel/status(arm, "kernel_unknown"))
+  builder = native_gen/unless(builder, native_kernel/absent(native_kernel/load_field(builder, relation, "source")), fn(readonly) => native_kernel/status(readonly, "kernel_schema"))
   builder = native_kernel/check_tuple(builder, row, relation, fn(arm) => native_kernel/status(arm, "kernel_arity"))
   builder = native_gen/unless(builder, native_gen/call(builder, "value_is_persistable", [row]), fn(arm) => native_kernel/status(arm, "kernel_nonpersistent"))
   let [writes: map, tracked: map] = native_kernel/draft_writes(builder, work, native_gen/ref(builder, "id"))
@@ -382,6 +404,7 @@ verb native_kernel/transactions(input: map) -> map
     ["change", change, [["work", work, :Gc], ["id", :U64, :Value]]],
     ["view", relation, [tx, ["id", :U64, :Value]]],
     ["catalogue", [:Record, "KernelSchemasResult"], [tx, ["budget", native_kernel/pointer("Budget"), :Borrow]]],
+    ["declare_catalogue", :U64, [tx, ["id", :U64, :Value], ["name", :U64, :Value], ["source", :U64, :Value]]],
     ["declare", :U64, [tx, ["id", :U64, :Value], ["name", :U64, :Value], ["arity", :U64, :Value], ["policy", :U64, :Value], ["keys", :U64, :Value], ["indexes", :U64, :Value]]],
     ["replace", :U64, [tx, ["id", :U64, :Value], ["row", word, :Gc]]],
     ["write", :U64, [tx, ["id", :U64, :Value], ["row", word, :Gc], ["asserted", :Bool, :Value]]],
@@ -405,6 +428,7 @@ verb native_kernel/transactions(input: map) -> map
     native/unless_statement(native_kernel/is_null("Change", "change"), [native/return_value(native_kernel/read("Change", "change", "after"))]),
     native/return_value(native/call_expression("kernel_relation", [native_kernel/read("Snapshot", native_kernel/read("Work", "work", "base"), "relations"), "id"]))])
   context = native_kernel/declare_body(context)
+  context = native_kernel/declare_body(context, true)
   context = native_kernel/write_body(context, false)
   context = native_kernel/write_body(context, true)
   context = native_kernel/define(context, "version", [@load_work,

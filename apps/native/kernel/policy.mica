@@ -18,12 +18,13 @@ verb native_authority/policy_declarations(input: map) -> map
   let budget: list = ["budget", native_kernel/pointer("Budget"), :Borrow]
   let views: list = native_kernel/pointer("AuthorityViews")
   let owner: list = ["owner", native_value/word(), :Gc]
+  let schemas: list = ["schemas", native_kernel/pointer("RelationSchemaIndex"), :Gc]
   for spec in [
     ["authority_views", [:Record, "KernelAuthorityViewsResult"], [worker, ["policy", native_kernel/pointer("AuthorityPolicy"), :Gc], ["evaluation", native_kernel/pointer("RuleEvaluation"), :Gc], ["previous", views, :Gc], budget]],
     ["authority_for", [:Record, "KernelAuthorityResult"], [worker, owner, ["views", views, :Gc], ["tenant", native_value/word(), :Gc], budget]],
-    ["authority_definition", :U64, [worker, ["authority", native_kernel/pointer("Authority"), :Gc], ["definition", native_kernel/pointer("RuleDef"), :Gc], budget]],
-    ["authority_validate", :U64, [worker, owner, ["views", views, :Gc], ["plan", native_kernel/pointer("RulePlan"), :Gc], budget]],
-    ["authority_changes", :U64, [worker, owner, ["views", views, :Gc], ["changes", native_kernel/pointer("RuleChange"), :Gc], budget]],
+    ["authority_definition", :U64, [worker, ["authority", native_kernel/pointer("Authority"), :Gc], ["definition", native_kernel/pointer("RuleDef"), :Gc], schemas, budget]],
+    ["authority_validate", :U64, [worker, owner, ["views", views, :Gc], ["plan", native_kernel/pointer("RulePlan"), :Gc], schemas, budget]],
+    ["authority_changes", :U64, [worker, owner, ["views", views, :Gc], ["changes", native_kernel/pointer("RuleChange"), :Gc], schemas, budget]],
     ["authority_stage", :U64, [["transaction", native_kernel/pointer("Transaction"), :Borrow], ["definition", native_kernel/pointer("RuleDef"), :Gc], budget]],
     ["authority_begin", :U64, [["transaction", native_kernel/pointer("Transaction"), :Borrow], budget]]]
     module = native_kernel/declare(module, spec[0], spec[1], spec[2], true)
@@ -133,15 +134,20 @@ verb native_authority/definition_body(module: map) -> map
   builder = native_gen/when(builder, native_rules/read(builder, authority, "root"), fn(root) => native_kernel/status(root, "kernel_ok"))
   builder = native_rules/check(builder, native_gen/call(builder, "kernel_authority_allows", [authority, native_rules/read(builder, definition, "head"), native_gen/ref(builder, "authority_export")]), "permission")
   builder = native_rules/each(builder, "atom", native_rules/read(builder, definition, "atoms"), fn(step, atom)
-    return native_rules/check(step, native_gen/call(step, "kernel_authority_allows", [authority, native_rules/read(step, atom, "relation"), native_gen/ref(step, "authority_read")]), "permission")
+    let ready: map = native_rules/check(step, native_gen/call(step, "kernel_authority_allows", [authority, native_rules/read(step, atom, "relation"), native_gen/ref(step, "authority_read")]), "permission")
+    let [schema: map, found: map] = native_gen/bind(ready, "source_schema", native_gen/call(ready, "kernel_schema_index_lookup", [native_roots/ref(ready, "schemas"), native_rules/read(ready, atom, "relation")]))
+    ready = native_rules/check(found, native_gen/negate(native_kernel/absent(schema)), "unknown")
+    return native_gen/unless(ready, native_kernel/absent(native_rules/read(ready, schema, "source")), fn(catalogue)
+      return native_rules/check(catalogue, native_gen/call(catalogue, "kernel_authority_catalogue", [authority]), "permission")
+    end)
   end)
   builder = native_kernel/status(builder, "kernel_ok")
   let result: map = native_gen/finish(module, builder)
   return result
 end
-verb native_authority/check_definition(builder: map, owner: map, views: map, definition: map) -> map
+verb native_authority/check_definition(builder: map, owner: map, views: map, definition: map, schemas: map) -> map
   let [authority: map, compiled: map] = native_rules/checked_call(builder, "authority_for", [native_roots/worker(builder), owner, views, native_rules/read(builder, definition, "tenant"), native_roots/ref(builder, "budget")], "authority")
-  let result: map = native_rules/status_call(compiled, "authority_definition", [native_roots/worker(compiled), authority, definition, native_roots/ref(compiled, "budget")])
+  let result: map = native_rules/status_call(compiled, "authority_definition", [native_roots/worker(compiled), authority, definition, schemas, native_roots/ref(compiled, "budget")])
   return result
 end
 
@@ -161,7 +167,7 @@ verb native_authority/changes_body(module: map) -> map
           return native_gen/assign(existing, check, native_gen/not_equal(definition, native_rules/read(existing, before, "definition")))
         end)
         return native_gen/when(ready, check, fn(required) => native_roots/temporary(required, fn(scoped)
-          return native_authority/check_definition(scoped, native_roots/ref(scoped, "owner"), native_roots/ref(scoped, "views"), definition)
+          return native_authority/check_definition(scoped, native_roots/ref(scoped, "owner"), native_roots/ref(scoped, "views"), definition, native_roots/ref(scoped, "schemas"))
         end))
       end))
     end)
@@ -177,7 +183,7 @@ verb native_authority/validate_body(module: map) -> map
   builder = native_rules/each(builder, "vertex", native_rules/read(builder, plan, "vertices"), fn(vertex_scope, vertex)
     return native_rules/each(vertex_scope, "entry", native_rules/read(vertex_scope, vertex, "rules"), fn(step, entry) => native_roots/temporary(step, fn(scoped)
       let definition: map = native_rules/read(scoped, native_rules/read(scoped, entry, "rule"), "definition")
-      return native_authority/check_definition(scoped, native_roots/ref(scoped, "owner"), native_roots/ref(scoped, "views"), definition)
+      return native_authority/check_definition(scoped, native_roots/ref(scoped, "owner"), native_roots/ref(scoped, "views"), definition, native_roots/ref(scoped, "schemas"))
     end))
   end)
   builder = native_kernel/status(builder, "kernel_ok")
@@ -187,18 +193,18 @@ end
 
 // Shared by draft refresh and publication preparation. No permission object
 // enters a snapshot; only the immutable effective policy views are retained.
-verb native_authority/validate_views(builder: map, owner: map, views: map, plan: map, previous_views: map, previous_plan: map) -> map
+verb native_authority/validate_views(builder: map, owner: map, views: map, plan: map, schemas: map, previous_views: map, previous_plan: map) -> map
   let result: map = native_gen/branch(builder, native_gen/equal(views, previous_views),
-    fn(same) => native_gen/unless(same, native_gen/equal(plan, previous_plan), fn(changed) => native_rules/status_call(changed, "authority_validate", [native_roots/worker(changed), owner, views, plan, native_roots/ref(changed, "budget")])),
-    fn(changed) => native_rules/status_call(changed, "authority_validate", [native_roots/worker(changed), owner, views, plan, native_roots/ref(changed, "budget")]))
+    fn(same) => native_gen/unless(same, native_gen/equal(plan, previous_plan), fn(changed) => native_rules/status_call(changed, "authority_validate", [native_roots/worker(changed), owner, views, plan, schemas, native_roots/ref(changed, "budget")])),
+    fn(changed) => native_rules/status_call(changed, "authority_validate", [native_roots/worker(changed), owner, views, plan, schemas, native_roots/ref(changed, "budget")]))
   return result
 end
 // Build complete effective views and authorize the active plan before making
 // either draft state or a publication candidate visible.
-verb native_authority/prepare_views(builder: map, owner: map, policy: map, evaluation: map, plan: map, previous_views: map, previous_plan: map) -> list
+verb native_authority/prepare_views(builder: map, owner: map, policy: map, evaluation: map, plan: map, schemas: map, previous_views: map, previous_plan: map) -> list
   let [computed: map, prepared: map] = native_rules/checked_call(builder, "authority_views", [native_roots/worker(builder), policy, evaluation, previous_views, native_roots/ref(builder, "budget")], "views")
   let [views: map, rooted: map] = native_roots/retain(prepared, "authority_views", computed)
-  let ready: map = native_authority/validate_views(rooted, owner, views, plan, previous_views, previous_plan)
+  let ready: map = native_authority/validate_views(rooted, owner, views, plan, schemas, previous_views, previous_plan)
   return [views, ready]
 end
 
@@ -217,7 +223,9 @@ verb native_authority/stage_body(module: map) -> map
   let builder: map = native_gen/unless(opened, native_kernel/absent(native_rules/read(opened, work, "policy")), fn(configured)
     return native_rules/status_call(configured, "rule_refresh", [native_roots/ref(configured, "transaction"), native_roots/ref(configured, "budget")])
   end)
-  builder = native_authority/check_definition(builder, native_authority/owner(builder, work), native_rules/read(builder, work, "authorized_views"), definition)
+  let [schemas: map, with_schemas: map] = native_rules/checked_call(builder, "schemas", [native_roots/worker(builder), work, native_gen/ref(builder, "true"), native_roots/ref(builder, "budget")], "schemas")
+  let [rooted_schemas: map, rooted: map] = native_roots/retain(with_schemas, "schemas", schemas)
+  builder = native_authority/check_definition(rooted, native_authority/owner(rooted, work), native_rules/read(rooted, work, "authorized_views"), definition, rooted_schemas)
   builder = native_kernel/status(builder, "kernel_ok")
   let result: map = native_gen/finish(module, builder)
   return result

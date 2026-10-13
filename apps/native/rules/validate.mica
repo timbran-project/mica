@@ -18,7 +18,7 @@ verb native_rules/schemas_body(module: map) -> map
         native_gen/add(native_rules/read(committing, base, "version"), native_rules/ref(committing, "one"))))
       let [schema: map, allocated: map] = native_rules/allocate(ready, "RelationSchema", {
         "id" -> native_rules/read(ready, relation, "id"), "name" -> native_rules/read(ready, relation, "name"),
-        "policy" -> native_rules/read(ready, relation, "policy"), "keys" -> native_rules/read(ready, relation, "keys"), "arity" -> native_rules/read(ready, relation, "arity"), "schema_revision" -> revision})
+        "source" -> native_rules/read(ready, relation, "source"), "policy" -> native_rules/read(ready, relation, "policy"), "keys" -> native_rules/read(ready, relation, "keys"), "arity" -> native_rules/read(ready, relation, "arity"), "schema_revision" -> revision})
       let [updated: map, indexed: map] = native_rules/index_put(allocated, "schema_index", index, schema)
       return native_roots/store(indexed, index, updated)
     end)
@@ -92,6 +92,7 @@ verb native_rules/definition_body(module: map) -> map
   end
   let [head: map, with_head: map] = native_gen/bind(builder, "head", native_rules/schema_lookup(builder, native_rules/read(builder, definition, "head")))
   builder = native_rules/check(with_head, native_gen/negate(native_kernel/absent(head)), "unknown")
+  builder = native_rules/check(builder, native_kernel/absent(native_rules/read(builder, head, "source")), "schema")
   builder = native_rules/observe_schema(builder, head)
   builder = native_rules/validate_terms(builder, native_rules/read(builder, definition, "terms"), bound, native_rules/read(builder, head, "arity"), native_rules/ref(builder, "false"), native_rules/ref(builder, "false"))
   builder = native_rules/each(builder, "guard", native_rules/read(builder, definition, "guards"), fn(step, guard)

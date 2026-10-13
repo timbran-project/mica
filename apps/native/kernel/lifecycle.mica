@@ -192,9 +192,9 @@ verb native_kernel/prepare_body(module: map) -> map
     return result
   end)
   let [evaluation: map, rooted_evaluation: map] = native_roots/retain(builder, "evaluation", native_gen/field(builder, maintained, "evaluation"))
-  let [views: map, with_views: map] = native_authority/prepare_views(rooted_evaluation, native_kernel/load_field(rooted_evaluation, current, "owner"), policy, evaluation, plan,
+  let [views: map, with_views: map] = native_authority/prepare_views(rooted_evaluation, native_kernel/load_field(rooted_evaluation, current, "owner"), policy, evaluation, plan, schemas,
     native_kernel/load_field(rooted_evaluation, current, "policy_views"), native_kernel/load_field(rooted_evaluation, current, "rule_plan"))
-  let authorized: map = native_rules/status_call(with_views, "authority_changes", [worker, native_kernel/load_field(with_views, current, "owner"), views, native_kernel/load_field(with_views, work, "rule_changes"), native_roots/ref(with_views, "budget")])
+  let authorized: map = native_rules/status_call(with_views, "authority_changes", [worker, native_kernel/load_field(with_views, current, "owner"), views, native_kernel/load_field(with_views, work, "rule_changes"), schemas, native_roots/ref(with_views, "budget")])
   let [policy_revision: map, with_revision: map] = native_gen/bind(authorized, "policy_revision", native_kernel/load_field(with_views, current, "policy_revision"))
   builder = native_gen/unless(with_revision, native_gen/equal(views, native_kernel/load_field(with_revision, current, "policy_views")),
     fn(changed) => native_gen/assign(changed, policy_revision, native_gen/add(native_kernel/load_field(changed, current, "version"), native_gen/ref(changed, "one"))))

@@ -29,8 +29,15 @@ int main(void) {
     assert(mica_task_source_roundtrip_constants(&worker, &symbols, &registry, (void *)code.f_pointer) == 0);
     struct mica_KernelTransaction tx = {0};
     assert(mica_kernel_begin(&kernel, &worker, &tx, source_integer(7)) == 0);
-    assert(mica_kernel_declare(&tx, 705, 705, 2, 1, 1, 0) == 0);
-    assert(mica_kernel_declare(&tx, 706, 706, 3, 0, 0, 0) == 0);
+    const char *names[] = {"NativeResult", "NativeQuery", "RelationName", "Arity", "FunctionalKey"};
+    for (unsigned i = 0; i < 5; ++i) {
+        struct mica_IdResult name = mica_value_symbol_intern(&symbols, (const uint8_t *)names[i], strlen(names[i]), NULL);
+        assert(name.f_ok);
+        if (i < 2)
+            assert(mica_kernel_declare(&tx, 705 + i, name.f_number, 2 + i, i == 0 ? 1 : 0, i == 0 ? 1 : 0, 0) == 0);
+        else
+            assert(mica_kernel_declare_catalogue(&tx, 705 + i, name.f_number, i - 1) == 0);
+    }
     assert(mica_kernel_commit(&tx) == 0);
     assert(mica_kernel_end(&tx));
     mica_type_Value arguments = source_body_arguments(&worker, &symbols);

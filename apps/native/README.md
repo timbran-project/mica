@@ -134,6 +134,7 @@ The heap uses `kernel_heap_init`, which installs both kernel and value descripto
 | `kernel_begin(kernel, worker, transaction, tenant)` | Capture the snapshot and compile permissions for the authenticated tenant |
 | `kernel_set_retention_limit(kernel, worker, limit)` | Set the maximum number of transactions that retain snapshot roots |
 | `kernel_declare(transaction, id, name, arity, policy, keys, indexes)` | Stage a relation declaration with caller-assigned identity and symbol IDs |
+| `kernel_declare_catalogue(transaction, id, name, source)` | Stage a read-only metadata projection; sources 1, 2, and 3 select names, arities, and functional keys |
 | `kernel_catalogue(transaction, budget)` | Read immutable relation metadata, including staged declarations, with catalogue authority |
 | `kernel_set_authority_policy(transaction, root, catalogue, grant, read, write, export)` | Stage effective-policy relation IDs; zero means no permission source |
 | `kernel_write(transaction, id, tuple, asserted)` | Stage an assertion or retraction of a list-valued tuple |
@@ -146,11 +147,32 @@ The heap uses `kernel_heap_init`, which installs both kernel and value descripto
 | `kernel_release(kernel, worker)` | Remove the snapshot and history roots under exclusive ownership of the kernel control |
 
 `kernel_catalogue` returns a status and a managed `RelationSchemaIndex`, ordered by relation ID.
-Each entry contains the identity, name symbol ID, arity, conflict policy, key-column mask, and schema revision.
+Each entry contains the identity, name symbol ID, arity, source kind, conflict policy, key-column mask, and schema revision.
 Root the returned index before a safepoint. The index retains metadata without retaining fact rows, and later declarations cannot change a captured index.
 Enumeration records a whole-catalogue dependency, including when the catalogue is empty.
 A concurrent declaration makes commit return a conflict; ordinary fact updates preserve the shared schema index and do not cause this conflict.
 Draft declarations disappear on rollback. Budget exhaustion, cancellation, and permission failures return distinct statuses without a partial result.
+
+`RelationName(relation, name)`, `Arity(relation, arity)`, and
+`FunctionalKey(relation, slot, position)` are computed relation sources.
+The host declares their identities and names with `kernel_declare_catalogue`.
+Ordinary query and rule operators read their rows through the evaluation cache.
+Functional key slots follow ascending positions in the kernel's key-column mask.
+These sources include staged declarations and cannot accept writes or rule heads.
+
+Direct metadata queries require catalogue authority. Rules also require the defining
+tenant's source read and head export rights, checked at installation and against the
+candidate's final policy. Readers of an explicitly exported head need its read right;
+they do not inherit the installer's catalogue permission.
+Both direct and transitive metadata reads record a catalogue dependency.
+Concurrent declarations therefore conflict even when a rule query returned no rows.
+
+Metadata input trees are immutable. Fact-only updates share them; declarations add
+rows to persistent trees and feed the ordinary rule-maintenance delta path.
+Rollback discards private metadata rows and derived results together.
+The reference evaluator builds metadata inputs independently.
+`native_source_queries_relation_catalogue` compares generated source execution
+against Rust using the three queries required by `apps/compiler/emit.mica`.
 
 The history capacity must be positive. Each changing commit retains its before/after snapshots and net stored-fact deltas.
 Preparation freezes this record outside the publication mutex. Publication updates one ring slot and the current snapshot together.

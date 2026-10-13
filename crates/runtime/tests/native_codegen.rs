@@ -3540,7 +3540,7 @@ fn generate_native_source_example(
     let module = eval(
         &mut runner,
         &format!(
-            "return native_source/compile(native_tasks/definitions(), \"source_roundtrip\", {example:?}, {{:NativeResult -> 705, :NativeQuery -> 706}}, {method_ids})"
+            "return native_source/compile(native_tasks/definitions(), \"source_roundtrip\", {example:?}, {{:NativeResult -> 705, :NativeQuery -> 706, :RelationName -> 707, :Arity -> 708, :FunctionalKey -> 709}}, {method_ids})"
         ),
     );
     eprintln!(
@@ -4014,6 +4014,15 @@ fn native_source_converts_numbers_and_parses_decimals() {
 }
 
 #[test]
+fn native_source_queries_relation_catalogue() {
+    check_native_source_body(
+        include_str!("../../../apps/native/compiler/catalogue_tests.mica"),
+        "static void source_body_checks(struct mica_MemoryWorker *worker, struct mica_Kernel *kernel, struct mica_MemoryRoot *code, struct mica_SymbolTable *symbols) { (void)worker; (void)kernel; (void)code; (void)symbols; }\n",
+        &[],
+    );
+}
+
+#[test]
 fn native_source_executes_relation_value_algebra() {
     check_native_source_body(
         include_str!("../../../apps/native/compiler/algebra_tests.mica"),
@@ -4172,6 +4181,7 @@ fn load_native_kernel(runner: &mut SourceRunner, tasks: bool) {
         include_str!("../../../apps/native/kernel/indexes.mica"),
         include_str!("../../../apps/native/kernel/relations.mica"),
         include_str!("../../../apps/native/kernel/transactions.mica"),
+        include_str!("../../../apps/native/kernel/catalogue.mica"),
         include_str!("../../../apps/native/kernel/rule_indexes.mica"),
         include_str!("../../../apps/native/kernel/rules.mica"),
         include_str!("../../../apps/native/kernel/history.mica"),

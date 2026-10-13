@@ -103,10 +103,12 @@ verb native_rules/evaluate_body(module: map) -> map
   let builder: map = native_authority/check_permission(opened, work, "root")
   builder = native_kernel/store_field(builder, work, "rules_read", native_rules/ref(builder, "true"))
   let [plan: map, with_plan: map] = native_roots/retain(builder, "plan", native_rules/read(builder, work, "rule_plan"))
-  let [captured: map, with_capture: map] = native_rules/checked_call(with_plan, "rule_capture", [native_roots/worker(with_plan), native_rules/read(with_plan, native_rules/read(with_plan, work, "base"), "relations"), native_rules/read(with_plan, work, "changes"), plan, native_rules/ref(with_plan, "budget")], "evaluation")
+  let [captured: map, with_capture: map] = native_rules/checked_call(with_plan, "rule_capture", [native_roots/worker(with_plan), native_rules/read(with_plan, native_rules/read(with_plan, work, "base"), "relations"), native_rules/read(with_plan, work, "changes"), plan, native_gen/zero(native_kernel/pointer("RuleEvaluation")), native_rules/ref(with_plan, "budget")], "evaluation")
   let [evaluation: map, ready: map] = native_roots/retain(with_capture, "evaluation", captured)
   // The explicit result exposes every captured relation, so observe each input.
-  builder = native_rules/each(ready, "captured_rows", native_rules/read(ready, evaluation, "first"), fn(step, rows)
+  builder = native_rules/each(ready, "captured_rows", native_rules/read(ready, evaluation, "first"), fn(input_step, rows)
+    let step: map = input_step
+    step = native_gen/unless(step, native_kernel/absent(native_rules/read(step, native_rules/read(step, rows, "relation"), "source")), fn(catalogue) => native_kernel/store_field(catalogue, work, "catalogue_read", native_gen/ref(catalogue, "true")))
     let id: map = native_rules/read(step, rows, "id")
     let base: map = native_rules/read(step, work, "base")
     let [relation: map, found: map] = native_gen/bind(step, "observed_schema", native_gen/call(step, "kernel_schema_index_lookup", [native_rules/read(step, base, "schemas"), id]))
@@ -115,7 +117,10 @@ verb native_rules/evaluate_body(module: map) -> map
     let result: map = native_rules/status_call(checked, "rule_head_observe", [native_roots/worker(checked), work, id, schema, native_rules/ref(checked, "true")])
     return result
   end)
-  builder = native_gen/when(builder, native_kernel/absent(plan), fn(empty) => native_rules/result(empty, native_rules/ref(empty, "kernel_ok"), {"evaluation" -> evaluation}))
+  builder = native_gen/when(builder, native_kernel/absent(plan), fn(empty)
+    let finished: map = native_rules/status_call(empty, "rule_finish", [native_roots/worker(empty), evaluation, native_rules/ref(empty, "budget")])
+    return native_rules/result(finished, native_rules/ref(finished, "kernel_ok"), {"evaluation" -> evaluation})
+  end)
   builder = native_rules/each(builder, "vertex", native_rules/read(builder, plan, "vertices"), fn(input_step, vertex)
     let step: map = input_step
     let generated_result: map = native_rules/each(step, "entry", native_rules/read(step, vertex, "rules"), fn(rule_step, entry) => native_rules/status_call(rule_step, "rule_lower", [native_roots/worker(rule_step), evaluation, native_rules/read(rule_step, entry, "rule"), native_rules/ref(rule_step, "budget")]))
@@ -136,8 +141,10 @@ verb native_rules/evaluate_body(module: map) -> map
     return generated_result
   end)
   builder = native_rules/status_call(builder, "rule_finish", [native_roots/worker(builder), evaluation, native_rules/ref(builder, "budget")])
-  let [views: map, authorized: map] = native_authority/prepare_views(builder, native_authority/owner(builder, work), native_rules/read(builder, work, "policy"), evaluation, plan,
-    native_rules/read(builder, work, "authorized_views"), native_rules/read(builder, work, "authorized_plan"))
+  let [schemas: map, with_schemas: map] = native_rules/checked_call(builder, "schemas", [native_roots/worker(builder), work, native_gen/ref(builder, "true"), native_roots/ref(builder, "budget")], "schemas")
+  let [rooted_schemas: map, schema_ready: map] = native_roots/retain(with_schemas, "schemas", schemas)
+  let [views: map, authorized: map] = native_authority/prepare_views(schema_ready, native_authority/owner(schema_ready, work), native_rules/read(schema_ready, work, "policy"), evaluation, plan, rooted_schemas,
+    native_rules/read(schema_ready, work, "authorized_views"), native_rules/read(schema_ready, work, "authorized_plan"))
   builder = authorized
   builder = native_rules/result(builder, native_rules/ref(builder, "kernel_ok"), {"evaluation" -> evaluation})
   let generated_result: map = native_gen/finish(module, builder)

@@ -27,7 +27,7 @@ verb native_kernel/schemas() -> list
     ["Scan", [["pattern", word], ["after", word], ["rows", word], ["order", :U64], ["mask", :U64], ["prefix", :U64], ["capacity", :U64], ["count", :U64], ["visited", :U64], ["more", :Bool]]],
     ["Node", [["left", node], ["right", node], ["row", word], ["height", :U64], ["present", :Bool]]],
     ["Index", [["next", native_kernel/pointer("Index")], ["mask", :U64], ["tree", node]]],
-    ["Relation", [["next", relation], ["id", :U64], ["name", :U64], ["arity", :U64],
+    ["Relation", [["next", relation], ["id", :U64], ["name", :U64], ["source", :U64], ["arity", :U64],
       ["policy", :U64], ["keys", :U64], ["schema_revision", :U64], ["indexes", native_kernel/pointer("Index")]]],
     ["Snapshot", [["owner", word], ["policy", native_kernel/pointer("AuthorityPolicy")], ["policy_views", native_kernel/pointer("AuthorityViews")], ["policy_revision", :U64], ["evaluation", native_kernel/pointer("RuleEvaluation")], ["version", :U64], ["relations", relation], ["rules", native_kernel/pointer("RuleIndex")], ["schemas", native_kernel/pointer("RelationSchemaIndex")], ["rule_heads", native_kernel/pointer("RuleGenerationIndex")], ["rule_plan", native_kernel/pointer("RulePlan")], ["programs", native_kernel/pointer("ProgramIndex")]]],
     ["Rule", [["next", rule], ["id", :U64], ["head", :U64], ["arity", :U64], ["active", :Bool], ["revision", :U64], ["definition", native_kernel/pointer("RuleDef")]]],
@@ -216,6 +216,8 @@ verb native_kernel/types(input: map) -> map
     ["kernel_default_retention", :U64, native_value/hex(1024)],
     ["kernel_unlimited", :U64, "ffffffffffffffff"], ["kernel_cancelled", :U64, native_value/hex(11)], ["kernel_limit", :U64, native_value/hex(10)], ["rule_default_limit", :U64, native_value/hex(16777216)], ["rule_default_bytes", :U64, native_value/hex(67108864)],
     ["kernel_oom", :U64, native_value/hex(8)], ["kernel_closed", :U64, native_value/hex(9)],
+    ["kernel_source_stored", :U64, native_value/hex(0)], ["kernel_source_names", :U64, native_value/hex(1)],
+    ["kernel_source_arity", :U64, native_value/hex(2)], ["kernel_source_keys", :U64, native_value/hex(3)],
     ["kernel_policy_set", :U64, native_value/hex(0)], ["kernel_policy_functional", :U64, native_value/hex(1)],
     ["kernel_policy_event", :U64, native_value/hex(2)], ["kernel_64", :U64, native_value/hex(64)]]
   let layout: int = 100

@@ -1,0 +1,86 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+// Catalogue projections are immutable inputs to query and rule evaluation.
+// Their rows live in the evaluation cache, never in the asserted relation.
+verb native_catalogue/immediate(builder: map, kind: string, payload: map) -> list
+  let input: map = payload
+  let checked: map = builder
+  if kind == "symbol"
+    input = native_gen/convert(:U32, payload)
+    checked = native_rules/check(checked, native_gen/equal(native_gen/convert(:U64, input), payload), "limit")
+  end
+  let [value: map, ready: map] = native_gen/checked_bind(checked, kind, native_gen/call(checked, string_concat("value_", kind), [input]), "ok", fn(failed) => native_rules/error(failed, "limit"))
+  return [native_gen/field(ready, value, "value"), ready]
+end
+verb native_catalogue/offer(builder: map, output: map, cells: list) -> map
+  let [row: map, ready: map] = native_query/tuple(builder, cells)
+  let result: map = native_rules/offer_field(ready, output, "stored", row, true)
+  return result
+end
+verb native_catalogue/project(builder: map, output: map, metadata: map, source: map) -> map
+  let relation: map = native_rules/read(builder, metadata, "relation")
+  let [id: map, ready: map] = native_catalogue/immediate(builder, "identity", native_rules/read(builder, relation, "id"))
+  ready = native_gen/when(ready, native_gen/equal(source, native_gen/ref(ready, "kernel_source_names")), fn(names)
+    let [name: map, named: map] = native_catalogue/immediate(names, "symbol", native_rules/read(names, native_rules/read(names, metadata, "relation"), "name"))
+    return native_catalogue/offer(named, output, [id, name])
+  end)
+  ready = native_gen/when(ready, native_gen/equal(source, native_gen/ref(ready, "kernel_source_arity")), fn(arities)
+    let [arity: map, sized: map] = native_catalogue/immediate(arities, "int", native_gen/bitcast(:I64, native_rules/read(arities, native_rules/read(arities, metadata, "relation"), "arity")))
+    return native_catalogue/offer(sized, output, [id, arity])
+  end)
+  let result: map = native_gen/when(ready, native_gen/equal(source, native_gen/ref(ready, "kernel_source_keys")), fn(keys)
+    let [slot: map, counted: map] = native_gen/bind(keys, "key_slot", native_gen/ref(keys, "zero"))
+    return native_kernel/columns(counted, native_rules/read(counted, native_rules/read(counted, metadata, "relation"), "arity"), fn(column, position, bit)
+      let mask: map = native_rules/read(column, native_rules/read(column, metadata, "relation"), "keys")
+      return native_gen/when(column, native_kernel/column_is_bound(mask, bit), fn(bound)
+        let [slot_value: map, slotted: map] = native_catalogue/immediate(bound, "int", native_gen/bitcast(:I64, slot))
+        let [position_value: map, positioned: map] = native_catalogue/immediate(slotted, "int", native_gen/bitcast(:I64, position))
+        let offered: map = native_catalogue/offer(positioned, output, [id, slot_value, position_value])
+        return native_gen/assign(offered, slot, native_gen/add(slot, native_gen/ref(offered, "one")))
+      end)
+    end)
+  end)
+  return result
+end
+verb native_catalogue/materialize(builder: map, evaluation: map, previous: map) -> map
+  let result: map = native_rules/each(builder, "projection", native_rules/read(builder, evaluation, "first"), fn(step, output)
+    let source: map = native_rules/read(step, native_rules/read(step, output, "relation"), "source")
+    return native_gen/unless(step, native_kernel/absent(source), fn(computed)
+      let [prior: map, rooted: map] = native_roots/retain(computed, "prior_projection", native_gen/zero(native_kernel/pointer("RuleRows")))
+      let ready: map = native_gen/unless(rooted, native_kernel/absent(previous), fn(cached)
+        return native_roots/store(cached, prior, native_rules/rows_lookup(cached, previous, native_rules/read(cached, output, "id")))
+      end)
+      ready = native_gen/unless(ready, native_kernel/absent(prior), fn(cached) => native_kernel/store_field(cached, output, "stored", native_rules/read(cached, prior, "stored")))
+      // Schemas are immutable and add-only. Existing metadata needs no rebuild.
+      ready = native_rules/each(ready, "metadata", native_rules/read(ready, evaluation, "first"), fn(entry, metadata)
+        let [added: map, marked: map] = native_gen/bind(entry, "new_metadata", native_gen/ref(entry, "true"))
+        let checked: map = native_gen/unless(marked, native_kernel/absent(prior), fn(cached)
+          return native_gen/assign(cached, added, native_kernel/absent(native_rules/rows_lookup(cached, previous, native_rules/read(cached, metadata, "id"))))
+        end)
+        return native_gen/when(checked, added, fn(uncached) => native_catalogue/project(uncached, output, metadata, source))
+      end)
+      ready = native_kernel/store_field(ready, output, "all", native_rules/read(ready, output, "stored"))
+      return native_rules/release_root(ready, prior)
+    end)
+  end)
+  return result
+end
+
+// Schema lookup avoids scanning the committed relation catalogue on each read.
+verb native_catalogue/read_permission(builder: map, work: map, id: map) -> map
+  let [source: map, ready: map] = native_gen/bind(builder, "relation_source", native_gen/ref(builder, "kernel_source_stored"))
+  let base: map = native_rules/read(ready, work, "base")
+  let [schema: map, found: map] = native_gen/bind(ready, "read_schema", native_gen/call(ready, "kernel_schema_index_lookup", [native_rules/read(ready, base, "schemas"), id]))
+  ready = native_gen/branch(found, native_kernel/absent(schema), fn(undeclared)
+    let [change: map, staged: map] = native_gen/bind(undeclared, "read_change", native_gen/call(undeclared, "kernel_change", [work, id]))
+    return native_gen/unless(staged, native_kernel/absent(change), fn(draft) => native_gen/assign(draft, source, native_rules/read(draft, native_rules/read(draft, change, "after"), "source")))
+  end, fn(committed) => native_gen/assign(committed, source, native_rules/read(committed, schema, "source")))
+  let result: map = native_gen/branch(ready, native_kernel/absent(source),
+    fn(stored) => native_authority/check_permission(stored, work, "read", id),
+    fn(computed)
+      let permitted: map = native_authority/check_permission(computed, work, "catalogue")
+      return native_kernel/store_field(permitted, work, "catalogue_read", native_gen/ref(permitted, "true"))
+    end)
+  return result
+end

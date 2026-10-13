@@ -9,7 +9,7 @@ verb native_rules/vertex_body(module: map) -> map
   builder = native_gen/unless(ready, native_kernel/absent(found), fn(existing) => native_rules/result(existing, native_rules/ref(existing, "kernel_ok"), {"vertex" -> found}))
   let schema: map = native_rules/schema_lookup(builder, native_rules/ref(builder, "id"))
   builder = native_rules/check(builder, native_gen/negate(native_kernel/absent(schema)), "unknown")
-  let [vertex: map, created: map] = native_rules/allocate(builder, "RuleVertex", {"schema" -> native_rules/read(builder, schema, "schema_revision"), "id" -> native_rules/ref(builder, "id"), "next" -> native_rules/read(builder, plan, "vertices")})
+  let [vertex: map, created: map] = native_rules/allocate(builder, "RuleVertex", {"source" -> native_rules/read(builder, schema, "source"), "schema" -> native_rules/read(builder, schema, "schema_revision"), "id" -> native_rules/ref(builder, "id"), "next" -> native_rules/read(builder, plan, "vertices")})
   let [index: map, indexed: map] = native_rules/index_put(created, "rule_vertex_index", native_rules/read(created, plan, "index"), vertex)
   builder = native_kernel/store_field(indexed, plan, "index", index)
   builder = native_kernel/store_field(builder, plan, "vertices", vertex)
