@@ -37,8 +37,14 @@ The entry advances the current image, stages effects, and requests completion, a
 The source compiler emits one shared native body per Mica program, with separate entry wrappers for its resumptions.
 Each wrapper selects the restoration of its captured environment and delivered input before entering the shared control-flow graph.
 The body roots source registers for the duration of that entry and unlinks them before the wrapper makes a tail transfer.
-All entry points allocate that complete frame, including registers needed only by other entry points.
+All entry points allocate the program's shared slot layout.
 Shared blocks execute directly, without creating extra task images or transaction boundaries.
+
+Register roots occupy one zeroed native array. A loop registers its slots, keeping initialization code independent of the register count.
+Values reload through these slots after collection. Success and failure both restore the enclosing root chain.
+
+Registers with disjoint live intervals share slots. Registers needed within the same instruction keep separate slots, including operands, destinations, and exception captures.
+Resumptions restore only registers live at their entry, so dead values cannot overwrite reused slots.
 
 Preparation orders the effects and publishes an immutable `TaskBoundary` before the kernel commit.
 The kernel memory control bounds preparation and checks cancellation during graph allocation and copying.

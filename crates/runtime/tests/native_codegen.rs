@@ -2591,6 +2591,16 @@ let loop = native_source/analyse({{:registers -> 2, :code -> [
   [:Load, 0, true], [:Load, 1, 42], [:CommitValue, 0],
   [:Branch, 0, 2, 4], [:Return, [:Register, 1]]]}}, 0)
 native/ensure(loop[:captures][2] == [1], "loop liveness reaches a fixed point")
+let sequential = native_source/analyse({{:registers -> 3, :code -> [
+  [:Load, 0, 7], [:Binary, 1, :Add, 0, 0], [:Load, 2, 9], [:Return, [:Register, 2]]]}}, 0)
+let slots = native_source/frame_slots(sequential, [0, 1, 2, 3])
+native/ensure(slots[:count] == 2 && slots[:registers][0] == slots[:registers][2], "disjoint register intervals share a root")
+let reused_parameter = native_source/analyse({{:registers -> 3, :code -> [
+  [:Branch, 0, 1, 3], [:Load, 2, 17], [:Return, [:Register, 2]],
+  [:Load, 1, 42], [:Return, [:Register, 1]]]}}, 2)
+let parameter_slots = native_source/frame_slots(reused_parameter, [0, 1, 2, 3, 4])
+native/ensure(parameter_slots[:count] == 1, "disjoint parameter and local intervals share storage")
+native/ensure(reused_parameter[:live][0] == {{0 -> true}}, "dead parameter must not overwrite the live entry value")
 return true
 "#,
             ),
@@ -2609,6 +2619,21 @@ for definition in emitted[:methods]
   let analysis = native_source/analyse(native_exceptions/lower(definition[:program]), len(definition[:parameters]))
   let regions = native_source/regions(analysis)
   let pcs = sort([pc for pc, present in analysis[:reachable]])
+  let slots = native_source/frame_slots(analysis, pcs)
+  for pc in pcs
+    let active = analysis[:live][pc]
+    if !native_source/dead_load(analysis, pc)
+      for reg in [@analysis[:instructions][pc][:reads], @analysis[:instructions][pc][:writes]]
+        active[reg] = true
+      end
+    end
+    let occupied = {{}}
+    for reg, present in active
+      let slot = slots[:registers][reg]
+      native/ensure(!map_contains_key(occupied, slot), "simultaneously live registers cannot share a root")
+      occupied[slot] = true
+    end
+  end
   let shared = native_source/program_blocks(analysis, [region[:start] for region in regions], pcs)
   let lowered = []
   for block in shared
@@ -3573,6 +3598,124 @@ return true
         );
     }
 }
+
+#[test]
+fn native_root_slots_preserve_values_and_unlink_their_scope() {
+    let mut previous = None;
+    for tier in [true, false] {
+        let mut runner = runner(tier);
+        load_native_values(&mut runner);
+        runner
+            .run_filein(include_str!("../../../apps/native/memory/roots.mica"))
+            .unwrap();
+        let generated = eval(&mut runner, r#"
+let module = native_value/definitions()
+let instruction_counts = {}
+for spec in [["empty", 0], ["single", 1], ["many", 64]]
+  let name = string_concat("root_slots_", spec[0])
+  module = native_memory/declare(module, name, :Bool, [
+    ["worker", native_memory/record_pointer("MemoryWorker"), :Borrow],
+    ["input", native_memory/record_pointer("MemoryRoot"), :Borrow], ["fail", :Bool, :Value]],
+    [:ReadMemory, :WriteMemory, :Allocate, :Release, :Block, :Relocate], :Value, "")
+  let failed = fn(body) => native_roots/return_value(body, native_gen/zero(:Bool))
+  let builder = native_roots/context(module, name, fn(body, reason) => failed(body))
+  let [slots, ready] = native_roots/slots(builder, "slots", spec[1])
+  builder = ready
+  if spec[1] == 0
+    builder = native_roots/return_value(builder, native_gen/equal(slots, native_gen/zero(native_memory/record_pointer("MemoryRoot"))))
+  else
+    let length = native_gen/divide(native_gen/sizeof([:Array, [:Record, "MemoryRoot"], spec[1]]), native_gen/sizeof([:Record, "MemoryRoot"]))
+    builder = native_gen/for_range(builder, "fill", native_gen/zero(:U64), length, fn(body, index)
+      let root = native_roots/root_value(body, native_gen/offset(slots, index), native_value/word())
+      let checked = native_gen/unless(body, native_gen/equal(root, native_gen/zero(native_value/word())), failed)
+      let source = native_roots/root_value(checked, native_gen/ref(checked, "input"), native_value/word())
+      let [frob, allocated] = native_gen/checked_bind(checked, "frob",
+        native_gen/call(checked, "value_frob", [native_roots/worker(checked), index, source]), "ok", failed)
+      return native_roots/store(allocated, root, native_gen/field(allocated, frob, "value"))
+    end)
+    builder = native_gen/do_call(builder, "value_root_set", [native_gen/ref(builder, "input"), native_gen/zero(native_value/word())])
+    builder = native_gen/when(builder, native_gen/ref(builder, "fail"), failed)
+    let [collected, polled] = native_gen/bind(builder, "collected",
+      native_gen/call(builder, "memory_safepoint", [native_roots/worker(builder), native_gen/ref(builder, "true")]))
+    builder = native_gen/unless(polled, collected, failed)
+    builder = native_gen/for_range(builder, "check", native_gen/zero(:U64), length, fn(body, index)
+      let value = native_roots/root_value(body, native_gen/offset(slots, index), native_value/word())
+      let [frob, checked] = native_gen/checked_bind(body, "frob", native_gen/call(body, "value_as_frob", [value]), "ok", failed)
+      let header = native_gen/field(checked, frob, "header")
+      checked = native_gen/unless(checked, native_gen/equal(native_gen/read(native_gen/field(checked, header, "delegate")), index), failed)
+      return native_gen/do_call(checked, "value_root_set", [native_gen/ref(checked, "input"), value])
+    end)
+    builder = native_roots/return_value(builder, native_gen/ref(builder, "true"))
+  end
+  module = native_gen/finish(module, builder)
+  let blocks = {}
+  for block in module[:state][:blocks]
+    if block[1] == module[:functions][name]
+      blocks[block[0]] = true
+    end
+  end
+  instruction_counts[spec[0]] = len([row for row in module[:state][:instructions] if map_contains_key(blocks, row[1])])
+end
+native/ensure(instruction_counts["single"] == instruction_counts["many"], "root initialization must not unroll per slot")
+return native/emit_c(module[:state])
+"#).with_str(str::to_owned).unwrap();
+        if let Some(previous) = &previous {
+            assert_eq!(&generated, previous);
+            continue;
+        }
+        previous = Some(generated.clone());
+        let platform = eval(&mut runner, "return native_memory/platform()")
+            .with_str(str::to_owned)
+            .unwrap();
+        check_native_source_fixture(&format!(
+            "{generated}\n{platform}\n{}\n{}\n{ROOT_SLOT_CHECKS}",
+            include_str!("../../../native/platform/allocation.c"),
+            include_str!("../../../native/platform/mutex.c"),
+        ));
+    }
+}
+
+const ROOT_SLOT_CHECKS: &str = r#"
+#include <assert.h>
+int main(void) {
+    struct mica_MemoryHeap heap = {0};
+    struct mica_MemoryWorker worker = {0};
+    struct mica_MemoryRoot input = {0};
+    assert(mica_value_heap_init(&heap));
+    assert(mica_memory_worker_init(&worker, &heap, 4096) && mica_memory_enter(&worker));
+    assert(mica_memory_root_push(&worker, &input));
+    assert(mica_root_slots_empty(&worker, &input, false));
+    bool (*checks[])(struct mica_MemoryWorker *, struct mica_MemoryRoot *, bool) = {
+        mica_root_slots_single, mica_root_slots_many
+    };
+    for (unsigned which = 0; which < 2; ++which) {
+        for (unsigned fail = 0; fail < 2; ++fail) {
+            struct mica_ValueResult text = mica_value_string(&worker, (const uint8_t *)"retained", 8);
+            assert(text.f_ok);
+            mica_value_root_set(&input, text.f_value);
+            uint64_t collections = heap.f_collections;
+            assert(checks[which](&worker, &input, fail) == !fail);
+            assert(worker.f_roots == &input && !input.f_next);
+            if (!fail) {
+                assert(heap.f_collections > collections);
+                struct mica_HeapFrobResult frob = mica_value_as_frob(mica_value_root_get(&input));
+                assert(frob.f_ok && frob.f_header->f_delegate == (which ? 63 : 0));
+                struct mica_HeapStringResult value = mica_value_as_string(frob.f_header->f_value);
+                assert(value.f_ok && value.f_header->f_length == 8);
+                assert(!memcmp(value.f_header->f_data, "retained", 8));
+            }
+        }
+    }
+    assert(mica_memory_leave(&worker));
+    assert(!mica_root_slots_many(&worker, &input, false));
+    assert(worker.f_roots == &input && !input.f_next);
+    assert(mica_memory_enter(&worker) && mica_memory_root_pop(&worker, &input));
+    assert(mica_memory_safepoint(&worker, true) && !heap.f_retained && !worker.f_roots);
+    assert(mica_memory_leave(&worker) && mica_memory_worker_release(&worker));
+    assert(mica_memory_heap_release(&heap));
+    return 0;
+}
+"#;
 
 fn generate_native_source(
     interpreter_only: bool,

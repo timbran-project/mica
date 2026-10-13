@@ -211,7 +211,7 @@ verb native_source/program_body(module: map, program: map, continuations: map) -
   let index: int = 0
   for region in program[:regions]
     cases = [@cases, [native_source/number(builder, index), fn(body)
-      let restored: map = native_source/restore_frame(body, region)
+      let restored: map = native_source/restore_frame(body, region, analysis[:live][region[:start]])
       return native_gen/jump_to(restored, native_source/block_label(region[:start]))
     end]]
     index = index + 1

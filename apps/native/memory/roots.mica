@@ -54,6 +54,32 @@ verb native_roots/retain(builder: map, label: string, value: map) -> list
   ready = native_gen/unless(with_push, pushed, fn(failed) => native_roots/fail(failed, "closed"))
   return [rooted, ready]
 end
+
+// Zeroed slots hold immediate zero until assigned. Register the array with a
+// target loop, keeping initialization code independent of the number of roots.
+verb native_roots/slots(builder: map, label: string, count: int) -> list
+  native/ensure(count >= 0, "root slot count must be nonnegative")
+  let root: list = [:Record, "MemoryRoot"]
+  if count == 0
+    return [native_gen/zero([:Pointer, root, :Mutable]), builder]
+  end
+  let array: list = [:Array, root, count]
+  let [storage: map, allocated: map] = native_gen/bind(builder, label, native_gen/zero(array))
+  let [data: map, addressed: map] = native_gen/bind(allocated, string_concat(label, "_data"),
+    native_gen/element(native_gen/address(storage), native_gen/zero(:U64)))
+  let length: map = native_gen/divide(native_gen/sizeof(array), native_gen/sizeof(root))
+  let ready: map = addressed
+  // The scope owns the entire array. Even a partial registration must unlink
+  // its roots before returning through the scope's failure handler.
+  ready[:scope_roots] = [@ready[:scope_roots], data]
+  ready = native_gen/for_range(ready, "root", native_gen/zero(:U64), length, fn(body, index)
+    let [pushed: map, registered: map] = native_gen/bind(body, "root_registered",
+      native_gen/call(body, "memory_root_push", [native_roots/worker(body), native_gen/offset(data, index)]))
+    return native_gen/unless(registered, pushed, fn(failed) => native_roots/fail(failed, "closed"))
+  end, native_gen/ref(ready, "memory_n1"))
+  return [data, ready]
+end
+
 verb native_roots/open_scope(input: map, failure) -> map
   let builder: map = input
   builder[:scope_failure] = failure

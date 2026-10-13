@@ -25,20 +25,65 @@ verb native_source/frame_registers(program: map, pcs: list) -> map
   return needed
 end
 
+// One interval conservatively covers every use, definition, and live point of
+// a register. Closed intervals keep operands and destinations separate within
+// an instruction, including its exceptional path and temporary allocations.
+verb native_source/frame_slots(program: map, pcs: list) -> map
+  let needed: map = native_source/frame_registers(program, pcs)
+  let intervals: map = {}
+  for pc in pcs
+    let registers: list = [reg for reg, present in program[:live][pc]]
+    if !native_source/dead_load(program, pc)
+      registers = [@registers, @program[:instructions][pc][:reads], @program[:instructions][pc][:writes]]
+    end
+    for reg in registers
+      if !map_contains_key(needed, reg)
+        continue
+      end
+      let interval: list = index_or(intervals, reg, [pc, pc])
+      if pc < interval[0]
+        interval[0] = pc
+      end
+      if interval[1] < pc
+        interval[1] = pc
+      end
+      intervals[reg] = interval
+    end
+  end
+  let slots: map = {}
+  let ends: list = []
+  for [first, last, reg] in sort([[interval[0], interval[1], reg] for reg, interval in intervals])
+    let slot: int = 0
+    while slot < len(ends) && ends[slot] >= first
+      slot = slot + 1
+    end
+    if slot == len(ends)
+      ends = [@ends, last]
+    else
+      ends[slot] = last
+    end
+    slots[reg] = slot
+  end
+  native/ensure(len(slots) == len(needed), "source register has no live interval")
+  return {:registers -> slots, :count -> len(ends)}
+end
+
 verb native_source/allocate_frame(input: map, program: map, pcs: list) -> map
   let builder: map = input
   let registers: map = {}
-  let needed: map = native_source/frame_registers(program, pcs)
-  for reg in sort([reg for reg, present in needed])
-    let [root: map, ready: map] = native_roots/retain(builder, string_concat("r", to_literal(reg)), native_gen/zero(native_value/word()))
-    registers[reg] = root
-    builder = ready
+  let layout: map = native_source/frame_slots(program, pcs)
+  let [slots: map, allocated: map] = native_roots/slots(builder, "registers", layout[:count])
+  builder = allocated
+  for reg, position in layout[:registers]
+    let slot: map = native_gen/offset(slots, native_source/number(builder, position))
+    registers[reg] = native_roots/root_value(builder, slot, native_value/word())
   end
   builder[:source_registers] = registers
+  builder = native_gen/note(builder, :Purpose, string_concat("Mica register slots ", to_literal(layout[:registers])))
   return builder
 end
 
-verb native_source/restore_frame(input: map, region: map) -> map
+verb native_source/restore_frame(input: map, region: map, live: map) -> map
   let builder: map = input
   if region[:pop_handler]
     let current: map = native_handlers/current(builder)
@@ -48,13 +93,15 @@ verb native_source/restore_frame(input: map, region: map) -> map
   let needed: map = builder[:source_registers]
   let position: int = 0
   for reg in region[:restore]
-    if map_contains_key(needed, reg)
+    // A dead restored register may share a slot with a live one. Restore only
+    // the values this entry can read, while preserving environment positions.
+    if map_contains_key(live, reg) && map_contains_key(needed, reg)
       let environment: map = native_kernel/load_field(builder, native_handlers/current(builder), "environment")
       builder = native_source/assign(builder, reg, native_query/cell(builder, environment, native_source/number(builder, position)))
     end
     position = position + 1
   end
-  if region[:input] >= 0 && map_contains_key(needed, region[:input])
+  if region[:input] >= 0 && map_contains_key(live, region[:input]) && map_contains_key(needed, region[:input])
     builder = native_source/assign(builder, region[:input], native_kernel/load_field(builder, native_handlers/current(builder), "input"))
   end
   return builder
