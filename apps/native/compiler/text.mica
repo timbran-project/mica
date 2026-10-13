@@ -1,0 +1,113 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+// Source text operations share rooted, budgeted construction. Character
+// positions are Unicode scalars; bytes determine copying and allocation costs.
+verb native_text/name(module: map, operation: string) -> string
+  return string_concat(module[:source_prefix], "_text_", operation)
+end
+verb native_text/append(builder: map, output: map, value: map) -> map
+  let header: map = native_gen/expression(native_memory/record_pointer("HeapString"), :UnpackPointer, [value])
+  let charged: map = native_query/charge(builder, native_kernel/load_field(builder, header, "length"), native_gen/ref(builder, "zero"))
+  let [joined: map, ready: map] = native_query/value(charged, "value_string_concat", [native_roots/worker(charged), output, value])
+  let result: map = native_roots/store(ready, output, joined)
+  return result
+end
+verb native_text/assemble_body(module: map) -> map
+  let builder: map = native_queries/budget_scope(native_gen/context(module, native_text/name(module, "assemble")))
+  let parts: map = native_roots/ref(builder, "parts")
+  let separator: map = native_roots/ref(builder, "separator")
+  builder = native_builtins/kind_check(builder, parts, "list")
+  builder = native_builtins/kind_check(builder, separator, "string")
+  let [empty: map, initialized: map] = native_query/value(builder, "value_string", [native_roots/worker(builder),
+    native_gen/zero([:Pointer, :U8, :Const]), native_gen/ref(builder, "zero")])
+  let [output: map, retained: map] = native_roots/retain(initialized, "text", empty)
+  builder = native_gen/for_range(retained, "part", native_gen/ref(retained, "zero"), native_query/width(retained, parts), fn(step, index)
+    let polled: map = native_query/poll_interval(step, index)
+    let part: map = native_query/cell(polled, parts, index)
+    let checked: map = native_builtins/kind_check(polled, part, "string")
+    checked = native_gen/when(checked, native_gen/ref(checked, "characters"), fn(character)
+      return native_tasks/check(character, native_gen/equal(native_access/length(character, part, "string"), native_gen/ref(character, "one")), "schema")
+    end)
+    checked = native_gen/unless(checked, native_kernel/absent(index), fn(separated) => native_text/append(separated, output, separator))
+    return native_text/append(checked, output, part)
+  end)
+  let target: map = native_roots/root_value(builder, native_gen/ref(builder, "output"), native_value/word())
+  builder = native_roots/store(builder, target, output)
+  let result: map = native_gen/finish(module, native_tasks/attempt_status(builder, "ok"))
+  return result
+end
+verb native_text/characters_body(module: map) -> map
+  let builder: map = native_queries/budget_scope(native_gen/context(module, native_text/name(module, "characters")))
+  let text: map = native_roots/ref(builder, "text")
+  builder = native_builtins/kind_check(builder, text, "string")
+  let [empty: map, initialized: map] = native_query/tuple(builder, [])
+  let [output: map, retained: map] = native_roots/retain(initialized, "characters", empty)
+  builder = native_gen/for_range(retained, "scalar", native_gen/ref(retained, "zero"), native_access/length(retained, text, "string"), fn(step, index)
+    let polled: map = native_query/poll_interval(step, index)
+    let [scalar: map, sliced: map] = native_query/value(polled, "value_string_slice", [native_roots/worker(polled), text, index,
+      native_gen/add(index, native_gen/ref(polled, "one"))])
+    let [appended: map, ready: map] = native_query/value(sliced, "kernel_query_append", [native_roots/worker(sliced), output, scalar])
+    return native_roots/store(ready, output, appended)
+  end)
+  let target: map = native_roots/root_value(builder, native_gen/ref(builder, "output"), native_value/word())
+  builder = native_roots/store(builder, target, output)
+  let result: map = native_gen/finish(module, native_tasks/attempt_status(builder, "ok"))
+  return result
+end
+verb native_text/definitions(input: map) -> map
+  let assembly: bool = false
+  let characters: bool = false
+  for program in input[:source_programs]
+    for instruction in program[:analysis][:description][:code]
+      if instruction[0] == :BuiltinCall
+        assembly = assembly || native/contains([:string_concat, :string_join, :string_from_chars], instruction[2])
+        characters = characters || instruction[2] == :string_chars
+      end
+    end
+  end
+  let module: map = input
+  let parameters: list = [["worker", native_memory/record_pointer("MemoryWorker"), :Borrow],
+    ["attempt", native_tasks/pointer("Attempt"), :Borrow], ["transaction", native_kernel/pointer("Transaction"), :Borrow]]
+  let output: list = ["output", native_memory/record_pointer("MemoryRoot"), :Borrow]
+  if assembly
+    module = native_memory/declare(module, native_text/name(module, "assemble"), :U64, [@parameters,
+      ["parts", native_value/word(), :Gc], ["separator", native_value/word(), :Gc], ["characters", :Bool, :Value], output], native_tasks/effects(), :Value, "")
+    module = native_text/assemble_body(module)
+  end
+  if characters
+    module = native_memory/declare(module, native_text/name(module, "characters"), :U64, [@parameters,
+      ["text", native_value/word(), :Gc], output], native_tasks/effects(), :Value, "")
+    module = native_text/characters_body(module)
+  end
+  return module
+end
+verb native_text/construct(builder: map, operation: string, arguments: list) -> list
+  let [output: map, ready: map] = native_roots/retain(builder, operation, native_gen/zero(native_value/word()))
+  ready = native_source/checked(ready, native_text/name(ready, operation), [native_roots/worker(ready), native_tasks/attempt(ready),
+    native_tasks/slot(ready, "transaction"), @arguments, output[:scope_root]])
+  return [output, ready]
+end
+verb native_text/concatenate(builder: map, items: list) -> list
+  let [parts: map, assembled: map] = native_source/list_items(builder, items, false)
+  let [rooted: map, ready: map] = native_roots/retain(assembled, "parts", parts)
+  let result: list = native_text/construct(ready, "assemble", [rooted, native_source/literal(ready, ""), native_gen/ref(ready, "false")])
+  return result
+end
+verb native_text/slice(builder: map, args: list) -> list
+  let ready: map = native_builtins/kind_check(builder, args[0], "string")
+  let [start: map, with_start: map] = native_gen/checked_bind(ready, "start", native_gen/call(ready, "value_as_int", [args[1]]), "ok",
+    fn(invalid) => native_tasks/attempt_status(invalid, "schema"))
+  let [finish: map, with_end: map] = native_gen/checked_bind(with_start, "end", native_gen/call(with_start, "value_as_int", [args[2]]), "ok",
+    fn(invalid) => native_tasks/attempt_status(invalid, "schema"))
+  let first: map = native_gen/bitcast(:U64, native_gen/field(with_end, start, "number"))
+  let last: map = native_gen/bitcast(:U64, native_gen/field(with_end, finish, "number"))
+  let invalid = fn(failed)
+    let [bounds: map, retained: map] = native_source/rooted_list(failed, "bounds", args)
+    return native_source/value_error(retained, E_INDEX, "string_slice bounds are out of range", bounds)
+  end
+  ready = native_gen/when(with_end, native_gen/less(native_access/length(with_end, args[0], "string"), last), invalid)
+  ready = native_gen/when(ready, native_gen/less(last, first), invalid)
+  let result: list = native_source/result(ready, "value_string_slice", [native_roots/worker(ready), args[0], first, last], "oom")
+  return result
+end

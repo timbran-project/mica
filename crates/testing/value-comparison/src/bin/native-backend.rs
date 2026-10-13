@@ -180,6 +180,7 @@ fn run() -> Result<()> {
         "compiler/updates",
         "compiler/ordering",
         "compiler/time",
+        "compiler/text",
         "compiler/functions",
         "compiler/collections",
         "compiler/access",

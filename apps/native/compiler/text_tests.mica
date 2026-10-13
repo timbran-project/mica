@@ -1,0 +1,24 @@
+// Construction and scalar slicing preserve aliases, combining marks and NULs.
+let original = "Aé🦀é\0Z"
+let saved = original
+let chars = string_chars(original)
+let rebuilt = string_from_chars(chars)
+let pieces = ["A", "é", "🦀", "é", "\0", "Z"]
+let joined = string_join(pieces, "|é|")
+let concatenated = string_concat("<", @pieces, ">")
+original = string_append(original, "tail")
+let slice = string_slice(saved, 1, 5)
+let errors = []
+for bounds in [[-1, 0], [0, -1], [4, 2], [0, 99]]
+  try
+    string_slice(saved, @bounds)
+    errors = [@errors, false]
+  catch E_INDEX as error
+    errors = [@errors, [error.code, error.value]]
+  end
+end
+return [saved, original, chars, rebuilt, joined, concatenated, slice, errors,
+  string_concat(), string_concat(@[]), string_concat("x"), string_concat(@["x", "é"]),
+  string_join([], ","), string_join([""], ","), string_join(["", "x", ""], ","),
+  string_from_chars([]), string_chars(""), string_slice(saved, 7, 7),
+  string_from_chars(string_chars(slice)), string_slice(slice, 1, 3)]

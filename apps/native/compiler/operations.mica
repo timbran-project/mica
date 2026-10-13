@@ -99,6 +99,10 @@ verb native_source/mailbox_builtin(builder: map, name: symbol, args: list) -> li
 end
 
 verb native_source/builtin_items(builder: map, name: symbol, items: list) -> list
+  if name == :string_concat
+    let result: list = native_text/concatenate(builder, items)
+    return result
+  end
   let arities: map = native_builtins/arities()
   native/ensure(map_contains_key(arities, name), string_concat("unsupported native source builtin: ", to_literal(name)))
   if !native_source/spliced(items)

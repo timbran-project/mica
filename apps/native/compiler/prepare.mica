@@ -179,6 +179,12 @@ verb native_source/program_literals(analysis: map, initial: list) -> list
     elseif op == :Return || op == :Abort || op == :Throw
       pool = native_source/pool_operands(pool, [instruction[1]])
     end
+    if op == :BuiltinCall && native/contains([:string_concat, :string_join, :string_from_chars, :string_slice], instruction[2])
+      pool = native_source/pool(pool, "")
+      if instruction[2] == :string_slice
+        pool = native_source/pool(native_source/pool(pool, E_INDEX), "string_slice bounds are out of range")
+      end
+    end
     if native/contains([:SuspendValue, :MailboxRecv, :SpawnDispatch, :SpawnDispatchDynamic, :SpawnPositionalDispatch], op)
       pool = native_source/pool(native_source/pool(pool, E_INVARG), "invalid suspend duration")
       let duration = instruction[2]

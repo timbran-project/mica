@@ -2291,6 +2291,7 @@ fn load_native_source_compiler(runner: &mut SourceRunner) {
         include_str!("../../../apps/native/compiler/updates.mica"),
         include_str!("../../../apps/native/compiler/ordering.mica"),
         include_str!("../../../apps/native/compiler/time.mica"),
+        include_str!("../../../apps/native/compiler/text.mica"),
         include_str!("../../../apps/native/compiler/functions.mica"),
         include_str!("../../../apps/native/compiler/collections.mica"),
         include_str!("../../../apps/native/compiler/access.mica"),
@@ -3507,6 +3508,14 @@ fn native_source_sorts_and_constructs_relations() {
     check_native_source_body(
         include_str!("../../../apps/native/compiler/ordering_tests.mica"),
         include_str!("../../../apps/native/compiler/ordering_tests.c"),
+    );
+}
+
+#[test]
+fn native_source_constructs_and_slices_unicode_text() {
+    check_native_source_body(
+        include_str!("../../../apps/native/compiler/text_tests.mica"),
+        include_str!("../../../apps/native/compiler/text_tests.c"),
     );
 }
 
