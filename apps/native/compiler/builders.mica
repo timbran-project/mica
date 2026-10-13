@@ -7,7 +7,7 @@ verb native_source/context(module: map, name: string) -> map
   let builder: map = native_roots/context(module, name,
     fn(failed, reason) => native_tasks/attempt_status(failed, reason))
   builder[:source_prefix] = module[:source_prefix]
-  builder[:source_literals] = module[:source_literals]
+  builder[:source_literal_index] = module[:source_literal_index]
   return builder
 end
 
@@ -39,23 +39,17 @@ verb native_source/assign(builder: map, index: int, value: map) -> map
   return result
 end
 verb native_source/literal(builder: map, value) -> map
-  let position: int = 0
-  for literal in builder[:source_literals]
-    if to_literal(literal) == to_literal(value)
-      let code: map = {}
-      if map_contains_key(builder, :source_code)
-        code = builder[:source_code]
-      else
-        code = native_kernel/load_field(builder, native_handlers/current(builder), "code")
-      end
-      let constants: map = native_kernel/load_field(builder, code, "constants")
-      let result: map = native_query/cell(builder, constants, native_source/number(builder, position))
-      return result
-    end
-    position = position + 1
+  let index: map = builder[:source_literal_index]
+  native/ensure(map_contains_key(index, value), "source literal is missing from its code constant pool")
+  let code: map = {}
+  if map_contains_key(builder, :source_code)
+    code = builder[:source_code]
+  else
+    code = native_kernel/load_field(builder, native_handlers/current(builder), "code")
   end
-  native/ensure(false, "source literal is missing from its code constant pool")
-  return {}
+  let constants: map = native_kernel/load_field(builder, code, "constants")
+  let result: map = native_query/cell(builder, constants, native_source/number(builder, index[value]))
+  return result
 end
 verb native_source/operand(builder: map, operand: list) -> map
   if operand[0] == :Register

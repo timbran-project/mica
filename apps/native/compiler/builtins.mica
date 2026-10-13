@@ -23,7 +23,7 @@ verb native_builtins/lookup_definition(input: map) -> map
     [["code", native_tasks/pointer("CodeRef"), :Gc], ["name", native_value/word(), :Gc]],
     [], [:ReadMemory], :Value, "")
   let builder: map = native_gen/context(module, native_builtins/lookup_name(module))
-  builder[:source_literals] = module[:source_literals]
+  builder[:source_literal_index] = module[:source_literal_index]
   builder[:source_prefix] = module[:source_prefix]
   builder[:source_code] = native_gen/ref(builder, "code")
   let name: map = native_gen/ref(builder, "name")

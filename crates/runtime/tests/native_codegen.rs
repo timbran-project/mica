@@ -2503,9 +2503,18 @@ end
 let linked = native_source/link_relations(module[:methods][0][:program], {{:NativeResult -> 701}})
 let changes = [instruction for instruction in linked[:code] if instruction[0] == :AssertDynamic]
 native/ensure(len(changes) == 1 && changes[0][1] == 701, "relation names link to native catalogue IDs")
-let literals = native_source/program_literals(parent, [])
+let literals = native_source/program_literals(parent, native_source/literal_pool([]))[:values]
 native/ensure(native/contains(literals, "parent continuation") && native/contains(literals, 42), "source literals retained")
-native/ensure(len(native_source/pool([42], 42.0)) == 2, "literal pool preserves numeric kinds")
+let pool = native_source/literal_pool([42, 42.0, [42], [42.0], {{:key -> 42}}, {{:key -> 42.0}}, "quoted\"text", :quoted])
+native/ensure(len(pool[:values]) == 8, "literal pool preserves structural kinds")
+native/ensure(pool[:index][42] == 0 && pool[:index][42.0] == 1, "literal slots preserve numeric kinds")
+native/ensure(pool[:index][[42]] == 2 && pool[:index][[42.0]] == 3, "literal slots preserve nested numeric kinds")
+native/ensure(pool[:index][{{:key -> 42}}] == 4 && pool[:index][{{:key -> 42.0}}] == 5, "literal slots preserve map values")
+let reused = native_source/pool(native_source/pool(pool, [42.0]), {{:key -> 42}})
+native/ensure(reused == pool, "repeated constants keep their first slot")
+let extended = native_source/pool(pool, [43])
+native/ensure(len(extended[:values]) == 9 && extended[:index][[43]] == 8, "new constants append")
+native/ensure(len(pool[:values]) == 8 && !map_contains_key(pool[:index], [43]), "pool extensions preserve earlier versions")
 native/ensure(native_source/symbol_text(:"line\nMontréal") == "line\nMontréal", "quoted symbol names survive lowering")
 for source in [
   "let x = 1\ntry\n x = 2\nfinally\n x = x + 3\nend\nreturn x",

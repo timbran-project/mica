@@ -34,7 +34,7 @@ verb native_source/kind_message_body(input: map) -> map
     [:ReadMemory, :WriteMemory, :Allocate], :Gc, "")
   let builder: map = native_gen/context(module, name)
   builder[:source_prefix] = module[:source_prefix]
-  builder[:source_literals] = module[:source_literals]
+  builder[:source_literal_index] = module[:source_literal_index]
   builder[:source_code] = native_gen/ref(builder, "code")
   let [message: map, ready: map] = native_gen/bind(builder, "kind", native_gen/zero(word))
   let cases: list = []

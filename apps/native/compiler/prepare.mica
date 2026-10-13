@@ -1,18 +1,26 @@
 // Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-verb native_source/pool(values: list, value) -> list
-  for existing in values
-    // Language numeric equality also compares integers with floats. Literal
-    // interning must preserve their distinct runtime kinds.
-    if to_literal(existing) == to_literal(value)
-      return values
-    end
+// Map keys use exact structural ordering, including distinct numeric kinds.
+// Keep first-use order separately: lookup order must not change constant slots.
+verb native_source/literal_pool(initial: list) -> map
+  let pool: map = {:values -> [], :index -> {}}
+  for value in initial
+    pool = native_source/pool(pool, value)
   end
-  return [@values, value]
+  return pool
 end
-verb native_source/pool_operands(values: list, operands: list) -> list
-  let pool: list = values
+verb native_source/pool(input: map, value) -> map
+  if map_contains_key(input[:index], value)
+    return input
+  end
+  let pool: map = input
+  pool[:index][value] = len(pool[:values])
+  pool[:values] = [@pool[:values], value]
+  return pool
+end
+verb native_source/pool_operands(values: map, operands: list) -> map
+  let pool: map = values
   for operand in operands
     if operand[0] == :Hole
       continue
@@ -38,8 +46,8 @@ verb native_source/dead_load(analysis: map, pc: int) -> bool
   return true
 end
 
-verb native_source/program_literals(analysis: map, initial: list) -> list
-  let pool: list = initial
+verb native_source/program_literals(analysis: map, initial: map) -> map
+  let pool: map = initial
   let code: list = analysis[:description][:code]
   let pc: int = 0
   while pc < len(code)
@@ -313,7 +321,7 @@ end
 verb native_source/prepare_module(input: map, prefix: string, emitted: map, relations: map, method_ids: list) -> map
   native/ensure(len(method_ids) == len(emitted[:methods]), "native module requires identities for every definition")
   let descriptions: list = [[emitted[:entry], 0, string_concat(prefix, "_entry")]]
-  let pool: list = [E_TYPE, E_RANGE, [] {[]}, :dispatch/unrestricted, :required, @[spec[0] for spec in native_value/kinds()]]
+  let pool: map = native_source/literal_pool([E_TYPE, E_RANGE, [] {[]}, :dispatch/unrestricted, :required, @[spec[0] for spec in native_value/kinds()]])
   let numbers: list = []
   let index: int = 0
   for definition in emitted[:methods]
@@ -378,8 +386,8 @@ verb native_source/prepare_module(input: map, prefix: string, emitted: map, rela
   if len(functions) > maximum
     maximum = len(functions)
   end
-  if len(pool) > maximum
-    maximum = len(pool)
+  if len(pool[:values]) > maximum
+    maximum = len(pool[:values])
   end
   for name, id in relations
     numbers = [@numbers, id]
@@ -389,7 +397,8 @@ verb native_source/prepare_module(input: map, prefix: string, emitted: map, rela
   end
   let module: map = input
   module[:source_prefix] = prefix
-  module[:source_literals] = pool
+  module[:source_literals] = pool[:values]
+  module[:source_literal_index] = pool[:index]
   module[:source_functions] = functions
   module[:source_programs] = programs
   module[:source_method_ids] = method_ids
@@ -400,7 +409,7 @@ verb native_source/prepare_module(input: map, prefix: string, emitted: map, rela
   end
   let prepared: list = []
   index = 0
-  for value in pool
+  for value in pool[:values]
     let [literal: map, ready: map] = native_literal/prepare(module, string_concat(prefix, "_literal_", to_literal(index)), native_source/literal_description(value))
     prepared = [@prepared, literal]
     module = ready
