@@ -289,11 +289,11 @@ fn expressions_preserve_values_evaluated_before_later_assignments() {
         ),
         (
             "let items = [1]\nreturn [(items[0] = 2), (items[0] = 3)]",
-            "[[2], [3]]",
+            "[2, 3]",
         ),
         (
             "let items = [1, 2]\nreturn [items, items[0] = 3]",
-            "[[1, 2], [3, 2]]",
+            "[[1, 2], 3]",
         ),
         (
             "let items = [1, 2]\nreturn items[begin\nitems = [3, 4]\n0\nend]",
