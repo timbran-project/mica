@@ -1,0 +1,288 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+verb native_command_text/name(module: map, operation: string) -> string
+  let result: string = string_concat(module[:source_prefix], "_command_", operation)
+  return result
+end
+verb native_command_text/number(builder: map, number: int) -> map
+  let result: map = native_gen/ref(builder, string_concat("command_", to_literal(number)))
+  return result
+end
+// Unicode White_Space (25 scalars), from Unicode 15.1 PropList.txt:
+// https://www.unicode.org/Public/15.1.0/ucd/PropList.txt
+verb native_command_text/whitespace_definition(input: map) -> map
+  let name: string = native_command_text/name(input, "whitespace")
+  let module: map = native/declare_function(input, name, :Bool, [["scalar", :U64, :Value]], [], [], :Value, "")
+  let builder: map = native_gen/context(module, name)
+  let scalar: map = native_gen/ref(builder, "scalar")
+  for [first, limit] in [[9, 14], [32, 33], [133, 134], [160, 161], [5760, 5761],
+      [8192, 8203], [8232, 8234], [8239, 8240], [8287, 8288], [12288, 12289]]
+    builder = native_gen/when(builder, native_gen/less(native_gen/subtract(scalar, native_command_text/number(builder, first)),
+      native_command_text/number(builder, limit - first)), fn(found) => native_gen/return_value(found, native_gen/ref(found, "true")))
+  end
+  let result: map = native_gen/finish(module, native_gen/return_value(builder, native_gen/ref(builder, "false")))
+  return result
+end
+verb native_command_text/whitespace(builder: map, scalar: map) -> map
+  let result: map = native_gen/call(builder, native_command_text/name(builder[:module], "whitespace"), [scalar])
+  return result
+end
+verb native_command_text/result(builder: map, shape: int, value: map) -> map
+  let result: map = native_roots/return_value(builder, native_gen/record(builder, builder[:result], {
+    "status" -> native_gen/ref(builder, "kernel_ok"), "shape" -> native_command_text/number(builder, shape), "value" -> value}))
+  return result
+end
+verb native_command_text/reject(builder: map, condition: map, shape: int) -> map
+  let result: map = native_gen/when(builder, condition, fn(invalid) => native_command_text/result(invalid, shape, native_gen/zero(native_value/word())))
+  return result
+end
+verb native_command_text/append_scalar(builder: map, buffer: map, scalar: map) -> map
+  let appended: map = native_quoting/scalar(builder, buffer, scalar)
+  let result: map = native_gen/unless(appended, native_gen/less(buffer[:used], native_command_text/number(appended, 252)),
+    fn(full) => native_text/flush_bytes(full, buffer))
+  return result
+end
+// Reuse roots across words. A completed word is immutable after insertion;
+// the next word starts from the shared empty string and a cleared byte buffer.
+verb native_command_text/finish_word(builder: map, buffer: map, empty: map, output: map) -> map
+  let ready: map = native_gen/unless(builder, native_kernel/absent(buffer[:used]), fn(pending) => native_text/flush_bytes(pending, buffer))
+  let result: map = native_gen/unless(ready, native_kernel/absent(native_value/string_field(ready, buffer[:text], "length")), fn(word)
+    let [appended: map, stored: map] = native_query/value(word, "kernel_query_append", [native_roots/worker(word), output, buffer[:text]])
+    let retained: map = native_roots/store(stored, output, appended)
+    return native_roots/store(retained, buffer[:text], empty)
+  end)
+  return result
+end
+verb native_command_text/words_body(module: map) -> map
+  let builder: map = native_queries/borrow_budget(native_gen/context(module, string_concat(native_command_text/name(module, "words"), "_value")))
+  let text: map = native_roots/ref(builder, "text")
+  builder = native_command_text/reject(builder, native_gen/negate(native_access/kind(builder, text, "string")), 1)
+  let [buffer: map, buffered: map] = native_text/byte_buffer(builder)
+  let [empty: map, saved: map] = native_roots/retain(buffered, "empty_word", buffer[:text])
+  let [list: map, allocated: map] = native_query/tuple(saved, [])
+  let [output: map, retained: map] = native_roots/retain(allocated, "words", list)
+  let [quoted: map, with_quotes: map] = native_gen/bind(retained, "quoted", native_gen/ref(retained, "false"))
+  let [escaped: map, ready: map] = native_gen/bind(with_quotes, "escaped", native_gen/ref(with_quotes, "false"))
+  builder = native_text/each_scalar(ready, text, native_gen/ref(ready, "zero"), fn(step, index, scalar)
+    return native_gen/branch(step, escaped, fn(literal)
+      let cleared: map = native_gen/assign(literal, escaped, native_gen/ref(literal, "false"))
+      return native_command_text/append_scalar(cleared, buffer, scalar)
+    end, fn(unescaped)
+      return native_gen/switch(unescaped, scalar, [
+        [native_command_text/number(unescaped, 92), fn(slash) => native_gen/assign(slash, escaped, native_gen/ref(slash, "true"))],
+        [native_command_text/number(unescaped, 34), fn(quote) => native_gen/assign(quote, quoted, native_gen/negate(quoted))]], fn(other)
+          return native_gen/branch(other, quoted, fn(in_quote) => native_command_text/append_scalar(in_quote, buffer, scalar), fn(unquoted)
+            return native_gen/branch(unquoted, native_command_text/whitespace(unquoted, scalar),
+              fn(separator) => native_command_text/finish_word(separator, buffer, empty, output),
+              fn(character) => native_command_text/append_scalar(character, buffer, scalar))
+          end)
+        end)
+    end)
+  end)
+  builder = native_gen/when(builder, escaped, fn(trailing) => native_command_text/append_scalar(trailing, buffer, native_command_text/number(trailing, 92)))
+  builder = native_command_text/finish_word(builder, buffer, empty, output)
+  let result: map = native_gen/finish(module, native_command_text/result(builder, 0, output))
+  return result
+end
+
+verb native_command_text/ordinal_words() -> list
+  return [["first", 1], ["second", 2], ["third", 3], ["fourth", 4], ["fifth", 5], ["sixth", 6], ["seventh", 7],
+    ["eighth", 8], ["ninth", 9], ["tenth", 10], ["eleventh", 11], ["twelfth", 12], ["thirteenth", 13],
+    ["fourteenth", 14], ["fifteenth", 15], ["sixteenth", 16], ["seventeenth", 17], ["eighteenth", 18], ["nineteenth", 19],
+    ["twenty", 20], ["twentieth", 20], ["thirty", 30], ["thirtieth", 30], ["forty", 40], ["fortieth", 40],
+    ["fifty", 50], ["fiftieth", 50], ["sixty", 60], ["sixtieth", 60], ["seventy", 70], ["seventieth", 70],
+    ["eighty", 80], ["eightieth", 80], ["ninety", 90], ["ninetieth", 90]]
+end
+// Encode short ASCII words in base 27 (a=1 through z=26). This is an exact
+// key, not a hash: eleven letters fit in U64 without collisions or allocation.
+verb native_command_text/keyword_definition(input: map) -> map
+  let name: string = native_command_text/name(input, "keyword")
+  let module: map = native/declare_function(input, name, :U64, [["key", :U64, :Value]], [], [], :Value, "")
+  let cases: list = []
+  for [word, number] in native_command_text/ordinal_words()
+    let key: int = 0
+    for character in string_chars(word)
+      key = key * 27 + string_find_any("abcdefghijklmnopqrstuvwxyz", 0, character) + 1
+    end
+    module = native_literal/constant(module, string_concat("command_word_", word), :U64, native_value/hex(key))
+  end
+  let builder: map = native_gen/context(module, name)
+  for [word, number] in native_command_text/ordinal_words()
+    cases = [@cases, [native_gen/ref(builder, string_concat("command_word_", word)),
+      fn(found) => native_gen/return_value(found, native_command_text/number(found, number))]]
+  end
+  builder = native_gen/switch(builder, native_gen/ref(builder, "key"), cases, fn(invalid) => native_gen/return_value(invalid, native_gen/ref(invalid, "zero")))
+  let result: map = native_gen/finish(module, builder)
+  return result
+end
+verb native_command_text/ascii_lower(builder: map, byte: map) -> list
+  let [lower: map, ready: map] = native_gen/bind(builder, "lower", byte)
+  ready = native_gen/when(ready, native_gen/less(native_gen/subtract(lower, native_command_text/number(ready, 65)), native_command_text/number(ready, 26)),
+    fn(upper) => native_gen/assign(upper, lower, native_gen/add(lower, native_command_text/number(upper, 32))))
+  return [lower, ready]
+end
+verb native_command_text/byte(builder: map, text: map, offset: map) -> map
+  let result: map = native_gen/convert(:U64, native_value/string_byte(builder, text, offset))
+  return result
+end
+// Trimming scans scalars once; subsequent parsing uses byte offsets into the
+// rooted view. No string copy or borrowed data pointer spans a checkpoint.
+verb native_command_text/trim(builder: map, text: map) -> list
+  let [start: map, begun: map] = native_gen/bind(builder, "start", native_value/string_field(builder, text, "length"))
+  let [finish: map, ready: map] = native_gen/bind(begun, "finish", native_gen/ref(begun, "zero"))
+  ready = native_text/each_decoded(ready, text, native_gen/ref(ready, "zero"), fn(step, index, scalar, offset, width)
+    return native_gen/unless(step, native_command_text/whitespace(step, scalar), fn(content)
+      let first: map = native_gen/when(content, native_kernel/absent(finish), fn(initial) => native_gen/assign(initial, start, offset))
+      return native_gen/assign(first, finish, native_gen/add(offset, width))
+    end)
+  end)
+  ready = native_command_text/reject(ready, native_kernel/absent(finish), 2)
+  return [start, finish, ready]
+end
+verb native_command_text/ordinal_number(builder: map, number: map) -> map
+  let ready: map = native_command_text/reject(builder, native_kernel/absent(number), 2)
+  ready = native_command_text/reject(ready, native_gen/less(native_gen/bitcast(:U64, native_gen/ref(ready, "int_max")), number), 3)
+  let [value: map, encoded: map] = native_query/value(ready, "value_int", [native_gen/bitcast(:I64, number)])
+  let result: map = native_command_text/result(encoded, 0, value)
+  return result
+end
+verb native_command_text/numeric_ordinal(builder: map, text: map, start: map, finish: map) -> map
+  let ready: map = native_gen/when(builder, native_gen/equal(native_command_text/byte(builder, text, start), native_command_text/number(builder, 43)),
+    fn(plus) => native_gen/assign(plus, start, native_gen/add(start, native_gen/ref(plus, "one"))))
+  ready = native_command_text/reject(ready, native_gen/equal(start, finish), 2)
+  let last: map = native_gen/subtract(finish, native_gen/ref(ready, "one"))
+  ready = native_gen/branch(ready, native_gen/equal(native_command_text/byte(ready, text, last), native_command_text/number(ready, 46)),
+    fn(dot) => native_gen/assign(dot, finish, native_gen/subtract(finish, native_gen/ref(dot, "one"))), fn(suffixed)
+      return native_gen/unless(suffixed, native_gen/less(native_gen/subtract(finish, start), native_command_text/number(suffixed, 2)), fn(pair)
+        let [first: map, left: map] = native_command_text/ascii_lower(pair, native_command_text/byte(pair, text, native_gen/subtract(finish, native_command_text/number(pair, 2))))
+        let [second: map, right: map] = native_command_text/ascii_lower(left, native_command_text/byte(left, text, last))
+        // Pack the ASCII pairs "st", "nd", "rd", and "th" for one switch.
+        let suffix: map = native_gen/add(native_gen/multiply(first, native_command_text/number(right, 256)), second)
+        let cases: list = []
+        for code in [29556, 28260, 29284, 29800]
+          cases = [@cases, [native_command_text/number(right, code), fn(matched) => native_gen/assign(matched, finish, native_gen/subtract(finish, native_command_text/number(matched, 2)))]]
+        end
+        return native_gen/switch(right, suffix, cases, fn(plain) => plain)
+      end)
+    end)
+  ready = native_command_text/reject(ready, native_gen/equal(start, finish), 2)
+  let [number: map, counted: map] = native_gen/bind(ready, "ordinal", native_gen/ref(ready, "zero"))
+  // Rust's acceptance boundary is i64; only then is Mica's smaller range checked.
+  ready = native_gen/for_range(counted, "digit", start, finish, fn(step, position)
+    let polled: map = native_query/poll_interval(step, position)
+    let [digit: map, decoded: map] = native_gen/bind(polled, "digit", native_gen/subtract(native_command_text/byte(polled, text, position), native_command_text/number(polled, 48)))
+    let valid: map = native_command_text/reject(decoded, native_gen/negate(native_gen/less(digit, native_command_text/number(decoded, 10))), 2)
+    let threshold: map = native_gen/divide(native_gen/subtract(native_gen/ref(valid, "command_i64_max"), digit), native_command_text/number(valid, 10))
+    valid = native_command_text/reject(valid, native_gen/less(threshold, number), 2)
+    return native_gen/assign(valid, number, native_gen/add(native_gen/multiply(number, native_command_text/number(valid, 10)), digit))
+  end)
+  let result: map = native_command_text/ordinal_number(ready, number)
+  return result
+end
+verb native_command_text/word_ordinal(builder: map, text: map, start: map, finish: map) -> map
+  let [key: map, keyed: map] = native_gen/bind(builder, "keyword", native_gen/ref(builder, "zero"))
+  let [length: map, counted: map] = native_gen/bind(keyed, "letters", native_gen/ref(keyed, "zero"))
+  let [total: map, ready: map] = native_gen/bind(counted, "ordinal", native_gen/ref(counted, "zero"))
+  ready = native_gen/for_range(ready, "letter", start, native_gen/add(finish, native_gen/ref(ready, "one")), fn(step, position)
+    let polled: map = native_query/poll_interval(step, position)
+    let [byte: map, initialized: map] = native_gen/bind(polled, "byte", native_command_text/number(polled, 45))
+    let loaded: map = native_gen/when(initialized, native_gen/less(position, finish), fn(input)
+      return native_gen/assign(input, byte, native_command_text/byte(input, text, position))
+    end)
+    return native_gen/branch(loaded, native_gen/equal(byte, native_command_text/number(loaded, 45)), fn(boundary)
+      let [number: map, matched: map] = native_gen/bind(boundary, "word_number", native_gen/call(boundary, native_command_text/name(boundary[:module], "keyword"), [key]))
+      let checked: map = native_command_text/reject(matched, native_kernel/absent(number), 2)
+      checked = native_command_text/reject(checked, native_gen/less(native_gen/subtract(native_gen/ref(checked, "command_i64_max"), number), total), 2)
+      checked = native_gen/assign(checked, total, native_gen/add(total, number))
+      checked = native_gen/assign(checked, key, native_gen/ref(checked, "zero"))
+      return native_gen/assign(checked, length, native_gen/ref(checked, "zero"))
+    end, fn(letter)
+      let [lower: map, folded: map] = native_command_text/ascii_lower(letter, byte)
+      let [digit: map, decoded: map] = native_gen/bind(folded, "letter_digit", native_gen/subtract(lower, native_command_text/number(folded, 97)))
+      let checked: map = native_command_text/reject(decoded, native_gen/negate(native_gen/less(digit, native_command_text/number(decoded, 26))), 2)
+      checked = native_command_text/reject(checked, native_gen/equal(length, native_command_text/number(checked, 11)), 2)
+      checked = native_gen/assign(checked, key, native_gen/add(native_gen/multiply(key, native_command_text/number(checked, 27)), native_gen/add(digit, native_gen/ref(checked, "one"))))
+      return native_gen/assign(checked, length, native_gen/add(length, native_gen/ref(checked, "one")))
+    end)
+  end)
+  let result: map = native_command_text/ordinal_number(ready, total)
+  return result
+end
+verb native_command_text/ordinal_body(module: map) -> map
+  let builder: map = native_queries/borrow_budget(native_gen/context(module, string_concat(native_command_text/name(module, "parse_ordinal"), "_value")))
+  let text: map = native_roots/ref(builder, "text")
+  builder = native_command_text/reject(builder, native_gen/negate(native_access/kind(builder, text, "string")), 1)
+  let [start: map, finish: map, ready: map] = native_command_text/trim(builder, text)
+  let first: map = native_command_text/byte(ready, text, start)
+  let [numeric: map, selected: map] = native_gen/bind(ready, "numeric", native_gen/less(native_gen/subtract(first, native_command_text/number(ready, 48)), native_command_text/number(ready, 10)))
+  builder = native_gen/when(selected, native_gen/equal(first, native_command_text/number(selected, 43)), fn(plus) => native_gen/assign(plus, numeric, native_gen/ref(plus, "true")))
+  builder = native_gen/branch(builder, numeric,
+    fn(number) => native_command_text/numeric_ordinal(number, text, start, finish),
+    fn(word) => native_command_text/word_ordinal(word, text, start, finish))
+  let result: map = native_gen/finish(module, builder)
+  return result
+end
+verb native_command_text/definitions(input: map) -> map
+  let needed: map = {}
+  for program in input[:source_programs]
+    let pc: int = 0
+    for instruction in program[:analysis][:description][:code]
+      if map_contains_key(program[:analysis][:reachable], pc) && instruction[0] == :BuiltinCall && native/contains([:words, :parse_ordinal], instruction[2])
+        needed[instruction[2]] = true
+      end
+      pc = pc + 1
+    end
+  end
+  if len(needed) == 0
+    return input
+  end
+  let module: map = input
+  for number in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 26, 27, 30, 32, 34, 40, 43, 45, 46, 48, 50, 60, 65, 70, 80, 90, 92, 97, 133, 160, 252, 256, 5760, 8192, 8232, 8239, 8287, 12288, 29556, 28260, 29284, 29800]
+    module = native_literal/constant(module, string_concat("command_", to_literal(number)), :U64, native_value/hex(number))
+  end
+  module = native_literal/constant(module, "command_i64_max", :U64, "7fffffffffffffff")
+  module = native_command_text/whitespace_definition(module)
+  let result_type: list = [:Record, string_concat(module[:source_prefix], "_CommandTextResult")]
+  module[:state] = native/record_type(module[:state], result_type[1], [["status", :U64], ["shape", :U64], ["value", native_value/word()]])[1]
+  for operation in [:words, :parse_ordinal]
+    if map_contains_key(needed, operation)
+      module = native_queries/operation(module, native_command_text/name(module, native_source/symbol_text(operation)), result_type, [["text", native_value/word(), :Gc]])
+    end
+  end
+  if map_contains_key(needed, :words)
+    module = native_command_text/words_body(module)
+  end
+  if map_contains_key(needed, :parse_ordinal)
+    module = native_command_text/keyword_definition(module)
+    module = native_command_text/ordinal_body(module)
+  end
+  return module
+end
+verb native_command_text/literals(name: symbol) -> list
+  return [E_INVARG, E_PARSE, "expected string argument", "ordinal is out of range", "invalid ordinal",
+    string_concat(native_source/symbol_text(name), " expects one string"), :case, :value, :ok, :error]
+end
+verb native_command_text/builtin(builder: map, name: symbol, text: map) -> list
+  let ready: map = native_gen/unless(builder, native_access/kind(builder, text, "string"), fn(invalid) => native_builtins/error(invalid, "expected string argument"))
+  let [parsed: map, called: map] = native_gen/bind(ready, "command_text", native_gen/call(ready, native_command_text/name(ready, native_source/symbol_text(name)), [
+    native_roots/worker(ready), native_tasks/attempt(ready), native_tasks/slot(ready, "transaction"), text]))
+  let status: map = native_gen/field(called, parsed, "status")
+  ready = native_gen/unless(called, native_kernel/absent(status), fn(failed) => native_roots/return_value(failed, status))
+  if name == :words
+    return [native_gen/field(ready, parsed, "value"), ready]
+  end
+  let shape: map = native_gen/field(ready, parsed, "shape")
+  ready = native_gen/when(ready, native_gen/equal(shape, native_command_text/number(ready, 3)), fn(range) => native_builtins/error(range, "ordinal is out of range"))
+  let [value: map, retained: map] = native_roots/retain(ready, "ordinal_value", native_gen/field(ready, parsed, "value"))
+  let [case: map, marked: map] = native_gen/bind(retained, "ordinal_case", native_source/literal(retained, :ok))
+  ready = native_gen/unless(marked, native_kernel/absent(shape), fn(invalid)
+    let code: map = native_source/literal(invalid, E_PARSE)
+    let [error: map, built: map] = native_source/result(invalid, "value_error", [native_roots/worker(invalid),
+      native_gen/convert(:U32, native_gen/expression(:U64, :Payload, [code])), native_gen/ref(invalid, "true"), native_source/literal(invalid, "invalid ordinal"), native_gen/ref(invalid, "true"), text], "oom")
+    let saved: map = native_roots/store(built, value, error)
+    return native_gen/assign(saved, case, native_source/literal(saved, :error))
+  end)
+  let result: list = native_read/record(ready, [:case, :value], [case, value])
+  return result
+end

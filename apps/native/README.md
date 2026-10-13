@@ -72,6 +72,19 @@ Run the source oracle, rounding-boundary, and resource-control checks with:
 CC=clang cargo test --release -p mica-runtime --test native_codegen native_source_converts_numbers_and_parses_decimals
 ```
 
+Native `words` and `parse_ordinal` use Unicode White_Space for splitting and trimming.
+`words` supports double-quoted groups and backslash escapes. It discards empty groups and preserves a trailing backslash.
+Ordinal parsing accepts positive decimal integers with an optional leading `+` and one suffix: `st`, `nd`, `rd`, `th`, or `.`.
+It also accepts hyphen-separated English ordinal words.
+It preserves Rust's acceptance rules, including case-insensitive keywords, additive word combinations, and rejection of `first-`.
+Invalid spellings return `err(error(E_PARSE, "invalid ordinal", text))`.
+Positive values within i64 but outside Mica's integer range raise `E_INVARG`; larger values fail parsing.
+Scans charge task budgets and check cancellation. Word construction uses a bounded UTF-8 buffer and rooted output values.
+
+```sh
+CC=clang cargo test --release -p mica-runtime --test native_codegen native_source_splits_words_and_parses_ordinals
+```
+
 ## Transactional relation kernel
 
 `native_kernel/program()` generates values, managed memory, the in-memory relation store, query execution, and rule evaluation as one module.

@@ -1,0 +1,30 @@
+let split = []
+for text in word_samples
+  split = [@split, words(text)]
+end
+let whitespace = "\t\n\u{b}\u{c}\r \u{85}\u{a0}\u{1680}\u{2000}\u{2001}\u{2002}\u{2003}\u{2004}\u{2005}\u{2006}\u{2007}\u{2008}\u{2009}\u{200a}\u{2028}\u{2029}\u{202f}\u{205f}\u{3000}"
+let separated = []
+for space in string_chars(whitespace)
+  separated = [@separated, words(string_concat("a", space, "b")), words(string_concat("a\\", space, "b")), parse_ordinal(string_concat(space, "Twenty-FIRST", space))]
+end
+let ordinals = []
+for text in ordinal_samples
+  try
+    ordinals = [@ordinals, parse_ordinal(text)]
+  catch error
+    ordinals = [@ordinals, error.code]
+  end
+end
+let long_word = ""
+let many_words = ""
+let long_ordinal = "first"
+let n = 0
+while n < 300
+  if n < 100
+    long_word = string_concat(long_word, "é🙂")
+  end
+  many_words = string_concat(many_words, "a ")
+  long_ordinal = string_concat(long_ordinal, "-first")
+  n = n + 1
+end
+return [errors, split, separated, ordinals, parse_ordinal(long_ordinal), words(long_word), words(many_words), words("a\u{200b}b\u{feff}c\u{180e}d"), words(@["a b"]), parse_ordinal(@["22nd"])]

@@ -2486,6 +2486,7 @@ fn load_native_source_compiler(runner: &mut SourceRunner) {
         include_str!("../../../apps/native/compiler/distance.mica"),
         include_str!("../../../apps/native/compiler/algebra.mica"),
         include_str!("../../../apps/native/compiler/url.mica"),
+        include_str!("../../../apps/native/compiler/command_text.mica"),
         include_str!("../../../apps/native/compiler/quoting.mica"),
         include_str!("../../../apps/native/compiler/format_number.mica"),
         include_str!("../../../apps/native/compiler/literal_read.mica"),
@@ -3861,6 +3862,11 @@ fn native_builtin_definitions_ignore_unreachable_calls() {
                 "../../../apps/native/compiler/subscriptions.mica"
             ))
             .unwrap();
+        runner
+            .run_filein(include_str!(
+                "../../../apps/native/compiler/command_text.mica"
+            ))
+            .unwrap();
         assert_eq!(
             eval(
                 &mut runner,
@@ -3869,9 +3875,10 @@ let input = {:source_programs -> [{:analysis -> {
   :description -> {:code -> [[:Return, 0], [:BuiltinCall, 0, :is_builtin, []],
     [:BuiltinCall, 0, :to_symbol, []], [:BuiltinCall, 0, :sort, []],
     [:BuiltinCall, 0, :relation_from_rows, []], [:BuiltinCall, 0, :from_literal, []],
-    [:BuiltinCall, 0, :subscribe_changes, []]]},
+    [:BuiltinCall, 0, :subscribe_changes, []], [:BuiltinCall, 0, :words, []],
+    [:BuiltinCall, 0, :parse_ordinal, []]]},
   :reachable -> {0 -> true}}}]}
-return native_builtins/definitions(input) == input && native_read/definitions(input) == input && native_source_subscriptions/definitions(input) == input
+return native_builtins/definitions(input) == input && native_read/definitions(input) == input && native_source_subscriptions/definitions(input) == input && native_command_text/definitions(input) == input
 "#
             ),
             Value::bool(true)
@@ -4143,6 +4150,62 @@ fn native_source_constructs_errors_and_frobs() {
             ("other", "make_identity(:native_other)"),
             ("mode", "0"),
             ("message", "none"),
+        ],
+    );
+}
+
+#[test]
+fn native_source_splits_words_and_parses_ordinals() {
+    let body = include_str!("../../../apps/native/compiler/command_text_tests.mica");
+    // Rust reports these as host InvalidBuiltinCall errors, outside Mica catch.
+    // Check native catchability against explicit codes; compare shared values
+    // and E_PARSE results with the Rust implementation below.
+    let error_cases = r#"
+let errors = []
+for value in [1, true, [], none]
+  try
+    words(value)
+  catch error
+    errors = [@errors, error.code]
+  end
+  try
+    parse_ordinal(value)
+  catch error
+    errors = [@errors, error.code]
+  end
+end
+for text in ["36028797018963968", "9223372036854775807"]
+  try
+    parse_ordinal(text)
+  catch error
+    errors = [@errors, error.code]
+  end
+end
+try
+  words(@[])
+catch error
+  errors = [@errors, error.code]
+end
+try
+  parse_ordinal(@["1", "2"])
+catch error
+  errors = [@errors, error.code]
+end
+"#;
+    let expected_errors = "let errors = [E_INVARG, E_INVARG, E_INVARG, E_INVARG, E_INVARG, E_INVARG, E_INVARG, E_INVARG, E_INVARG, E_INVARG, E_INVARG, E_INVARG]";
+    check_native_source_body_against(
+        &format!("{error_cases}\n{body}"),
+        &format!("{expected_errors}\n{body}"),
+        include_str!("../../../apps/native/compiler/command_text_tests.c"),
+        &[
+            (
+                "word_samples",
+                r#"["", "   ", "alpha beta", "a\"b c\"d", "\"\"", "a \"\" b", "\"unclosed quote", "a\\ b c", "a\\\"b", "trail\\", "\\", "\\\\", "a\0b c", "'a b'", "é\\世界 🙂", string_slice("xé z!", 1, 4)]"#,
+            ),
+            (
+                "ordinal_samples",
+                r#"["1", "+01", "00042", "1st", "2ND", "3rD", "4TH", "99.", "11st", "36028797018963967", "9223372036854775808", "999999999999999999999999x", "36028797018963968x", "0", "-1", "+", "", " ", "1st.", "1.st", "1\0", "١", "first-", "-first", "first--second", "first-second", "twenty-twenty", "twenty-first", "TWENTY-FIRST", "twenty first", "first", "second", "third", "fourth", "fifth", "sixth", "seventh", "eighth", "ninth", "tenth", "eleventh", "twelfth", "thirteenth", "fourteenth", "fifteenth", "sixteenth", "seventeenth", "eighteenth", "nineteenth", "twenty", "twentieth", "thirty", "thirtieth", "forty", "fortieth", "fifty", "fiftieth", "sixty", "sixtieth", "seventy", "seventieth", "eighty", "eightieth", "ninety", "ninetieth", "FİRST", "\u{180e}first", "first\u{200b}", "\u{feff}first", string_slice("x+21STy", 1, 6)]"#,
+            ),
         ],
     );
 }
