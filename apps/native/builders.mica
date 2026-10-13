@@ -19,7 +19,7 @@ end
 
 verb native/module_context(state: map, constants: map) -> map
   return {:state -> state, :constants -> constants, :functions -> {}, :bindings -> {},
-    :call_shapes -> native/call_shapes(state)}
+    :call_shapes -> native/call_shapes(state), :function_values -> {}}
 end
 
 // Separate declarations from bodies to support mutually recursive modules.
@@ -37,6 +37,19 @@ verb native/declare_function(input: map, name: string, result, parameters: list,
   let scopes: map = context[:bindings]
   scopes[name] = bindings
   context[:bindings] = scopes
+  let types: map = {}
+  let writable: map = {}
+  for parameter in parameters
+    types[bindings[parameter[0]]] = parameter[1]
+  end
+  for local in locals
+    let binding: int = bindings[local[0]]
+    types[binding] = local[1]
+    writable[binding] = true
+  end
+  let values: map = context[:function_values]
+  values[name] = [types, writable]
+  context[:function_values] = values
   return context
 end
 

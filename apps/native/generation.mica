@@ -3,33 +3,45 @@
 
 // Generation executes in Mica. Expressions describe target operations; only
 // bind and statement builders change construction state, and return that state.
+// Schema tables are immutable values. Share their validated metadata until a
+// declaration changes the relevant table; unrelated function bodies reuse it.
+verb native_gen/layout(module: map) -> map
+  let state: map = module[:state]
+  let layout: map = index_or(module, :generation_layout, {})
+  if !map_contains_key(layout, :record_rows) || layout[:record_rows] != state[:records] || layout[:field_rows] != state[:fields]
+    layout[:records] = native/check_records(state)
+    layout[:record_rows] = state[:records]
+    layout[:field_rows] = state[:fields]
+  end
+  if !map_contains_key(layout, :constant_rows) || layout[:constant_rows] != state[:constants]
+    let types: map = {}
+    for row in state[:constants]
+      types[row[0]] = row[1]
+    end
+    layout[:constant_types] = types
+    layout[:constant_rows] = state[:constants]
+  end
+  return layout
+end
 verb native_gen/context(module: map, name: string) -> map
   native/ensure(map_contains_key(module[:functions], name), "unknown generated function")
   let function: int = module[:functions][name]
-  let records: map = native/check_records(module[:state])
+  let layout: map = native_gen/layout(module)
+  let records: map = layout[:records]
+  let cached: map = module
+  cached[:generation_layout] = layout
   let bindings: map = module[:constants]
   for spelling, id in module[:bindings][name]
     native/ensure(!map_contains_key(bindings, spelling), "duplicate generated binding")
     bindings[spelling] = id
   end
-  let writable: map = {}
-  let types: map = {}
-  for row in module[:state][:constants]
-    types[row[0]] = row[1]
-  end
-  for row in module[:state][:parameters]
-    if row[1] == function
-      types[row[0]] = row[4]
-    end
-  end
-  for row in module[:state][:locals]
-    if row[1] == function
-      types[row[0]] = row[3]
-      writable[row[0]] = true
-    end
+  let [declared: map, writable: map] = module[:function_values][name]
+  let types: map = layout[:constant_types]
+  for id, type_id in declared
+    types[id] = type_id
   end
   let shape: list = module[:call_shapes][function]
-  return {:function -> function, :result -> shape[0], :name -> name, :module -> module, :bindings -> bindings,
+  return {:function -> function, :result -> shape[0], :name -> name, :module -> cached, :bindings -> bindings,
     :types -> types, :writable -> writable, :records -> records, :serial -> 0, :scope -> [], :statements -> [],
     :closed -> false, :loops -> 0, :references -> {}, :owner -> [function, name, records, module[:state][:constants], module[:state][:parameters]]}
 end
@@ -502,7 +514,9 @@ end
 verb native_gen/finish(module: map, builder: map) -> map
   native/ensure(builder[:closed] && len(builder[:scope]) == 0, "generated function can fall through or ends in a nested scope")
   native/ensure(module[:functions][builder[:name]] == builder[:function], "generated function belongs to another module")
-  let generated_result: map = native/define_function(module, builder[:name], builder[:statements])
+  let cached: map = module
+  cached[:generation_layout] = builder[:module][:generation_layout]
+  let generated_result: map = native/define_function(cached, builder[:name], builder[:statements])
   return generated_result
 end
 

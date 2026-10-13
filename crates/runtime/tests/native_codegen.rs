@@ -64,6 +64,122 @@ fn callable_runner(interpreter_only: bool) -> SourceRunner {
 }
 
 #[test]
+fn native_identifier_validation_preserves_ascii_rules() {
+    for tier in [true, false] {
+        let mut runner = runner(tier).with_task_limits(TaskLimits {
+            instruction_budget: 5_000_000,
+            ..TaskLimits::default()
+        });
+        assert_eq!(
+            eval(
+                &mut runner,
+                r#"
+let valid = ["a", "Z", "a0", "z9", "A_Z", "value_tuple_get", "gen_1203_column"]
+let invalid = ["", "_name", "0name", "a-b", "a.b", "a b", "a\n", "é", "aé", "a🦀", "Ａ", "a١"]
+for text in valid
+  native/identifier(text)
+end
+for text in invalid
+  let rejected = false
+  try
+    native/identifier(text)
+  catch E_INVARG
+    rejected = true
+  end
+  require rejected
+end
+for iteration in 0..999
+  native/identifier("native_source_roundtrip_method_123_456")
+end
+return true
+"#
+            ),
+            Value::bool(true)
+        );
+    }
+}
+
+#[test]
+fn native_generation_context_refreshes_changed_schema_tables() {
+    for tier in [true, false] {
+        let mut runner = runner(tier);
+        assert_eq!(
+            eval(
+                &mut runner,
+                r#"
+let [constants, state] = native/constants(native/program(), [["one", :U64, "0000000000000001"]])
+let module = native/module_context(state, constants)
+module = native/declare_function(module, "first", :U64, [["argument", :U64, :Value]], [["scratch", :I64]], [], :Value, "")
+let builder = native_gen/context(module, "first")
+require native_gen/ref(builder, "argument")[:type] == :U64
+require !native_gen/ref(builder, "argument")[:writable]
+require native_gen/ref(builder, "scratch")[:type] == :I64
+require native_gen/ref(builder, "scratch")[:writable]
+module = native_gen/finish(module, native_gen/return_value(builder, native_gen/ref(builder, "argument")))
+let earlier = module
+let [more, updated] = native/constants(module[:state], [["extra", :I64, "0000000000000002"]])
+module[:state] = updated
+let names = module[:constants]
+names["extra"] = more["extra"]
+module[:constants] = names
+let record_id = module[:state][:next]
+let [record, fields] = native/record_type(module[:state], "Flag", [["value", :Bool]])
+module[:state] = fields
+module = native/declare_function(module, "second", :Bool, [["flag", [:Record, "Flag"], :Value]], [], [], :Value, "")
+builder = native_gen/context(module, "second")
+require native_gen/ref(builder, "extra")[:type] == :I64
+require native_gen/field(builder, native_gen/ref(builder, "flag"), "value")[:type] == :Bool
+require !map_contains_key(builder[:types], earlier[:bindings]["first"]["argument"])
+module = native_gen/finish(module, native_gen/return_value(builder, native_gen/field(builder, native_gen/ref(builder, "flag"), "value")))
+let original = native_gen/context(earlier, "first")
+require !map_contains_key(original[:bindings], "extra")
+require !map_contains_key(original[:records], "Flag")
+// Cached record validation must observe changes to existing fields too.
+module[:state] = native/add_field(module[:state], record_id, 1, "value", :U64)
+let rejected = false
+try
+  native_gen/context(module, "second")
+catch E_INVARG
+  rejected = true
+end
+require rejected
+return true
+"#
+            ),
+            Value::bool(true)
+        );
+    }
+}
+
+#[test]
+fn native_generation_context_scales_with_function_bindings() {
+    for tier in [true, false] {
+        let mut runner = runner(tier).with_task_limits(TaskLimits {
+            instruction_budget: 20_000_000,
+            ..TaskLimits::default()
+        });
+        assert_eq!(
+            eval(
+                &mut runner,
+                r#"
+let parameters = [[string_concat("argument_", to_literal(i)), :U64, :Value] for i in 0..31]
+let module = native/module_context(native/program(), {})
+for i in 0..255
+  module = native/declare_function(module, string_concat("function_", to_literal(i)), :U64, parameters, [], [], :Value, "")
+end
+for i in 0..255
+  let builder = native_gen/context(module, string_concat("function_", to_literal(i)))
+  module = native_gen/finish(module, native_gen/return_value(builder, native_gen/ref(builder, "argument_0")))
+end
+return len(module[:state][:functions])
+"#
+            ),
+            Value::int(256).unwrap()
+        );
+    }
+}
+
+#[test]
 fn typed_callables_execute_and_preserve_aggregate_layout() {
     let mut previous = None;
     for interpreter_only in [true, false] {

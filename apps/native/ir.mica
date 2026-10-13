@@ -125,12 +125,14 @@ verb native/ordered(rows, column)
 end
 
 verb native/identifier(spelling)
-  native/ensure(string_len(spelling) > 0, "empty identifier")
-  let letters = string_chars("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")
-  let digits = string_chars("0123456789")
+  let length = string_len(spelling)
+  native/ensure(length > 0, "empty identifier")
   let position = 0
-  for ch in string_chars(spelling)
-    native/ensure(native/contains(letters, ch) || (position > 0 && (ch == "_" || native/contains(digits, ch))), "invalid identifier")
+  while position < length
+    let code = spelling[position]
+    let letter = (code >= 65 && code <= 90) || (code >= 97 && code <= 122)
+    let digit = code >= 48 && code <= 57
+    native/ensure(letter || (position > 0 && (code == 95 || digit)), "invalid identifier")
     position = position + 1
   end
 end
