@@ -34,6 +34,7 @@ verb native_source/compile(input: map, prefix: string, source: string, relations
   module = native_algebra/definitions(module)
   module = native_time/definitions(module)
   module = native_text/definitions(module)
+  module = native_quoting/definitions(module)
   module = native_numeric/definitions(module)
   module = native_source/declare_entries(module)
   module = native_source/constants_body(module)

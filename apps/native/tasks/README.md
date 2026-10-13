@@ -409,6 +409,18 @@ Spawn fixtures cover rollback, conflict retry, delayed resolution, policy revoca
 Native `edit_distance(left, right)` computes Levenshtein distance over Unicode scalars, with unit insertion, deletion, and substitution costs.
 Its rooted scratch arrays scale with the shorter input. Inner-loop checks charge work and permit cancellation and collection.
 
+The generated string-literal codec uses double quotes and preserves readable Unicode.
+It emits `\"`, `\\`, `\0`, `\t`, `\n`, and `\r` as short escapes.
+Other controls and invisible characters use lowercase `\u{hex}` escapes, without leading zeroes.
+The classification uses Unicode 15.1 categories Cc, Cf, Zl, Zp, and Zs (except ordinary space), plus Default_Ignorable_Code_Point.
+Visible combining marks remain unchanged. Escaping a format character preserves its value, including within an emoji sequence.
+
+`literal_quote` writes a string token. `literal_read_string` accepts a byte offset and returns the cursor after its closing quote.
+The reader accepts one to six Unicode hex digits, including uppercase digits and leading zeroes.
+Unknown escapes and malformed Unicode escapes remain literal, matching the existing reader; `\xNN` is not decoded.
+Both helpers bound work and allocation, poll for collection, and return distinct syntax, type, limit, and cancellation outcomes.
+These are internal compiler-runtime helpers. The general native `to_literal` and `from_literal` builtins remain unfinished.
+
 Native `is_builtin(symbol)` reports the source backend's supported builtin inventory, including its variadic calls.
 Compiler forms and Rust-only builtins return false. Invalid arguments raise catchable `E_TYPE` or `E_INVARG` errors.
 

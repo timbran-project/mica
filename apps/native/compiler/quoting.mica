@@ -1,0 +1,267 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+// String tokens are shared by string values, quoted names, and error messages.
+// The reader returns a byte cursor after the closing quote. Syntax failures
+// have shape 2; type failures have shape 1. Resource failures retain status.
+verb native_quoting/name(module: map, operation: string) -> string
+  return string_concat(module[:source_prefix], "_literal_", operation)
+end
+verb native_quoting/number(builder: map, number: int) -> map
+  let result: map = native_gen/ref(builder, string_concat("quoting_", to_literal(number)))
+  return result
+end
+verb native_quoting/result(builder: map, shape: int, next: map, value: map) -> map
+  let result: map = native_roots/return_value(builder, native_gen/record(builder, builder[:result], {
+    "status" -> native_gen/ref(builder, "kernel_ok"), "shape" -> native_quoting/number(builder, shape),
+    "next" -> next, "value" -> value}))
+  return result
+end
+verb native_quoting/check(builder: map, condition: map, shape: int) -> map
+  let result: map = native_gen/unless(builder, condition, fn(invalid) => native_quoting/result(invalid, shape,
+    native_gen/ref(invalid, "zero"), native_gen/zero(native_value/word())))
+  return result
+end
+verb native_quoting/byte(builder: map, text: map, position: map) -> map
+  let result: map = native_gen/convert(:U64, native_value/string_byte(builder, text, position))
+  return result
+end
+verb native_quoting/bytes(builder: map, buffer: map, bytes: list) -> map
+  let ready: map = builder
+  for byte in bytes
+    ready = native_text/buffer_byte(ready, buffer, native_quoting/number(ready, byte))
+  end
+  return ready
+end
+verb native_quoting/scalar(builder: map, buffer: map, scalar: map) -> map
+  let rune: map = native_gen/expression([:Scalar, "Rune", :U32], :Wrap, [native_gen/convert(:U32, scalar)])
+  let [encoded: map, ready: map] = native_gen/bind(builder, "utf8", native_gen/call(builder, "utf8_encode", [rune]))
+  let bytes: map = native_gen/field(ready, native_gen/address(encoded), "bytes")[:pointer]
+  let result: map = native_gen/for_range(ready, "byte", native_gen/ref(ready, "zero"), native_gen/field(ready, encoded, "width"), fn(step, index)
+    return native_text/buffer_byte(step, buffer, native_gen/load(native_gen/element(bytes, index)))
+  end)
+  return result
+end
+// Flush only between scalars or complete escapes. Ten bytes always remain
+// available for the longest escape, and no borrowed heap address survives.
+verb native_quoting/flush_full(builder: map, buffer: map) -> map
+  let result: map = native_gen/unless(builder, native_gen/less(buffer[:used], native_quoting/number(builder, 246)),
+    fn(full) => native_text/flush_bytes(full, buffer))
+  return result
+end
+verb native_quoting/hex_escape(builder: map, buffer: map, scalar: map) -> map
+  let ready: map = native_quoting/bytes(builder, buffer, [92, 117, 123])
+  let [shift: map, shifted: map] = native_gen/bind(ready, "hex_shift", native_quoting/number(ready, 20))
+  ready = native_gen/while_loop(shifted, native_gen/less(native_gen/ref(shifted, "zero"), shift), fn(step)
+    let found: map = native_gen/unless(step, native_kernel/absent(native_gen/shift_right(scalar, shift)), fn(done) => native_gen/break_loop(done))
+    return native_gen/assign(found, shift, native_gen/subtract(shift, native_quoting/number(found, 4)))
+  end)
+  ready = native_gen/while_loop(ready, native_gen/ref(ready, "true"), fn(step)
+    let nibble: map = native_gen/bit_and(native_gen/shift_right(scalar, shift), native_quoting/number(step, 15))
+    let [digit: map, initialized: map] = native_gen/bind(step, "hex_digit", native_gen/add(nibble, native_quoting/number(step, 48)))
+    let selected: map = native_gen/unless(initialized, native_gen/less(nibble, native_quoting/number(initialized, 10)),
+      fn(letter) => native_gen/assign(letter, digit, native_gen/add(nibble, native_quoting/number(letter, 87))))
+    let written: map = native_text/buffer_byte(selected, buffer, digit)
+    written = native_gen/when(written, native_kernel/absent(shift), fn(done) => native_gen/break_loop(done))
+    return native_gen/assign(written, shift, native_gen/subtract(shift, native_quoting/number(written, 4)))
+  end)
+  let result: map = native_quoting/bytes(ready, buffer, [125])
+  return result
+end
+verb native_quoting/range_tree(builder: map, scalar: map, ranges: list, first: int, limit: int) -> map
+  if first == limit
+    let result: map = native_gen/return_value(builder, native_gen/ref(builder, "false"))
+    return result
+  end
+  let width: int = limit - first
+  let middle: int = first + (width - width % 2) / 2
+  let range: list = ranges[middle]
+  let result: map = native_gen/branch(builder, native_gen/less(scalar, native_quoting/number(builder, range[0])),
+    fn(left) => native_quoting/range_tree(left, scalar, ranges, first, middle), fn(right)
+      let present: map = native_gen/when(right, native_gen/less(scalar, native_quoting/number(right, range[1])),
+        fn(found) => native_gen/return_value(found, native_gen/ref(found, "true")))
+      return native_quoting/range_tree(present, scalar, ranges, middle + 1, limit)
+    end)
+  return result
+end
+verb native_quoting/quote_body(module: map) -> map
+  let builder: map = native_queries/budget_scope(native_gen/context(module, native_quoting/name(module, "quote")))
+  builder = native_query/charge(builder, native_gen/ref(builder, "one"), native_gen/ref(builder, "zero"))
+  let text: map = native_roots/ref(builder, "text")
+  builder = native_quoting/check(builder, native_access/kind(builder, text, "string"), 1)
+  let [buffer: map, ready: map] = native_text/byte_buffer(builder)
+  builder = native_quoting/bytes(ready, buffer, [34])
+  builder = native_text/each_scalar(builder, text, native_gen/ref(builder, "zero"), fn(step, index, scalar)
+    let cases: list = []
+    for pair in [[0, 48], [9, 116], [10, 110], [13, 114], [34, 34], [92, 92]]
+      cases = [@cases, [native_quoting/number(step, pair[0]), fn(short) => native_quoting/bytes(short, buffer, [92, pair[1]])]]
+    end
+    let written: map = native_gen/switch(step, scalar, cases, fn(other)
+      let invisible: map = native_gen/call(other, native_quoting/name(module, "invisible"), [scalar])
+      return native_gen/branch(other, invisible,
+        fn(escaped) => native_quoting/hex_escape(escaped, buffer, scalar),
+        fn(readable) => native_quoting/scalar(readable, buffer, scalar))
+    end)
+    return native_quoting/flush_full(written, buffer)
+  end)
+  builder = native_quoting/bytes(builder, buffer, [34])
+  builder = native_text/flush_bytes(builder, buffer)
+  let result: map = native_gen/finish(module, native_quoting/result(builder, 0, native_gen/ref(builder, "zero"), buffer[:text]))
+  return result
+end
+// A failed Unicode escape consumes nothing past the 'u'. The ordinary reader
+// then preserves its remaining bytes, including an invalid scalar or hex digit.
+verb native_quoting/unicode_escape(builder: map, text: map, position: map, length: map, scalar: map) -> map
+  let [cursor: map, positioned: map] = native_gen/bind(builder, "unicode_cursor", position)
+  let [number: map, accumulated: map] = native_gen/bind(positioned, "unicode_number", native_gen/ref(positioned, "zero"))
+  let [digits: map, counted: map] = native_gen/bind(accumulated, "unicode_digits", native_gen/ref(accumulated, "zero"))
+  let result: map = native_gen/when(counted, native_gen/less(cursor, length), fn(available)
+    return native_gen/when(available, native_gen/equal(native_quoting/byte(available, text, cursor), native_quoting/number(available, 123)), fn(brace)
+      let begun: map = native_gen/assign(brace, cursor, native_gen/add(cursor, native_gen/ref(brace, "one")))
+      return native_gen/while_loop(begun, native_gen/less(cursor, length), fn(step)
+        let [byte: map, loaded: map] = native_gen/bind(step, "hex_byte", native_quoting/byte(step, text, cursor))
+        let checked: map = native_gen/when(loaded, native_gen/equal(byte, native_quoting/number(loaded, 125)), fn(close)
+          let nonempty: map = native_gen/when(close, native_gen/less(native_gen/ref(close, "zero"), digits), fn(nonempty)
+            let valid: map = native_gen/field(nonempty, native_gen/call(nonempty, "unicode_scalar", [native_gen/convert(:U32, number)]), "ok")
+            return native_gen/when(nonempty, valid, fn(accepted)
+              let decoded: map = native_gen/assign(accepted, scalar, number)
+              return native_gen/assign(decoded, position, native_gen/add(cursor, native_gen/ref(decoded, "one")))
+            end)
+          end)
+          return native_gen/break_loop(nonempty)
+        end)
+        checked = native_gen/when(checked, native_gen/equal(digits, native_quoting/number(checked, 6)), fn(full) => native_gen/break_loop(full))
+        let [digit: map, prepared: map] = native_gen/bind(checked, "digit", native_quoting/number(checked, 16))
+        for range in [[48, 58, 0], [65, 71, 10], [97, 103, 10]]
+          let inside: map = native_gen/less(native_gen/subtract(byte, native_quoting/number(prepared, range[0])), native_quoting/number(prepared, range[1] - range[0]))
+          prepared = native_gen/when(prepared, inside, fn(found) => native_gen/assign(found, digit,
+            native_gen/add(native_gen/subtract(byte, native_quoting/number(found, range[0])), native_quoting/number(found, range[2]))))
+        end
+        prepared = native_gen/when(prepared, native_gen/equal(digit, native_quoting/number(prepared, 16)), fn(invalid) => native_gen/break_loop(invalid))
+        prepared = native_gen/assign(prepared, number, native_gen/add(native_gen/multiply(number, native_quoting/number(prepared, 16)), digit))
+        prepared = native_gen/assign(prepared, digits, native_gen/add(digits, native_gen/ref(prepared, "one")))
+        return native_gen/assign(prepared, cursor, native_gen/add(cursor, native_gen/ref(prepared, "one")))
+      end)
+    end)
+  end)
+  return result
+end
+verb native_quoting/read_escape(builder: map, text: map, position: map, length: map, scalar: map, buffer: map) -> map
+  let checked: map = native_quoting/check(builder, native_gen/less(position, length), 2)
+  let [byte: map, ready: map] = native_gen/bind(checked, "escape", native_quoting/byte(checked, text, position))
+  let cases: list = []
+  for pair in [[48, 0], [116, 9], [110, 10], [114, 13], [34, 34], [92, 92]]
+    cases = [@cases, [native_quoting/number(ready, pair[0]), fn(short)
+      let decoded: map = native_gen/assign(short, scalar, native_quoting/number(short, pair[1]))
+      return native_gen/assign(decoded, position, native_gen/add(position, native_gen/ref(decoded, "one")))
+    end]]
+  end
+  cases = [@cases, [native_quoting/number(ready, 117), fn(unicode)
+    let [after_u: map, saved: map] = native_gen/bind(unicode, "after_u", native_gen/add(position, native_gen/ref(unicode, "one")))
+    let advanced: map = native_gen/assign(saved, position, after_u)
+    advanced = native_quoting/unicode_escape(advanced, text, position, length, scalar)
+    return native_gen/when(advanced, native_gen/equal(position, after_u), fn(preserved)
+      let slash: map = native_quoting/bytes(preserved, buffer, [92])
+      return native_gen/assign(slash, scalar, native_quoting/number(slash, 117))
+    end)
+  end]]
+  // Unknown escapes retain the backslash. The following scalar is consumed
+  // on the next iteration, which also handles multibyte UTF-8 without splitting.
+  let result: map = native_gen/switch(ready, byte, cases, fn(unknown) => unknown)
+  return result
+end
+verb native_quoting/read_body(module: map) -> map
+  let builder: map = native_queries/budget_scope(native_gen/context(module, native_quoting/name(module, "read_string")))
+  builder = native_query/charge(builder, native_gen/ref(builder, "one"), native_gen/ref(builder, "zero"))
+  let text: map = native_roots/ref(builder, "text")
+  builder = native_quoting/check(builder, native_access/kind(builder, text, "string"), 1)
+  let [length: map, sized: map] = native_gen/bind(builder, "length", native_value/string_field(builder, text, "length"))
+  let [position: map, positioned: map] = native_gen/bind(sized, "position", native_gen/ref(sized, "start"))
+  builder = native_quoting/check(positioned, native_gen/less(position, length), 2)
+  builder = native_quoting/check(builder, native_gen/equal(native_quoting/byte(builder, text, position), native_quoting/number(builder, 34)), 2)
+  builder = native_gen/assign(builder, position, native_gen/add(position, native_gen/ref(builder, "one")))
+  let [buffer: map, buffered: map] = native_text/byte_buffer(builder)
+  let [ticks: map, counted: map] = native_gen/bind(buffered, "visited", native_gen/ref(buffered, "zero"))
+  builder = native_gen/while_loop(counted, native_gen/less(position, length), fn(step)
+    let polled: map = native_query/poll_interval(step, ticks)
+    polled = native_gen/assign(polled, ticks, native_gen/add(ticks, native_gen/ref(polled, "one")))
+    let data: map = native_value/string_field(polled, text, "data")
+    let [decoded: map, loaded: map] = native_gen/checked_bind(polled, "decoded", native_gen/call(polled, "utf8_decode", [
+      native_gen/freeze(native_gen/offset(data, position)), native_gen/subtract(length, position)]), "ok", fn(invalid) => native_query/error(invalid, "schema"))
+    let [scalar: map, ready: map] = native_gen/bind(loaded, "scalar", native_gen/convert(:U64, native_gen/expression(:U32, :Unwrap, [native_gen/field(loaded, decoded, "rune")])))
+    ready = native_gen/assign(ready, position, native_gen/add(position, native_gen/field(ready, decoded, "width")))
+    ready = native_gen/when(ready, native_gen/equal(scalar, native_quoting/number(ready, 34)), fn(closed)
+      let flushed: map = native_text/flush_bytes(closed, buffer)
+      return native_quoting/result(flushed, 0, position, buffer[:text])
+    end)
+    ready = native_gen/when(ready, native_gen/equal(scalar, native_quoting/number(ready, 92)),
+      fn(escape) => native_quoting/read_escape(escape, text, position, length, scalar, buffer))
+    ready = native_quoting/scalar(ready, buffer, scalar)
+    return native_quoting/flush_full(ready, buffer)
+  end)
+  let result: map = native_gen/finish(module, native_quoting/result(builder, 2, native_gen/ref(builder, "zero"), native_gen/zero(native_value/word())))
+  return result
+end
+verb native_quoting/definitions(input: map) -> map
+  let module: map = input
+  let numbers: list = [0, 1, 2, 4, 6, 9, 10, 13, 15, 16, 20, 34, 48, 65, 87, 92, 97, 110, 114, 116, 117, 123, 125, 246]
+  for range in native_quoting/invisible_ranges()
+    numbers = [@numbers, @range]
+  end
+  let seen: map = {}
+  for number in numbers
+    if !map_contains_key(seen, number)
+      module = native_literal/constant(module, string_concat("quoting_", to_literal(number)), :U64, native_value/hex(number))
+      seen[number] = true
+    end
+  end
+  let name: string = native_quoting/name(module, "invisible")
+  module = native/declare_function(module, name, :Bool, [["scalar", :U64, :Value]], [], [], :Value, "")
+  let builder: map = native_gen/context(module, name)
+  module = native_gen/finish(module, native_quoting/range_tree(builder, native_gen/ref(builder, "scalar"), native_quoting/invisible_ranges(), 0, len(native_quoting/invisible_ranges())))
+  let result_type: list = [:Record, string_concat(module[:source_prefix], "_LiteralTextResult")]
+  module[:state] = native/record_type(module[:state], result_type[1], [["status", :U64], ["shape", :U64], ["next", :U64], ["value", native_value/word()]])[1]
+  let parameters: list = [["worker", native_memory/record_pointer("MemoryWorker"), :Borrow], ["attempt", native_tasks/pointer("Attempt"), :Borrow],
+    ["transaction", native_kernel/pointer("Transaction"), :Borrow], ["text", native_value/word(), :Gc]]
+  module = native_memory/declare(module, native_quoting/name(module, "quote"), result_type, parameters, native_tasks/effects(), :Gc, "")
+  module = native_memory/declare(module, native_quoting/name(module, "read_string"), result_type, [@parameters, ["start", :U64, :Value]], native_tasks/effects(), :Gc, "")
+  module = native_quoting/quote_body(module)
+  let result: map = native_quoting/read_body(module)
+  return result
+end
+
+// Unicode 15.1: Cc, Cf, Zl, Zp, non-ASCII Zs, and Default_Ignorable_Code_Point.
+// Ordinary space and visible combining marks remain readable. Half-open ranges
+// come from UnicodeData.txt and DerivedCoreProperties.txt in the Unicode UCD.
+verb native_quoting/invisible_ranges() -> list
+  return [
+    [0, 32],
+    [127, 161],
+    [173, 174],
+    [847, 848],
+    [1536, 1542],
+    [1564, 1565],
+    [1757, 1758],
+    [1807, 1808],
+    [2192, 2194],
+    [2274, 2275],
+    [4447, 4449],
+    [5760, 5761],
+    [6068, 6070],
+    [6155, 6160],
+    [8192, 8208],
+    [8232, 8240],
+    [8287, 8304],
+    [12288, 12289],
+    [12644, 12645],
+    [65024, 65040],
+    [65279, 65280],
+    [65440, 65441],
+    [65520, 65532],
+    [69821, 69822],
+    [69837, 69838],
+    [78896, 78912],
+    [113824, 113828],
+    [119155, 119163],
+    [917504, 921600]]
+end

@@ -2445,6 +2445,7 @@ fn load_native_source_compiler(runner: &mut SourceRunner) {
         include_str!("../../../apps/native/compiler/distance.mica"),
         include_str!("../../../apps/native/compiler/algebra.mica"),
         include_str!("../../../apps/native/compiler/url.mica"),
+        include_str!("../../../apps/native/compiler/quoting.mica"),
         include_str!("../../../apps/native/compiler/numeric.mica"),
         include_str!("../../../apps/native/compiler/decimal.mica"),
         include_str!("../../../apps/native/compiler/functions.mica"),
@@ -4018,6 +4019,15 @@ fn native_source_converts_numbers_and_parses_decimals() {
     check_native_source_body(
         include_str!("../../../apps/native/compiler/numeric_tests.mica"),
         include_str!("../../../apps/native/compiler/numeric_tests.c"),
+        &[],
+    );
+}
+
+#[test]
+fn native_source_quotes_and_reads_string_literals() {
+    check_native_source_body(
+        "return true",
+        include_str!("../../../apps/native/compiler/quoting_tests.c"),
         &[],
     );
 }
