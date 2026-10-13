@@ -1,0 +1,78 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+// Sort positions in a rooted input list. The two opaque position arrays can
+// move at checkpoints; values remain in the input's traced storage throughout.
+verb native_ordering/name(module: map) -> string
+  return string_concat(module[:source_prefix], "_sort")
+end
+verb native_ordering/compare(builder: map, input: map, left: map, right: map) -> list
+  let [order: map, ready: map] = native_gen/checked_bind(builder, "order", native_gen/call(builder, "value_compare", [
+    native_query/cell(builder, input, left), native_query/cell(builder, input, right)]), "ok",
+    fn(failed) => native_query/error(failed, "schema"))
+  return [native_gen/negate(native_gen/less(native_gen/ref(ready, "int_zero"), native_gen/field(ready, order, "number"))), ready]
+end
+verb native_ordering/positions(initial: map, input: map) -> list
+  let builder: map = initial
+  let length: map = native_query/width(builder, input)
+  let controls: map = {
+    :retain -> fn(step, label, value) => native_roots/retain(step, label, value),
+    :assign -> fn(step, cursor, value) => native_roots/store(step, cursor, value),
+    :checkpoint -> fn(step, index) => native_query/poll_interval(step, index)}
+  let [positions: map, allocated: map] = native_memory/array_storage(builder, native_roots/worker(builder), :U64, length, "layout_opaque",
+    fn(failed) => native_query/error(failed, "oom"))
+  let [data: map, rooted: map] = native_roots/retain(allocated, "positions", positions)
+  builder = native_gen/for_range(rooted, "position", native_gen/ref(rooted, "zero"), length, fn(step, index)
+    let polled: map = native_sequence/checkpoint(step, index, controls)
+    return native_gen/store(polled, native_gen/offset(data, index), index)
+  end)
+  let compare = fn(step, left, right) => native_ordering/compare(step, input, left, right)
+  let [ordered: map, tested: map] = native_sequence/is_ordered(builder, native_sequence/span(data, length), compare, controls)
+  let [result: map, selected: map] = native_roots/retain(tested, "ordered_positions", data)
+  builder = native_gen/unless(selected, ordered, fn(disordered) => native_roots/temporary(disordered, fn(unsorted)
+    let [scratch: map, reserved: map] = native_memory/array_storage(unsorted, native_roots/worker(unsorted), :U64, length, "layout_opaque",
+      fn(failed) => native_query/error(failed, "oom"))
+    let [sorted: map, merged: map] = native_sequence/stable_merge(reserved, native_sequence/span(data, length), scratch, compare, controls)
+    return native_roots/store(merged, result, sorted)
+  end))
+  return [result, ordered, builder]
+end
+verb native_ordering/body(module: map) -> map
+  let builder: map = native_queries/budget_scope(native_gen/context(module, native_ordering/name(module)))
+  let input: map = native_roots/ref(builder, "input")
+  let output: map = native_roots/root_value(builder, native_gen/ref(builder, "output"), native_value/word())
+  builder = native_builtins/kind_check(builder, input, "list")
+  let length: map = native_query/width(builder, input)
+  builder = native_gen/unless(builder, native_gen/less(native_gen/ref(builder, "one"), length), fn(trivial)
+    return native_tasks/attempt_status(native_roots/store(trivial, output, input), "ok")
+  end)
+  let [sorted: map, ordered: map, merged: map] = native_ordering/positions(builder, input)
+  let ready: map = native_gen/when(merged, ordered, fn(unchanged)
+    return native_tasks/attempt_status(native_roots/store(unchanged, output, input), "ok")
+  end)
+  let [empty: map, initialized: map] = native_query/tuple(ready, [])
+  let [result: map, retained: map] = native_roots/retain(initialized, "result", empty)
+  builder = native_gen/for_range(retained, "element", native_gen/ref(retained, "zero"), length, fn(step, index)
+    let polled: map = native_query/poll_interval(step, index)
+    let value: map = native_query/cell(polled, input, native_gen/load(native_gen/offset(sorted, index)))
+    let [appended: map, copied: map] = native_query/value(polled, "kernel_query_append", [native_roots/worker(polled), result, value])
+    return native_roots/store(copied, result, appended)
+  end)
+  builder = native_roots/store(builder, output, result)
+  let completed: map = native_gen/finish(module, native_tasks/attempt_status(builder, "ok"))
+  return completed
+end
+verb native_ordering/definitions(input: map) -> map
+  let module: map = native_memory/declare(input, native_ordering/name(input), :U64, [
+    ["worker", native_memory/record_pointer("MemoryWorker"), :Borrow], ["attempt", native_tasks/pointer("Attempt"), :Borrow],
+    ["transaction", native_kernel/pointer("Transaction"), :Borrow], ["input", native_value/word(), :Gc],
+    ["output", native_memory/record_pointer("MemoryRoot"), :Borrow]], native_tasks/effects(), :Value, "")
+  let result: map = native_ordering/body(module)
+  return result
+end
+verb native_ordering/sort(builder: map, value: map) -> list
+  let [output: map, ready: map] = native_roots/retain(builder, "sorted", native_gen/zero(native_value/word()))
+  ready = native_source/checked(ready, native_ordering/name(ready), [native_roots/worker(ready), native_tasks/attempt(ready),
+    native_tasks/slot(ready, "transaction"), value, output[:scope_root]])
+  return [output, ready]
+end

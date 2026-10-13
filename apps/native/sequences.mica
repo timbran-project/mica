@@ -24,10 +24,10 @@ end
 
 // The comparator returns [ordered predicate, updated builder]. It may emit a
 // checked comparison and leave the generated function on failure.
-verb native_sequence/is_ordered(builder: map, span: map, compare) -> list
+verb native_sequence/is_ordered(builder: map, span: map, compare, ?controls: map = {}) -> list
   let [ordered: map, current: map] = native_gen/bind(builder, "ordered", native_gen/ref(builder, "true"))
   current = native_gen/for_range(current, "scan", native_gen/ref(current, "one"), span[:length], fn(initial_body, index)
-    let body: map = initial_body
+    let body: map = native_sequence/checkpoint(initial_body, index, controls)
     let left: map = native_gen/read(native_sequence/at(span, native_gen/subtract(index, native_gen/ref(body, "one"))))
     let right: map = native_gen/read(native_sequence/at(span, index))
     let [in_order, compared] = compare(body, left, right)
@@ -67,35 +67,61 @@ verb native_sequence/compact_sorted(builder: map, span: map, compare, on_equal) 
   return [written, current]
 end
 
+// Moving collectors supply rooted cursors and an item checkpoint. Ordinary
+// borrowed spans use local pointers and emit no checkpoint or root machinery.
+verb native_sequence/cursor(builder: map, label: string, value: map, controls: map) -> list
+  if map_contains_key(controls, :retain)
+    let result: list = controls[:retain](builder, label, value)
+    return result
+  end
+  let result: list = native_gen/bind(builder, label, value)
+  return result
+end
+verb native_sequence/set_cursor(builder: map, cursor: map, value: map, controls: map) -> map
+  if map_contains_key(controls, :assign)
+    let result: map = controls[:assign](builder, cursor, value)
+    return result
+  end
+  let result: map = native_gen/assign(builder, cursor, value)
+  return result
+end
+verb native_sequence/checkpoint(builder: map, index: map, controls: map) -> map
+  if map_contains_key(controls, :checkpoint)
+    let result: map = controls[:checkpoint](builder, index)
+    return result
+  end
+  return builder
+end
+
 // Stable bottom-up merging. Storage and failure policy belong to the caller.
 // The returned pointer can be either input buffer; equality takes the left run.
 // Length must fit the allocation limit and be below 2^63, so doubling cannot wrap.
-verb native_sequence/stable_merge(builder: map, span: map, scratch: map, compare) -> list
-  let [source: map, current: map] = native_gen/bind(builder, "source", span[:data])
-  let [target: map, with_target: map] = native_gen/bind(current, "target", scratch)
+verb native_sequence/stable_merge(builder: map, span: map, scratch: map, compare, ?controls: map = {}) -> list
+  let [source: map, current: map] = native_sequence/cursor(builder, "source", span[:data], controls)
+  let [target: map, with_target: map] = native_sequence/cursor(current, "target", scratch, controls)
   current = with_target
   let [width: map, with_width: map] = native_gen/bind(current, "width", native_gen/ref(current, "one"))
   current = with_width
   current = native_gen/while_loop(current, native_gen/less(width, span[:length]),
-    fn(pass) => native_sequence/merge_pass(pass, source, target, width, span[:length], compare))
+    fn(pass) => native_sequence/merge_pass(pass, source, target, width, span[:length], compare, controls))
   return [source, current]
 end
 
 // Each pass merges adjacent runs, swaps buffers, and doubles the run width.
-verb native_sequence/merge_pass(builder: map, source: map, target: map, width: map, length: map, compare) -> map
+verb native_sequence/merge_pass(builder: map, source: map, target: map, width: map, length: map, compare, controls: map) -> map
   let [base: map, current: map] = native_gen/bind(builder, "base", native_gen/zero(:U64))
   current = native_gen/while_loop(current, native_gen/less(base, length),
-    fn(run) => native_sequence/merge_run(run, source, target, width, base, length, compare))
+    fn(run) => native_sequence/merge_run(run, source, target, width, base, length, compare, controls))
   let [swap: map, with_swap: map] = native_gen/bind(current, "swap", source)
   current = with_swap
-  current = native_gen/assign(current, source, target)
-  current = native_gen/assign(current, target, swap)
+  current = native_sequence/set_cursor(current, source, target, controls)
+  current = native_sequence/set_cursor(current, target, swap, controls)
   let result: map = native_gen/assign(current, width, native_gen/add(width, width))
   return result
 end
 
 // Clamp the two run boundaries, then fill their shared output interval.
-verb native_sequence/merge_run(builder: map, source: map, target: map, width: map, base: map, length: map, compare) -> map
+verb native_sequence/merge_run(builder: map, source: map, target: map, width: map, base: map, length: map, compare, controls: map) -> map
   let [middle: map, current: map] = native_gen/bind(builder, "middle", native_gen/add(base, width))
   current = native_gen/when(current, native_gen/less(length, middle),
     fn(clamp) => native_gen/assign(clamp, middle, length))
@@ -108,7 +134,7 @@ verb native_sequence/merge_run(builder: map, source: map, target: map, width: ma
   let [right: map, with_right: map] = native_gen/bind(current, "right", middle)
   current = with_right
   current = native_gen/for_range(current, "output", base, limit, fn(output, index)
-    let [chosen: map, selected: map] = native_sequence/merge_choice(output, source, left, right, middle, limit, compare)
+    let [chosen: map, selected: map] = native_sequence/merge_choice(native_sequence/checkpoint(output, index, controls), source, left, right, middle, limit, compare)
     return native_gen/store(selected, native_gen/offset(target, index), native_gen/load(native_gen/offset(source, chosen)))
   end)
   let result: map = native_gen/assign(current, base, limit)

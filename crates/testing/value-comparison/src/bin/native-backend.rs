@@ -178,6 +178,7 @@ fn run() -> Result<()> {
         "compiler/patterns",
         "compiler/queries",
         "compiler/updates",
+        "compiler/ordering",
         "compiler/functions",
         "compiler/collections",
         "compiler/access",

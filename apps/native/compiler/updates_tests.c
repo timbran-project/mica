@@ -15,7 +15,7 @@ static mica_type_Value update_row(struct mica_MemoryWorker *worker, int64_t a, i
 static bool update_present(struct mica_KernelTransaction *tx, uint64_t id, mica_type_Value row) {
     return mica_kernel_find(mica_kernel_index(mica_kernel_view(tx, id), 0), row, 0, false) != NULL;
 }
-static void update_kernel_checks(struct mica_MemoryWorker *worker, struct mica_Kernel *kernel) {
+static void source_body_checks(struct mica_MemoryWorker *worker, struct mica_Kernel *kernel) {
     struct mica_KernelTransaction tx = {0}, rival = {0};
     struct mica_MemoryRoot pattern = {0};
     assert(mica_memory_root_push(worker, &pattern));
@@ -141,64 +141,4 @@ static void update_kernel_checks(struct mica_MemoryWorker *worker, struct mica_K
     assert(update_present(&tx, 706, update_row(worker, 1, 0, 0, 3)));
     assert(mica_kernel_end(&tx));
     assert(mica_memory_root_pop(worker, &pattern));
-}
-int main(void) {
-    struct mica_MemoryHeap heap = {0};
-    struct mica_MemoryWorker worker = {0};
-    struct mica_SymbolTable symbols = {0};
-    struct mica_Kernel kernel = {0};
-    struct mica_TaskCodeRegistry registry = {0};
-    struct mica_MemoryRoot code = {0}, image = {0}, result = {0};
-    assert(mica_task_resources_start());
-    assert(mica_task_heap_init(&heap));
-    assert(mica_memory_worker_init(&worker, &heap, 4096) && mica_memory_enter(&worker));
-    assert(mica_value_symbol_table_init(&symbols));
-    assert(mica_kernel_init(&kernel, &worker, update_integer(7), 1));
-    assert(mica_task_code_init(&registry, &worker) == 0);
-    assert(mica_memory_root_push(&worker, &code));
-    assert(mica_memory_root_push(&worker, &image));
-    assert(mica_memory_root_push(&worker, &result));
-    void *library = dlopen(NULL, RTLD_NOW);
-    assert(library && mica_task_code_register(&registry, &worker, library, &code) == 0);
-    assert(mica_task_source_roundtrip_constants(&worker, &symbols, &registry, (void *)code.f_pointer) == 0);
-    struct mica_KernelTransaction tx = {0};
-    assert(mica_kernel_begin(&kernel, &worker, &tx, update_integer(7)) == 0);
-    assert(mica_kernel_declare(&tx, 705, 705, 2, 1, 1, 0) == 0);
-    assert(mica_kernel_declare(&tx, 706, 706, 3, 0, 0, 0) == 0);
-    assert(mica_kernel_commit(&tx) == 0);
-    assert(mica_kernel_end(&tx));
-    struct mica_ValueResult empty = mica_value_list(&worker, NULL, 0);
-    assert(empty.f_ok);
-    image.f_pointer = (void *)mica_task_new_Image(&worker, mica_source_roundtrip_method_2_0,
-        (void *)code.f_pointer, update_integer(7), empty.f_value, 0, NULL, NULL, 0, NULL, NULL);
-    assert(image.f_pointer);
-    struct mica_TaskControl task = {0};
-    struct mica_TaskRuntime runtime = {.f_symbols = &symbols};
-    struct mica_TaskServices services = {0};
-    assert(mica_task_init(&task, &worker, &kernel, &image, 100000, 3, 16, &runtime) == 0);
-    assert(mica_task_execute(&task, &worker) == 0);
-    assert(mica_task_dispatch(&task, &worker, &services) == 0);
-    struct mica_MemoryRoot acquired = {0};
-    assert(mica_memory_acquire(&worker, &task.f_image, &acquired));
-    mica_value_root_set(&result, ((struct mica_TaskImage *)acquired.f_pointer)->f_input);
-    assert(mica_memory_root_pop(&worker, &acquired));
-    assert(mica_task_release(&task, &worker));
-    assert(mica_memory_safepoint(&worker, true));
-    check_update_value(mica_value_root_get(&result), &symbols, &worker);
-    update_kernel_checks(&worker, &kernel);
-    assert(mica_kernel_release(&kernel, &worker));
-    assert(mica_memory_root_pop(&worker, &result));
-    assert(mica_memory_root_pop(&worker, &image));
-    assert(mica_memory_root_pop(&worker, &code));
-    assert(mica_task_code_close(&registry, &worker) == 0);
-    struct mica_TaskCodeReap reaped = mica_task_code_reap(&registry, &worker);
-    assert(reaped.f_status == 0 && reaped.f_released == 1);
-    assert(mica_task_code_release(&registry, &worker) == 0);
-    assert(mica_memory_safepoint(&worker, true));
-    assert(!heap.f_retained && !worker.f_roots);
-    assert(mica_memory_leave(&worker) && mica_memory_worker_release(&worker));
-    assert(mica_memory_heap_release(&heap));
-    mica_value_symbol_table_release(&symbols);
-    assert(mica_task_resources_stop());
-    return 0;
 }

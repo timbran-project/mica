@@ -85,18 +85,20 @@ end
 
 // Build a canonical relation from rooted row lists. The borrowed descriptors
 // live only through value_relation; there is no relocation in this final copy.
-verb native_queries/relation_value(builder: map, heading: map, rows: map) -> list
+verb native_queries/relation_value(builder: map, heading: map, rows: map, ?controls: map = {}) -> list
   let worker: map = native_roots/worker(builder)
   let width: map = native_query/width(builder, heading)
   let count: map = native_query/width(builder, rows)
   let failure = fn(failed) => native_query/error(failed, "oom")
   let [columns: map, allocated: map] = native_memory/array_storage(builder, worker, :U32, width, "layout_opaque", failure)
-  let ready: map = native_gen/for_range(allocated, "column", native_gen/ref(allocated, "zero"), width, fn(step, index)
+  let ready: map = native_gen/for_range(allocated, "column", native_gen/ref(allocated, "zero"), width, fn(initial, index)
+    let step: map = native_sequence/checkpoint(initial, index, controls)
     let id: map = native_gen/convert(:U32, native_gen/expression(:U64, :Payload, [native_query/cell(step, heading, index)]))
     return native_gen/store(step, native_gen/offset(columns, index), id)
   end)
   let [tuples: map, described: map] = native_memory/array_storage(ready, worker, [:Record, "ValueTuple"], count, "layout_opaque", failure)
-  ready = native_gen/for_range(described, "tuple", native_gen/ref(described, "zero"), count, fn(step, index)
+  ready = native_gen/for_range(described, "tuple", native_gen/ref(described, "zero"), count, fn(initial, index)
+    let step: map = native_sequence/checkpoint(initial, index, controls)
     let row: map = native_query/cell(step, rows, index)
     let header: map = native_gen/expression(native_memory/record_pointer("HeapList"), :UnpackPointer, [row])
     let tuple: map = native_gen/record(step, [:Record, "ValueTuple"], {"data" -> native_kernel/load_field(step, header, "data"), "arity" -> width})

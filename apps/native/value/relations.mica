@@ -253,6 +253,15 @@ verb native_value/relation_order(input: map) -> map
   return context
 end
 
+// Canonical construction borrows pointers and cannot relocate. Check its work
+// through the enclosing allocation control, preserving cancellation and limits.
+verb native_value/relation_work(builder: map, cost: map) -> map
+  let allowed: map = native_gen/call(builder, "memory_control_check", [
+    native_gen/read(native_gen/field(builder, native_gen/ref(builder, "worker"), "control")), native_gen/ref(builder, "zero"), cost])
+  let result: map = native_gen/unless(builder, allowed, fn(failed) => native_gen/return_zero(failed))
+  return result
+end
+
 // Ordering policy is separate from the shared traversal and stable merge.
 verb native_value/relation_ordered(builder: map, kind: string, left: map, right: map) -> list
   if kind == "columns"
@@ -282,12 +291,13 @@ verb native_value/relation_sort(input: map, kind: string, element: list) -> map
   let capacity: map = native_gen/divide(native_gen/ref(builder, "allocation_limit"), native_gen/sizeof(element))
   builder = native_gen/when(builder, native_gen/less(capacity, length), failure)
   let compare = fn(body, left, right) => native_value/relation_ordered(body, kind, left, right)
-  let [ordered: map, with_ordered: map] = native_sequence/is_ordered(builder, span, compare)
+  let controls: map = {:checkpoint -> fn(step, index) => native_value/relation_work(step, native_gen/ref(step, "one"))}
+  let [ordered: map, with_ordered: map] = native_sequence/is_ordered(builder, span, compare, controls)
   builder = with_ordered
   builder = native_gen/when(builder, ordered, success)
   let [scratch: map, with_scratch: map] = native_memory/array_storage(builder, native_gen/ref(builder, "worker"), element, length, "layout_opaque", failure)
   builder = with_scratch
-  let [sorted: map, with_sorted: map] = native_sequence/stable_merge(builder, span, scratch, compare)
+  let [sorted: map, with_sorted: map] = native_sequence/stable_merge(builder, span, scratch, compare, controls)
   builder = with_sorted
   builder = native_gen/unless(builder, native_gen/equal(sorted, data), fn(copy)
     return native_sequence/copy(copy, span, native_sequence/span(sorted, length))
@@ -300,7 +310,8 @@ end
 // Validate the complete source before allocating the canonical relation.
 verb native_value/relation_validate_rows(builder: map, source: map, arity: map, length: map) -> map
   let result: map = native_gen/for_range(builder, "validate_row", native_gen/zero(:U64), length, fn(initial_body, index)
-    let [row: map, with_row: map] = native_gen/bind(initial_body, "row", native_gen/load(native_gen/offset(source, index)))
+    let charged: map = native_value/relation_work(initial_body, native_gen/ref(initial_body, "one"))
+    let [row: map, with_row: map] = native_gen/bind(charged, "row", native_gen/load(native_gen/offset(source, index)))
     let body: map = native_gen/unless(with_row,
       native_gen/equal(native_gen/field(with_row, row, "arity"), arity),
       fn(failed) => native_gen/return_zero(failed))
@@ -416,7 +427,8 @@ end
 verb native_value/relation_project_rows(builder: map, source: map, order: map, arity: map, count: map, rows: map, cells: map) -> map
   let tuple: list = [:Record, "ValueTuple"]
   let result: map = native_gen/for_range(builder, "row", native_gen/zero(:U64), count, fn(initial_row, index)
-    let [input: map, with_input: map] = native_gen/bind(initial_row, "row", native_gen/load(native_gen/offset(source, index)))
+    let charged: map = native_value/relation_work(initial_row, native_gen/add(arity, native_gen/ref(initial_row, "one")))
+    let [input: map, with_input: map] = native_gen/bind(charged, "row", native_gen/load(native_gen/offset(source, index)))
     let data: map = native_gen/field(with_input, input, "data")
     let body: map = native_gen/for_range(with_input, "cell", native_gen/zero(:U64), arity, fn(cell, position)
       let descriptor: map = native_gen/load(native_gen/offset(order, position))
@@ -437,7 +449,8 @@ verb native_value/relation_compact_rows(builder: map, worker: map, rows: map, co
     fn(failed) => native_gen/return_zero(failed))
   let compacted: list = native_sequence/compact_sorted(sorted, native_sequence/span(rows, count),
     fn(body, left, right)
-      let [comparison: map, current: map] = native_value/checked_result(body,
+      let charged: map = native_value/relation_work(body, native_gen/ref(body, "one"))
+      let [comparison: map, current: map] = native_value/checked_result(charged,
         "value_tuple_compare", [left, right], fn(failed) => native_gen/return_zero(failed))
       return [native_gen/field(current, comparison, "number"), current]
     end,

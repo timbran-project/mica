@@ -6,7 +6,7 @@
 verb native_builtins/arities() -> map
   return {:mailbox -> 0, :mailbox_send -> 2, :mailbox_close -> 1,
     :len -> 1, :string_len -> 1, :string_append -> 2,
-    :map_contains_key -> 2, :map_pairs -> 1, :index_or -> 3, :is_kind -> 2}
+    :sort -> 1, :relation_from_rows -> 2, :map_contains_key -> 2, :map_pairs -> 1, :index_or -> 3, :is_kind -> 2}
 end
 verb native_builtins/kind_check(builder: map, value: map, kind: string) -> map
   let result: map = native_tasks/check(builder, native_access/kind(builder, value, kind), "schema")
@@ -20,8 +20,8 @@ verb native_builtins/has_kind(builder: map, value: map, kinds: list) -> list
   end
   return [found, ready]
 end
-verb native_builtins/error(builder: map, message: string) -> map
-  let code: map = native_source/literal(builder, E_INVARG)
+verb native_builtins/error(builder: map, message: string, ?error_code = E_INVARG) -> map
+  let code: map = native_source/literal(builder, error_code)
   let [error: map, ready: map] = native_source/result(builder, "value_error", [native_roots/worker(builder),
     native_gen/convert(:U32, native_gen/expression(:U64, :Payload, [code])),
     native_gen/ref(builder, "true"), native_source/literal(builder, message),
@@ -30,6 +30,10 @@ verb native_builtins/error(builder: map, message: string) -> map
   return result
 end
 verb native_builtins/arity_failure(builder: map, name: symbol) -> map
+  if name == :relation_from_rows
+    let result: map = native_builtins/error(builder, "relation_from_rows expects a heading and a list of rows")
+    return result
+  end
   if name == :is_kind
     let result: map = native_builtins/error(builder, "is_kind expects a value and kind symbol")
     return result
@@ -121,6 +125,14 @@ verb native_builtins/is_kind(builder: map, value: map, kind: map) -> list
   return [native_gen/call(ready, "value_bool", [matched]), ready]
 end
 verb native_builtins/call(builder: map, name: symbol, args: list) -> list
+  if name == :sort
+    let result: list = native_ordering/sort(builder, args[0])
+    return result
+  end
+  if name == :relation_from_rows
+    let result: list = native_builtins/relation(builder, args[0], args[1])
+    return result
+  end
   if name == :len || name == :string_len
     let result: list = native_builtins/length(builder, args[0], name == :string_len)
     return result
@@ -148,5 +160,116 @@ verb native_builtins/call(builder: map, name: symbol, args: list) -> list
     return result
   end
   let result: list = native_source/mailbox_builtin(builder, name, args)
+  return result
+end
+
+// Shape failures are language errors; allocation, limit, and cancellation
+// failures retain their kernel status. One helper validates every call site.
+verb native_builtins/relation_errors() -> list
+  return [[E_TYPE, "relation_from_rows heading must be a list"],
+    [E_TYPE, "relation_from_rows heading must contain symbols"],
+    [E_TYPE, "relation_from_rows rows must be a list"],
+    [E_TYPE, "relation_from_rows rows must be lists"],
+    [E_INVARG, "relation_from_rows heading exceeds 65535 columns"],
+    [E_INVARG, "relation_from_rows heading contains duplicate columns"],
+    [E_INVARG, "relation_from_rows row arity does not match heading"]]
+end
+verb native_builtins/relation_name(module: map) -> string
+  return string_concat(module[:source_prefix], "_relation_from_rows")
+end
+verb native_builtins/relation_result(builder: map, shape: int, value: map) -> map
+  let result: map = native_roots/return_value(builder, native_gen/record(builder, builder[:result], {
+    "status" -> native_gen/ref(builder, "kernel_ok"), "shape" -> native_gen/ref(builder, string_concat(builder[:module][:source_prefix], "_number_", to_literal(shape))), "value" -> value}))
+  return result
+end
+verb native_builtins/relation_check(builder: map, condition: map, shape: int) -> map
+  let result: map = native_gen/unless(builder, condition,
+    fn(invalid) => native_builtins/relation_result(invalid, shape, native_gen/zero(native_value/word())))
+  return result
+end
+verb native_builtins/relation_body(module: map) -> map
+  let builder: map = native_queries/budget_scope(native_gen/context(module, native_builtins/relation_name(module)))
+  let heading: map = native_roots/ref(builder, "heading")
+  let rows: map = native_roots/ref(builder, "rows")
+  let ready: map = native_builtins/relation_check(builder, native_access/kind(builder, heading, "list"), 1)
+  ready = native_gen/for_range(ready, "column", native_gen/ref(ready, "zero"), native_query/width(ready, heading), fn(step, index)
+    let polled: map = native_query/poll_interval(step, index)
+    return native_builtins/relation_check(polled, native_access/kind(polled, native_query/cell(polled, heading, index), "symbol"), 2)
+  end)
+  ready = native_builtins/relation_check(ready, native_access/kind(ready, rows, "list"), 3)
+  ready = native_gen/for_range(ready, "row", native_gen/ref(ready, "zero"), native_query/width(ready, rows), fn(step, index)
+    let polled: map = native_query/poll_interval(step, index)
+    return native_builtins/relation_check(polled, native_access/kind(polled, native_query/cell(polled, rows, index), "list"), 4)
+  end)
+  let width: map = native_query/width(ready, heading)
+  ready = native_builtins/relation_check(ready, native_gen/negate(native_gen/less(native_gen/ref(ready, "relation_max_arity"), width)), 5)
+  let [positions: map, already_ordered: map, ordered: map] = native_ordering/positions(ready, heading)
+  ready = native_gen/for_range(ordered, "column", native_gen/ref(ordered, "one"), width, fn(step, index)
+    let polled: map = native_query/poll_interval(step, index)
+    let left: map = native_query/cell(polled, heading, native_gen/load(native_gen/offset(positions, native_gen/subtract(index, native_gen/ref(polled, "one")))))
+    let right: map = native_query/cell(polled, heading, native_gen/load(native_gen/offset(positions, index)))
+    return native_builtins/relation_check(polled, native_gen/not_equal(left, right), 6)
+  end)
+  ready = native_gen/for_range(ready, "row", native_gen/ref(ready, "zero"), native_query/width(ready, rows), fn(step, index)
+    let polled: map = native_query/poll_interval(step, index)
+    let row: map = native_query/cell(polled, rows, index)
+    return native_builtins/relation_check(polled, native_gen/equal(native_query/width(polled, row), width), 7)
+  end)
+  let controls: map = {:checkpoint -> fn(step, index) => native_query/charge(step, native_gen/ref(step, "one"), native_gen/ref(step, "zero"))}
+  let [value: map, constructed: map] = native_queries/relation_value(ready, heading, rows, controls)
+  let result: map = native_gen/finish(module, native_builtins/relation_result(constructed, 0, value))
+  return result
+end
+verb native_builtins/relation(builder: map, heading: map, rows: map) -> list
+  let [value: map, called: map] = native_gen/bind(builder, "relation", native_gen/call(builder, native_builtins/relation_name(builder), [
+    native_roots/worker(builder), native_tasks/attempt(builder), native_tasks/slot(builder, "transaction"), heading, rows]))
+  let status: map = native_gen/field(called, value, "status")
+  let ready: map = native_gen/unless(called, native_kernel/absent(status), fn(failed) => native_roots/return_value(failed, status))
+  let shape: map = native_gen/field(ready, value, "shape")
+  ready = native_gen/unless(ready, native_kernel/absent(shape), fn(invalid)
+    let [code: map, coded: map] = native_gen/bind(invalid, "error_code", native_gen/zero(native_value/word()))
+    let [message: map, with_message: map] = native_gen/bind(coded, "error_message", native_gen/zero(native_value/word()))
+    let cases: list = []
+    let ordinal: int = 1
+    for [error_code, text] in native_builtins/relation_errors()
+      cases = [@cases, [native_source/number(with_message, ordinal), fn(selected)
+        let assigned: map = native_gen/assign(selected, code, native_source/literal(selected, error_code))
+        return native_gen/assign(assigned, message, native_source/literal(assigned, text))
+      end]]
+      ordinal = ordinal + 1
+    end
+    let selected: map = native_gen/switch(with_message, shape, cases, fn(unknown) => native_tasks/attempt_status(unknown, "schema"))
+    let [error: map, allocated: map] = native_source/result(selected, "value_error", [native_roots/worker(selected),
+      native_gen/convert(:U32, native_gen/expression(:U64, :Payload, [code])), native_gen/ref(selected, "true"), message,
+      native_gen/ref(selected, "false"), native_gen/zero(native_value/word())], "oom")
+    return native_source/throw(allocated, error)
+  end)
+  return [native_gen/field(ready, value, "value"), ready]
+end
+
+verb native_builtins/definitions(input: map) -> map
+  let sorting: bool = false
+  let relations: bool = false
+  for program in input[:source_programs]
+    for instruction in program[:analysis][:description][:code]
+      if instruction[0] == :BuiltinCall
+        sorting = sorting || instruction[2] == :sort
+        relations = relations || instruction[2] == :relation_from_rows
+      end
+    end
+  end
+  let module: map = input
+  if sorting || relations
+    module = native_ordering/definitions(module)
+  end
+  if !relations
+    return module
+  end
+  let result_type: list = [:Record, string_concat(module[:source_prefix], "_RelationResult")]
+  module[:state] = native/record_type(module[:state], result_type[1], [["status", :U64], ["shape", :U64], ["value", native_value/word()]])[1]
+  module = native_memory/declare(module, native_builtins/relation_name(module), result_type, [
+    ["worker", native_memory/record_pointer("MemoryWorker"), :Borrow], ["attempt", native_tasks/pointer("Attempt"), :Borrow],
+    ["transaction", native_kernel/pointer("Transaction"), :Borrow], ["heading", native_value/word(), :Gc], ["rows", native_value/word(), :Gc]], native_tasks/effects(), :Gc, "")
+  let result: map = native_builtins/relation_body(module)
   return result
 end

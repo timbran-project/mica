@@ -1829,6 +1829,25 @@ return native/emit_c(module[:state])
 }
 
 #[test]
+fn native_terminal_guard_regions_do_not_consume_bootstrap_call_depth() {
+    for interpreter_only in [true, false] {
+        let mut runner = runner(interpreter_only);
+        let generated = eval(&mut runner, r#"
+let [constants, state] = native/constants(native/program(), [["zero", :U64, "0000000000000000"], ["one", :U64, "0000000000000001"]])
+let module = native/module_context(state, constants)
+module = native/declare_function(module, "cleanup_guards", :U64, [["stop", :Bool, :Value], ["check", :Bool, :Value]], [], [], :Value, "")
+let cleanup = [native/when_statement("check", [native/return_value("zero")]), native/return_value("one")]
+let statements = [native/when_statement("stop", cleanup) for position in 1..300]
+module = native/define_function(module, "cleanup_guards", [@statements, native/return_value("zero")])
+return native/emit_c(module[:state])
+"#).with_str(str::to_owned).unwrap();
+        assert_eq!(generated.matches("if (").count(), 600);
+        assert!(!generated.contains("\n      if ("));
+        assert!(!generated.contains("goto "));
+    }
+}
+
+#[test]
 fn structured_builders_preserve_control_flow_and_notes() {
     let mut previous = None;
     for interpreter_only in [true, false] {
@@ -2270,6 +2289,7 @@ fn load_native_source_compiler(runner: &mut SourceRunner) {
         include_str!("../../../apps/native/compiler/patterns.mica"),
         include_str!("../../../apps/native/compiler/queries.mica"),
         include_str!("../../../apps/native/compiler/updates.mica"),
+        include_str!("../../../apps/native/compiler/ordering.mica"),
         include_str!("../../../apps/native/compiler/functions.mica"),
         include_str!("../../../apps/native/compiler/collections.mica"),
         include_str!("../../../apps/native/compiler/access.mica"),
@@ -3419,7 +3439,21 @@ fn native_source_program_executes_on_generated_runtime() {
 
 #[test]
 fn native_source_updates_preserve_atomicity_and_authority() {
-    let body = include_str!("../../../apps/native/compiler/updates_tests.mica");
+    check_native_source_body(
+        include_str!("../../../apps/native/compiler/updates_tests.mica"),
+        include_str!("../../../apps/native/compiler/updates_tests.c"),
+    );
+}
+
+#[test]
+fn native_source_sorts_and_constructs_relations() {
+    check_native_source_body(
+        include_str!("../../../apps/native/compiler/ordering_tests.mica"),
+        include_str!("../../../apps/native/compiler/ordering_tests.c"),
+    );
+}
+
+fn check_native_source_body(body: &str, extra_checks: &str) {
     let mut oracle = SourceRunner::new_empty().with_interpreter_only(true);
     oracle
         .run_filein(
@@ -3428,10 +3462,10 @@ fn native_source_updates_preserve_atomicity_and_authority() {
         .unwrap();
     let expected = eval(&mut oracle, body);
     let checks = format!(
-        "static void check_update_value(mica_type_Value actual, struct mica_SymbolTable *symbols, struct mica_MemoryWorker *worker) {{ (void)symbols; (void)worker; {} }}",
+        "static void check_source_value(mica_type_Value actual, struct mica_SymbolTable *symbols, struct mica_MemoryWorker *worker) {{ (void)symbols; (void)worker; {} }}",
         source_value_check(&expected, "actual")
     );
-    let source = format!("verb native_update_fixture()\n{body}\nend");
+    let source = format!("verb native_body_fixture()\n{body}\nend");
     thread::scope(|scope| {
         let builds = [true, false].map(|tier| {
             let source = &source;
@@ -3448,10 +3482,10 @@ fn native_source_updates_preserve_atomicity_and_authority() {
             }
             previous = Some(generated.clone());
             let fixture = format!(
-                "{generated}\n{memory}\n{tasks}\n{}\n{}\n#include <assert.h>\n{checks}\n{}",
+                "{generated}\n{memory}\n{tasks}\n{}\n{}\n#include <assert.h>\n{checks}\n{}\n{extra_checks}",
                 include_str!("../../../native/platform/allocation.c"),
                 include_str!("../../../native/platform/mutex.c"),
-                include_str!("../../../apps/native/compiler/updates_tests.c")
+                include_str!("../../../apps/native/compiler/body_tests.c")
             );
             check_native_source_fixture(&fixture);
         }

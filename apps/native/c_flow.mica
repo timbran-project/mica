@@ -11,6 +11,35 @@ verb native/flow_inline_return(index: map, flow: map, block) -> bool
   return len(rows) == 0 || (len(rows) == 1 && rows[0][3] == :Zero)
 end
 
+// A guard may perform conditional cleanup before returning. Recognize small
+// terminal regions without recursing through the much larger continuing arm.
+// The bound limits analysis work; inconclusive regions use ordinary structuring.
+verb native/flow_terminal_guard(index: map, flow: map, start: int, other: int, stop) -> bool
+  let pending: list = [start]
+  let seen: map = {}
+  let position: int = 0
+  while position < len(pending)
+    if position >= 32
+      return false
+    end
+    let block: int = pending[position]
+    position = position + 1
+    if block == other || block == stop || map_contains_key(flow[:loops], block)
+      return false
+    end
+    if map_contains_key(seen, block)
+      continue
+    end
+    seen[block] = true
+    let term: list = index[:terms][block]
+    if term[1] == :Return || native/is_transfer(term)
+      continue
+    end
+    pending = [@pending, @native/targets(term)]
+  end
+  return true
+end
+
 verb native/flow_comparison(index: map, flow: map, block: int) -> list
   let rows: list = flow[:instructions][block]
   let term: list = index[:terms][block]
@@ -101,7 +130,25 @@ end
 // Emit a region up to its postdominator. A visited block remains an explicit
 // transfer: this preserves shared tails and irreducible cycles without code
 // explosion. Declaration placement follows the resulting C scopes.
+// Exception edges can prevent local joins and produce very deep regions.
+// Defer their remaining blocks to the function's existing label pass, bounding
+// both generated nesting and the bootstrap stack used by later syntax walks.
 verb native/c_region(index: map, flow: map, input: map, start, stop, enter_loop: bool) -> list
+  if start == :Exit
+    return [[], input]
+  end
+  let depth: int = index_or(input, :region_depth, 0)
+  if depth >= 32
+    return [[native/c_goto(start)], input]
+  end
+  let context: map = input
+  context[:region_depth] = depth + 1
+  let [nodes: list, following: map] = native/c_region_body(index, flow, context, start, stop, enter_loop)
+  following[:region_depth] = depth
+  return [nodes, following]
+end
+
+verb native/c_region_body(index: map, flow: map, input: map, start, stop, enter_loop: bool) -> list
   let context: map = input
   let nodes: list = []
   let block = start
@@ -188,6 +235,10 @@ verb native/c_region(index: map, flow: map, input: map, start, stop, enter_loop:
       let no: int = term[2][2]
       let yes_returns: bool = index[:terms][yes][1] == :Return || native/is_transfer(index[:terms][yes])
       let no_returns: bool = index[:terms][no][1] == :Return || native/is_transfer(index[:terms][no])
+      if !yes_returns && !no_returns
+        yes_returns = native/flow_terminal_guard(index, flow, yes, no, stop)
+        no_returns = native/flow_terminal_guard(index, flow, no, yes, stop)
+      end
       if yes_returns != no_returns
         let guard: int = yes
         let following: int = no
