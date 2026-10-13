@@ -4510,10 +4510,49 @@ fn native_source_converts_numbers_and_parses_decimals() {
 #[test]
 #[ignore = "C emitter bootstrap generates and compiles a large native module"]
 fn native_source_executes_the_c_emitter() {
-    let entry = "verb native_c_fixture(state)\nreturn native/emit_c(state)\nend\n";
+    let entry = "verb native_c_fixture(example)\nreturn native/build_c_fixture(example)\nend\n";
+    let builders = r#"
+verb native/build_c_fixture(example: symbol) -> string
+  let state: map = native/program()
+  if example == :scalar
+    state = native/scalar_example()
+  elseif example == :values
+    state = native/value_examples()
+  elseif example == :structured
+    state = native/structured_c_fixture()
+  else
+    native/ensure(example == :empty, "unknown C fixture")
+  end
+  let emitted: string = native/emit_c(state)
+  return emitted
+end
+
+verb native/structured_c_fixture() -> map
+  let [constants, state] = native/constants(native/program(), [
+    ["zero", :U64, "0000000000000000"], ["one", :U64, "0000000000000001"],
+    ["three", :U64, "0000000000000003"]])
+  let module: map = native/module_context(state, constants)
+  module = native/declare_function(module, "sum_except_three", :U64,
+    [["limit", :U64, :Value]], [], [], :Value, "")
+  let builder: map = native_gen/context(module, "sum_except_three")
+  let [sum, initialized] = native_gen/bind(builder, "sum", native_gen/ref(builder, "zero"))
+  builder = native_gen/for_range(initialized, "index", native_gen/ref(initialized, "zero"),
+    native_gen/ref(initialized, "limit"), fn(body, index)
+      let guarded = native_gen/when(body, native_gen/equal(index, native_gen/ref(body, "three")),
+        fn(skipped) => native_gen/continue_loop(skipped))
+      return native_gen/assign(guarded, sum, native_gen/add(sum, index))
+    end)
+  builder = native_gen/return_value(builder, sum)
+  module = native_gen/finish(module, builder)
+  let result: map = module[:state]
+  return result
+end
+"#;
+    let mut library = SOURCES.to_vec();
+    library.push(builders);
     let source = format!(
         "{entry}\n{}",
-        native_source_dependency_closure(SOURCES, "native/emit_c")
+        native_source_dependency_closure(&library, "native/build_c_fixture")
     );
     let method_ids = format!(
         "[{}]",
@@ -4526,14 +4565,18 @@ fn native_source_executes_the_c_emitter() {
             .join(",")
     );
     let mut oracle = runner(true);
+    oracle.run_filein(builders).unwrap();
     let mut checks = String::new();
     let mut outputs = Vec::new();
-    for expression in [
-        "native/program()",
-        "native/scalar_example()",
-        "native/value_examples()",
+    for (name, expression) in [
+        ("empty", "native/program()"),
+        ("scalar", "native/scalar_example()"),
+        ("values", "native/value_examples()"),
+        ("structured", "native/structured_c_fixture()"),
     ] {
-        let input = eval(&mut oracle, &format!("return {expression}"));
+        // Only the example selector crosses into the generated runtime. Its
+        // Mica builders construct all IR before the native emitter consumes it.
+        let input = Value::symbol(Symbol::intern(name));
         let expected = eval(&mut oracle, &format!("return native/emit_c({expression})"));
         let (input, construction) = source_value_literal(&input, &mut 0);
         checks.push_str(&format!(
@@ -4564,8 +4607,8 @@ fn native_source_executes_the_c_emitter() {
         ),
         &["-O0", "-g0"],
     );
-    // Native emission above must match these bytes exactly. Compile them too,
-    // then run the existing value example's independent semantic assertions.
+    // Native construction and emission must match these bytes exactly.
+    // Compile the outputs and run independent semantic assertions.
     for output in &outputs[..2] {
         check_native_source_fixture(&format!("{output}\nint main(void) {{ return 0; }}\n"));
     }
@@ -4576,6 +4619,15 @@ fn native_source_executes_the_c_emitter() {
         outputs[2],
         include_str!("../../../native/platform/allocation.c"),
         include_str!("../../../apps/native/tests/values.c"),
+    ));
+    check_native_source_fixture(&format!(
+        "{}\n#include <assert.h>\nint main(void) {{\n\
+         for (uint64_t limit = 0; limit < 100; ++limit) {{\n\
+         uint64_t expected = 0;\n\
+         for (uint64_t index = 0; index < limit; ++index) {{\n\
+         if (index != 3) expected += index;\n}}\n\
+         assert(mica_sum_except_three(limit) == expected);\n}}\nreturn 0;\n}}\n",
+        outputs[3],
     ));
 }
 

@@ -495,11 +495,14 @@ cargo test --release -p mica-runtime --test native_codegen \
   native_source_supports_c_generator_dependencies
 ```
 
-The C emitter check compiles `native/emit_c` and its complete transitive method dependencies into the generated runtime.
+The C emitter check compiles the example builders, `native/emit_c`, and their transitive method dependencies into the generated runtime.
 It follows calls inside nested functions and preserves the original verb sources.
-Empty, scalar, and value example modules must produce byte-identical C to Rust-hosted Mica, with ordinary and forced collection.
-The resulting C must compile, and the value example must pass its existing semantic assertions.
-Both bootstrap tiers must also produce identical emitter code.
+The runtime receives an example selector, then builds the native IR and emits C entirely in Mica.
+Empty, scalar, value, and structured-builder examples must produce byte-identical C to Rust-hosted Mica, with ordinary and forced collection.
+
+The structured example uses captured builder callbacks, a range loop, and conditional `continue`.
+The resulting C must compile. Independent assertions check the value example and the structured loop's results.
+Both bootstrap tiers must also produce identical code for the generator.
 The sanitizer harness uses separate function sections so the linker can extend calls across large AArch64 modules.
 
 ```sh
@@ -507,8 +510,8 @@ CC=clang cargo test --release -p mica-runtime --test native_codegen \
   native_source_executes_the_c_emitter -- --ignored --nocapture
 ```
 
-This gate starts from native IR supplied by the bootstrap host.
-It does not yet execute the authoring builders or native lowering as part of a complete self-hosting rebuild.
+This gate executes authoring builders and C emission on the generated runtime.
+Native lowering of Mica register descriptions and a complete self-hosting rebuild remain separate acceptance gates.
 Generation and sanitizer compilation take several minutes, so ordinary test runs exclude this check.
 
 The full parser check compiles the lexer and every verb in `apps/compiler/parse.mica`.
