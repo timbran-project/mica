@@ -170,12 +170,85 @@ for i in 0..255
 end
 for i in 0..255
   let builder = native_gen/context(module, string_concat("function_", to_literal(i)))
+  for branch in 0..15
+    builder = native_gen/branch(builder,
+      native_gen/less(native_gen/zero(:U64), native_gen/ref(builder, "argument_0")),
+      fn(arm) => arm, fn(arm) => arm)
+  end
   module = native_gen/finish(module, native_gen/return_value(builder, native_gen/ref(builder, "argument_0")))
 end
 return len(module[:state][:functions])
 "#
             ),
             Value::int(256).unwrap()
+        );
+    }
+}
+
+#[test]
+fn native_module_body_index_preserves_raw_state_checks() {
+    for tier in [true, false] {
+        let mut runner = runner(tier);
+        let prefix = r#"
+let module = native/module_context(native/program(), {})
+for name in ["first", "second"]
+  module = native/declare_function(module, name, :Void, [], [], [], :Value, "")
+end
+let raw = native/function_body(module[:state], module[:functions]["first"], module[:functions], [[:Return]])
+module = native/define_function(module, "first", [[:Return]])
+native/ensure(raw == module[:state], "module lowering differs from raw-state lowering")
+"#;
+        for (edit, name, expected) in [
+            ("", "first", "function already has a body"),
+            (
+                "module[:state][:blocks] = [[row[0], module[:functions][\"second\"], row[2], row[3]] for row in module[:state][:blocks]]",
+                "second",
+                "function already has a body",
+            ),
+            (
+                "let rows = module[:state][:functions]\nmodule[:state][:functions] = [@rows, rows[1]]",
+                "second",
+                "body requires a declared function",
+            ),
+            (
+                "module[:state][:functions] = []",
+                "second",
+                "body requires a declared function",
+            ),
+        ] {
+            let result = eval(
+                &mut runner,
+                &format!(
+                    r#"
+{prefix}
+{edit}
+try
+  native/define_function(module, "{name}", [[:Return]])
+  return "accepted"
+catch E_INVARG as problem
+  return native/error_message(problem)
+end
+"#
+                ),
+            );
+            assert!(result.with_str(|text| text.contains(expected)).unwrap());
+        }
+        assert_eq!(
+            eval(
+                &mut runner,
+                &format!(
+                    r#"
+{prefix}
+let rows = module[:state][:functions]
+module[:state][:functions] = [rows[0], [rows[1][0], rows[1][1], :U64]]
+raw = native/function_body(module[:state], module[:functions]["second"], module[:functions], [[:Return, [:Zero]]])
+module = native/define_function(module, "second", [[:Return, [:Zero]]])
+native/check(module[:state])
+return raw == module[:state]
+"#
+                )
+            ),
+            Value::bool(true)
         );
     }
 }

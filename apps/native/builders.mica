@@ -55,6 +55,26 @@ end
 
 verb native/define_function(input: map, name: string, statements: list) -> map
   let context: map = input
+  native/ensure(map_contains_key(context[:functions], name), "body requires a declared function")
+  let function: int = context[:functions][name]
+  // Module construction tracks completed bodies. Refresh after direct edits to
+  // the block table; ordinary definitions share the exact cached row value.
+  let bodies: map = index_or(context, :body_layout, {})
+  if !map_contains_key(bodies, :rows) || bodies[:rows] != context[:state][:blocks]
+    let owners: map = {}
+    for block in context[:state][:blocks]
+      owners[block[1]] = true
+    end
+    bodies[:rows] = context[:state][:blocks]
+    bodies[:owners] = owners
+  end
+  if !map_contains_key(bodies, :function_rows) || bodies[:function_rows] != context[:state][:functions]
+    bodies[:functions] = native/group_rows(context[:state][:functions], 0)
+    bodies[:function_rows] = context[:state][:functions]
+  end
+  let declarations: list = index_or(bodies[:functions], function, [])
+  native/ensure(len(declarations) == 1, "body requires a declared function")
+  native/ensure(!map_contains_key(bodies[:owners], function), "function already has a body")
   let bindings: map = context[:constants]
   for group in [context[:functions], context[:bindings][name]]
     for spelling, id in group
@@ -62,7 +82,10 @@ verb native/define_function(input: map, name: string, statements: list) -> map
       bindings[spelling] = id
     end
   end
-  context[:state] = native/function_body(context[:state], context[:functions][name], bindings, statements)
+  context[:state] = native/build_function_body(context[:state], function, declarations[0][2], bindings, statements)
+  bodies[:owners][function] = true
+  bodies[:rows] = context[:state][:blocks]
+  context[:body_layout] = bodies
   return context
 end
 
@@ -436,10 +459,17 @@ verb native/function_body(state: map, fn_id: int, bindings: map, statements: lis
   let functions = native/owned(state[:functions], 0, fn_id)
   native/ensure(len(functions) == 1, "body requires a declared function")
   native/ensure(len(native/owned(state[:blocks], 1, fn_id)) == 0, "function already has a body")
+  let result: map = native/build_function_body(state, fn_id, functions[0][2], bindings, statements)
+  return result
+end
+
+// Module builders supply their checked declaration and body ownership index.
+// Raw-state callers validate those preconditions through function_body.
+verb native/build_function_body(state: map, fn_id: int, result_type, bindings: map, statements: list) -> map
   for spelling, id in bindings
     native/ensure(!(string_len(spelling) >= 5 && string_slice(spelling, 0, 5) == "body_"), "body_ names are reserved by structured builders")
   end
-  let context: map = {:state -> state, :function -> fn_id, :result -> functions[0][2], :bindings -> bindings,
+  let context: map = {:state -> state, :function -> fn_id, :result -> result_type, :bindings -> bindings,
     :serial -> 0, :block -> :Closed, :position -> 0, :loops -> []}
   let [entry, opened] = native/body_block(context, "entry", true)
   context = native/body_enter(opened, entry)
