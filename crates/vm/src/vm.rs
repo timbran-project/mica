@@ -171,7 +171,7 @@ pub struct VmState {
     pending_resume: Option<Register>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
 struct CallableInfo {
     program: usize,
     captures: Vec<Value>,
@@ -1064,6 +1064,8 @@ pub struct RegisterVm {
     register_buffers: Vec<Vec<Value>>,
     call_arguments: Vec<Value>,
     type_check_cache: BTreeMap<usize, (Value, BTreeSet<TypeContract>)>,
+    // Derived from the checkpoint's function table; rebuilt lazily after restore.
+    function_ids: BTreeMap<CallableInfo, FunctionId>,
     #[cfg(feature = "cranelift")]
     native_execution: bool,
     #[cfg(feature = "cranelift")]
@@ -1107,6 +1109,7 @@ impl RegisterVm {
             register_buffers: Vec::new(),
             call_arguments: Vec::new(),
             type_check_cache: BTreeMap::new(),
+            function_ids: BTreeMap::new(),
             #[cfg(feature = "cranelift")]
             native_execution: true,
             #[cfg(feature = "cranelift")]
@@ -1143,6 +1146,7 @@ impl RegisterVm {
             register_buffers: Vec::new(),
             call_arguments: Vec::new(),
             type_check_cache: BTreeMap::new(),
+            function_ids: BTreeMap::new(),
             #[cfg(feature = "cranelift")]
             native_execution: true,
             #[cfg(feature = "cranelift")]
@@ -1159,6 +1163,7 @@ impl RegisterVm {
         self.register_buffers.clear();
         self.call_arguments.clear();
         self.type_check_cache.clear();
+        self.function_ids.clear();
         #[cfg(feature = "cranelift")]
         self.native_side_exits.clear();
     }
@@ -2798,21 +2803,28 @@ impl RegisterVm {
     }
 
     fn intern_function(&mut self, function: CallableInfo) -> Result<FunctionId, RuntimeError> {
-        if let Some((index, _)) = self
+        // The table owns stable IDs. The ordered index preserves structural
+        // closure equality without scanning every earlier captured environment
+        // or hashing a large shared capture on each creation.
+        for (index, loaded) in self
             .state
             .functions
             .iter()
             .enumerate()
-            .find(|(_, loaded)| **loaded == function)
+            .skip(self.function_ids.len())
         {
-            return FunctionId::new(index as u64).ok_or_else(|| {
-                RuntimeError::ProgramArtifact("function id exceeds value payload range".to_owned())
-            });
+            let id = FunctionId::new(index as u64)
+                .expect("checkpoint function index fits the value payload");
+            self.function_ids.insert(loaded.clone(), id);
+        }
+        if let Some(id) = self.function_ids.get(&function) {
+            return Ok(*id);
         }
         let index = self.state.functions.len();
         let function_id = FunctionId::new(index as u64).ok_or_else(|| {
             RuntimeError::ProgramArtifact("function id exceeds value payload range".to_owned())
         })?;
+        self.function_ids.insert(function.clone(), function_id);
         self.state.functions.push(function);
         Ok(function_id)
     }
@@ -4071,6 +4083,111 @@ mod structural_type_cache_tests {
 mod call_storage_tests {
     use super::*;
     use crate::{Instruction, Operand};
+
+    fn closure(captures: Vec<Value>) -> CallableInfo {
+        CallableInfo {
+            program: 0,
+            captures,
+            min_arity: 1,
+            max_arity: Some(1),
+            bind_self: false,
+        }
+    }
+
+    fn empty_vm() -> RegisterVm {
+        RegisterVm::new(Arc::new(
+            Program::new(
+                1,
+                [Instruction::Return {
+                    value: Operand::Value(Value::unit()),
+                }],
+            )
+            .unwrap(),
+        ))
+    }
+
+    #[test]
+    fn closure_interning_preserves_structural_equality_and_callable_metadata() {
+        let mut vm = empty_vm();
+        let captured = || {
+            Value::map([(
+                Value::symbol(Symbol::intern("nested")),
+                Value::list([Value::int(42).unwrap(), Value::string("capture")]),
+            )])
+        };
+        let original = closure(vec![captured()]);
+        let first = vm.intern_function(original.clone()).unwrap();
+        assert_eq!(
+            vm.intern_function(closure(vec![captured()])).unwrap(),
+            first
+        );
+
+        let mut variants = vec![closure(vec![Value::int(42).unwrap()])];
+        let mut variant = original.clone();
+        variant.program = 1;
+        variants.push(variant);
+        let mut variant = original.clone();
+        variant.min_arity = 0;
+        variants.push(variant);
+        let mut variant = original.clone();
+        variant.max_arity = None;
+        variants.push(variant);
+        let mut variant = original;
+        variant.bind_self = true;
+        variants.push(variant);
+        let mut ids = BTreeSet::from([first]);
+        for variant in variants {
+            let id = vm.intern_function(variant.clone()).unwrap();
+            assert!(ids.insert(id));
+            assert_eq!(vm.intern_function(variant).unwrap(), id);
+        }
+    }
+
+    #[test]
+    fn closure_index_tracks_checkpoint_restore_and_reused_ids() {
+        let mut vm = empty_vm();
+        let capture = |number| closure(vec![Value::int(number).unwrap()]);
+        let first = vm.intern_function(capture(1)).unwrap();
+        let checkpoint = vm.snapshot_state();
+        let discarded = vm.intern_function(capture(2)).unwrap();
+        vm.restore_state(&checkpoint);
+        assert_eq!(vm.intern_function(capture(1)).unwrap(), first);
+        assert_eq!(vm.intern_function(capture(3)).unwrap(), discarded);
+        let second = vm.intern_function(capture(2)).unwrap();
+        assert_ne!(second, discarded);
+        assert_eq!(vm.callable(discarded).unwrap(), capture(3));
+
+        let mut resumed = RegisterVm::from_state(vm.snapshot_state());
+        assert_eq!(resumed.intern_function(capture(1)).unwrap(), first);
+        assert_eq!(resumed.intern_function(capture(2)).unwrap(), second);
+        assert_eq!(resumed.intern_function(capture(3)).unwrap(), discarded);
+        assert_eq!(resumed.snapshot_state(), vm.snapshot_state());
+    }
+
+    #[test]
+    fn closure_interning_handles_many_shared_environments() {
+        let mut vm = empty_vm();
+        let shared = Value::list((0..4096).map(|n| Value::int(n).unwrap()));
+        let capture = |number| {
+            closure(vec![
+                shared.clone(),
+                Value::list([Value::int(0).unwrap(), Value::int(number).unwrap()]),
+            ])
+        };
+        for number in 0..4096 {
+            assert_eq!(
+                vm.intern_function(capture(number)).unwrap().raw(),
+                number as u64
+            );
+        }
+        for number in (0..4096).rev() {
+            assert_eq!(
+                vm.intern_function(capture(number)).unwrap().raw(),
+                number as u64
+            );
+        }
+        assert_eq!(vm.state.functions.len(), 4096);
+    }
 
     #[test]
     fn recycled_frames_drop_values_and_reset_registers() {
