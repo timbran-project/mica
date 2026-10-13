@@ -40,7 +40,8 @@ int main(void) {
     struct mica_TaskControl task = {0};
     struct mica_TaskRuntime runtime = {.f_symbols = &symbols};
     struct mica_TaskServices services = {0};
-    assert(mica_task_init(&task, &worker, &kernel, &image, 100000, 3, 16, &runtime) == 0);
+    // Corpus helpers charge their internal work, including decimal rounding.
+    assert(mica_task_init(&task, &worker, &kernel, &image, 1000000, 3, 16, &runtime) == 0);
     assert(mica_task_execute(&task, &worker) == 0);
     assert(mica_task_dispatch(&task, &worker, &services) == 0);
     struct mica_MemoryRoot acquired = {0};

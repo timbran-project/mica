@@ -2446,6 +2446,7 @@ fn load_native_source_compiler(runner: &mut SourceRunner) {
         include_str!("../../../apps/native/compiler/algebra.mica"),
         include_str!("../../../apps/native/compiler/url.mica"),
         include_str!("../../../apps/native/compiler/numeric.mica"),
+        include_str!("../../../apps/native/compiler/decimal.mica"),
         include_str!("../../../apps/native/compiler/functions.mica"),
         include_str!("../../../apps/native/compiler/collections.mica"),
         include_str!("../../../apps/native/compiler/access.mica"),
@@ -4004,7 +4005,7 @@ fn native_source_encodes_and_decodes_url_components() {
 }
 
 #[test]
-fn native_source_converts_numbers_and_parses_decimal_integers() {
+fn native_source_converts_numbers_and_parses_decimals() {
     check_native_source_body(
         include_str!("../../../apps/native/compiler/numeric_tests.mica"),
         include_str!("../../../apps/native/compiler/numeric_tests.c"),

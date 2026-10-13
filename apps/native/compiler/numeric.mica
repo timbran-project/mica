@@ -8,6 +8,11 @@ verb native_numeric/errors(name: symbol) -> list
   if name == :to_float
     return [[E_TYPE, "to_float expects a numeric value"]]
   end
+  if name == :parse_float
+    return [[E_TYPE, "parse_float expects a string"],
+      [E_INVARG, "parse_float expects a decimal float spelling"],
+      [E_INVARG, "parse_float spelling is invalid or out of range"]]
+  end
   return [[E_TYPE, "parse_int expects a string"],
     [E_INVARG, "parse_int expects decimal digits with an optional leading minus"],
     [E_INVARG, "parse_int value is out of range"]]
@@ -72,35 +77,48 @@ verb native_numeric/parse_body(module: map) -> map
   return result
 end
 verb native_numeric/definitions(input: map) -> map
-  let needed: bool = false
+  let integers: bool = false
+  let floats: bool = false
   for program in input[:source_programs]
     for instruction in program[:analysis][:description][:code]
-      needed = needed || (instruction[0] == :BuiltinCall && instruction[2] == :parse_int)
+      integers = integers || (instruction[0] == :BuiltinCall && instruction[2] == :parse_int)
+      floats = floats || (instruction[0] == :BuiltinCall && instruction[2] == :parse_float)
     end
   end
-  if !needed
+  if !integers && !floats
     return input
   end
   let module: map = input
   for [name, number] in [["radix", 10], ["zero", 48], ["minus", 45], ["shape_0", 0], ["shape_1", 1], ["shape_2", 2], ["shape_3", 3]]
     module = native_literal/constant(module, string_concat("numeric_", name), :U64, native_value/hex(number))
   end
-  let result_type: list = [:Record, string_concat(module[:source_prefix], "_ParsedInteger")]
+  let result_type: list = [:Record, string_concat(module[:source_prefix], "_ParsedNumber")]
   module[:state] = native/record_type(module[:state], result_type[1], [["status", :U64], ["shape", :U64], ["value", native_value/word()]])[1]
-  module = native_memory/declare(module, native_numeric/name(module), result_type, [
+  let parameters: list = [
     ["worker", native_memory/record_pointer("MemoryWorker"), :Borrow], ["attempt", native_tasks/pointer("Attempt"), :Borrow],
-    ["transaction", native_kernel/pointer("Transaction"), :Borrow], ["text", native_value/word(), :Gc]], native_tasks/effects(), :Gc, "")
-  let result: map = native_numeric/parse_body(module)
-  return result
+    ["transaction", native_kernel/pointer("Transaction"), :Borrow], ["text", native_value/word(), :Gc]]
+  if integers
+    module = native_memory/declare(module, native_numeric/name(module), result_type, parameters, native_tasks/effects(), :Gc, "")
+    module = native_numeric/parse_body(module)
+  end
+  if floats
+    module = native_decimal/definitions(module, result_type, parameters)
+  end
+  return module
 end
-verb native_numeric/parse(builder: map, text: map) -> list
-  let [parsed: map, ready: map] = native_gen/bind(builder, "parsed", native_gen/call(builder, native_numeric/name(builder), [
+
+verb native_numeric/parse(builder: map, name: symbol, text: map) -> list
+  let function: string = native_numeric/name(builder)
+  if name == :parse_float
+    function = native_decimal/name(builder, "parse")
+  end
+  let [parsed: map, ready: map] = native_gen/bind(builder, "parsed", native_gen/call(builder, function, [
     native_roots/worker(builder), native_tasks/attempt(builder), native_tasks/slot(builder, "transaction"), text]))
   let status: map = native_gen/field(ready, parsed, "status")
   ready = native_gen/unless(ready, native_kernel/absent(status), fn(failed) => native_roots/return_value(failed, status))
   let shape: map = native_gen/field(ready, parsed, "shape")
   let index: int = 1
-  for error in native_numeric/errors(:parse_int)
+  for error in native_numeric/errors(name)
     ready = native_gen/when(ready, native_gen/equal(shape, native_gen/ref(ready, string_concat("numeric_shape_", to_literal(index)))),
       fn(invalid) => native_builtins/error(invalid, error[1], error[0]))
     index = index + 1

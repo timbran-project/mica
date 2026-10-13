@@ -193,7 +193,7 @@ verb native_source/program_literals(analysis: map, initial: list) -> list
     elseif op == :Return || op == :Abort || op == :Throw
       pool = native_source/pool_operands(pool, [instruction[1]])
     end
-    if op == :BuiltinCall && native/contains([:to_int, :to_float, :parse_int], instruction[2])
+    if op == :BuiltinCall && native/contains([:to_int, :to_float, :parse_int, :parse_float], instruction[2])
       for error in native_numeric/errors(instruction[2])
         pool = native_source/pool(native_source/pool(pool, error[0]), error[1])
       end

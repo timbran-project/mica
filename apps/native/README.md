@@ -60,6 +60,17 @@ Separate tests reject invalid types, control flow, effects, and ownership contra
 Fresh processes vary symbol creation order. Other tests reverse relation rows and change node IDs.
 Generated source, binaries, and measurement output stay outside source control.
 
+Native source lowering supports `parse_int` and `parse_float` with the language's decimal syntax and error results.
+Float parsing rounds directly to binary32, with ties to even, finite overflow checks, and underflow to canonical zero.
+The Mica generator builds exact rounding-boundary tables. Parsing uses bounded stack storage and integer comparisons, without a host parser or locale dependency.
+Input scans and rounding searches charge task budgets and check cancellation. Rooted inputs survive collection during parsing.
+
+Run the source oracle, rounding-boundary, and resource-control checks with:
+
+```sh
+CC=clang cargo test --release -p mica-runtime --test native_codegen native_source_converts_numbers_and_parses_decimals
+```
+
 ## Transactional relation kernel
 
 `native_kernel/program()` generates values, managed memory, the in-memory relation store, query execution, and rule evaluation as one module.
