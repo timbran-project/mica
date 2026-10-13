@@ -1,0 +1,109 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+verb native_numeric/errors(name: symbol) -> list
+  if name == :to_int
+    return [[E_TYPE, "to_int expects an exactly integral number within the integer range"]]
+  end
+  if name == :to_float
+    return [[E_TYPE, "to_float expects a numeric value"]]
+  end
+  return [[E_TYPE, "parse_int expects a string"],
+    [E_INVARG, "parse_int expects decimal digits with an optional leading minus"],
+    [E_INVARG, "parse_int value is out of range"]]
+end
+verb native_numeric/convert(builder: map, name: symbol, value: map) -> list
+  let error: list = native_numeric/errors(name)[0]
+  let operation: string = string_concat("value_", native_source/symbol_text(name))
+  let [converted: map, ready: map] = native_gen/checked_bind(builder, "converted", native_gen/call(builder, operation, [value]), "ok",
+    fn(invalid) => native_builtins/error(invalid, error[1], error[0]))
+  return [native_gen/field(ready, converted, "value"), ready]
+end
+verb native_numeric/name(module: map) -> string
+  return string_concat(module[:source_prefix], "_parse_int")
+end
+verb native_numeric/result(builder: map, shape: int, value: map) -> map
+  let result: map = native_roots/return_value(builder, native_gen/record(builder, builder[:result], {
+    "status" -> native_gen/ref(builder, "kernel_ok"), "shape" -> native_gen/ref(builder, string_concat("numeric_shape_", to_literal(shape))), "value" -> value}))
+  return result
+end
+verb native_numeric/invalid(builder: map, condition: map, shape: int) -> map
+  let result: map = native_gen/when(builder, condition,
+    fn(invalid) => native_numeric/result(invalid, shape, native_gen/zero(native_value/word())))
+  return result
+end
+
+// Validate every digit even after overflow: invalid syntax takes precedence
+// over range failure. Keep only numbers and the rooted text across checkpoints.
+verb native_numeric/parse_body(module: map) -> map
+  let builder: map = native_queries/budget_scope(native_gen/context(module, native_numeric/name(module)))
+  let text: map = native_roots/ref(builder, "text")
+  builder = native_numeric/invalid(builder, native_gen/negate(native_access/kind(builder, text, "string")), 1)
+  let [length: map, sized: map] = native_gen/bind(builder, "length", native_value/string_field(builder, text, "length"))
+  builder = native_numeric/invalid(sized, native_kernel/absent(length), 2)
+  let [start: map, with_start: map] = native_gen/bind(builder, "start", native_gen/ref(builder, "zero"))
+  let first: map = native_gen/convert(:U64, native_value/string_byte(with_start, text, start))
+  let [negative: map, signed: map] = native_gen/bind(with_start, "negative", native_gen/equal(first, native_gen/ref(with_start, "numeric_minus")))
+  builder = native_gen/when(signed, negative, fn(minus) => native_gen/assign(minus, start, native_gen/ref(minus, "one")))
+  builder = native_numeric/invalid(builder, native_gen/equal(start, length), 2)
+  let [limit: map, with_limit: map] = native_gen/bind(builder, "limit", native_gen/bitcast(:U64, native_gen/ref(builder, "int_max")))
+  builder = native_gen/when(with_limit, negative, fn(minimum) => native_gen/assign(minimum, limit, native_gen/ref(minimum, "sign_bit")))
+  let [number: map, with_number: map] = native_gen/bind(builder, "number", native_gen/ref(builder, "zero"))
+  let [overflow: map, with_overflow: map] = native_gen/bind(with_number, "overflow", native_gen/ref(with_number, "false"))
+  builder = native_gen/for_range(with_overflow, "byte", start, length, fn(step, index)
+    let polled: map = native_query/poll_interval(step, index)
+    let byte: map = native_gen/convert(:U64, native_value/string_byte(polled, text, index))
+    let [digit: map, decoded: map] = native_gen/bind(polled, "digit", native_gen/subtract(byte, native_gen/ref(polled, "numeric_zero")))
+    let radix: map = native_gen/ref(decoded, "numeric_radix")
+    let checked: map = native_numeric/invalid(decoded, native_gen/negate(native_gen/less(digit, radix)), 2)
+    return native_gen/unless(checked, overflow, fn(accumulate)
+      let threshold: map = native_gen/divide(native_gen/subtract(limit, digit), radix)
+      return native_gen/branch(accumulate, native_gen/less(threshold, number),
+        fn(large) => native_gen/assign(large, overflow, native_gen/ref(large, "true")),
+        fn(fits) => native_gen/assign(fits, number, native_gen/add(native_gen/multiply(number, radix), digit)))
+    end)
+  end)
+  builder = native_numeric/invalid(builder, overflow, 3)
+  // The magnitude is bounded to 2^55. Form its two's-complement bits using
+  // defined unsigned arithmetic, then reinterpret the signed result.
+  builder = native_gen/when(builder, negative, fn(minus) => native_gen/assign(minus, number, native_gen/subtract(native_gen/ref(minus, "zero"), number)))
+  let [value: map, encoded: map] = native_query/value(builder, "value_int", [native_gen/bitcast(:I64, number)])
+  let result: map = native_gen/finish(module, native_numeric/result(encoded, 0, value))
+  return result
+end
+verb native_numeric/definitions(input: map) -> map
+  let needed: bool = false
+  for program in input[:source_programs]
+    for instruction in program[:analysis][:description][:code]
+      needed = needed || (instruction[0] == :BuiltinCall && instruction[2] == :parse_int)
+    end
+  end
+  if !needed
+    return input
+  end
+  let module: map = input
+  for [name, number] in [["radix", 10], ["zero", 48], ["minus", 45], ["shape_0", 0], ["shape_1", 1], ["shape_2", 2], ["shape_3", 3]]
+    module = native_literal/constant(module, string_concat("numeric_", name), :U64, native_value/hex(number))
+  end
+  let result_type: list = [:Record, string_concat(module[:source_prefix], "_ParsedInteger")]
+  module[:state] = native/record_type(module[:state], result_type[1], [["status", :U64], ["shape", :U64], ["value", native_value/word()]])[1]
+  module = native_memory/declare(module, native_numeric/name(module), result_type, [
+    ["worker", native_memory/record_pointer("MemoryWorker"), :Borrow], ["attempt", native_tasks/pointer("Attempt"), :Borrow],
+    ["transaction", native_kernel/pointer("Transaction"), :Borrow], ["text", native_value/word(), :Gc]], native_tasks/effects(), :Gc, "")
+  let result: map = native_numeric/parse_body(module)
+  return result
+end
+verb native_numeric/parse(builder: map, text: map) -> list
+  let [parsed: map, ready: map] = native_gen/bind(builder, "parsed", native_gen/call(builder, native_numeric/name(builder), [
+    native_roots/worker(builder), native_tasks/attempt(builder), native_tasks/slot(builder, "transaction"), text]))
+  let status: map = native_gen/field(ready, parsed, "status")
+  ready = native_gen/unless(ready, native_kernel/absent(status), fn(failed) => native_roots/return_value(failed, status))
+  let shape: map = native_gen/field(ready, parsed, "shape")
+  let index: int = 1
+  for error in native_numeric/errors(:parse_int)
+    ready = native_gen/when(ready, native_gen/equal(shape, native_gen/ref(ready, string_concat("numeric_shape_", to_literal(index)))),
+      fn(invalid) => native_builtins/error(invalid, error[1], error[0]))
+    index = index + 1
+  end
+  return [native_gen/field(ready, parsed, "value"), ready]
+end

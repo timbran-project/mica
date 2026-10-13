@@ -1,0 +1,27 @@
+let conversions = []
+for value in [0, 42, -42, 16777217, 36028797018963967, -36028797018963968,
+    0.0, -0.0, 42.0, -42.0, 1.5, 36028797018963968.0, -36028797018963968.0,
+    3.4028235e38, -3.4028235e38, true, "42", [], {}, none]
+  try
+    conversions = [@conversions, [:int, to_int(value)]]
+  catch error
+    conversions = [@conversions, [error.code, error.message, error.value]]
+  end
+  try
+    conversions = [@conversions, [:float, to_float(value)]]
+  catch error
+    conversions = [@conversions, [error.code, error.message, error.value]]
+  end
+end
+let parsed = []
+for text in ["0", "-0", "000042", "-00042", "36028797018963967", "-36028797018963968",
+    "36028797018963968", "-36028797018963969", "99999999999999999999999999999999999999",
+    "99999999999999999999999999999999999999x", "", "-", "+1", " 1", "1 ", "1.0", "1e3",
+    "1\0", "١", "é", "--1", "1-1", 42, false, none, string_slice("x-123y", 1, 5)]
+  try
+    parsed = [@parsed, parse_int(text)]
+  catch error
+    parsed = [@parsed, [error.code, error.message, error.value]]
+  end
+end
+return [conversions, parsed, to_int(@[2.0]), to_float(@[2]), parse_int(@["-99"])]

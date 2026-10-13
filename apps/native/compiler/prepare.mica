@@ -181,6 +181,11 @@ verb native_source/program_literals(analysis: map, initial: list) -> list
     elseif op == :Return || op == :Abort || op == :Throw
       pool = native_source/pool_operands(pool, [instruction[1]])
     end
+    if op == :BuiltinCall && native/contains([:to_int, :to_float, :parse_int], instruction[2])
+      for error in native_numeric/errors(instruction[2])
+        pool = native_source/pool(native_source/pool(pool, error[0]), error[1])
+      end
+    end
     if op == :BuiltinCall && native/contains([:string_span, :string_find_any], instruction[2])
       pool = native_source/pool(native_source/pool(pool, E_INDEX), string_concat(native_source/symbol_text(instruction[2]), " start is out of range"))
     end
