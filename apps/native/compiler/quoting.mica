@@ -85,7 +85,7 @@ verb native_quoting/range_tree(builder: map, scalar: map, ranges: list, first: i
   return result
 end
 verb native_quoting/quote_body(module: map) -> map
-  let builder: map = native_queries/budget_scope(native_gen/context(module, native_quoting/name(module, "quote")))
+  let builder: map = native_queries/borrow_budget(native_gen/context(module, string_concat(native_quoting/name(module, "quote"), "_value")))
   builder = native_query/charge(builder, native_gen/ref(builder, "one"), native_gen/ref(builder, "zero"))
   let text: map = native_roots/ref(builder, "text")
   builder = native_quoting/check(builder, native_access/kind(builder, text, "string"), 1)
@@ -171,7 +171,7 @@ verb native_quoting/read_escape(builder: map, text: map, position: map, length: 
   return result
 end
 verb native_quoting/read_body(module: map) -> map
-  let builder: map = native_queries/budget_scope(native_gen/context(module, native_quoting/name(module, "read_string")))
+  let builder: map = native_queries/borrow_budget(native_gen/context(module, string_concat(native_quoting/name(module, "read_string"), "_value")))
   builder = native_query/charge(builder, native_gen/ref(builder, "one"), native_gen/ref(builder, "zero"))
   let text: map = native_roots/ref(builder, "text")
   builder = native_quoting/check(builder, native_access/kind(builder, text, "string"), 1)
@@ -221,10 +221,9 @@ verb native_quoting/definitions(input: map) -> map
   module = native_gen/finish(module, native_quoting/range_tree(builder, native_gen/ref(builder, "scalar"), native_quoting/invisible_ranges(), 0, len(native_quoting/invisible_ranges())))
   let result_type: list = [:Record, string_concat(module[:source_prefix], "_LiteralTextResult")]
   module[:state] = native/record_type(module[:state], result_type[1], [["status", :U64], ["shape", :U64], ["next", :U64], ["value", native_value/word()]])[1]
-  let parameters: list = [["worker", native_memory/record_pointer("MemoryWorker"), :Borrow], ["attempt", native_tasks/pointer("Attempt"), :Borrow],
-    ["transaction", native_kernel/pointer("Transaction"), :Borrow], ["text", native_value/word(), :Gc]]
-  module = native_memory/declare(module, native_quoting/name(module, "quote"), result_type, parameters, native_tasks/effects(), :Gc, "")
-  module = native_memory/declare(module, native_quoting/name(module, "read_string"), result_type, [@parameters, ["start", :U64, :Value]], native_tasks/effects(), :Gc, "")
+  let parameters: list = [["text", native_value/word(), :Gc]]
+  module = native_queries/operation(module, native_quoting/name(module, "quote"), result_type, parameters)
+  module = native_queries/operation(module, native_quoting/name(module, "read_string"), result_type, [@parameters, ["start", :U64, :Value]])
   module = native_quoting/quote_body(module)
   let result: map = native_quoting/read_body(module)
   return result

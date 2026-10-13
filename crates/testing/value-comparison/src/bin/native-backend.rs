@@ -189,6 +189,7 @@ fn run() -> Result<()> {
         "compiler/algebra",
         "compiler/url",
         "compiler/quoting",
+        "compiler/literal_read",
         "compiler/numeric",
         "compiler/decimal",
         "compiler/functions",

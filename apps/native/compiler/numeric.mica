@@ -41,7 +41,7 @@ end
 // Validate every digit even after overflow: invalid syntax takes precedence
 // over range failure. Keep only numbers and the rooted text across checkpoints.
 verb native_numeric/parse_body(module: map) -> map
-  let builder: map = native_queries/budget_scope(native_gen/context(module, native_numeric/name(module)))
+  let builder: map = native_queries/borrow_budget(native_gen/context(module, string_concat(native_numeric/name(module), "_value")))
   let text: map = native_roots/ref(builder, "text")
   builder = native_numeric/invalid(builder, native_gen/negate(native_access/kind(builder, text, "string")), 1)
   let [length: map, sized: map] = native_gen/bind(builder, "length", native_value/string_field(builder, text, "length"))
@@ -81,8 +81,8 @@ verb native_numeric/definitions(input: map) -> map
   let floats: bool = false
   for program in input[:source_programs]
     for instruction in program[:analysis][:description][:code]
-      integers = integers || (instruction[0] == :BuiltinCall && instruction[2] == :parse_int)
-      floats = floats || (instruction[0] == :BuiltinCall && instruction[2] == :parse_float)
+      integers = integers || (instruction[0] == :BuiltinCall && native/contains([:parse_int, :from_literal], instruction[2]))
+      floats = floats || (instruction[0] == :BuiltinCall && native/contains([:parse_float, :from_literal], instruction[2]))
     end
   end
   if !integers && !floats
@@ -94,11 +94,9 @@ verb native_numeric/definitions(input: map) -> map
   end
   let result_type: list = [:Record, string_concat(module[:source_prefix], "_ParsedNumber")]
   module[:state] = native/record_type(module[:state], result_type[1], [["status", :U64], ["shape", :U64], ["value", native_value/word()]])[1]
-  let parameters: list = [
-    ["worker", native_memory/record_pointer("MemoryWorker"), :Borrow], ["attempt", native_tasks/pointer("Attempt"), :Borrow],
-    ["transaction", native_kernel/pointer("Transaction"), :Borrow], ["text", native_value/word(), :Gc]]
+  let parameters: list = [["text", native_value/word(), :Gc]]
   if integers
-    module = native_memory/declare(module, native_numeric/name(module), result_type, parameters, native_tasks/effects(), :Gc, "")
+    module = native_queries/operation(module, native_numeric/name(module), result_type, parameters)
     module = native_numeric/parse_body(module)
   end
   if floats

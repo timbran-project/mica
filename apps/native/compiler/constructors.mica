@@ -84,11 +84,10 @@ verb native_builtins/symbol_name(module: map) -> string
   return string_concat(module[:source_prefix], "_to_symbol")
 end
 verb native_builtins/symbol_definition(input: map) -> map
-  let module: map = native_memory/declare(input, native_builtins/symbol_name(input), :U64, [
-    ["worker", native_memory/record_pointer("MemoryWorker"), :Borrow], ["attempt", native_tasks/pointer("Attempt"), :Borrow],
-    ["transaction", native_kernel/pointer("Transaction"), :Borrow], ["symbols", native_memory/record_pointer("SymbolTable"), :Borrow],
-    ["input", native_value/word(), :Gc], ["output", native_memory/record_pointer("MemoryRoot"), :Borrow]], native_tasks/effects(), :Value, "")
-  let builder: map = native_queries/budget_scope(native_gen/context(module, native_builtins/symbol_name(module)))
+  let module: map = native_queries/operation(input, native_builtins/symbol_name(input), :U64, [
+    ["symbols", native_memory/record_pointer("SymbolTable"), :Borrow], ["input", native_value/word(), :Gc],
+    ["output", native_memory/record_pointer("MemoryRoot"), :Borrow]])
+  let builder: map = native_queries/borrow_budget(native_gen/context(module, string_concat(native_builtins/symbol_name(module), "_value")))
   let value: map = native_roots/ref(builder, "input")
   let output: map = native_gen/ref(builder, "output")
   builder = native_gen/when(builder, native_access/kind(builder, value, "symbol"), fn(symbol)

@@ -119,6 +119,11 @@ verb native_source/program_literals(analysis: map, initial: map) -> map
     elseif op == :BuiltinCall
       pool = native_source/pool_operands(pool, instruction[3])
       pool = native_source/pool(pool, "list splice requires a list")
+      if instruction[2] == :from_literal
+        for value in native_read/literals()
+          pool = native_source/pool(pool, value)
+        end
+      end
       if instruction[2] == :error
         pool = native_source/pool(pool, none)
       elseif instruction[2] == :frob_delegate

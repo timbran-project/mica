@@ -283,7 +283,7 @@ verb native_decimal/round(builder: map, coefficient: map, power: map, negative: 
   return generated_result
 end
 verb native_decimal/parse_body(module: map) -> map
-  let builder: map = native_queries/budget_scope(native_gen/context(module, native_decimal/name(module, "parse")))
+  let builder: map = native_queries/borrow_budget(native_gen/context(module, string_concat(native_decimal/name(module, "parse"), "_value")))
   let text: map = native_roots/ref(builder, "text")
   builder = native_numeric/invalid(builder, native_gen/negate(native_access/kind(builder, text, "string")), 1)
   let [length: map, sized: map] = native_gen/bind(builder, "length", native_value/string_field(builder, text, "length"))
@@ -324,7 +324,7 @@ verb native_decimal/definitions(input: map, result_type: list, parameters: list)
   module[:constants][name] = global
   module = native/declare_function(module, native_decimal/name(module, "compare"), :I64,
     [["digits", [:Pointer, :U8, :Const], :Borrow], ["power", :I64, :Value], ["sticky", :Bool, :Value], ["bits", :U64, :Value]], [], [:ReadMemory, :WriteMemory], :Value, "")
-  module = native_memory/declare(module, native_decimal/name(module, "parse"), result_type, parameters, native_tasks/effects(), :Gc, "")
+  module = native_queries/operation(module, native_decimal/name(module, "parse"), result_type, parameters)
   module = native_decimal/compare_body(module)
   let generated_result: map = native_decimal/parse_body(module)
   return generated_result

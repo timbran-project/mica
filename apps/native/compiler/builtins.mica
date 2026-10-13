@@ -4,7 +4,7 @@
 // Fixed signatures share argument expansion; ordinary calls retain direct
 // operands rather than constructing an argument list at runtime.
 verb native_builtins/arities() -> map
-  return {:union -> 2, :difference -> 2, :natural_join -> 2, :edit_distance -> 2, :is_builtin -> 1, :to_symbol -> 1, :error_code -> 1, :frob -> 2, :frob_delegate -> 1, :frob_value -> 1, :is_frob -> 1,
+  return {:from_literal -> 1, :union -> 2, :difference -> 2, :natural_join -> 2, :edit_distance -> 2, :is_builtin -> 1, :to_symbol -> 1, :error_code -> 1, :frob -> 2, :frob_delegate -> 1, :frob_value -> 1, :is_frob -> 1,
     :url_encode_component -> 1, :url_decode_component -> 1, :to_int -> 1, :to_float -> 1, :parse_int -> 1, :parse_float -> 1, :emit -> 2, :mailbox -> 0, :mailbox_send -> 2, :mailbox_close -> 1,
     :len -> 1, :string_len -> 1, :string_append -> 2, :string_contains -> 2, :string_starts_with -> 2,
     :string_span -> 3, :string_find_any -> 3, :string_slice -> 3, :string_chars -> 1, :string_from_chars -> 1, :string_join -> 2,
@@ -63,6 +63,10 @@ verb native_builtins/error(builder: map, message: string, ?error_code = E_INVARG
   return result
 end
 verb native_builtins/arity_failure(builder: map, name: symbol) -> map
+  if name == :from_literal
+    let result: map = native_builtins/error(builder, "from_literal expects one string", E_INVARG)
+    return result
+  end
   if name == :is_builtin
     let result: map = native_builtins/error(builder, "is_builtin expects one symbol")
     return result
@@ -162,6 +166,10 @@ verb native_builtins/is_kind(builder: map, value: map, kind: map) -> list
   return [native_gen/call(ready, "value_bool", [matched]), ready]
 end
 verb native_builtins/call(builder: map, name: symbol, args: list) -> list
+  if name == :from_literal
+    let result: list = native_read/builtin(builder, args[0])
+    return result
+  end
   if name == :is_builtin
     let result: list = native_builtins/lookup(builder, args[0])
     return result
@@ -299,7 +307,7 @@ verb native_builtins/relation_check(builder: map, condition: map, shape: int) ->
   return result
 end
 verb native_builtins/relation_body(module: map) -> map
-  let builder: map = native_queries/budget_scope(native_gen/context(module, native_builtins/relation_name(module)))
+  let builder: map = native_queries/borrow_budget(native_gen/context(module, string_concat(native_builtins/relation_name(module), "_value")))
   let heading: map = native_roots/ref(builder, "heading")
   let rows: map = native_roots/ref(builder, "rows")
   let ready: map = native_builtins/relation_check(builder, native_access/kind(builder, heading, "list"), 1)
@@ -368,9 +376,9 @@ verb native_builtins/definitions(input: map) -> map
     for instruction in program[:analysis][:description][:code]
       if map_contains_key(program[:analysis][:reachable], pc) && instruction[0] == :BuiltinCall
         lookup = lookup || instruction[2] == :is_builtin
-        symbols = symbols || instruction[2] == :to_symbol
+        symbols = symbols || native/contains([:to_symbol, :from_literal], instruction[2])
         sorting = sorting || instruction[2] == :sort
-        relations = relations || instruction[2] == :relation_from_rows
+        relations = relations || native/contains([:relation_from_rows, :from_literal], instruction[2])
       end
       pc = pc + 1
     end
@@ -390,9 +398,8 @@ verb native_builtins/definitions(input: map) -> map
   end
   let result_type: list = [:Record, string_concat(module[:source_prefix], "_RelationResult")]
   module[:state] = native/record_type(module[:state], result_type[1], [["status", :U64], ["shape", :U64], ["value", native_value/word()]])[1]
-  module = native_memory/declare(module, native_builtins/relation_name(module), result_type, [
-    ["worker", native_memory/record_pointer("MemoryWorker"), :Borrow], ["attempt", native_tasks/pointer("Attempt"), :Borrow],
-    ["transaction", native_kernel/pointer("Transaction"), :Borrow], ["heading", native_value/word(), :Gc], ["rows", native_value/word(), :Gc]], native_tasks/effects(), :Gc, "")
+  module = native_queries/operation(module, native_builtins/relation_name(module), result_type,
+    [["heading", native_value/word(), :Gc], ["rows", native_value/word(), :Gc]])
   let result: map = native_builtins/relation_body(module)
   return result
 end

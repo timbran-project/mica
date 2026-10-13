@@ -1,0 +1,665 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+// Literal readers share a byte cursor and an operation budget. Child values
+// are rooted before a sibling is read; native recursion has an explicit bound.
+verb native_read/name(module: map, operation: string) -> string
+  return string_concat(module[:source_prefix], "_literal_", operation)
+end
+verb native_read/number(builder: map, value: int) -> map
+  let result: map = native_gen/ref(builder, string_concat("literal_", to_literal(value)))
+  return result
+end
+verb native_read/context(module: map, operation: string) -> map
+  let builder: map = native_queries/borrow_budget(native_gen/context(module, native_read/name(module, operation)))
+  builder[:source_prefix] = module[:source_prefix]
+  builder[:source_literal_index] = module[:source_literal_index]
+  builder[:source_code] = native_roots/ref(builder, "code")
+  return builder
+end
+verb native_read/byte(builder: map, position: map) -> map
+  let result: map = native_quoting/byte(builder, native_roots/ref(builder, "text"), position)
+  return result
+end
+verb native_read/advance(builder: map, position: map) -> map
+  let result: map = native_gen/assign(builder, position, native_gen/add(position, native_gen/ref(builder, "one")))
+  return result
+end
+verb native_read/check(builder: map, condition: map) -> map
+  let result: map = native_quoting/check(builder, condition, 2)
+  return result
+end
+verb native_read/is_byte(builder: map, position: map, length: map, byte: int) -> list
+  let [matches: map, ready: map] = native_gen/bind(builder, "matches_byte", native_gen/ref(builder, "false"))
+  ready = native_gen/when(ready, native_gen/less(position, length),
+    fn(available) => native_gen/assign(available, matches, native_gen/equal(native_read/byte(available, position), native_read/number(available, byte))))
+  return [matches, ready]
+end
+verb native_read/expect(builder: map, position: map, length: map, byte: int) -> map
+  let [matches: map, ready: map] = native_read/is_byte(builder, position, length, byte)
+  let result: map = native_read/advance(native_read/check(ready, matches), position)
+  return result
+end
+verb native_read/trivia(builder: map, position: map, length: map) -> map
+  let [comment: map, ready: map] = native_gen/bind(builder, "comment", native_gen/ref(builder, "false"))
+  let result: map = native_gen/while_loop(ready, native_gen/less(position, length), fn(step)
+    let polled: map = native_query/poll_interval(step, position)
+    let [byte: map, loaded: map] = native_gen/bind(polled, "trivia", native_read/byte(polled, position))
+    let cases: list = []
+    for byte in [10, 13]
+      cases = [@cases, [native_read/number(loaded, byte), fn(newline)
+        let ended: map = native_gen/assign(newline, comment, native_gen/ref(newline, "false"))
+        return native_gen/continue_loop(native_read/advance(ended, position))
+      end]]
+    end
+    for byte in [9, 32]
+      cases = [@cases, [native_read/number(loaded, byte), fn(space) => native_gen/continue_loop(native_read/advance(space, position))]]
+    end
+    let selected: map = native_gen/switch(loaded, byte, cases, fn(other) => other)
+    selected = native_gen/when(selected, comment, fn(comment) => native_gen/continue_loop(native_read/advance(comment, position)))
+    selected = native_gen/when(selected, native_gen/equal(byte, native_read/number(selected, 47)), fn(slash)
+      let next: map = native_gen/add(position, native_gen/ref(slash, "one"))
+      let [second: map, checked: map] = native_read/is_byte(slash, next, length, 47)
+      return native_gen/when(checked, second, fn(begun)
+        let marked: map = native_gen/assign(begun, comment, native_gen/ref(begun, "true"))
+        return native_gen/continue_loop(native_read/advance(marked, position))
+      end)
+    end)
+    return native_gen/break_loop(selected)
+  end)
+  return result
+end
+verb native_read/call(builder: map, operation: string, start: map, depth: map) -> list
+  let arguments: list = [native_roots/worker(builder), native_roots/ref(builder, "transaction"),
+    native_roots/ref(builder, "code"), native_gen/ref(builder, "symbols"), native_roots/ref(builder, "text"), start, depth,
+    native_roots/ref(builder, "budget")]
+  let [parsed: map, ready: map] = native_gen/bind(builder, "parsed", native_gen/call(builder, native_read/name(builder[:module], operation), arguments))
+  ready = native_gen/unless(ready, native_kernel/absent(native_gen/field(ready, parsed, "status")), fn(failed) => native_roots/return_value(failed, parsed))
+  ready = native_gen/unless(ready, native_kernel/absent(native_gen/field(ready, parsed, "shape")), fn(failed) => native_roots/return_value(failed, parsed))
+  return [parsed, ready]
+end
+verb native_read/child(builder: map, position: map) -> list
+  let depth: map = native_gen/add(native_gen/ref(builder, "depth"), native_gen/ref(builder, "one"))
+  let [parsed: map, ready: map] = native_read/call(builder, "read", position, depth)
+  let [value: map, retained: map] = native_roots/retain(ready, "child", native_gen/field(ready, parsed, "value"))
+  let advanced: map = native_gen/assign(retained, position, native_gen/field(retained, parsed, "next"))
+  return [value, advanced]
+end
+verb native_read/span(builder: map, first: map, limit: map) -> list
+  let text: map = native_roots/ref(builder, "text")
+  let data: map = native_gen/freeze(native_gen/offset(native_value/string_field(builder, text, "data"), first))
+  let result: list = native_query/value(builder, "value_string", [native_roots/worker(builder), data, native_gen/subtract(limit, first)])
+  return result
+end
+verb native_read/intern(builder: map, text: map) -> list
+  let [output: map, rooted: map] = native_roots/retain(builder, "symbol", native_gen/zero(native_value/word()))
+  let ready: map = native_query/status_call(rooted, string_concat(native_builtins/symbol_name(rooted[:module]), "_value"), [
+    native_roots/worker(rooted), native_roots/ref(rooted, "transaction"), native_gen/ref(rooted, "symbols"), text, output[:scope_root]])
+  return [output, ready]
+end
+verb native_read/word_is(builder: map, word: map, spelling: string) -> map
+  let result: map = native_gen/field(builder, native_gen/call(builder, "value_equal", [word, native_source/literal(builder, spelling)]), "value")
+  return result
+end
+verb native_read/digit(builder: map, byte: map) -> map
+  let result: map = native_gen/less(native_gen/subtract(byte, native_read/number(builder, 48)), native_read/number(builder, 10))
+  return result
+end
+verb native_read/digits(builder: map, position: map, length: map) -> map
+  let result: map = native_gen/while_loop(builder, native_gen/less(position, length), fn(step)
+    let ready: map = native_query/poll_interval(step, position)
+    ready = native_gen/unless(ready, native_read/digit(ready, native_read/byte(ready, position)), fn(done) => native_gen/break_loop(done))
+    return native_read/advance(ready, position)
+  end)
+  return result
+end
+verb native_read/number_value(builder: map, position: map, length: map) -> map
+  let [first: map, ready: map] = native_gen/bind(builder, "number_start", position)
+  let [minus: map, signed: map] = native_read/is_byte(ready, position, length, 45)
+  ready = native_gen/when(signed, minus, fn(sign) => native_read/advance(sign, position))
+  ready = native_read/check(ready, native_gen/less(position, length))
+  ready = native_read/check(ready, native_read/digit(ready, native_read/byte(ready, position)))
+  ready = native_read/digits(ready, position, length)
+  let [floating: map, typed: map] = native_gen/bind(ready, "float", native_gen/ref(ready, "false"))
+  let [point: map, checked: map] = native_read/is_byte(typed, position, length, 46)
+  ready = native_gen/when(checked, point, fn(point)
+    let next: map = native_gen/add(position, native_gen/ref(point, "one"))
+    let [range: map, tested: map] = native_read/is_byte(point, next, length, 46)
+    return native_gen/unless(tested, range, fn(fraction)
+      let marked: map = native_gen/assign(fraction, floating, native_gen/ref(fraction, "true"))
+      return native_read/digits(native_read/advance(marked, position), position, length)
+    end)
+  end)
+  for exponent in [69, 101]
+    let [present: map, tested: map] = native_read/is_byte(ready, position, length, exponent)
+    ready = native_gen/when(tested, present, fn(exponent)
+      let marked: map = native_gen/assign(exponent, floating, native_gen/ref(exponent, "true"))
+      marked = native_read/advance(marked, position)
+      let [sign: map, with_sign: map] = native_gen/bind(marked, "exponent_sign", native_gen/ref(marked, "false"))
+      for byte in [43, 45]
+        let [present: map, checked: map] = native_read/is_byte(with_sign, position, length, byte)
+        with_sign = native_gen/when(checked, present, fn(signed) => native_gen/assign(signed, sign, native_gen/ref(signed, "true")))
+      end
+      marked = native_gen/when(with_sign, sign, fn(sign) => native_read/advance(sign, position))
+      return native_read/digits(marked, position, length)
+    end)
+  end
+  let [text: map, copied: map] = native_read/span(ready, first, position)
+  let [rooted: map, retained: map] = native_roots/retain(copied, "spelling", text)
+  let [number: map, initialized: map] = native_gen/bind(retained, "number", native_gen/zero([:Record, string_concat(builder[:module][:source_prefix], "_ParsedNumber")]))
+  let arguments: list = [native_roots/worker(initialized), native_roots/ref(initialized, "transaction"), rooted, native_roots/ref(initialized, "budget")]
+  ready = native_gen/branch(initialized, floating,
+    fn(float) => native_gen/assign(float, number, native_gen/call(float, string_concat(native_decimal/name(float[:module], "parse"), "_value"), arguments)),
+    fn(integer) => native_gen/assign(integer, number, native_gen/call(integer, string_concat(native_numeric/name(integer[:module]), "_value"), arguments)))
+  ready = native_gen/unless(ready, native_kernel/absent(native_gen/field(ready, number, "status")),
+    fn(failed) => native_query/fail(failed, native_gen/field(failed, number, "status")))
+  ready = native_read/check(ready, native_kernel/absent(native_gen/field(ready, number, "shape")))
+  let result: map = native_quoting/result(ready, 0, position, native_gen/field(ready, number, "value"))
+  return result
+end
+
+verb native_read/sequence(builder: map, position: map, length: map, close: int, mapping: bool) -> list
+  let ready: map = native_read/advance(builder, position)
+  let empty: map = native_source/literal(ready, [])
+  if mapping
+    empty = native_source/literal(ready, {})
+  end
+  let [output: map, initialized: map] = native_roots/retain(ready, "collection", empty)
+  ready = native_gen/while_loop(initialized, native_gen/ref(initialized, "true"), fn(step)
+    let spaced: map = native_read/trivia(step, position, length)
+    spaced = native_read/check(spaced, native_gen/less(position, length))
+    spaced = native_gen/when(spaced, native_gen/equal(native_read/byte(spaced, position), native_read/number(spaced, close)),
+      fn(done) => native_gen/break_loop(native_read/advance(done, position)))
+    let appended: map = native_roots/temporary(spaced, fn(element)
+      let [value: map, read: map] = native_read/child(element, position)
+      if mapping
+        read = native_read/trivia(read, position, length)
+        read = native_read/expect(read, position, length, 45)
+        read = native_read/expect(read, position, length, 62)
+        let [right: map, paired: map] = native_read/child(read, position)
+        let [updated: map, stored: map] = native_query/value(paired, "value_map_set", [native_roots/worker(paired), output, value, right])
+        return native_roots/store(stored, output, updated)
+      end
+      let [updated: map, stored: map] = native_query/value(read, "kernel_query_append", [native_roots/worker(read), output, value])
+      return native_roots/store(stored, output, updated)
+    end)
+    appended = native_read/trivia(appended, position, length)
+    let [comma: map, checked: map] = native_read/is_byte(appended, position, length, 44)
+    return native_gen/branch(checked, comma, fn(next) => native_read/advance(next, position), fn(done)
+      return native_gen/break_loop(native_read/expect(done, position, length, close))
+    end)
+  end)
+  return [output, ready]
+end
+verb native_read/record(builder: map, heading: list, row: list) -> list
+  let [columns: map, prepared: map] = native_literal/list(builder, [native_source/literal(builder, name) for name in heading], fn(failed) => native_query/error(failed, "oom"))
+  let [rooted: map, ready: map] = native_roots/retain(prepared, "heading", columns)
+  let [cells: map, built: map] = native_literal/list(ready, row, fn(failed) => native_query/error(failed, "oom"))
+  let [tuple: map, with_tuple: map] = native_roots/retain(built, "row", cells)
+  let [rows: map, collected: map] = native_literal/list(with_tuple, [tuple], fn(failed) => native_query/error(failed, "oom"))
+  let [tuples: map, with_rows: map] = native_roots/retain(collected, "rows", rows)
+  let result: list = native_queries/relation_value(with_rows, rooted, tuples)
+  return result
+end
+verb native_read/string(builder: map, position: map) -> list
+  let [parsed: map, ready: map] = native_gen/bind(builder, "string", native_gen/call(builder,
+    string_concat(native_quoting/name(builder[:module], "read_string"), "_value"), [native_roots/worker(builder),
+      native_roots/ref(builder, "transaction"), native_roots/ref(builder, "text"), position, native_roots/ref(builder, "budget")]))
+  ready = native_gen/unless(ready, native_kernel/absent(native_gen/field(ready, parsed, "status")), fn(failed) => native_roots/return_value(failed, parsed))
+  ready = native_read/check(ready, native_kernel/absent(native_gen/field(ready, parsed, "shape")))
+  let [value: map, retained: map] = native_roots/retain(ready, "string", native_gen/field(ready, parsed, "value"))
+  return [value, native_gen/assign(retained, position, native_gen/field(retained, parsed, "next"))]
+end
+verb native_read/letter(builder: map, byte: map) -> list
+  let [letter: map, ready: map] = native_gen/bind(builder, "letter", native_gen/equal(byte, native_read/number(builder, 95)))
+  for range in [[65, 91], [97, 123]]
+    ready = native_gen/when(ready, native_gen/less(native_gen/subtract(byte, native_read/number(ready, range[0])), native_read/number(ready, 26)),
+      fn(found) => native_gen/assign(found, letter, native_gen/ref(found, "true")))
+  end
+  return [letter, ready]
+end
+verb native_read/identifier(builder: map, position: map, length: map, qualified: bool) -> list
+  let [first: map, initialized: map] = native_gen/bind(builder, "name_start", position)
+  let ready: map = native_gen/while_loop(initialized, native_gen/ref(initialized, "true"), fn(part)
+    let checked: map = native_read/check(part, native_gen/less(position, length))
+    let [letter: map, tested: map] = native_read/letter(checked, native_read/byte(checked, position))
+    checked = native_read/check(tested, letter)
+    let [start: map, saved: map] = native_gen/bind(checked, "part_start", position)
+    checked = native_read/advance(saved, position)
+    checked = native_gen/while_loop(checked, native_gen/less(position, length), fn(step)
+      let polled: map = native_query/poll_interval(step, position)
+      let [byte: map, read: map] = native_gen/bind(polled, "name_byte", native_read/byte(polled, position))
+      let [letter: map, tested: map] = native_read/letter(read, byte)
+      tested = native_gen/unless(tested, letter, fn(other)
+        return native_gen/unless(other, native_read/digit(other, byte), fn(done) => native_gen/break_loop(done))
+      end)
+      return native_read/advance(tested, position)
+    end)
+    if !qualified
+      return native_gen/break_loop(checked)
+    end
+    checked = native_roots/temporary(checked, fn(part)
+      let [text: map, copied: map] = native_read/span(part, start, position)
+      let [name: map, retained: map] = native_roots/retain(copied, "part", text)
+      let validated: map = retained
+      for keyword in native_read/keywords()
+        validated = native_read/check(validated, native_gen/negate(native_read/word_is(validated, name, keyword)))
+      end
+      let count: map = native_gen/subtract(position, start)
+      validated = native_gen/when(validated, native_gen/less(native_read/number(validated, 2), count), fn(error)
+        return native_gen/when(error, native_gen/equal(native_read/byte(error, start), native_read/number(error, 69)), fn(prefix)
+          let next: map = native_gen/add(start, native_gen/ref(prefix, "one"))
+          return native_read/check(prefix, native_gen/not_equal(native_read/byte(prefix, next), native_read/number(prefix, 95)))
+        end)
+      end)
+      return validated
+    end)
+    let [slash: map, next: map] = native_read/is_byte(checked, position, length, 47)
+    next = native_gen/unless(next, slash, fn(done) => native_gen/break_loop(done))
+    let [comment: map, comment_checked: map] = native_read/is_byte(next, native_gen/add(position, native_gen/ref(next, "one")), length, 47)
+    next = native_gen/when(comment_checked, comment, fn(done) => native_gen/break_loop(done))
+    return native_read/advance(next, position)
+  end)
+  let result: list = native_read/span(ready, first, position)
+  return result
+end
+verb native_read/construct(builder: map, name: string, position: map, length: map) -> map
+  let ready: map = native_read/trivia(builder, position, length)
+  let [open: map, checked: map] = native_read/is_byte(ready, position, length, 40)
+  ready = native_read/check(checked, open)
+  let [arguments: map, parsed: map] = native_read/sequence(ready, position, length, 41, false)
+  let count: map = native_query/width(parsed, arguments)
+  ready = parsed
+  if name == "error_code"
+    ready = native_read/check(ready, native_gen/equal(count, native_gen/ref(ready, "one")))
+    let value: map = native_query/cell(ready, arguments, native_gen/ref(ready, "zero"))
+    ready = native_read/check(ready, native_access/kind(ready, value, "symbol"))
+    let [encoded: map, built: map] = native_query/value(ready, "value_error_code", [native_gen/convert(:U32, native_gen/expression(:U64, :Payload, [value]))])
+    let result: map = native_quoting/result(built, 0, position, encoded)
+    return result
+  end
+  ready = native_read/check(ready, native_gen/less(native_gen/ref(ready, "zero"), count))
+  ready = native_read/check(ready, native_gen/less(count, native_read/number(ready, 4)))
+  let code: map = native_query/cell(ready, arguments, native_gen/ref(ready, "zero"))
+  ready = native_read/check(ready, native_access/kind(ready, code, "error_code"))
+  let [message: map, initialized: map] = native_gen/bind(ready, "message", native_gen/zero(native_value/word()))
+  let [present: map, marked: map] = native_gen/bind(initialized, "has_message", native_gen/ref(initialized, "false"))
+  let [payload: map, with_payload: map] = native_gen/bind(marked, "payload", native_gen/zero(native_value/word()))
+  let has_payload: map = native_gen/equal(count, native_read/number(with_payload, 3))
+  ready = native_gen/when(with_payload, native_gen/less(native_gen/ref(with_payload, "one"), count), fn(supplied)
+    let read: map = native_gen/assign(supplied, message, native_query/cell(supplied, arguments, native_gen/ref(supplied, "one")))
+    let absent: map = native_gen/field(read, native_gen/call(read, "value_equal", [message, native_source/literal(read, none)]), "value")
+    return native_gen/unless(read, absent, fn(text)
+      let checked: map = native_read/check(text, native_access/kind(text, message, "string"))
+      return native_gen/assign(checked, present, native_gen/ref(checked, "true"))
+    end)
+  end)
+  ready = native_gen/when(ready, has_payload, fn(value) => native_gen/assign(value, payload, native_query/cell(value, arguments, native_read/number(value, 2))))
+  let [error: map, built: map] = native_query/value(ready, "value_error", [native_roots/worker(ready),
+    native_gen/convert(:U32, native_gen/expression(:U64, :Payload, [code])), present, message, has_payload, payload])
+  let result: map = native_quoting/result(built, 0, position, error)
+  return result
+end
+verb native_read/keywords() -> list
+  return ["_", "let", "const", "if", "elseif", "else", "end", "begin", "for", "in", "while", "return", "raise", "recover", "spawn", "after", "not", "break", "continue", "try", "catch", "as", "finally", "fn", "method", "verb", "do", "assert", "retract", "require", "true", "false"]
+end
+verb native_read/literals() -> list
+  return [[], {}, none, :case, :value, :ok, :error, E_PARSE, E_TYPE, E_INVARG,
+    "from_literal expects a string", "from_literal expects one string", "invalid literal",
+    "true", "false", "none", "error", "error_code", @native_read/keywords()]
+end
+
+verb native_read/base64_digit(builder: map, byte: map) -> list
+  let [digit: map, ready: map] = native_gen/bind(builder, "base64_digit", native_read/number(builder, 64))
+  for range in [[65, 91, 0], [97, 123, 26], [48, 58, 52]]
+    let matches: map = native_gen/less(native_gen/subtract(byte, native_read/number(ready, range[0])), native_read/number(ready, range[1] - range[0]))
+    ready = native_gen/when(ready, matches, fn(found) => native_gen/assign(found, digit,
+      native_gen/add(native_gen/subtract(byte, native_read/number(found, range[0])), native_read/number(found, range[2]))))
+  end
+  for pair in [[45, 62], [95, 63]]
+    ready = native_gen/when(ready, native_gen/equal(byte, native_read/number(ready, pair[0])),
+      fn(found) => native_gen/assign(found, digit, native_read/number(found, pair[1])))
+  end
+  ready = native_read/check(ready, native_gen/less(digit, native_read/number(ready, 64)))
+  return [digit, ready]
+end
+verb native_read/bytes_value(builder: map, position: map, length: map) -> map
+  let ready: map = native_read/advance(builder, position)
+  ready = native_read/expect(ready, position, length, 34)
+  let [first: map, initialized: map] = native_gen/bind(ready, "base64_start", position)
+  ready = native_gen/while_loop(initialized, native_gen/less(position, length), fn(step)
+    let polled: map = native_query/poll_interval(step, position)
+    polled = native_gen/when(polled, native_gen/equal(native_read/byte(polled, position), native_read/number(polled, 34)), fn(done) => native_gen/break_loop(done))
+    return native_read/advance(polled, position)
+  end)
+  ready = native_read/check(ready, native_gen/less(position, length))
+  let [width: map, sized: map] = native_gen/bind(ready, "base64_length", native_gen/subtract(position, first))
+  ready = native_read/advance(sized, position)
+  ready = native_read/check(ready, native_kernel/absent(native_gen/remainder(width, native_read/number(ready, 4))))
+  let capacity: map = native_gen/multiply(native_gen/divide(width, native_read/number(ready, 4)), native_read/number(ready, 3))
+  let [storage: map, allocated: map] = native_memory/array_storage(ready, native_roots/worker(ready), :U8, capacity, "layout_opaque", fn(failed) => native_query/error(failed, "oom"))
+  let [bytes: map, retained: map] = native_roots/retain(allocated, "decoded_bytes", storage)
+  let [used: map, counted: map] = native_gen/bind(retained, "bytes_used", native_gen/ref(retained, "zero"))
+  let [offset: map, with_offset: map] = native_gen/bind(counted, "base64_offset", native_gen/ref(counted, "zero"))
+  ready = native_gen/while_loop(with_offset, native_gen/less(offset, width), fn(step)
+    let polled: map = native_query/poll_interval(step, offset)
+    let start: map = native_gen/add(first, offset)
+    let [a: map, first_digit: map] = native_read/base64_digit(polled, native_read/byte(polled, start))
+    let [b: map, second_digit: map] = native_read/base64_digit(first_digit, native_read/byte(first_digit, native_gen/add(start, native_gen/ref(first_digit, "one"))))
+    let [third: map, with_third: map] = native_gen/bind(second_digit, "third", native_read/byte(second_digit, native_gen/add(start, native_read/number(second_digit, 2))))
+    let [fourth: map, read: map] = native_gen/bind(with_third, "fourth", native_read/byte(with_third, native_gen/add(start, native_read/number(with_third, 3))))
+    let first_byte: map = native_gen/bit_or(native_gen/shift_left(a, native_read/number(read, 2)), native_gen/shift_right(b, native_read/number(read, 4)))
+    read = native_gen/store(read, native_gen/offset(bytes, used), native_gen/convert(:U8, first_byte))
+    read = native_read/advance(read, used)
+    let finish: map = native_gen/add(offset, native_read/number(read, 4))
+    read = native_gen/branch(read, native_gen/equal(third, native_read/number(read, 61)), fn(one)
+      let checked: map = native_read/check(one, native_gen/equal(finish, width))
+      checked = native_read/check(checked, native_gen/equal(fourth, native_read/number(checked, 61)))
+      return native_read/check(checked, native_kernel/absent(native_gen/bit_and(b, native_read/number(checked, 15))))
+    end, fn(more)
+      let [c: map, checked: map] = native_read/base64_digit(more, third)
+      let byte: map = native_gen/bit_or(native_gen/shift_left(b, native_read/number(checked, 4)), native_gen/shift_right(c, native_read/number(checked, 2)))
+      checked = native_gen/store(checked, native_gen/offset(bytes, used), native_gen/convert(:U8, byte))
+      checked = native_read/advance(checked, used)
+      return native_gen/branch(checked, native_gen/equal(fourth, native_read/number(checked, 61)), fn(two)
+        let checked: map = native_read/check(two, native_gen/equal(finish, width))
+        return native_read/check(checked, native_kernel/absent(native_gen/bit_and(c, native_read/number(checked, 3))))
+      end, fn(three)
+        let [d: map, checked: map] = native_read/base64_digit(three, fourth)
+        let byte: map = native_gen/bit_or(native_gen/shift_left(c, native_read/number(checked, 6)), d)
+        checked = native_gen/store(checked, native_gen/offset(bytes, used), native_gen/convert(:U8, byte))
+        return native_read/advance(checked, used)
+      end)
+    end)
+    return native_gen/assign(read, offset, finish)
+  end)
+  let [value: map, built: map] = native_query/value(ready, "value_bytes", [native_roots/worker(ready), native_gen/freeze(bytes), used])
+  let result: map = native_quoting/result(built, 0, position, value)
+  return result
+end
+verb native_read/identity_value(builder: map, position: map, length: map) -> map
+  let ready: map = native_read/trivia(native_read/advance(builder, position), position, length)
+  ready = native_read/check(ready, native_gen/less(position, length))
+  let [identity: map, initialized: map] = native_gen/bind(ready, "identity", native_gen/ref(ready, "zero"))
+  let [first: map, saved: map] = native_gen/bind(initialized, "identity_start", position)
+  ready = native_gen/while_loop(saved, native_gen/less(position, length), fn(step)
+    let polled: map = native_query/poll_interval(step, position)
+    let [digit: map, loaded: map] = native_gen/bind(polled, "identity_digit", native_gen/subtract(native_read/byte(polled, position), native_read/number(polled, 48)))
+    loaded = native_gen/unless(loaded, native_gen/less(digit, native_read/number(loaded, 10)), fn(done) => native_gen/break_loop(done))
+    let limit: map = native_gen/divide(native_gen/subtract(native_gen/ref(loaded, "payload_mask"), digit), native_read/number(loaded, 10))
+    loaded = native_read/check(loaded, native_gen/negate(native_gen/less(limit, identity)))
+    loaded = native_gen/assign(loaded, identity, native_gen/add(native_gen/multiply(identity, native_read/number(loaded, 10)), digit))
+    return native_read/advance(loaded, position)
+  end)
+  // Named identities require the runtime's NamedIdentity catalogue, which is
+  // not installed by this source backend yet. Do not create an identity here.
+  ready = native_gen/when(ready, native_gen/equal(position, first), fn(named)
+    return native_quoting/result(named, 2, position, native_gen/zero(native_value/word()))
+  end)
+  let [encoded: map, constructed: map] = native_gen/checked_bind(ready, "identity", native_gen/call(ready, "value_identity", [identity]), "ok",
+    fn(invalid) => native_quoting/result(invalid, 2, position, native_gen/zero(native_value/word())))
+  let [output: map, retained: map] = native_roots/retain(constructed, "identity", native_gen/field(constructed, encoded, "value"))
+  ready = native_read/trivia(retained, position, length)
+  let [frob: map, checked: map] = native_read/is_byte(ready, position, length, 60)
+  ready = native_gen/when(checked, frob, fn(frob)
+    let advanced: map = native_read/advance(frob, position)
+    let [payload: map, read: map] = native_read/child(advanced, position)
+    read = native_read/trivia(read, position, length)
+    read = native_read/expect(read, position, length, 62)
+    let [value: map, built: map] = native_query/value(read, "value_frob", [native_roots/worker(read), identity, payload])
+    return native_roots/store(built, output, value)
+  end)
+  let result: map = native_quoting/result(ready, 0, position, output)
+  return result
+end
+
+// Separate generated functions keep recursive C frames small, including in
+// unoptimized builds. Dispatch retains only the cursor and rooted inputs.
+verb native_read/dispatch(builder: map, operation: string, position: map) -> map
+  let [parsed: map, ready: map] = native_read/call(builder, operation, position, native_gen/ref(builder, "depth"))
+  let result: map = native_roots/return_value(ready, parsed)
+  return result
+end
+verb native_read/variant(builder: map, kind: string, position: map, length: map) -> map
+  if kind == "string"
+    let string: map = builder
+    let [value: map, read: map] = native_read/string(string, position)
+    let result: map = native_quoting/result(read, 0, position, value)
+    return result
+  end
+  if kind == "symbol"
+    let symbol: map = builder
+    let ready: map = native_read/trivia(native_read/advance(symbol, position), position, length)
+    let [value: map, retained: map] = native_roots/retain(ready, "name", native_gen/zero(native_value/word()))
+    let [quoted: map, checked: map] = native_read/is_byte(retained, position, length, 34)
+    ready = native_gen/branch(checked, quoted, fn(quoted)
+      let [name: map, read: map] = native_read/string(quoted, position)
+      return native_roots/store(read, value, name)
+    end, fn(identifier)
+      let [name: map, read: map] = native_read/identifier(identifier, position, length, true)
+      return native_roots/store(read, value, name)
+    end)
+    let [name: map, interned: map] = native_read/intern(ready, value)
+    let result: map = native_quoting/result(interned, 0, position, name)
+    return result
+  end
+  if kind == "negative"
+    let negative: map = builder
+    let next: map = native_gen/add(position, native_gen/ref(negative, "one"))
+    let ready: map = native_gen/when(negative, native_gen/less(next, length), fn(available)
+      return native_gen/when(available, native_read/digit(available, native_read/byte(available, next)), fn(number) => native_read/dispatch(number, "number", position))
+    end)
+    ready = native_read/advance(ready, position)
+    let [parsed: map, read: map] = native_read/call(ready, "atom", position, native_gen/add(native_gen/ref(ready, "depth"), native_gen/ref(ready, "one")))
+    let [negated: map, checked: map] = native_gen/checked_bind(read, "negative", native_gen/call(read, "value_checked_neg", [native_gen/field(read, parsed, "value")]), "ok",
+      fn(invalid) => native_quoting/result(invalid, 2, position, native_gen/zero(native_value/word())))
+    let result: map = native_quoting/result(checked, 0, native_gen/field(checked, parsed, "next"), native_gen/field(checked, negated, "value"))
+    return result
+  end
+  if kind == "group"
+    let group: map = builder
+    let ready: map = native_read/trivia(native_read/advance(group, position), position, length)
+    let [unit: map, checked: map] = native_read/is_byte(ready, position, length, 41)
+    ready = native_gen/when(checked, unit, fn(unit) => native_quoting/result(native_read/advance(unit, position), 0, position, native_source/literal(unit, [] {[]})))
+    let [value: map, read: map] = native_read/child(ready, position)
+    read = native_read/expect(native_read/trivia(read, position, length), position, length, 41)
+    let result: map = native_quoting/result(read, 0, position, value)
+    return result
+  end
+  if kind == "mapping"
+    let mapping: map = builder
+    let [value: map, read: map] = native_read/sequence(mapping, position, length, 125, true)
+    let result: map = native_quoting/result(read, 0, position, value)
+    return result
+  end
+  if kind == "list"
+    let list: map = builder
+    let [value: map, read: map] = native_read/sequence(list, position, length, 93, false)
+    read = native_read/trivia(read, position, length)
+    let [relation: map, checked: map] = native_read/is_byte(read, position, length, 123)
+    read = native_gen/when(checked, relation, fn(relation)
+      let [rows: map, parsed: map] = native_read/sequence(relation, position, length, 125, false)
+      let [constructed: map, built: map] = native_gen/bind(parsed, "relation", native_query/call(parsed,
+        string_concat(native_builtins/relation_name(parsed[:module]), "_value"), [native_roots/worker(parsed), native_roots/ref(parsed, "transaction"), value, rows]))
+      built = native_gen/unless(built, native_kernel/absent(native_gen/field(built, constructed, "status")), fn(failed) => native_query/fail(failed, native_gen/field(failed, constructed, "status")))
+      built = native_read/check(built, native_kernel/absent(native_gen/field(built, constructed, "shape")))
+      return native_quoting/result(built, 0, position, native_gen/field(built, constructed, "value"))
+    end)
+    let result: map = native_quoting/result(read, 0, position, value)
+    return result
+  end
+  if kind == "number"
+    let result: map = native_read/number_value(builder, position, length)
+    return result
+  end
+  if kind == "bytes"
+    let result: map = native_read/bytes_value(builder, position, length)
+    return result
+  end
+  if kind == "identity"
+    let result: map = native_read/identity_value(builder, position, length)
+    return result
+  end
+  if kind == "error" || kind == "error_code"
+    let result: map = native_read/construct(builder, kind, position, length)
+    return result
+  end
+  let [name: map, parsed: map] = native_read/identifier(builder, position, length, false)
+  let [word: map, ready: map] = native_roots/retain(parsed, "word", name)
+  for name in ["true", "false", "none"]
+    ready = native_gen/when(ready, native_read/word_is(ready, word, name), fn(literal)
+      let value: map = native_source/literal(literal, none)
+      if name != "none"
+        value = native_gen/call(literal, "value_bool", [native_gen/ref(literal, name)])
+      end
+      return native_quoting/result(literal, 0, position, value)
+    end)
+  end
+  for name in ["error", "error_code"]
+    ready = native_gen/when(ready, native_read/word_is(ready, word, name), fn(constructor) => native_read/dispatch(constructor, name, position))
+  end
+  ready = native_gen/when(ready, native_gen/less(native_read/number(ready, 2), native_value/string_field(ready, word, "length")), fn(code)
+    let first: map = native_quoting/byte(code, word, native_gen/ref(code, "zero"))
+    return native_gen/when(code, native_gen/equal(first, native_read/number(code, 69)), fn(prefix)
+      let second: map = native_quoting/byte(prefix, word, native_gen/ref(prefix, "one"))
+      return native_gen/when(prefix, native_gen/equal(second, native_read/number(prefix, 95)), fn(error)
+        let [symbol: map, interned: map] = native_read/intern(error, word)
+        let [encoded: map, built: map] = native_query/value(interned, "value_error_code", [native_gen/convert(:U32, native_gen/expression(:U64, :Payload, [symbol]))])
+        return native_quoting/result(built, 0, position, encoded)
+      end)
+    end)
+  end)
+  let result: map = native_quoting/result(ready, 2, position, native_gen/zero(native_value/word()))
+  return result
+end
+verb native_read/variant_body(module: map, kind: string) -> map
+  let builder: map = native_read/context(module, kind)
+  let length: map = native_value/string_field(builder, native_roots/ref(builder, "text"), "length")
+  let [position: map, ready: map] = native_gen/bind(builder, "position", native_gen/ref(builder, "start"))
+  let result: map = native_gen/finish(module, native_read/variant(ready, kind, position, length))
+  return result
+end
+verb native_read/atom_body(module: map) -> map
+  let builder: map = native_read/context(module, "atom")
+  builder = native_query/check(builder, native_gen/less(native_gen/ref(builder, "depth"), native_read/number(builder, 64)), "limit")
+  let length: map = native_value/string_field(builder, native_roots/ref(builder, "text"), "length")
+  let [position: map, initialized: map] = native_gen/bind(builder, "position", native_gen/ref(builder, "start"))
+  builder = native_read/trivia(initialized, position, length)
+  builder = native_read/check(builder, native_gen/less(position, length))
+  let [byte: map, loaded: map] = native_gen/bind(builder, "first", native_read/byte(builder, position))
+  builder = native_gen/when(loaded, native_read/digit(loaded, byte), fn(number) => native_read/dispatch(number, "number", position))
+  let cases: list = []
+  for [byte, kind] in [[34, "string"], [58, "symbol"], [35, "identity"], [45, "negative"], [40, "group"], [123, "mapping"], [91, "list"]]
+    cases = [@cases, [native_read/number(builder, byte), fn(selected) => native_read/dispatch(selected, kind, position)]]
+  end
+  cases = [@cases, [native_read/number(builder, 98), fn(bytes)
+    let next: map = native_gen/add(position, native_gen/ref(bytes, "one"))
+    let [quote: map, checked: map] = native_read/is_byte(bytes, next, length, 34)
+    let ready: map = native_gen/when(checked, quote, fn(bytes) => native_read/dispatch(bytes, "bytes", position))
+    return native_read/dispatch(ready, "word", position)
+  end]]
+  let selected: map = native_gen/switch(builder, byte, cases, fn(word) => native_read/dispatch(word, "word", position))
+  let result: map = native_gen/finish(module, selected)
+  return result
+end
+verb native_read/read_body(module: map) -> map
+  let builder: map = native_read/context(module, "read")
+  let [parsed: map, ready: map] = native_read/call(builder, "atom", native_gen/ref(builder, "start"), native_gen/ref(builder, "depth"))
+  let [value: map, retained: map] = native_roots/retain(ready, "value", native_gen/field(ready, parsed, "value"))
+  let [position: map, positioned: map] = native_gen/bind(retained, "position", native_gen/field(retained, parsed, "next"))
+  let length: map = native_value/string_field(positioned, native_roots/ref(positioned, "text"), "length")
+  ready = native_gen/while_loop(positioned, native_gen/ref(positioned, "true"), fn(step)
+    let spaced: map = native_read/trivia(step, position, length)
+    let [point: map, checked: map] = native_read/is_byte(spaced, position, length, 46)
+    checked = native_gen/unless(checked, point, fn(done) => native_gen/break_loop(done))
+    checked = native_read/advance(checked, position)
+    checked = native_read/expect(checked, position, length, 46)
+    checked = native_read/trivia(checked, position, length)
+    return native_roots/temporary(checked, fn(endpoint)
+      let [finish: map, initialized: map] = native_roots/retain(endpoint, "range_end", native_gen/zero(native_value/word()))
+      let [hole: map, tested: map] = native_read/is_byte(initialized, position, length, 95)
+      let read: map = native_gen/branch(tested, hole, fn(open) => native_read/advance(open, position), fn(closed)
+        let [parsed: map, ready: map] = native_read/call(closed, "atom", position, native_gen/add(native_gen/ref(closed, "depth"), native_gen/ref(closed, "one")))
+        let saved: map = native_roots/store(ready, finish, native_gen/field(ready, parsed, "value"))
+        return native_gen/assign(saved, position, native_gen/field(saved, parsed, "next"))
+      end)
+      let [range: map, built: map] = native_query/value(read, "value_range", [native_roots/worker(read), value, native_gen/negate(hole), finish])
+      return native_roots/store(built, value, range)
+    end)
+  end)
+  let result: map = native_gen/finish(module, native_quoting/result(ready, 0, position, value))
+  return result
+end
+verb native_read/parse_body(module: map) -> map
+  let builder: map = native_read/context(module, "parse_value")
+  builder = native_quoting/check(builder, native_access/kind(builder, native_roots/ref(builder, "text"), "string"), 1)
+  let [parsed: map, ready: map] = native_read/call(builder, "read", native_gen/ref(builder, "zero"), native_gen/ref(builder, "zero"))
+  let [value: map, retained: map] = native_roots/retain(ready, "value", native_gen/field(ready, parsed, "value"))
+  let [position: map, positioned: map] = native_gen/bind(retained, "end", native_gen/field(retained, parsed, "next"))
+  let length: map = native_value/string_field(positioned, native_roots/ref(positioned, "text"), "length")
+  ready = native_read/trivia(positioned, position, length)
+  ready = native_gen/while_loop(ready, native_gen/less(position, length), fn(step)
+    let checked: map = native_read/expect(step, position, length, 59)
+    return native_read/trivia(checked, position, length)
+  end)
+  let result: map = native_gen/finish(module, native_quoting/result(ready, 0, position, value))
+  return result
+end
+verb native_read/definitions(input: map) -> map
+  let required: bool = false
+  for program in input[:source_programs]
+    let pc: int = 0
+    for instruction in program[:analysis][:description][:code]
+      required = required || (map_contains_key(program[:analysis][:reachable], pc) && instruction[0] == :BuiltinCall && instruction[2] == :from_literal)
+      pc = pc + 1
+    end
+  end
+  if !required
+    return input
+  end
+  let module: map = input
+  for number in 0..128
+    module = native_literal/constant(module, string_concat("literal_", to_literal(number)), :U64, native_value/hex(number))
+  end
+  let result_type: list = [:Record, string_concat(module[:source_prefix], "_LiteralTextResult")]
+  let parameters: list = [["code", native_tasks/pointer("CodeRef"), :Gc],
+    ["symbols", native_memory/record_pointer("SymbolTable"), :Borrow], ["text", native_value/word(), :Gc]]
+  let variants: list = ["string", "symbol", "negative", "group", "mapping", "list", "number", "bytes", "identity", "error", "error_code", "word"]
+  for operation in ["atom", "read", @variants]
+    module = native_memory/declare(module, native_read/name(module, operation), result_type,
+      [["worker", native_memory/record_pointer("MemoryWorker"), :Borrow], ["transaction", native_kernel/pointer("Transaction"), :Borrow], @parameters,
+        ["start", :U64, :Value], ["depth", :U64, :Value], ["budget", native_kernel/pointer("Budget"), :Borrow]], native_tasks/effects(), :Gc, "")
+  end
+  module = native_queries/operation(module, native_read/name(module, "parse"), result_type, parameters)
+  for kind in variants
+    module = native_read/variant_body(module, kind)
+  end
+  module = native_read/atom_body(module)
+  module = native_read/read_body(module)
+  let result: map = native_read/parse_body(module)
+  return result
+end
+verb native_read/builtin(builder: map, text: map) -> list
+  let ready: map = native_gen/unless(builder, native_access/kind(builder, text, "string"), fn(invalid) => native_builtins/error(invalid, "from_literal expects a string", E_TYPE))
+  let [symbols: map, initialized: map] = native_gen/bind(ready, "symbols", native_gen/zero(native_memory/record_pointer("SymbolTable")))
+  ready = native_gen/when(initialized, native_gen/negate(native_kernel/absent(native_tasks/attempt_field(initialized, "runtime"))),
+    fn(attached) => native_gen/assign(attached, symbols, native_source/service(attached, "symbols")))
+  let code: map = native_kernel/load_field(ready, native_handlers/current(ready), "code")
+  let [parsed: map, called: map] = native_gen/bind(ready, "literal", native_gen/call(ready, native_read/name(ready, "parse"), [
+    native_roots/worker(ready), native_tasks/attempt(ready), native_tasks/slot(ready, "transaction"), code, symbols, text]))
+  let status: map = native_gen/field(called, parsed, "status")
+  ready = native_gen/unless(called, native_kernel/absent(status), fn(failed) => native_roots/return_value(failed, status))
+  let [value: map, retained: map] = native_roots/retain(ready, "literal_value", native_gen/field(ready, parsed, "value"))
+  let [case: map, marked: map] = native_gen/bind(retained, "literal_case", native_source/literal(retained, :ok))
+  ready = native_gen/unless(marked, native_kernel/absent(native_gen/field(marked, parsed, "shape")), fn(invalid)
+    let code: map = native_source/literal(invalid, E_PARSE)
+    let message: map = native_source/literal(invalid, "invalid literal")
+    let described: map = invalid
+    let [error: map, built: map] = native_source/result(described, "value_error", [native_roots/worker(described),
+      native_gen/convert(:U32, native_gen/expression(:U64, :Payload, [code])), native_gen/ref(described, "true"), message, native_gen/ref(described, "true"), text], "oom")
+    let saved: map = native_roots/store(built, value, error)
+    return native_gen/assign(saved, case, native_source/literal(saved, :error))
+  end)
+  let result: list = native_read/record(ready, [:case, :value], [case, value])
+  return result
+end

@@ -202,3 +202,34 @@ verb native_queries/scan(builder: map, id: int, items: list) -> list
     positions, equalities, output[:scope_root]])
   return [output, ready]
 end
+
+// Composite operations borrow one budget through every nested helper. Only
+// the task entry owns an allowance and debits the task's remaining work.
+verb native_queries/borrow_budget(input: map) -> map
+  let [work: map, opened: map] = native_kernel/open_transaction(input, fn(failed) => native_query/error(failed, "closed"))
+  let rooted: map = native_query/begin_roots(opened)
+  let controlled: map = native_execution/control_scope(rooted, native_roots/worker(rooted), native_roots/ref(rooted, "budget"))
+  let result: map = native_query/charge(controlled, native_gen/ref(controlled, "zero"), native_gen/ref(controlled, "zero"))
+  return result
+end
+verb native_queries/operation(input: map, name: string, result_type, parameters: list) -> map
+  let worker: list = ["worker", native_memory/record_pointer("MemoryWorker"), :Borrow]
+  let transaction: list = ["transaction", native_kernel/pointer("Transaction"), :Borrow]
+  let ownership: symbol = :Gc
+  if result_type == :U64
+    ownership = :Value
+  end
+  let module: map = native_memory/declare(input, string_concat(name, "_value"), result_type,
+    [worker, transaction, @parameters, ["budget", native_kernel/pointer("Budget"), :Borrow]], native_tasks/effects(), ownership, "")
+  module = native_memory/declare(module, name, result_type,
+    [worker, ["attempt", native_tasks/pointer("Attempt"), :Borrow], transaction, @parameters], native_tasks/effects(), ownership, "")
+  let builder: map = native_queries/budget_scope(native_gen/context(module, name))
+  let arguments: list = [native_roots/worker(builder), native_roots/ref(builder, "transaction")]
+  for parameter in parameters
+    arguments = [@arguments, native_roots/ref(builder, parameter[0])]
+  end
+  arguments = [@arguments, native_roots/ref(builder, "budget")]
+  let result: map = native_gen/finish(module, native_roots/return_value(builder,
+    native_gen/call(builder, string_concat(name, "_value"), arguments)))
+  return result
+end

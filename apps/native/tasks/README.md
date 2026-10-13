@@ -419,7 +419,11 @@ Visible combining marks remain unchanged. Escaping a format character preserves 
 The reader accepts one to six Unicode hex digits, including uppercase digits and leading zeroes.
 Unknown escapes and malformed Unicode escapes remain literal, matching the existing reader; `\xNN` is not decoded.
 Both helpers bound work and allocation, poll for collection, and return distinct syntax, type, limit, and cancellation outcomes.
-These are internal compiler-runtime helpers. The general native `to_literal` and `from_literal` builtins remain unfinished.
+Native `from_literal(text)` uses a dedicated value reader, independent of the full compiler.
+It reads strings, numbers, booleans, symbols, bytes, lists, maps, relations, ranges, errors, options, results, and raw identities with optional frob payloads.
+Rejected text returns `err(error(E_PARSE, "invalid literal", text))`; a non-string argument raises `E_TYPE`.
+Resource limits and cancellation remain runtime outcomes. Nested helpers share one budget, and nesting depth is bounded at 64.
+Named identity lookup and the general native `to_literal` builtin remain unfinished.
 
 Native `is_builtin(symbol)` reports the source backend's supported builtin inventory, including its variadic calls.
 Compiler forms and Rust-only builtins return false. Invalid arguments raise catchable `E_TYPE` or `E_INVARG` errors.

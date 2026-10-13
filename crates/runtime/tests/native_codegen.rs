@@ -2446,6 +2446,7 @@ fn load_native_source_compiler(runner: &mut SourceRunner) {
         include_str!("../../../apps/native/compiler/algebra.mica"),
         include_str!("../../../apps/native/compiler/url.mica"),
         include_str!("../../../apps/native/compiler/quoting.mica"),
+        include_str!("../../../apps/native/compiler/literal_read.mica"),
         include_str!("../../../apps/native/compiler/numeric.mica"),
         include_str!("../../../apps/native/compiler/decimal.mica"),
         include_str!("../../../apps/native/compiler/functions.mica"),
@@ -3374,6 +3375,12 @@ fn source_value_literal(value: &Value, serial: &mut usize) -> (String, String) {
                 format!("mica_value_error(worker, (uint32_t)mica_value_as_error_code({code}).f_number, {}, {message}, {}, {payload})", error.message().is_some(), error.value().is_some())
             })
             .unwrap(),
+        ValueKind::Frob => {
+            let delegate = value.frob_delegate().unwrap().raw();
+            let (payload, construction) = source_value_literal(value.frob_value().unwrap(), serial);
+            setup.push_str(&construction);
+            format!("mica_value_frob(worker, UINT64_C({delegate}), {payload})")
+        }
         ValueKind::Range => value
             .with_range(|start, end| {
                 let (start, construction) = source_value_literal(start, serial);
@@ -3467,7 +3474,7 @@ fn source_value_check(expected: &Value, actual: &str) -> String {
             }
             checks
         }).unwrap(),
-        ValueKind::Map | ValueKind::Relation | ValueKind::Bytes | ValueKind::Range | ValueKind::Identity | ValueKind::Symbol | ValueKind::ErrorCode | ValueKind::Error => {
+        ValueKind::Map | ValueKind::Relation | ValueKind::Bytes | ValueKind::Range | ValueKind::Identity | ValueKind::Symbol | ValueKind::ErrorCode | ValueKind::Error | ValueKind::Frob => {
             let (value, construction) = source_value_literal(expected, &mut 0);
             format!("{{ {construction}\n struct mica_IntResult compared = mica_value_compare({actual}, {value}); assert(compared.f_ok && compared.f_number == 0); }}")
         }
@@ -3725,6 +3732,11 @@ fn native_builtin_definitions_ignore_unreachable_calls() {
         runner
             .run_filein(include_str!("../../../apps/native/compiler/builtins.mica"))
             .unwrap();
+        runner
+            .run_filein(include_str!(
+                "../../../apps/native/compiler/literal_read.mica"
+            ))
+            .unwrap();
         assert_eq!(
             eval(
                 &mut runner,
@@ -3732,9 +3744,9 @@ fn native_builtin_definitions_ignore_unreachable_calls() {
 let input = {:source_programs -> [{:analysis -> {
   :description -> {:code -> [[:Return, 0], [:BuiltinCall, 0, :is_builtin, []],
     [:BuiltinCall, 0, :to_symbol, []], [:BuiltinCall, 0, :sort, []],
-    [:BuiltinCall, 0, :relation_from_rows, []]]},
+    [:BuiltinCall, 0, :relation_from_rows, []], [:BuiltinCall, 0, :from_literal, []]]},
   :reachable -> {0 -> true}}}]}
-return native_builtins/definitions(input) == input
+return native_builtins/definitions(input) == input && native_read/definitions(input) == input
 "#
             ),
             Value::bool(true)
@@ -3791,7 +3803,7 @@ static void source_body_checks(struct mica_MemoryWorker *worker, struct mica_Ker
     struct mica_MemoryRoot *code, struct mica_SymbolTable *symbols) {
     (void)kernel;
     // These exist in Rust's registry but have no native source lowering.
-    const char *unavailable[] = {"assemble", "make_identity", "from_literal"};
+    const char *unavailable[] = {"assemble", "make_identity", "to_literal"};
     for (size_t i = 0; i < sizeof(unavailable) / sizeof(unavailable[0]); ++i) {
         struct mica_IdResult interned = mica_value_symbol_intern(symbols,
             (const uint8_t *)unavailable[i], strlen(unavailable[i]), NULL);
@@ -4024,6 +4036,109 @@ fn native_source_converts_numbers_and_parses_decimals() {
 }
 
 #[test]
+fn native_source_reads_literal_values() {
+    let examples = [
+        "()",
+        "true",
+        "false",
+        "none",
+        "[:value] {[()]}",
+        "[:case, :value] {[:ok, [1, 2]]}",
+        "[:case, :value] {[:error, E_FAIL]}",
+        "0",
+        "-36028797018963968",
+        "36028797018963967",
+        "-0.0",
+        "1.25e-3",
+        "1e-45",
+        "(1)",
+        "-(1)",
+        r#""café 🦊""#,
+        r#""\0\u{41}\n\q""#,
+        ":name",
+        ":a/b",
+        r#":"some name""#,
+        r#"b"""#,
+        r#"b"AAH-_w==""#,
+        "E_CUSTOM",
+        r#"error(E_FAIL, "bad", [1, :x])"#,
+        "error(E_FAIL)",
+        "error(E_FAIL, none, 3)",
+        r#"error_code(:"other code")"#,
+        "[]",
+        "[1, [2, 3], true,]",
+        "{}",
+        "{:a -> [1, 2], 1 -> 3, 1.0 -> 4, :a -> 5}",
+        "1..3",
+        "1.._",
+        "1..2..3",
+        "[1..2, 3]",
+        "[] {}",
+        "[] {[]}",
+        "[:b, :a] {[2, 1], [2, 1], [3, 4]}",
+        "#123",
+        "#123<[1, 2]>",
+        " // start\n [1, // item\n 2] ; // end",
+    ];
+    let invalid = [
+        "",
+        "[",
+        "{1}",
+        "[1,",
+        "1e",
+        "36028797018963968",
+        "-36028797018963969",
+        "1e99",
+        r#"b"AB==""#,
+        r#"b"Zg""#,
+        r#"b"Zg==AA==""#,
+        ":if",
+        ":a/if",
+        ":E_CODE",
+        "[:a, :a] {[1, 2]}",
+        "[:a] {[1, 2]}",
+        "1+2",
+        "unknown",
+        "let x = 1",
+        "some(1)",
+        "ok(1)",
+        "err(1)",
+    ];
+    let body = r#"
+let values = [from_literal(text) for text in examples]
+let failures = []
+for text in invalid
+  let parsed = from_literal(text)
+  failures = [@failures, [parsed[0][:case], parsed[0][:value].code, parsed[0][:value].value[0][:value]]]
+end
+let type_code = none
+try
+  from_literal(1)
+catch error
+  type_code = error.code
+end
+return [values, failures, from_literal(@["42"]), type_code]
+"#;
+    // The dedicated reader uses E_PARSE for all rejected text and raises E_TYPE
+    // for non-string input. Rust's full-parser error classification differs.
+    let oracle_body = body
+        .replace(
+            "[parsed[0][:case], parsed[0][:value].code, parsed[0][:value].value[0][:value]]",
+            "[:error, E_PARSE, text]",
+        )
+        .replace("from_literal(1)", "raise error(E_TYPE)");
+    check_native_source_body_against(
+        body,
+        &oracle_body,
+        include_str!("../../../apps/native/compiler/literal_read_tests.c"),
+        &[
+            ("examples", &format!("{examples:?}")),
+            ("invalid", &format!("{invalid:?}")),
+        ],
+    );
+}
+
+#[test]
 fn native_source_quotes_and_reads_string_literals() {
     check_native_source_body(
         "return true",
@@ -4072,6 +4187,15 @@ fn native_source_constructs_and_slices_unicode_text() {
 }
 
 fn check_native_source_body(body: &str, extra_checks: &str, arguments: &[(&str, &str)]) {
+    check_native_source_body_against(body, body, extra_checks, arguments);
+}
+
+fn check_native_source_body_against(
+    body: &str,
+    oracle_body: &str,
+    extra_checks: &str,
+    arguments: &[(&str, &str)],
+) {
     let mut oracle = SourceRunner::new_empty().with_interpreter_only(true);
     oracle
         .run_filein(
@@ -4089,7 +4213,9 @@ fn check_native_source_body(body: &str, extra_checks: &str, arguments: &[(&str, 
         .join(",");
     let evaluated = eval(
         &mut oracle,
-        &format!("{bindings}\nlet fixture = fn()\n{body}\nend\nreturn [[{parameters}], fixture()]"),
+        &format!(
+            "{bindings}\nlet fixture = fn()\n{oracle_body}\nend\nreturn [[{parameters}], fixture()]"
+        ),
     );
     let values = evaluated.list_get(0).unwrap();
     let expected = evaluated.list_get(1).unwrap();
