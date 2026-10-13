@@ -221,7 +221,7 @@ static void spawn_late_resolution(bool revoke) {
         assert(mica_kernel_write(&tx, 12, mailbox_receivers(&f.call.worker, right, 2), true) == OK);
         for (uint64_t id = 701; id <= 704; ++id)
             assert(mica_kernel_write(&tx, 13, permission(&f.call.worker, 8, id), true) == OK);
-        assert(mica_kernel_set_authority_policy(&tx, 11, 0, 0, 13, 0, 0, 12) == OK);
+        assert(mica_kernel_set_authority_policy(&tx, 11, 0, 0, 13, 0, 0, 12, 0) == OK);
     } else {
         call_body(&tx, 8001, mica_task_test_call_wait, NULL);
     }

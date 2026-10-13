@@ -63,7 +63,7 @@ verb native_calls/continuation(builder: map) -> list
 end
 
 verb native_calls/invoke_body(module: map) -> map
-  let builder: map = native_invocation/rights(native_invocation/context(module, "invoke"))
+  let builder: map = native_invocation/rights(native_tasks/operation_context(module, "invoke"))
   builder = native_execution/control_scope(builder, native_roots/worker(builder), native_roots/ref(builder, "budget"))
   let [selection: map, selected: map] = native_gen/bind(builder, "selected", native_query/call(builder, "task_dispatch_resolve", [
     native_tasks/slot(builder, "transaction"), native_gen/ref(builder, "vocabulary"), native_gen/ref(builder, "selectors"),

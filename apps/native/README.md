@@ -212,10 +212,11 @@ Ordinary tenants can install or edit only their own rules. Explicit root authori
 The defining tenant must still hold source-read and head-export permissions.
 
 `kernel/authority.mica` generates the permission-cache builder used by that boundary.
-`kernel_authority_compile(worker, tenant, root, catalogue, grant, read, write, export, budget)` returns a status and a managed `Authority` pointer.
-The six relation arguments are complete effective policy views from one snapshot or draft. Null arguments grant no permissions.
+`kernel_authority_compile(worker, tenant, root, catalogue, grant, read, write, export, invoke, emit, budget)` returns a status and a managed `Authority` pointer.
+The eight relation arguments are complete effective policy views from one snapshot or draft. Null arguments grant no permissions.
 Root, catalogue, and grant views contain unary tenant tuples. Read, write, and export views contain `(tenant, relation_identity)` tuples.
-Relation references must be nonzero Mica identity values. Tenant values must be persistable.
+Invoke views contain `(tenant, selector_symbol)` tuples. Emit views contain `(tenant, target_identity)` tuples, representing `CanEmit` rights.
+Relation references must be nonzero Mica identity values. Emission targets accept identity zero. Tenant values must be persistable.
 An explicit root-policy row grants all supported rights. Grant permission alone does not grant read, export, or catalogue permission.
 
 Projection uses the tenant prefix of each relation index and shares the caller's operation budget and memory control.
@@ -223,6 +224,8 @@ It merges relation permissions into a managed AVL index. Checks do not allocate 
 `kernel_authority_allows(context, relation, mask)` requires every requested bit: read is 1, write is 2, and export is 4.
 Zero masks, unknown bits, relation zero, and null contexts return false.
 `kernel_authority_catalogue(context)` and `kernel_authority_grant(context)` check their separate flags.
+`kernel_authority_can_invoke(context, selector)` and `kernel_authority_can_emit(context, target)` use separate indexes.
+Rights in one index cannot authorize an operation in another index.
 Contexts are immutable after construction and require ordinary roots across collection.
 Rebuilding a context observes changed effective policy; it does not mutate an earlier task's context.
 `kernel/policy.mica` connects these caches to transactions and rule maintenance.
@@ -234,6 +237,11 @@ Transaction entry captures the snapshot under the publication lock, then compile
 Policy configuration requires grant permission and participates in ordinary transaction rollback and commit.
 Reads and writes check cached relation permissions. Relation declarations require grant permission; catalogue access requires catalogue permission.
 The full reference evaluator requires root authority because its result exposes every relation.
+
+`task_emit(worker, attempt, target, payload)` requires target-specific emission permission or root authority.
+It records a policy dependency and stages the payload in the attempt outbox. Commit releases emissions in source order.
+Abort discards staged emissions. A new task segment compiles fresh authority and observes committed revocations.
+
 Low-level constructors, raw views, and maintenance helpers remain trusted runtime primitives.
 
 A task keeps its entry cache throughout the transaction. Its own policy edits do not grant it additional task permissions.

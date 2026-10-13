@@ -4,7 +4,7 @@
 // Fixed signatures share argument expansion; ordinary calls retain direct
 // operands rather than constructing an argument list at runtime.
 verb native_builtins/arities() -> map
-  return {:mailbox -> 0, :mailbox_send -> 2, :mailbox_close -> 1,
+  return {:emit -> 2, :mailbox -> 0, :mailbox_send -> 2, :mailbox_close -> 1,
     :len -> 1, :string_len -> 1, :string_append -> 2, :string_contains -> 2, :string_starts_with -> 2,
     :string_span -> 3, :string_find_any -> 3, :string_slice -> 3, :string_chars -> 1, :string_from_chars -> 1, :string_join -> 2,
     :sort -> 1, :relation_from_rows -> 2, :map_contains_key -> 2, :map_pairs -> 1, :index_or -> 3, :is_kind -> 2}
@@ -126,6 +126,9 @@ verb native_builtins/is_kind(builder: map, value: map, kind: map) -> list
   return [native_gen/call(ready, "value_bool", [matched]), ready]
 end
 verb native_builtins/call(builder: map, name: symbol, args: list) -> list
+  if name == :emit
+    return [args[1], native_source/emit(builder, args[0], args[1])]
+  end
   if name == :string_contains
     let result: list = native_text/construct(builder, "contains", args)
     return result

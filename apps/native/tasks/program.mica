@@ -215,6 +215,7 @@ verb native_tasks/definitions() -> map
   module = native_tasks/images(module)
   module = native_dispatch/program(module)
   module = native_tasks/attempts(module)
+  module = native_tasks/emissions(module)
   module = native_invocation/program(module)
   module = native_handlers/program(module)
   module = native_tasks/control(module)

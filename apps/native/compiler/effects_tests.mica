@@ -1,0 +1,8 @@
+verb native_emission(target, payload, fail)
+  let accepted = emit(target, payload)
+  if fail
+    raise E_INVARG, "discard staged emission"
+  end
+  emit(@[target, [accepted, "second"]])
+  return accepted
+end

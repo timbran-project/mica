@@ -61,6 +61,11 @@ verb native_source/check_kind(builder: map, value: map, kind: symbol, site: symb
   end)
   return result
 end
+verb native_source/emit(builder: map, target: map, value: map) -> map
+  let result: map = native_source/checked(builder, "task_emit", [native_roots/worker(builder), native_tasks/attempt(builder), target, value])
+  return result
+end
+
 // Mailbox sends join the attempt's staged effects. Resource creation and close
 // use the native mailbox service directly, as required by its current API.
 verb native_source/mailbox(builder: map, hub: map) -> list

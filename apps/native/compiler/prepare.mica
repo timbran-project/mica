@@ -176,6 +176,8 @@ verb native_source/program_literals(analysis: map, initial: list) -> list
       if instruction[3] != none
         pool = native_source/pool_operands(pool, [instruction[3]])
       end
+    elseif op == :Emit
+      pool = native_source/pool_operands(pool, [instruction[1], instruction[2]])
     elseif op == :Return || op == :Abort || op == :Throw
       pool = native_source/pool_operands(pool, [instruction[1]])
     end

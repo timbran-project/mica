@@ -131,7 +131,7 @@ static void source_body_checks(struct mica_MemoryWorker *worker, struct mica_Ker
         struct mica_ValueResult row = mica_value_list(worker, grant, 2);
         assert(row.f_ok && mica_kernel_write(&tx, 802, row.f_value, true) == 0);
     }
-    assert(mica_kernel_set_authority_policy(&tx, 803, 0, 0, 0, 802, 0, 0) == 0);
+    assert(mica_kernel_set_authority_policy(&tx, 803, 0, 0, 0, 802, 0, 0, 0) == 0);
     assert(mica_kernel_commit(&tx) == 0);
     assert(mica_kernel_end(&tx));
     assert(mica_kernel_begin(kernel, worker, &tx, update_integer(99)) == 0);

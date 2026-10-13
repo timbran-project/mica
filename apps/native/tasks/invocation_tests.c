@@ -53,13 +53,15 @@ static void invocation_authority(void) {
     assert(mica_kernel_declare(&owner, 1, 1, 1, 0, 0, 0) == OK);
     assert(mica_kernel_declare(&owner, 2, 2, 2, 0, 0, 0) == OK);
     assert(mica_kernel_declare(&owner, 3, 3, 2, 0, 0, 0) == OK);
+    assert(mica_kernel_declare(&owner, 4, 4, 2, 0, 0, 0) == OK);
     mica_type_Value root = integer(7);
     assert(mica_kernel_write(&owner, 1, mailbox_receivers(&worker, &root, 1), true) == OK);
     mica_type_Value right[] = {integer(8), allowed};
     assert(mica_kernel_write(&owner, 2, mailbox_receivers(&worker, right, 2), true) == OK);
     // The same numeric payload in relation and selector namespaces is harmless.
     assert(mica_kernel_write(&owner, 3, permission(&worker, 8, mica_value_as_symbol(denied).f_number), true) == OK);
-    assert(mica_kernel_set_authority_policy(&owner, 1, 0, 0, 3, 0, 0, 2) == OK);
+    assert(mica_kernel_write(&owner, 4, permission(&worker, 8, 77), true) == OK);
+    assert(mica_kernel_set_authority_policy(&owner, 1, 0, 0, 3, 0, 0, 2, 4) == OK);
     assert(mica_kernel_commit(&owner) == OK && mica_kernel_end(&owner));
     assert(mica_memory_root_push(&worker, &image));
     image.f_pointer = (void *)mica_task_new_Image(&worker, mica_task_test_entry, NULL,
@@ -68,6 +70,17 @@ static void invocation_authority(void) {
     assert(mica_task_init(&task, &worker, &kernel, &image, 1000, 2, 8, NULL) == OK);
     assert(mica_task_claim(&task, &worker, &attempt) == OK);
     uint64_t epoch = attempt.f_epoch;
+    mica_type_Value emit_target = mica_value_identity(77).f_value;
+    assert(mica_task_emit(&worker, &attempt, emit_target, integer(42)) == OK);
+    assert(attempt.f_effects.f_pointer);
+    assert(mica_task_emit(&worker, &attempt, mica_value_identity(78).f_value, integer(42)) == PERMISSION);
+    assert(mica_task_emit(&worker, &attempt, integer(77), integer(42)) == SCHEMA);
+    uint64_t remaining = attempt.f_remaining;
+    attempt.f_remaining = 0;
+    assert(mica_task_emit(&worker, &attempt, emit_target, integer(42)) == LIMIT);
+    attempt.f_remaining = remaining;
+    struct mica_MemoryRoot unpublished = {0};
+    assert(mica_task_delivery(&task, &worker, &unpublished) == CLOSED);
     assert(epoch && !mica_task_resources_stop());
     assert(mica_task_invoke_authorize(&worker, &attempt, allowed) == OK);
     assert(mica_task_invoke_authorize(&worker, &attempt, denied) == PERMISSION);
@@ -98,12 +111,13 @@ static void invocation_authority(void) {
     // retains segment authority and epoch; a scheduled resumption refreshes both.
     assert(mica_kernel_begin(&kernel, &worker, &owner, integer(7)) == OK);
     assert(mica_kernel_write(&owner, 2, mailbox_receivers(&worker, right, 2), false) == OK);
+    assert(mica_kernel_write(&owner, 4, permission(&worker, 8, 77), false) == OK);
     assert(mica_kernel_commit(&owner) == OK && mica_kernel_end(&owner));
     assert(mica_kernel_commit(&attempt.f_transaction) == CONFLICT);
     assert(mica_task_detach(&task, &worker) == OK);
     assert(mica_task_attempt_retry(&attempt) == OK);
     assert(mica_task_attach(&task, &worker, &attempt) == OK);
-    assert(attempt.f_epoch == epoch);
+    assert(attempt.f_epoch == epoch && !attempt.f_effects.f_pointer);
     assert(mica_memory_safepoint(&worker, true));
     assert(mica_task_invoke_check(&worker, &attempt, allowed, capability) == OK);
     assert(mica_task_finish(&task, &worker, &attempt, CLOSED) == CLOSED);
@@ -111,6 +125,7 @@ static void invocation_authority(void) {
     assert(mica_task_init(&task, &worker, &kernel, &image, 1000, 2, 8, NULL) == OK);
     assert(mica_task_claim(&task, &worker, &attempt) == OK);
     assert(attempt.f_epoch != epoch);
+    assert(mica_task_emit(&worker, &attempt, emit_target, integer(42)) == PERMISSION);
     assert(mica_task_invoke_authorize(&worker, &attempt, allowed) == PERMISSION);
     assert(mica_task_invoke_check(&worker, &attempt, allowed, capability) == PERMISSION);
     assert(mica_task_finish(&task, &worker, &attempt, CLOSED) == CLOSED);

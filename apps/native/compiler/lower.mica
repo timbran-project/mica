@@ -98,6 +98,10 @@ verb native_source/value_instruction(builder: map, instruction: list) -> list
 end
 verb native_source/emit_instruction(builder: map, instruction: list) -> map
   let op: symbol = instruction[0]
+  if op == :Emit
+    let result: map = native_source/emit(builder, native_source/operand(builder, instruction[1]), native_source/operand(builder, instruction[2]))
+    return result
+  end
   if op == :CheckKind
     let result: map = native_source/check_kind(builder, native_source/register(builder, instruction[1]), instruction[2], instruction[3], instruction[4])
     return result

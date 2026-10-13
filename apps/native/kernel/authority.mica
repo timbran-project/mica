@@ -8,10 +8,10 @@ verb native_authority/schemas() -> list
   return [
     ["AuthorityPermission", [["id", :U64], ["mask", :U64]]],
     ["AuthorityIndex", [["left", permissions], ["right", permissions], ["entry", native_kernel/pointer("AuthorityPermission")], ["height", :U64]]],
-    ["Authority", [["tenant", native_value/word()], ["permissions", permissions], ["invocations", permissions], ["root", :Bool], ["catalogue", :Bool], ["grant", :Bool]]]]
+    ["Authority", [["tenant", native_value/word()], ["permissions", permissions], ["invocations", permissions], ["emissions", permissions], ["root", :Bool], ["catalogue", :Bool], ["grant", :Bool]]]]
 end
 verb native_authority/policies() -> list
-  return [["root", 1], ["catalogue", 1], ["grant", 1], ["read", 2], ["write", 2], ["export", 2], ["invoke", 2]]
+  return [["root", 1], ["catalogue", 1], ["grant", 1], ["read", 2], ["write", 2], ["export", 2], ["invoke", 2], ["emit", 2]]
 end
 verb native_authority/declarations(input: map) -> map
   let module: map = input
@@ -25,6 +25,8 @@ verb native_authority/declarations(input: map) -> map
     [["authority", native_kernel/pointer("Authority"), :Gc], ["relation", :U64, :Value], ["mask", :U64, :Value]])
   module = native_kernel/declare(module, "authority_can_invoke", :Bool,
     [["authority", native_kernel/pointer("Authority"), :Gc], ["selector", native_value/word(), :Gc]])
+  module = native_kernel/declare(module, "authority_can_emit", :Bool,
+    [["authority", native_kernel/pointer("Authority"), :Gc], ["target", native_value/word(), :Gc]])
   for name in ["catalogue", "grant"]
     module = native_kernel/declare(module, string_concat("authority_", name), :Bool, [["authority", native_kernel/pointer("Authority"), :Gc]])
   end
@@ -38,12 +40,14 @@ verb native_authority/permission(builder: map, authority: map, row: map, mask: m
   if operation == "invoke"
     accessor = "value_as_symbol"
     field = "invocations"
+  elseif operation == "emit"
+    field = "emissions"
   end
   let [identity: map, decoded: map] = native_gen/checked_bind(builder, "permission_key", native_gen/call(builder, accessor, [reference]), "ok",
     fn(invalid) => native_rules/error(invalid, "schema"))
   let id: map = native_gen/field(decoded, identity, "number")
   let ready: map = decoded
-  if operation != "invoke"
+  if operation != "invoke" && operation != "emit"
     ready = native_rules/check(ready, native_gen/negate(native_kernel/absent(id)), "schema")
   end
   let [tree: map, with_tree: map] = native_gen/bind(ready, "permissions", native_rules/read(ready, authority, field))
@@ -75,7 +79,7 @@ verb native_authority/project(builder: map, authority: map, policy: list) -> map
         return native_gen/break_loop(matched)
       end
       let mask: map = native_gen/ref(row_scope, "one")
-      if policy[0] != "invoke"
+      if policy[0] != "invoke" && policy[0] != "emit"
         mask = native_gen/ref(row_scope, string_concat("authority_", policy[0]))
       end
       return native_authority/permission(row_scope, authority, row, mask, policy[0])
@@ -101,6 +105,7 @@ verb native_authority/compile_body(module: map) -> map
   let [allocated: map, with_allocation: map] = native_rules/allocate(builder, "Authority", {
     "tenant" -> native_roots/ref(builder, "tenant"), "permissions" -> native_gen/zero(native_kernel/pointer("AuthorityIndex")),
     "invocations" -> native_gen/zero(native_kernel/pointer("AuthorityIndex")),
+    "emissions" -> native_gen/zero(native_kernel/pointer("AuthorityIndex")),
     "root" -> native_gen/ref(builder, "false"), "catalogue" -> native_gen/ref(builder, "false"), "grant" -> native_gen/ref(builder, "false")})
   let [authority: map, rooted: map] = native_roots/retain(with_allocation, "authority", allocated)
   builder = rooted
@@ -118,22 +123,25 @@ verb native_authority/compile_body(module: map) -> map
   return result
 end
 
-// Selector rights have their own scalar index. A relation ID and a symbol ID
-// with equal payloads cannot grant each other's rights.
-verb native_authority/invocation_body(module: map) -> map
-  let builder: map = native_gen/context(module, "kernel_authority_can_invoke")
+// Each operation has its own index: equal numeric payloads in relation,
+// selector, and emission-target identities cannot grant each other's rights.
+verb native_authority/target_body(module: map, operation: string, field: string, parameter: string, accessor: string) -> map
+  let name: string = string_concat("kernel_authority_can_", operation)
+  let builder: map = native_gen/context(module, name)
   let authority: map = native_gen/ref(builder, "authority")
   builder = native_gen/when(builder, native_kernel/absent(authority), fn(absent) => native_gen/return_zero(absent))
-  let [selector: map, decoded: map] = native_gen/checked_bind(builder, "selector", native_gen/call(builder, "value_as_symbol", [native_gen/ref(builder, "selector")]), "ok",
+  let [target: map, decoded: map] = native_gen/checked_bind(builder, "target", native_gen/call(builder, accessor, [native_gen/ref(builder, parameter)]), "ok",
     fn(invalid) => native_gen/return_zero(invalid))
   builder = native_gen/when(decoded, native_rules/read(decoded, authority, "root"), fn(root) => native_gen/return_value(root, native_gen/ref(root, "true")))
-  let entry: map = native_gen/call(builder, "kernel_authority_index_lookup", [native_rules/read(builder, authority, "invocations"), native_gen/field(builder, selector, "number")])
+  let entry: map = native_gen/call(builder, "kernel_authority_index_lookup", [native_rules/read(builder, authority, field), native_gen/field(builder, target, "number")])
   let result: map = native_gen/finish(module, native_gen/return_value(builder, native_gen/negate(native_kernel/absent(entry))))
   return result
 end
 
 verb native_authority/program(input: map) -> map
-  let module: map = native_authority/invocation_body(native_authority/compile_body(input))
+  let module: map = native_authority/compile_body(input)
+  module = native_authority/target_body(module, "invoke", "invocations", "selector", "value_as_symbol")
+  module = native_authority/target_body(module, "emit", "emissions", "target", "value_as_identity")
   let builder: map = native_gen/context(module, "kernel_authority_allows")
   let authority: map = native_gen/ref(builder, "authority")
   builder = native_gen/when(builder, native_kernel/absent(authority), fn(absent) => native_gen/return_value(absent, native_gen/ref(absent, "false")))

@@ -88,7 +88,7 @@ static void subscription_pump(void) {
     assert(mica_kernel_write(&transaction, 10, mailbox_receivers(&worker, (mica_type_Value[]){integer(7)}, 1), true) == OK);
     assert(mica_kernel_write(&transaction, 1, pair(&worker, 1, 10), true) == OK);
     assert(mica_kernel_rule_add(&transaction, 1, subscription_test_rule(&worker), true) == OK);
-    assert(mica_kernel_set_authority_policy(&transaction, 10, 0, 0, 0, 0, 0, 0) == OK);
+    assert(mica_kernel_set_authority_policy(&transaction, 10, 0, 0, 0, 0, 0, 0, 0) == OK);
     assert(mica_kernel_commit(&transaction) == OK && mica_kernel_end(&transaction));
     assert(mica_task_mailbox_hub_init(&mailboxes, &worker, 1) == OK);
     struct mica_TaskMailboxCaps caps = mica_task_mailbox_create(&mailboxes, &worker, 16);

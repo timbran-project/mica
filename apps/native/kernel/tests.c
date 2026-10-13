@@ -3106,7 +3106,7 @@ static struct mica_KernelAuthorityResult compile_authority(struct mica_KernelTra
     mica_memory_control_push(tx->f_worker, &control);
     struct mica_KernelAuthorityResult result = mica_kernel_authority_compile(tx->f_worker, integer(tenant),
         mica_kernel_view(tx, 6), mica_kernel_view(tx, 4), mica_kernel_view(tx, 5),
-        mica_kernel_view(tx, 1), mica_kernel_view(tx, 2), mica_kernel_view(tx, 3), NULL, &budget);
+        mica_kernel_view(tx, 1), mica_kernel_view(tx, 2), mica_kernel_view(tx, 3), NULL, NULL, &budget);
     mica_memory_control_pop(tx->f_worker);
     return result;
 }
@@ -3191,11 +3191,11 @@ static void authority_projection(void) {
     struct mica_KernelRelation *effective = mica_kernel_rule_rows_index_lookup(mica_kernel_work(&tx)->f_evaluation->f_rows, 1)->f_view;
     struct mica_KernelBudget budget = operation_budget(&tx);
     budget.f_steps = 128;
-    result = mica_kernel_authority_compile(&f.worker, integer(11), NULL, NULL, NULL, effective, NULL, NULL, NULL, &budget);
+    result = mica_kernel_authority_compile(&f.worker, integer(11), NULL, NULL, NULL, effective, NULL, NULL, NULL, NULL, &budget);
     assert(result.f_status == OK && mica_kernel_authority_allows(result.f_authority, 42, 1));
     assert(!mica_kernel_authority_allows(result.f_authority, 42, 4));
     budget = operation_budget(&tx);
-    result = mica_kernel_authority_compile(&f.worker, integer(7), NULL, NULL, NULL, mica_kernel_view(&tx, 4), NULL, NULL, NULL, &budget);
+    result = mica_kernel_authority_compile(&f.worker, integer(7), NULL, NULL, NULL, mica_kernel_view(&tx, 4), NULL, NULL, NULL, NULL, &budget);
     assert(result.f_status == ARITY && !result.f_authority && f.worker.f_roots == &cached);
     // Matching malformed rows fail closed, with no partially built context.
     assert(write_pair(&tx, 1, 7, 50, true) == OK);
@@ -3262,7 +3262,7 @@ static void configure_policy(struct fixture *f) {
     assert(write_pair(&tx, 13, 1, 2, true) == OK);
     assert(write_pair(&tx, 14, 1, 2, true) == OK);
     assert(write_pair(&tx, 14, 3, 4, true) == OK);
-    assert(mica_kernel_set_authority_policy(&tx, 6, 4, 5, 1, 2, 3, 0) == OK);
+    assert(mica_kernel_set_authority_policy(&tx, 6, 4, 5, 1, 2, 3, 0, 0) == OK);
     assert(mica_kernel_commit(&tx) == OK && mica_kernel_end(&tx));
 }
 static void inactive_authority(void) {
@@ -3313,7 +3313,7 @@ static void transactional_authority(void) {
     // An all-zero configuration revokes implicit bootstrap ownership. Rollback
     // restores the unconfigured world; the draft task's boundary cache is fixed.
     begin(&f, &tx);
-    assert(mica_kernel_set_authority_policy(&tx, 0, 0, 0, 0, 0, 0, 0) == OK);
+    assert(mica_kernel_set_authority_policy(&tx, 0, 0, 0, 0, 0, 0, 0, 0) == OK);
     assert(refresh(&tx) == OK && mica_kernel_work(&tx)->f_authority->f_root);
     assert(mica_kernel_end(&tx));
     configure_policy(&f);
@@ -3321,7 +3321,7 @@ static void transactional_authority(void) {
     assert(count(&tx, 10) == 1);
     assert(read_status(&tx, 12) == PERMISSION);
     assert(write_pair(&tx, 11, 1, 2, true) == PERMISSION);
-    assert(mica_kernel_set_authority_policy(&tx, 0, 0, 0, 0, 0, 0, 0) == PERMISSION);
+    assert(mica_kernel_set_authority_policy(&tx, 0, 0, 0, 0, 0, 0, 0, 0) == PERMISSION);
     assert(mica_kernel_declare(&tx, 18, 18, 2, SET, 0, 0) == PERMISSION);
     assert(mica_kernel_rule_evaluate(&tx).f_status == PERMISSION);
     assert(tenant_edge(&tx, 1, 7, 12, 10, false) == PERMISSION);
@@ -3430,7 +3430,7 @@ static void transactional_authority(void) {
     assert(count(&reader, 12) == 0 && mica_kernel_end(&reader));
     // Configuration is transactional even without any extensional writes.
     begin(&f, &tx);
-    assert(mica_kernel_set_authority_policy(&tx, 0, 0, 0, 0, 0, 0, 0) == OK);
+    assert(mica_kernel_set_authority_policy(&tx, 0, 0, 0, 0, 0, 0, 0, 0) == OK);
     assert(mica_kernel_rule_remove(&tx, 2) == OK);
     assert(mica_kernel_commit(&tx) == OK && mica_kernel_end(&tx));
     begin(&f, &tx);
@@ -3518,7 +3518,7 @@ static void authority_controls(void) {
     // Cancellation and budget failures publish neither grants nor configuration.
     begin(&f, &tx);
     policy_fact(&tx, 1, 9, 10, true);
-    assert(mica_kernel_set_authority_policy(&tx, 6, 4, 5, 1, 2, 3, 0) == OK);
+    assert(mica_kernel_set_authority_policy(&tx, 6, 4, 5, 1, 2, 3, 0, 0) == OK);
     assert(mica_kernel_cancel(&tx));
     assert(mica_kernel_commit(&tx) == CANCELLED && mica_kernel_end(&tx));
     unsigned limited = 0;
@@ -3545,7 +3545,7 @@ static void authority_controls(void) {
     }
     assert(limited > 0);
     begin(&f, &tx);
-    assert(mica_kernel_set_authority_policy(&tx, 0, 0, 0, 0, 0, 0, 0) == OK);
+    assert(mica_kernel_set_authority_policy(&tx, 0, 0, 0, 0, 0, 0, 0, 0) == OK);
     assert(!mica_kernel_work(&tx)->f_changes && !mica_kernel_work(&tx)->f_rule_changes);
     assert(mica_kernel_commit(&tx) == OK && mica_kernel_end(&tx));
     begin(&f, &tx);

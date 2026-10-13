@@ -3514,6 +3514,37 @@ fn native_source_sorts_and_constructs_relations() {
 }
 
 #[test]
+fn native_source_emissions_obey_target_authority_and_transactions() {
+    thread::scope(|scope| {
+        let builds = [true, false].map(|tier| {
+            scope.spawn(move || {
+                generate_native_source_example(
+                    tier,
+                    include_str!("../../../apps/native/compiler/effects_tests.mica"),
+                    "[[610, 8010]]",
+                )
+            })
+        });
+        let mut previous = None;
+        for build in builds {
+            let (generated, memory, tasks) = build.join().unwrap();
+            if let Some(previous) = &previous {
+                assert_eq!(&generated, previous);
+                continue;
+            }
+            previous = Some(generated.clone());
+            let fixture = format!(
+                "{generated}\n{memory}\n{tasks}\n{}\n{}\n#include <assert.h>\n{}",
+                include_str!("../../../native/platform/allocation.c"),
+                include_str!("../../../native/platform/mutex.c"),
+                include_str!("../../../apps/native/compiler/effects_tests.c"),
+            );
+            check_native_source_fixture(&fixture);
+        }
+    });
+}
+
+#[test]
 fn native_source_constructs_and_slices_unicode_text() {
     check_native_source_body(
         include_str!("../../../apps/native/compiler/text_tests.mica"),

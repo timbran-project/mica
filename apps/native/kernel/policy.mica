@@ -113,6 +113,7 @@ verb native_authority/for_body(module: map) -> map
     let owner: map = native_gen/field(compared, equal, "value")
     let [authority: map, allocated: map] = native_rules/allocate(compared, "Authority", {"tenant" -> native_roots/ref(bootstrap, "tenant"),
       "permissions" -> native_gen/zero(native_kernel/pointer("AuthorityIndex")),
+      "emissions" -> native_gen/zero(native_kernel/pointer("AuthorityIndex")),
       "invocations" -> native_gen/zero(native_kernel/pointer("AuthorityIndex")), "root" -> owner, "catalogue" -> owner, "grant" -> owner})
     return native_roots/return_value(allocated, native_gen/record(allocated, [:Record, "KernelAuthorityResult"], {"status" -> native_gen/ref(allocated, "kernel_ok"), "authority" -> authority}))
   end)

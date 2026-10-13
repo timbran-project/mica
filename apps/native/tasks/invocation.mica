@@ -4,33 +4,19 @@
 // Invocation tokens belong to a segment authority epoch. Images can retain the
 // opaque value, but cannot retain the permission cache or token index. A fresh
 // scheduled segment therefore cannot use a token from an earlier epoch.
-verb native_invocation/context(module: map, name: string) -> map
-  let builder: map = native_query/begin_roots(native_gen/context(module, string_concat("task_", name)))
-  builder = native_query/check(builder, native_gen/equal(native_gen/ref(builder, "worker"), native_tasks/attempt_field(builder, "worker")), "closed")
-  builder = native_query/check(builder, native_kernel/absent(native_tasks/attempt_field(builder, "boundary")), "closed")
-  let ready: map = native_query/status_call(builder, "task_poll", [native_tasks/attempt(builder), native_gen/ref(builder, "one")])
-  return ready
-end
-
-verb native_invocation/rights(input: map) -> map
-  let builder: map = input
-  let tx: map = native_tasks/slot(builder, "transaction")
-  let work: map = native_gen/call(builder, "kernel_work", [tx])
-  builder = native_kernel/store_field(builder, work, "policy_used", native_gen/ref(builder, "true"))
-  let allowed: map = native_gen/call(builder, "kernel_authority_can_invoke", [
-    native_tasks/saved(builder, "authority", native_kernel/pointer("Authority")), native_roots/ref(builder, "selector")])
-  let result: map = native_query/check(builder, allowed, "permission")
+verb native_invocation/rights(builder: map) -> map
+  let result: map = native_tasks/authorize(builder, "invoke", native_roots/ref(builder, "selector"))
   return result
 end
 
 verb native_invocation/authorize_body(module: map) -> map
-  let builder: map = native_invocation/rights(native_invocation/context(module, "invoke_authorize"))
+  let builder: map = native_invocation/rights(native_tasks/operation_context(module, "invoke_authorize"))
   let result: map = native_gen/finish(module, native_roots/return_value(builder, native_gen/ref(builder, "kernel_ok")))
   return result
 end
 
 verb native_invocation/mint_body(module: map) -> map
-  let builder: map = native_invocation/context(module, "invoke_mint")
+  let builder: map = native_tasks/operation_context(module, "invoke_mint")
   builder = native_execution/control_scope(builder, native_roots/worker(builder), native_roots/ref(builder, "budget"))
   builder = native_invocation/rights(builder)
   let [id: map, claimed: map] = native_gen/checked_bind(builder, "token_id", native_gen/call(builder, "task_resource_reserve", [native_roots/worker(builder), native_gen/ref(builder, "one")]), "ok",
@@ -52,7 +38,7 @@ end
 // The index is ordered by capability payload, its first tuple column. Search
 // without allocating a query tuple or consulting a policy relation.
 verb native_invocation/check_body(module: map) -> map
-  let builder: map = native_invocation/context(module, "invoke_check")
+  let builder: map = native_tasks/operation_context(module, "invoke_check")
   let [decoded: map, valid: map] = native_gen/checked_bind(builder, "capability", native_gen/call(builder, "value_as_capability", [native_roots/ref(builder, "capability")]), "ok",
     fn(invalid) => native_query/error(invalid, "permission"))
   let key: map = native_gen/field(valid, decoded, "number")

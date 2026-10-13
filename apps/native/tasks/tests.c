@@ -469,7 +469,7 @@ static void authority_renewal(void) {
     assert(root_grant.f_ok && mica_kernel_write(&owner, 4, root_grant.f_value, true) == OK);
     assert(mica_kernel_write(&owner, 2, permission(&worker, 8, 1), true) == OK);
     assert(mica_kernel_write(&owner, 3, permission(&worker, 8, 1), true) == OK);
-    assert(mica_kernel_set_authority_policy(&owner, 4, 0, 0, 2, 3, 0, 0) == OK);
+    assert(mica_kernel_set_authority_policy(&owner, 4, 0, 0, 2, 3, 0, 0, 0) == OK);
     assert(mica_kernel_commit(&owner) == OK);
     assert(mica_kernel_end(&owner));
     assert(mica_memory_root_push(&worker, &image));
