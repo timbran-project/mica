@@ -64,6 +64,9 @@ An existing error can be raised directly with `raise problem`. This preserves it
 payload. `raise problem.code` constructs a fresh error from just the code, so use the former when
 forwarding a caught error or converting an `err` result into a raised failure.
 
+An explicit `none` message preserves the existing message. For example, `raise problem, none, payload` replaces only the payload.
+An empty string replaces the message with empty text. Other empty relations are invalid messages.
+
 ## Handling a Block
 
 `try` handles errors for a block of code:

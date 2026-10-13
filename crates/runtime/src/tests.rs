@@ -2108,6 +2108,54 @@ fn relation_literals_construct_dynamic_empty_and_unit_relations() {
 }
 
 #[test]
+fn raised_error_none_message_preserves_existing_message() {
+    for interpreter_only in [true, false] {
+        let mut runner = SourceRunner::new_empty().with_interpreter_only(interpreter_only);
+        let report = runner
+            .run_source(
+                r#"
+            let original = error(E_SAMPLE, "original", 10)
+            let retained = recover raise original, none
+              catch problem => problem
+            end
+            let replaced_payload = recover raise original, none, none
+              catch problem => problem
+            end
+            let empty_message = recover raise original, ""
+              catch problem => problem
+            end
+            let fresh = recover raise E_SAMPLE, none, 20
+              catch problem => problem
+            end
+            return [retained.message == some("original"), retained.value == some(10),
+              replaced_payload.message == some("original"), replaced_payload.value == some(none),
+              empty_message.message == some(""), empty_message.value == some(10),
+              fresh.message == none, fresh.value == some(20)]
+        "#,
+            )
+            .unwrap();
+        assert_completed_value(
+            &report,
+            Value::list(std::iter::repeat_n(Value::bool(true), 8)),
+        );
+        for message in ["[] {}", "[:other] {}", "some(\"text\")", "()", "42"] {
+            let error = runner
+                .run_source(&format!("raise E_SAMPLE, {message}"))
+                .unwrap_err();
+            assert!(
+                matches!(
+                    error,
+                    SourceTaskError::TaskManager(TaskManagerError::Task(TaskError::Runtime(
+                        RuntimeError::InvalidErrorMessage(_)
+                    )))
+                ),
+                "{message}: {error:?}"
+            );
+        }
+    }
+}
+
+#[test]
 fn standard_relational_values_distinguish_unit_option_and_result_cases() {
     let mut runner = SourceRunner::new_empty();
     let report = runner

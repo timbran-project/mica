@@ -4010,7 +4010,7 @@ fn normalize_raised_error(
 ) -> Result<Value, RuntimeError> {
     let message = message
         .and_then(|message| {
-            if message.is_empty_relation() {
+            if matches!(message.option_payload(), Some(None)) {
                 None
             } else {
                 Some(error_message_text(message))
