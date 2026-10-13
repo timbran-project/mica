@@ -214,7 +214,11 @@ verb native_literal/emit(builder: map, literal: map, table: map, failure) -> lis
     let address: map = native_gen/expression([:Pointer, array, :Const], :GlobalAddress, [literal[:global]])
     let data: map = native_gen/cast([:Pointer, :U8, :Const], address)
     if kind == :Symbol || kind == :ErrorCode
-      let [interned: map, checked: map] = native_gen/checked_bind(ready, "symbol", native_gen/call(ready, "value_symbol_intern", [table, data, argument]), "ok", failure)
+      let control: map = native_gen/zero(native_memory/record_pointer("MemoryControl"))
+      if map_contains_key(ready[:bindings], "worker") || map_contains_key(index_or(ready, :scope_bindings, {}), "worker")
+        control = native_gen/read(native_gen/field(ready, native_roots/worker(ready), "control"))
+      end
+      let [interned: map, checked: map] = native_gen/checked_bind(ready, "symbol", native_gen/call(ready, "value_symbol_intern", [table, data, argument, control]), "ok", failure)
       ready = checked
       let constructor: string = "value_symbol"
       if kind == :ErrorCode

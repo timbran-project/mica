@@ -364,7 +364,7 @@ static int symbol_driver(void) {
     if (!mica_value_symbol_table_init(&table)) fail("symbol table initialization failed");
     for (uint64_t i = 0; i < count; ++i) names[i].bytes = read_bytes(&names[i].length);
     for (uint64_t i = 0; i < count; ++i)
-        ids[i] = mica_value_symbol_intern(&table, names[i].bytes, names[i].length);
+        ids[i] = mica_value_symbol_intern(&table, names[i].bytes, names[i].length, NULL);
     for (uint64_t i = 0; i < count; ++i) {
         write_number(ids[i].f_ok, 1);
         if (ids[i].f_ok) {
@@ -407,7 +407,7 @@ static int codec_driver(void) {
     if(!mica_value_symbol_table_init(&table)) fail("codec symbol table init failed");
     // Force a different ID order from the Rust source namespace.
     const uint8_t prefix[]="pre-existing C name";
-    if(!mica_value_symbol_intern(&table,prefix,sizeof(prefix)-1).f_ok) fail("codec preseed failed");
+    if(!mica_value_symbol_intern(&table,prefix,sizeof(prefix)-1, NULL).f_ok) fail("codec preseed failed");
     uint64_t length;
     uint8_t *bytes=read_bytes(&length);
     struct mica_MemoryHeap heap={0};

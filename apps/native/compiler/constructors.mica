@@ -79,3 +79,49 @@ verb native_builtins/frob(builder: map, name: symbol, args: list) -> list
   let result: list = native_source/result(ready, "value_identity", [native_kernel/load_field(ready, header, "delegate")], "schema")
   return result
 end
+
+verb native_builtins/symbol_name(module: map) -> string
+  return string_concat(module[:source_prefix], "_to_symbol")
+end
+verb native_builtins/symbol_definition(input: map) -> map
+  let module: map = native_memory/declare(input, native_builtins/symbol_name(input), :U64, [
+    ["worker", native_memory/record_pointer("MemoryWorker"), :Borrow], ["attempt", native_tasks/pointer("Attempt"), :Borrow],
+    ["transaction", native_kernel/pointer("Transaction"), :Borrow], ["symbols", native_memory/record_pointer("SymbolTable"), :Borrow],
+    ["input", native_value/word(), :Gc], ["output", native_memory/record_pointer("MemoryRoot"), :Borrow]], native_tasks/effects(), :Value, "")
+  let builder: map = native_queries/budget_scope(native_gen/context(module, native_builtins/symbol_name(module)))
+  let value: map = native_roots/ref(builder, "input")
+  let output: map = native_gen/ref(builder, "output")
+  builder = native_gen/when(builder, native_access/kind(builder, value, "symbol"), fn(symbol)
+    let stored: map = native_gen/do_call(symbol, "value_root_set", [output, value])
+    return native_roots/return_value(stored, native_gen/ref(stored, "kernel_ok"))
+  end)
+  builder = native_query/check(builder, native_access/kind(builder, value, "string"), "schema")
+  let symbols: map = native_gen/ref(builder, "symbols")
+  builder = native_query/check(builder, native_gen/negate(native_kernel/absent(symbols)), "closed")
+  let [mutex: map, with_mutex: map] = native_gen/bind(builder, "mutex", native_kernel/load_field(builder, symbols, "mutex"))
+  builder = native_query/check(with_mutex, native_gen/negate(native_kernel/absent(mutex)), "closed")
+  // Waiting tasks reach safepoints with the text rooted. Once locked, the
+  // interner's controls check limits and cancellation without relocation.
+  builder = native_gen/while_loop(builder, native_gen/negate(native_gen/call(builder, "mutex_try_lock", [mutex])), fn(waiting)
+    let charged: map = native_query/charge(waiting, native_gen/ref(waiting, "one"), native_gen/ref(waiting, "zero"))
+    return native_roots/poll(charged)
+  end)
+  let control: map = native_kernel/load_field(builder, native_roots/worker(builder), "control")
+  let [interned: map, called: map] = native_gen/bind(builder, "interned", native_gen/call(builder, "symbol_intern_locked", [symbols,
+    native_gen/freeze(native_value/string_field(builder, value, "data")), native_value/string_field(builder, value, "length"), control]))
+  builder = native_gen/do_call(called, "mutex_unlock", [mutex])
+  let ready: map = native_query/check(builder, native_gen/field(builder, interned, "ok"), "oom")
+  let [symbol: map, encoded: map] = native_query/value(ready, "value_symbol", [native_gen/convert(:U32, native_gen/field(ready, interned, "number"))])
+  builder = native_gen/do_call(encoded, "value_root_set", [output, symbol])
+  let result: map = native_gen/finish(module, native_roots/return_value(builder, native_gen/ref(builder, "kernel_ok")))
+  return result
+end
+verb native_builtins/symbol(builder: map, value: map) -> list
+  let [symbols: map, with_symbols: map] = native_gen/bind(builder, "symbols", native_gen/zero(native_memory/record_pointer("SymbolTable")))
+  let ready: map = native_gen/when(with_symbols, native_gen/negate(native_kernel/absent(native_tasks/attempt_field(with_symbols, "runtime"))),
+    fn(attached) => native_gen/assign(attached, symbols, native_source/service(attached, "symbols")))
+  let [output: map, rooted: map] = native_roots/retain(ready, "symbol", native_gen/zero(native_value/word()))
+  ready = native_source/checked(rooted, native_builtins/symbol_name(rooted), [native_roots/worker(rooted), native_tasks/attempt(rooted),
+    native_tasks/slot(rooted, "transaction"), symbols, value, output[:scope_root]])
+  return [output, ready]
+end

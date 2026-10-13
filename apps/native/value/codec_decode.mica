@@ -81,11 +81,11 @@ verb native_value/codec_decoder(input: map) -> map
     native/return_value("true")
   ])
   context = native/declare_function(context, "codec_decode", result, [worker, table, ["reader", pointer, :Borrow], options], [],
-    [:Allocate, :ReadMemory, :WriteMemory, :Block], :Gc, "")
+    [:Allocate, :Release, :ReadMemory, :WriteMemory, :Block], :Gc, "")
   context = native_value/decode_relation(context)
   context = native_value/decode_value(context)
   let parameters: list = [worker, table, ["data", bytes, :Borrow], ["length", :U64, :Value], options]
-  context = native/declare_function(context, "value_decode", decoded, parameters, [], [:Allocate, :ReadMemory, :WriteMemory, :Block], :Gc, "")
+  context = native/declare_function(context, "value_decode", decoded, parameters, [], [:Allocate, :Release, :ReadMemory, :WriteMemory, :Block], :Gc, "")
   context = native/define_function(context, "value_decode", [
     native/when_statement(
       native/binary_expression(:Equal, "data", native/typed_zero(bytes)),
@@ -101,7 +101,7 @@ verb native_value/codec_decoder(input: map) -> map
     ),
     native/return_record(["true", native/typed_field(word, "result", "value"), "position"])
   ])
-  context = native/declare_function(context, "value_decode_exact", result, parameters, [], [:Allocate, :ReadMemory, :WriteMemory, :Block], :Gc, "")
+  context = native/declare_function(context, "value_decode_exact", result, parameters, [], [:Allocate, :Release, :ReadMemory, :WriteMemory, :Block], :Gc, "")
   context = native/define_function(context, "value_decode_exact", [
     @native/try_call("result", decoded, "value_decode", ["worker", "table", "data", "length", "options"], [native/return_zero()]),
     native/unless_statement(
@@ -240,7 +240,7 @@ verb native_value/decode_value(input: map) -> map
       let id: string = string_concat(name, "_id")
       body = [
         @body,
-        @native/try_call(id, [:Record, "IdResult"], "value_symbol_intern", ["table", native/typed_field(bytes, span, "data"), "aux"], [native/return_zero()]),
+        @native/try_call(id, [:Record, "IdResult"], "value_symbol_intern", ["table", native/typed_field(bytes, span, "data"), "aux", native_memory/field(native_memory/record_pointer("MemoryControl"), "worker", "control")], [native/return_zero()]),
         native/return_value(
           native/call_expression(
             string_concat("value_", name),
@@ -407,7 +407,7 @@ verb native_value/decode_relation(input: map) -> map
     ["table", [:Pointer, [:Record, "SymbolTable"], :Mutable], :Borrow],
     ["reader", [:Pointer, [:Record, "ValueReader"], :Mutable], :Borrow],
     ["options", [:Record, "ValueCodecOptions"], :Value], ["arity", :U64, :Value]], [],
-    [:Allocate, :ReadMemory, :WriteMemory, :Block], :Gc, "")
+    [:Allocate, :Release, :ReadMemory, :WriteMemory, :Block], :Gc, "")
   context = native/define_function(context, "codec_relation", [
     native/when_statement(native/binary_expression(:Less, "relation_max_arity", "arity"), [native/return_zero()]),
     native/unless_statement(

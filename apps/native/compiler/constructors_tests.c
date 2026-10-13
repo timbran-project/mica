@@ -7,7 +7,7 @@ static void source_body_checks(struct mica_MemoryWorker *worker, struct mica_Ker
     assert(mica_memory_root_push(worker, &message));
     assert(mica_memory_root_push(worker, &arguments));
     assert(mica_memory_root_push(worker, &image));
-    struct mica_IdResult other = mica_value_symbol_intern(symbols, (const uint8_t *)"other", 5);
+    struct mica_IdResult other = mica_value_symbol_intern(symbols, (const uint8_t *)"other", 5, NULL);
     assert(other.f_ok);
     uint32_t heading = (uint32_t)other.f_number;
     struct mica_TaskRuntime runtime = {.f_symbols = symbols};

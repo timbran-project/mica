@@ -26,62 +26,6 @@ verb native_value/symbol_storage(input: map) -> map
   context[:state] = native/foreign(context[:state], context[:functions]["allocate"])
   context = native/declare_function(context, "release", :Void, [["allocation", bytes, :Consume]], [], [:Release], :Value, "")
   context[:state] = native/foreign(context[:state], context[:functions]["release"])
-  context = native/declare_function(context, "symbol_storage_allocate", bytes, [["storage", storage_ptr, :Borrow], ["size", :U64, :Value]],
-    [["adopted", block_ptr]], [:ReadMemory, :WriteMemory, :Allocate], :Borrow, "storage")
-  let failure: list = [native/return_value("null_bytes")]
-  context = native/define_function(
-    context,
-    "symbol_storage_allocate",
-    [
-      native/note_statement(:Invariant, "Symbol storage remains stable until table release and is aligned to eight bytes."),
-      native/when_statement(native/binary_expression(:Equal, "size", "zero"), failure),
-      native/when_statement(native/binary_expression(:Less, "allocation_limit", "size"), failure),
-      native/let_statement("header_size", :U64, native/unary_expression(:SizeOf, block)),
-      native/let_statement(
-        "head_slot",
-        [:Pointer, block_ptr, :Mutable],
-        native/field_pointer_expression("storage", "head")
-      ),
-      native/let_load("head", block_ptr, "head_slot"),
-      native/let_statement("aligned", :U64, "zero"),
-      native/let_statement("fits", :Bool, "false"),
-      native/unless_statement(native/binary_expression(:Equal, "head", "null_block"), [
-        native/let_load("existing", block, "head"),
-        native/let_field("used", :U64, "existing", "used"),
-        native/let_field("available", :U64, "existing", "capacity"),
-        native/set_statement("aligned", native/binary_expression(:Add, "used", "alignment_slack")),
-        native/set_statement("aligned", native/binary_expression(:BitAnd, "aligned", "alignment_mask")),
-        native/unless_statement(native/binary_expression(:Less, "available", "aligned"), [
-          native/let_statement("remaining", :U64, native/binary_expression(:Subtract, "available", "aligned")),
-          native/unless_statement(
-            native/binary_expression(:Less, "remaining", "size"),
-            [native/set_statement("fits", "true")]
-          )
-        ])
-      ]),
-      native/if_statement("fits", [native/set_statement("adopted", "head")], [
-        native/let_statement("capacity", :U64, "size"),
-        native/when_statement(
-          native/binary_expression(:Less, "size", "chunk_size"),
-          [native/set_statement("capacity", "chunk_size")]
-        ),
-        native/let_statement("total", :U64, native/binary_expression(:Add, "capacity", "header_size")),
-        native/let_call("owned_bytes", bytes, "allocate", ["total"]),
-        native/when_statement(native/binary_expression(:Equal, "owned_bytes", "null_bytes"), failure),
-        native/let_statement("owned_block", block_ptr, native/unary_expression(:PointerCast, "owned_bytes")),
-        native/set_statement("adopted", native/binary_expression(:Adopt, "head_slot", "owned_block")),
-        native/let_statement("header", block, native/record_expression(["head", "zero", "capacity"])),
-        native/store_statement("adopted", "header"),
-        native/set_statement("aligned", "zero")
-      ]),
-      native/let_statement("base", bytes, native/unary_expression(:PointerCast, "adopted")),
-      native/let_offset("data", bytes, "base", "header_size"),
-      native/let_statement("next_used", :U64, native/binary_expression(:Add, "aligned", "size")),
-      native/let_statement("used_slot", [:Pointer, :U64, :Mutable], native/field_pointer_expression("adopted", "used")),
-      native/store_statement("used_slot", "next_used"),
-      native/return_value(native/offset_expression("data", "aligned"))
-    ]
-  )
   context = native/declare_function(context, "symbol_storage_release", :Void, [["storage", storage_ptr, :Consume]], [], [:ReadMemory, :WriteMemory, :Release], :Value, "")
   context = native/define_function(
     context,

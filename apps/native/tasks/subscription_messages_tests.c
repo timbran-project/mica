@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 static mica_type_Value subscription_symbol(struct mica_SymbolTable *symbols, const char *name) {
-    struct mica_IdResult id = mica_value_symbol_intern(symbols, (const uint8_t *)name, strlen(name));
+    struct mica_IdResult id = mica_value_symbol_intern(symbols, (const uint8_t *)name, strlen(name), NULL);
     assert(id.f_ok && id.f_number <= UINT32_MAX);
     struct mica_ValueResult value = mica_value_symbol((uint32_t)id.f_number);
     assert(value.f_ok);

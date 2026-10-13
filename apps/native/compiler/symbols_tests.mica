@@ -1,0 +1,10 @@
+let values = []
+for text in ["", "Name", "name", "é", "é", "🙂", "a\0b", "with spaces", "x:y/z", "quote\"slash\\"]
+  let symbol = to_symbol(text)
+  values = [@values, [symbol, symbol == to_symbol(text), to_symbol(symbol), to_symbol(@[text]), is_kind(symbol, :symbol)]]
+end
+let table = {}
+for text in ["red", "green", "red", "blue"]
+  table[to_symbol(text)] = text
+end
+return [values, table, to_symbol("Name") != to_symbol("name"), to_symbol("é") != to_symbol("é")]

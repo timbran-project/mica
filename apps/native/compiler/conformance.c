@@ -99,7 +99,7 @@ static void source_call_failures(struct mica_MemoryWorker *worker,
         struct mica_TaskRuntime *runtime, struct mica_MemoryRoot *code) {
     struct mica_MemoryRoot image = {0};
     assert(mica_memory_root_push(worker, &image));
-    struct mica_IdResult name = mica_value_symbol_intern(symbols, (const uint8_t *)"native_expression_2", 19);
+    struct mica_IdResult name = mica_value_symbol_intern(symbols, (const uint8_t *)"native_expression_2", 19, NULL);
     assert(name.f_ok);
     mica_type_Value selector = mica_value_symbol(name.f_number).f_value;
     mica_type_Value original = mica_value_identity(1002).f_value;
@@ -147,7 +147,7 @@ static void source_query_controls(struct mica_MemoryWorker *worker,
     struct mica_ValueResult value = mica_value_list(worker, cells, 3);
     assert(value.f_ok);
     mica_value_root_set(&pattern, value.f_value);
-    struct mica_IdResult symbol = mica_value_symbol_intern(symbols, (const uint8_t *)"x", 1);
+    struct mica_IdResult symbol = mica_value_symbol_intern(symbols, (const uint8_t *)"x", 1, NULL);
     assert(symbol.f_ok);
     mica_type_Value column = mica_value_symbol((uint32_t)symbol.f_number).f_value;
     value = mica_value_list(worker, &column, 1);

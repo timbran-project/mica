@@ -3172,7 +3172,12 @@ fn source_value_literal(value: &Value, serial: &mut usize) -> (String, String) {
                 .unwrap()
                 .name()
                 .unwrap();
-            setup.push_str(&format!("struct mica_IdResult {name}_symbol = mica_value_symbol_intern(symbols, (const uint8_t *){symbol:?}, {});\nassert({name}_symbol.f_ok);\n", symbol.len()));
+            let bytes = symbol.bytes().map(|byte| byte.to_string()).collect::<Vec<_>>();
+            setup.push_str(&format!(
+                "const uint8_t {name}_bytes[] = {{{}}};\n",
+                if bytes.is_empty() { "0".to_owned() } else { bytes.join(",") }
+            ));
+            setup.push_str(&format!("struct mica_IdResult {name}_symbol = mica_value_symbol_intern(symbols, {name}_bytes, {}, NULL);\nassert({name}_symbol.f_ok);\n", symbol.len()));
             let constructor = if value.kind() == ValueKind::Symbol {
                 "symbol"
             } else {
@@ -3551,6 +3556,15 @@ fn native_source_emissions_obey_target_authority_and_transactions() {
             check_native_source_fixture(&fixture);
         }
     });
+}
+
+#[test]
+fn native_source_interns_symbols_with_resource_controls() {
+    check_native_source_body(
+        include_str!("../../../apps/native/compiler/symbols_tests.mica"),
+        include_str!("../../../apps/native/compiler/symbols_tests.c"),
+        &[],
+    );
 }
 
 #[test]

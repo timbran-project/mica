@@ -17,6 +17,8 @@ verb native_value/symbols(input: map) -> map
     ["length", :U64], ["scalars", :U64], ["ascii", :Bool]])[1]
   let [constants: map, next: map] = native/constants(state, [
     ["symbol_initial_capacity", :U64, "0000000000000010"],
+    ["symbol_poll_mask", :U64, "000000000000003f"],
+    ["symbol_poll_steps", :U64, "0000000000000040"],
     ["symbol_id_limit", :U64, "0000000100000000"],
     ["symbol_two", :U64, "0000000000000002"],
     ["symbol_hash_basis", :U64, "cbf29ce484222325"],
@@ -28,20 +30,54 @@ verb native_value/symbols(input: map) -> map
   context[:constants] = all
   context[:state] = next
   context = native_value/symbol_synchronization(context)
+  context = native_value/symbol_scan(context)
   context = native_value/symbol_lookup(context)
-  context = native_value/symbol_grow(context)
   context = native_value/symbol_intern(context)
   context = native_value/symbol_access(context)
   context = native_value/symbol_synchronized_access(context)
   return context
 end
 
+// Controls cannot relocate borrowed input. Each loop checks before doing a
+// bounded quantum of work; allocation checks charge retained storage too.
+verb native_value/symbol_work(steps, failure: list) -> list
+  let result: list = native/unless_statement(native/call_expression("memory_control_check", ["control", "zero", steps]), failure)
+  return result
+end
+verb native_value/symbol_poll(position: string, failure: list) -> list
+  let result: list = native/when_statement(native/binary_expression(:Equal,
+    native/typed_expression(:U64, native/binary_expression(:BitAnd, position, "symbol_poll_mask")), "zero"),
+    [native_value/symbol_work("symbol_poll_steps", failure)])
+  return result
+end
+verb native_value/symbol_scan(input: map) -> map
+  let context: map = native/declare_function(input, "symbol_scan", [:Record, "Utf8Scan"],
+    [["source", [:Pointer, :U8, :Const], :Borrow], ["length", :U64, :Value],
+      ["control", native_memory/record_pointer("MemoryControl"), :Borrow]], [], [:ReadMemory, :WriteMemory], :Value, "")
+  context = native/define_function(context, "symbol_scan", [
+    native/let_statement("position", :U64, "zero"),
+    native/let_statement("scalars", :U64, "zero"),
+    native/let_statement("ascii", :Bool, "true"),
+    native/while_statement(native/binary_expression(:Less, "position", "length"), [
+      native_value/symbol_poll("scalars", [native/return_zero()]),
+      @native/try_call("decoded", [:Record, "Utf8Decode"], "utf8_decode", [
+        native/typed_expression([:Pointer, :U8, :Const], native/offset_expression("source", "position")),
+        native/typed_expression(:U64, native/binary_expression(:Subtract, "length", "position"))], [native/return_zero()]),
+      native/let_field("width", :U64, "decoded", "width"),
+      native/unless_statement(native/binary_expression(:Equal, "width", "one"), [native/set_statement("ascii", "false")]),
+      native/set_statement("position", native/binary_expression(:Add, "position", "width")),
+      native/set_statement("scalars", native/binary_expression(:Add, "scalars", "one"))]),
+    native/return_record(["true", "scalars", "ascii"])])
+  return context
+end
+
 // Probe generation keeps collision advancement and wraparound identical for
 // lookup and rehash. The empty arm must exit the generated loop.
 verb native_value/probe_symbol_buckets(buckets: string, slot: string, mask: string,
-    occupied: string, empty: list, present: list) -> list
+    occupied: string, empty: list, present: list, failure: list) -> list
   let bucket: list = native/typed_expression([:Pointer, :U64, :Mutable], native/offset_expression(buckets, slot))
   let result: list = native/while_statement("true", [
+    native_value/symbol_work("one", failure),
     native/let_load(occupied, :U64, bucket),
     native/when_statement(native/binary_expression(:Equal, occupied, "zero"), empty),
     @present,
@@ -55,11 +91,12 @@ verb native_value/symbol_lookup(input: map) -> map
   let bytes: list = [:Pointer, :U8, :Const]
   let table: list = [:Record, "SymbolTable"]
   let entry: list = [:Record, "SymbolEntry"]
-  context = native/declare_function(context, "symbol_hash", :U64,
-    [["source", bytes, :Borrow], ["length", :U64, :Value]], [], [:ReadMemory], :Value, "")
+  context = native/declare_function(context, "symbol_hash", [:Record, "IdResult"],
+    [["source", bytes, :Borrow], ["length", :U64, :Value], ["control", native_memory/record_pointer("MemoryControl"), :Borrow]], [], [:ReadMemory, :WriteMemory], :Value, "")
   context = native/define_function(context, "symbol_hash", [
     native/let_statement("hash", :U64, "symbol_hash_basis"),
     @native/for_range("position", "zero", "length", [
+      native_value/symbol_poll("position", [native/return_zero()]),
       native/let_load("byte", :U8, native/typed_expression(bytes, native/offset_expression("source", "position"))),
       native/set_statement(
         "hash",
@@ -70,11 +107,11 @@ verb native_value/symbol_lookup(input: map) -> map
         )
       ),
       native/set_statement("hash", native/binary_expression(:Multiply, "hash", "symbol_hash_prime"))]),
-    native/return_value("hash")
+    native/return_record(["true", "hash"])
   ])
-  context = native/declare_function(context, "symbol_slot", :U64,
+  context = native/declare_function(context, "symbol_slot", [:Record, "IdResult"],
     [["table", [:Pointer, table, :Mutable], :Borrow], ["source", bytes, :Borrow],
-     ["length", :U64, :Value], ["hash", :U64, :Value]], [], [:ReadMemory], :Value, "")
+     ["length", :U64, :Value], ["hash", :U64, :Value], ["control", native_memory/record_pointer("MemoryControl"), :Borrow]], [], [:ReadMemory, :WriteMemory], :Value, "")
   context = native/define_function(context, "symbol_slot", [
     native/note_statement(:Invariant, "Capacity is nonzero; at least half the buckets are empty."),
     native/let_load("header", table, "table"),
@@ -87,7 +124,7 @@ verb native_value/symbol_lookup(input: map) -> map
     ),
     native/set_statement("mask", native/binary_expression(:Subtract, "mask", "one")),
     native/let_statement("slot", :U64, native/binary_expression(:BitAnd, "hash", "mask")),
-    native_value/probe_symbol_buckets("buckets", "slot", "mask", "id", [native/return_value("slot")], [
+    native_value/probe_symbol_buckets("buckets", "slot", "mask", "id", [native/return_record(["true", "slot"])], [
       native/let_load(
         "candidate",
         entry,
@@ -109,6 +146,7 @@ verb native_value/symbol_lookup(input: map) -> map
           ), [
             native/let_field("data", bytes, "candidate", "data"),
             @native/for_range("position", "zero", "length", [
+              native_value/symbol_poll("position", [native/return_zero()]),
               native/let_load(
                 "left_byte",
                 :U8,
@@ -123,122 +161,87 @@ verb native_value/symbol_lookup(input: map) -> map
                 native/binary_expression(:Equal, "left_byte", "right_byte"),
                 [native/break_statement()]
               )]),
-            native/when_statement(native/binary_expression(:Equal, "position", "length"), [native/return_value("slot")])
+            native/when_statement(native/binary_expression(:Equal, "position", "length"), [native/return_record(["true", "slot"])])
           ])
         ]
       )
-    ]),
-    native/return_value("zero")
+    ], [native/return_zero()]),
+    native/return_zero()
   ])
   return context
 end
 
-verb native_value/symbol_grow(input: map) -> map
-  let context: map = input
+// Rebuild an index in the caller's reserved storage. Keeping this a builder
+// preserves the allocation's ownership through the caller's failure cleanup.
+verb native_value/symbol_index(failure: list) -> list
   let table: list = [:Record, "SymbolTable"]
   let entry: list = [:Record, "SymbolEntry"]
   let entries: list = [:Pointer, entry, :Mutable]
   let buckets: list = [:Pointer, :U64, :Mutable]
   let bytes: list = [:Pointer, :U8, :Mutable]
-  context = native/declare_function(context, "symbol_grow", :Bool,
-    [["table", [:Pointer, table, :Mutable], :Borrow]], [], [:ReadMemory, :WriteMemory, :Allocate], :Value, "")
-  context = native/define_function(context, "symbol_grow", [
-    native/let_load("header", table, "table"),
-    native/let_field("capacity", :U64, "header", "capacity"),
-    native/unless_statement(
-      native/binary_expression(:Less, "capacity", "symbol_id_limit"),
-      [native/return_value("false")]
-    ),
-    native/set_statement("capacity", native/binary_expression(:Multiply, "capacity", "symbol_two")),
-    native/when_statement(
-      native/binary_expression(:Equal, "capacity", "zero"),
-      [native/set_statement("capacity", "symbol_initial_capacity")]
-    ),
-    native/let_field("count", :U64, "header", "count"),
-    native/let_statement("entry_size", :U64, native/unary_expression(:SizeOf, entry)),
-    native/let_statement("entry_bytes", :U64, native/binary_expression(:Multiply, "capacity", "entry_size")),
-    native/let_statement("bucket_count", :U64, native/binary_expression(:Multiply, "capacity", "symbol_two")),
+  let body: list = [
+    native/let_statement("index_header", table, "candidate"),
+    native/let_field("index_count", :U64, "index_header", "count"),
+    native/let_statement("index_entry_size", :U64, native/unary_expression(:SizeOf, entry)),
+    native/let_statement("index_entry_bytes", :U64, native/binary_expression(:Multiply, "capacity", "index_entry_size")),
+    native/let_statement("index_bucket_count", :U64, native/binary_expression(:Multiply, "capacity", "symbol_two")),
+    native/let_statement("index_new_entries", entries, native/unary_expression(:PointerCast, "data")),
     native/let_statement(
-      "bucket_bytes",
-      :U64,
-      native/binary_expression(
-        :Multiply,
-        "bucket_count",
-        native/typed_expression(:U64, native/unary_expression(:SizeOf, :U64))
-      )
-    ),
-    native/let_statement(
-      "storage",
-      [:Pointer, [:Record, "SymbolStorage"], :Mutable],
-      native/field_pointer_expression("table", "storage")
-    ),
-    native/let_call(
-      "allocation",
-      bytes,
-      "symbol_storage_allocate",
-      ["storage", native/typed_expression(:U64, native/binary_expression(:Add, "entry_bytes", "bucket_bytes"))]
-    ),
-    native/when_statement(native/binary_expression(:Equal, "allocation", "null_bytes"), [native/return_value("false")]),
-    native/let_statement("new_entries", entries, native/unary_expression(:PointerCast, "allocation")),
-    native/let_statement(
-      "new_buckets",
+      "index_new_buckets",
       buckets,
       native/unary_expression(
         :PointerCast,
-        native/typed_expression(bytes, native/offset_expression("allocation", "entry_bytes"))
+        native/typed_expression(bytes, native/offset_expression("data", "index_entry_bytes"))
       )
     ),
-    @native/for_range("position", "zero", "bucket_count", [
+    @native/for_range("index_position", "zero", "index_bucket_count", [
+      native_value/symbol_poll("index_position", failure),
       native/store_statement(
-        native/typed_expression(buckets, native/offset_expression("new_buckets", "position")),
+        native/typed_expression(buckets, native/offset_expression("index_new_buckets", "index_position")),
         "zero"
       )]),
-    native/unless_statement(native/binary_expression(:Equal, "count", "zero"), [
-      native/let_field("previous", entries, "header", "entries"),
-      native/copy_bytes_statement(
-        "allocation",
-        native/typed_expression(bytes, native/unary_expression(:PointerCast, "previous")),
-        native/typed_expression(:U64, native/binary_expression(:Multiply, "count", "entry_size"))
-      )
-    ]),
-    native/let_statement("mask", :U64, native/binary_expression(:Subtract, "bucket_count", "one")),
-    native/set_statement("position", "zero"),
-    native/while_statement(native/binary_expression(:Less, "position", "count"), [
+    native/let_field("index_previous", entries, "index_header", "entries"),
+    native/let_statement("index_mask", :U64, native/binary_expression(:Subtract, "index_bucket_count", "one")),
+    native/set_statement("index_position", "zero"),
+    native/while_statement(native/binary_expression(:Less, "index_position", "index_count"), [
+      native_value/symbol_poll("index_position", failure),
       native/let_load(
-        "item",
+        "index_item",
         entry,
-        native/typed_expression(entries, native/offset_expression("new_entries", "position"))
+        native/typed_expression(entries, native/offset_expression("index_previous", "index_position"))
       ),
+      native/store_statement(native/typed_expression(entries, native/offset_expression("index_new_entries", "index_position")), "index_item"),
       native/let_statement(
-        "slot",
+        "index_slot",
         :U64,
-        native/binary_expression(:BitAnd, native/typed_field(:U64, "item", "hash"), "mask")
+        native/binary_expression(:BitAnd, native/typed_field(:U64, "index_item", "hash"), "index_mask")
       ),
-      native_value/probe_symbol_buckets("new_buckets", "slot", "mask", "occupied", [native/break_statement()], []),
+      native_value/probe_symbol_buckets("index_new_buckets", "index_slot", "index_mask", "index_occupied", [native/break_statement()], [], failure),
       native/store_statement(
-        native/typed_expression(buckets, native/offset_expression("new_buckets", "slot")),
-        native/typed_expression(:U64, native/binary_expression(:Add, "position", "one"))
+        native/typed_expression(buckets, native/offset_expression("index_new_buckets", "index_slot")),
+        native/typed_expression(:U64, native/binary_expression(:Add, "index_position", "one"))
       ),
-      native/set_statement("position", native/binary_expression(:Add, "position", "one"))
+      native/set_statement("index_position", native/binary_expression(:Add, "index_position", "one"))
     ]),
-    native/note_statement(:Purpose, "Publish rebuilt tables only after allocation and rehashing succeed."),
+    native/note_statement(:Purpose, "Install rebuilt indexes in the private candidate."),
     native/store_statement(
-      native/typed_expression([:Pointer, entries, :Mutable], native/field_pointer_expression("table", "entries")),
-      "new_entries"
+      native/typed_expression([:Pointer, entries, :Mutable], native/field_pointer_expression("candidate_ptr", "entries")),
+      "index_new_entries"
     ),
     native/store_statement(
-      native/typed_expression([:Pointer, buckets, :Mutable], native/field_pointer_expression("table", "buckets")),
-      "new_buckets"
+      native/typed_expression([:Pointer, buckets, :Mutable], native/field_pointer_expression("candidate_ptr", "buckets")),
+      "index_new_buckets"
     ),
     native/store_statement(
-      native/typed_expression(buckets, native/field_pointer_expression("table", "capacity")),
+      native/typed_expression(buckets, native/field_pointer_expression("candidate_ptr", "capacity")),
       "capacity"
-    ),
-    native/return_value("true")
-  ])
-  return context
+    )
+  ]
+  return body
 end
 
+// Prepare into reserved, unpublished storage. Existing index slots are
+// changed only after the last operation that can fail.
 verb native_value/symbol_intern(input: map) -> map
   let context: map = input
   let table: list = [:Record, "SymbolTable"]
@@ -247,89 +250,111 @@ verb native_value/symbol_intern(input: map) -> map
   let mutable_bytes: list = [:Pointer, :U8, :Mutable]
   let buckets: list = [:Pointer, :U64, :Mutable]
   let result: list = [:Record, "IdResult"]
+  let control: list = native_memory/record_pointer("MemoryControl")
+  let block: list = [:Record, "SymbolStorageBlock"]
+  let block_ptr: list = native_memory/record_pointer("SymbolStorageBlock")
   context = native/declare_function(context, "symbol_intern_locked", result,
-    [["table", [:Pointer, table, :Mutable], :Borrow], ["source", bytes, :Borrow],
-     ["length", :U64, :Value]], [], [:ReadMemory, :WriteMemory, :Allocate], :Value, "")
+    [["table", native_memory/record_pointer("SymbolTable"), :Borrow], ["source", bytes, :Borrow],
+      ["length", :U64, :Value], ["control", control, :Borrow]],
+    [], [:ReadMemory, :WriteMemory, :Allocate, :Release], :Value, "")
+  // The mutex address is immutable: waiters read it before taking the lock.
+  let publish: list = []
+  for [field, type_id] in [["storage", [:Record, "SymbolStorage"]], ["entries", [:Pointer, entry, :Mutable]],
+      ["buckets", buckets], ["count", :U64], ["capacity", :U64]]
+    publish = [@publish, native_memory/store(type_id, "table", field, native/typed_field(type_id, "candidate", field))]
+  end
+  let failure: list = [
+    native/unless_statement(native/binary_expression(:Equal, "owned", "null_bytes"), [native/do_statement(native/call_expression("release", ["owned"]))]),
+    native/return_zero()]
   context = native/define_function(context, "symbol_intern_locked", [
     native/when_statement(native/binary_expression(:Less, "allocation_limit", "length"), [native/return_zero()]),
-    native/unless_statement(
-      native/binary_expression(:Equal, "length", "zero"),
-      [
-        native/when_statement(
-          native/binary_expression(:Equal, "source", native/typed_zero(bytes)),
-          [native/return_zero()]
-        )
-      ]
-    ),
-    native/let_call("hash", :U64, "symbol_hash", ["source", "length"]),
-    native/let_load("header", table, "table"),
-    native/let_field("capacity", :U64, "header", "capacity"),
-    native/let_field("count", :U64, "header", "count"),
+    native/unless_statement(native/binary_expression(:Equal, "length", "zero"), [
+      native/when_statement(native/binary_expression(:Equal, "source", native/typed_zero(bytes)), [native/return_zero()])]),
+    native_value/symbol_work("one", [native/return_zero()]),
+    @native/try_call("hashed", result, "symbol_hash", ["source", "length", "control"], [native/return_zero()]),
+    native/let_field("hash", :U64, "hashed", "number"),
+    native/let_load("candidate", table, "table"),
+    native/let_field("capacity", :U64, "candidate", "capacity"),
+    native/let_field("count", :U64, "candidate", "count"),
     native/let_statement("slot", :U64, "zero"),
     native/unless_statement(native/binary_expression(:Equal, "capacity", "zero"), [
-      native/set_statement("slot", native/call_expression("symbol_slot", ["table", "source", "length", "hash"])),
-      native/let_field("existing_buckets", buckets, "header", "buckets"),
-      native/let_load(
-        "existing",
-        :U64,
-        native/typed_expression(buckets, native/offset_expression("existing_buckets", "slot"))
-      ),
-      native/unless_statement(
-        native/binary_expression(:Equal, "existing", "zero"),
-        [
-          native/return_record(
-            ["true", native/typed_expression(:U64, native/binary_expression(:Subtract, "existing", "one"))]
-          )
-        ]
-      )
-    ]),
+      @native/try_call("located", result, "symbol_slot", ["table", "source", "length", "hash", "control"], [native/return_zero()]),
+      native/set_statement("slot", native/field_expression("located", "number")),
+      native/let_field("existing_buckets", buckets, "candidate", "buckets"),
+      native/let_load("existing", :U64, native/typed_expression(buckets, native/offset_expression("existing_buckets", "slot"))),
+      native/unless_statement(native/binary_expression(:Equal, "existing", "zero"), [
+        native/return_record(["true", native/typed_expression(:U64, native/binary_expression(:Subtract, "existing", "one"))])])]),
     native/unless_statement(native/binary_expression(:Less, "count", "symbol_id_limit"), [native/return_zero()]),
-    @native/try_call("scan", [:Record, "Utf8Scan"], "utf8_scan", ["source", "length"], [native/return_zero()]),
+    @native/try_call("scan", [:Record, "Utf8Scan"], "symbol_scan", ["source", "length", "control"], [native/return_zero()]),
+    native/let_statement("index_bytes", :U64, "zero"),
     native/when_statement(native/binary_expression(:Equal, "count", "capacity"), [
-      native/unless_statement(native/call_expression("symbol_grow", ["table"]), [native/return_zero()]),
-      native/set_statement("header", native/load_expression("table")),
-      native/set_statement("slot", native/call_expression("symbol_slot", ["table", "source", "length", "hash"]))
-    ]),
-    native/let_statement(
-      "storage",
-      [:Pointer, [:Record, "SymbolStorage"], :Mutable],
-      native/field_pointer_expression("table", "storage")
-    ),
-    native/let_statement("size", :U64, "length"),
-    native/when_statement(native/binary_expression(:Equal, "size", "zero"), [native/set_statement("size", "one")]),
-    native/let_call("data", mutable_bytes, "symbol_storage_allocate", ["storage", "size"]),
-    native/when_statement(native/binary_expression(:Equal, "data", "null_bytes"), [native/return_zero()]),
-    native/unless_statement(
-      native/binary_expression(:Equal, "length", "zero"),
-      [native/copy_bytes_statement("data", "source", "length")]
-    ),
-    native/let_statement(
-      "item",
-      entry,
-      native/record_expression(
-        [
-          native/typed_expression(bytes, native/unary_expression(:Freeze, "data")),
-          "length",
-          native/typed_field(:U64, "scan", "scalars"),
-          "hash",
-          native/typed_field(:Bool, "scan", "ascii")
-        ]
-      )
-    ),
-    native/let_field("entries", [:Pointer, entry, :Mutable], "header", "entries"),
-    native/store_statement(
-      native/typed_expression([:Pointer, entry, :Mutable], native/offset_expression("entries", "count")),
-      "item"
-    ),
-    native/let_field("buckets", buckets, "header", "buckets"),
+      native/set_statement("capacity", native/binary_expression(:Multiply, "capacity", "symbol_two")),
+      native/when_statement(native/binary_expression(:Equal, "capacity", "zero"), [native/set_statement("capacity", "symbol_initial_capacity")]),
+      native/let_statement("entry_size", :U64, native/unary_expression(:SizeOf, entry)),
+      native/let_statement("bucket_size", :U64, native/unary_expression(:SizeOf, :U64)),
+      native/set_statement("bucket_size", native/binary_expression(:Multiply, "bucket_size", "symbol_two")),
+      native/let_statement("stride", :U64, native/binary_expression(:Add, "entry_size", "bucket_size")),
+      native/set_statement("index_bytes", native/binary_expression(:Multiply, "capacity", "stride"))]),
+    native/let_statement("name_bytes", :U64, "length"),
+    native/when_statement(native/binary_expression(:Equal, "name_bytes", "zero"), [native/set_statement("name_bytes", "one")]),
+    native/let_statement("required", :U64, native/binary_expression(:Add, "index_bytes", "name_bytes")),
+    native/when_statement(native/binary_expression(:Less, "allocation_limit", "required"), [native/return_zero()]),
+    native/let_statement("candidate_ptr", native_memory/record_pointer("SymbolTable"), native/unary_expression(:Address, "candidate")),
+    native/let_statement("storage", native_memory/record_pointer("SymbolStorage"), native/field_pointer_expression("candidate_ptr", "storage")),
+    native/let_statement("original_storage", native_memory/record_pointer("SymbolStorage"), native/field_pointer_expression("table", "storage")),
+    native/let_statement("head", block_ptr, native_memory/field(block_ptr, "original_storage", "head")),
+    native/let_statement("aligned", :U64, "zero"),
+    native/let_statement("fits", :Bool, "false"),
+    native/unless_statement(native/binary_expression(:Equal, "head", "null_block"), [
+      native/let_statement("used", :U64, native_memory/field(:U64, "head", "used")),
+      native/let_statement("available", :U64, native_memory/field(:U64, "head", "capacity")),
+      native/set_statement("aligned", native/binary_expression(:Add, "used", "alignment_slack")),
+      native/set_statement("aligned", native/binary_expression(:BitAnd, "aligned", "alignment_mask")),
+      native/unless_statement(native/binary_expression(:Less, "available", "aligned"), [
+        native/let_statement("remaining", :U64, native/binary_expression(:Subtract, "available", "aligned")),
+        native/set_statement("fits", native/binary_expression(:Equal, native/typed_expression(:Bool, native/binary_expression(:Less, "remaining", "required")), "false"))])]),
+    native/let_statement("owned", mutable_bytes, "null_bytes"),
+    native/let_statement("header_size", :U64, native/unary_expression(:SizeOf, block)),
+    native/let_statement("block_capacity", :U64, "required"),
+    native/let_statement("data", mutable_bytes, "null_bytes"),
+    native/if_statement("fits", [
+      native/unless_statement(native/call_expression("memory_control_check", ["control", "required", "one"]), [native/return_zero()]),
+      native/let_statement("base", mutable_bytes, native/unary_expression(:PointerCast, "head")),
+      native/let_statement("offset", :U64, native/binary_expression(:Add, "header_size", "aligned")),
+      native/set_statement("data", native/offset_expression("base", "offset"))], [
+      native/when_statement(native/binary_expression(:Less, "block_capacity", "chunk_size"), [native/set_statement("block_capacity", "chunk_size")]),
+      native/let_statement("total", :U64, native/binary_expression(:Add, "block_capacity", "header_size")),
+      native/unless_statement(native/call_expression("memory_control_check", ["control", "total", "one"]), [native/return_zero()]),
+      native/set_statement("owned", native/call_expression("allocate", ["total"])),
+      native/when_statement(native/binary_expression(:Equal, "owned", "null_bytes"), [native/return_zero()]),
+      native/set_statement("data", native/offset_expression("owned", "header_size")),
+      native/set_statement("aligned", "zero")]),
+    native/unless_statement(native/binary_expression(:Equal, "index_bytes", "zero"), [
+      @native_value/symbol_index(failure),
+      @native/try_call("rebuilt_slot", result, "symbol_slot", ["candidate_ptr", "source", "length", "hash", "control"], failure),
+      native/set_statement("slot", native/field_expression("rebuilt_slot", "number"))]),
+    native/let_offset("name", mutable_bytes, "data", "index_bytes"),
+    @native/for_range("position", "zero", "length", [
+      native_value/symbol_poll("position", failure),
+      native/let_load("byte", :U8, native/typed_expression(bytes, native/offset_expression("source", "position"))),
+      native/store_statement(native/typed_expression(mutable_bytes, native/offset_expression("name", "position")), "byte")]),
+    native/let_statement("item", entry, native/record_expression([
+      native/typed_expression(bytes, native/unary_expression(:Freeze, "name")), "length",
+      native/typed_field(:U64, "scan", "scalars"), "hash", native/typed_field(:Bool, "scan", "ascii")])),
+    native/let_field("entries", [:Pointer, entry, :Mutable], "candidate", "entries"),
+    native/store_statement(native/typed_expression([:Pointer, entry, :Mutable], native/offset_expression("entries", "count")), "item"),
+    native/let_field("buckets", buckets, "candidate", "buckets"),
     native/let_statement("next_count", :U64, native/binary_expression(:Add, "count", "one")),
     native/store_statement(native/typed_expression(buckets, native/offset_expression("buckets", "slot")), "next_count"),
-    native/store_statement(
-      native/typed_expression(buckets, native/field_pointer_expression("table", "count")),
-      "next_count"
-    ),
-    native/return_record(["true", "count"])
-  ])
+    native_memory/store(:U64, "candidate_ptr", "count", "next_count"),
+    native/let_statement("used_end", :U64, native/binary_expression(:Add, "aligned", "required")),
+    native/if_statement("fits", [native_memory/store(:U64, "head", "used", "used_end")], [
+      native/let_statement("new_block", block_ptr, native/unary_expression(:PointerCast, "owned")),
+      native/let_statement("head_slot", native_memory/pointer(block_ptr), native/field_pointer_expression("storage", "head")),
+      native/let_statement("adopted", block_ptr, native/binary_expression(:Adopt, "head_slot", "new_block")),
+      native/store_statement("adopted", native/typed_expression(block, native/record_expression(["head", "used_end", "block_capacity"])))]),
+    @publish,
+    native/return_record(["true", "count"])])
   return context
 end
 
@@ -398,6 +423,8 @@ verb native_value/symbol_synchronization(input: map) -> map
   let pointer: list = [:Pointer, [:Record, "SymbolTable"], :Mutable]
   context = native/declare_function(context, "mutex_create", bytes, [], [], [:Allocate, :Release, :WriteMemory], :Owned, "")
   context[:state] = native/foreign(context[:state], context[:functions]["mutex_create"])
+  context = native/declare_function(context, "mutex_try_lock", :Bool, [["mutex", bytes, :Borrow]], [], [:ReadMemory, :WriteMemory], :Value, "")
+  context[:state] = native/foreign(context[:state], context[:functions]["mutex_try_lock"])
   for spec in [["mutex_lock", :Borrow, [:ReadMemory, :WriteMemory, :Block]],
                ["mutex_unlock", :Borrow, [:ReadMemory, :WriteMemory]],
                ["mutex_destroy", :Consume, [:ReadMemory, :WriteMemory, :Release]]]
@@ -425,8 +452,8 @@ verb native_value/symbol_synchronized_access(input: map) -> map
   let pointer: list = [:Pointer, [:Record, "SymbolTable"], :Mutable]
   for spec in [
       ["value_symbol_intern", "symbol_intern_locked", [:Record, "IdResult"],
-       [["source", [:Pointer, :U8, :Const], :Borrow], ["length", :U64, :Value]],
-       ["source", "length"], [:ReadMemory, :WriteMemory, :Allocate, :Block], :Value, ""],
+       [["source", [:Pointer, :U8, :Const], :Borrow], ["length", :U64, :Value], ["control", native_memory/record_pointer("MemoryControl"), :Borrow]],
+       ["source", "length", "control"], [:ReadMemory, :WriteMemory, :Allocate, :Release, :Block], :Value, ""],
       ["value_symbol_text", "symbol_text_locked", [:Record, "SymbolText"],
        [["id", :U32, :Value]], ["id"], [:ReadMemory, :WriteMemory, :Block], :Borrow, "table"]]
     context = native/declare_function(context, spec[0], spec[2], [["table", pointer, :Borrow], @spec[3]], [], spec[5], spec[6], spec[7])

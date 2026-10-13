@@ -37,7 +37,7 @@ static void *load_worker(void *argument) {
         struct LoadOperation op = worker->operations[i];
         if (op.name < worker->preintern) {
             const struct LoadName *name = &worker->names[op.name];
-            if (op.kind == 0) (void)mica_value_symbol_intern(worker->table, name->bytes, name->length);
+            if (op.kind == 0) (void)mica_value_symbol_intern(worker->table, name->bytes, name->length, NULL);
             else (void)mica_value_symbol_text(worker->table, (uint32_t)worker->known[op.name].f_number);
         }
     }
@@ -52,7 +52,7 @@ static void *load_worker(void *argument) {
             struct mica_SymbolText text = {0};
             uint64_t observed;
             if (op.kind == 0) {
-                id = mica_value_symbol_intern(worker->table, name->bytes, name->length);
+                id = mica_value_symbol_intern(worker->table, name->bytes, name->length, NULL);
                 observed = id.f_ok;
                 __asm__ volatile("" : "+r"(id.f_number) : : "memory");
             } else {
@@ -99,7 +99,7 @@ static int symbol_load_driver(uint64_t requested_rounds) {
         names[i].scalars = read_number(8);
         names[i].ascii = read_number(1) != 0;
         if (i < preintern) {
-            known[i] = mica_value_symbol_intern(&table, names[i].bytes, names[i].length);
+            known[i] = mica_value_symbol_intern(&table, names[i].bytes, names[i].length, NULL);
             if (!known[i].f_ok) fail("invalid pre-interned symbol");
             canonical[i] = known[i];
         }
@@ -155,7 +155,7 @@ static int symbol_load_driver(uint64_t requested_rounds) {
             ++unique;
             struct mica_SymbolText text = mica_value_symbol_text(&table, (uint32_t)canonical[i].f_number);
             if (!load_text_matches(text, &names[i])) fail("symbol text or metadata mismatch after concurrent load");
-            struct mica_IdResult again = mica_value_symbol_intern(&table, names[i].bytes, names[i].length);
+            struct mica_IdResult again = mica_value_symbol_intern(&table, names[i].bytes, names[i].length, NULL);
             if (!again.f_ok || again.f_number != canonical[i].f_number) fail("symbol identity changed after concurrent load");
         }
         free(names[i].bytes);

@@ -1296,7 +1296,7 @@ Its API uses these generated functions:
 | Function after `mica_` | Result |
 | --- | --- |
 | `value_symbol_table_init(table)` | Boolean success; allocates and initializes the table mutex |
-| `value_symbol_intern(table, bytes, length)` | `IdResult { ok, number }`; successful IDs fit `uint32_t` |
+| `value_symbol_intern(table, bytes, length, control)` | `IdResult { ok, number }`; successful IDs fit `uint32_t` |
 | `value_symbol_text(table, id)` | `SymbolText { ok, data, length, scalars, ascii }` |
 | `value_symbol_table_release(table)` | Releases storage and resets the table |
 
@@ -1312,7 +1312,15 @@ FNV-1a hashes select buckets with linear probing. Matching hashes still require 
 At most half the buckets contain entries. Reverse lookup indexes entries directly.
 Pinned symbol storage retains names and earlier table arrays until table release. Symbol IDs do not retain pointers into the managed heap.
 Geometric growth keeps the total array size below twice the current array size.
-Allocation failure preserves published names and IDs, but can retain unused capacity until release.
+Interning reserves index and name storage together. It publishes the symbol only after all preparation succeeds.
+Allocation failure, cancellation, and budget exhaustion preserve names, IDs, table capacity, and storage usage.
+
+An optional `MemoryControl` charges work during hashing, validation, probes, rebuilding, and copying.
+It also charges allocation bytes, including block overhead when a new block is needed.
+Pass null for host operations without a resource budget. The callback cannot collect or relocate borrowed input.
+Native source `to_symbol` uses task and transaction controls, accepts strings or symbols, and preserves existing symbol identity.
+It reports limit and cancellation separately from allocation failure. Contended source tasks check their budgets and reach safepoints before retrying the lock.
+The host interning API still uses a blocking mutex wait.
 
 Interning and reverse lookup acquire the table's mutex internally. Concurrent calls share one namespace and cannot publish duplicate IDs for equal names.
 Returned text is immutable and stays valid after unlock, including during concurrent insertion and growth.

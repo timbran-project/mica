@@ -1,7 +1,9 @@
 /* Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
  * SPDX-License-Identifier: AGPL-3.0-or-later */
 
+#include <errno.h>
 #include <pthread.h>
+#include <stdbool.h>
 #include <stdint.h>
 #include <stdlib.h>
 
@@ -22,6 +24,13 @@ uint8_t *mica_foreign_mutex_create(void) {
 
 void mica_foreign_mutex_lock(uint8_t *storage) {
     if (pthread_mutex_lock((pthread_mutex_t *)storage) != 0) abort();
+}
+
+bool mica_foreign_mutex_try_lock(uint8_t *storage) {
+    int status = pthread_mutex_trylock((pthread_mutex_t *)storage);
+    if (status == EBUSY) return false;
+    if (status != 0) abort();
+    return true;
 }
 
 void mica_foreign_mutex_unlock(uint8_t *storage) {

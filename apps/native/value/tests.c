@@ -67,30 +67,30 @@ static int64_t compare(mica_type_Value left, mica_type_Value right) {
 static void symbol_cases(void) {
     struct mica_SymbolTable table = {0};
     assert(!mica_value_symbol_text(&table, 0).f_ok);
-    assert(!mica_value_symbol_intern(&table, NULL, 0).f_ok);
+    assert(!mica_value_symbol_intern(&table, NULL, 0, NULL).f_ok);
     fail_allocation = true;
     assert(!mica_value_symbol_table_init(&table));
     assert(table.f_mutex == NULL);
     fail_allocation = false;
     assert(mica_value_symbol_table_init(&table));
     assert(!mica_value_symbol_table_init(&table));
-    assert(!mica_value_symbol_intern(&table, NULL, 1).f_ok);
-    assert(!mica_value_symbol_intern(&table, (const uint8_t *)"x", UINT64_MAX).f_ok);
+    assert(!mica_value_symbol_intern(&table, NULL, 1, NULL).f_ok);
+    assert(!mica_value_symbol_intern(&table, (const uint8_t *)"x", UINT64_MAX, NULL).f_ok);
     const uint8_t invalid[][4] = {{0xc0, 0x80}, {0xed, 0xa0, 0x80}, {0xf4, 0x90, 0x80, 0x80}};
     const size_t widths[] = {2, 3, 4};
     for (size_t i = 0; i < 3; ++i)
-        assert(!mica_value_symbol_intern(&table, invalid[i], widths[i]).f_ok);
+        assert(!mica_value_symbol_intern(&table, invalid[i], widths[i], NULL).f_ok);
     assert(table.f_count == 0 && table.f_storage.f_head == NULL);
     fail_allocation = true;
-    assert(!mica_value_symbol_intern(&table, NULL, 0).f_ok);
+    assert(!mica_value_symbol_intern(&table, NULL, 0, NULL).f_ok);
     assert(table.f_count == 0 && table.f_capacity == 0);
     fail_allocation = false;
-    struct mica_IdResult empty = mica_value_symbol_intern(&table, NULL, 0);
+    struct mica_IdResult empty = mica_value_symbol_intern(&table, NULL, 0, NULL);
     assert(empty.f_ok && empty.f_number == 0);
     struct mica_SymbolText text = mica_value_symbol_text(&table, 0);
     assert(text.f_ok && text.f_length == 0 && text.f_scalars == 0 && text.f_ascii);
     uint8_t original[] = {0xc3, 0xa9, 0, 0xf0, 0x9f, 0x98, 0x80};
-    struct mica_IdResult unicode = mica_value_symbol_intern(&table, original, sizeof(original));
+    struct mica_IdResult unicode = mica_value_symbol_intern(&table, original, sizeof(original), NULL);
     assert(unicode.f_ok && unicode.f_number == 1);
     text = mica_value_symbol_text(&table, 1);
     assert(text.f_length == 7 && text.f_scalars == 3 && !text.f_ascii);
@@ -100,32 +100,34 @@ static void symbol_cases(void) {
     size_t before = allocations;
     uint64_t used_before = table.f_storage.f_head->f_used;
     fail_allocation = true;
-    assert(mica_value_symbol_intern(&table, stable, 7).f_number == 1);
-    empty = mica_value_symbol_intern(&table, NULL, 0);
+    assert(mica_value_symbol_intern(&table, stable, 7, NULL).f_number == 1);
+    empty = mica_value_symbol_intern(&table, NULL, 0, NULL);
     assert(empty.f_ok && empty.f_number == 0);
     fail_allocation = false;
     assert(allocations == before && table.f_count == 2);
     assert(table.f_storage.f_head->f_used == used_before);
-    assert(mica_value_symbol_intern(&table, (const uint8_t *)"Name", 4).f_number == 2);
-    assert(mica_value_symbol_intern(&table, (const uint8_t *)"name", 4).f_number == 3);
+    assert(mica_value_symbol_intern(&table, (const uint8_t *)"Name", 4, NULL).f_number == 2);
+    assert(mica_value_symbol_intern(&table, (const uint8_t *)"name", 4, NULL).f_number == 3);
     // Equal hash and length are insufficient: the candidate bytes must match.
-    uint64_t slot = mica_symbol_slot(&table, (const uint8_t *)"xxxx", 4, table.f_entries[2].f_hash);
+    struct mica_IdResult located = mica_symbol_slot(&table, (const uint8_t *)"xxxx", 4, table.f_entries[2].f_hash, NULL);
+    assert(located.f_ok);
+    uint64_t slot = located.f_number;
     assert(table.f_buckets[slot] == 0);
     // Force a probe chain across the end of the initial bucket array.
     unsigned collisions = 0;
     for (unsigned n = 0; collisions < 12; ++n) {
         char name[32];
         int length = snprintf(name, sizeof(name), "collision-%u", n);
-        if ((mica_symbol_hash((const uint8_t *)name, (uint64_t)length) & 31) != 31) continue;
-        struct mica_IdResult id = mica_value_symbol_intern(&table, (const uint8_t *)name, (uint64_t)length);
+        if ((mica_symbol_hash((const uint8_t *)name, (uint64_t)length, NULL).f_number & 31) != 31) continue;
+        struct mica_IdResult id = mica_value_symbol_intern(&table, (const uint8_t *)name, (uint64_t)length, NULL);
         assert(id.f_ok && id.f_number == 4 + collisions);
-        assert(mica_value_symbol_intern(&table, (const uint8_t *)name, (uint64_t)length).f_number == id.f_number);
+        assert(mica_value_symbol_intern(&table, (const uint8_t *)name, (uint64_t)length, NULL).f_number == id.f_number);
         ++collisions;
     }
     for (unsigned n = 0; n < 4096; ++n) {
         char name[32];
         int length = snprintf(name, sizeof(name), "symbol-%u", n);
-        struct mica_IdResult id = mica_value_symbol_intern(&table, (const uint8_t *)name, (uint64_t)length);
+        struct mica_IdResult id = mica_value_symbol_intern(&table, (const uint8_t *)name, (uint64_t)length, NULL);
         assert(id.f_ok && id.f_number == n + 16);
     }
     for (unsigned n = 0; n < 4096; ++n) {
@@ -134,15 +136,15 @@ static void symbol_cases(void) {
         text = mica_value_symbol_text(&table, n + 16);
         assert(text.f_ok && text.f_length == (uint64_t)length && text.f_scalars == text.f_length && text.f_ascii);
         assert(memcmp(text.f_data, name, (size_t)length) == 0);
-        assert(mica_value_symbol_intern(&table, text.f_data, text.f_length).f_number == n + 16);
+        assert(mica_value_symbol_intern(&table, text.f_data, text.f_length, NULL).f_number == n + 16);
     }
     assert(mica_value_symbol_text(&table, 1).f_data == stable);
     assert(!mica_value_symbol_text(&table, (uint32_t)table.f_count).f_ok);
     assert(!mica_value_symbol_text(&table, UINT32_MAX).f_ok);
     uint64_t count = table.f_count;
     table.f_count = UINT64_C(1) << 32;
-    assert(!mica_value_symbol_intern(&table, (const uint8_t *)"exhausted", 9).f_ok);
-    assert(mica_value_symbol_intern(&table, stable, 7).f_number == 1);
+    assert(!mica_value_symbol_intern(&table, (const uint8_t *)"exhausted", 9, NULL).f_ok);
+    assert(mica_value_symbol_intern(&table, stable, 7, NULL).f_number == 1);
     table.f_count = count;
     mica_value_symbol_table_release(&table);
     assert(table.f_count == 0 && table.f_capacity == 0 && table.f_entries == NULL && table.f_buckets == NULL);
@@ -155,40 +157,98 @@ static void symbol_cases(void) {
     for (size_t allowance = 0; allowance < 3; ++allowance) {
         assert(mica_value_symbol_table_init(&table));
         allocation_allowance = allowance;
-        struct mica_IdResult id = mica_value_symbol_intern(&table, large, 70000);
-        assert(id.f_ok == (allowance == 2));
+        struct mica_IdResult id = mica_value_symbol_intern(&table, large, 70000, NULL);
+        assert(id.f_ok == (allowance >= 1));
         assert(table.f_count == (id.f_ok ? 1 : 0));
         allocation_allowance = SIZE_MAX;
-        id = mica_value_symbol_intern(&table, large, 70000);
+        id = mica_value_symbol_intern(&table, large, 70000, NULL);
         assert(id.f_ok && id.f_number == 0);
         assert(mica_value_symbol_text(&table, 0).f_length == 70000);
         for (unsigned n = 1; n < 16; ++n) {
             uint8_t name = (uint8_t)('a' + n);
-            id = mica_value_symbol_intern(&table, &name, 1);
+            id = mica_value_symbol_intern(&table, &name, 1, NULL);
             assert(id.f_ok && id.f_number == n);
         }
-        // Exhaust the current chunk so growth and the new name each allocate.
+        // Exhaust the current chunk so growth and the name require a new block.
         struct mica_SymbolStorageBlock *head = table.f_storage.f_head;
         head->f_used = head->f_capacity;
         large[0] = 'b';
         allocation_allowance = allowance;
-        id = mica_value_symbol_intern(&table, large, 70000);
-        assert(id.f_ok == (allowance == 2));
+        id = mica_value_symbol_intern(&table, large, 70000, NULL);
+        assert(id.f_ok == (allowance >= 1));
         assert(table.f_count == (id.f_ok ? 17 : 16));
-        assert(table.f_capacity == (allowance == 0 ? 16 : 32));
+        assert(table.f_capacity == (id.f_ok ? 32 : 16));
         fail_allocation = true;
         text = mica_value_symbol_text(&table, 0);
         assert(text.f_ok && text.f_data[0] == 'a');
-        id = mica_value_symbol_intern(&table, text.f_data, text.f_length);
+        id = mica_value_symbol_intern(&table, text.f_data, text.f_length, NULL);
         assert(id.f_ok && id.f_number == 0);
         fail_allocation = false;
         allocation_allowance = SIZE_MAX;
-        id = mica_value_symbol_intern(&table, large, 70000);
+        id = mica_value_symbol_intern(&table, large, 70000, NULL);
         assert(id.f_ok && id.f_number == 16);
         large[0] = 'a';
         mica_value_symbol_table_release(&table);
     }
     free(large);
+}
+
+// Deny every control checkpoint in turn, including those after allocation.
+// Failure must discard unpublished allocations and preserve bump usage.
+struct SymbolControl {
+    uint64_t calls, deny_at, bytes, steps;
+};
+
+static bool symbol_control_check(uint8_t *context, uint64_t bytes, uint64_t steps) {
+    struct SymbolControl *state = (void *)context;
+    state->bytes += bytes;
+    state->steps += steps;
+    return state->calls++ != state->deny_at;
+}
+
+static void symbol_control_cases(void) {
+    for (unsigned growth = 0; growth < 3; ++growth) {
+        struct mica_SymbolTable table = {0};
+        assert(mica_value_symbol_table_init(&table));
+        unsigned existing = growth == 0 ? 0 : (growth == 1 ? 3 : 16);
+        for (unsigned i = 0; i < existing; ++i) {
+            uint8_t name = (uint8_t)('a' + i);
+            assert(mica_value_symbol_intern(&table, &name, 1, NULL).f_ok);
+        }
+        if (growth == 2) table.f_storage.f_head->f_used = table.f_storage.f_head->f_capacity;
+        struct mica_SymbolTable before = table;
+        uint64_t used = before.f_storage.f_head ? before.f_storage.f_head->f_used : 0;
+        size_t live = allocations - releases;
+        bool succeeded = false;
+        for (unsigned checkpoint = 0; checkpoint < 256; ++checkpoint) {
+            struct SymbolControl state = {.deny_at = checkpoint};
+            struct mica_MemoryControl control = {.f_context = (void *)&state, .f_check = symbol_control_check};
+            struct mica_IdResult id = mica_value_symbol_intern(&table, (const uint8_t *)"controlled-name", 15, &control);
+            if (id.f_ok) {
+                assert(!control.f_denied && id.f_number == existing && state.steps > 0 && state.bytes > 0);
+                succeeded = true;
+                break;
+            }
+            assert(control.f_denied && state.calls == checkpoint + 1);
+            assert(table.f_count == before.f_count && table.f_capacity == before.f_capacity);
+            assert(table.f_entries == before.f_entries && table.f_buckets == before.f_buckets);
+            assert(table.f_storage.f_head == before.f_storage.f_head);
+            assert(!table.f_storage.f_head || table.f_storage.f_head->f_used == used);
+            assert(allocations - releases == live);
+            for (unsigned i = 0; i < existing; ++i) {
+                uint8_t name = (uint8_t)('a' + i);
+                id = mica_value_symbol_intern(&table, &name, 1, NULL);
+                assert(id.f_ok && id.f_number == i);
+            }
+        }
+        assert(succeeded);
+        // An existing symbol performs no allocation but still consumes work.
+        struct SymbolControl state = {.deny_at = UINT64_MAX};
+        struct mica_MemoryControl control = {.f_context = (void *)&state, .f_check = symbol_control_check};
+        assert(mica_value_symbol_intern(&table, (const uint8_t *)"controlled-name", 15, &control).f_ok);
+        assert(state.bytes == 0 && state.steps > 0);
+        mica_value_symbol_table_release(&table);
+    }
 }
 
 enum { SYMBOL_THREADS = 8, SYMBOL_SHARED = 2048 };
@@ -209,7 +269,7 @@ static void *symbol_thread(void *argument) {
         char name[80];
         unsigned shared = (i * 17 + task->thread * 31) % SYMBOL_SHARED;
         int length = snprintf(name, sizeof(name), "shared-λ-%u", shared);
-        struct mica_IdResult id = mica_value_symbol_intern(task->table, (const uint8_t *)name, (uint64_t)length);
+        struct mica_IdResult id = mica_value_symbol_intern(task->table, (const uint8_t *)name, (uint64_t)length, NULL);
         assert(id.f_ok && id.f_number <= UINT32_MAX);
         task->shared[shared] = (uint32_t)id.f_number;
         struct mica_SymbolText view = mica_value_symbol_text(task->table, (uint32_t)id.f_number);
@@ -218,7 +278,7 @@ static void *symbol_thread(void *argument) {
         assert(memcmp(view.f_data, name, (size_t)length) == 0);
         char unique[80];
         int unique_length = snprintf(unique, sizeof(unique), "thread-%u-name-%u", task->thread, i);
-        struct mica_IdResult own = mica_value_symbol_intern(task->table, (const uint8_t *)unique, (uint64_t)unique_length);
+        struct mica_IdResult own = mica_value_symbol_intern(task->table, (const uint8_t *)unique, (uint64_t)unique_length, NULL);
         assert(own.f_ok);
         struct mica_SymbolText own_view = mica_value_symbol_text(task->table, (uint32_t)own.f_number);
         assert(own_view.f_ok && own_view.f_ascii && own_view.f_scalars == (uint64_t)unique_length);
@@ -226,12 +286,12 @@ static void *symbol_thread(void *argument) {
         assert(memcmp(own_view.f_data, unique, (size_t)unique_length) == 0);
         // Borrowed text remains readable after unlock while other threads grow.
         assert(memcmp(view.f_data, name, (size_t)length) == 0);
-        id = mica_value_symbol_intern(task->table, view.f_data, view.f_length);
+        id = mica_value_symbol_intern(task->table, view.f_data, view.f_length, NULL);
         assert(id.f_ok && id.f_number == task->shared[shared]);
         if (i % 32 == 0) {
             assert(!mica_value_symbol_text(task->table, UINT32_MAX).f_ok);
             const uint8_t invalid = 0xff;
-            assert(!mica_value_symbol_intern(task->table, &invalid, 1).f_ok);
+            assert(!mica_value_symbol_intern(task->table, &invalid, 1, NULL).f_ok);
         }
     }
     return NULL;
@@ -263,7 +323,7 @@ static void concurrent_symbol_cases(void) {
     mica_value_symbol_table_release(&table);
     assert(table.f_mutex == NULL);
     assert(mica_value_symbol_table_init(&table));
-    struct mica_IdResult first = mica_value_symbol_intern(&table, NULL, 0);
+    struct mica_IdResult first = mica_value_symbol_intern(&table, NULL, 0, NULL);
     assert(first.f_ok && first.f_number == 0);
     mica_value_symbol_table_release(&table);
 }
@@ -1023,9 +1083,9 @@ static void codec_cases(void) {
     assert(mica_value_symbol_table_init(&source_symbols));
     assert(mica_value_symbol_table_init(&target_symbols));
     const uint8_t spelling[]={0xc3,0xa9,0,'x'};
-    struct mica_IdResult id=mica_value_symbol_intern(&source_symbols,spelling,sizeof(spelling));
+    struct mica_IdResult id=mica_value_symbol_intern(&source_symbols,spelling,sizeof(spelling), NULL);
     assert(id.f_ok);
-    assert(mica_value_symbol_intern(&target_symbols,(const uint8_t *)"other",5).f_ok);
+    assert(mica_value_symbol_intern(&target_symbols,(const uint8_t *)"other",5, NULL).f_ok);
     mica_type_Value symbol=mica_value_symbol((uint32_t)id.f_number).f_value;
     assert(mica_value_is_persistable(symbol));
     assert(!mica_value_encode(&encoded,NULL,symbol,names).f_ok);
@@ -1203,6 +1263,7 @@ int main(void) {
     comparison_cases(&arena);
     map_cases(&arena);
     symbol_cases();
+    symbol_control_cases();
     concurrent_symbol_cases();
     test_worker_release(&arena);
     assert(arena.f_heap == NULL);

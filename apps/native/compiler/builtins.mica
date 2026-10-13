@@ -4,7 +4,7 @@
 // Fixed signatures share argument expansion; ordinary calls retain direct
 // operands rather than constructing an argument list at runtime.
 verb native_builtins/arities() -> map
-  return {:error_code -> 1, :frob -> 2, :frob_delegate -> 1, :frob_value -> 1, :is_frob -> 1,
+  return {:to_symbol -> 1, :error_code -> 1, :frob -> 2, :frob_delegate -> 1, :frob_value -> 1, :is_frob -> 1,
     :url_encode_component -> 1, :url_decode_component -> 1, :to_int -> 1, :to_float -> 1, :parse_int -> 1, :emit -> 2, :mailbox -> 0, :mailbox_send -> 2, :mailbox_close -> 1,
     :len -> 1, :string_len -> 1, :string_append -> 2, :string_contains -> 2, :string_starts_with -> 2,
     :string_span -> 3, :string_find_any -> 3, :string_slice -> 3, :string_chars -> 1, :string_from_chars -> 1, :string_join -> 2,
@@ -127,6 +127,10 @@ verb native_builtins/is_kind(builder: map, value: map, kind: map) -> list
   return [native_gen/call(ready, "value_bool", [matched]), ready]
 end
 verb native_builtins/call(builder: map, name: symbol, args: list) -> list
+  if name == :to_symbol
+    let result: list = native_builtins/symbol(builder, args[0])
+    return result
+  end
   if name == :error_code
     let ready: map = native_builtins/kind_check(builder, args[0], "symbol")
     let result: list = native_source/result(ready, "value_error_code", [native_gen/convert(:U32, native_gen/expression(:U64, :Payload, [args[0]]))], "schema")
@@ -310,15 +314,20 @@ end
 verb native_builtins/definitions(input: map) -> map
   let sorting: bool = false
   let relations: bool = false
+  let symbols: bool = false
   for program in input[:source_programs]
     for instruction in program[:analysis][:description][:code]
       if instruction[0] == :BuiltinCall
+        symbols = symbols || instruction[2] == :to_symbol
         sorting = sorting || instruction[2] == :sort
         relations = relations || instruction[2] == :relation_from_rows
       end
     end
   end
   let module: map = input
+  if symbols
+    module = native_builtins/symbol_definition(module)
+  end
   if sorting || relations
     module = native_ordering/definitions(module)
   end
