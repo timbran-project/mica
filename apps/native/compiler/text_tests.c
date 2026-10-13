@@ -42,7 +42,35 @@ static void source_body_checks(struct mica_MemoryWorker *worker, struct mica_Ker
     assert(mica_memory_safepoint(worker, true));
     struct mica_IntResult equal = mica_value_compare(mica_value_root_get(&input), mica_value_root_get(&output));
     assert(equal.f_ok && equal.f_number == 0);
+    // Scans retain only rooted strings and numeric cursors across collection.
+    attempt.f_remaining = 10;
+    mica_value_root_set(&output, source_integer(99));
+    assert(mica_source_roundtrip_text_scan(worker, &attempt, &tx, mica_value_root_get(&text), 0,
+        mica_value_root_get(&separator), false, &output) == 10);
+    assert(mica_value_root_get(&output) == source_integer(99));
+    attempt.f_remaining = 1000000;
+    assert(mica_source_roundtrip_text_scan(worker, &attempt, &tx, mica_value_root_get(&text), 0,
+        mica_value_root_get(&separator), false, &output) == 0);
+    assert(mica_value_root_get(&output) == source_integer(1024));
+    assert(attempt.f_remaining < 1000000);
+    // A long non-ASCII membership string is ignored, but still costs task budget.
+    attempt.f_remaining = 10;
+    mica_value_root_set(&output, source_integer(99));
+    assert(mica_source_roundtrip_text_scan(worker, &attempt, &tx, mica_value_root_get(&text), 0,
+        mica_value_root_get(&text), true, &output) == 10);
+    assert(mica_value_root_get(&output) == source_integer(99));
+    attempt.f_remaining = 1000000;
+    assert(mica_source_roundtrip_text_scan(worker, &attempt, &tx, mica_value_root_get(&text), 0,
+        mica_value_root_get(&text), true, &output) == 0);
+    assert(mica_value_root_get(&output) == source_integer(0));
+    assert(mica_source_roundtrip_text_scan(worker, &attempt, &tx, mica_value_root_get(&text), 9999,
+        mica_value_root_get(&separator), false, &output) == 0);
+    assert(mica_value_root_get(&output) == source_integer(1024));
     assert(mica_kernel_cancel(&tx));
+    mica_value_root_set(&output, source_integer(99));
+    assert(mica_source_roundtrip_text_scan(worker, &attempt, &tx, mica_value_root_get(&text), 0,
+        mica_value_root_get(&separator), false, &output) == 11);
+    assert(mica_value_root_get(&output) == source_integer(99));
     assert(mica_source_roundtrip_text_characters(worker, &attempt, &tx, mica_value_root_get(&text), &output) == 11);
     assert(mica_kernel_end(&tx));
     assert(mica_memory_root_pop(worker, &output) && mica_memory_root_pop(worker, &separator));

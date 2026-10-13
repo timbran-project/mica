@@ -179,6 +179,9 @@ verb native_source/program_literals(analysis: map, initial: list) -> list
     elseif op == :Return || op == :Abort || op == :Throw
       pool = native_source/pool_operands(pool, [instruction[1]])
     end
+    if op == :BuiltinCall && native/contains([:string_span, :string_find_any], instruction[2])
+      pool = native_source/pool(native_source/pool(pool, E_INDEX), string_concat(native_source/symbol_text(instruction[2]), " start is out of range"))
+    end
     if op == :BuiltinCall && native/contains([:string_concat, :string_join, :string_from_chars, :string_slice], instruction[2])
       pool = native_source/pool(pool, "")
       if instruction[2] == :string_slice

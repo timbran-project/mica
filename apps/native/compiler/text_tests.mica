@@ -17,7 +17,27 @@ for bounds in [[-1, 0], [0, -1], [4, 2], [0, 99]]
     errors = [@errors, [error.code, error.value]]
   end
 end
-return [saved, original, chars, rebuilt, joined, concatenated, slice, errors,
+let scans = []
+for subject in ["", "abc", saved, slice, "ééab🦀c", "\0a\0"]
+  for members in ["", "abc", "aZ\0", "é🦀", "éab🦀", "aaa"]
+    for start in [0, 1, 2, 3, 7, 99]
+      scans = [@scans, [string_span(subject, start, members), string_find_any(subject, start, members)]]
+    end
+  end
+end
+let scan_errors = []
+try
+  string_span("abc", -1, "a")
+catch E_INDEX as error
+  scan_errors = [@scan_errors, [error.code, error.message, error.value]]
+end
+try
+  string_find_any("abc", -1, "a")
+catch E_INDEX as error
+  scan_errors = [@scan_errors, [error.code, error.message, error.value]]
+end
+return [scans, scan_errors, string_span(@["abc", 0, "ab"]), string_find_any(@["éabc", 0, "b"]),
+  saved, original, chars, rebuilt, joined, concatenated, slice, errors,
   string_concat(), string_concat(@[]), string_concat("x"), string_concat(@["x", "é"]),
   string_join([], ","), string_join([""], ","), string_join(["", "x", ""], ","),
   string_from_chars([]), string_chars(""), string_slice(saved, 7, 7),

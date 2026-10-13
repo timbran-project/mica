@@ -1,0 +1,89 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+// Walk a string view once. Only numeric positions survive a safepoint; reload
+// the rooted view's data afterwards so its backing may move during collection.
+verb native_text/each_scalar(builder: map, text: map, start: map, visit) -> map
+  let [located: map, checked: map] = native_gen/checked_bind(builder, "offset", native_gen/call(builder, "value_string_byte_offset", [text, start]), "ok",
+    fn(invalid) => native_query/error(invalid, "schema"))
+  let [offset: map, ready: map] = native_gen/bind(checked, "byte_offset", native_gen/field(checked, located, "number"))
+  let result: map = native_gen/for_range(ready, "scalar", start, native_access/length(ready, text, "string"), fn(step, index)
+    let polled: map = native_query/poll_interval(step, index)
+    let header: map = native_gen/expression(native_memory/record_pointer("HeapString"), :UnpackPointer, [text])
+    let data: map = native_kernel/load_field(polled, header, "data")
+    let remaining: map = native_gen/subtract(native_kernel/load_field(polled, header, "length"), offset)
+    let [decoded: map, with_scalar: map] = native_gen/checked_bind(polled, "decoded", native_gen/call(polled, "utf8_decode", [
+      native_gen/freeze(native_gen/offset(data, offset)), remaining]), "ok", fn(invalid) => native_query/error(invalid, "schema"))
+    let scalar: map = native_gen/convert(:U64, native_gen/expression(:U32, :Unwrap, [native_gen/field(with_scalar, decoded, "rune")]))
+    let visited: map = visit(with_scalar, index, scalar)
+    return native_gen/assign(visited, offset, native_gen/add(offset, native_gen/field(visited, decoded, "width")))
+  end)
+  return result
+end
+
+// ASCII membership is a fixed stack table, independent of the input length.
+// Non-ASCII members are ignored and never match a non-ASCII subject scalar.
+verb native_text/ascii_members(builder: map, members: map) -> list
+  let [table: map, ready: map] = native_gen/bind(builder, "ascii_members", native_gen/zero([:Array, :Bool, 128]))
+  ready = native_text/each_scalar(ready, members, native_gen/ref(ready, "zero"), fn(step, index, scalar)
+    return native_gen/when(step, native_gen/less(scalar, native_gen/convert(:U64, native_gen/ref(step, "utf32_128"))), fn(ascii)
+      return native_gen/store(ascii, native_gen/element(native_gen/address(table), scalar), native_gen/ref(ascii, "true"))
+    end)
+  end)
+  return [table, ready]
+end
+verb native_text/member(builder: map, table: map, scalar: map) -> list
+  let [member: map, ready: map] = native_gen/bind(builder, "member", native_gen/ref(builder, "false"))
+  ready = native_gen/when(ready, native_gen/less(scalar, native_gen/convert(:U64, native_gen/ref(ready, "utf32_128"))), fn(ascii)
+    return native_gen/assign(ascii, member, native_gen/load(native_gen/element(native_gen/address(table), scalar)))
+  end)
+  return [member, ready]
+end
+verb native_text/scan_body(module: map) -> map
+  let builder: map = native_queries/budget_scope(native_gen/context(module, native_text/name(module, "scan")))
+  let text: map = native_roots/ref(builder, "text")
+  let members: map = native_roots/ref(builder, "members")
+  builder = native_builtins/kind_check(builder, members, "string")
+  builder = native_builtins/kind_check(builder, text, "string")
+  let [table: map, prepared: map] = native_text/ascii_members(builder, members)
+  let length: map = native_access/length(prepared, text, "string")
+  let [start: map, with_start: map] = native_gen/bind(prepared, "start", native_gen/ref(prepared, "start"))
+  builder = native_gen/when(with_start, native_gen/less(length, start), fn(clamped) => native_gen/assign(clamped, start, length))
+  let [position: map, with_position: map] = native_gen/bind(builder, "position", length)
+  builder = native_text/each_scalar(with_position, text, start, fn(step, index, scalar)
+    let [member: map, checked: map] = native_text/member(step, table, scalar)
+    return native_gen/unless(checked, native_gen/equal(member, native_gen/ref(checked, "span")), fn(found)
+      let selected: map = native_gen/assign(found, position, index)
+      return native_gen/break_loop(selected)
+    end)
+  end)
+  let target: map = native_roots/root_value(builder, native_gen/ref(builder, "output"), native_value/word())
+  let [encoded: map, ready: map] = native_query/value(builder, "value_int", [native_gen/bitcast(:I64, position)])
+  builder = native_roots/store(ready, target, encoded)
+  let result: map = native_gen/finish(module, native_tasks/attempt_status(builder, "ok"))
+  return result
+end
+verb native_text/scan_definitions(input: map) -> map
+  let module: map = native_memory/declare(input, native_text/name(input, "scan"), :U64, [
+    ["worker", native_memory/record_pointer("MemoryWorker"), :Borrow], ["attempt", native_tasks/pointer("Attempt"), :Borrow],
+    ["transaction", native_kernel/pointer("Transaction"), :Borrow], ["text", native_value/word(), :Gc],
+    ["start", :U64, :Value], ["members", native_value/word(), :Gc], ["span", :Bool, :Value],
+    ["output", native_memory/record_pointer("MemoryRoot"), :Borrow]], native_tasks/effects(), :Value, "")
+  let result: map = native_text/scan_body(module)
+  return result
+end
+verb native_text/scan(builder: map, name: symbol, args: list) -> list
+  let [start: map, ready: map] = native_gen/checked_bind(builder, "start", native_gen/call(builder, "value_as_int", [args[1]]), "ok",
+    fn(invalid) => native_tasks/attempt_status(invalid, "schema"))
+  let number: map = native_gen/field(ready, start, "number")
+  ready = native_gen/when(ready, native_gen/less(number, native_gen/ref(ready, "int_zero")), fn(negative)
+    let [arguments: map, rooted: map] = native_source/rooted_list(negative, "arguments", args)
+    return native_source/value_error(rooted, E_INDEX, string_concat(native_source/symbol_text(name), " start is out of range"), arguments)
+  end)
+  let mode: string = "false"
+  if name == :string_span
+    mode = "true"
+  end
+  let result: list = native_text/construct(ready, "scan", [args[0], native_gen/bitcast(:U64, number), args[2], native_gen/ref(ready, mode)])
+  return result
+end

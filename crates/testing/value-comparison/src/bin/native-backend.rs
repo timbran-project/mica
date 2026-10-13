@@ -181,6 +181,7 @@ fn run() -> Result<()> {
         "compiler/ordering",
         "compiler/time",
         "compiler/text",
+        "compiler/text_scan",
         "compiler/functions",
         "compiler/collections",
         "compiler/access",
