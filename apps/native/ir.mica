@@ -71,7 +71,7 @@ verb native/relations(state)
     :Terminator -> relation_from_rows([:block_id, :opcode, :operands], state[:terminators]),
     :Record -> relation_from_rows([:id, :spelling], state[:records]),
     :Field -> relation_from_rows([:owner, :position, :spelling, :type_id], state[:fields]),
-    :Foreign -> relation_from_rows([:id], state[:foreign]),
+    :Foreign -> relation_from_rows([:id, :symbol], state[:foreign]),
     :Contract -> relation_from_rows([:id, :effects, :result_mode, :owner], state[:contracts]),
     :ParameterContract -> relation_from_rows([:id, :mode], state[:parameter_contracts]),
     :Constant -> relation_from_rows([:id, :type_id, :encoding], state[:constants])
@@ -146,10 +146,49 @@ verb native/add_field(state, record_id, position, spelling, type_id)
   return native/append(state, :fields, [record_id, position, spelling, type_id])
 end
 
-// Foreign functions share the function/parameter schema. C names receive the
-// mica_foreign_ prefix; no raw C statements or declarations enter the IR.
-verb native/foreign(state, fn_id)
-  return native/append(state, :foreign, [fn_id])
+// External functions and globals name their linker symbol explicitly. Platform
+// functions use the conventional prefix when no symbol is supplied.
+verb native/foreign(state, id, ?symbol: string = "")
+  let spelling: string = symbol
+  if spelling == ""
+    let rows: list = [row for row in state[:functions] if row[0] == id]
+    native/ensure(len(rows) == 1, "default foreign symbol requires a function")
+    spelling = string_concat("mica_foreign_", rows[0][1])
+  end
+  return native/append(state, :foreign, [id, spelling])
+end
+
+verb native/link_symbol(index: map, id: int) -> string
+  if map_contains_key(index[:foreign], id)
+    let symbol: string = index[:foreign][id]
+    return symbol
+  end
+  if map_contains_key(index[:functions], id)
+    return string_concat("mica_", index[:functions][id][1])
+  end
+  return string_concat("mica_global_", index[:globals][id][1])
+end
+
+// Export validated declarations. Inferred effects preserve the information
+// callers had when implementation bodies were available for checking.
+verb native/interface(input: map) -> map
+  let index: map = native/check(input)
+  let state: map = input
+  for table in [:locals, :blocks, :instructions, :terminators]
+    state[table] = []
+  end
+  state[:foreign] = [[row[0], native/link_symbol(index, row[0])] for row in [@state[:functions], @state[:globals]]]
+  state[:contracts] = [[row[0], sort([effect for effect, path in index[:effects][row[0]]]),
+    index[:contracts][row[0]][2], index[:contracts][row[0]][3]] for row in state[:functions]]
+  state[:globals] = [[row[0], row[1], row[2], row[3], :Zero] for row in state[:globals]]
+  let declarations: map = {}
+  for table in [:functions, :parameters, :constants, :records, :globals]
+    for row in state[table]
+      declarations[row[0]] = true
+    end
+  end
+  state[:annotations] = [row for row in state[:annotations] if map_contains_key(declarations, row[0])]
+  return state
 end
 
 // Effects are upper bounds. Pointer-bearing results require :Owned or :Borrow.

@@ -729,7 +729,7 @@ Builders batch rows without changing the world.
 | `native/add_field` | record, position, name string, type |
 | `native/add_instruction` | block, position, opcode, destination local, operand list |
 | `native/terminate` | block, opcode, operand list |
-| `native/foreign` | function |
+| `native/foreign` | function or global, linker symbol |
 | `native/contract` | function, allowed effects, result ownership, owner parameter name |
 | `native/parameter_contract` | parameter, ownership mode |
 
@@ -991,7 +991,8 @@ Terminators are `:Return [value]`, `:Return []` for Void, `:Jump [block]`, and `
 Their headings describe the schemas. Duplicate keys remain visible to validation before relation construction removes duplicate rows.
 Node IDs identify references within one build. Stable names and explicit positions determine emitted C order.
 Generated functions, fields, locals, and labels use `mica_`, `f_`, `v_`, and `b_` prefixes.
-Foreign functions use `mica_foreign_`.
+`native/foreign(state, id, symbol)` imports a function or global under an explicit linker symbol.
+Omitting `symbol` for a function selects the `mica_foreign_` prefix. Imported globals require an explicit symbol and no initializer.
 
 ## Types and operations
 
@@ -1110,6 +1111,14 @@ The caller writes the artifacts and invokes the C compiler. Emission has no file
 Each source contains at most `functions_per_unit` complete function definitions. The limit must be positive.
 Global storage is defined once, in the first source. Individual functions are never split.
 Compile the sources as separate translation units, then link their object files with the consumers.
+
+`native/interface(state)` validates the implementation and returns declarations for a separately compiled consumer.
+The interface preserves linker symbols, types, ownership, and inferred effects. It removes function bodies and global initializers.
+Global storage remains in the provider, including thread-local storage and constant arrays.
+`native/module_interface(context)` also preserves generation bindings and constants, while discarding caches that contain implementation bodies.
+
+The import fixture links generated providers and consumers through C, libgccjit object files, and libgccjit shared libraries.
+
 
 ## Effects and ownership
 

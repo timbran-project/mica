@@ -12,7 +12,7 @@ verb native_jit/format() -> list
     [:Local, [:Id, :Function, :Name, :Type]],
     [:Block, [:Id, :Function, :Name, :Entry]],
     [:Constant, [:Id, :Type, :Low, :High, :Negative]],
-    [:Global, [:Id, :Name, :Type, :Storage, :Initializer]],
+    [:Global, [:Id, :Name, :Type, :Storage, :Initializer, :Foreign]],
     [:Instruction, [:Id, :Block, :Opcode, :Destination]],
     [:Terminator, [:Block, :Opcode]]]
 end
@@ -280,7 +280,7 @@ verb native_jit/data(state: map) -> map
         encoded = native_jit/encode_row(:Constant, {:Id -> row[0], :Type -> type_ids[row[1]], :Low -> low, :High -> high, :Negative -> negative}, [])
       end
       if table == :globals
-        let [name, next] = native_jit/intern(pool, string_concat("mica_global_", row[1]))
+        let [name, next] = native_jit/intern(pool, native/link_symbol(index, row[0]))
         pool = next
         let initializer: list = [0]
         if is_kind(row[4], :list)
@@ -296,7 +296,11 @@ verb native_jit/data(state: map) -> map
           tail = [@tail, initializer[position]]
           position = position + 1
         end
-        encoded = native_jit/encode_row(:Global, {:Id -> row[0], :Name -> name, :Type -> type_ids[row[2]], :Storage -> native_jit/position([:Mutable, :Constant, :ThreadLocal], row[3]), :Initializer -> initializer[0]}, tail)
+        let imported: int = 0
+        if map_contains_key(index[:foreign], row[0])
+          imported = 1
+        end
+        encoded = native_jit/encode_row(:Global, {:Id -> row[0], :Name -> name, :Type -> type_ids[row[2]], :Storage -> native_jit/position([:Mutable, :Constant, :ThreadLocal], row[3]), :Initializer -> initializer[0], :Foreign -> imported}, tail)
       end
       if table == :instructions
         let arguments: list = row[5]

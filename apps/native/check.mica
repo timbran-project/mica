@@ -119,7 +119,7 @@ verb native/check(state)
     end
   end
   index[:function_graphs] = graphs
-  native/check_effects(state, index)
+  index[:effects] = native/check_effects(state, index)
   let origins: map = native/check_ownership(state, index)
   native/check_relocation_liveness(state, index, origins)
   return index

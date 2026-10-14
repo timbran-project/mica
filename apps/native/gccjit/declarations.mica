@@ -172,19 +172,21 @@ verb native_jit/define_declarations(input: map) -> map
     native/let_statement("id", :U64, native_jit/row_field(:Global, "row", :Id)), native/let_statement("type_id", :U64, native_jit/row_field(:Global, "row", :Type)),
     native/let_statement("type", h, native_jit/cache(:Type, "type_id")), native/let_statement("declared_type", h, "type"),
     native/when_statement(native/binary_expression(:Equal, native_jit/row_field(:Global, "row", :Storage), "n1"), [native/set_statement("declared_type", native_jit/j("const_type", ["type"]))]),
-    native/let_statement("global", h, native_jit/j("global", ["ctx", "declared_type", native_jit/text(native_jit/row_field(:Global, "row", :Name))])),
+    native/let_statement("imported", :Bool, native_jit/binary(:Equal, native_jit/row_field(:Global, "row", :Foreign), "n1")),
+    native/let_statement("global", h, native_jit/j("global", ["ctx", "declared_type", native_jit/text(native_jit/row_field(:Global, "row", :Name)), "imported"])),
     native/when_statement(native/binary_expression(:Equal, native_jit/row_field(:Global, "row", :Storage), "n2"), [native/do_statement(native/call_expression("j_tls", ["global"]))]),
-    native/let_statement("value", h, native_jit/invoke("zero", ["type_id"], h)),
-    native/when_statement(native/binary_expression(:Equal, native_jit/row_field(:Global, "row", :Initializer), "n1"), [native/set_statement("value", native_jit/cache(:Rvalue, native_jit/row_tail(:Global, "row", 0)))]),
-    native/when_statement(native/binary_expression(:Equal, native_jit/row_field(:Global, "row", :Initializer), "n2"), [
-      @native_jit/consume_prepared_arguments([
-        native/let_statement("position", :U64, native_jit/n(native_jit/tail_start(:Global))),
-        native/while_statement(native/binary_expression(:Less, "position", native_jit/word("row", 0)), [
-          native_jit/publish(:Arguments, native_jit/binary(:Subtract, "position", native_jit/n(native_jit/tail_start(:Global))), native_jit/integer(native_jit/at("row", "position", :U64), native_jit/primitive_type(:U8))),
-          native/set_statement("position", native_jit/binary(:Add, "position", "n1"))])],
-        "array_value", ["ctx", native_jit/cache(:ArrayRepresentation, "type_id")], native_jit/binary(:Subtract, "position", native_jit/n(native_jit/tail_start(:Global))), [:Let, "bytes"]),
-      @native_jit/consume_arguments(["bytes"], "record", ["ctx", "type"], [:Set, "value"]) ]),
-    native/let_statement("initialized", h, native_jit/j("global_init", ["global", "value"])),
-    native_jit/publish(:Lvalue, "id", "initialized"), native_jit/publish(:Rvalue, "id", native_jit/j("value", ["initialized"])), native_jit/publish_metadata(:NodeType, "id", "type_id")]), native/return_void()])
+    native/unless_statement("imported", [
+      native/let_statement("value", h, native_jit/invoke("zero", ["type_id"], h)),
+      native/when_statement(native/binary_expression(:Equal, native_jit/row_field(:Global, "row", :Initializer), "n1"), [native/set_statement("value", native_jit/cache(:Rvalue, native_jit/row_tail(:Global, "row", 0)))]),
+      native/when_statement(native/binary_expression(:Equal, native_jit/row_field(:Global, "row", :Initializer), "n2"), [
+        @native_jit/consume_prepared_arguments([
+          native/let_statement("position", :U64, native_jit/n(native_jit/tail_start(:Global))),
+          native/while_statement(native/binary_expression(:Less, "position", native_jit/word("row", 0)), [
+            native_jit/publish(:Arguments, native_jit/binary(:Subtract, "position", native_jit/n(native_jit/tail_start(:Global))), native_jit/integer(native_jit/at("row", "position", :U64), native_jit/primitive_type(:U8))),
+            native/set_statement("position", native_jit/binary(:Add, "position", "n1"))])],
+          "array_value", ["ctx", native_jit/cache(:ArrayRepresentation, "type_id")], native_jit/binary(:Subtract, "position", native_jit/n(native_jit/tail_start(:Global))), [:Let, "bytes"]),
+        @native_jit/consume_arguments(["bytes"], "record", ["ctx", "type"], [:Set, "value"]) ]),
+      native/set_statement("global", native_jit/j("global_init", ["global", "value"]))]),
+    native_jit/publish(:Lvalue, "id", "global"), native_jit/publish(:Rvalue, "id", native_jit/j("value", ["global"])), native_jit/publish_metadata(:NodeType, "id", "type_id")]), native/return_void()])
   return context
 end

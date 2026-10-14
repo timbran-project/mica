@@ -1511,7 +1511,7 @@ end
 let foreign = native/program()
 let [id, next] = native/add_function(foreign, "external", :U64)
 foreign = native/contract(next, id, [], :Value, "")
-foreign[:foreign] = [[id]]
+foreign = native/foreign(foreign, id)
 require len(native/emit_module(foreign, "foreign", 1)[:sources]) == 1
 return true
 "#,
@@ -1522,8 +1522,8 @@ return true
             &mut runner,
             "return native/emit_module(native/scalar_example(), \"scalar\", 1)",
         );
-        check_native_module_fixture(
-            &module,
+        check_native_modules_fixture(
+            &[module],
             r#"
 #include <assert.h>
 int main(void) {
@@ -1661,6 +1661,99 @@ return [module[:header], module[:sources]]
             assert!(!rejected.status.success());
             assert!(rejected.stderr.is_empty(), "{rejected:?}");
         }
+    }
+}
+
+#[test]
+fn module_interfaces_validate_symbols_and_discard_body_caches() {
+    for tier in [true, false] {
+        let mut runner = runner(tier);
+        assert_eq!(
+            eval(
+                &mut runner,
+                r#"
+let state = native/scalar_example()
+let declarations = native/interface(state)
+require declarations == native/interface(declarations)
+require len(declarations[:functions]) == 3
+require declarations[:blocks] == [] && declarations[:instructions] == [] && declarations[:locals] == []
+let context = native/module_context(state, {})
+context[:body_layout] = {:sentinel -> true}
+let exported = native/module_interface(context)
+require !map_contains_key(exported, :body_layout)
+require exported[:state] == declarations
+require map_contains_key(exported[:bindings]["sum"], "limit")
+require !map_contains_key(exported[:bindings]["sum"], "cursor")
+let functions = declarations[:functions]
+for [imports, message] in [
+  [[[functions[0][0]]], "invalid foreign declaration"],
+  [[[999999, "unknown"]], "foreign declaration has unknown symbol"],
+  [[[functions[0][0], "bad-name"]], "invalid identifier"],
+  [[[functions[0][0], "return"]], "foreign symbol is a C keyword"],
+  [[[functions[0][0], "mica_internal_f32_bits"]], "reserved C helper name"],
+  [[[functions[0][0], "same"], [functions[1][0], "same"]], "duplicate emitted symbol name"],
+  [[[functions[0][0], "same"], [functions[0][0], "same"]], "duplicate foreign declaration"]]
+  let invalid = declarations
+  invalid[:foreign] = imports
+  let failed = false
+  try
+    native/check(invalid)
+  catch E_INVARG as problem
+    require native/error_message(problem) == string_concat("native: ", message)
+    failed = true
+  end
+  require failed
+end
+let [collision, with_collision] = native/add_global(declarations, "collision", :U64, :Mutable, :Zero)
+let collided = false
+try
+  native/check(native/foreign(with_collision, collision, "mica_tag"))
+catch E_INVARG as problem
+  require native/error_message(problem) == "native: duplicate emitted symbol name"
+  collided = true
+end
+require collided
+let [constant, with_constant] = native/add_constant(native/program(), :U64, "0000000000000001")
+let [global, with_global] = native/add_global(with_constant, "storage", :U64, :Mutable, constant)
+let failed = false
+try
+  native/check(native/foreign(with_global, global, "external_storage"))
+catch E_INVARG as problem
+  require native/error_message(problem) == "native: imported global cannot have an initializer"
+  failed = true
+end
+require failed
+return true
+"#
+            ),
+            Value::bool(true)
+        );
+    }
+}
+
+#[test]
+fn imported_functions_and_globals_link_to_generated_definitions() {
+    for tier in [true, false] {
+        let mut runner = runner(tier);
+        for source in [
+            include_str!("../../../apps/native/tests/surface.mica"),
+            include_str!("../../../apps/native/tests/imports.mica"),
+        ] {
+            runner.run_filein(source).unwrap();
+        }
+        let module = eval(
+            &mut runner,
+            r#"
+let provider = native/emit_module(native/imports_provider(), "provider")
+let consumer = native/emit_module(native/imports_example(), "consumer")
+return [provider, consumer]
+"#,
+        );
+        check_native_modules_fixture(
+            &module.with_list(|modules| modules.to_vec()).unwrap(),
+            include_str!("../../../apps/native/tests/imports.c"),
+            &["-O0", "-g0"],
+        );
     }
 }
 
@@ -4224,6 +4317,58 @@ fn emit_native_source_artifacts(
 }
 
 #[test]
+fn native_source_links_to_a_separately_generated_runtime() {
+    let mut previous = None;
+    for tier in [true, false] {
+        let mut runner = runner(tier).with_task_limits(TaskLimits {
+            instruction_budget: 20_000_000_000,
+            max_call_depth: 256,
+            ..TaskLimits::default()
+        });
+        load_native_kernel(&mut runner, true);
+        load_native_source_compiler(&mut runner);
+        let artifacts = eval(
+            &mut runner,
+            r#"
+let runtime = native_tasks/definitions()
+let interface = native/module_interface(runtime)
+let application = native_source/compile(interface, "source_roundtrip",
+  "verb compiled_increment(input)\nreturn input + 1\nend", {}, {}, [[10000, 20000]])
+return [[native/emit_module(runtime[:state], "runtime"), native/emit_module(application[:state], "application")],
+  native_memory/platform(), native_tasks/platform()]
+"#,
+        );
+        if let Some(previous) = &previous {
+            assert_eq!(&artifacts, previous, "linked runtime differs between tiers");
+            continue;
+        }
+        previous = Some(artifacts.clone());
+        let parts = artifacts.with_list(|parts| parts.to_vec()).unwrap();
+        let checks = r#"
+    mica_value_root_set(&input, source_integer(41));
+    for (unsigned collect = 0; collect < 2; ++collect) {
+        run_frontend(worker, kernel, code, runtime, &input, &output, 1000000, collect != 0);
+        assert(mica_value_root_get(&output) == source_integer(42));
+    }
+    (void)symbols;
+"#;
+        let fixture = include_str!("../../../apps/native/compiler/frontend_tests.c")
+            .replace("/* FRONTEND_CONFORMANCE_CASES */", checks);
+        check_native_modules_fixture(
+            &parts[0].with_list(|modules| modules.to_vec()).unwrap(),
+            &format!(
+                "{}\n{}\n{}\n{}\n{fixture}",
+                parts[1].with_str(str::to_owned).unwrap(),
+                parts[2].with_str(str::to_owned).unwrap(),
+                include_str!("../../../native/platform/allocation.c"),
+                include_str!("../../../native/platform/mutex.c")
+            ),
+            &["-O0", "-g0"],
+        );
+    }
+}
+
+#[test]
 fn native_source_program_executes_on_generated_runtime() {
     let (conformance_source, method_ids, checks) = source_expression_cases();
     // Each bootstrap owns its runner. Generate concurrently, then require the
@@ -4551,9 +4696,8 @@ end
             &format!(
                 r#"
 let module = native_source/compile(native_tasks/definitions(), "subject", {source:?}, {{}}, {{}}, {method_ids})
-for table in [:locals, :blocks, :instructions, :terminators, :annotations]
-  module[:state][table] = []
-end
+module[:state] = native/interface(module[:state])
+module[:state][:annotations] = []
 let entries = {{}}
 for program in module[:source_programs]
   entries[module[:functions][string_concat(program[:name], "_body")]] = true
@@ -4561,7 +4705,7 @@ for program in module[:source_programs]
     entries[module[:functions][string_concat(program[:name], "_", to_literal(index))]] = true
   end
 end
-module[:state][:foreign] = [[row[0]] for row in module[:state][:functions] if !map_contains_key(entries, row[0])]
+module[:state][:foreign] = [row for row in module[:state][:foreign] if !map_contains_key(entries, row[0])]
 // Analysis is computed by the native fixture, not supplied by its host.
 module[:source_programs] = [{{:name -> program[:name], :analysis -> {{
   :description -> program[:analysis][:description], :parameters -> program[:analysis][:parameters]}}}}
@@ -4681,40 +4825,12 @@ end
     load_native_kernel(&mut oracle, true);
     load_native_source_compiler(&mut oracle);
     oracle.run_filein(entry).unwrap();
-    oracle
-        .run_filein(
-            r#"
-verb native_check_compilation_fixture(input: map)
-  let state = input
-  let runtime = native_tasks/definitions()[:state]
-  // Restore the real bodies for whole-program effect and ownership checking.
-  // Runtime declarations allow wider effects than their implementations use.
-  state[:foreign] = runtime[:foreign]
-  for table in [:locals, :blocks, :instructions, :terminators, :annotations]
-    state[table] = [@runtime[table], @state[table]]
-  end
-  return native/check(state)
-end
-"#,
-        )
-        .unwrap();
     // A compiler receives the runtime ABI as declarations. No application
     // syntax, register descriptions, constants, analysis, or bodies are prepared
     // by the bootstrap host for these inputs.
     let runtime = eval(
         &mut oracle,
-        r#"
-let module = native_tasks/definitions()
-for table in [:locals, :blocks, :instructions, :terminators, :annotations]
-  module[:state][table] = []
-end
-module[:state][:foreign] = [[row[0]] for row in module[:state][:functions]]
-let declarations = {}
-for key in [:state, :functions, :bindings, :constants, :function_values, :call_shapes]
-  declarations[key] = module[key]
-end
-return declarations
-"#,
+        "return native/module_interface(native_tasks/definitions())",
     );
     let mut checks = String::new();
     for (source, ids) in native_compilation_cases() {
@@ -4743,8 +4859,8 @@ return declarations
         };
         let mut validation = SourceRunner::root_source_request("");
         validation.input = TaskInput::Invocation {
-            selector: Symbol::intern("native_check_compilation_fixture"),
-            roles: vec![(Symbol::intern("input"), expected.clone())],
+            selector: Symbol::intern("native/check"),
+            roles: vec![(Symbol::intern("state"), expected.clone())],
         };
         let validated = oracle.submit_invocation(validation).unwrap();
         assert!(
@@ -4798,8 +4914,8 @@ return declarations
         assert!(first == second, "compiler differs between bootstrap tiers");
         first
     });
-    check_native_module_fixture(
-        &generated,
+    check_native_modules_fixture(
+        &[generated],
         &format!(
             "{memory}\n{tasks}\n{}\n{}\n{fixture}",
             include_str!("../../../native/platform/allocation.c"),
@@ -6004,25 +6120,27 @@ fn check_native_source_fixture(fixture: &str) {
     check_native_source_fixture_with_flags(fixture, &["-O2", "-g"]);
 }
 
-fn check_native_module_fixture(module: &Value, fixture: &str, compilation_flags: &[&str]) {
+fn check_native_modules_fixture(modules: &[Value], fixture: &str, compilation_flags: &[&str]) {
     let scratch = Scratch::new();
-    let field = |name| {
-        module
-            .map_get(&Value::symbol(Symbol::intern(name)))
-            .unwrap()
-    };
-    let header_name = field("header_name").with_str(str::to_owned).unwrap();
-    fs::write(
-        scratch.0.join(&header_name),
-        field("header").with_str(str::to_owned).unwrap(),
-    )
-    .unwrap();
     let mut sources = Vec::new();
-    for unit in field("sources").with_list(|units| units.to_vec()).unwrap() {
-        let pair = unit.with_list(|pair| pair.to_vec()).unwrap();
-        let path = scratch.0.join(pair[0].with_str(str::to_owned).unwrap());
-        fs::write(&path, pair[1].with_str(str::to_owned).unwrap()).unwrap();
-        sources.push(path);
+    let mut header_name = String::new();
+    for module in modules {
+        let field = |name| {
+            module
+                .map_get(&Value::symbol(Symbol::intern(name)))
+                .unwrap()
+        };
+        header_name = field("header_name").with_str(str::to_owned).unwrap();
+        let header = scratch.0.join(&header_name);
+        assert!(!header.exists(), "duplicate module header");
+        fs::write(header, field("header").with_str(str::to_owned).unwrap()).unwrap();
+        for unit in field("sources").with_list(|units| units.to_vec()).unwrap() {
+            let pair = unit.with_list(|pair| pair.to_vec()).unwrap();
+            let path = scratch.0.join(pair[0].with_str(str::to_owned).unwrap());
+            assert!(!path.exists(), "duplicate module source");
+            fs::write(&path, pair[1].with_str(str::to_owned).unwrap()).unwrap();
+            sources.push(path);
+        }
     }
     let driver = scratch.0.join("fixture.c");
     fs::write(&driver, format!("#include \"{header_name}\"\n{fixture}")).unwrap();

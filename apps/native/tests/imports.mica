@@ -1,0 +1,44 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+verb native/imports_provider() -> map
+  let state: map = native/surface_program()
+  let counter: int = [row[0] for row in state[:functions] if row[1] == "counter_next"][0]
+  // The interface must export inferred effects, not this deliberately wider bound.
+  let contracts: list = []
+  for row in state[:contracts]
+    if row[0] == counter
+      row[1] = [@row[1], :Release]
+    end
+    contracts = [@contracts, row]
+  end
+  state[:contracts] = contracts
+  return state
+end
+
+verb native/imports_example() -> map
+  let state: map = native/interface(native/imports_provider())
+  let functions: map = {}
+  let globals: map = {}
+  for row in state[:functions]
+    functions[row[1]] = row[0]
+  end
+  for row in state[:globals]
+    globals[row[1]] = row[0]
+  end
+  let pointer: list = [:Pointer, :U64, :Mutable]
+  for [name, callee, global] in [["imported_next", "counter_next", "counter"], ["imported_cache", "cache_next", "cache"]]
+    let [id, names, declared] = native/function_scope(state, name, :U64, [],
+      [["called", :U64], ["address", pointer], ["observed", :U64]], ["entry"])
+    state = native/contract(declared, id, [:ReadMemory, :WriteMemory], :Value, "")
+    state = native/block_body(state, names["entry"], [
+      [:Call, names["called"], [functions[callee]]],
+      [:GlobalAddress, names["address"], [globals[global]]],
+      [:Load, names["observed"], [names["address"]]]], :Return, [names["observed"]])
+  end
+  let bytes: list = [:Pointer, [:Array, :U8, 4], :Const]
+  let [id, names, declared] = native/function_scope(state, "imported_literal", bytes, [], [["address", bytes]], ["entry"])
+  state = native/contract(declared, id, [], :Static, "")
+  state = native/block_body(state, names["entry"], [[:GlobalAddress, names["address"], [globals["literal"]]]], :Return, [names["address"]])
+  return state
+end

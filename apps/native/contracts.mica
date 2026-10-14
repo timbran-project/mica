@@ -169,9 +169,18 @@ verb native/check_contracts(state, input_index)
   let index = input_index
   let foreign = {}
   for row in state[:foreign]
-    native/ensure(map_contains_key(index[:functions], row[0]), "foreign declaration has unknown function")
+    native/ensure(is_kind(row, :list) && len(row) == 2, "invalid foreign declaration")
+    native/ensure(map_contains_key(index[:functions], row[0]) || map_contains_key(index[:globals], row[0]), "foreign declaration has unknown symbol")
     native/ensure(!map_contains_key(foreign, row[0]), "duplicate foreign declaration")
-    foreign[row[0]] = true
+    native/identifier(row[1])
+    native/ensure(!native/contains(["auto", "break", "case", "char", "const", "continue", "default", "do",
+      "double", "else", "enum", "extern", "float", "for", "goto", "if", "inline", "int", "long", "register",
+      "restrict", "return", "short", "signed", "sizeof", "static", "struct", "switch", "typedef", "union",
+      "unsigned", "void", "volatile", "while"], row[1]), "foreign symbol is a C keyword")
+    if map_contains_key(index[:globals], row[0])
+      native/ensure(index[:globals][row[0]][4] == :Zero, "imported global cannot have an initializer")
+    end
+    foreign[row[0]] = row[1]
   end
   let contracts = {}
   for row in state[:contracts]
@@ -237,19 +246,16 @@ verb native/check_contracts(state, input_index)
   index[:parameter_modes] = modes
   index[:parameter_owners] = owners_by_id
   let c_names = {}
-  for fn_row in state[:functions]
-    let spelling = native/c_function(index, fn_row[0])
+  for row in [@state[:functions], @state[:globals]]
+    let spelling: string = native/link_symbol(index, row[0])
     native/ensure(!native/contains(["mica_internal_f32_bits", "mica_internal_word_payload", "mica_internal_word_tag"], spelling), "reserved C helper name")
-    native/ensure(!map_contains_key(c_names, spelling), "duplicate emitted function name")
+    native/ensure(!map_contains_key(c_names, spelling), "duplicate emitted symbol name")
     c_names[spelling] = true
   end
   for type_id in index[:type_order]
     if native/is_scalar(type_id) || native/is_tagged(type_id) || native/is_function_pointer(type_id)
-      native/ensure(!map_contains_key(c_names, native/c_type(type_id)), "function conflicts with C typedef")
+      native/ensure(!map_contains_key(c_names, native/c_type(type_id)), "symbol conflicts with C typedef")
     end
-  end
-  for row in state[:globals]
-    native/ensure(!map_contains_key(c_names, string_concat("mica_global_", row[1])), "global conflicts with function C name")
   end
   return index
 end
@@ -366,6 +372,7 @@ verb native/check_effects(state, index)
       native/ensure(native/contains(index[:contracts][fn_row[0]][1], effect), string_concat("effect ", to_literal(effect), " exceeds contract of ", fn_row[1], ": ", path))
     end
   end
+  return summaries
 end
 
 verb native/union(left, right)

@@ -45,6 +45,9 @@ end
 verb native/c_globals(state, index, declaration)
   let lines = []
   for row in native/ordered(state[:globals], 1)
+    if !declaration && map_contains_key(index[:foreign], row[0])
+      continue
+    end
     let prefix = ""
     if declaration
       prefix = "extern "
@@ -67,7 +70,7 @@ verb native/c_globals(state, index, declaration)
         end
       end
     end
-    lines = [@lines, @native/c_notes(index, row[0], ""), string_concat(prefix, native/c_type(row[2]), qualifier, " mica_global_", row[1], initializer, ";")]
+    lines = [@lines, @native/c_notes(index, row[0], ""), string_concat(prefix, native/c_type(row[2]), qualifier, " ", native/link_symbol(index, row[0]), initializer, ";")]
   end
   return lines
 end

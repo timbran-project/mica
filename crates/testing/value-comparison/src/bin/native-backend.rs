@@ -104,6 +104,7 @@ fn run() -> Result<()> {
         "examples/values",
         "tests/callables",
         "tests/surface",
+        "tests/imports",
         "value/program",
         "memory/program",
         "memory/allocation",
@@ -412,7 +413,7 @@ fn generate_module(
     let module = eval(
         runner,
         &format!(
-            "let state = {}\nlet output = native/emit_module(state, \"{stem}\")\nreturn [native_jit/data(state), output[:source], output[:header]{companions}]",
+            "let state = {}\nlet output = native/emit_module(state, \"{stem}\")\nreturn [native_jit/data(state), string_join([unit[1] for unit in output[:sources]], \"\\n\"), output[:header]{companions}]",
             expression
         ),
     )?;
@@ -560,6 +561,12 @@ fn check_fixtures(
             "mica_checked_add",
             "nsdaphuem",
         ),
+        (
+            "imports",
+            "native/imports_example()",
+            "mica_imported_next",
+            "",
+        ),
         ("callable", "native/callable_example()", "mica_chain", "n"),
         (
             "execution",
@@ -630,6 +637,7 @@ fn check_fixtures(
                 fs::read_to_string(root.join("apps/native/tests/values.c"))?,
             ),
             "surface" => fs::read_to_string(root.join("apps/native/tests/surface.c"))?,
+            "imports" => fs::read_to_string(root.join("apps/native/tests/imports.c"))?,
             "callable" => fs::read_to_string(root.join("apps/native/tests/callables.c"))?,
             "execution" => format!(
                 "{}\n{}",
@@ -755,7 +763,35 @@ fn check_fixtures(
         }
         generate_module(runner, expression, &directory, "module")?;
         compile_module(backend, &directory, options.sanitize, None)?;
-        compile_module(backend, &directory, options.sanitize, Some(symbol))?;
+        if name == "imports" {
+            let provider = text(&eval(
+                runner,
+                "return native/emit_c(native/imports_provider())",
+            )?)?;
+            fs::write(directory.join("provider.c"), provider)?;
+            checked_command(compiler(options.sanitize).current_dir(&directory).args([
+                "-fPIC",
+                "-shared",
+                "provider.c",
+                "-lm",
+                "-o",
+                "provider.so",
+            ]))?;
+            let mut command = backend_command(
+                backend,
+                &directory.join("module.ir"),
+                &fs::canonicalize(&directory)?.join("module.so"),
+                options.sanitize,
+                Some(symbol),
+            )?;
+            command.env(
+                "MICA_JIT_IMPORT_LIBRARY",
+                fs::canonicalize(directory.join("provider.so"))?,
+            );
+            run_backend(command, &directory, "loading.json")?;
+        } else {
+            compile_module(backend, &directory, options.sanitize, Some(symbol))?;
+        }
         if name == "tasks" {
             for name in ["code-library", "code-replacement"] {
                 let mut command = Command::new("clang");
@@ -809,9 +845,11 @@ fn check_fixtures(
                     "-fno-sanitize-recover=all",
                 ]);
             }
-            let compiled = command
-                .args(["check.c", input, "-lm", "-ldl", "-o", "check"])
-                .output()?;
+            command.args(["check.c", input]);
+            if name == "imports" {
+                command.arg("provider.so");
+            }
+            let compiled = command.args(["-lm", "-ldl", "-o", "check"]).output()?;
             if !compiled.status.success() {
                 return Err(format!(
                     "{name}/{input}: {}",

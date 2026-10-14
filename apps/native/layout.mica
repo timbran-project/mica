@@ -192,7 +192,7 @@ verb native/c_layout_emission(index, row)
   let dst = native/c_value(index, row[4])
   let type_id = index[:variables][row[4]][2]
   if op == :GlobalAddress
-    return native/c_emission(string_concat(dst, " = &mica_global_", index[:globals][args[0]][1], ";"), true)
+    return native/c_emission(string_concat(dst, " = &", native/link_symbol(index, args[0]), ";"), true)
   end
   if op == :Zero
     return native/c_emission(string_concat(dst, " = (", native/c_type(type_id), "){0};"), true)

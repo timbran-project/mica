@@ -285,11 +285,7 @@ verb native/c_definitions(state, index, order: map)
 end
 
 verb native/c_function(index, id)
-  let prefix = "mica_"
-  if map_contains_key(index[:foreign], id)
-    prefix = "mica_foreign_"
-  end
-  return string_concat(prefix, index[:functions][id][1])
+  return native/link_symbol(index, id)
 end
 
 verb native/c_signed_constant(encoding)

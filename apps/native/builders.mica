@@ -22,6 +22,25 @@ verb native/module_context(state: map, constants: map) -> map
     :call_shapes -> native/call_shapes(state), :function_values -> {}}
 end
 
+// Generation caches contain bodies and must not cross the module boundary.
+verb native/module_interface(input: map) -> map
+  let state: map = native/interface(input[:state])
+  let module: map = native/module_context(state, input[:constants])
+  let parameters: map = native/group_rows(state[:parameters], 1)
+  for row in state[:functions]
+    let bindings: map = {}
+    let types: map = {}
+    for parameter in index_or(parameters, row[0], [])
+      bindings[parameter[3]] = parameter[0]
+      types[parameter[0]] = parameter[4]
+    end
+    module[:functions][row[1]] = row[0]
+    module[:bindings][row[1]] = bindings
+    module[:function_values][row[1]] = [types, {}]
+  end
+  return module
+end
+
 // Separate declarations from bodies to support mutually recursive modules.
 verb native/declare_function(input: map, name: string, result, parameters: list, locals: list, effects: list, mode: symbol, owner: string) -> map
   let context: map = input
