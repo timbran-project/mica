@@ -1235,6 +1235,7 @@ pub fn workloads() -> Vec<(String, Vec<Case>)> {
         ("list_append", Operation::ListAppend),
         ("list_append_chain", Operation::ListAppendChain),
         ("map_set", Operation::MapSet),
+        ("map_set_unchanged", Operation::MapSet),
     ] {
         workloads.push((
             name,
@@ -1248,6 +1249,9 @@ pub fn workloads() -> Vec<(String, Vec<Case>)> {
                     let right = match op {
                         Operation::ListGet => Input::Int(i),
                         Operation::ListSlice => Input::List(vec![Input::Int(i), Input::Int(120)]),
+                        Operation::MapSet if name == "map_set_unchanged" => {
+                            Input::List(vec![Input::Int(i), Input::Int(i)])
+                        }
                         Operation::ListSet | Operation::MapSet => {
                             Input::List(vec![Input::Int(i), Input::Int(999)])
                         }

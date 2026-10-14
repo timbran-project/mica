@@ -754,6 +754,12 @@ static void collection_cases(void) {
     struct mica_ValueMapEntry entries[]={{integer(2),list.f_value},{integer(4),slice.f_value}};
     struct mica_ValueResult map=mica_value_map(&arena,entries,2);
     assert(map.f_ok);
+    uint64_t unchanged_used=arena.f_used, unchanged_allocated=arena.f_heap->f_allocated;
+    for(unsigned repeat=0;repeat<100;repeat++) {
+        struct mica_ValueResult unchanged=mica_value_map_set(&arena,map.f_value,integer(2),list.f_value);
+        assert(unchanged.f_ok && unchanged.f_value==map.f_value);
+    }
+    assert(arena.f_used==unchanged_used && arena.f_heap->f_allocated==unchanged_allocated);
     for(int key=1;key<=5;key++) {
         struct mica_ValueResult updated=mica_value_map_set(&arena,map.f_value,integer(key),changed.f_value);
         assert(updated.f_ok);

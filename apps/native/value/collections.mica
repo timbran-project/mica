@@ -213,6 +213,18 @@ verb native_value/map_update(input: map) -> map
   let key: map = native_gen/ref(builder, "key")
   let [position: map, replace: map, with_position: map] = native_value/map_search(builder, view, key)
   builder = with_position
+  // Exact word equality preserves the supplied key representation and avoids
+  // recursive comparison. Unchanged assignments can share the original map.
+  builder = native_gen/when(builder, replace, fn(found)
+    let source: map = native_gen/field(found, view, "data")
+    let current: map = native_gen/load(native_gen/offset(source, position))
+    return native_gen/when(found, native_gen/equal(native_gen/field(found, current, "key"), key), fn(same_key)
+      return native_gen/when(same_key, native_gen/equal(native_gen/field(same_key, current, "value"), native_gen/ref(same_key, "element")), fn(unchanged)
+        return native_gen/return_value(unchanged, native_gen/record(unchanged, [:Record, "ValueResult"],
+          {"ok" -> native_gen/ref(unchanged, "true"), "value" -> native_gen/ref(unchanged, "value")}))
+      end)
+    end)
+  end)
   let [count: map, with_count: map] = native_gen/bind(builder, "count", native_gen/field(builder, view, "length"))
   builder = with_count
   builder = native_gen/unless(builder, replace, fn(insert)
