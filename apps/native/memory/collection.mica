@@ -148,10 +148,11 @@ verb native_memory/trace_state(builder: map, heap: map, phase: string) -> map
   return result
 end
 
-// Allow page storage to double between collections, with a minimum allowance
-// for small heaps. Saturate the allowance before multiplication can overflow.
-verb native_memory/update_collection_limit(input: map, heap: map) -> map
-  let builder: map = input
+// Allow page storage to double, subject to the heap capacity. Keep half the
+// remaining capacity available for allocations before the next safepoint.
+verb native_memory/collection_target(module: map) -> map
+  let builder: map = native_gen/context(module, "memory_collection_target")
+  let heap: map = native_gen/ref(builder, "heap")
   let [allocated: map, with_allocated: map] = native_gen/bind(builder, "allocated", native_gen/read(native_gen/field(builder, heap, "allocated")))
   let [limit: map, with_limit: map] = native_gen/bind(with_allocated, "limit", native_gen/ref(with_allocated, "memory_allocation_limit"))
   builder = native_gen/when(with_limit, native_gen/less(allocated,
@@ -159,8 +160,15 @@ verb native_memory/update_collection_limit(input: map, heap: map) -> map
     fn(bounded) => native_gen/assign(bounded, limit, native_gen/multiply(allocated, native_gen/ref(bounded, "memory_n2"))))
   builder = native_gen/when(builder, native_gen/less(limit, native_gen/ref(builder, "memory_collection_floor")),
     fn(small) => native_gen/assign(small, limit, native_gen/ref(small, "memory_collection_floor")))
-  builder = native_gen/write(builder, native_gen/field(builder, heap, "collection_limit"), limit)
-  return builder
+  let [available: map, with_available: map] = native_gen/bind(builder, "available", native_gen/read(native_gen/field(builder, heap, "capacity_limit")))
+  let nursery: map = native_gen/read(native_gen/field(with_available, heap, "nursery_bytes"))
+  builder = native_gen/when(with_available, native_gen/less(available, nursery), fn(full) => native_gen/return_value(full, allocated))
+  builder = native_gen/assign(builder, available, native_gen/subtract(available, nursery))
+  builder = native_gen/when(builder, native_gen/less(available, allocated), fn(full) => native_gen/return_value(full, allocated))
+  let ceiling: map = native_gen/add(allocated, native_gen/divide(native_gen/subtract(available, allocated), native_gen/ref(builder, "memory_n2")))
+  builder = native_gen/when(builder, native_gen/less(ceiling, limit), fn(bounded) => native_gen/assign(bounded, limit, ceiling))
+  let result: map = native_gen/finish(module, native_gen/return_value(builder, limit))
+  return result
 end
 
 verb native_memory/collect_stopped_body(module: map) -> map
@@ -186,7 +194,7 @@ verb native_memory/collect_stopped_body(module: map) -> map
   builder = native_gen/do_call(builder, "memory_sweep", [heap, native_gen/ref(builder, "memory_true")])
   builder = native_memory/reset_workers(builder, heap)
   builder = native_gen/write(builder, native_gen/field(builder, heap, "pressure"), native_gen/ref(builder, "memory_false"))
-  builder = native_memory/update_collection_limit(builder, heap)
+  builder = native_gen/write(builder, native_gen/field(builder, heap, "collection_limit"), native_gen/call(builder, "memory_collection_target", [heap]))
   builder = native_gen/write(builder, native_gen/field(builder, heap, "copied"),
     native_gen/add(native_gen/read(native_gen/field(builder, heap, "copied")),
       native_gen/read(native_gen/field(builder, collection, "copied"))))
@@ -289,7 +297,7 @@ verb native_memory/sweep_body(module: map) -> map
 end
 
 verb native_memory/collection(input: map) -> map
-  let context: map = input
+  let context: map = native_memory/collection_target(input)
   let bytes: list = native_memory/pointer(:U8)
   let object: list = native_memory/record_pointer("MemoryObject")
   let page: list = native_memory/record_pointer("MemoryPage")

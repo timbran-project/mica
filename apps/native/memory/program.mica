@@ -280,6 +280,8 @@ verb native_memory/context(input: map) -> map
   context = native_memory/declare(context, "memory_nursery_allocate", bytes,
     [["worker", worker, :Borrow], ["size", :U64, :Value], ["layout", :U64, :Value]],
     [:ReadMemory, :WriteMemory], :Gc, "")
+  context = native_memory/declare(context, "memory_collection_target", :U64,
+    [["heap", heap, :Borrow]], [:ReadMemory], :Value, "")
   context = native_memory/declare(context, "memory_has_capacity", :Bool,
     [["heap", heap, :Borrow], ["size", :U64, :Value]], [:ReadMemory], :Value, "")
   context = native_memory/declare(context, "memory_control_deny", :Void,

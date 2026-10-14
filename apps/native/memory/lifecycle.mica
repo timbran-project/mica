@@ -17,6 +17,15 @@ verb native_memory/find_registered_link(record: string, first: string, sought: s
       native/set_statement("link", native/field_pointer_expression("candidate", "next"))])]
 end
 
+// Capacity changes and worker admission can reduce the room for managed pages.
+// Clamp an existing trigger without postponing collection that is already due.
+verb native_memory/clamp_collection_limit() -> list
+  return [
+    native/let_call("collection_target", :U64, "memory_collection_target", ["heap"]),
+    native/when_statement(native/binary_expression(:Less, "collection_target", native_memory/field(:U64, "heap", "collection_limit")), [
+      native_memory/store(:U64, "heap", "collection_limit", "collection_target")])]
+end
+
 verb native_memory/lifecycle(input: map) -> map
   let context: map = input
   let bytes: list = native_memory/pointer(:U8)
@@ -76,7 +85,8 @@ verb native_memory/lifecycle(input: map) -> map
     native/when_statement(native/binary_expression(:Less, "limit", "used"), failed),
     native/let_statement("remaining", :U64, native/binary_expression(:Subtract, "limit", "used")),
     native/when_statement(native/binary_expression(:Less, "remaining", native_memory/field(:U64, "heap", "nursery_bytes")), failed),
-    native_memory/store(:U64, "heap", "capacity_limit", "limit"), @success])
+    native_memory/store(:U64, "heap", "capacity_limit", "limit"),
+    @native_memory/clamp_collection_limit(), @success])
   // Like roots, controls borrow native frames for a strict dynamic extent.
   // The caller must pop before that frame returns; callbacks cannot relocate.
   context = native/define_function(context, "memory_control_push", [
@@ -135,6 +145,7 @@ verb native_memory/lifecycle(input: map) -> map
       native/let_statement("adopted", bytes, native/binary_expression(:Adopt, "slot", "nursery"))]),
     native_memory/store(:U64, "worker", "capacity", "capacity"),
     native_memory/store(:U64, "heap", "nursery_bytes", native/typed_expression(:U64, native/binary_expression(:Add, native_memory/field(:U64, "heap", "nursery_bytes"), "capacity"))),
+    @native_memory/clamp_collection_limit(),
     native_memory/store_root(heap, "worker", "heap", native/typed_expression(heap, native/manage_expression("heap"))),
     native_memory/store_root(worker, "worker", "next", native_memory/root(worker, "heap", "workers")),
     native_memory/store_root(worker, "heap", "workers", native/typed_expression(worker, native/manage_expression("worker"))),

@@ -511,6 +511,48 @@ static void capacity_admission(void) {
     assert(mica_memory_heap_release(&heap));
 }
 
+static void collection_preserves_capacity_headroom(void) {
+    const uint64_t capacity = 2 * 1024 * 1024;
+    struct mica_MemoryHeap heap = {0};
+    struct mica_MemoryWorker worker = {0}, other = {0};
+    struct mica_MemoryRoot root = {0};
+    assert(mica_memory_heap_init(&heap, mica_memory_test_trace));
+    assert(mica_memory_set_capacity(&heap, capacity));
+    assert(mica_memory_worker_init(&worker, &heap, 4096));
+    assert(mica_memory_enter(&worker) && mica_memory_root_push(&worker, &root));
+    root.f_pointer = mica_memory_allocate(&worker, 1200000, 0);
+    assert(root.f_pointer);
+    memset(root.f_pointer, 0x63, 1200000);
+    assert(mica_memory_safepoint(&worker, true));
+    assert(heap.f_allocated > capacity / 2);
+    assert(heap.f_collection_limit < capacity - heap.f_nursery_bytes);
+
+    // Lowering a capacity must also lower a previously larger growth trigger.
+    assert(mica_memory_set_capacity(&heap, 8 * capacity));
+    assert(mica_memory_safepoint(&worker, true));
+    assert(heap.f_collection_limit > capacity);
+    assert(mica_memory_set_capacity(&heap, capacity));
+    assert(heap.f_collection_limit < capacity - heap.f_nursery_bytes);
+
+    // An idle worker's reserved nursery reduces the capacity for managed pages.
+    uint64_t before = heap.f_collection_limit;
+    assert(mica_memory_worker_init(&other, &heap, 524288));
+    assert(heap.f_collection_limit < before);
+    uint64_t collections = heap.f_collections;
+    for (unsigned i = 0; i < 100; ++i) {
+        assert(mica_memory_allocate(&worker, 65536, 0));
+        assert(mica_memory_safepoint(&worker, false));
+        assert(root.f_pointer[0] == 0x63 && root.f_pointer[1199999] == 0x63);
+    }
+    assert(heap.f_collections > collections);
+    assert(mica_memory_worker_release(&other));
+    assert(mica_memory_root_pop(&worker, &root));
+    assert(mica_memory_safepoint(&worker, true));
+    assert(!heap.f_allocated && !heap.f_retained);
+    assert(mica_memory_leave(&worker) && mica_memory_worker_release(&worker));
+    assert(mica_memory_heap_release(&heap));
+}
+
 static void bounded_collection_and_sharing(void) {
     struct mica_MemoryHeap heap = {0};
     struct mica_MemoryWorker worker = {0};
@@ -579,6 +621,7 @@ static void concurrent_capacity_admission(void) {
 
 int main(void) {
     capacity_admission();
+    collection_preserves_capacity_headroom();
     bounded_collection_and_sharing();
     concurrent_capacity_admission();
     relocation_and_cycles();
