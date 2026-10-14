@@ -1254,6 +1254,24 @@ pub fn workloads() -> Vec<(String, Vec<Case>)> {
             ],
         ));
     }
+    // Retain the source map while changing one value. Larger maps expose the
+    // cost of copying a flat map versus copying a persistent tree path.
+    for (name, length) in [("map_set_1024", 1024), ("map_set_8192", 8192)] {
+        let entries = (0..length)
+            .map(|key| (Input::Int(key), Input::Int(key)))
+            .collect::<Vec<_>>();
+        workloads.push((
+            name,
+            [0, length / 2, length - 1, length]
+                .into_iter()
+                .map(|key| Case {
+                    op: Operation::MapSet,
+                    left: Input::Map(entries.clone()),
+                    right: Input::List(vec![Input::Int(key), Input::Int(-1)]),
+                })
+                .collect(),
+        ));
+    }
     for (name, op) in [
         ("list_index", Operation::ListGet),
         ("list_slice", Operation::ListSlice),
