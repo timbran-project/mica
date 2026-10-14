@@ -605,7 +605,23 @@ CC=clang cargo test --release -p mica-runtime --test native_codegen \
 
 Generation and sanitizer compilation take several minutes, so ordinary test runs exclude this check.
 This check starts after literal preparation and exception lowering. It uses supplied runtime declarations and predeclared continuation entry points.
-Native execution of the complete `native_source/compile` pipeline, live installation, and a self-hosting rebuild remain separate acceptance gates.
+The complete compilation check runs `native_source/compile` on the generated runtime.
+Inputs contain raw source text, method identities, and runtime declarations.
+The compiler parses source, prepares literals, lowers exceptions, generates helpers, declares entries, and builds native function bodies.
+It receives no application register descriptions, cached analysis, or precompiled application bodies.
+
+The two cases above must produce exactly the same IR as Rust-hosted Mica.
+Validation restores the real runtime bodies before checking whole-program effects and ownership.
+Each case runs with ordinary and forced collection under sanitizers.
+Both bootstrap tiers must produce identical C artifacts for the compiler.
+The compiler uses separate C translation units. The harness compiles two units concurrently, then links them for sanitizer execution.
+
+```sh
+CC=clang cargo test --release -p mica-runtime --test native_codegen \
+  native_source_executes_the_compilation_pipeline -- --ignored --nocapture
+```
+
+This check ends at native IR. Runtime generation, linking and executing the compiled output, live installation, and a self-hosting rebuild remain separate acceptance gates.
 
 ## Remaining integration
 
@@ -613,9 +629,9 @@ The broader integration gate is in `sketches/NATIVE_TASKS_AND_MEMORY_DESIGN.md`,
 `TaskServices` defines entry slots for emission, mailbox sends, subscriptions, and child requests.
 The service context has stable storage and owns roots for its managed state.
 The generated spawn service admits children and delivers their IDs to waiting parents.
-General source lowering, language-level method installation, transactional buffers, and live compiler qualification remain unfinished.
+Language-level method installation, transactional buffers, and live compiler qualification remain unfinished.
 Method facts and compiled bodies can already be staged in one kernel transaction; `task_invoke` resolves and executes that view.
-Source lowering for catch patterns, guards, and structured exits still needs integration with the handler primitives.
+Catch patterns and guards still need explicit conformance coverage alongside the exception and structured-exit fixtures.
 
 Entries explicitly charge logical work through `task_poll`.
 The current budget persists across retries and waits.

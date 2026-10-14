@@ -4463,6 +4463,36 @@ fn native_source_supports_backend_dependencies() {
     );
 }
 
+fn native_compilation_cases() -> [(&'static str, &'static str); 2] {
+    [
+        ("return 42", "[]"),
+        (
+            r#"
+verb lowering_subject(value)
+  let adjust = fn(amount) => value + amount
+  let total = 0
+  for index in 0..4
+    if index == 2
+      continue
+    end
+    total = total + adjust(index)
+  end
+  try
+    require value >= 0
+    commit()
+  catch E_INVARG as problem
+    return [:failed, problem.code]
+  finally
+    total = total + 1
+  end
+  return [total, {:value -> value}, adjust]
+end
+"#,
+            "[[810, 811]]",
+        ),
+    ]
+}
+
 #[test]
 #[ignore = "native backend bootstrap and sanitizer compilation take several minutes"]
 fn native_source_executes_register_lowering() {
@@ -4512,38 +4542,10 @@ end
     load_native_source_compiler(&mut oracle);
     oracle.run_filein(entry).unwrap();
     let mut checks = String::new();
-    for source in [
-        "return 42",
-        r#"
-verb lowering_subject(value)
-  let adjust = fn(amount) => value + amount
-  let total = 0
-  for index in 0..4
-    if index == 2
-      continue
-    end
-    total = total + adjust(index)
-  end
-  try
-    require value >= 0
-    commit()
-  catch E_INVARG as problem
-    return [:failed, problem.code]
-  finally
-    total = total + 1
-  end
-  return [total, {:value -> value}, adjust]
-end
-"#,
-    ] {
+    for (source, method_ids) in native_compilation_cases() {
         // Retain runtime declarations and literal layout, but no pre-lowered
         // function bodies. The generated runtime reconstructs analysis, native
         // bodies, continuation wrappers, roots, and source annotations.
-        let method_ids = if source.starts_with("return") {
-            "[]"
-        } else {
-            "[[810, 811]]"
-        };
         let input = eval(
             &mut oracle,
             &format!(
@@ -4635,6 +4637,171 @@ return input
     check_native_source_fixture_with_flags(
         &format!(
             "{generated}\n{memory}\n{tasks}\n{}\n{}\n{fixture}",
+            include_str!("../../../native/platform/allocation.c"),
+            include_str!("../../../native/platform/mutex.c")
+        ),
+        &["-O0", "-g0"],
+    );
+}
+
+#[test]
+#[ignore = "large native compiler bootstrap; run explicitly"]
+fn native_source_executes_the_compilation_pipeline() {
+    let entry = r#"
+verb native_compile_fixture(input: map) -> map
+  let module: map = native_source/compile(input[:module], "compiled", input[:source], {}, {}, input[:method_ids])
+  let state: map = module[:state]
+  return state
+end
+"#;
+    let mut library = native_backend_library();
+    library.push(entry);
+    let inventory = native_source_dependency_inventory(&library, &["emit_source"]);
+    let dependencies = native_source_dependency_closure_from_inventory(
+        &library,
+        "native_compile_fixture",
+        &inventory,
+    );
+    let source = format!("{entry}\n{}", dependencies.replace(entry.trim(), ""));
+    let method_ids = format!(
+        "[{}]",
+        source
+            .lines()
+            .filter(|line| line.starts_with("verb "))
+            .enumerate()
+            .map(|(index, _)| format!("[{}, {}]", 10000 + index, 20000 + index))
+            .collect::<Vec<_>>()
+            .join(",")
+    );
+    let mut oracle = runner(true).with_task_limits(TaskLimits {
+        instruction_budget: 2_000_000_000,
+        max_call_depth: 256,
+        ..TaskLimits::default()
+    });
+    load_native_kernel(&mut oracle, true);
+    load_native_source_compiler(&mut oracle);
+    oracle.run_filein(entry).unwrap();
+    oracle
+        .run_filein(
+            r#"
+verb native_check_compilation_fixture(input: map)
+  let state = input
+  let runtime = native_tasks/definitions()[:state]
+  // Restore the real bodies for whole-program effect and ownership checking.
+  // Runtime declarations allow wider effects than their implementations use.
+  state[:foreign] = runtime[:foreign]
+  for table in [:locals, :blocks, :instructions, :terminators, :annotations]
+    state[table] = [@runtime[table], @state[table]]
+  end
+  return native/check(state)
+end
+"#,
+        )
+        .unwrap();
+    // A compiler receives the runtime ABI as declarations. No application
+    // syntax, register descriptions, constants, analysis, or bodies are prepared
+    // by the bootstrap host for these inputs.
+    let runtime = eval(
+        &mut oracle,
+        r#"
+let module = native_tasks/definitions()
+for table in [:locals, :blocks, :instructions, :terminators, :annotations]
+  module[:state][table] = []
+end
+module[:state][:foreign] = [[row[0]] for row in module[:state][:functions]]
+let declarations = {}
+for key in [:state, :functions, :bindings, :constants, :function_values, :call_shapes]
+  declarations[key] = module[key]
+end
+return declarations
+"#,
+    );
+    let mut checks = String::new();
+    for (source, ids) in native_compilation_cases() {
+        let input = Value::map([
+            (Value::symbol(Symbol::intern("module")), runtime.clone()),
+            (
+                Value::symbol(Symbol::intern("source")),
+                Value::string(source),
+            ),
+            (
+                Value::symbol(Symbol::intern("method_ids")),
+                eval(&mut oracle, &format!("return {ids}")),
+            ),
+        ]);
+        let mut request = SourceRunner::root_source_request("");
+        request.input = TaskInput::Invocation {
+            selector: Symbol::intern("native_compile_fixture"),
+            roles: vec![(Symbol::intern("input"), input.clone())],
+        };
+        let submitted = oracle.submit_invocation(request).unwrap();
+        let TaskOutcome::Complete {
+            value: expected, ..
+        } = submitted.outcome
+        else {
+            panic!("compiler oracle: {:?}", submitted.outcome);
+        };
+        let mut validation = SourceRunner::root_source_request("");
+        validation.input = TaskInput::Invocation {
+            selector: Symbol::intern("native_check_compilation_fixture"),
+            roles: vec![(Symbol::intern("input"), expected.clone())],
+        };
+        let validated = oracle.submit_invocation(validation).unwrap();
+        assert!(
+            matches!(validated.outcome, TaskOutcome::Complete { .. }),
+            "compiled IR validation: {:?}",
+            validated.outcome
+        );
+        let construction = source_encoded_value(&input, "argument");
+        let expectation = source_encoded_value(&expected, "expected");
+        eprintln!(
+            "native compiler fixture: {} input C bytes, {} expected IR C bytes",
+            construction.len(),
+            expectation.len()
+        );
+        checks.push_str(&format!(
+            "{{ {construction}\nmica_value_root_set(&input, argument.f_value);\n\
+             struct mica_MemoryRoot expected_root = {{0}};\n\
+             assert(mica_memory_root_push(worker, &expected_root));\n\
+             {expectation}\nmica_value_root_set(&expected_root, expected.f_value);\n\
+             for (unsigned collect = 0; collect < 2; ++collect) {{\n\
+               run_frontend(worker, kernel, code, runtime, &input, &output, 500000000, collect != 0);\n\
+               struct mica_IntResult compared = mica_value_compare(mica_value_root_get(&output), mica_value_root_get(&expected_root));\n\
+               assert(compared.f_ok && compared.f_number == 0);\n\
+             }}\nassert(mica_memory_root_pop(worker, &expected_root));\n}}\n"
+        ));
+    }
+    let fixture = include_str!("../../../apps/native/compiler/frontend_tests.c")
+        .replace("/* FRONTEND_CONFORMANCE_CASES */", &checks);
+    let (generated, memory, tasks) = thread::scope(|scope| {
+        let [first, second] = [true, false].map(|tier| {
+            let source = &source;
+            let method_ids = &method_ids;
+            scope.spawn(move || {
+                // The complete compiler closure is nearly three times the
+                // register-lowering library. Keep construction at its proven
+                // bound, and give validation plus C emission a separate limit.
+                let (runner, state) = prepare_native_source_example(tier, source, method_ids, &[]);
+                emit_native_source_artifacts(
+                    runner,
+                    "native/emit_module",
+                    vec![
+                        (Symbol::intern("state"), state),
+                        (Symbol::intern("spelling"), Value::string("compiler")),
+                    ],
+                    60_000_000_000,
+                )
+            })
+        });
+        let first = first.join().unwrap();
+        let second = second.join().unwrap();
+        assert!(first == second, "compiler differs between bootstrap tiers");
+        first
+    });
+    check_native_module_fixture(
+        &generated,
+        &format!(
+            "{memory}\n{tasks}\n{}\n{}\n{fixture}",
             include_str!("../../../native/platform/allocation.c"),
             include_str!("../../../native/platform/mutex.c")
         ),
