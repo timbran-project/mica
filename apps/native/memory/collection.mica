@@ -150,6 +150,8 @@ end
 
 // Allow page storage to double, subject to the heap capacity. Keep half the
 // remaining capacity available for allocations before the next safepoint.
+// Growth occurs in whole pages: a fractional page of headroom cannot admit
+// another size class. Reserve a page, or half the capacity for smaller heaps.
 verb native_memory/collection_target(module: map) -> map
   let builder: map = native_gen/context(module, "memory_collection_target")
   let heap: map = native_gen/ref(builder, "heap")
@@ -165,6 +167,12 @@ verb native_memory/collection_target(module: map) -> map
   builder = native_gen/when(with_available, native_gen/less(available, nursery), fn(full) => native_gen/return_value(full, allocated))
   builder = native_gen/assign(builder, available, native_gen/subtract(available, nursery))
   builder = native_gen/when(builder, native_gen/less(available, allocated), fn(full) => native_gen/return_value(full, allocated))
+  let half: map = native_gen/divide(available, native_gen/ref(builder, "memory_n2"))
+  let [reserve: map, reserved: map] = native_gen/bind(builder, "page_reserve", native_gen/add(
+    native_gen/ref(builder, "memory_page_size"), native_gen/sizeof([:Record, "MemoryPage"])))
+  builder = native_gen/when(reserved, native_gen/less(half, reserve), fn(small) => native_gen/assign(small, reserve, half))
+  let page_ceiling: map = native_gen/subtract(available, reserve)
+  builder = native_gen/when(builder, native_gen/less(page_ceiling, limit), fn(bounded) => native_gen/assign(bounded, limit, page_ceiling))
   let ceiling: map = native_gen/add(allocated, native_gen/divide(native_gen/subtract(available, allocated), native_gen/ref(builder, "memory_n2")))
   builder = native_gen/when(builder, native_gen/less(ceiling, limit), fn(bounded) => native_gen/assign(bounded, limit, ceiling))
   let result: map = native_gen/finish(module, native_gen/return_value(builder, limit))

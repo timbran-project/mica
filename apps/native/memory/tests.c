@@ -553,6 +553,39 @@ static void collection_preserves_capacity_headroom(void) {
     assert(mica_memory_heap_release(&heap));
 }
 
+static void collection_before_page_growth(void) {
+    const uint64_t page = 65536 + sizeof(struct mica_MemoryPage);
+    struct mica_MemoryHeap heap = {0};
+    struct mica_MemoryWorker worker = {0};
+    struct mica_MemoryRoot first = {0}, second = {0};
+    assert(mica_memory_heap_init(&heap, mica_memory_test_trace));
+    assert(mica_memory_set_capacity(&heap, 2 * page + page / 2));
+    assert(mica_memory_worker_init(&worker, &heap, 0));
+    assert(mica_memory_enter(&worker));
+    assert(mica_memory_root_push(&worker, &first));
+    assert(mica_memory_root_push(&worker, &second));
+    first.f_pointer = mica_memory_allocate(&worker, 512, 0);
+    second.f_pointer = mica_memory_allocate(&worker, 2048, 0);
+    assert(first.f_pointer && second.f_pointer);
+    memset(second.f_pointer, 0x39, 2048);
+    assert(mica_memory_safepoint(&worker, true));
+    assert(heap.f_allocated == 2 * page);
+
+    // The next size class needs a whole page. Reclaim the released class at
+    // the safepoint, before that page request reaches the hard capacity.
+    first.f_pointer = NULL;
+    assert(mica_memory_safepoint(&worker, false));
+    first.f_pointer = mica_memory_allocate(&worker, 4096, 0);
+    assert(first.f_pointer && !heap.f_pressure);
+    assert(second.f_pointer[0] == 0x39 && second.f_pointer[2047] == 0x39);
+    assert(mica_memory_root_pop(&worker, &second));
+    assert(mica_memory_root_pop(&worker, &first));
+    assert(mica_memory_safepoint(&worker, true));
+    assert(!heap.f_allocated && !heap.f_retained);
+    assert(mica_memory_leave(&worker) && mica_memory_worker_release(&worker));
+    assert(mica_memory_heap_release(&heap));
+}
+
 static void bounded_collection_and_sharing(void) {
     struct mica_MemoryHeap heap = {0};
     struct mica_MemoryWorker worker = {0};
@@ -622,6 +655,7 @@ static void concurrent_capacity_admission(void) {
 int main(void) {
     capacity_admission();
     collection_preserves_capacity_headroom();
+    collection_before_page_growth();
     bounded_collection_and_sharing();
     concurrent_capacity_admission();
     relocation_and_cycles();
