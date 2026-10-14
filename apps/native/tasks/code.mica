@@ -149,6 +149,14 @@ verb native_code/program(input: map) -> map
   let registry: list = ["registry", native_tasks/pointer("CodeRegistry"), :Borrow]
   let worker: list = ["worker", native_memory/record_pointer("MemoryWorker"), :Borrow]
   let code: list = ["code", native_tasks/pointer("CodeRef"), :Gc]
+  // Constant pools belong to the rooted code reference. Reading a slot does
+  // not allocate or relocate; the caller roots the value before any safepoint.
+  module = native_memory/declare(module, "task_code_constant", native_value/word(),
+    [code, ["position", :U64, :Value]], [:ReadMemory], :Gc, "")
+  let reader: map = native_gen/context(module, "task_code_constant")
+  module = native_gen/finish(module, native_gen/return_value(reader,
+    native_query/cell(reader, native_kernel/load_field(reader, native_gen/ref(reader, "code"), "constants"),
+      native_gen/ref(reader, "position"))))
   for name in ["init", "close", "release"]
     module = native_tasks/declare(module, string_concat("code_", name), :U64, [registry, worker])
   end

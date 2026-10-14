@@ -5,7 +5,8 @@
 // Frames and pending transfers are immutable: a retry can reuse the checkpoint
 // after a speculative handler or finalizer has advanced the current image.
 verb native_handlers/current(builder: map) -> map
-  let result: map = native_tasks/saved(builder, "current", native_tasks/pointer("Image"))
+  let result: map = native_gen/call(builder, "task_current_image", [native_tasks/attempt(builder)])
+  result[:scope_root] = native_tasks/slot(builder, "current")
   return result
 end
 verb native_handlers/copy_image(builder: map, source: map, fields: map) -> map

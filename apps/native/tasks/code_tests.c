@@ -18,7 +18,56 @@ static struct mica_TaskCodeRef *code_reference(struct mica_MemoryRoot *root) {
     return (void *)root->f_pointer;
 }
 
+static void code_readers_follow_collection(void) {
+    struct mica_MemoryHeap heap = {0};
+    struct mica_MemoryWorker worker = {0};
+    struct mica_MemoryRoot images[2] = {0};
+    struct mica_TaskAttempt attempt = {0};
+    assert(mica_task_heap_init(&heap));
+    assert(mica_memory_worker_init(&worker, &heap, 4096));
+    assert(mica_memory_enter(&worker));
+    for (unsigned index = 0; index < 2; ++index) {
+        assert(mica_memory_root_push(&worker, &images[index]));
+        uint8_t text[256];
+        memset(text, 'a' + index, sizeof(text));
+        struct mica_ValueResult string = mica_value_string(&worker, text, sizeof(text));
+        assert(string.f_ok);
+        mica_type_Value values[] = {string.f_value, integer(index)};
+        struct mica_ValueResult constants = mica_value_list(&worker, values, 2);
+        assert(constants.f_ok);
+        struct mica_TaskCodeRef *code = mica_task_new_CodeRef(&worker, NULL, NULL, constants.f_value, NULL);
+        assert(code);
+        images[index].f_pointer = (void *)mica_task_new_Image(&worker, mica_task_test_entry,
+            code, integer(0), integer(0), integer(0), NULL, NULL, 0, NULL, NULL);
+        assert(images[index].f_pointer);
+    }
+    assert(mica_memory_root_push(&worker, &attempt.f_current));
+    assert(mica_task_current_image(&attempt) == NULL);
+    for (unsigned round = 0; round < 4; ++round) {
+        for (unsigned index = 0; index < 2; ++index) {
+            attempt.f_current.f_pointer = images[index].f_pointer;
+            assert(mica_memory_safepoint(&worker, true));
+            struct mica_TaskImage *current = mica_task_current_image(&attempt);
+            assert(current == (void *)images[index].f_pointer);
+            assert(mica_task_code_constant(current->f_code, 1) == integer(index));
+            struct mica_HeapStringResult string = mica_value_as_string(mica_task_code_constant(current->f_code, 0));
+            assert(string.f_ok && string.f_header->f_length == 256);
+            for (unsigned position = 0; position < 256; ++position)
+                assert(string.f_header->f_data[position] == 'a' + index);
+        }
+    }
+    assert(mica_memory_root_pop(&worker, &attempt.f_current));
+    assert(mica_memory_root_pop(&worker, &images[1]));
+    assert(mica_memory_root_pop(&worker, &images[0]));
+    assert(mica_memory_safepoint(&worker, true));
+    assert(heap.f_retained == 0);
+    assert(mica_memory_leave(&worker));
+    assert(mica_memory_worker_release(&worker));
+    assert(mica_memory_heap_release(&heap));
+}
+
 static void code_registry(void) {
+    code_readers_follow_collection();
     struct mica_MemoryHeap heap = {0};
     struct mica_MemoryWorker worker = {0};
     struct mica_TaskCodeRegistry registry = {0}, dependency_registry = {0};

@@ -47,8 +47,7 @@ verb native_source/literal(builder: map, value) -> map
   else
     code = native_kernel/load_field(builder, native_handlers/current(builder), "code")
   end
-  let constants: map = native_kernel/load_field(builder, code, "constants")
-  let result: map = native_query/cell(builder, constants, native_source/number(builder, index[value]))
+  let result: map = native_gen/call(builder, "task_code_constant", [code, native_source/number(builder, index[value])])
   return result
 end
 verb native_source/operand(builder: map, operand: list) -> map

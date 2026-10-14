@@ -43,6 +43,13 @@ verb native_tasks/images(input: map) -> map
   let worker: list = ["worker", native_memory/record_pointer("MemoryWorker"), :Borrow]
   let root: list = native_memory/record_pointer("MemoryRoot")
   let word: list = native_value/word()
+  // Reload from the attempt's root on every call. This reader cannot collect,
+  // so callers may use its result until their next relocating operation.
+  module = native_memory/declare(module, "task_current_image", native_tasks/pointer("Image"),
+    [["attempt", native_tasks/pointer("Attempt"), :Borrow]], [:ReadMemory], :Gc, "")
+  let reader: map = native_gen/context(module, "task_current_image")
+  module = native_gen/finish(module, native_gen/return_value(reader,
+    native_tasks/saved(reader, "current", native_tasks/pointer("Image"))))
   module = native_tasks/declare(module, "stage", :U64, [worker, ["effects", root, :Borrow],
     ["kind", :U64, :Value], ["target", word, :Gc], ["payload", word, :Gc]])
   module = native_tasks/declare(module, "emit", :U64, [worker,
