@@ -3,6 +3,7 @@
 
 #include <assert.h>
 #include <pthread.h>
+#include <stdio.h>
 #include <string.h>
 
 static mica_type_Value checked(struct mica_ValueResult result) {
@@ -364,7 +365,144 @@ static void function_graph(void) {
     assert(mica_memory_heap_release(&heap));
 }
 
+static unsigned map_tree_shape(const struct mica_HeapMap *node) {
+    assert(node->f_count <= 16);
+    if (node->f_leaf) {
+        assert(node->f_length == node->f_count && !node->f_branches);
+        for (uint64_t i = 1; i < node->f_count; ++i)
+            assert(mica_value_compare(node->f_data[i-1].f_key, node->f_data[i].f_key).f_number < 0);
+        return 0;
+    }
+    assert(node->f_count && !node->f_data);
+    uint64_t total = 0;
+    unsigned depth = map_tree_shape(node->f_branches[0].f_child);
+    for (uint64_t i = 0; i < node->f_count; ++i) {
+        const struct mica_MapBranchEntry *entry = &node->f_branches[i];
+        assert(map_tree_shape(entry->f_child) == depth);
+        assert(mica_map_first(entry->f_child) == entry->f_key);
+        if (i) assert(mica_value_compare(node->f_branches[i-1].f_key, entry->f_key).f_number < 0);
+        total += entry->f_child->f_length;
+        assert(entry->f_end == total);
+    }
+    assert(total == node->f_length);
+    return depth + 1;
+}
+
+static bool map_allocation_limit(uint8_t *context, uint64_t bytes, uint64_t steps) {
+    (void)steps;
+    unsigned *remaining = (void *)context;
+    return !bytes || --*remaining != 0;
+}
+
+static void persistent_maps(void) {
+    struct mica_MemoryHeap heap = {0};
+    struct mica_MemoryWorker worker = {0};
+    struct mica_MemoryRoot original = {0}, current = {0}, snapshot = {0}, payload = {0};
+    assert(mica_value_heap_init(&heap));
+    assert(mica_memory_worker_init(&worker, &heap, 65536));
+    assert(mica_memory_enter(&worker));
+    assert(mica_memory_root_push(&worker, &original));
+    assert(mica_memory_root_push(&worker, &current));
+    assert(mica_memory_root_push(&worker, &snapshot));
+    assert(mica_memory_root_push(&worker, &payload));
+    uint8_t text[256];
+    memset(text, 'p', sizeof(text));
+    mica_value_root_set(&payload, checked(mica_value_string(&worker, text, sizeof(text))));
+    struct mica_ValueMapEntry entries[1024];
+    for (unsigned i = 0; i < 1024; ++i)
+        entries[i] = (struct mica_ValueMapEntry){integer(i), mica_value_root_get(&payload)};
+    mica_value_root_set(&original, checked(mica_value_map(&worker, entries, 1024)));
+    original.f_pointer = mica_memory_share(&worker, original.f_pointer);
+    assert(original.f_pointer);
+    for (unsigned failure = 1; failure <= 3; ++failure) {
+        unsigned remaining = failure;
+        struct mica_MemoryControl control = {.f_context = (void *)&remaining, .f_check = map_allocation_limit};
+        worker.f_control = &control;
+        assert(!mica_value_map_set(&worker, mica_value_root_get(&original), integer(1023), integer(77)).f_ok);
+        worker.f_control = NULL;
+        assert(mica_value_as_string(mica_value_map_get(mica_value_root_get(&original), integer(1023)).f_value).f_ok);
+        collect(&worker);
+    }
+    mica_value_root_set(&current, checked(mica_value_map_set(&worker, mica_value_root_get(&original), integer(1023), integer(77))));
+    for (unsigned round = 0; round < 2; ++round) {
+        const struct mica_HeapMap *a = mica_value_as_map(mica_value_root_get(&original)).f_header;
+        const struct mica_HeapMap *b = mica_value_as_map(mica_value_root_get(&current)).f_header;
+        assert(a != b && a->f_branches[0].f_child == b->f_branches[0].f_child);
+        map_tree_shape(a);
+        map_tree_shape(b);
+        collect(&worker);
+    }
+    for (unsigned i = 0; i < 512; ++i) {
+        mica_value_root_set(&current, checked(mica_value_map_set(&worker, mica_value_root_get(&current), integer(-1-(int64_t)i), mica_value_root_get(&payload))));
+        if (i == 127) mica_value_root_set(&snapshot, mica_value_root_get(&current));
+        if (i == 255) {
+            current.f_pointer = mica_memory_share(&worker, current.f_pointer);
+            assert(current.f_pointer);
+        }
+        if (i % 31 == 0) collect(&worker);
+    }
+    collect(&worker);
+    mica_type_Value a = mica_value_root_get(&original), b = mica_value_root_get(&current);
+    mica_type_Value saved = mica_value_root_get(&snapshot);
+    map_tree_shape(mica_value_as_map(b).f_header);
+    assert(mica_value_map_length(a).f_number == 1024);
+    assert(mica_value_map_length(b).f_number == 1536);
+    assert(mica_value_map_length(saved).f_number == 1152);
+    assert(!mica_value_map_get(a, integer(-1)).f_ok);
+    assert(!mica_value_map_get(saved, integer(-129)).f_ok);
+    for (int64_t key = -512; key < 1024; ++key) {
+        struct mica_ValueMapEntry entry = mica_value_map_entry(b, (uint64_t)(key+512));
+        assert(entry.f_key == integer(key));
+        assert(mica_value_map_get(b, integer(key)).f_value == entry.f_value);
+        if (key == 1023) assert(entry.f_value == integer(77));
+        else {
+            const struct mica_HeapString *string = mica_value_as_string(entry.f_value).f_header;
+            assert(string && string->f_length == sizeof(text) && !memcmp(string->f_data, text, sizeof(text)));
+        }
+    }
+    mica_type_Value unchanged = mica_value_map_get(b, integer(0)).f_value;
+    assert(checked(mica_value_map_set(&worker, b, integer(0), unchanged)) == b);
+    assert(mica_value_as_string(mica_value_map_get(a, integer(1023)).f_value).f_ok);
+    // Managed separator keys must relocate with their leaf keys. Replacing
+    // an equal key preserves the replacement's representation in every level.
+    mica_value_root_set(&current, checked(mica_value_map(&worker, NULL, 0)));
+    for (unsigned i = 0; i < 300; ++i) {
+        char name[16];
+        int length = snprintf(name, sizeof(name), "key-%03u", i);
+        assert(length > 0 && (size_t)length < sizeof(name));
+        mica_type_Value key = checked(mica_value_string(&worker, (const uint8_t *)name, (uint64_t)length));
+        mica_value_root_set(&current, checked(mica_value_map_set(&worker, mica_value_root_get(&current), key, integer(i))));
+        if (i % 17 == 0) collect(&worker);
+    }
+    current.f_pointer = mica_memory_share(&worker, current.f_pointer);
+    assert(current.f_pointer);
+    mica_value_root_set(&snapshot, mica_value_root_get(&current));
+    mica_type_Value replacement = checked(mica_value_string(&worker, (const uint8_t *)"key-000", 7));
+    mica_value_root_set(&current, checked(mica_value_map_set(&worker, mica_value_root_get(&current), replacement, integer(0))));
+    assert(mica_value_map_entry(mica_value_root_get(&current), 0).f_key == replacement);
+    assert(mica_value_map_entry(mica_value_root_get(&snapshot), 0).f_key != replacement);
+    collect(&worker);
+    map_tree_shape(mica_value_as_map(mica_value_root_get(&current)).f_header);
+    assert(mica_value_compare(mica_value_root_get(&current), mica_value_root_get(&snapshot)).f_number == 0);
+    for (unsigned i = 0; i < 300; ++i) {
+        char name[16];
+        int length = snprintf(name, sizeof(name), "key-%03u", i);
+        assert(length > 0 && (size_t)length < sizeof(name));
+        mica_type_Value key = checked(mica_value_string(&worker, (const uint8_t *)name, (uint64_t)length));
+        assert(mica_value_map_get(mica_value_root_get(&current), key).f_value == integer(i));
+    }
+    assert(mica_memory_root_pop(&worker, &payload));
+    assert(mica_memory_root_pop(&worker, &snapshot));
+    assert(mica_memory_root_pop(&worker, &current));
+    assert(mica_memory_root_pop(&worker, &original));
+    collect(&worker);
+    assert(heap.f_retained == 0);
+    assert(mica_memory_leave(&worker) && mica_memory_worker_release(&worker));
+    assert(mica_memory_heap_release(&heap));
+}
+
 int main(void) {
+    persistent_maps();
     function_graph();
     bounded_value_tracing();
     value_graph();

@@ -2163,6 +2163,7 @@ const VALUE_SOURCES: &[&str] = &[
     include_str!("../../../apps/native/value/string_append.mica"),
     include_str!("../../../apps/native/value/string_search.mica"),
     include_str!("../../../apps/native/value/compare.mica"),
+    include_str!("../../../apps/native/value/map_nodes.mica"),
     include_str!("../../../apps/native/value/maps.mica"),
     include_str!("../../../apps/native/value/collections.mica"),
     include_str!("../../../apps/native/value/relations.mica"),
@@ -6065,6 +6066,11 @@ let values = [(), [] {}, none, true, false, 0, -36028797018963968, 3602879701896
   E_FAIL, error_code(:"strange code"), error(E_FAIL), error(E_FAIL, "bad", [1, 2]),
   error(E_FAIL, none, []), b"", b"AAH-_w==", [1, :two, [false]], {},
   {:a -> 1, :b -> [2, 3]}, [:b, :a] {[2, 1], [3, 4]}, 1..3, 1.._, from_literal("#123")[0][:value], from_literal("#123<[1]>")[0][:value]]
+let large = {}
+for key in 0..63
+  large[key] = [key, "café"]
+end
+values = [@values, large]
 let texts = [to_literal(value) for value in values]
 let roundtrips = [from_literal(to_literal(value)) == ok(value) for value in values]
 let failures = []

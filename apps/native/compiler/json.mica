@@ -134,44 +134,20 @@ verb native_json/key(builder: map, pairs: map, index: map) -> map
   let result: map = native_query/cell(builder, pairs, native_gen/multiply(index, native_gen/ref(builder, "two")))
   return result
 end
-verb native_json/key_order(builder: map, pairs: map, left: map, right: map) -> list
-  let [order: map, ready: map] = native_gen/checked_bind(builder, "order", native_gen/call(builder, "value_compare", [
-    native_json/key(builder, pairs, left), native_json/key(builder, pairs, right)]), "ok", fn(failed) => native_query/error(failed, "schema"))
-  return [native_gen/field(ready, order, "number"), ready]
-end
-// Sort positions, leaving keys and values in traced storage. During copying,
-// the map header exposes only initialized entries to a moving collection.
+// Insert in source order so duplicate keys retain their final value. The
+// persistent tree maintains key order while completed maps remain rooted.
 verb native_json/map_body(module: map) -> map
   let builder: map = native_queries/borrow_budget(native_gen/context(module, native_json/name(module, "map")))
   let pairs: map = native_roots/ref(builder, "pairs")
   let length: map = native_gen/divide(native_query/width(builder, pairs), native_gen/ref(builder, "two"))
-  let [positions: map, ordered: map, sorted: map] = native_ordering/positions_by(builder, length, fn(step, left, right)
-    let [order: map, ready: map] = native_json/key_order(step, pairs, left, right)
-    return [native_gen/negate(native_gen/less(native_gen/ref(ready, "int_zero"), order)), ready]
-  end)
-  let [header: map, entries: map, allocated: map] = native_memory/tail_storage(sorted, native_roots/worker(sorted), [:Record, "HeapMap"], [:Record, "ValueMapEntry"], length, "layout_map", fn(failed) => native_query/error(failed, "oom"))
-  builder = native_gen/store(allocated, header, native_gen/record(allocated, [:Record, "HeapMap"], {"data" -> entries, "length" -> native_gen/ref(allocated, "zero")}))
-  let [map: map, rooted: map] = native_roots/retain(builder, "map", header)
-  let [previous: map, initialized: map] = native_gen/bind(rooted, "previous", native_gen/ref(rooted, "zero"))
-  builder = native_gen/for_range(initialized, "entry", native_gen/ref(initialized, "zero"), length, fn(step, index)
+  let [empty: map, allocated: map] = native_query/value(builder, "value_map", [native_roots/worker(builder), native_gen/ref(builder, "null_map_entries"), native_gen/zero(:U64)])
+  let [map: map, rooted: map] = native_roots/retain(allocated, "map", empty)
+  builder = native_gen/for_range(rooted, "entry", native_gen/zero(:U64), length, fn(step, index)
     let polled: map = native_query/poll_interval(step, index)
-    let [position: map, loaded: map] = native_gen/bind(polled, "position", native_gen/load(native_gen/offset(positions, index)))
-    let [replace: map, ready: map] = native_gen/bind(loaded, "replace", native_gen/ref(loaded, "false"))
-    ready = native_gen/unless(ready, native_kernel/absent(index), fn(next)
-      let [order: map, compared: map] = native_json/key_order(next, pairs, previous, position)
-      return native_gen/assign(compared, replace, native_gen/equal(order, native_gen/ref(compared, "int_zero")))
-    end)
-    let count: map = native_kernel/load_field(ready, map, "length")
-    let [destination: map, positioned: map] = native_gen/bind(ready, "destination", count)
-    ready = native_gen/branch(positioned, replace,
-      fn(duplicate) => native_gen/assign(duplicate, destination, native_gen/subtract(count, native_gen/ref(duplicate, "one"))),
-      fn(fresh) => native_kernel/store_field(fresh, map, "length", native_gen/add(count, native_gen/ref(fresh, "one"))))
-    let value: map = native_query/cell(ready, pairs, native_gen/add(native_gen/multiply(position, native_gen/ref(ready, "two")), native_gen/ref(ready, "one")))
-    let entry: map = native_gen/record(ready, [:Record, "ValueMapEntry"], {"key" -> native_json/key(ready, pairs, position), "value" -> value})
-    ready = native_gen/store(ready, native_gen/offset(native_kernel/load_field(ready, map, "data"), destination), entry)
-    return native_gen/assign(ready, previous, position)
+    let value: map = native_query/cell(polled, pairs, native_gen/add(native_gen/multiply(index, native_gen/ref(polled, "two")), native_gen/ref(polled, "one")))
+    let [updated: map, ready: map] = native_query/value(polled, "value_map_set", [native_roots/worker(polled), map, native_json/key(polled, pairs, index), value])
+    return native_roots/store(ready, map, updated)
   end)
-  let value: map = native_gen/expression(native_value/word(), :PackPointer, [map, native_gen/ref(builder, "tag_map")])
-  let result: map = native_gen/finish(module, native_quoting/result(builder, 0, native_gen/ref(builder, "zero"), value))
-  return result
+  let generated_result: map = native_gen/finish(module, native_quoting/result(builder, 0, native_gen/ref(builder, "zero"), map))
+  return generated_result
 end

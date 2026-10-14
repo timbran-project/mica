@@ -51,14 +51,10 @@ verb native_value/persistence(input: map) -> map
             native/unary_expression(:UnpackPointer, "value")
           )
         ),
-        native/let_field(data, [:Pointer, spec[2], :Mutable], header, "data"),
+        @native_value/sequence_data(spec, header, data),
         native/let_field(length, :U64, header, "length"),
         @native/for_range(index, "zero", length, [
-          native/let_load(
-            element,
-            spec[2],
-            native/typed_expression([:Pointer, spec[2], :Mutable], native/offset_expression(data, index))
-          ),
+          @native_value/sequence_element(spec, "value", data, index, element),
           @children]),
         native/return_value("true")
       ])

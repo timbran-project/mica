@@ -158,7 +158,7 @@ verb native_access/at_body(module: map, field: string) -> map
   ready = native_gen/when(ready, native_access/kind(ready, value, "map"), fn(map)
     let header: map = native_gen/expression(native_memory/record_pointer("HeapMap"), :UnpackPointer, [value])
     let checked: map = native_access/check(map, native_gen/less(position, native_kernel/load_field(map, header, "length")), "ok")
-    let entry: map = native_gen/load(native_gen/offset(native_kernel/load_field(checked, header, "data"), position))
+    let entry: map = native_gen/call(checked, "value_map_entry", [value, position])
     let generated: map = native_access/result(checked, "ok", native_gen/field(checked, entry, field))
     return generated
   end)

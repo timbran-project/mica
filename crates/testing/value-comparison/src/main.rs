@@ -327,6 +327,7 @@ impl Native {
             "value/string_append",
             "value/string_search",
             "value/compare",
+            "value/map_nodes",
             "value/maps",
             "value/collections",
             "value/relations",

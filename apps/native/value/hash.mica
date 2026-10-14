@@ -93,7 +93,7 @@ verb native_value/hashing(input: map) -> map
         native/unary_expression(:UnpackPointer, "value")
       ),
       native/let_load(header, [:Record, spec[1]], pointer),
-      native/let_field(data, [:Pointer, spec[2], :Mutable], header, "data"),
+      @native_value/sequence_data(spec, header, data),
       native/let_field(length, :U64, header, "length")
     ]
     if spec[2] == :U8
@@ -112,7 +112,6 @@ verb native_value/hashing(input: map) -> map
       ]
     else
       let index: string = string_concat(prefix, "_i")
-      let slot: string = string_concat(prefix, "_slot")
       let element: string = string_concat(prefix, "_element")
       let children: list = []
       if prefix == "list"
@@ -131,8 +130,7 @@ verb native_value/hashing(input: map) -> map
         @body,
         native/set_statement("hash", native/call_expression("value_hash_mix", ["hash", length])),
         @native/for_range(index, "zero", length, [
-          native/let_offset(slot, [:Pointer, spec[2], :Mutable], data, index),
-          native/let_load(element, spec[2], slot),
+          @native_value/sequence_element(spec, "value", data, index, element),
           @children]),
         native/return_record(["true", "hash"])
       ]

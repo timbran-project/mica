@@ -1,0 +1,280 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+// Immutable B+ tree nodes hold at most sixteen entries. Branch keys are the
+// first key of each child; cumulative ends support ordered ordinal access.
+verb native_maps/read(builder: map, node: map, field: string) -> map
+  let generated_result: map = native_gen/read(native_gen/field(builder, node, field))
+  return generated_result
+end
+verb native_maps/null() -> map
+  let generated_result: map = native_gen/zero(native_memory/record_pointer("HeapMap"))
+  return generated_result
+end
+verb native_maps/scratch(builder: map, record: string, capacity: int) -> list
+  let [storage: map, ready: map] = native_gen/bind(builder, "entries", native_gen/zero([:Array, [:Record, record], capacity]))
+  let [data: map, addressed: map] = native_gen/bind(ready, "entries_data", native_gen/element(native_gen/address(storage), native_gen/zero(:U64)))
+  return [data, addressed]
+end
+// Stack entries borrow managed values only until the non-relocating node
+// constructor copies them. RootStore records that ownership in the IR.
+verb native_maps/store_entry(builder: map, data: map, index: map, value: map) -> map
+  let result: map = native_gen/root_write(builder, native_gen/location(native_gen/offset(data, index)), value)
+  return result
+end
+verb native_maps/result(builder: map, left: map, right: map) -> map
+  let generated_result: map = native_gen/return_value(builder, native_gen/record(builder, [:Record, "MapSplitResult"],
+    {"ok" -> native_gen/ref(builder, "true"), "left" -> left, "right" -> right}))
+  return generated_result
+end
+verb native_maps/node(builder: map, name: string, data: map, count: map) -> list
+  let [node: map, ready: map] = native_gen/bind(builder, "node", native_gen/call(builder, name,
+    [native_gen/ref(builder, "worker"), native_gen/freeze(data), count]))
+  ready = native_gen/when(ready, native_gen/equal(node, native_maps/null()), fn(failed) => native_gen/return_zero(failed))
+  return [node, ready]
+end
+verb native_maps/branch_entry(builder: map, child: map, total: map) -> map
+  let generated_result: map = native_gen/record(builder, [:Record, "MapBranchEntry"], {"key" -> native_gen/call(builder, "map_first", [child]), "child" -> child, "end" -> total})
+  return generated_result
+end
+
+// Constructors copy borrowed arrays without a safepoint. Only complete nodes
+// become visible to a caller; failure leaves every existing version intact.
+verb native_maps/constructor(module: map, leaf: bool) -> map
+  let name: string = "map_leaf"
+  let record: string = "ValueMapEntry"
+  let field: string = "data"
+  if !leaf
+    name = "map_branch"
+    record = "MapBranchEntry"
+    field = "branches"
+  end
+  let builder: map = native_gen/context(module, name)
+  let count: map = native_gen/ref(builder, "count")
+  let source: map = native_gen/ref(builder, "source")
+  builder = native_gen/when(builder, native_gen/less(native_gen/ref(builder, "map_capacity"), count), fn(failed) => native_gen/return_zero(failed))
+  let [node: map, data: map, allocated: map] = native_memory/tail_storage(builder, native_gen/ref(builder, "worker"), [:Record, "HeapMap"], [:Record, record], count, "layout_map", fn(failed) => native_gen/return_zero(failed))
+  builder = native_gen/for_range(allocated, "copy", native_gen/zero(:U64), count, fn(step, index)
+    return native_maps/store_entry(step, data, index, native_gen/root_read(native_gen/location(native_gen/offset(source, index))))
+  end)
+  let length: map = count
+  if !leaf
+    builder = native_gen/when(builder, native_gen/equal(count, native_gen/zero(:U64)), fn(failed) => native_gen/return_zero(failed))
+    length = native_gen/field(builder, native_gen/load(native_gen/offset(data, native_gen/subtract(count, native_gen/ref(builder, "one")))), "end")
+  end
+  let fields: map = {"length" -> length, "count" -> count, "leaf" -> native_gen/ref(builder, "false"),
+    "data" -> native_gen/zero(native_memory/record_pointer("ValueMapEntry")), "branches" -> native_gen/zero(native_memory/record_pointer("MapBranchEntry"))}
+  fields[field] = data
+  if leaf
+    fields["leaf"] = native_gen/ref(builder, "true")
+  end
+  builder = native_gen/store(builder, node, native_gen/record(builder, [:Record, "HeapMap"], fields))
+  let generated_result: map = native_gen/finish(module, native_gen/return_value(builder, node))
+  return generated_result
+end
+
+verb native_maps/readers(module: map) -> map
+  let builder: map = native_gen/context(module, "map_first")
+  let node: map = native_gen/ref(builder, "node")
+  builder = native_gen/when(builder, native_gen/equal(native_maps/read(builder, node, "count"), native_gen/zero(:U64)), fn(empty) => native_gen/return_zero(empty))
+  builder = native_gen/when(builder, native_maps/read(builder, node, "leaf"), fn(leaf)
+    return native_gen/return_value(leaf, native_gen/field(leaf, native_gen/load(native_maps/read(leaf, node, "data")), "key"))
+  end)
+  builder = native_gen/return_value(builder, native_gen/field(builder, native_gen/load(native_maps/read(builder, node, "branches")), "key"))
+  let output: map = native_gen/finish(module, builder)
+  builder = native_gen/context(output, "value_map_entry")
+  let value: map = native_gen/ref(builder, "value")
+  builder = native_gen/unless(builder, native_gen/equal(native_gen/expression(:U8, :Tag, [value]), native_gen/ref(builder, "tag_map")), fn(invalid) => native_gen/return_zero(invalid))
+  let [cursor: map, with_cursor: map] = native_gen/bind(builder, "node", native_gen/expression(native_memory/record_pointer("HeapMap"), :UnpackPointer, [value]))
+  let [index: map, with_index: map] = native_gen/bind(with_cursor, "position", native_gen/ref(with_cursor, "index"))
+  builder = native_gen/unless(with_index, native_gen/less(index, native_maps/read(with_index, cursor, "length")), fn(outside) => native_gen/return_zero(outside))
+  builder = native_gen/while_loop(builder, native_gen/negate(native_maps/read(builder, cursor, "leaf")), fn(branch)
+    let data: map = native_maps/read(branch, cursor, "branches")
+    let [position: map, found: map, searched: map] = native_sequence/search(branch,
+      native_sequence/span(data, native_maps/read(branch, cursor, "count")), fn(step, candidate)
+      return [native_gen/ref(step, "false"), native_gen/negate(native_gen/less(index, native_gen/field(step, candidate, "end"))), step]
+    end)
+    let ready: map = native_gen/unless(searched, native_gen/equal(position, native_gen/zero(:U64)), fn(relative)
+      let previous: map = native_gen/load(native_gen/offset(data, native_gen/subtract(position, native_gen/ref(relative, "one"))))
+      return native_gen/assign(relative, index, native_gen/subtract(index, native_gen/field(relative, previous, "end")))
+    end)
+    return native_gen/assign(ready, cursor, native_gen/field(ready, native_gen/load(native_gen/offset(data, position)), "child"))
+  end)
+  builder = native_gen/return_value(builder, native_gen/load(native_gen/offset(native_maps/read(builder, cursor, "data"), index)))
+  let generated_result: map = native_gen/finish(output, builder)
+  return generated_result
+end
+
+verb native_maps/search_child(builder: map, node: map, key: map) -> list
+  let [position: map, found: map, ready: map] = native_sequence/search(builder,
+    native_sequence/span(native_maps/read(builder, node, "branches"), native_maps/read(builder, node, "count")),
+    fn(step, candidate) => native_value/map_key_search_order(step, candidate, key))
+  ready = native_gen/unless(ready, found, fn(before)
+    return native_gen/unless(before, native_gen/equal(position, native_gen/zero(:U64)), fn(preceding)
+      return native_gen/assign(preceding, position, native_gen/subtract(position, native_gen/ref(preceding, "one")))
+    end)
+  end)
+  return [position, ready]
+end
+
+// Build every level from sorted entries. Capacity is a power of sixteen,
+// which keeps all leaves at the same depth without repeated insertion.
+verb native_maps/build_body(module: map) -> map
+  let builder: map = native_gen/context(module, "map_build")
+  let source: map = native_gen/ref(builder, "source")
+  let length: map = native_gen/ref(builder, "length")
+  let capacity: map = native_gen/ref(builder, "capacity")
+  builder = native_gen/when(builder, native_gen/equal(capacity, native_gen/ref(builder, "map_capacity")), fn(leaf)
+    return native_gen/return_value(leaf, native_gen/call(leaf, "map_leaf", [native_gen/ref(leaf, "worker"), source, length]))
+  end)
+  let [data: map, allocated: map] = native_maps/scratch(builder, "MapBranchEntry", 16)
+  let [span: map, divided: map] = native_gen/bind(allocated, "span", native_gen/divide(capacity, native_gen/ref(allocated, "map_capacity")))
+  let [position: map, positioned: map] = native_gen/bind(divided, "position", native_gen/zero(:U64))
+  let [count: map, counted: map] = native_gen/bind(positioned, "count", native_gen/zero(:U64))
+  builder = native_gen/while_loop(counted, native_gen/less(position, length), fn(step)
+    let [size: map, sized: map] = native_gen/bind(step, "size", native_gen/subtract(length, position))
+    let ready: map = native_gen/when(sized, native_gen/less(span, size), fn(bounded) => native_gen/assign(bounded, size, span))
+    let [child: map, built: map] = native_gen/bind(ready, "child", native_gen/call(ready, "map_build", [native_gen/ref(ready, "worker"), native_gen/offset(source, position), size, span]))
+    ready = native_gen/when(built, native_gen/equal(child, native_maps/null()), fn(failed) => native_gen/return_zero(failed))
+    ready = native_gen/assign(ready, position, native_gen/add(position, size))
+    ready = native_maps/store_entry(ready, data, count, native_maps/branch_entry(ready, child, position))
+    return native_gen/assign(ready, count, native_gen/add(count, native_gen/ref(ready, "one")))
+  end)
+  builder = native_gen/return_value(builder, native_gen/call(builder, "map_branch", [native_gen/ref(builder, "worker"), native_gen/freeze(data), count]))
+  let generated_result: map = native_gen/finish(module, builder)
+  return generated_result
+end
+
+// Finish a map from a sorted, unique borrowed span. Capacity checks bound
+// the recursion, and the node builder copies entries into owned leaf storage.
+verb native_maps/build_result(builder: map, source: map, count: map) -> map
+  let [capacity: map, with_capacity: map] = native_gen/bind(builder, "capacity", native_gen/ref(builder, "map_capacity"))
+  let ready: map = native_gen/while_loop(with_capacity, native_gen/less(capacity, count), fn(level)
+    let checked: map = native_gen/when(level, native_gen/less(native_gen/ref(level, "map_capacity_limit"), capacity), fn(failed) => native_gen/return_zero(failed))
+    return native_gen/assign(checked, capacity, native_gen/multiply(capacity, native_gen/ref(checked, "map_capacity")))
+  end)
+  let [object: map, built: map] = native_gen/bind(ready, "map", native_gen/call(ready, "map_build", [native_gen/ref(ready, "worker"), source, count, capacity]))
+  ready = native_gen/when(built, native_gen/equal(object, native_maps/null()), fn(failed) => native_gen/return_zero(failed))
+  let result: map = native_gen/return_value(ready, native_value/packed_result(ready, object, "map"))
+  return result
+end
+
+// A seventeenth entry splits into eight and nine. Only this path is copied;
+// siblings retain their original managed node identity.
+verb native_maps/split(builder: map, data: map, count: map, leaf: bool) -> map
+  let constructor: string = "map_leaf"
+  if !leaf
+    constructor = "map_branch"
+  end
+  let ready: map = native_gen/unless(builder, native_gen/less(native_gen/ref(builder, "map_capacity"), count), fn(fits)
+    let [node: map, allocated: map] = native_maps/node(fits, constructor, data, count)
+    return native_maps/result(allocated, node, native_maps/null())
+  end)
+  let half: map = native_gen/ref(ready, "map_half")
+  let [left: map, allocated: map] = native_maps/node(ready, constructor, data, half)
+  ready = allocated
+  if !leaf
+    // Branch offsets are relative to the new right node, not the parent.
+    let left_length: map = native_maps/read(ready, left, "length")
+    ready = native_gen/for_range(ready, "relative", half, count, fn(step, index)
+      let entry: map = native_gen/offset(data, index)
+      return native_gen/write(step, native_gen/field(step, entry, "end"), native_gen/subtract(native_maps/read(step, entry, "end"), left_length))
+    end)
+  end
+  let [right: map, with_right: map] = native_maps/node(ready, constructor, native_gen/offset(data, half), native_gen/subtract(count, half))
+  let generated_result: map = native_maps/result(with_right, left, right)
+  return generated_result
+end
+
+verb native_maps/update_leaf(builder: map, node: map, key: map, value: map) -> map
+  let source: map = native_maps/read(builder, node, "data")
+  let length: map = native_maps/read(builder, node, "count")
+  let [position: map, replace: map, searched: map] = native_sequence/search(builder, native_sequence/span(source, length),
+    fn(step, candidate) => native_value/map_key_search_order(step, candidate, key))
+  let ready: map = native_gen/when(searched, replace, fn(found)
+    let entry: map = native_gen/load(native_gen/offset(source, position))
+    return native_gen/when(found, native_gen/equal(native_gen/field(found, entry, "key"), key), fn(same_key)
+      return native_gen/when(same_key, native_gen/equal(native_gen/field(same_key, entry, "value"), value),
+        fn(unchanged) => native_maps/result(unchanged, node, native_maps/null()))
+    end)
+  end)
+  let [data: map, allocated: map] = native_maps/scratch(ready, "ValueMapEntry", 17)
+  let [count: map, counted: map] = native_gen/bind(allocated, "count", length)
+  ready = native_gen/unless(counted, replace, fn(insert) => native_gen/assign(insert, count, native_gen/add(count, native_gen/ref(insert, "one"))))
+  ready = native_gen/for_range(ready, "copy", native_gen/zero(:U64), count, fn(step, index)
+    return native_gen/branch(step, native_gen/equal(index, position), fn(changed)
+      return native_maps/store_entry(changed, data, index, native_gen/record(changed, [:Record, "ValueMapEntry"], {"key" -> key, "value" -> value}))
+    end, fn(copy)
+      let [from: map, positioned: map] = native_gen/bind(copy, "from", index)
+      let shifted: map = native_gen/unless(positioned, replace, fn(insert)
+        return native_gen/when(insert, native_gen/less(position, index), fn(later) => native_gen/assign(later, from, native_gen/subtract(index, native_gen/ref(later, "one"))))
+      end)
+      return native_maps/store_entry(shifted, data, index, native_gen/load(native_gen/offset(source, from)))
+    end)
+  end)
+  let generated_result: map = native_maps/split(ready, data, count, true)
+  return generated_result
+end
+
+verb native_maps/update_body(module: map) -> map
+  let builder: map = native_gen/context(module, "map_update")
+  let node: map = native_gen/ref(builder, "node")
+  let key: map = native_gen/ref(builder, "key")
+  let value: map = native_gen/ref(builder, "value")
+  builder = native_gen/when(builder, native_maps/read(builder, node, "leaf"), fn(leaf) => native_maps/update_leaf(leaf, node, key, value))
+  let [position: map, searched: map] = native_maps/search_child(builder, node, key)
+  let source: map = native_maps/read(searched, node, "branches")
+  let child: map = native_gen/field(searched, native_gen/load(native_gen/offset(source, position)), "child")
+  let [changed: map, updated: map] = native_gen/checked_bind(searched, "changed", native_gen/call(searched, "map_update", [native_gen/ref(searched, "worker"), child, key, value]), "ok", fn(failed) => native_gen/return_zero(failed))
+  let left: map = native_gen/field(updated, changed, "left")
+  let right: map = native_gen/field(updated, changed, "right")
+  builder = native_gen/when(updated, native_gen/equal(left, child), fn(same)
+    return native_gen/when(same, native_gen/equal(right, native_maps/null()), fn(unchanged) => native_maps/result(unchanged, node, native_maps/null()))
+  end)
+  let [data: map, allocated: map] = native_maps/scratch(builder, "MapBranchEntry", 17)
+  builder = native_gen/for_range(allocated, "prefix", native_gen/zero(:U64), position, fn(step, index)
+    return native_maps/store_entry(step, data, index, native_gen/load(native_gen/offset(source, index)))
+  end)
+  builder = native_maps/store_entry(builder, data, position, native_maps/branch_entry(builder, left, native_gen/zero(:U64)))
+  let [count: map, counted: map] = native_gen/bind(builder, "count", native_gen/add(position, native_gen/ref(builder, "one")))
+  builder = native_gen/unless(counted, native_gen/equal(right, native_maps/null()), fn(split)
+    let copied: map = native_maps/store_entry(split, data, count, native_maps/branch_entry(split, right, native_gen/zero(:U64)))
+    return native_gen/assign(copied, count, native_gen/add(count, native_gen/ref(copied, "one")))
+  end)
+  builder = native_gen/for_range(builder, "suffix", native_gen/add(position, native_gen/ref(builder, "one")), native_maps/read(builder, node, "count"), fn(step, index)
+    let copied: map = native_maps/store_entry(step, data, count, native_gen/load(native_gen/offset(source, index)))
+    return native_gen/assign(copied, count, native_gen/add(count, native_gen/ref(copied, "one")))
+  end)
+  let [total: map, with_end: map] = native_gen/bind(builder, "end", native_gen/zero(:U64))
+  builder = native_gen/for_range(with_end, "ends", native_gen/zero(:U64), count, fn(step, index)
+    let entry: map = native_gen/offset(data, index)
+    let counted: map = native_gen/assign(step, total, native_gen/add(total, native_maps/read(step, native_maps/read(step, entry, "child"), "length")))
+    return native_gen/write(counted, native_gen/field(counted, entry, "end"), total)
+  end)
+  let generated_result: map = native_gen/finish(module, native_maps/split(builder, data, count, false))
+  return generated_result
+end
+
+verb native_maps/definitions(input: map) -> map
+  let module: map = input
+  let [constants: map, state: map] = native/constants(module[:state], [["two", :U64, "0000000000000002"], ["map_capacity", :U64, "0000000000000010"], ["map_half", :U64, "0000000000000008"], ["map_capacity_limit", :U64, "0fffffffffffffff"]])
+  module[:state] = state
+  for name, id in constants
+    module[:constants][name] = id
+  end
+  let worker: list = ["worker", native_memory/record_pointer("MemoryWorker"), :Borrow]
+  let node: list = ["node", native_memory/record_pointer("HeapMap"), :Gc]
+  let effects: list = [:ReadMemory, :WriteMemory, :Allocate]
+  for [name, record] in [["map_leaf", "ValueMapEntry"], ["map_branch", "MapBranchEntry"]]
+    module = native_memory/declare(module, name, node[1], [worker, ["source", [:Pointer, [:Record, record], :Const], :Borrow], ["count", :U64, :Value]], effects, :Gc, "")
+  end
+  module = native_memory/declare(module, "map_first", native_value/word(), [node], [:ReadMemory], :Gc, "")
+  module = native_memory/declare(module, "map_build", node[1], [worker, ["source", [:Pointer, [:Record, "ValueMapEntry"], :Const], :Borrow], ["length", :U64, :Value], ["capacity", :U64, :Value]], effects, :Gc, "")
+  module = native_memory/declare(module, "map_update", [:Record, "MapSplitResult"], [worker, node, ["key", native_value/word(), :Gc], ["value", native_value/word(), :Gc]], effects, :Gc, "")
+  module = native_maps/constructor(module, true)
+  module = native_maps/constructor(module, false)
+  module = native_maps/readers(module)
+  module = native_maps/build_body(module)
+  let generated_result: map = native_maps/update_body(module)
+  return generated_result
+end

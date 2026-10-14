@@ -87,7 +87,7 @@ verb native_value/copying(input: map) -> map
     let body: list = [
       native/let_statement(pointer, [:Pointer, header_type, :Const], native/unary_expression(:UnpackPointer, "value")),
       native/let_load(header, header_type, pointer),
-      native/let_field(source, elements, header, "data"),
+      @native_value/sequence_data(spec, header, source),
       native/let_field(length, :U64, header, "length")
     ]
     if prefix == "list"
@@ -101,21 +101,15 @@ verb native_value/copying(input: map) -> map
     else
       body = [
         @body,
-        native/let_statement("map_header_size", :U64, native/unary_expression(:SizeOf, header_type)),
+        native/when_statement(native/binary_expression(:Equal, length, "zero"), [
+          native/return_value(native/call_expression("value_map", ["worker", "null_map_entries", "zero"]))]),
         native/let_statement("map_entry_size", :U64, native/unary_expression(:SizeOf, spec[2])),
-        @native_memory/allocate_with_tail("map_raw", "map_header_size", "map_entry_size", length,
-          "layout_map", [native/return_zero()], "map_limit", "map_bytes", "map_total"),
-        native/let_statement(
-          target,
-          [:Pointer, header_type, :Mutable],
-          native/unary_expression(:PointerCast, "map_raw")
-        ),
-        native/let_offset("map_raw_data", [:Pointer, :U8, :Mutable], "map_raw", "map_header_size"),
-        native/let_statement(destination, elements, native/unary_expression(:PointerCast, "map_raw_data"))
+        @native_memory/allocate_with_tail("map_raw", "zero", "map_entry_size", length,
+          "layout_opaque", [native/return_zero()], "map_limit", "map_bytes", "map_total"),
+        native/let_statement(destination, elements, native/unary_expression(:PointerCast, "map_raw"))
       ]
     end
     let index: string = string_concat(prefix, "_i")
-    let slot: string = string_concat(prefix, "_slot")
     let output_slot: string = string_concat(prefix, "_output_slot")
     let element: string = string_concat(prefix, "_element")
     let children: list = []
@@ -140,8 +134,7 @@ verb native_value/copying(input: map) -> map
     body = [
       @body,
       @native/for_range(index, "zero", length, [
-        native/let_offset(slot, elements, source, index),
-        native/let_load(element, spec[2], slot),
+        @native_value/sequence_element(spec, "value", source, index, element),
         @children,
         native/let_offset(output_slot, elements, destination, index),
         native/store_statement(output_slot, output)])
@@ -149,18 +142,16 @@ verb native_value/copying(input: map) -> map
     if prefix == "map"
       body = [
         @body,
-        native/store_statement(target, native/typed_record(header_type, [destination, length]))
+        native/return_value(native/call_expression("value_map", ["worker", native/typed_expression([:Pointer, spec[2], :Const], native/unary_expression(:Freeze, destination)), length]))
       ]
     end
-    body = [
-      @body,
-      native/return_record(
-        [
+    if prefix == "list"
+      body = [
+        @body,
+        native/return_record([
           "true",
-          native/typed_expression(word, native/binary_expression(:PackPointer, target, string_concat("tag_", prefix)))
-        ]
-      )
-    ]
+          native/typed_expression(word, native/binary_expression(:PackPointer, target, string_concat("tag_", prefix)))])]
+    end
     rows = [
       @rows,
       native/when_statement(native/binary_expression(:Equal, "tag", string_concat("tag_", prefix)), body)

@@ -47,8 +47,8 @@ verb native_json_write/quote_body(module: map) -> map
   return result
 end
 verb native_json_write/entry(builder: map, value: map, index: map, field: string) -> map
-  let data: map = native_write/header(builder, "Map", value, "data")
-  let result: map = native_kernel/load_field(builder, native_gen/offset(data, index), field)
+  let entry: map = native_gen/call(builder, "value_map_entry", [value, index])
+  let result: map = native_gen/field(builder, entry, field)
   return result
 end
 // Normalize key spellings before writing. A string key and a symbol key with

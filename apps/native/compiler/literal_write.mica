@@ -240,12 +240,11 @@ verb native_write/variant(builder: map, kind: string) -> map
       if kind == "list"
         return native_write/child(polled, native_query/cell(polled, value, index))
       end
-      let entries: map = native_write/header(polled, "Map", value, "data")
-      let entry: map = native_gen/offset(entries, index)
-      let key: map = native_kernel/load_field(polled, entry, "key")
+      let entry: map = native_gen/call(polled, "value_map_entry", [value, index])
+      let key: map = native_gen/field(polled, entry, "key")
       let written: map = native_write/child(polled, key)
       written = native_write/text(written, " -> ")
-      let element: map = native_kernel/load_field(written, entry, "value")
+      let element: map = native_gen/field(written, entry, "value")
       return native_write/child(written, element)
     end)
     ready = native_write/text(ready, closing)

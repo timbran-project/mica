@@ -8,9 +8,8 @@ verb native_value/map_order(builder: map, left: map, right: map) -> list
 end
 
 verb native_value/maps(input: map) -> map
-  let context: map = input
+  let context: map = native_maps/definitions(input)
   let entry: list = [:Record, "ValueMapEntry"]
-  let header: list = [:Record, "HeapMap"]
   let source_type: list = [:Pointer, entry, :Const]
   let [null, state] = native/add_constant(context[:state], source_type, "null")
   context[:state] = state
@@ -30,7 +29,27 @@ verb native_value/maps(input: map) -> map
   builder = native_gen/unless(builder, native_gen/equal(length, native_gen/zero(:U64)), fn(nonempty)
     return native_gen/when(nonempty, native_gen/equal(source, native_gen/ref(nonempty, "null_map_entries")), failure)
   end)
-  let [object: map, data: map, with_object: map] = native_memory/tail_storage(builder, worker, header, entry, length, "layout_map", failure)
+  let [prefix: map, bytes: map, bounded: map] = native_memory/extent(builder, native_gen/zero(:U64), entry, length, failure)
+  let [unique: map, with_unique: map] = native_gen/bind(bounded, "unique", native_gen/ref(bounded, "true"))
+  let [in_order: map, with_order: map] = native_gen/bind(with_unique, "ordered", native_gen/ref(with_unique, "true"))
+  let inspected: map = native_gen/for_range(with_order, "scan", native_gen/ref(with_order, "one"), length, fn(body, index)
+    let left: map = native_gen/root_read(native_sequence/at(native_sequence/span(source, length), native_gen/subtract(index, native_gen/ref(body, "one"))))
+    let right: map = native_gen/root_read(native_sequence/at(native_sequence/span(source, length), index))
+    let [order: map, compared: map] = native_value/map_order(body, left, right)
+    let ready: map = native_gen/when(compared, native_gen/equal(order, native_gen/zero(:I64)), fn(duplicate) => native_gen/assign(duplicate, unique, native_gen/ref(duplicate, "false")))
+    return native_gen/when(ready, native_gen/less(native_gen/zero(:I64), order), fn(unordered)
+      return native_gen/break_loop(native_gen/assign(unordered, in_order, native_gen/ref(unordered, "false")))
+    end)
+  end)
+  let ordered = fn(body, left, right)
+    let [order: map, compared: map] = native_value/map_order(body, left, right)
+    return [native_gen/negate(native_gen/less(native_gen/zero(:I64), order)), compared]
+  end
+  // Ordered unique input needs no temporary entry array or duplicate pass.
+  builder = native_gen/when(inspected, in_order, fn(sorted)
+    return native_gen/when(sorted, unique, fn(distinct) => native_maps/build_result(distinct, source, length))
+  end)
+  let [data: map, with_object: map] = native_memory/array_storage(builder, worker, entry, length, "layout_opaque", failure)
   builder = with_object
   // The caller owns the span and roots the values it contains. No safepoint
   // occurs while these borrowed entries are copied into managed storage.
@@ -44,12 +63,7 @@ verb native_value/maps(input: map) -> map
   builder = with_count
   builder = native_gen/when(builder, native_gen/less(native_gen/ref(builder, "one"), length), fn(input_sort)
     let sort: map = input_sort
-    let ordered = fn(body, left, right)
-      let [order: map, compared: map] = native_value/map_order(body, left, right)
-      return [native_gen/negate(native_gen/less(native_gen/zero(:I64), order)), compared]
-    end
-    let [in_order: map, inspected: map] = native_sequence/is_ordered(sort, native_sequence/span(data, length), ordered)
-    sort = native_gen/unless(inspected, in_order, fn(unsorted)
+    sort = native_gen/unless(sort, in_order, fn(unsorted)
       let [scratch: map, allocated: map] = native_memory/array_storage(unsorted, worker, entry, length, "layout_opaque", failure)
       let [result: map, merged: map] = native_sequence/stable_merge(allocated, native_sequence/span(data, length), scratch, ordered)
       return native_gen/assign(merged, sorted, result)
@@ -62,8 +76,7 @@ verb native_value/maps(input: map) -> map
     sort = with_written
     return native_gen/assign(sort, count, written)
   end)
-  builder = native_gen/store(builder, object, native_gen/record(builder, header, {"data" -> sorted, "length" -> count}))
-  builder = native_gen/return_value(builder, native_value/packed_result(builder, object, "map"))
+  builder = native_maps/build_result(builder, native_gen/freeze(sorted), count)
   context = native_gen/finish(context, builder)
   context = native_value/map_lookup(context)
   return context
@@ -77,35 +90,27 @@ verb native_value/map_key_search_order(builder: map, candidate: map, key: map) -
     native_gen/less(order, native_gen/ref(current, "int_zero")), current]
 end
 
-verb native_value/map_search(builder: map, header: map, key: map) -> list
-  let span: map = native_sequence/span(native_gen/field(builder, header, "data"), native_gen/field(builder, header, "length"))
-  let result: list = native_sequence/search(builder, span,
-    fn(body, candidate) => native_value/map_key_search_order(body, candidate, key))
-  return result
-end
-
 verb native_value/map_lookup(input: map) -> map
   let context: map = input
   let word: list = native_value/word()
   let result: list = [:Record, "ValueResult"]
-  let [two, state] = native/add_constant(context[:state], :U64, "0000000000000002")
-  context[:state] = state
-  let constants: map = context[:constants]
-  constants["two"] = two
-  context[:constants] = constants
   context = native/declare_function(context, "value_map_get", result, [["map", word, :Gc], ["key", word, :Gc]], [], [:ReadMemory], :Gc, "")
   let builder: map = native_gen/context(context, "value_map_get")
-  let [header: map, with_header: map] = native_value/open_value(builder, native_gen/ref(builder, "map"), "map", "HeapMap", fn(failed) => native_gen/return_zero(failed))
-  builder = with_header
-  let data: map = native_gen/field(builder, header, "data")
-  let length: map = native_gen/field(builder, header, "length")
-  let key: map = native_gen/ref(builder, "key")
-  builder = native_sequence/search_return(builder, native_sequence/span(data, length),
+  let value: map = native_gen/ref(builder, "map")
+  builder = native_gen/unless(builder, native_gen/equal(native_gen/expression(:U8, :Tag, [value]), native_gen/ref(builder, "tag_map")), fn(failed) => native_gen/return_zero(failed))
+  let [node: map, with_node: map] = native_gen/bind(builder, "node", native_gen/expression(native_memory/record_pointer("HeapMap"), :UnpackPointer, [value]))
+  let key: map = native_gen/ref(with_node, "key")
+  builder = native_gen/while_loop(with_node, native_gen/negate(native_maps/read(with_node, node, "leaf")), fn(branch)
+    let [position: map, searched: map] = native_maps/search_child(branch, node, key)
+    let entry: map = native_gen/load(native_gen/offset(native_maps/read(searched, node, "branches"), position))
+    return native_gen/assign(searched, node, native_gen/field(searched, entry, "child"))
+  end)
+  builder = native_sequence/search_return(builder,
+    native_sequence/span(native_maps/read(builder, node, "data"), native_maps/read(builder, node, "count")),
     fn(body, candidate) => native_value/map_key_search_order(body, candidate, key), fn(found, index, entry)
     return native_gen/return_value(found, native_gen/record(found, result,
       {"ok" -> native_gen/ref(found, "true"), "value" -> native_gen/field(found, entry, "value")}))
   end)
-  builder = native_gen/return_zero(builder)
-  context = native_gen/finish(context, builder)
-  return context
+  let generated_result: map = native_gen/finish(context, native_gen/return_zero(builder))
+  return generated_result
 end

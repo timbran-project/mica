@@ -1196,6 +1196,7 @@ apps/native/value/string_append.mica
 apps/native/value/string_search.mica
 apps/native/value/heap.mica
 apps/native/value/compare.mica
+apps/native/value/map_nodes.mica
 apps/native/value/maps.mica
 apps/native/value/collections.mica
 apps/native/value/relations.mica

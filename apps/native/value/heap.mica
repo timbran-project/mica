@@ -97,6 +97,21 @@ verb native_value/packed_result(builder: map, pointer: map, kind: string) -> map
   return result
 end
 
+// Sequential value operations use logical map entries, independent of the
+// tree shape. Byte and list sequences retain their contiguous storage path.
+verb native_value/sequence_data(spec: list, header: string, data: string) -> list
+  if spec[0] == "map"
+    return []
+  end
+  return [native/let_field(data, native_memory/pointer(spec[2]), header, "data")]
+end
+verb native_value/sequence_element(spec: list, value: string, data: string, index: string, element: string) -> list
+  if spec[0] == "map"
+    return [native/let_call(element, spec[2], "value_map_entry", [value, index])]
+  end
+  return [native/let_load(element, spec[2], native/typed_expression(native_memory/pointer(spec[2]), native/offset_expression(data, index)))]
+end
+
 verb native_value/heap(input: map) -> map
   let context: map = input
   let word = native_value/word()
@@ -104,7 +119,11 @@ verb native_value/heap(input: map) -> map
   let values = [:Pointer, word, :Mutable]
   let state = context[:state]
   state = native/record_type(state, "ValueMapEntry", [["key", word], ["value", word]])[1]
-  state = native/record_type(state, "HeapMap", [["data", [:Pointer, [:Record, "ValueMapEntry"], :Mutable]], ["length", :U64]])[1]
+  let node: list = native_memory/record_pointer("HeapMap")
+  state = native/record_type(state, "MapBranchEntry", [["key", word], ["child", node], ["end", :U64]])[1]
+  state = native/record_type(state, "MapSplitResult", [["ok", :Bool], ["left", node], ["right", node]])[1]
+  state = native/record_type(state, "HeapMap", [["length", :U64], ["count", :U64], ["leaf", :Bool],
+    ["data", native_memory/record_pointer("ValueMapEntry")], ["branches", native_memory/record_pointer("MapBranchEntry")]])[1]
   state = native/record_type(state, "ListStorage", [["data", values], ["used", :U64], ["capacity", :U64]])[1]
   for spec in [["HeapBytes", [["data", bytes], ["length", :U64]]],
                ["HeapList", [["data", values], ["length", :U64], ["storage", [:Pointer, [:Record, "ListStorage"], :Mutable]]]],
@@ -112,6 +131,8 @@ verb native_value/heap(input: map) -> map
     state = native/record_type(state, spec[0], spec[1])[1]
   end
   context[:state] = state
+  context = native/declare_function(context, "value_map_entry", [:Record, "ValueMapEntry"],
+    [["value", word, :Gc], ["index", :U64, :Value]], [], [:ReadMemory], :Gc, "")
   for spec in [["bytes", "HeapBytes", :U8], ["list", "HeapList", word]]
     if spec[0] == "bytes"
       context = native_value/bytes_constructor(context)

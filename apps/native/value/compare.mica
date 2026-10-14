@@ -74,7 +74,6 @@ verb native_value/comparison(input: map) -> map
       let header: string = string_concat(base, "_header")
       let pointer: string = string_concat(base, "_pointer")
       let data: string = string_concat(base, "_data")
-      let slot: string = string_concat(base, "_slot")
       rows = [
         @rows,
         native/let_statement(
@@ -83,13 +82,12 @@ verb native_value/comparison(input: map) -> map
           native/unary_expression(:UnpackPointer, side)
         ),
         native/let_load(header, [:Record, spec[1]], pointer),
-        native/let_field(data, [:Pointer, spec[2], :Mutable], header, "data"),
+        @native_value/sequence_data(spec, header, data),
         native/let_field(string_concat(base, "_length"), :U64, header, "length")
       ]
       elements = [
         @elements,
-        native/let_offset(slot, [:Pointer, spec[2], :Mutable], data, index),
-        native/let_load(string_concat(base, "_element"), spec[2], slot)
+        @native_value/sequence_element(spec, side, data, index, string_concat(base, "_element"))
       ]
     end
     let left_element: string = string_concat(left, "_element")

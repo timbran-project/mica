@@ -76,7 +76,7 @@ verb native_source/map_items(builder: map, items: list) -> list
       ready = native_source/splice_check(ready, value, "map", false)
       let header: map = native_gen/expression(native_memory/record_pointer("HeapMap"), :UnpackPointer, [value])
       ready = native_gen/for_range(ready, "splice_index", native_gen/ref(ready, "zero"), native_kernel/load_field(ready, header, "length"), fn(step, index)
-        let entry: map = native_gen/load(native_gen/offset(native_kernel/load_field(step, header, "data"), index))
+        let entry: map = native_gen/call(step, "value_map_entry", [value, index])
         let key: map = native_gen/field(step, entry, "key")
         let copied: map = native_source/append_item(step, buffer, key)
         return native_source/append_item(copied, buffer, native_gen/field(copied, entry, "value"))

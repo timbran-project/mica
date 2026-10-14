@@ -142,7 +142,7 @@ static void write_value(mica_type_Value v) {
     case 9: { const struct mica_HeapList *h = mica_value_as_list(v).f_header;
         write_number(h->f_length,8); for (uint64_t i=0;i<h->f_length;++i) write_value(h->f_data[i]); return; }
     case 10: { const struct mica_HeapMap *h = mica_value_as_map(v).f_header;
-        write_number(h->f_length,8); for (uint64_t i=0;i<h->f_length;++i) { write_value(h->f_data[i].f_key); write_value(h->f_data[i].f_value); } return; }
+        write_number(h->f_length,8); for (uint64_t i=0;i<h->f_length;++i) { struct mica_ValueMapEntry entry=mica_value_map_entry(v,i); write_value(entry.f_key); write_value(entry.f_value); } return; }
     case 11: { const struct mica_HeapRange *h = mica_value_as_range(v).f_header;
         write_value(h->f_start); write_number(h->f_has_end,1); if(h->f_has_end) write_value(h->f_end); return; }
     case 12: { const struct mica_HeapError *h = mica_value_as_error(v).f_header;

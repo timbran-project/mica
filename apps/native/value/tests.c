@@ -350,7 +350,7 @@ static void map_cases(struct mica_MemoryWorker *arena) {
             assert(found.f_ok == (expected[key] >= 0));
             if (found.f_ok) {
                 assert(found.f_value == integer(expected[key]));
-                assert(header->f_data[count].f_key == integer(key));
+                assert(mica_value_map_entry(map.f_value, count).f_key == integer(key));
                 ++count;
             }
         }
@@ -371,11 +371,10 @@ static void map_cases(struct mica_MemoryWorker *arena) {
     assert(failed.f_heap->f_pages == NULL);
     struct mica_ValueMapEntry *large = calloc(4096, sizeof(*large));
     assert(large != NULL);
-    // Ordered duplicate runs need only the map allocation, with the last
-    // source value retained for each key.
+    // Ordered duplicate runs retain the last source value for each key.
     for (size_t i = 0; i < 4096; ++i)
         large[i] = (struct mica_ValueMapEntry){integer((int64_t)(i / 2)), integer((int64_t)i)};
-    allocation_allowance = 1;
+    allocation_allowance = SIZE_MAX;
     struct mica_ValueResult ordered = mica_value_map(&failed, large, 4096);
     assert(ordered.f_ok);
     assert(mica_value_map_length(ordered.f_value).f_number == 2048);
@@ -405,8 +404,8 @@ static void map_cases(struct mica_MemoryWorker *arena) {
     assert(equal.f_ok);
     const struct mica_HeapMap *equal_header = mica_value_as_map(equal.f_value).f_header;
     assert(equal_header->f_length == 1);
-    assert(equal_header->f_data[0].f_key == b.f_value);
-    assert(equal_header->f_data[0].f_value == integer(2));
+    assert(mica_value_map_entry(equal.f_value, 0).f_key == b.f_value);
+    assert(mica_value_map_entry(equal.f_value, 0).f_value == integer(2));
     struct mica_ValueMapEntry pairs[] = {
         {floating(1), integer(30)}, {a.f_value, integer(1)},
         {integer(1), integer(20)}, {b.f_value, integer(2)}
