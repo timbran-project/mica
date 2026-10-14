@@ -7569,6 +7569,10 @@ for id in 1..count
 end
 return true
 "#;
+    check_native_validation_fixture(body);
+}
+
+fn check_native_validation_fixture(body: &str) {
     for tier in [true, false] {
         let mut runner = runner(tier).with_task_limits(TaskLimits {
             instruction_budget: 10_000_000,
@@ -7576,10 +7580,10 @@ return true
         });
         assert_eq!(eval(&mut runner, body), Value::bool(true));
     }
-    let entry = format!("verb native_ownership_fixture(input)\n{body}\nend\n");
+    let entry = format!("verb native_validation_fixture(input)\n{body}\nend\n");
     let mut library = SOURCES.to_vec();
     library.push(&entry);
-    let dependencies = native_source_dependency_closure(&library, "native_ownership_fixture");
+    let dependencies = native_source_dependency_closure(&library, "native_validation_fixture");
     let source = format!("{entry}\n{}", dependencies.replace(entry.trim(), ""));
     let ids = format!(
         "[{}]",
@@ -7600,7 +7604,7 @@ return true
         let [first, second] = builds.map(|build| build.join().unwrap());
         assert!(
             first == second,
-            "ownership checker differs between bootstrap tiers"
+            "native validation differs between bootstrap tiers"
         );
         first
     });
@@ -7654,6 +7658,79 @@ return true
             Value::bool(true)
         );
     }
+}
+
+#[test]
+fn native_relocation_validation_propagates_reverse_loops() {
+    let body = r#"
+let count = 512
+let pointer = [:Pointer, :U64, :Mutable]
+let state = native/program()
+state[:functions] = [[10, "entry", :Void]]
+let parameters = [[1, 10, 0, "value", pointer], [2, 10, 1, "root", [:Pointer, pointer, :Mutable]], [4, 10, 2, "scalar", :U64]]
+let index = {:functions -> {10 -> state[:functions][0]}, :blocks -> {}, :terms -> {},
+  :function_parameters -> {10 -> parameters}, :function_locals -> {10 -> [[3, 10, "loaded", :U64]]},
+  :contracts -> {11 -> [11, [:Relocate], :Value, ""]}}
+let blocks = []
+let predecessors = {}
+let instructions = {}
+for i in 0..count
+  let id = 1000 + i
+  let block = [id, 10, string_concat("block_", to_literal(i)), i == 0]
+  blocks = [@blocks, block]
+  index[:blocks][id] = block
+  index[:terms][id] = [id, :Jump, [id + 1]]
+  predecessors[id] = [id - 1]
+  instructions[id] = [[10000 + 16 * i + position, id, position, :Move, 3, [4]] for position in 0..7]
+end
+predecessors[1000] = []
+predecessors[1001] = [1000, 1000 + count]
+index[:terms][1000 + count] = [1000 + count, :Jump, [1001]]
+instructions[1000] = [[9000, 1000, 0, :Call, :Discard, [11, 2]]]
+let final = instructions[1000 + count]
+instructions[1000 + count] = [@final,
+  [30000, 1000 + count, 8, :RootLoad, 1, [2]],
+  [30001, 1000 + count, 9, :Load, 3, [1]]]
+let graph = {:blocks -> blocks, :predecessors -> predecessors, :instructions -> instructions,
+  :order -> [1000 + count - offset for offset in 0..count]}
+index[:function_graphs] = {10 -> graph}
+let origins = {1 -> [[:Gc, 0]], 2 -> [[:Borrow, 2]], 3 -> [], 4 -> []}
+// The loop has one stale path and one refreshed path. Reload before the use
+// is valid; removing that reload must expose the stale incoming path.
+native/check_relocation_liveness(state, index, origins)
+instructions[1000 + count] = [@final, [30000, 1000 + count, 8, :Load, 3, [1]]]
+graph[:instructions] = instructions
+index[:function_graphs] = {10 -> graph}
+let rejected = false
+try
+  native/check_relocation_liveness(state, index, origins)
+catch E_INVARG as problem
+  require native/error_message(problem) == "native: managed reference used after relocation at entry/block_512 instruction 8"
+  rejected = true
+end
+require rejected
+// Within a block, only definitions after the last relocation stay fresh.
+let id = 1000 + count
+index[:terms][id] = [id, :Return, []]
+let rows = [[31000, id, 0, :Call, :Discard, [11, 2]],
+  [31001, id, 1, :RootLoad, 1, [2]], [31002, id, 2, :Call, :Discard, [11, 2]]]
+graph = {:blocks -> [index[:blocks][id]], :predecessors -> {id -> []}, :order -> [id],
+  :instructions -> {id -> [@rows, [31003, id, 3, :RootLoad, 1, [2]], [31004, id, 4, :Load, 3, [1]]]}}
+index[:function_graphs] = {10 -> graph}
+native/check_relocation_liveness(state, index, origins)
+graph[:instructions][id] = [@rows, [31003, id, 3, :Load, 3, [1]]]
+index[:function_graphs] = {10 -> graph}
+rejected = false
+try
+  native/check_relocation_liveness(state, index, origins)
+catch E_INVARG as problem
+  require native/error_message(problem) == "native: managed reference used after relocation at entry/block_512 instruction 3"
+  rejected = true
+end
+require rejected
+return true
+"#;
+    check_native_validation_fixture(body);
 }
 
 #[test]

@@ -147,8 +147,9 @@ verb native/check_call_arguments(index: map, origins: map, row: list)
         message = "indirect argument does not share borrow region at "
       end
       for origin in sources
-        native/ensure(origin[0] == :Static || native/contains(origins[row[5][owner + 1]], origin),
-          string_concat(message, native/instruction_location(index, row)))
+        if origin[0] != :Static && !native/contains(origins[row[5][owner + 1]], origin)
+          native/reject_instruction(index, row, message)
+        end
       end
     end
     if parameter[2] == :Consume
@@ -157,8 +158,9 @@ verb native/check_call_arguments(index: map, origins: map, row: list)
         message = "cannot consume borrowed storage in indirect call at "
       end
       for origin in sources
-        native/ensure(origin[0] == :Owned || origin[0] == :Consume,
-          string_concat(message, native/instruction_location(index, row)))
+        if origin[0] != :Owned && origin[0] != :Consume
+          native/reject_instruction(index, row, message)
+        end
       end
     end
     position = position + 1
@@ -278,6 +280,11 @@ verb native/instruction_location(index, row)
   return string_concat(index[:functions][block[1]][1], "/", block[2], " instruction ", to_literal(row[2]))
 end
 
+// Call only on failure: successful checks need no location formatting.
+verb native/reject_instruction(index: map, row: list, message: string)
+  native/ensure(false, string_concat(message, native/instruction_location(index, row)))
+end
+
 // Summaries derive from instructions and actual call edges. Foreign summaries
 // are trusted declarations. Store one witness path per effect for diagnostics.
 verb native/check_effects(state, index)
@@ -369,7 +376,9 @@ verb native/check_effects(state, index)
   end
   for fn_row in state[:functions]
     for effect, path in summaries[fn_row[0]]
-      native/ensure(native/contains(index[:contracts][fn_row[0]][1], effect), string_concat("effect ", to_literal(effect), " exceeds contract of ", fn_row[1], ": ", path))
+      if !native/contains(index[:contracts][fn_row[0]][1], effect)
+        native/ensure(false, string_concat("effect ", to_literal(effect), " exceeds contract of ", fn_row[1], ": ", path))
+      end
     end
   end
   return summaries
@@ -460,9 +469,13 @@ verb native/check_ownership(state, index)
   for row in state[:instructions]
     if row[3] == :Adopt
       let allocation = origins[row[5][1]]
-      native/ensure(len(allocation) > 0, string_concat("Adopt requires an owned allocation at ", native/instruction_location(index, row)))
+      if len(allocation) == 0
+        native/reject_instruction(index, row, "Adopt requires an owned allocation at ")
+      end
       for origin in allocation
-        native/ensure(origin[0] == :Owned || origin[0] == :Consume, string_concat("cannot adopt borrowed storage at ", native/instruction_location(index, row)))
+        if origin[0] != :Owned && origin[0] != :Consume
+          native/reject_instruction(index, row, "cannot adopt borrowed storage at ")
+        end
       end
     end
     if row[3] == :Manage
@@ -472,9 +485,15 @@ verb native/check_ownership(state, index)
     end
     if row[3] == :Store
       for origin in origins[row[5][1]]
-        native/ensure(origin[0] != :Gc || native/gc_origins(origins[row[5][0]]), string_concat("managed reference requires a managed object or RootStore at ", native/instruction_location(index, row)))
-        native/ensure(origin[0] != :Stack, string_concat("stack address escapes through store at ", native/instruction_location(index, row)))
-        native/ensure(origin[0] != :Borrow || native/contains(origins[row[5][0]], origin), string_concat("borrow escapes through store at ", native/instruction_location(index, row)))
+        if origin[0] == :Gc && !native/gc_origins(origins[row[5][0]])
+          native/reject_instruction(index, row, "managed reference requires a managed object or RootStore at ")
+        end
+        if origin[0] == :Stack
+          native/reject_instruction(index, row, "stack address escapes through store at ")
+        end
+        if origin[0] == :Borrow && !native/contains(origins[row[5][0]], origin)
+          native/reject_instruction(index, row, "borrow escapes through store at ")
+        end
       end
     end
     if row[3] == :Call || row[3] == :CallIndirect
@@ -512,7 +531,9 @@ verb native/check_ownership(state, index)
       if contract[2] == :Borrow
         valid = origin[0] == :Borrow && origin[1] == borrowed_owner
       end
-      native/ensure(valid, string_concat("result ownership mismatch in ", index[:functions][fn_id][1], "/", index[:blocks][term[0]][2]))
+      if !valid
+        native/ensure(false, string_concat("result ownership mismatch in ", index[:functions][fn_id][1], "/", index[:blocks][term[0]][2]))
+      end
     end
   end
   native/check_execution_ownership(state, index, origins)
