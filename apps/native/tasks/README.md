@@ -610,23 +610,28 @@ Inputs contain raw source text, method identities, and runtime declarations.
 The compiler parses source, prepares literals, lowers exceptions, generates helpers, declares entries, and builds native function bodies.
 It receives no application register descriptions, cached analysis, or precompiled application bodies.
 
-The two cases above must produce exactly the same IR as Rust-hosted Mica.
+The two cases above must produce exactly the same IR and C artifacts as Rust-hosted Mica.
 The runtime interface retains inferred effects and explicit linker symbols. The resulting IR validates without restoring runtime bodies.
 Each case runs with ordinary and forced collection under sanitizers.
 Both bootstrap tiers must produce identical C artifacts for the compiler.
 The compiler uses separate C translation units. The harness compiles two units concurrently, then links them for sanitizer execution.
+The full compiler bootstrap takes tens of minutes and runs only when explicitly selected.
 
 ```sh
 CC=clang cargo test --release -p mica-runtime --test native_codegen \
   native_source_executes_the_compilation_pipeline -- --ignored --nocapture
 ```
 
-This check ends at native IR. Runtime generation, linking and executing the compiled output, live installation, and a self-hosting rebuild remain separate acceptance gates.
+The native compiler emits application headers and C translation units through `native/emit_module`.
+The harness reads these artifacts through the value codec and writes their contents unchanged.
+It links each application against a separately generated runtime, then executes it with ordinary and forced collection.
+The compiler executable serves both source cases within one test run.
+Runtime generation, live installation, and a self-hosting rebuild remain separate acceptance gates.
 
-`native_source_links_to_a_separately_generated_runtime` checks the module boundary with a source-compiled increment method.
+`native_source_links_to_a_separately_generated_runtime` checks the same applications without bootstrapping the native compiler.
 Rust-hosted Mica emits the runtime and application separately. Both bootstrap tiers must produce identical artifacts.
 The linked application executes through native tasks with ordinary and forced collection under sanitizers.
-This fixture establishes runtime imports; it does not yet link output produced by the running native compiler.
+This smaller fixture checks runtime imports and the application runner before the full compiler gate.
 
 
 ## Remaining integration

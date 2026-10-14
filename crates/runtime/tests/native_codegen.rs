@@ -11,7 +11,7 @@ use std::thread;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use mica_runtime::{SourceRunner, TaskInput, TaskLimits, TaskOutcome};
-use mica_var::{Symbol, Value, ValueKind, encode_value};
+use mica_var::{Symbol, Value, ValueKind, decode_value_exact, encode_value};
 
 const SOURCES: &[&str] = &[
     include_str!("../../../apps/native/ir.mica"),
@@ -4316,6 +4316,56 @@ fn emit_native_source_artifacts(
     (value, memory, tasks)
 }
 
+fn compiled_application_fixture(case: usize) -> String {
+    let (entry, arguments, check) = match case {
+        0 => (
+            "mica_compiled_entry_0",
+            "NULL, 0".to_owned(),
+            "assert(actual == source_integer(42));".to_owned(),
+        ),
+        1 => (
+            "mica_compiled_method_0_0",
+            "&argument, 1".to_owned(),
+            format!(
+                "assert(mica_value_list_length(actual).f_number == 3);\n{}\n{}\nassert(mica_value_kind(mica_value_list_get(actual, 2).f_value) == 15);",
+                source_value_check(
+                    &Value::int(29).unwrap(),
+                    "mica_value_list_get(actual, 0).f_value"
+                ),
+                source_value_check(
+                    &Value::map([(
+                        Value::symbol(Symbol::intern("value")),
+                        Value::int(5).unwrap()
+                    )]),
+                    "mica_value_list_get(actual, 1).f_value"
+                )
+            ),
+        ),
+        _ => unreachable!(),
+    };
+    let checks = format!(
+        r#"
+    (void)symbols;
+    mica_type_Value argument = source_integer(5);
+    (void)argument;
+    for (unsigned collect = 0; collect < 2; ++collect) {{
+        struct mica_ValueResult arguments = mica_value_list(worker, {arguments});
+        assert(arguments.f_ok);
+        run_program(worker, kernel, code, runtime, {entry}, arguments.f_value,
+            &output, 1000000, collect != 0);
+        mica_type_Value actual = mica_value_root_get(&output);
+        {check}
+    }}
+"#
+    );
+    format!(
+        "#define MICA_FRONTEND_CUSTOM_ENTRY\n{}",
+        include_str!("../../../apps/native/compiler/frontend_tests.c")
+            .replace("source_roundtrip", "compiled")
+            .replace("/* FRONTEND_CONFORMANCE_CASES */", &checks)
+    )
+}
+
 #[test]
 fn native_source_links_to_a_separately_generated_runtime() {
     let mut previous = None;
@@ -4327,44 +4377,59 @@ fn native_source_links_to_a_separately_generated_runtime() {
         });
         load_native_kernel(&mut runner, true);
         load_native_source_compiler(&mut runner);
+        let sources = native_compilation_cases()
+            .into_iter()
+            .map(|(source, ids)| format!("[{source:?}, {ids}]"))
+            .collect::<Vec<_>>()
+            .join(",");
         let artifacts = eval(
             &mut runner,
-            r#"
+            &format!(
+                r#"
 let runtime = native_tasks/definitions()
 let interface = native/module_interface(runtime)
-let application = native_source/compile(interface, "source_roundtrip",
-  "verb compiled_increment(input)\nreturn input + 1\nend", {}, {}, [[10000, 20000]])
-return [[native/emit_module(runtime[:state], "runtime"), native/emit_module(application[:state], "application")],
-  native_memory/platform(), native_tasks/platform()]
-"#,
+let applications = []
+for input in [{sources}]
+  let application = native_source/compile(interface, "compiled", input[0], {{}}, {{}}, input[1])
+  applications = [@applications, native/emit_module(application[:state], "application")]
+end
+return [native/emit_module(runtime[:state], "runtime"), applications]
+"#
+            ),
         );
         if let Some(previous) = &previous {
-            assert_eq!(&artifacts, previous, "linked runtime differs between tiers");
+            assert!(
+                &artifacts == previous,
+                "linked runtime differs between tiers"
+            );
             continue;
         }
-        previous = Some(artifacts.clone());
-        let parts = artifacts.with_list(|parts| parts.to_vec()).unwrap();
-        let checks = r#"
-    mica_value_root_set(&input, source_integer(41));
-    for (unsigned collect = 0; collect < 2; ++collect) {
-        run_frontend(worker, kernel, code, runtime, &input, &output, 1000000, collect != 0);
-        assert(mica_value_root_get(&output) == source_integer(42));
-    }
-    (void)symbols;
-"#;
-        let fixture = include_str!("../../../apps/native/compiler/frontend_tests.c")
-            .replace("/* FRONTEND_CONFORMANCE_CASES */", checks);
-        check_native_modules_fixture(
-            &parts[0].with_list(|modules| modules.to_vec()).unwrap(),
-            &format!(
-                "{}\n{}\n{}\n{}\n{fixture}",
-                parts[1].with_str(str::to_owned).unwrap(),
-                parts[2].with_str(str::to_owned).unwrap(),
-                include_str!("../../../native/platform/allocation.c"),
-                include_str!("../../../native/platform/mutex.c")
-            ),
-            &["-O0", "-g0"],
-        );
+        let memory = eval(&mut runner, "return native_memory/platform()")
+            .with_str(str::to_owned)
+            .unwrap();
+        let tasks = eval(&mut runner, "return native_tasks/platform()")
+            .with_str(str::to_owned)
+            .unwrap();
+        for (case, application) in artifacts
+            .list_get(1)
+            .unwrap()
+            .with_list(|items| items.to_vec())
+            .unwrap()
+            .iter()
+            .enumerate()
+        {
+            check_native_modules_fixture(
+                &[artifacts.list_get(0).unwrap(), application.clone()],
+                &format!(
+                    "{memory}\n{tasks}\n{}\n{}\n{}",
+                    include_str!("../../../native/platform/allocation.c"),
+                    include_str!("../../../native/platform/mutex.c"),
+                    compiled_application_fixture(case)
+                ),
+                &["-O0", "-g0"],
+            );
+        }
+        previous = Some(artifacts);
     }
 }
 
@@ -4795,7 +4860,7 @@ fn native_source_executes_the_compilation_pipeline() {
 verb native_compile_fixture(input: map) -> map
   let module: map = native_source/compile(input[:module], "compiled", input[:source], {}, {}, input[:method_ids])
   let state: map = module[:state]
-  return state
+  return {:state -> state, :artifacts -> native/emit_module(state, "application")}
 end
 "#;
     let mut library = native_backend_library();
@@ -4830,12 +4895,15 @@ end
     // by the bootstrap host for these inputs.
     let runtime = eval(
         &mut oracle,
-        "return native/module_interface(native_tasks/definitions())",
+        "let runtime = native_tasks/definitions()\nreturn [native/module_interface(runtime), native/emit_module(runtime[:state], \"runtime\")]",
     );
     let mut checks = String::new();
-    for (source, ids) in native_compilation_cases() {
+    for (case, (source, ids)) in native_compilation_cases().into_iter().enumerate() {
         let input = Value::map([
-            (Value::symbol(Symbol::intern("module")), runtime.clone()),
+            (
+                Value::symbol(Symbol::intern("module")),
+                runtime.list_get(0).unwrap(),
+            ),
             (
                 Value::symbol(Symbol::intern("source")),
                 Value::string(source),
@@ -4860,7 +4928,12 @@ end
         let mut validation = SourceRunner::root_source_request("");
         validation.input = TaskInput::Invocation {
             selector: Symbol::intern("native/check"),
-            roles: vec![(Symbol::intern("state"), expected.clone())],
+            roles: vec![(
+                Symbol::intern("state"),
+                expected
+                    .map_get(&Value::symbol(Symbol::intern("state")))
+                    .unwrap(),
+            )],
         };
         let validated = oracle.submit_invocation(validation).unwrap();
         assert!(
@@ -4871,7 +4944,7 @@ end
         let construction = source_encoded_value(&input, "argument");
         let expectation = source_encoded_value(&expected, "expected");
         eprintln!(
-            "native compiler fixture: {} input C bytes, {} expected IR C bytes",
+            "native compiler fixture: {} input C bytes, {} expected output C bytes",
             construction.len(),
             expectation.len()
         );
@@ -4884,6 +4957,14 @@ end
                run_frontend(worker, kernel, code, runtime, &input, &output, 500000000, collect != 0);\n\
                struct mica_IntResult compared = mica_value_compare(mica_value_root_get(&output), mica_value_root_get(&expected_root));\n\
                assert(compared.f_ok && compared.f_number == 0);\n\
+               struct mica_ValueResult wire = mica_value_encode(worker, symbols, mica_value_root_get(&output), (struct mica_ValueCodecOptions){{0}});\n\
+               assert(wire.f_ok);\n\
+               const struct mica_HeapBytes *bytes = mica_value_as_bytes(wire.f_value).f_header;\n\
+               char path[64];\n\
+               assert(snprintf(path, sizeof(path), \"application_{case}_%u.bin\", collect) > 0);\n\
+               FILE *file = fopen(path, \"wb\"); assert(file);\n\
+               assert(fwrite(bytes->f_data, 1, bytes->f_length, file) == bytes->f_length);\n\
+               assert(fclose(file) == 0);\n\
              }}\nassert(mica_memory_root_pop(worker, &expected_root));\n}}\n"
         ));
     }
@@ -4894,9 +4975,8 @@ end
             let source = &source;
             let method_ids = &method_ids;
             scope.spawn(move || {
-                // The complete compiler closure is nearly three times the
-                // register-lowering library. Keep construction at its proven
-                // bound, and give validation plus C emission a separate limit.
+                // Bootstrap the compiler and C emitter together. Give their
+                // validation and C emission a separate construction limit.
                 let (runner, state) = prepare_native_source_example(tier, source, method_ids, &[]);
                 emit_native_source_artifacts(
                     runner,
@@ -4914,15 +4994,44 @@ end
         assert!(first == second, "compiler differs between bootstrap tiers");
         first
     });
-    check_native_modules_fixture(
+    let compiler = compile_native_modules_fixture(
         &[generated],
         &format!(
-            "{memory}\n{tasks}\n{}\n{}\n{fixture}",
+            "{memory}\n{tasks}\n{}\n{}\n#include <stdio.h>\n{fixture}",
             include_str!("../../../native/platform/allocation.c"),
             include_str!("../../../native/platform/mutex.c")
         ),
         &["-O0", "-g0"],
     );
+    execute_native_source_fixture(&compiler, &compiler.0.join("source"));
+    let runtime_module = runtime.list_get(1).unwrap();
+    for case in 0..native_compilation_cases().len() {
+        let read_output = |collect| {
+            let bytes =
+                fs::read(compiler.0.join(format!("application_{case}_{collect}.bin"))).unwrap();
+            decode_value_exact(&bytes)
+                .unwrap()
+                .map_get(&Value::symbol(Symbol::intern("artifacts")))
+                .unwrap()
+        };
+        let application = read_output(0);
+        assert!(
+            application == read_output(1),
+            "collection changed emitted C"
+        );
+        // Only transport and write the native-produced files here. The host
+        // never recompiles Mica or re-emits C from the returned IR.
+        check_native_modules_fixture(
+            &[runtime_module.clone(), application],
+            &format!(
+                "{memory}\n{tasks}\n{}\n{}\n{}",
+                include_str!("../../../native/platform/allocation.c"),
+                include_str!("../../../native/platform/mutex.c"),
+                compiled_application_fixture(case)
+            ),
+            &["-O0", "-g0"],
+        );
+    }
 }
 
 fn native_source_dependency_inventory(sources: &[&str], excluded: &[&str]) -> Value {
@@ -6121,6 +6230,15 @@ fn check_native_source_fixture(fixture: &str) {
 }
 
 fn check_native_modules_fixture(modules: &[Value], fixture: &str, compilation_flags: &[&str]) {
+    let scratch = compile_native_modules_fixture(modules, fixture, compilation_flags);
+    execute_native_source_fixture(&scratch, &scratch.0.join("source"));
+}
+
+fn compile_native_modules_fixture(
+    modules: &[Value],
+    fixture: &str,
+    compilation_flags: &[&str],
+) -> Scratch {
     let scratch = Scratch::new();
     let mut sources = Vec::new();
     let mut header_name = String::new();
@@ -6197,7 +6315,7 @@ fn check_native_modules_fixture(modules: &[Value], fixture: &str, compilation_fl
         "native source: module compilation and link={:?}",
         started.elapsed()
     );
-    execute_native_source_fixture(&scratch, &binary);
+    scratch
 }
 
 fn native_source_sanitizer() -> &'static str {

@@ -2,22 +2,21 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 #include <assert.h>
+#include <stdio.h>
 
 static mica_type_Value source_integer(int64_t number) {
     struct mica_ValueResult value = mica_value_int(number);
     assert(value.f_ok);
     return value.f_value;
 }
-static void run_frontend(struct mica_MemoryWorker *worker, struct mica_Kernel *kernel,
+static void run_program(struct mica_MemoryWorker *worker, struct mica_Kernel *kernel,
     struct mica_MemoryRoot *code, struct mica_TaskRuntime *runtime,
-    struct mica_MemoryRoot *input, struct mica_MemoryRoot *output, uint64_t steps, bool collect) {
+    mica_function_type_TaskEntry entry, mica_type_Value arguments,
+    struct mica_MemoryRoot *output, uint64_t steps, bool collect) {
     struct mica_MemoryRoot image = {0};
     assert(mica_memory_root_push(worker, &image));
-    mica_type_Value value = mica_value_root_get(input);
-    struct mica_ValueResult arguments = mica_value_list(worker, &value, 1);
-    assert(arguments.f_ok);
-    image.f_pointer = (void *)mica_task_new_Image(worker, mica_source_roundtrip_method_0_0,
-        (void *)code->f_pointer, source_integer(7), arguments.f_value, 0, NULL, NULL, 0, NULL, NULL);
+    image.f_pointer = (void *)mica_task_new_Image(worker, entry,
+        (void *)code->f_pointer, source_integer(7), arguments, 0, NULL, NULL, 0, NULL, NULL);
     assert(image.f_pointer);
     struct mica_TaskControl task = {0};
     struct mica_TaskServices services = {0};
@@ -26,9 +25,33 @@ static void run_frontend(struct mica_MemoryWorker *worker, struct mica_Kernel *k
     uint64_t limit = worker->f_heap->f_collection_limit;
     if (collect) worker->f_heap->f_collection_limit = 0;
     uint64_t collections = worker->f_heap->f_collections;
-    assert(mica_task_execute(&task, worker) == 0);
+    for (unsigned boundary = 0; ; ++boundary) {
+        assert(boundary < 16);
+        uint64_t status = mica_task_execute(&task, worker);
+        if (status != 0) {
+            fprintf(stderr, "native task failed: status=%llu, remaining=%llu\n",
+                (unsigned long long)status, (unsigned long long)task.f_remaining);
+            struct mica_MemoryRoot error = {0};
+            if (mica_task_error(&task, worker, &error) == 0) {
+                struct mica_HeapErrorResult raised = mica_value_as_error(mica_value_root_get(&error));
+                if (raised.f_ok && raised.f_header->f_has_message) {
+                    struct mica_HeapStringResult text = mica_value_as_string(raised.f_header->f_message);
+                    if (text.f_ok) {
+                        fwrite(text.f_header->f_data, 1, text.f_header->f_length, stderr);
+                        fputc('\n', stderr);
+                    }
+                }
+                assert(mica_memory_root_pop(worker, &error));
+            }
+        }
+        assert(status == 0);
+        assert(mica_task_dispatch(&task, worker, &services) == 0);
+        struct mica_TaskObservation observed = mica_task_observe(&task, worker);
+        assert(observed.f_status == 0);
+        if (observed.f_state == 5) break;
+        assert(observed.f_state == 1);
+    }
     if (collect) assert(worker->f_heap->f_collections > collections);
-    assert(mica_task_dispatch(&task, worker, &services) == 0);
     struct mica_MemoryRoot acquired = {0};
     assert(mica_memory_acquire(worker, &task.f_image, &acquired));
     mica_value_root_set(output, ((struct mica_TaskImage *)acquired.f_pointer)->f_input);
@@ -37,6 +60,17 @@ static void run_frontend(struct mica_MemoryWorker *worker, struct mica_Kernel *k
     assert(mica_memory_root_pop(worker, &image));
     worker->f_heap->f_collection_limit = limit;
 }
+#ifndef MICA_FRONTEND_CUSTOM_ENTRY
+static void run_frontend(struct mica_MemoryWorker *worker, struct mica_Kernel *kernel,
+    struct mica_MemoryRoot *code, struct mica_TaskRuntime *runtime,
+    struct mica_MemoryRoot *input, struct mica_MemoryRoot *output, uint64_t steps, bool collect) {
+    mica_type_Value value = mica_value_root_get(input);
+    struct mica_ValueResult arguments = mica_value_list(worker, &value, 1);
+    assert(arguments.f_ok);
+    run_program(worker, kernel, code, runtime, mica_source_roundtrip_method_0_0,
+        arguments.f_value, output, steps, collect);
+}
+#endif
 static void frontend_checks(struct mica_MemoryWorker *worker, struct mica_Kernel *kernel,
     struct mica_MemoryRoot *code, struct mica_TaskRuntime *runtime, struct mica_SymbolTable *symbols) {
     struct mica_MemoryRoot input = {0}, output = {0};
