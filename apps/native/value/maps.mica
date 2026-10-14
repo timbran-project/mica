@@ -44,15 +44,16 @@ verb native_value/maps(input: map) -> map
   builder = with_count
   builder = native_gen/when(builder, native_gen/less(native_gen/ref(builder, "one"), length), fn(input_sort)
     let sort: map = input_sort
-    let [scratch: map, with_scratch: map] = native_memory/array_storage(sort, worker, entry, length, "layout_opaque", failure)
-    sort = with_scratch
     let ordered = fn(body, left, right)
       let [order: map, compared: map] = native_value/map_order(body, left, right)
       return [native_gen/negate(native_gen/less(native_gen/zero(:I64), order)), compared]
     end
-    let [result: map, with_result: map] = native_sequence/stable_merge(sort, native_sequence/span(data, length), scratch, ordered)
-    sort = with_result
-    sort = native_gen/assign(sort, sorted, result)
+    let [in_order: map, inspected: map] = native_sequence/is_ordered(sort, native_sequence/span(data, length), ordered)
+    sort = native_gen/unless(inspected, in_order, fn(unsorted)
+      let [scratch: map, allocated: map] = native_memory/array_storage(unsorted, worker, entry, length, "layout_opaque", failure)
+      let [result: map, merged: map] = native_sequence/stable_merge(allocated, native_sequence/span(data, length), scratch, ordered)
+      return native_gen/assign(merged, sorted, result)
+    end)
     // Stable sorting keeps duplicate keys in source order; replacing the
     // preceding entry makes the final input value win.
     let [written: map, with_written: map] = native_sequence/compact_sorted(sort, native_sequence/span(sorted, length),

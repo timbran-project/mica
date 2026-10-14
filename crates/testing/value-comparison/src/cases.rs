@@ -1228,6 +1228,32 @@ pub fn workloads() -> Vec<(String, Vec<Case>)> {
             ],
         ),
     ];
+    for (name, duplicate_keys) in [
+        ("map_construct_ordered", false),
+        ("map_construct_ordered_duplicates", true),
+    ] {
+        let entries = Input::List(
+            (0..128)
+                .flat_map(|i| {
+                    [
+                        Input::Int(if duplicate_keys { i / 4 } else { i }),
+                        Input::Int(i),
+                    ]
+                })
+                .collect(),
+        );
+        workloads.push((
+            name,
+            vec![
+                Case {
+                    op: Operation::MapBuild,
+                    left: entries,
+                    right: Input::Empty
+                };
+                16
+            ],
+        ));
+    }
     for (name, op) in [
         ("list_index", Operation::ListGet),
         ("list_slice", Operation::ListSlice),

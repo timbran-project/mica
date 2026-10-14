@@ -371,6 +371,21 @@ static void map_cases(struct mica_MemoryWorker *arena) {
     assert(failed.f_heap->f_pages == NULL);
     struct mica_ValueMapEntry *large = calloc(4096, sizeof(*large));
     assert(large != NULL);
+    // Ordered duplicate runs need only the map allocation, with the last
+    // source value retained for each key.
+    for (size_t i = 0; i < 4096; ++i)
+        large[i] = (struct mica_ValueMapEntry){integer((int64_t)(i / 2)), integer((int64_t)i)};
+    allocation_allowance = 1;
+    struct mica_ValueResult ordered = mica_value_map(&failed, large, 4096);
+    assert(ordered.f_ok);
+    assert(mica_value_map_length(ordered.f_value).f_number == 2048);
+    for (size_t i = 0; i < 2048; ++i)
+        assert(mica_value_map_get(ordered.f_value, integer((int64_t)i)).f_value == integer((int64_t)(2 * i + 1)));
+    allocation_allowance = SIZE_MAX;
+    test_worker_release(&failed);
+    test_worker_init(&failed, 0);
+    for (size_t i = 0; i < 4096; ++i)
+        large[i] = (struct mica_ValueMapEntry){integer((int64_t)(4096 - i)), integer((int64_t)i)};
     allocation_allowance = 1;
     assert(!mica_value_map(&failed, large, 4096).f_ok);
     allocation_allowance = SIZE_MAX;
@@ -385,6 +400,13 @@ static void map_cases(struct mica_MemoryWorker *arena) {
     struct mica_ValueResult a = mica_value_string(arena, (const uint8_t *)"same", 4);
     struct mica_ValueResult b = mica_value_string(arena, (const uint8_t *)"same", 4);
     assert(a.f_ok && b.f_ok && a.f_value != b.f_value);
+    struct mica_ValueMapEntry equal_keys[] = {{a.f_value, integer(1)}, {b.f_value, integer(2)}};
+    struct mica_ValueResult equal = mica_value_map(arena, equal_keys, 2);
+    assert(equal.f_ok);
+    const struct mica_HeapMap *equal_header = mica_value_as_map(equal.f_value).f_header;
+    assert(equal_header->f_length == 1);
+    assert(equal_header->f_data[0].f_key == b.f_value);
+    assert(equal_header->f_data[0].f_value == integer(2));
     struct mica_ValueMapEntry pairs[] = {
         {floating(1), integer(30)}, {a.f_value, integer(1)},
         {integer(1), integer(20)}, {b.f_value, integer(2)}
