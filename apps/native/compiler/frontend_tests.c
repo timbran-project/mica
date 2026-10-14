@@ -22,8 +22,9 @@ static void run_program(struct mica_MemoryWorker *worker, struct mica_Kernel *ke
     struct mica_TaskServices services = {0};
     // Match the call-depth limit used by the Rust-hosted frontend oracle.
     assert(mica_task_init(&task, worker, kernel, &image, steps, 3, 256, runtime) == 0);
-    uint64_t limit = worker->f_heap->f_collection_limit;
-    if (collect) worker->f_heap->f_collection_limit = 0;
+    // Request collection at the first generated safepoint even when allocation
+    // can reuse existing pages without crossing a reservation threshold.
+    if (collect) worker->f_heap->f_pressure = true;
     uint64_t collections = worker->f_heap->f_collections;
     for (unsigned boundary = 0; ; ++boundary) {
         assert(boundary < 16);
@@ -58,7 +59,6 @@ static void run_program(struct mica_MemoryWorker *worker, struct mica_Kernel *ke
     assert(mica_memory_root_pop(worker, &acquired));
     assert(mica_task_release(&task, worker));
     assert(mica_memory_root_pop(worker, &image));
-    worker->f_heap->f_collection_limit = limit;
 }
 #ifndef MICA_FRONTEND_CUSTOM_ENTRY
 static void run_frontend(struct mica_MemoryWorker *worker, struct mica_Kernel *kernel,

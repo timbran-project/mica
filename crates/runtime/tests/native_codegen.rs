@@ -1694,6 +1694,32 @@ return [module[:header], module[:sources]]
 }
 
 #[test]
+fn module_interfaces_export_effects_in_a_fixed_order() {
+    for tier in [true, false] {
+        let mut runner = runner(tier);
+        assert_eq!(
+            eval(
+                &mut runner,
+                r#"
+let expected = [:Allocate, :Block, :ReadMemory, :Release, :Relocate, :WriteMemory]
+let state = native/program()
+for effects in [[:WriteMemory, :Relocate, :Release, :ReadMemory, :Block, :Allocate],
+                [:ReadMemory, :Block], [], expected]
+  let [id, added] = native/add_function(state, string_concat("foreign_", to_literal(len(state[:functions]))), :Void)
+  state = native/contract(native/foreign(added, id), id, effects, :Value, "")
+end
+let declarations = native/interface(state)
+require [row[1] for row in declarations[:contracts]] == [expected, [:Block, :ReadMemory], [], expected]
+require native/interface(declarations) == declarations
+return true
+"#
+            ),
+            Value::bool(true)
+        );
+    }
+}
+
+#[test]
 fn module_interfaces_validate_symbols_and_discard_body_caches() {
     for tier in [true, false] {
         let mut runner = runner(tier);

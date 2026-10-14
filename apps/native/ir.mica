@@ -178,7 +178,10 @@ verb native/interface(input: map) -> map
     state[table] = []
   end
   state[:foreign] = [[row[0], native/link_symbol(index, row[0])] for row in [@state[:functions], @state[:globals]]]
-  state[:contracts] = [[row[0], sort([effect for effect, path in index[:effects][row[0]]]),
+  // Symbol ordering depends on interning order. Export effects in a fixed
+  // order so independently bootstrapped runtimes produce the same interface.
+  let effects: list = [:Allocate, :Block, :ReadMemory, :Release, :Relocate, :WriteMemory]
+  state[:contracts] = [[row[0], [effect for effect in effects if map_contains_key(index[:effects][row[0]], effect)],
     index[:contracts][row[0]][2], index[:contracts][row[0]][3]] for row in state[:functions]]
   state[:globals] = [[row[0], row[1], row[2], row[3], :Zero] for row in state[:globals]]
   let declarations: map = {}
