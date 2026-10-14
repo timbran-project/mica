@@ -4192,6 +4192,60 @@ return true
 }
 
 #[test]
+fn native_root_parameters_refresh_after_declaration_edits() {
+    for tier in [true, false] {
+        let mut host = runner(tier);
+        load_native_values(&mut host);
+        host.run_filein(include_str!("../../../apps/native/memory/roots.mica"))
+            .unwrap();
+        assert_eq!(
+            eval(
+                &mut host,
+                r#"
+let module = native_value/definitions()
+let worker = ["worker", native_memory/record_pointer("MemoryWorker"), :Borrow]
+let managed = ["value", native_value/word(), :Gc]
+let failure = fn(body, reason) => native_roots/return_value(body, native_gen/zero(:U64))
+module = native_memory/declare(module, "first", :U64, [worker, managed], [:ReadMemory, :WriteMemory], :Value, "")
+let builder = native_roots/context(module, "first", failure)
+require map_contains_key(builder[:scope_bindings], "value")
+require !map_contains_key(builder[:scope_bindings], "worker")
+module = native_gen/finish(module, native_roots/return_value(builder, native_gen/zero(:U64)))
+let original = module
+// Replacing a contract without changing the table length must invalidate it.
+let parameter = module[:bindings]["first"]["value"]
+let contracts = []
+for row in module[:state][:parameter_contracts]
+  if row[0] == parameter
+    row = [row[0], :Borrow]
+  end
+  contracts = [@contracts, row]
+end
+module[:state][:parameter_contracts] = contracts
+builder = native_roots/context(module, "first", failure)
+require !map_contains_key(builder[:scope_bindings], "value")
+module = builder[:module]
+// Appending declarations must refresh the parameter grouping too.
+module = native_memory/declare(module, "second", :U64, [worker, managed, ["other", native_value/word(), :Gc]], [:ReadMemory, :WriteMemory], :Value, "")
+builder = native_roots/context(module, "second", failure)
+require map_contains_key(builder[:scope_bindings], "value")
+require map_contains_key(builder[:scope_bindings], "other")
+require len(builder[:scope_roots]) == 2
+module = native_gen/finish(module, native_roots/return_value(builder, native_gen/zero(:U64)))
+let unchanged = native_roots/context(original, "first", failure)
+require map_contains_key(unchanged[:scope_bindings], "value")
+// Interfaces rebuild metadata from declarations, independently of bodies.
+let imported = native_roots/context(native/module_interface(original), "first", failure)
+require map_contains_key(imported[:scope_bindings], "value")
+return true
+"#
+            ),
+            Value::bool(true)
+        );
+    }
+}
+
+#[test]
 fn native_root_slots_preserve_values_and_unlink_their_scope() {
     let mut previous = None;
     for tier in [true, false] {

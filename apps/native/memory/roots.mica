@@ -80,6 +80,33 @@ verb native_roots/slots(builder: map, label: string, count: int) -> list
   return [data, ready]
 end
 
+// Cache managed parameter names by function. Declaration edits invalidate
+// the index; defining another body reuses the same immutable metadata.
+verb native_roots/parameters(input: map) -> list
+  let builder: map = input
+  let state: map = builder[:module][:state]
+  let layout: map = builder[:module][:generation_layout]
+  if !map_contains_key(layout, :root_parameter_rows) || layout[:root_parameter_rows] != state[:parameters] || layout[:root_contract_rows] != state[:parameter_contracts]
+    let managed: map = {}
+    for row in state[:parameter_contracts]
+      if row[1] == :Gc
+        managed[row[0]] = true
+      end
+    end
+    let parameters: map = {}
+    for row in state[:parameters]
+      if map_contains_key(managed, row[0])
+        parameters[row[1]] = [@index_or(parameters, row[1], []), row[3]]
+      end
+    end
+    layout[:root_parameters] = parameters
+    layout[:root_parameter_rows] = state[:parameters]
+    layout[:root_contract_rows] = state[:parameter_contracts]
+    builder[:module][:generation_layout] = layout
+  end
+  return [index_or(layout[:root_parameters], builder[:function], []), builder]
+end
+
 verb native_roots/open_scope(input: map, failure) -> map
   let builder: map = input
   builder[:scope_failure] = failure
@@ -101,14 +128,12 @@ verb native_roots/open_scope(input: map, failure) -> map
   ready = with_parent
   ready[:scope_parent] = parent
   let bindings: map = {}
-  let managed: list = [row[0] for row in module[:state][:parameter_contracts] if row[1] == :Gc]
-  for parameter in module[:state][:parameters]
-    if parameter[1] == builder[:function] && native/contains(managed, parameter[0])
-      let spelling: string = parameter[3]
-      let [rooted: map, with_root: map] = native_roots/retain(ready, spelling, native_gen/ref(ready, spelling))
-      ready = with_root
-      bindings[spelling] = rooted
-    end
+  let [parameters: list, indexed: map] = native_roots/parameters(ready)
+  ready = indexed
+  for spelling in parameters
+    let [rooted: map, with_root: map] = native_roots/retain(ready, spelling, native_gen/ref(ready, spelling))
+    ready = with_root
+    bindings[spelling] = rooted
   end
   ready[:scope_bindings] = bindings
   return ready
