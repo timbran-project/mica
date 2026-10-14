@@ -221,13 +221,14 @@ verb native/targets(term)
 end
 
 verb native/reads(row)
-  if native/contains([:Zero, :SizeOf, :AlignOf, :GlobalAddress, :FunctionAddress], row[3])
-    return []
-  end
-  if row[3] == :Field || row[3] == :FieldPointer
+  let op = row[3]
+  if op == :Field || op == :FieldPointer
     return [row[5][0]]
   end
-  if row[3] == :Call
+  if op == :Zero || op == :SizeOf || op == :AlignOf || op == :GlobalAddress || op == :FunctionAddress
+    return []
+  end
+  if op == :Call
     let args = []
     let i = 1
     while i < len(row[5])

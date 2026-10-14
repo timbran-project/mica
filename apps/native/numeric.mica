@@ -111,16 +111,13 @@ end
 verb native/c_numeric_emission(index, row)
   let op = row[3]
   let args = row[5]
-  if native/contains([:CheckedAdd, :CheckedSubtract, :CheckedMultiply, :CheckedDivide, :CheckedRemainder, :CheckedNegate, :CheckedFloatToInt], op)
-    return native/c_emission(native/c_checked(index, row), false)
-  end
   if op == :Bitcast
     let source_type = native/value_type(index, index[:blocks][row[1]][1], args[0])
     return native/c_emission(string_concat("memcpy(&", native/c_value(index, row[4]), ", &(", native/c_type(source_type), "){", native/c_value(index, args[0]), "}, sizeof(", native/c_type(source_type), "));"), false)
   end
   let dst = native/c_value(index, row[4])
   let type_id = index[:variables][row[4]][2]
-  if native/contains([:Convert, :Negate, :Truncate, :IsFinite], op)
+  if op == :Convert || op == :Negate || op == :Truncate || op == :IsFinite
     let arg = native/c_value(index, args[0])
     let expressions = {:Convert -> string_concat("(", native/c_type(type_id), ")(", arg, ")"),
                        :Negate -> string_concat("-(", arg, ")"), :Truncate -> string_concat("truncf(", arg, ")"),
@@ -130,9 +127,7 @@ verb native/c_numeric_emission(index, row)
   let operators = {:Add -> " + ", :Subtract -> " - ", :Multiply -> " * ", :Divide -> " / ", :Remainder -> " % ",
                    :BitAnd -> " & ", :BitOr -> " | ", :BitXor -> " ^ ", :ShiftLeft -> " << ", :ShiftRight -> " >> ",
                    :Equal -> " == ", :Less -> " < "}
-  if !map_contains_key(operators, op)
-    return native/c_emission("", false)
-  end
+  native/ensure(map_contains_key(operators, op), "unsupported C numeric operation")
   let left = native/c_value(index, args[0])
   let right = native/c_value(index, args[1])
   if op == :Remainder && type_id == :F32

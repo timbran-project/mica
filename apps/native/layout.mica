@@ -204,9 +204,6 @@ verb native/c_layout_emission(index, row)
     end
     return native/c_emission(string_concat(dst, " = ", operator, "(", native/c_type(args[0]), ");"), true)
   end
-  if !native/contains([:Address, :ElementPointer, :PointerCast, :Wrap, :Unwrap, :PackPointer, :PackImmediate, :UnpackPointer, :Tag, :Payload], op)
-    return native/c_emission("", false)
-  end
   let arg = native/c_value(index, args[0])
   if op == :Address
     return native/c_emission(string_concat(dst, " = &", arg, ";"), true)
@@ -242,6 +239,7 @@ verb native/c_layout_emission(index, row)
   if op == :Tag
     return native/c_emission(string_concat(dst, " = mica_internal_word_tag(", arg, ");"), true)
   end
+  native/ensure(op == :Payload, "unsupported C layout operation")
   let tagged = native/value_type(index, index[:blocks][row[1]][1], args[0])
   let heap = native/c_heap_tag(tagged, string_concat("mica_internal_word_tag(", arg, ")"))
   return native/c_emission(string_concat("if (", heap, ") { abort(); } ", dst, " = mica_internal_word_payload(", arg, ");"), false)
