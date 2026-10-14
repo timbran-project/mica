@@ -23,7 +23,10 @@ verb native_memory/clamp_collection_limit() -> list
   return [
     native/let_call("collection_target", :U64, "memory_collection_target", ["heap"]),
     native/when_statement(native/binary_expression(:Less, "collection_target", native_memory/field(:U64, "heap", "collection_limit")), [
-      native_memory/store(:U64, "heap", "collection_limit", "collection_target")])]
+      native_memory/store(:U64, "heap", "collection_limit", "collection_target")]),
+    native/let_call("allocation_allowance", :U64, "memory_allocation_allowance", ["heap"]),
+    native/when_statement(native/binary_expression(:Less, "allocation_allowance", native_memory/field(:U64, "heap", "allocation_allowance")), [
+      native_memory/store(:U64, "heap", "allocation_allowance", "allocation_allowance")])]
 end
 
 verb native_memory/lifecycle(input: map) -> map
@@ -119,6 +122,7 @@ verb native_memory/lifecycle(input: map) -> map
     native/let_statement("adopted", bytes, native/binary_expression(:Adopt, "slot", "sync")),
     native_memory/store(trace, "heap", "trace", "trace"),
     native_memory/store(:U64, "heap", "collection_limit", "memory_collection_floor"),
+    native_memory/store(:U64, "heap", "allocation_allowance", "memory_collection_floor"),
     native_memory/store(:U64, "heap", "capacity_limit", "memory_default_capacity"),
     native_memory/store(:Bool, "heap", "collection_ok", "memory_true"),
     native/return_value("memory_true")])
@@ -187,12 +191,18 @@ verb native_memory/lifecycle(input: map) -> map
     native_memory/call("memory_wake", ["sync"]),
     native/let_statement("requested", :Bool, native_memory/field(:Bool, "heap", "collecting")),
     native/if_statement("requested", wait, [
-      // Nursery overflow uses managed pages. The heap growth limit decides
-      // when to collect; a small nursery must not trigger repeated full scans.
+      // Reused cells consume capacity without reserving pages. Track both
+      // allocation traffic and page growth, and require progress since the
+      // last collection so an unchanged full heap cannot cause repeated scans.
       native/let_statement("should_collect", :Bool, "collect"),
       native/when_statement(native_memory/field(:Bool, "heap", "pressure"), [native/set_statement("should_collect", "memory_true")]),
-      native/unless_statement(native/binary_expression(:Less,
-        native_memory/field(:U64, "heap", "allocated"), native_memory/field(:U64, "heap", "collection_limit")),
+      native/when_statement(native/binary_expression(:Less,
+        native_memory/field(:U64, "heap", "collected_allocated"), native_memory/field(:U64, "heap", "allocated")), [
+        native/unless_statement(native/binary_expression(:Less,
+          native_memory/field(:U64, "heap", "allocated"), native_memory/field(:U64, "heap", "collection_limit")),
+          [native/set_statement("should_collect", "memory_true")])]),
+      native/when_statement(native/binary_expression(:Less,
+        native_memory/field(:U64, "heap", "allocation_allowance"), native_memory/field(:U64, "heap", "allocated_since_collection")),
         [native/set_statement("should_collect", "memory_true")]),
       native/when_statement("should_collect", [
         native_memory/store(:Bool, "heap", "collecting", "memory_true"),

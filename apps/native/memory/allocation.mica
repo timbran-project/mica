@@ -86,34 +86,42 @@ verb native_memory/allocation(input: map) -> map
       native/let_statement("page_size", :U64, native/unary_expression(:SizeOf, [:Record, "MemoryPage"])),
       native/let_statement("payload_size", :U64, native/binary_expression(:Multiply, "count", "stride")),
       native/let_statement("allocation_size", :U64, native/binary_expression(:Add, "page_size", "payload_size")),
+      // Prefer the exact class while pages fit. At the capacity limit, consume
+      // the smallest available larger cell before reporting exhaustion.
       native/unless_statement(native/call_expression("memory_has_capacity", ["heap", "allocation_size"]), [
-        native_memory/store(:Bool, "heap", "pressure", "memory_true"),
-        native/return_value([:Record, "memory_null_object", "memory_true"])]),
-      native/let_call("allocation", bytes, "memory_platform_allocate", ["allocation_size"]),
-      native/when_statement(native/binary_expression(:Equal, "allocation", "memory_null_bytes"), [native/return_zero()]),
-      native/let_statement("owned_page", page, native/unary_expression(:PointerCast, "allocation")),
-      native/let_statement("previous", page, native_memory/field(page, "heap", "pages")),
-      native/let_statement("page_slot", native_memory/pointer(page), native/field_pointer_expression("heap", "pages")),
-      native/let_statement("page", page, native/binary_expression(:Adopt, "page_slot", "owned_page")),
-      native/store_statement("page", native/initialize_record(native_memory/page_schema(),
-        {"next" -> "previous", "stride" -> "stride", "capacity" -> "count", "live" -> "memory_n0", "bucket" -> "bucket"})),
-      native/let_statement("managed_page", page, native/manage_expression("page")),
-      native/let_statement("managed_heap", native_memory/record_pointer("MemoryHeap"), native/manage_expression("heap")),
-      native/let_statement("page_bytes", bytes, native/unary_expression(:PointerCast, "managed_page")),
-      native/let_offset("cells", bytes, "page_bytes", "page_size"),
-      native/let_statement("index", :U64, "memory_n0"),
-      native/while_statement(native/binary_expression(:Less, "index", "count"), [
-        native/let_statement("offset", :U64, native/binary_expression(:Multiply, "index", "stride")),
-        native/let_offset("cell", bytes, "cells", "offset"),
-        native/let_statement("item", object, native/unary_expression(:PointerCast, "cell")),
-        native/store_statement("item", native/initialize_record(native_memory/object_schema(),
-          {"next" -> "candidate", "work" -> "memory_null_object", "forward" -> "memory_null_object",
-            "page" -> "managed_page", "heap" -> "managed_heap", "size" -> "memory_n0", "layout" -> "memory_n0",
-            "mark" -> "memory_n0", "state" -> "memory_object_free"})),
-        native/set_statement("candidate", "item"),
-        native/set_statement("index", native/binary_expression(:Add, "index", "memory_n1"))]),
-      native_memory/store(:U64, "heap", "allocated", native/typed_expression(:U64,
-        native/binary_expression(:Add, native_memory/field(:U64, "heap", "allocated"), "allocation_size")))]),
+        native/while_statement(native/binary_expression(:Less, "bucket", "memory_n9"), [
+          native/set_statement("bucket", native/binary_expression(:Add, "bucket", "memory_n1")),
+          native/set_statement("candidate", native/root_load_expression(native_memory/free_slot("heap", "bucket"))),
+          native/unless_statement(native/binary_expression(:Equal, "candidate", "memory_null_object"), [native/break_statement()])]),
+        native/when_statement(native/binary_expression(:Equal, "candidate", "memory_null_object"), [
+          native_memory/store(:Bool, "heap", "pressure", "memory_true"),
+          native/return_value([:Record, "memory_null_object", "memory_true"])])]),
+      native/when_statement(native/binary_expression(:Equal, "candidate", "memory_null_object"), [
+        native/let_call("allocation", bytes, "memory_platform_allocate", ["allocation_size"]),
+        native/when_statement(native/binary_expression(:Equal, "allocation", "memory_null_bytes"), [native/return_zero()]),
+        native/let_statement("owned_page", page, native/unary_expression(:PointerCast, "allocation")),
+        native/let_statement("previous", page, native_memory/field(page, "heap", "pages")),
+        native/let_statement("page_slot", native_memory/pointer(page), native/field_pointer_expression("heap", "pages")),
+        native/let_statement("page", page, native/binary_expression(:Adopt, "page_slot", "owned_page")),
+        native/store_statement("page", native/initialize_record(native_memory/page_schema(),
+          {"next" -> "previous", "stride" -> "stride", "capacity" -> "count", "live" -> "memory_n0", "bucket" -> "bucket"})),
+        native/let_statement("managed_page", page, native/manage_expression("page")),
+        native/let_statement("managed_heap", native_memory/record_pointer("MemoryHeap"), native/manage_expression("heap")),
+        native/let_statement("page_bytes", bytes, native/unary_expression(:PointerCast, "managed_page")),
+        native/let_offset("cells", bytes, "page_bytes", "page_size"),
+        native/let_statement("index", :U64, "memory_n0"),
+        native/while_statement(native/binary_expression(:Less, "index", "count"), [
+          native/let_statement("offset", :U64, native/binary_expression(:Multiply, "index", "stride")),
+          native/let_offset("cell", bytes, "cells", "offset"),
+          native/let_statement("item", object, native/unary_expression(:PointerCast, "cell")),
+          native/store_statement("item", native/initialize_record(native_memory/object_schema(),
+            {"next" -> "candidate", "work" -> "memory_null_object", "forward" -> "memory_null_object",
+              "page" -> "managed_page", "heap" -> "managed_heap", "size" -> "memory_n0", "layout" -> "memory_n0",
+              "mark" -> "memory_n0", "state" -> "memory_object_free"})),
+          native/set_statement("candidate", "item"),
+          native/set_statement("index", native/binary_expression(:Add, "index", "memory_n1"))]),
+        native_memory/store(:U64, "heap", "allocated", native/typed_expression(:U64,
+          native/binary_expression(:Add, native_memory/field(:U64, "heap", "allocated"), "allocation_size")))])]),
     native/when_statement(native/binary_expression(:Less, "bucket", "memory_n10"), [
       native/root_store_statement(native_memory/free_slot("heap", "bucket"), native_memory/field(object, "candidate", "next"))]),
     native_memory/store(:U64, "candidate", "size", "size"),
@@ -126,6 +134,16 @@ verb native_memory/allocation(input: map) -> map
     native/let_statement("owner", page, native_memory/field(page, "candidate", "page")),
     native_memory/store(:U64, "owner", "live", native/typed_expression(:U64,
       native/binary_expression(:Add, native_memory/field(:U64, "owner", "live"), "memory_n1"))),
+    // Count occupied cell bytes even when no page was reserved. The owner
+    // stride includes rounding and any larger-class fallback. Saturate so a
+    // long interval without a safepoint cannot wrap away collection pressure.
+    native/let_statement("traffic", :U64, native_memory/field(:U64, "heap", "allocated_since_collection")),
+    native/let_statement("charge", :U64, native_memory/field(:U64, "owner", "stride")),
+    native/let_statement("remaining_traffic", :U64, native/binary_expression(:Subtract, "memory_allocation_limit", "traffic")),
+    native/if_statement(native/binary_expression(:Less, "remaining_traffic", "charge"), [
+      native/set_statement("traffic", "memory_allocation_limit")], [
+      native/set_statement("traffic", native/binary_expression(:Add, "traffic", "charge"))]),
+    native_memory/store(:U64, "heap", "allocated_since_collection", "traffic"),
     native/return_value([:Record, "candidate", "memory_false"])])
   return context
 end

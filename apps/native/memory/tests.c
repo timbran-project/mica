@@ -553,6 +553,81 @@ static void collection_preserves_capacity_headroom(void) {
     assert(mica_memory_heap_release(&heap));
 }
 
+// A full reservation can still contain useful free cells. Keep two pages
+// alive, exhaust the smaller class, and reuse the next class without a page.
+static void fragmented_capacity_reuses_cells_and_requests_collection(void) {
+    struct mica_MemoryHeap heap = {0};
+    struct mica_MemoryWorker worker = {0};
+    struct mica_MemoryRoot small = {0}, large = {0};
+    assert(mica_memory_heap_init(&heap, mica_memory_test_trace));
+    assert(mica_memory_worker_init(&worker, &heap, 0));
+    assert(mica_memory_enter(&worker));
+    assert(mica_memory_root_push(&worker, &small));
+    assert(mica_memory_root_push(&worker, &large));
+    small.f_pointer = mica_memory_allocate(&worker, 400, 0);
+    large.f_pointer = mica_memory_allocate(&worker, 900, 0);
+    assert(small.f_pointer && large.f_pointer);
+    small.f_pointer[399] = 0x51;
+    large.f_pointer[899] = 0x72;
+    assert(mica_memory_safepoint(&worker, true));
+    const uint64_t reserved = heap.f_allocated;
+    assert(reserved < 132000);
+    assert(mica_memory_set_capacity(&heap, reserved));
+    assert(heap.f_free.elements[2] && heap.f_free.elements[3]);
+    while (heap.f_free.elements[2]) assert(mica_memory_allocate(&worker, 400, 0));
+    uint64_t traffic = heap.f_allocated_since_collection;
+    uint8_t *fallback = mica_memory_allocate(&worker, 400, 0);
+    assert(fallback && mica_memory_object(fallback)->f_page->f_bucket == 3);
+    memset(fallback, 0x94, 400);
+    assert(heap.f_allocated == reserved && !heap.f_pressure);
+    assert(heap.f_allocated_since_collection == traffic + 1024);
+    assert(heap.f_allocated_since_collection > heap.f_allocation_allowance);
+    uint64_t collections = heap.f_collections;
+    assert(mica_memory_safepoint(&worker, false));
+    assert(heap.f_collections == collections + 1);
+    assert(heap.f_allocated == reserved && !heap.f_allocated_since_collection);
+
+    // Repeated traffic through the same pages must keep requesting collection.
+    collections = heap.f_collections;
+    for (unsigned i = 0; i < 2000; ++i) {
+        assert(mica_memory_allocate(&worker, 400, 0));
+        assert(mica_memory_safepoint(&worker, false));
+        assert(heap.f_allocated == reserved);
+    }
+    assert(heap.f_collections > collections);
+    assert(small.f_pointer[399] == 0x51 && large.f_pointer[899] == 0x72);
+    collections = heap.f_collections;
+    for (unsigned i = 0; i < 100; ++i) assert(mica_memory_safepoint(&worker, false));
+    assert(heap.f_collections == collections);
+    assert(mica_memory_root_pop(&worker, &large));
+    assert(mica_memory_root_pop(&worker, &small));
+    assert(mica_memory_safepoint(&worker, true));
+    assert(!heap.f_allocated);
+    assert(mica_memory_leave(&worker) && mica_memory_worker_release(&worker));
+    assert(mica_memory_heap_release(&heap));
+}
+
+static void full_live_heap_does_not_repeat_collection(void) {
+    struct mica_MemoryHeap heap = {0};
+    struct mica_MemoryWorker worker = {0};
+    struct mica_MemoryRoot root = {0};
+    assert(mica_memory_heap_init(&heap, mica_memory_test_trace));
+    assert(mica_memory_worker_init(&worker, &heap, 0));
+    assert(mica_memory_enter(&worker) && mica_memory_root_push(&worker, &root));
+    root.f_pointer = mica_memory_allocate(&worker, 65536, 0);
+    assert(root.f_pointer);
+    assert(mica_memory_set_capacity(&heap, heap.f_allocated));
+    assert(mica_memory_safepoint(&worker, true));
+    assert(!heap.f_allocation_allowance && heap.f_collection_limit == heap.f_allocated);
+    uint64_t collections = heap.f_collections;
+    for (unsigned i = 0; i < 100; ++i) assert(mica_memory_safepoint(&worker, false));
+    assert(heap.f_collections == collections);
+    assert(mica_memory_root_pop(&worker, &root));
+    assert(mica_memory_safepoint(&worker, true));
+    assert(mica_memory_leave(&worker) && mica_memory_worker_release(&worker));
+    assert(mica_memory_heap_release(&heap));
+}
+
 static void bounded_collection_and_sharing(void) {
     struct mica_MemoryHeap heap = {0};
     struct mica_MemoryWorker worker = {0};
@@ -622,6 +697,8 @@ static void concurrent_capacity_admission(void) {
 int main(void) {
     capacity_admission();
     collection_preserves_capacity_headroom();
+    fragmented_capacity_reuses_cells_and_requests_collection();
+    full_live_heap_does_not_repeat_collection();
     bounded_collection_and_sharing();
     concurrent_capacity_admission();
     relocation_and_cycles();

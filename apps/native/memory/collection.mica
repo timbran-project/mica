@@ -171,6 +171,40 @@ verb native_memory/collection_target(module: map) -> map
   return result
 end
 
+// Allow traffic proportional to occupied cells, capped at half the remaining
+// capacity. Free cells count as capacity even though their pages stay reserved.
+// Called under the heap mutex after collection or a capacity/admission change.
+verb native_memory/allocation_allowance(module: map) -> map
+  let builder: map = native_gen/context(module, "memory_allocation_allowance")
+  let heap: map = native_gen/ref(builder, "heap")
+  let [occupied: map, with_occupied: map] = native_gen/bind(builder, "occupied", native_gen/ref(builder, "memory_n0"))
+  let [spare: map, with_spare: map] = native_gen/bind(with_occupied, "spare", native_gen/ref(with_occupied, "memory_n0"))
+  let [page: map, with_page: map] = native_gen/bind(with_spare, "page", native_gen/read(native_gen/field(with_spare, heap, "pages")))
+  builder = native_gen/while_loop(with_page, native_gen/negate(native_gen/equal(page, native_gen/ref(with_page, "memory_null_page"))), fn(initial_body)
+    let body: map = initial_body
+    let live: map = native_gen/read(native_gen/field(body, page, "live"))
+    let count: map = native_gen/read(native_gen/field(body, page, "capacity"))
+    let stride: map = native_gen/read(native_gen/field(body, page, "stride"))
+    body = native_gen/assign(body, occupied, native_gen/add(occupied, native_gen/multiply(live, stride)))
+    body = native_gen/assign(body, spare, native_gen/add(spare, native_gen/multiply(native_gen/subtract(count, live), stride)))
+    return native_gen/assign(body, page, native_gen/read(native_gen/field(body, page, "next")))
+  end)
+  let [unreserved: map, with_unreserved: map] = native_gen/bind(builder, "unreserved", native_gen/read(native_gen/field(builder, heap, "capacity_limit")))
+  builder = with_unreserved
+  for field in ["nursery_bytes", "allocated"]
+    let used: map = native_gen/read(native_gen/field(builder, heap, field))
+    builder = native_gen/branch(builder, native_gen/less(unreserved, used),
+      fn(full) => native_gen/assign(full, unreserved, native_gen/ref(full, "memory_n0")),
+      fn(room) => native_gen/assign(room, unreserved, native_gen/subtract(unreserved, used)))
+  end
+  builder = native_gen/assign(builder, spare, native_gen/divide(native_gen/add(spare, unreserved), native_gen/ref(builder, "memory_n2")))
+  builder = native_gen/when(builder, native_gen/less(occupied, native_gen/ref(builder, "memory_collection_floor")),
+    fn(small) => native_gen/assign(small, occupied, native_gen/ref(small, "memory_collection_floor")))
+  builder = native_gen/when(builder, native_gen/less(spare, occupied), fn(bounded) => native_gen/assign(bounded, occupied, spare))
+  let result: map = native_gen/finish(module, native_gen/return_value(builder, occupied))
+  return result
+end
+
 verb native_memory/collect_stopped_body(module: map) -> map
   let builder: map = native_gen/context(module, "memory_collect_stopped")
   let heap: map = native_gen/ref(builder, "heap")
@@ -195,6 +229,9 @@ verb native_memory/collect_stopped_body(module: map) -> map
   builder = native_memory/reset_workers(builder, heap)
   builder = native_gen/write(builder, native_gen/field(builder, heap, "pressure"), native_gen/ref(builder, "memory_false"))
   builder = native_gen/write(builder, native_gen/field(builder, heap, "collection_limit"), native_gen/call(builder, "memory_collection_target", [heap]))
+  builder = native_gen/write(builder, native_gen/field(builder, heap, "allocation_allowance"), native_gen/call(builder, "memory_allocation_allowance", [heap]))
+  builder = native_gen/write(builder, native_gen/field(builder, heap, "allocated_since_collection"), native_gen/ref(builder, "memory_n0"))
+  builder = native_gen/write(builder, native_gen/field(builder, heap, "collected_allocated"), native_gen/read(native_gen/field(builder, heap, "allocated")))
   builder = native_gen/write(builder, native_gen/field(builder, heap, "copied"),
     native_gen/add(native_gen/read(native_gen/field(builder, heap, "copied")),
       native_gen/read(native_gen/field(builder, collection, "copied"))))
@@ -298,6 +335,7 @@ end
 
 verb native_memory/collection(input: map) -> map
   let context: map = native_memory/collection_target(input)
+  context = native_memory/allocation_allowance(context)
   let bytes: list = native_memory/pointer(:U8)
   let object: list = native_memory/record_pointer("MemoryObject")
   let page: list = native_memory/record_pointer("MemoryPage")

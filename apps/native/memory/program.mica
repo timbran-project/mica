@@ -228,7 +228,8 @@ verb native_memory/context(input: map) -> map
   state = native/record_type(state, "MemoryHeap", [
     ["pages", page], ["free", [:Array, object, 10]], ["workers", worker], ["roots", root], ["trace", trace],
     ["mutex", bytes], ["collecting", :Bool], ["collection_ok", :Bool], ["collection_limited", :Bool], ["pressure", :Bool], ["epoch", :U64],
-    ["allocated", :U64], ["nursery_bytes", :U64], ["capacity_limit", :U64], ["collection_limit", :U64], ["retained", :U64], ["copied", :U64], ["collections", :U64]])[1]
+    ["allocated", :U64], ["nursery_bytes", :U64], ["capacity_limit", :U64], ["collection_limit", :U64], ["retained", :U64], ["copied", :U64], ["collections", :U64],
+    ["allocated_since_collection", :U64], ["allocation_allowance", :U64], ["collected_allocated", :U64]])[1]
   let collection_schema: list = native_memory/collection_schema()
   state = native/record_type(state, collection_schema[0], collection_schema[1])[1]
   let declarations: list = [
@@ -281,6 +282,8 @@ verb native_memory/context(input: map) -> map
     [["worker", worker, :Borrow], ["size", :U64, :Value], ["layout", :U64, :Value]],
     [:ReadMemory, :WriteMemory], :Gc, "")
   context = native_memory/declare(context, "memory_collection_target", :U64,
+    [["heap", heap, :Borrow]], [:ReadMemory], :Value, "")
+  context = native_memory/declare(context, "memory_allocation_allowance", :U64,
     [["heap", heap, :Borrow]], [:ReadMemory], :Value, "")
   context = native_memory/declare(context, "memory_has_capacity", :Bool,
     [["heap", heap, :Borrow], ["size", :U64, :Value]], [:ReadMemory], :Value, "")
