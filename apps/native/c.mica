@@ -253,26 +253,35 @@ verb native/c_local_declarations(index: map, locals: list) -> list
   return lines
 end
 
-verb native/c_definitions(state, index, order: map)
-  let functions: list = [index[:functions][id] for id in order[:order]]
-  let lines = [@native/c_globals(state, index, false),
-    "/* Lowering can retain unused locals and parameters. Scope these warnings to generated definitions. */",
+verb native/c_definition_prologue()
+  return ["/* Lowering can retain unused locals and parameters. Scope these warnings to generated definitions. */",
     "#if defined(__GNUC__) || defined(__clang__)",
     "#pragma GCC diagnostic push",
     "#pragma GCC diagnostic ignored \"-Wunused-variable\"",
     "#pragma GCC diagnostic ignored \"-Wunused-but-set-variable\"",
     "#pragma GCC diagnostic ignored \"-Wunused-parameter\"",
     "#endif"]
-  for fn_row in functions
-    let fn_id = fn_row[0]
-    if map_contains_key(index[:foreign], fn_id)
-      continue
+end
+
+verb native/c_definition_epilogue()
+  return ["#if defined(__GNUC__) || defined(__clang__)", "#pragma GCC diagnostic pop", "#endif"]
+end
+
+verb native/c_function_definition(state, index, fn_row)
+  let fn_id = fn_row[0]
+  return ["", @native/c_notes(index, fn_id, ""), @native/c_contract_notes(index, fn_id),
+    string_concat(native/c_signature(index, fn_row), " {"),
+    @native/c_function_body(state, index, fn_id), "}"]
+end
+
+verb native/c_definitions(state, index, order: map)
+  let lines = [@native/c_globals(state, index, false), @native/c_definition_prologue()]
+  for id in order[:order]
+    if !map_contains_key(index[:foreign], id)
+      lines = [@lines, @native/c_function_definition(state, index, index[:functions][id])]
     end
-    lines = [@lines, "", @native/c_notes(index, fn_id, ""), @native/c_contract_notes(index, fn_id), string_concat(native/c_signature(index, fn_row), " {")]
-    lines = [@lines, @native/c_function_body(state, index, fn_id)]
-    lines = [@lines, "}"]
   end
-  return [@lines, "#if defined(__GNUC__) || defined(__clang__)", "#pragma GCC diagnostic pop", "#endif"]
+  return [@lines, @native/c_definition_epilogue()]
 end
 
 verb native/c_function(index, id)
@@ -345,16 +354,40 @@ verb native/emit_c(state)
 end
 
 // The caller writes these artifacts. Emission performs no filesystem effects.
-verb native/emit_module(state, spelling)
+verb native/emit_module(state, spelling, ?functions_per_unit: int = 128)
   native/identifier(spelling)
+  native/ensure(functions_per_unit > 0, "module function limit must be positive")
   let index = native/check(state)
   let order: map = native/function_order(state, index)
   let guard = string_concat("MICA_GENERATED_", spelling, "_H")
   let header = string_concat(string_join([string_concat("#ifndef ", guard), string_concat("#define ", guard),
     @native/c_declarations(state, index, order, true), "#endif"], "\n"), "\n")
-  let source = string_concat("#include \"", spelling, ".h\"\n", string_join(native/c_definitions(state, index, order), "\n"), "\n")
+  let include = string_concat("#include \"", spelling, ".h\"")
+  let sources: list = []
+  // Global storage is defined once. Every unit uses the same guarded header.
+  let lines: list = [include, @native/c_globals(state, index, false), @native/c_definition_prologue()]
+  let count: int = 0
+  for id in order[:order]
+    if map_contains_key(index[:foreign], id)
+      continue
+    end
+    if count == functions_per_unit
+      sources = [@sources, native/c_source_unit(spelling, len(sources), lines)]
+      lines = [include, @native/c_definition_prologue()]
+      count = 0
+    end
+    lines = [@lines, @native/c_function_definition(state, index, index[:functions][id])]
+    count = count + 1
+  end
+  sources = [@sources, native/c_source_unit(spelling, len(sources), lines)]
   let symbols = [[row[1], native/c_function(index, row[0])] for row in native/ordered(state[:functions], 1)]
   return {:header_name -> string_concat(spelling, ".h"), :header -> header,
-          :source_name -> string_concat(spelling, ".c"), :source -> source, :symbols -> symbols,
+          :sources -> sources, :symbols -> symbols,
           :c_flags -> ["-std=c11", "-ffp-contract=off", "-fno-fast-math"], :link_flags -> ["-lm"]}
+end
+
+// Sources contain complete functions. A single large function stays intact.
+verb native/c_source_unit(spelling: string, ordinal: int, lines: list) -> list
+  return [string_concat(spelling, "_", to_literal(ordinal), ".c"),
+    string_concat(string_join([@lines, @native/c_definition_epilogue()], "\n"), "\n")]
 end

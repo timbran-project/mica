@@ -1098,16 +1098,18 @@ Mutable globals require external synchronization when shared between threads.
 OS synchronization remains available through foreign functions and their effect contracts.
 
 `native/emit_c(state)` returns standalone C source.
-`native/emit_module(state, name)` returns a map with these entries:
+`native/emit_module(state, name, ?functions_per_unit = 128)` returns a map with these entries:
 
 - `:header_name` and `:header`: guarded declarations, types, and target assertions.
-- `:source_name` and `:source`: definitions that include the generated header.
+- `:sources`: ordered `[filename, text]` pairs, each including the generated header.
 - `:symbols`: ordered pairs of IR function names and C symbol names.
 - `:c_flags`: C11, disabled floating-point contraction, and disabled fast math.
 - `:link_flags`: the math library.
 
 The caller writes the artifacts and invokes the C compiler. Emission has no filesystem effects.
-A generated module and its consumers can compile as separate translation units.
+Each source contains at most `functions_per_unit` complete function definitions. The limit must be positive.
+Global storage is defined once, in the first source. Individual functions are never split.
+Compile the sources as separate translation units, then link their object files with the consumers.
 
 ## Effects and ownership
 

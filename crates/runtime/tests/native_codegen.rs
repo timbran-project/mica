@@ -1481,6 +1481,47 @@ return actual
 }
 
 #[test]
+fn module_emission_partitions_complete_functions() {
+    for tier in [true, false] {
+        let mut runner = runner(tier);
+        assert_eq!(
+            eval(
+                &mut runner,
+                r#"
+for limit in [0, -1]
+  let rejected = false
+  try
+    native/emit_module(native/program(), "empty", limit)
+  catch E_INVARG
+    rejected = true
+  end
+  require rejected
+end
+let empty = native/emit_module(native/program(), "empty", 1)
+require len(empty[:sources]) == 1
+require empty[:sources][0][0] == "empty_0.c"
+let state = native/scalar_example()
+for [limit, count] in [[1, 3], [2, 2], [3, 1], [4, 1]]
+  let module = native/emit_module(state, "scalar", limit)
+  require len(module[:sources]) == count
+  for index in 0..(count - 1)
+    require module[:sources][index][0] == string_concat("scalar_", to_literal(index), ".c")
+  end
+end
+let foreign = native/program()
+let [id, next] = native/add_function(foreign, "external", :U64)
+foreign = native/contract(next, id, [], :Value, "")
+foreign[:foreign] = [[id]]
+require len(native/emit_module(foreign, "foreign", 1)[:sources]) == 1
+return true
+"#,
+            ),
+            Value::bool(true)
+        );
+    }
+}
+
+#[test]
 fn value_surface_executes_with_defined_numeric_and_heap_semantics() {
     let mut previous = None;
     for interpreter_only in [true, false] {
@@ -1493,7 +1534,7 @@ fn value_surface_executes_with_defined_numeric_and_heap_semantics() {
                 &mut runner,
                 r#"
 let state = native/surface_program()
-let expected = native/emit_module(state, "surface")
+let expected = native/emit_module(state, "surface", 1)
 for table in [:functions, :parameters, :locals, :blocks, :instructions, :terminators,
               :constants, :records, :fields, :globals, :foreign, :contracts, :parameter_contracts]
   let reversed = []
@@ -1502,36 +1543,44 @@ for table in [:functions, :parameters, :locals, :blocks, :instructions, :termina
   end
   state[table] = reversed
 end
-return expected == native/emit_module(state, "surface")
+return expected == native/emit_module(state, "surface", 1)
 "#
             ),
             Value::bool(true)
         );
-        let header = eval(
+        let module = eval(
             &mut runner,
-            "return native/emit_module(native/surface_program(), \"surface\")[:header]",
-        )
-        .with_str(str::to_owned)
-        .unwrap();
-        let generated = eval(
-            &mut runner,
-            "return native/emit_module(native/surface_program(), \"surface\")[:source]",
-        )
-        .with_str(str::to_owned)
-        .unwrap();
+            r#"
+let module = native/emit_module(native/surface_program(), "surface", 1)
+return [module[:header], module[:sources]]
+"#,
+        );
         if let Some(previous) = &previous {
-            assert_eq!(&generated, previous);
+            assert_eq!(&module, previous);
         }
-        previous = Some(generated.clone());
+        previous = Some(module.clone());
+        let parts = module.with_list(|parts| parts.to_vec()).unwrap();
+        let header = parts[0].with_str(str::to_owned).unwrap();
+        let units = parts[1].with_list(|units| units.to_vec()).unwrap();
+        assert!(units.len() > 1);
         let scratch = Scratch::new();
         fs::write(scratch.0.join("surface.h"), header).unwrap();
+        let mut sources = Vec::new();
+        let mut generated = String::new();
+        for unit in units {
+            let pair = unit.with_list(|pair| pair.to_vec()).unwrap();
+            let name = pair[0].with_str(str::to_owned).unwrap();
+            let text = pair[1].with_str(str::to_owned).unwrap();
+            let source = scratch.0.join(name);
+            fs::write(&source, &text).unwrap();
+            generated.push_str(&text);
+            sources.push(source);
+        }
         assert!(generated.contains("mica_internal_word_payload(v_value)"));
         assert!(generated.contains("mica_internal_word_tag(v_value)"));
         assert!(!generated.contains("& UINT64_C(0x00ffffffffffffff)"));
-        let source = scratch.0.join("surface.c");
         let harness = scratch.0.join("harness.c");
         let binary = scratch.0.join("surface");
-        fs::write(&source, &generated).unwrap();
         fs::write(
             &harness,
             format!(
@@ -1555,7 +1604,7 @@ return expected == native/emit_module(state, "surface")
                 "-fno-sanitize-recover=all",
                 "-fno-omit-frame-pointer",
             ])
-            .arg(&source)
+            .args(&sources)
             .arg(&harness)
             .args(["-lm", "-o"])
             .arg(&binary)
@@ -1616,7 +1665,7 @@ let [id, names, state] = native/function_scope(native/program(), "{name}", :{res
   [["word", word, :Borrow]], [["result", :{result}]], ["entry"])
 state = native/block_body(state, names["entry"], [[:{operation}, names["result"], [names["word"]]]], :Return, [names["result"]])
 let module = native/emit_module(state, "{name}")
-return [module[:header], module[:source]]
+return [module[:header], string_join([row[1] for row in module[:sources]], "\n")]
 "#
             ),
         );
@@ -2372,7 +2421,7 @@ for table in [:functions, :parameters, :locals, :blocks, :instructions, :termina
   state[table] = rows
 end
 let module = native/emit_module(state, "structured")
-return [native/emit_c(state), module[:header], module[:source]]
+return [native/emit_c(state), module[:header], string_join([row[1] for row in module[:sources]], "\n")]
 "#,
         );
         reordered
