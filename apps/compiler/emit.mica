@@ -546,7 +546,7 @@ verb emit_expr(rows, node, input_state)
   if kind == :Match
     return emit_match(rows, node, state)
   end
-  if kind == :Try
+  if kind == :Try || kind == :Recover
     return emit_try(rows, node, state)
   end
   if kind == :Raise
@@ -801,8 +801,49 @@ verb emit_match_map(rows, node, subject, input_failures, input_state)
   return [failures, state]
 end
 
+verb emit_catch_code(rows, clause)
+  let [present, condition] = ast_attr(rows, clause, :condition)
+  if !present || ast_kind(rows, condition) != :Error_Code_Literal
+    return none
+  end
+  let [_, text] = ast_attr(rows, condition, :text)
+  return error_code(to_symbol(text))
+end
+
+// A guarded region has one VM handler. Ordinary branches select its clauses,
+// so errors in conditions or bodies escape to the enclosing region.
+verb emit_catch_condition(rows, clause, error_reg, state)
+  let code = emit_catch_code(rows, clause)
+  if code != none
+    let [actual, allocated] = emit_register(state)
+    let ready = emit_append(allocated, [:ErrorField, actual, error_reg, :Code])
+    let [expected, loaded] = emit_constant(ready, code)
+    let [matched, compared] = emit_register(loaded)
+    return [matched, emit_append(compared, [:Binary, matched, :Eq, actual, expected])]
+  end
+  let [present, condition] = ast_attr(rows, clause, :condition)
+  if present
+    return emit_expr(rows, condition, state)
+  end
+  return [none, state]
+end
+
 verb emit_try(rows, node, input_state)
   let [result, state] = emit_constant(input_state, [] {[]})
+  let clauses = ast_children(rows, node, :catch_clause)
+  let dynamic = false
+  for clause in clauses
+    let [present, condition] = ast_attr(rows, clause, :condition)
+    if present && ast_kind(rows, condition) != :Error_Code_Literal
+      dynamic = true
+    end
+  end
+  let error_reg = none
+  if dynamic
+    let [reg, allocated] = emit_register(state)
+    error_reg = reg
+    state = allocated
+  end
   let enter = len(state[:code])
   state = emit_append(state, [:EnterTry, [], none, 0])
   let [body_reg, emitted] = emit_block(rows, ast_children(rows, node, :body), emit_scope(state))
@@ -811,21 +852,36 @@ verb emit_try(rows, node, input_state)
   let [has_finally, _] = ast_attr(rows, node, :has_finally)
   let handlers = []
   let exits = []
-  for clause in ast_children(rows, node, :catch_clause)
-    let code = none
-    let [has_code, code_text] = ast_attr(rows, clause, :code)
-    if has_code
-      code = error_code(to_symbol(code_text))
-    end
+  if dynamic
+    handlers = [[none, error_reg, len(state[:code])]]
+  end
+  for clause in clauses
+    let code = emit_catch_code(rows, clause)
     let binding = none
     state = emit_scope(state)
     let [has_name, name_text] = ast_attr(rows, clause, :name)
     if has_name
-      let [reg, allocated] = emit_register(state)
-      state = emit_declare(allocated, name_text, reg, true)
-      binding = reg
+      binding = error_reg
+      if !dynamic
+        let [reg, allocated] = emit_register(state)
+        state = allocated
+        binding = reg
+      end
+      state = emit_declare(state, name_text, binding, true)
     end
-    handlers = [@handlers, [code, binding, len(state[:code])]]
+    let branch = none
+    let matched = none
+    if dynamic
+      let [condition, tested] = emit_catch_condition(rows, clause, error_reg, state)
+      matched = condition
+      state = tested
+      if matched != none
+        branch = len(state[:code])
+        state = emit_append(state, [:Branch, matched, branch + 1, 0])
+      end
+    else
+      handlers = [@handlers, [code, binding, len(state[:code])]]
+    end
     let [catch_reg, after_catch] = emit_block(rows, ast_children(rows, clause, :body), state)
     state = emit_append(emit_unscope(after_catch), [:Move, result, catch_reg])
     if has_finally
@@ -834,6 +890,12 @@ verb emit_try(rows, node, input_state)
       exits = [@exits, len(state[:code])]
       state = emit_append(state, [:Jump, 0])
     end
+    if branch != none
+      state = emit_patch(state, branch, [:Branch, matched, branch + 1, len(state[:code])])
+    end
+  end
+  if dynamic
+    state = emit_append(state, [:Raise, [:Register, error_reg], none, none])
   end
   let finally_target = none
   if has_finally

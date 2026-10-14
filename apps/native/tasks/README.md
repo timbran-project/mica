@@ -642,7 +642,9 @@ The service context has stable storage and owns roots for its managed state.
 The generated spawn service admits children and delivers their IDs to waiting parents.
 Language-level method installation, transactional buffers, and live compiler qualification remain unfinished.
 Method facts and compiled bodies can already be staged in one kernel transaction; `task_invoke` resolves and executes that view.
-Catch patterns and guards still need explicit conformance coverage alongside the exception and structured-exit fixtures.
+Guarded catches and `recover` share a conformance corpus with the Rust-hosted compiler tests.
+The native fixture checks handler ordering, guard side effects, escaping errors, and finalization with ordinary and forced collection.
+Destructuring catch patterns remain unsupported.
 
 Entries explicitly charge logical work through `task_poll`.
 The current budget persists across retries and waits.

@@ -1,0 +1,108 @@
+// Catch selection is ordered; a rejected guard retains its side effects.
+let trace = []
+let selected = try
+  raise E_TEST, "payload", [7]
+catch E_OTHER
+  :wrong_code
+catch problem if begin
+  trace = [@trace, problem.code]
+  false
+end
+  :wrong_guard
+catch problem if problem.value == some([7])
+  [problem.code, problem.message, problem.value]
+catch
+  :wrong_fallback
+finally
+  trace = [@trace, :cleaned]
+end
+require selected == [E_TEST, some("payload"), some([7])]
+require trace == [E_TEST, :cleaned]
+
+// A static clause still tests the code inside a dynamic dispatcher.
+let ordered = try
+  raise E_TEST
+catch problem if false
+  0
+catch E_OTHER
+  1
+catch E_TEST as problem
+  problem.code
+catch problem if true
+  2
+end
+require ordered == E_TEST
+
+// Rejected clauses rethrow the original error, after finalization.
+let escaped = try
+  try
+    raise E_TEST, "original", [9]
+  catch problem if false
+    :wrong
+  finally
+    trace = [@trace, :unmatched]
+  end
+catch E_TEST as problem
+  [problem.message, problem.value]
+end
+require escaped == [some("original"), some([9])]
+
+// Errors in a guard or body bypass sibling handlers and run cleanup once.
+let guard_failure = try
+  try
+    raise E_TEST
+  catch problem if begin raise E_GUARD end
+    :wrong
+  catch E_GUARD
+    :wrong_sibling
+  finally
+    trace = [@trace, :guard]
+  end
+catch E_GUARD
+  :outer_guard
+end
+let body_failure = try
+  try
+    raise E_TEST
+  catch problem if true
+    raise E_BODY
+  catch E_BODY
+    :wrong_sibling
+  finally
+    trace = [@trace, :body]
+  end
+catch E_BODY
+  :outer_body
+end
+require [guard_failure, body_failure] == [:outer_guard, :outer_body]
+require trace == [E_TEST, :cleaned, :unmatched, :guard, :body]
+
+// Recovery evaluates the protected expression once and skips unused guards.
+let count = 0
+let recovered = recover begin
+  count = count + 1
+  raise E_TEST, "recover", 11
+end
+catch problem if false => :wrong
+catch E_TEST as problem => problem.value
+catch => :fallback
+end
+let success = recover begin count = count + 1; 42 end
+catch problem if begin count = count + 100; true end => 0
+end
+require [recovered, success, count] == [some(11), 42, 2]
+let fallback = recover raise E_OTHER
+catch E_TEST => 0
+catch => 1
+end
+require fallback == 1
+
+// Guard bindings shadow outer names and remain live across local calls.
+let problem = :outside
+let accepts = fn(candidate) => candidate.value == some([13])
+let called = recover raise E_TEST, "called", [13]
+catch problem if accepts(problem) => problem.value
+end
+require [problem, called] == [:outside, some([13])]
+return [selected, ordered, escaped, trace, guard_failure, body_failure,
+  recovered, success, count, fallback, problem, called]

@@ -4434,6 +4434,38 @@ return [native/emit_module(runtime[:state], "runtime"), applications]
 }
 
 #[test]
+fn native_source_selects_guarded_catches_and_recovery_expressions() {
+    let body = include_str!("../../../apps/compiler/catch_tests.mica");
+    let expected = eval(&mut SourceRunner::new_empty(), body);
+    let source = format!("verb native_catch_fixture(input)\n{body}\nend");
+    let checks = format!(
+        "for (unsigned collect = 0; collect < 2; ++collect) {{\n\
+         run_frontend(worker, kernel, code, runtime, &input, &output, 1000000, collect != 0);\n\
+         {}\n}}",
+        source_value_check(&expected, "mica_value_root_get(&output)")
+    );
+    let fixture = include_str!("../../../apps/native/compiler/frontend_tests.c")
+        .replace("/* FRONTEND_CONFORMANCE_CASES */", &checks);
+    let (generated, memory, tasks) = thread::scope(|scope| {
+        let builds = [true, false].map(|tier| {
+            let source = &source;
+            scope.spawn(move || generate_native_source_example(tier, source, "[[610, 8010]]", &[]))
+        });
+        let [first, second] = builds.map(|build| build.join().unwrap());
+        assert!(
+            first == second,
+            "catch emission differs between bootstrap tiers"
+        );
+        first
+    });
+    check_native_source_fixture(&format!(
+        "{generated}\n{memory}\n{tasks}\n{}\n{}\n{fixture}",
+        include_str!("../../../native/platform/allocation.c"),
+        include_str!("../../../native/platform/mutex.c"),
+    ));
+}
+
+#[test]
 fn native_source_program_executes_on_generated_runtime() {
     let (conformance_source, method_ids, checks) = source_expression_cases();
     // Each bootstrap owns its runner. Generate concurrently, then require the

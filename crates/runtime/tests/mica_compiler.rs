@@ -82,6 +82,10 @@ fn mica_frontend_parses_language_forms_and_reports_malformed_input() {
             assert_eq!(errors, Value::list([]), "{source}");
         }
         for source in [
+            "recover 1 / 0\ncatch E_DIV 42\nend",
+            "recover 1 / 0\ncatch =>\nend",
+            "recover 1 / 0\ncatch => 42",
+            "try\nraise E_TEST\ncatch problem if\nend",
             "let = 7",
             "if true\n 1",
             "return [1,",
@@ -201,6 +205,14 @@ fn assert_emitted_agrees(runner: &mut SourceRunner, source: &str) {
         panic!("{source}: {}", actual.render());
     };
     assert_eq!(actual, expected, "{source}");
+}
+
+#[test]
+fn mica_emitter_selects_guarded_catches_and_recovery_expressions() {
+    let source = include_str!("../../../apps/compiler/catch_tests.mica");
+    for interpreter_only in [true, false] {
+        assert_emitted_agrees(&mut compiler(interpreter_only), source);
+    }
 }
 
 #[test]

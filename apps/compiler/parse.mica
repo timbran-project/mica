@@ -1870,6 +1870,9 @@ verb parse_primary(input_state)
   if kind == :Try
     return parse_try(state)
   end
+  if kind == :Recover
+    return parse_recover(state)
+  end
   if kind == :Spawn
     return parse_spawn(state)
   end
@@ -2047,6 +2050,46 @@ end
 
 // --- Try and spawn -----------------------------------------------------------
 
+// Both forms bind the error before evaluating their optional condition.
+verb parse_catch_header(input_state)
+  let state = bump(input_state)
+  let [clause, allocated] = make_node(state, :Catch)
+  state = allocated
+  if at(state, :Ident) && tok_at(state, 1)[:kind] != :As
+    state = fact(state, clause, :name, tok(state)[:text], 0)
+    state = bump(state)
+    if at(state, :If)
+      let [condition, parsed] = parse_expression(bump(state))
+      state = fact(parsed, clause, :condition, condition, 0)
+    end
+  elseif !at_separator(state) && !at_any(state, [:As, :Fat_Arrow, :Catch, :Finally, :End, :Eof])
+    let [condition, parsed] = parse_expression(state)
+    state = fact(parsed, clause, :condition, condition, 0)
+  end
+  if at(state, :As)
+    let [name_token, parsed] = expect(bump(state), :Ident, "expected a name after 'as'")
+    state = fact(parsed, clause, :name, name_token[:text], 0)
+  end
+  return [clause, state]
+end
+
+verb parse_recover(input_state)
+  let [node, allocated] = make_node(bump(input_state), :Recover)
+  let [expression, parsed] = parse_expression(allocated)
+  let state = skip_separators(fact(parsed, node, :body, expression, 0))
+  let index = 0
+  while at(state, :Catch)
+    let [clause, header] = parse_catch_header(state)
+    let [_, arrow] = expect(header, :Fat_Arrow, "expected '=>' in recovery clause")
+    let [replacement, body_state] = parse_expression(arrow)
+    state = fact(body_state, clause, :body, replacement, 0)
+    state = skip_separators(fact(state, node, :catch_clause, clause, index))
+    index = index + 1
+  end
+  let [_, closed] = expect(state, :End, "expected 'end' to close recover")
+  return [node, closed]
+end
+
 verb parse_try(input_state)
   let state = input_state
   state = bump(state)
@@ -2062,27 +2105,8 @@ verb parse_try(input_state)
   end
   let catch_index = 0
   while at(state, :Catch)
-    state = bump(state)
-    let [clause, after_clause] = make_node(state, :Catch)
+    let [clause, after_clause] = parse_catch_header(state)
     state = after_clause
-    if at(state, :Error_Code)
-      let code_token = tok(state)
-      state = bump(state)
-      state = fact(state, clause, :has_code, true, 0)
-      state = fact(state, clause, :code, code_token[:text], 0)
-    end
-    if at(state, :As)
-      state = bump(state)
-      let [name_token, after_name] = expect(state, :Ident, "expected a name after 'as'")
-      state = after_name
-      state = fact(state, clause, :has_name, true, 0)
-      state = fact(state, clause, :name, name_token[:text], 0)
-    elseif at(state, :Ident)
-      let name_token = tok(state)
-      state = bump(state)
-      state = fact(state, clause, :has_name, true, 0)
-      state = fact(state, clause, :name, name_token[:text], 0)
-    end
     state = skip_separators(state)
     let [catch_body, after_catch_body] = parse_block_until(state, [:Catch, :Finally, :End, :Newline])
     state = after_catch_body
