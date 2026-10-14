@@ -3936,6 +3936,79 @@ fn source_encoded_value(value: &Value, name: &str) -> String {
 }
 
 #[test]
+fn native_source_rejects_conflicting_definition_identities() {
+    let source = "verb first(value)\nreturn value\nend\nverb second(value)\nreturn value + 1\nend";
+    for tier in [true, false] {
+        let mut runner = runner(tier);
+        for filein in [
+            include_str!("../../../apps/compiler/lex.mica"),
+            include_str!("../../../apps/compiler/parse.mica"),
+            include_str!("../../../apps/compiler/ast.mica"),
+        ] {
+            runner.run_filein(filein).unwrap();
+        }
+        load_native_source_compiler(&mut runner);
+        for (ids, expected) in [
+            (
+                "[[101, 201], [101, 202]]",
+                "duplicate native method identity",
+            ),
+            (
+                "[[101, 201], [102, 201]]",
+                "duplicate native program identity",
+            ),
+            (
+                "[[101, 201], [101, 201]]",
+                "duplicate native method identity",
+            ),
+            ("[[101, 201]]", "requires identities for every definition"),
+            (
+                "[[101, 201], [102]]",
+                "requires definition and program identities",
+            ),
+            (
+                "[[101, 201], 102]",
+                "requires definition and program identities",
+            ),
+            (
+                "[[-1, 201], [102, 202]]",
+                "method identity must be a nonnegative integer",
+            ),
+            (
+                "[[101.0, 201], [102, 202]]",
+                "method identity must be a nonnegative integer",
+            ),
+            (
+                "[[101, 0], [102, 202]]",
+                "program identity must be a positive integer",
+            ),
+            (
+                "[[101, -1], [102, 202]]",
+                "program identity must be a positive integer",
+            ),
+            (
+                "[[101, :program], [102, 202]]",
+                "program identity must be a positive integer",
+            ),
+        ] {
+            // Invalid installation IDs must fail before native IR construction,
+            // even when both source definitions are otherwise valid.
+            let message = eval(&mut runner, &format!(
+                "try\nnative_source/compile({{}}, \"checked\", {source:?}, {{}}, {{}}, {ids})\nreturn \"accepted\"\ncatch E_INVARG as problem\nreturn native/error_message(problem)\nend"
+            )).with_str(str::to_owned).unwrap();
+            assert!(message.contains(expected), "{ids}: {message}");
+        }
+        assert_eq!(
+            eval(
+                &mut runner,
+                "native_source/check_method_ids([], 0)\nnative_source/check_method_ids([[101, 201], [102, 202]], 2)\nreturn true"
+            ),
+            Value::bool(true)
+        );
+    }
+}
+
+#[test]
 fn native_source_links_prototype_restrictions_and_identity_constants() {
     let source = r#"
 verb native_restriction_fixture(value)

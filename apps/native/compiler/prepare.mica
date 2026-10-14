@@ -355,9 +355,31 @@ verb native_source/symbol_text(value: symbol) -> string
   return name
 end
 
+// One definition owns each method ID and each compiled-program slot within a
+// module. Duplicate slots would overwrite bodies while retaining dispatch rows.
+verb native_source/check_method_ids(method_ids: list, count: int)
+  native/ensure(len(method_ids) == count, "native module requires identities for every definition")
+  let methods: list = []
+  let programs: list = []
+  for ids in method_ids
+    native/ensure(is_kind(ids, :list) && len(ids) == 2, "native definition requires definition and program identities")
+    native/ensure(is_kind(ids[0], :int) && ids[0] >= 0, "native method identity must be a nonnegative integer")
+    native/ensure(is_kind(ids[1], :int) && ids[1] > 0, "native program identity must be a positive integer")
+    methods = [@methods, ids[0]]
+    programs = [@programs, ids[1]]
+  end
+  for [values, message] in [[methods, "duplicate native method identity"], [programs, "duplicate native program identity"]]
+    let previous: int = -1
+    for identity in sort(values)
+      native/ensure(identity != previous, message)
+      previous = identity
+    end
+  end
+end
+
 // Resolve the frontend output, collect literals, and plan continuation regions.
 verb native_source/prepare_module(input: map, prefix: string, emitted: map, relations: map, identities: map, method_ids: list) -> map
-  native/ensure(len(method_ids) == len(emitted[:methods]), "native module requires identities for every definition")
+  native_source/check_method_ids(method_ids, len(emitted[:methods]))
   let descriptions: list = [[emitted[:entry], 0, string_concat(prefix, "_entry")]]
   let pool: map = native_source/literal_pool([E_TYPE, E_RANGE, [] {[]}, :dispatch/unrestricted, :required, @[spec[0] for spec in native_value/kinds()]])
   let numbers: list = []
@@ -375,7 +397,6 @@ verb native_source/prepare_module(input: map, prefix: string, emitted: map, rela
       pool = native_source/pool(pool, position)
       position = position + 1
     end
-    native/ensure(len(method_ids[index]) == 2, "native definition requires definition and program identities")
     numbers = [@numbers, @method_ids[index]]
     descriptions = [@descriptions, [definition[:program], len(definition[:parameters]), string_concat(prefix, "_method_", to_literal(index))]]
     index = index + 1
