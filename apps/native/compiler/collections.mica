@@ -41,21 +41,68 @@ verb native_source/splice_check(builder: map, value: map, kind: string, language
   end)
   return result
 end
+
+// Persistent appends can reuse an immutable prefix. Keep their copying and
+// allocation under the task allowance, including after a collection freezes it.
+verb native_source/collection_append_body(input: map) -> map
+  let name: string = string_concat(input[:source_prefix], "_collection_append")
+  let module: map = native_memory/declare(input, name, :U64, [
+    ["worker", native_memory/record_pointer("MemoryWorker"), :Borrow],
+    ["attempt", native_tasks/pointer("Attempt"), :Borrow],
+    ["transaction", native_kernel/pointer("Transaction"), :Borrow],
+    ["input", native_value/word(), :Gc], ["element", native_value/word(), :Gc],
+    ["output", native_memory/record_pointer("MemoryRoot"), :Borrow]], native_tasks/effects(), :Value, "")
+  let builder: map = native_queries/budget_scope(native_gen/context(module, name))
+  let [value: map, appended: map] = native_query/value(builder, "value_list_append", [
+    native_roots/worker(builder), native_roots/ref(builder, "input"), native_roots/ref(builder, "element")])
+  let output: map = native_roots/root_value(appended, native_gen/ref(appended, "output"), native_value/word())
+  let result: map = native_gen/finish(module, native_tasks/attempt_status(native_roots/store(appended, output, value), "ok"))
+  return result
+end
+verb native_source/append_list_item(builder: map, buffer: map, value: map) -> map
+  let ready: map = native_source/checked(builder, "task_poll", [native_tasks/attempt(builder), native_gen/ref(builder, "one")])
+  let result: map = native_source/checked(ready, string_concat(ready[:source_prefix], "_collection_append"), [
+    native_roots/worker(ready), native_tasks/attempt(ready), native_tasks/slot(ready, "transaction"), buffer, value, buffer[:scope_root]])
+  return result
+end
 verb native_source/list_items(builder: map, items: list, language_error: bool) -> list
   if !native_source/spliced(items)
     let result: list = native_source/list(builder, native_source/operands(builder, items))
     return result
   end
-  let [buffer: map, ready: map] = native_source/collection_buffer(builder)
-  for item in items
+  let shared: bool = items[0][0] == :Splice
+  let buffer: map = {}
+  let ready: map = builder
+  if shared
+    let prefix: map = native_source/operand(ready, items[0][1])
+    ready = native_source/splice_check(ready, prefix, "list", language_error)
+    let retained: list = native_roots/retain(ready, "items", prefix)
+    buffer = retained[0]
+    ready = retained[1]
+  else
+    let allocated: list = native_source/collection_buffer(ready)
+    buffer = allocated[0]
+    ready = allocated[1]
+  end
+  let append = fn(step, value)
+    if shared
+      return native_source/append_list_item(step, buffer, value)
+    end
+    return native_source/append_item(step, buffer, value)
+  end
+  for position in 0..(len(items) - 1)
+    if shared && position == 0
+      continue
+    end
+    let item: list = items[position]
     if item[0] == :Splice
       let value: map = native_source/operand(ready, item[1])
       ready = native_source/splice_check(ready, value, "list", language_error)
       ready = native_gen/for_range(ready, "splice_index", native_gen/ref(ready, "zero"), native_query/width(ready, value), fn(step, index)
-        return native_source/append_item(step, buffer, native_query/cell(step, value, index))
+        return append(step, native_query/cell(step, value, index))
       end)
     else
-      ready = native_source/append_item(ready, buffer, native_source/operand(ready, item))
+      ready = append(ready, native_source/operand(ready, item))
     end
   end
   return [buffer, ready]

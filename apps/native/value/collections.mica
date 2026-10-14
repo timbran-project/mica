@@ -1,7 +1,7 @@
 // Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-// List views share immutable prefixes. Mutating an worker, including claiming a
+// List views share immutable prefixes. Mutating a worker, including claiming a
 // list's unused tail, requires serialization just as string append does.
 verb native_value/collections(input: map) -> map
   let context: map = input
@@ -20,6 +20,7 @@ verb native_value/list_allocation(input: map) -> map
   let values: list = [:Pointer, word, :Mutable]
   let [constants, state] = native/constants(context[:state], [
     ["null_list_header", pointer, "null"],
+    ["list_copy_mask", :U64, "00000000000000ff"],
     ["null_values", [:Pointer, word, :Const], "null"]])
   context[:state] = state
   let bindings: map = context[:constants]
@@ -146,6 +147,7 @@ verb native_value/list_operations(input: map) -> map
   ])
   context = native/declare_function(context, "value_list_append", result, [worker, ["value", word, :Gc],
     ["element", word, :Gc]], [], [:Allocate, :ReadMemory, :WriteMemory], :Gc, "")
+  context = native/execution_function(context, "value_list_append", :Collector)
   context = native/define_function(context, "value_list_append", [
     @read,
     native/let_field("storage", [:Pointer, [:Record, "ListStorage"], :Mutable], "header", "storage"),
@@ -170,6 +172,9 @@ verb native_value/list_operations(input: map) -> map
       native/let_statement("used_slot", [:Pointer, :U64, :Mutable], native/field_pointer_expression("storage", "used")),
       native/store_statement("used_slot", native/typed_expression(:U64, native/binary_expression(:Add, "used", "one")))
     ], [
+      native/let_statement("copy_control", native_memory/record_pointer("MemoryControl"),
+        native_memory/root(native_memory/record_pointer("MemoryControl"), "worker", "control")),
+      native/unless_statement(native/call_expression("memory_control_check", ["copy_control", "zero", "length"]), [native/return_zero()]),
       native/set_statement("capacity", native/binary_expression(:Add, "total", "total")),
       native/set_statement("target", native/call_expression("list_allocate", ["worker", "total", "capacity"])),
       native/when_statement(native/binary_expression(:Equal, "target", "null_list_header"), [
@@ -178,7 +183,12 @@ verb native_value/list_operations(input: map) -> map
       ]),
       native/let_load("new_header", header, "target"),
       native/let_field("destination", values, "new_header", "data"),
-      @native/copy_elements(word, "destination", "data", "length", :Mutable),
+      @native/for_range("copy", "zero", "length", [
+        native/when_statement(native/binary_expression(:Equal, native/typed_expression(:U64, native/binary_expression(:BitAnd, "copy", "list_copy_mask")), "zero"), [
+          native/unless_statement(native/call_expression("memory_control_check", ["copy_control", "zero", "zero"]), [native/return_zero()])]),
+        native/let_offset("source_slot", values, "data", "copy"),
+        native/let_offset("target_slot", values, "destination", "copy"),
+        native/store_statement("target_slot", native/typed_load(word, "source_slot"))]),
       native/set_statement("tail", native/offset_expression("destination", "length")),
       native/store_statement("tail", "element"),
       native/set_statement("data", "destination"),

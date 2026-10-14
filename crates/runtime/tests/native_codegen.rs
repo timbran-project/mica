@@ -4833,6 +4833,89 @@ fn native_source_program_executes_on_generated_runtime() {
 }
 
 #[test]
+fn native_source_list_splices_share_prefixes_with_bounded_work() {
+    let source = r#"
+verb native_list_fixture(count)
+  let values = []
+  let saved = []
+  for index in 0..(count - 1)
+    values = [@values, index]
+    if index == 31
+      saved = values
+    end
+  end
+  let branch = [@saved, -1]
+  return [values, saved, branch, [@saved, @saved, none], [7, @saved, 8], [@[]]]
+end
+"#;
+    let checks = r#"
+    (void)symbols;
+    const unsigned sizes[] = {64, 1024, 8192};
+    for (unsigned collect = 0; collect < 2; ++collect) {
+        for (unsigned test = 0; test < 3; ++test) {
+            unsigned count = sizes[test];
+            mica_value_root_set(&input, source_integer(count));
+            run_frontend(worker, kernel, code, runtime, &input, &output, 2000000, collect != 0);
+            mica_type_Value result = mica_value_root_get(&output);
+            mica_type_Value values = mica_value_list_get(result, 0).f_value;
+            mica_type_Value saved = mica_value_list_get(result, 1).f_value;
+            mica_type_Value branch = mica_value_list_get(result, 2).f_value;
+            mica_type_Value joined = mica_value_list_get(result, 3).f_value;
+            mica_type_Value surrounded = mica_value_list_get(result, 4).f_value;
+            assert(mica_value_list_length(values).f_number == count);
+            for (unsigned i = 0; i < count; ++i)
+                assert(mica_value_list_get(values, i).f_value == source_integer(i));
+            assert(mica_value_list_length(saved).f_number == 32);
+            assert(mica_value_list_length(branch).f_number == 33);
+            assert(mica_value_list_get(branch, 32).f_value == source_integer(-1));
+            assert(mica_value_list_length(joined).f_number == 65);
+            /* NONE_CHECK */
+            assert(mica_value_list_length(surrounded).f_number == 34);
+            assert(mica_value_list_get(surrounded, 0).f_value == source_integer(7));
+            assert(mica_value_list_get(surrounded, 33).f_value == source_integer(8));
+            for (unsigned i = 0; i < 32; ++i) {
+                assert(mica_value_list_get(saved, i).f_value == source_integer(i));
+                assert(mica_value_list_get(branch, i).f_value == source_integer(i));
+                assert(mica_value_list_get(joined, i).f_value == source_integer(i));
+                assert(mica_value_list_get(joined, i + 32).f_value == source_integer(i));
+                assert(mica_value_list_get(surrounded, i + 1).f_value == source_integer(i));
+            }
+            assert(mica_value_list_length(mica_value_list_get(result, 5).f_value).f_number == 0);
+        }
+    }
+"#
+    .replace(
+        "/* NONE_CHECK */",
+        &source_value_check(
+            &Value::option_none(),
+            "mica_value_list_get(joined, 64).f_value",
+        ),
+    );
+    thread::scope(|scope| {
+        let builds = [true, false].map(|tier| {
+            scope
+                .spawn(move || generate_native_source_example(tier, source, "[[10000,20000]]", &[]))
+        });
+        let [first, second] = builds.map(|build| build.join().unwrap());
+        assert!(
+            first == second,
+            "list splice generation differs between tiers"
+        );
+        let (generated, memory, tasks) = first;
+        let fixture = include_str!("../../../apps/native/compiler/frontend_tests.c")
+            .replace("/* FRONTEND_CONFORMANCE_CASES */", &checks);
+        check_native_source_fixture_with_flags(
+            &format!(
+                "{generated}\n{memory}\n{tasks}\n{}\n{}\n{fixture}",
+                include_str!("../../../native/platform/allocation.c"),
+                include_str!("../../../native/platform/mutex.c"),
+            ),
+            &["-O2", "-g0"],
+        );
+    });
+}
+
+#[test]
 fn native_source_commits_suspends_and_delays_tasks() {
     let example = include_str!("../../../apps/native/compiler/examples/roundtrip.mica")
         .replace(

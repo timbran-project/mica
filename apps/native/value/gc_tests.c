@@ -286,6 +286,68 @@ static bool trace_allowance(uint8_t *context, uint64_t bytes, uint64_t steps) {
     return true;
 }
 
+static bool list_copy_allowance(uint8_t *context, uint64_t bytes, uint64_t steps) {
+    uint64_t *remaining = (void *)context;
+    (void)bytes;
+    if (steps > *remaining) return false;
+    *remaining -= steps;
+    return true;
+}
+
+static void bounded_list_append(void) {
+    struct mica_MemoryHeap heap = {0};
+    struct mica_MemoryWorker worker = {0};
+    assert(mica_value_heap_init(&heap));
+    assert(mica_memory_worker_init(&worker, &heap, 65536));
+    assert(mica_memory_enter(&worker));
+    mica_type_Value cells[1024];
+    for (unsigned i = 0; i < 1024; ++i) cells[i] = integer(i);
+    mica_type_Value list = checked(mica_value_list(&worker, cells, 1024));
+    const struct mica_HeapList *source = mica_value_as_list(list).f_header;
+    bool completed = false;
+    unsigned failures = 0;
+    for (uint64_t allowance = 0; allowance < 16; ++allowance) {
+        uint64_t remaining = allowance;
+        struct mica_MemoryControl control = {.f_context = (void *)&remaining, .f_check = trace_allowance};
+        mica_memory_control_push(&worker, &control);
+        struct mica_ValueResult appended = mica_value_list_append(&worker, list, integer(1024));
+        mica_memory_control_pop(&worker);
+        assert(source->f_length == 1024 && source->f_storage->f_used == 1024);
+        assert(!memcmp(source->f_data, cells, sizeof(cells)));
+        if (appended.f_ok) {
+            assert(mica_value_list_length(appended.f_value).f_number == 1025);
+            assert(mica_value_list_get(appended.f_value, 1024).f_value == integer(1024));
+            completed = true;
+            break;
+        }
+        ++failures;
+    }
+    assert(completed && failures >= 5);
+    uint64_t remaining = 1023;
+    struct mica_MemoryControl control = {.f_context = (void *)&remaining, .f_check = list_copy_allowance};
+    mica_memory_control_push(&worker, &control);
+    assert(!mica_value_list_append(&worker, list, integer(1024)).f_ok);
+    mica_memory_control_pop(&worker);
+    // A copy charges each existing word and its allocation. A subsequent
+    // private-tail append charges only the new view allocation.
+    remaining = 1025;
+    mica_memory_control_push(&worker, &control);
+    mica_type_Value copied = checked(mica_value_list_append(&worker, list, integer(1024)));
+    mica_memory_control_pop(&worker);
+    assert(remaining == 0);
+    remaining = 1;
+    mica_memory_control_push(&worker, &control);
+    mica_type_Value extended = checked(mica_value_list_append(&worker, copied, integer(1025)));
+    mica_memory_control_pop(&worker);
+    assert(remaining == 0);
+    assert(mica_value_list_length(copied).f_number == 1025);
+    assert(mica_value_list_get(extended, 1025).f_value == integer(1025));
+    collect(&worker);
+    assert(heap.f_retained == 0);
+    assert(mica_memory_leave(&worker) && mica_memory_worker_release(&worker));
+    assert(mica_memory_heap_release(&heap));
+}
+
 // Immediate-only arrays still need checkpoints: no pointer visitor sees them.
 static void bounded_value_tracing(void) {
     struct mica_MemoryHeap heap = {0};
@@ -502,6 +564,7 @@ static void persistent_maps(void) {
 }
 
 int main(void) {
+    bounded_list_append();
     persistent_maps();
     function_graph();
     bounded_value_tracing();
