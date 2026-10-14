@@ -4437,11 +4437,14 @@ return [native/emit_module(runtime[:state], "runtime"), applications]
 fn native_source_selects_guarded_catches_and_recovery_expressions() {
     let body = include_str!("../../../apps/compiler/catch_tests.mica");
     let expected = eval(&mut SourceRunner::new_empty(), body);
-    let source = format!("verb native_catch_fixture(input)\n{body}\nend");
+    let source = format!(
+        "verb native_catch_fixture(input)\n{body}\nend\n{}",
+        include_str!("../../../apps/native/compiler/handler_tests.mica")
+    );
     let checks = format!(
         "for (unsigned collect = 0; collect < 2; ++collect) {{\n\
          run_frontend(worker, kernel, code, runtime, &input, &output, 1000000, collect != 0);\n\
-         {}\n}}",
+         {}\n}}\nhandler_checks(worker, kernel, code, runtime);",
         source_value_check(&expected, "mica_value_root_get(&output)")
     );
     let fixture = include_str!("../../../apps/native/compiler/frontend_tests.c")
@@ -4449,7 +4452,9 @@ fn native_source_selects_guarded_catches_and_recovery_expressions() {
     let (generated, memory, tasks) = thread::scope(|scope| {
         let builds = [true, false].map(|tier| {
             let source = &source;
-            scope.spawn(move || generate_native_source_example(tier, source, "[[610, 8010]]", &[]))
+            scope.spawn(move || {
+                generate_native_source_example(tier, source, "[[610, 8010], [611, 8011]]", &[])
+            })
         });
         let [first, second] = builds.map(|build| build.join().unwrap());
         assert!(
@@ -4459,9 +4464,10 @@ fn native_source_selects_guarded_catches_and_recovery_expressions() {
         first
     });
     check_native_source_fixture(&format!(
-        "{generated}\n{memory}\n{tasks}\n{}\n{}\n{fixture}",
+        "{generated}\n{memory}\n{tasks}\n{}\n{}\n{}\n{fixture}",
         include_str!("../../../native/platform/allocation.c"),
         include_str!("../../../native/platform/mutex.c"),
+        include_str!("../../../apps/native/compiler/handler_tests.c"),
     ));
 }
 

@@ -216,6 +216,56 @@ fn mica_emitter_selects_guarded_catches_and_recovery_expressions() {
 }
 
 #[test]
+fn mica_emitter_preserves_guard_and_cleanup_state_across_suspension() {
+    let definition = include_str!("../../../apps/native/compiler/handler_tests.mica").replacen(
+        "verb native_handler_fixture",
+        "fn native_handler_fixture",
+        1,
+    );
+    for interpreter_only in [true, false] {
+        let mut runner = compiler(interpreter_only);
+        runner
+            .run_filein("make_functional_relation(:NativeResult, 2, [0])")
+            .unwrap();
+        for mode in 0..3 {
+            let source = format!("{definition}\nreturn native_handler_fixture({mode})");
+            let module = invoke(&mut runner, "emit_source", &source);
+            install_emitted(&mut runner, module);
+            let expected = Value::list([
+                Value::int(mode).unwrap(),
+                Value::list([
+                    Value::string("retained handler payload"),
+                    Value::int(mode).unwrap(),
+                ]),
+            ]);
+            for entry in [source.as_str(), "return :compiler_test_entry()"] {
+                let report = runner.run_source(entry).unwrap();
+                let mut outcome = report.outcome;
+                for reply in [41, 42] {
+                    assert!(
+                        matches!(outcome, TaskOutcome::Suspended { .. }),
+                        "{outcome:?}"
+                    );
+                    outcome = runner
+                        .resume_task(TaskRequest {
+                            input: TaskInput::Continuation {
+                                task_id: report.task_id,
+                                value: Value::int(reply).unwrap(),
+                            },
+                            ..SourceRunner::root_source_request("")
+                        })
+                        .unwrap();
+                }
+                assert!(
+                    matches!(&outcome, TaskOutcome::Complete { value, .. } if value == &expected),
+                    "mode {mode}: {outcome:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn mica_emitter_typed_list_bindings_check_slots_and_later_assignments() {
     for interpreter_only in [true, false] {
         let mut runner = compiler(interpreter_only);

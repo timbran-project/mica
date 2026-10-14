@@ -644,6 +644,9 @@ Language-level method installation, transactional buffers, and live compiler qua
 Method facts and compiled bodies can already be staged in one kernel transaction; `task_invoke` resolves and executes that view.
 Guarded catches and `recover` share a conformance corpus with the Rust-hosted compiler tests.
 The native fixture checks handler ordering, guard side effects, escaping errors, and finalization with ordinary and forced collection.
+It also suspends inside a guard and its finalizer, then resumes each segment on a separate native thread after the previous worker exits.
+Forced collection preserves captured payloads and pending returns or errors across these waits.
+Cancellation at either wait retains committed facts and discards the continuation without further cleanup.
 Destructuring catch patterns remain unsupported.
 
 Entries explicitly charge logical work through `task_poll`.

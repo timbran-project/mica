@@ -1,0 +1,37 @@
+// A guard and its finalizer each publish a wait. Their source registers and
+// pending return or error must survive collection and a change of worker.
+verb native_handler_fixture(mode)
+  let saved = ["retained handler payload", mode]
+  fn guarded()
+    try
+      raise E_TEST, "original", saved
+    catch problem if begin
+      assert NativeResult(100 + mode * 10, 1)
+      let reply = suspend()
+      require reply == 41
+      require problem.value == some(saved)
+      if mode == 2
+        raise E_GUARD, "replacement", saved
+      end
+      mode != 1
+    end
+      return [0, problem.value[0][:value]]
+    catch E_TEST as problem
+      return [1, problem.value[0][:value]]
+    finally
+      assert NativeResult(101 + mode * 10, 1)
+      let reply = suspend()
+      require reply == 42
+      try
+        raise E_CLEANUP
+      catch E_CLEANUP
+        assert NativeResult(102 + mode * 10, 1)
+      end
+    end
+  end
+  try
+    return guarded()
+  catch E_GUARD as problem
+    return [2, problem.value[0][:value]]
+  end
+end
