@@ -4139,6 +4139,61 @@ end
 }
 
 #[test]
+fn native_literal_constants_validate_imported_bindings() {
+    for tier in [true, false] {
+        let mut runner = runner(tier);
+        runner
+            .run_filein(include_str!("../../../apps/native/value/literals.mica"))
+            .unwrap();
+        assert_eq!(
+            eval(
+                &mut runner,
+                r#"
+let initial = native/module_context(native/program(), {})
+let first = native_literal/constant(initial, "limit", :U64, "0000000000000007")
+let reused = native_literal/constant(first, "limit", :U64, "0000000000000007")
+native/ensure(first[:state] == reused[:state], "reuse must preserve the constant ID")
+let imported = native/module_interface(reused)
+let extended = native_literal/constant(imported, "next", :U64, "0000000000000008")
+let cached = native_literal/constant(extended, "limit", :U64, "0000000000000007")
+let appended = native_literal/constant(cached, "last", :U64, "0000000000000009")
+let repeated = native_literal/constant(appended, "last", :U64, "0000000000000009")
+native/ensure(repeated[:state] == appended[:state], "reuse after append must preserve rows")
+let rejected = 0
+for [kind, encoding] in [[:I64, "0000000000000007"], [:U64, "0000000000000008"]]
+  try
+    native_literal/constant(cached, "limit", kind, encoding)
+  catch E_INVARG
+    rejected = rejected + 1
+  end
+end
+let edited = cached
+edited[:state][:constants][0][2] = "000000000000000a"
+try
+  native_literal/constant(edited, "limit", :U64, "0000000000000007")
+catch E_INVARG
+  rejected = rejected + 1
+end
+let refreshed = native_literal/constant(edited, "limit", :U64, "000000000000000a")
+native/ensure(refreshed[:state] == edited[:state], "edited constant must refresh the index")
+let unchanged = native_literal/constant(cached, "limit", :U64, "0000000000000007")
+native/ensure(unchanged[:state] == cached[:state], "edits must preserve earlier modules")
+let invalid = cached
+invalid[:constants]["missing"] = 999
+try
+  native_literal/constant(invalid, "missing", :U64, "0000000000000007")
+catch E_INVARG
+  rejected = rejected + 1
+end
+return rejected == 4
+"#,
+            ),
+            Value::bool(true)
+        );
+    }
+}
+
+#[test]
 fn native_source_composite_literals_preserve_ownership() {
     for interpreter_only in [true, false] {
         let mut runner = runner(interpreter_only);
@@ -4586,6 +4641,123 @@ return [native/emit_module(runtime[:state], "runtime"), applications]
                 &["-O0", "-g0"],
             );
         }
+        previous = Some(artifacts);
+    }
+}
+
+#[test]
+fn native_source_calls_across_separate_method_modules() {
+    let entry = r#"
+verb native_module/run(input)
+  if is_kind(input, :function)
+    return [input(3), native_module/even(8), native_module/odd(9)]
+  end
+  return native_module/make_adder(input)
+end
+verb native_module/even(number: int) -> bool
+  if number == 0
+    return true
+  end
+  return native_module/odd(number - 1)
+end
+verb native_module/adjust(number: int, offset: int) -> int
+  return number + offset
+end
+"#;
+    let support = r#"
+verb native_module/make_adder(offset: int) -> function
+  return fn(number) => native_module/adjust(number, offset)
+end
+verb native_module/odd(number: int) -> bool
+  if number == 0
+    return false
+  end
+  return native_module/even(number - 1)
+end
+"#;
+    let mut previous = None;
+    for tier in [true, false] {
+        let mut runner = runner(tier).with_task_limits(TaskLimits {
+            instruction_budget: 2_000_000_000,
+            max_call_depth: 256,
+            ..TaskLimits::default()
+        });
+        load_native_kernel(&mut runner, true);
+        load_native_source_compiler(&mut runner);
+        let artifacts = eval(
+            &mut runner,
+            &format!(
+                r#"
+let runtime = native_tasks/definitions()
+let first = native_source/compile(native/module_interface(runtime), "module_entry", {entry:?}, {{}}, {{}}, [[620, 8200], [621, 8201], [622, 8202]])
+let second = native_source/compile(native/module_interface(first), "module_support", {support:?}, {{}}, {{}}, [[623, 8203], [624, 8204]])
+return [native/emit_module(runtime[:state], "runtime"), native/emit_module(first[:state], "entry"),
+  native/emit_module(second[:state], "support"), native_memory/platform(), native_tasks/platform()]
+"#
+            ),
+        );
+        if let Some(previous) = &previous {
+            assert!(
+                &artifacts == previous,
+                "method modules differ between tiers"
+            );
+            continue;
+        }
+        let expected = eval(&mut runner, "return [10, true, true]");
+        let checks = format!(
+            "(void)symbols; // This fixture constructs no symbol values.\n\
+             for (unsigned collect = 0; collect < 2; ++collect) {{\n\
+             mica_value_root_set(&input, source_integer(7));\n\
+             run_frontend(worker, kernel, code, runtime, &input, &output, 1000000, collect != 0);\n\
+             mica_value_root_set(&input, mica_value_root_get(&output));\n\
+             assert(mica_memory_safepoint(worker, true));\n\
+             run_frontend(worker, kernel, code, runtime, &input, &output, 1000000, collect != 0);\n\
+             {}\n}}\n",
+            source_value_check(&expected, "mica_value_root_get(&output)")
+        );
+        let fixture = include_str!("../../../apps/native/compiler/frontend_tests.c")
+            .replace("source_roundtrip", "module_entry")
+            .replace("/* FRONTEND_CONFORMANCE_CASES */", &checks)
+            .replace(
+                "mica_type_Value kinds[16];",
+                "struct mica_MemoryRoot support_code = {0};\n\
+                 assert(mica_memory_root_push(&worker, &support_code));\n\
+                 void *support_library = dlopen(NULL, RTLD_NOW);\n\
+                 assert(support_library && mica_task_code_register(&registry, &worker, support_library, &support_code) == 0);\n\
+                 assert(mica_task_module_support_constants(&worker, &symbols, &registry, (void *)support_code.f_pointer) == 0);\n\
+                 mica_type_Value kinds[16];",
+            )
+            .replace(
+                "assert(mica_kernel_commit(&install) == 0 && mica_kernel_end(&install));",
+                "assert(mica_task_module_support_install(&install, &dispatch, (void *)support_code.f_pointer, source_integer(7)) == 0);\n\
+                 assert(mica_kernel_commit(&install) == 0 && mica_kernel_end(&install));",
+            )
+            .replace(
+                "assert(mica_memory_root_pop(&worker, &prototypes)",
+                "assert(mica_memory_root_pop(&worker, &support_code));\n\
+                 assert(mica_memory_root_pop(&worker, &prototypes)",
+            )
+            .replace("reaped.f_released == 1", "reaped.f_released == 2");
+        let text = |index| {
+            artifacts
+                .list_get(index)
+                .unwrap()
+                .with_str(str::to_owned)
+                .unwrap()
+        };
+        check_native_modules_fixture(
+            &(0..3)
+                .map(|index| artifacts.list_get(index).unwrap())
+                .collect::<Vec<_>>(),
+            &format!(
+                "{}\n{}\n{}\n{}\n{fixture}",
+                text(3),
+                text(4),
+                include_str!("../../../native/platform/allocation.c"),
+                include_str!("../../../native/platform/mutex.c"),
+            ),
+            &["-O0", "-g0"],
+        );
         previous = Some(artifacts);
     }
 }

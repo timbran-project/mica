@@ -79,13 +79,39 @@ verb native_literal/integer_encoding(number: int) -> string
   return string_concat("-", encoding)
 end
 verb native_literal/constant(input: map, name: string, type_id, encoding: string) -> map
-  native/ensure(!map_contains_key(input[:constants], name), "duplicate literal constant")
   let module: map = input
+  // Imported helpers can share an identical named constant. Cache its row
+  // index so a batch of reused constants does not repeatedly scan the module.
+  let cache: map = index_or(module, :literal_constant_index, {})
+  if map_contains_key(module[:constants], name)
+    if !map_contains_key(cache, :rows) || cache[:rows] != module[:state][:constants]
+      let rows: map = {}
+      for row in module[:state][:constants]
+        rows[row[0]] = row
+      end
+      cache = {:rows -> module[:state][:constants], :values -> rows}
+    end
+    let existing: int = module[:constants][name]
+    if !map_contains_key(cache[:values], existing)
+      native/ensure(false, string_concat("literal binding is not a constant: ", name))
+    end
+    let row: list = cache[:values][existing]
+    if row[1] != type_id || row[2] != encoding
+      native/ensure(false, string_concat("conflicting literal constant ", name))
+    end
+    module[:literal_constant_index] = cache
+    return module
+  end
   let [id: int, state: map] = native/add_constant(module[:state], type_id, encoding)
   module[:state] = state
   let constants: map = module[:constants]
   constants[name] = id
   module[:constants] = constants
+  if map_contains_key(cache, :rows) && cache[:rows] == input[:state][:constants]
+    cache[:values][id] = [id, type_id, encoding]
+    cache[:rows] = state[:constants]
+    module[:literal_constant_index] = cache
+  end
   return module
 end
 
