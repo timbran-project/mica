@@ -1024,6 +1024,35 @@ int main(void) {
 }
 
 #[test]
+fn c_comments_preserve_unicode_and_escape_c_delimiters() {
+    let cases = [
+        ("", "/*  */"),
+        ("type é 🦀", "/* type é 🦀 */"),
+        (
+            "*/??/\\\n\r\t\0",
+            "/* \\x2a/\\x3f\\x3f/\\x5c\\n\\r\\t\\0 */",
+        ),
+        ("a*é?🦀\\z", "/* a\\x2aé\\x3f🦀\\x5cz */"),
+        ("\\x2a*", "/* \\x5cx2a\\x2a */"),
+    ];
+    for tier in [true, false] {
+        let mut runner = runner(tier);
+        for (input, expected) in cases {
+            assert_eq!(
+                eval(&mut runner, &format!("return native/c_comment({input:?})")),
+                Value::string(expected),
+                "{input:?}"
+            );
+        }
+        let plain = "ordinary Unicode é🦀 ".repeat(1024);
+        assert_eq!(
+            eval(&mut runner, &format!("return native/c_comment({plain:?})")),
+            Value::string(format!("/* {plain} */"))
+        );
+    }
+}
+
+#[test]
 fn rejects_invalid_programs_before_emission() {
     let edit = |table: &str, ordinal: usize, change: &str| {
         format!(

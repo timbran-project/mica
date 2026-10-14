@@ -3,17 +3,22 @@
 
 // Escape text before placing it in a C comment. In particular, comment
 // delimiters, line splices, trigraphs, and embedded control bytes stay inert.
-verb native/c_comment(text)
-  let escaped = ""
-  for ch in string_chars(text)
-    if native/contains(["*", "?", "\\", "\n", "\r", "\t", "\0"], ch)
-      let encodings = {"*" -> "\\x2a", "?" -> "\\x3f", "\\" -> "\\x5c", "\n" -> "\\n", "\r" -> "\\r", "\t" -> "\\t", "\0" -> "\\0"}
-      escaped = string_concat(escaped, encodings[ch])
-    else
-      escaped = string_concat(escaped, ch)
+verb native/c_comment(text: string) -> string
+  let encodings: map = {42 -> "\\x2a", 63 -> "\\x3f", 92 -> "\\x5c", 10 -> "\\n", 13 -> "\\r", 9 -> "\\t", 0 -> "\\0"}
+  let pieces: list = []
+  let position: int = 0
+  let length: int = string_len(text)
+  while position < length
+    // Copy ordinary spans together; only escaped characters need individual pieces.
+    let next: int = string_find_any(text, position, "*?\\\n\r\t\0")
+    pieces = [@pieces, string_slice(text, position, next)]
+    if next == length
+      break
     end
+    pieces = [@pieces, encodings[text[next]]]
+    position = next + 1
   end
-  return string_concat("/* ", escaped, " */")
+  return string_concat("/* ", string_join(pieces, ""), " */")
 end
 
 verb native/c_notes(index, id, indent)
