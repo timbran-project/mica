@@ -110,8 +110,8 @@ end
 verb native_source/capture_image(builder: map, entry: string, registers: list) -> list
   let values: list = [native_source/register(builder, register) for register in registers]
   let [retained: map, rooted: map] = native_source/rooted_list(builder, "environment", values)
-  let [image: map, allocated: map] = native_roots/retain(rooted, "continuation", native_handlers/copy_image(rooted, native_handlers/current(rooted), {
-    "entry" -> native_source/entry(entry), "environment" -> retained, "input" -> native_gen/zero(native_value/word())}))
+  let [image: map, allocated: map] = native_roots/retain(rooted, "continuation", native_gen/call(rooted, "task_image_continuation", [native_roots/worker(rooted),
+    native_handlers/current(rooted), native_source/entry(entry), retained]))
   let checked: map = native_tasks/check(allocated, native_gen/negate(native_kernel/absent(image)), "oom")
   return [image, checked]
 end

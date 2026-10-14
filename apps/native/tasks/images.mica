@@ -50,6 +50,16 @@ verb native_tasks/images(input: map) -> map
   let reader: map = native_gen/context(module, "task_current_image")
   module = native_gen/finish(module, native_gen/return_value(reader,
     native_tasks/saved(reader, "current", native_tasks/pointer("Image"))))
+  // Continuations change their entry and captured environment, preserving the
+  // immutable caller and handler state. Construction cannot relocate inputs.
+  module = native_memory/declare(module, "task_image_continuation", native_tasks/pointer("Image"),
+    [worker, ["source", native_tasks/pointer("Image"), :Gc], ["entry", [:FunctionPointer, "TaskEntry"], :Value],
+      ["environment", word, :Gc]], [:ReadMemory, :WriteMemory, :Allocate, :Release], :Gc, "")
+  let continuation: map = native_gen/context(module, "task_image_continuation")
+  let captured_image: map = native_handlers/copy_image(continuation, native_gen/ref(continuation, "source"), {
+    "entry" -> native_gen/ref(continuation, "entry"), "environment" -> native_gen/ref(continuation, "environment"),
+    "input" -> native_gen/zero(word)})
+  module = native_gen/finish(module, native_gen/return_value(continuation, captured_image))
   module = native_tasks/declare(module, "stage", :U64, [worker, ["effects", root, :Borrow],
     ["kind", :U64, :Value], ["target", word, :Gc], ["payload", word, :Gc]])
   module = native_tasks/declare(module, "emit", :U64, [worker,

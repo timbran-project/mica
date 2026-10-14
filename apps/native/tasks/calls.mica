@@ -108,8 +108,19 @@ end
 // Dispatch and generated instructions consume one segment budget. Keep only
 // scalar selection results across the accounting poll; the callee image owns
 // selected arguments after a successful invocation.
-verb native_calls/invoke_accounted(input: map, arguments: list, continuation: map) -> map
-  let builder: map = input
+verb native_calls/invoke_accounted(builder: map, arguments: list, continuation: map) -> map
+  let [status: map, called: map] = native_gen/bind(builder, "invocation_status", native_gen/call(builder, "task_invoke_accounted", [@arguments, continuation]))
+  let result: map = native_gen/unless(called, native_kernel/absent(status), fn(failed) => native_roots/return_value(failed, status))
+  return result
+end
+
+verb native_calls/accounted_body(module: map) -> map
+  let builder: map = native_tasks/context(module, "invoke_accounted")
+  let arguments: list = [native_roots/worker(builder), native_tasks/attempt(builder)]
+  for name in ["vocabulary", "selectors", "parameters", "delegates", "programs", "prototypes", "selector", "supplied"]
+    arguments = [@arguments, native_roots/ref(builder, name)]
+  end
+  let continuation: map = native_roots/ref(builder, "continuation")
   let [allowance: map, bounded: map] = native_gen/bind(builder, "allowance", native_tasks/attempt_field(builder, "remaining"))
   let [budget: map, budgeted: map] = native_gen/bind(bounded, "budget", native_gen/record(bounded, [:Record, "KernelBudget"], {
     "steps" -> allowance, "rows" -> native_gen/ref(bounded, "kernel_unlimited"),
@@ -128,7 +139,8 @@ verb native_calls/invoke_accounted(input: map, arguments: list, continuation: ma
   builder = native_gen/unless(builder, native_kernel/absent(charged), fn(exhausted) => native_roots/return_value(exhausted, charged))
   builder = native_gen/when(builder, native_kernel/absent(count), fn(missing) => native_roots/return_value(missing, native_gen/ref(missing, "task_no_method")))
   builder = native_gen/unless(builder, native_gen/equal(count, native_gen/ref(builder, "one")), fn(ambiguous) => native_roots/return_value(ambiguous, native_gen/ref(ambiguous, "task_ambiguous_dispatch")))
-  return builder
+  let result: map = native_gen/finish(module, native_roots/return_value(builder, native_gen/ref(builder, "kernel_ok")))
+  return result
 end
 
 verb native_calls/program(input: map) -> map
@@ -136,10 +148,12 @@ verb native_calls/program(input: map) -> map
   let worker: list = ["worker", native_memory/record_pointer("MemoryWorker"), :Borrow]
   let attempt: list = ["attempt", native_tasks/pointer("Attempt"), :Borrow]
   let word: list = native_value/word()
-  module = native_tasks/declare(module, "invoke", [:Record, "TaskDispatchSelection"], [worker, attempt,
+  let parameters: list = [worker, attempt,
     ["vocabulary", native_tasks/pointer("DispatchVocabulary"), :Borrow], ["selectors", :U64, :Value], ["parameters", :U64, :Value],
     ["delegates", :U64, :Value], ["programs", :U64, :Value], ["prototypes", word, :Gc], ["selector", word, :Gc], ["supplied", word, :Gc],
-    ["continuation", native_tasks/pointer("Image"), :Gc], ["budget", native_kernel/pointer("Budget"), :Borrow]], :Gc)
+    ["continuation", native_tasks/pointer("Image"), :Gc]]
+  module = native_tasks/declare(module, "invoke", [:Record, "TaskDispatchSelection"], [@parameters, ["budget", native_kernel/pointer("Budget"), :Borrow]], :Gc)
+  module = native_tasks/declare(module, "invoke_accounted", :U64, parameters)
   module = native_tasks/declare(module, "return", :U64, [worker, attempt, ["value", word, :Gc]])
   module = native/declare_function(module, "task_return_complete", :U64, [attempt], [], native_tasks/effects(), :Value, "")
   module = native/execution_function(module, "task_return_complete", :Tail)
@@ -147,6 +161,7 @@ verb native_calls/program(input: map) -> map
   builder = native_gen/return_value(builder, native_gen/call(builder, "task_request", [native_tasks/attempt(builder), native_gen/ref(builder, "task_boundary_complete")]))
   module = native_gen/finish(module, builder)
   module = native_calls/invoke_body(module)
+  module = native_calls/accounted_body(module)
   let result: map = native_calls/return_body(module)
   return result
 end

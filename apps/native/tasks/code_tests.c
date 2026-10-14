@@ -21,7 +21,7 @@ static struct mica_TaskCodeRef *code_reference(struct mica_MemoryRoot *root) {
 static void code_readers_follow_collection(void) {
     struct mica_MemoryHeap heap = {0};
     struct mica_MemoryWorker worker = {0};
-    struct mica_MemoryRoot images[2] = {0};
+    struct mica_MemoryRoot images[2] = {0}, continuation = {0};
     struct mica_TaskAttempt attempt = {0};
     assert(mica_task_heap_init(&heap));
     assert(mica_memory_worker_init(&worker, &heap, 4096));
@@ -38,17 +38,32 @@ static void code_readers_follow_collection(void) {
         struct mica_TaskCodeRef *code = mica_task_new_CodeRef(&worker, NULL, NULL, constants.f_value, NULL);
         assert(code);
         images[index].f_pointer = (void *)mica_task_new_Image(&worker, mica_task_test_entry,
-            code, integer(0), integer(0), integer(0), NULL, NULL, 0, NULL, NULL);
+            code, integer(index + 7), integer(100), integer(200), NULL, NULL, index + 1, NULL, NULL);
         assert(images[index].f_pointer);
     }
     assert(mica_memory_root_push(&worker, &attempt.f_current));
     assert(mica_task_current_image(&attempt) == NULL);
+    assert(mica_memory_root_push(&worker, &continuation));
     for (unsigned round = 0; round < 4; ++round) {
         for (unsigned index = 0; index < 2; ++index) {
             attempt.f_current.f_pointer = images[index].f_pointer;
             assert(mica_memory_safepoint(&worker, true));
             struct mica_TaskImage *current = mica_task_current_image(&attempt);
             assert(current == (void *)images[index].f_pointer);
+            struct mica_MemoryRoot *roots = worker.f_roots;
+            continuation.f_pointer = (void *)mica_task_image_continuation(&worker, current,
+                mica_task_return_complete, current->f_code->f_constants);
+            assert(continuation.f_pointer && worker.f_roots == roots);
+            assert(mica_memory_safepoint(&worker, true));
+            current = mica_task_current_image(&attempt);
+            struct mica_TaskImage *captured = (void *)continuation.f_pointer;
+            assert(captured != current && captured->f_entry == mica_task_return_complete);
+            assert(captured->f_code == current->f_code && captured->f_tenant == current->f_tenant);
+            assert(captured->f_environment == current->f_code->f_constants && captured->f_input == 0);
+            assert(captured->f_handlers == current->f_handlers && captured->f_unwind == current->f_unwind);
+            assert(captured->f_caller == current->f_caller && captured->f_depth == current->f_depth);
+            assert(captured->f_pending == current->f_pending);
+            assert(current->f_environment == integer(100) && current->f_input == integer(200));
             assert(mica_task_code_constant(current->f_code, 1) == integer(index));
             struct mica_HeapStringResult string = mica_value_as_string(mica_task_code_constant(current->f_code, 0));
             assert(string.f_ok && string.f_header->f_length == 256);
@@ -56,6 +71,7 @@ static void code_readers_follow_collection(void) {
                 assert(string.f_header->f_data[position] == 'a' + index);
         }
     }
+    assert(mica_memory_root_pop(&worker, &continuation));
     assert(mica_memory_root_pop(&worker, &attempt.f_current));
     assert(mica_memory_root_pop(&worker, &images[1]));
     assert(mica_memory_root_pop(&worker, &images[0]));
