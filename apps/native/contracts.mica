@@ -389,13 +389,20 @@ end
 // checks reject borrowed consumption and invalid result borrows. They do not
 // establish liveness after release, aliasing, bounds, or exclusive ownership.
 verb native/check_ownership(state, index)
-  let origins = {}
+  let origins: map = {}
+  let pointer_types: map = {}
+  for id, variable in index[:variables]
+    let kind = variable[2]
+    if !map_contains_key(pointer_types, kind)
+      pointer_types[kind] = native/has_pointer(index, kind)
+    end
+  end
   for row in state[:constants]
     origins[row[0]] = []
   end
   for row in state[:parameters]
-    let sources = []
-    if native/has_pointer(index, row[4])
+    let sources: list = []
+    if pointer_types[row[4]]
       let owner = row[0]
       if map_contains_key(index[:parameter_owners], owner)
         owner = index[:parameter_owners][owner]
@@ -407,18 +414,46 @@ verb native/check_ownership(state, index)
   for row in state[:locals]
     origins[row[0]] = []
   end
-  let changed = true
-  while changed
-    changed = false
-    for row in state[:instructions]
-      if row[4] == :Discard || !native/has_pointer(index, index[:variables][row[4]][2])
-        continue
-      end
-      let sources = native/result_origins(state, index, origins, row)
-      let combined = native/union(origins[row[4]], sources)
-      if combined != origins[row[4]]
-        origins[row[4]] = combined
-        changed = true
+  // Each transfer contains a destination, fixed origins, and origin inputs.
+  // Index consumers once; a changed binding wakes only its dependants, even
+  // when instructions are reverse ordered or form cycles across blocks.
+  let transfers: list = []
+  let dependants: map = {}
+  let pending: list = []
+  let queued: map = {}
+  for row in state[:instructions]
+    if row[4] == :Discard || !pointer_types[index[:variables][row[4]][2]]
+      continue
+    end
+    let transfer: list = native/ownership_transfer(index, row)
+    let position: int = len(transfers)
+    transfers = [@transfers, [row[4], @transfer]]
+    for operand in transfer[1]
+      dependants[operand] = [@index_or(dependants, operand, []), position]
+    end
+    pending = [@pending, position]
+    queued[position] = true
+  end
+  let position: int = 0
+  while position < len(pending)
+    let task: int = pending[position]
+    position = position + 1
+    queued[task] = false
+    let transfer: list = transfers[task]
+    let destination: int = transfer[0]
+    let sources: list = transfer[1]
+    for operand in transfer[2]
+      sources = native/union(sources, origins[operand])
+    end
+    let combined: list = native/union(origins[destination], sources)
+    if combined == origins[destination]
+      continue
+    end
+    origins[destination] = combined
+    for dependant in index_or(dependants, destination, [])
+      if !queued[dependant]
+        queued[dependant] = true
+        pending = [@pending, dependant]
       end
     end
   end
@@ -455,6 +490,14 @@ verb native/check_ownership(state, index)
     if contract[2] == :Value
       continue
     end
+    let borrowed_owner: int = 0
+    if contract[2] == :Borrow
+      let parameters: list = index[:function_parameters][fn_id]
+      borrowed_owner = [p[0] for p in parameters if p[3] == contract[3]][0]
+      if map_contains_key(index[:parameter_owners], borrowed_owner)
+        borrowed_owner = index[:parameter_owners][borrowed_owner]
+      end
+    end
     for origin in origins[term[2][0]]
       let valid = origin[0] == :Owned || origin[0] == :Consume
       if contract[2] == :Gc
@@ -467,11 +510,7 @@ verb native/check_ownership(state, index)
         valid = origin[0] == :Static
       end
       if contract[2] == :Borrow
-        let owner = [p for p in state[:parameters] if p[1] == fn_id && p[3] == contract[3]][0][0]
-        if map_contains_key(index[:parameter_owners], owner)
-          owner = index[:parameter_owners][owner]
-        end
-        valid = origin[0] == :Borrow && origin[1] == owner
+        valid = origin[0] == :Borrow && origin[1] == borrowed_owner
       end
       native/ensure(valid, string_concat("result ownership mismatch in ", index[:functions][fn_id][1], "/", index[:blocks][term[0]][2]))
     end
@@ -480,33 +519,32 @@ verb native/check_ownership(state, index)
   return origins
 end
 
-verb native/result_origins(state, index, origins, row)
+// Resolve the origin transfer once, including the owner argument of direct
+// and indirect borrowed results. Fixed origins do not depend on operand state.
+verb native/ownership_transfer(index: map, row: list) -> list
   if row[3] == :Manage || row[3] == :RootLoad
-    return [[:Gc, 0]]
+    return [[[:Gc, 0]], []]
   end
   if row[3] == :Adopt
     // The owner now keeps the allocation alive; the result borrows its region.
-    return origins[row[5][0]]
+    return [[], [row[5][0]]]
   end
   if row[3] == :GlobalAddress
-    return [[:Static, row[5][0]]]
+    return [[[:Static, row[5][0]]], []]
   end
   if row[3] == :Address
-    return native/union([[:Stack, row[5][0]]], origins[row[5][0]])
+    return [[[:Stack, row[5][0]]], [row[5][0]]]
   end
   if row[3] == :Call || row[3] == :CallIndirect
     let signature: list = native/call_signature(index, index[:blocks][row[1]][1], row)
     if signature[3] == :Static || signature[3] == :Owned || signature[3] == :Gc
-      return [[signature[3], row[0]]]
+      return [[[signature[3], row[0]]], []]
     end
     if signature[3] == :Borrow
-      return origins[row[5][native/signature_owner(signature, signature[4]) + 1]]
+      return [[], [row[5][native/signature_owner(signature, signature[4]) + 1]]]
     end
-    return []
+    return [[], []]
   end
-  let sources = []
-  for operand in native/reads(row)
-    sources = native/union(sources, origins[operand])
-  end
-  return sources
+  let reads: list = native/reads(row)
+  return [[], reads]
 end

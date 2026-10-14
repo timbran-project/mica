@@ -7532,6 +7532,97 @@ return true
 }
 
 #[test]
+fn native_ownership_validation_propagates_reverse_chains_and_cycles() {
+    let body = r#"
+let count = 1024
+let pointer = [:Pointer, :U8, :Mutable]
+let state = native/program()
+state[:parameters] = [[0, 0, 0, "left", pointer], [count + 1, 0, 1, "right", pointer]]
+state[:locals] = [[i, 0, "value", pointer] for i in 1..count + 3 if i != count + 1]
+let index = {:records -> {}, :parameter_modes -> {0 -> :Borrow, count + 1 -> :Borrow},
+  :parameter_owners -> {}, :variables -> {}, :has_gc -> false}
+let variables = {0 -> [0, "left", pointer, :Parameter], count + 1 -> [0, "right", pointer, :Parameter]}
+variables[count + 2] = [0, "unseeded_a", pointer, :Local]
+variables[count + 3] = [0, "unseeded_b", pointer, :Local]
+let instructions = []
+for offset in 0..count - 1
+  let id = count - offset
+  variables[id] = [0, "value", pointer, :Local]
+  instructions = [@instructions, [id, 0, offset, :Move, id, [id - 1]]]
+end
+// A second source joins halfway through the reverse-ordered chain, and the
+// back edge must propagate both sources through the cycle without duplicates.
+state[:instructions] = [@instructions,
+  [count + 1, 0, count, :Move, count / 2, [count + 1]],
+  [count + 2, 0, count + 1, :Move, 1, [count]],
+  [count + 3, 0, count + 2, :Move, count + 2, [count + 3]],
+  [count + 4, 0, count + 3, :Move, count + 3, [count + 2]]]
+index[:variables] = variables
+let origins = native/check_ownership(state, index)
+require origins[0] == [[:Borrow, 0]]
+require origins[count + 1] == [[:Borrow, count + 1]]
+require origins[count + 2] == [] && origins[count + 3] == []
+for id in 1..count
+  require len(origins[id]) == 2
+  require native/contains(origins[id], [:Borrow, 0])
+  require native/contains(origins[id], [:Borrow, count + 1])
+end
+return true
+"#;
+    for tier in [true, false] {
+        let mut runner = runner(tier).with_task_limits(TaskLimits {
+            instruction_budget: 10_000_000,
+            ..TaskLimits::default()
+        });
+        assert_eq!(eval(&mut runner, body), Value::bool(true));
+    }
+    let entry = format!("verb native_ownership_fixture(input)\n{body}\nend\n");
+    let mut library = SOURCES.to_vec();
+    library.push(&entry);
+    let dependencies = native_source_dependency_closure(&library, "native_ownership_fixture");
+    let source = format!("{entry}\n{}", dependencies.replace(entry.trim(), ""));
+    let ids = format!(
+        "[{}]",
+        source
+            .lines()
+            .filter(|line| line.starts_with("verb "))
+            .enumerate()
+            .map(|(index, _)| format!("[{}, {}]", 10000 + index, 20000 + index))
+            .collect::<Vec<_>>()
+            .join(",")
+    );
+    let (generated, memory, tasks) = thread::scope(|scope| {
+        let builds = [true, false].map(|tier| {
+            let source = &source;
+            let ids = &ids;
+            scope.spawn(move || generate_native_source_example(tier, source, ids, &[]))
+        });
+        let [first, second] = builds.map(|build| build.join().unwrap());
+        assert!(
+            first == second,
+            "ownership checker differs between bootstrap tiers"
+        );
+        first
+    });
+    let checks = format!(
+        "(void)symbols;\nmica_value_root_set(&input, source_integer(0));\n\
+         for (unsigned collect = 0; collect < 2; ++collect) {{\n\
+           run_frontend(worker, kernel, code, runtime, &input, &output, 10000000, collect != 0);\n{}\n}}",
+        source_value_check(&Value::bool(true), "mica_value_root_get(&output)")
+    );
+    let fixture = include_str!("../../../apps/native/compiler/frontend_tests.c")
+        .replace("/* FRONTEND_CONFORMANCE_CASES */", &checks);
+    check_native_source_fixture_with_flags(
+        &format!(
+            "{generated}\n{memory}\n{tasks}\n{}\n{}\n{fixture}",
+            include_str!("../../../native/platform/allocation.c"),
+            include_str!("../../../native/platform/mutex.c"),
+        ),
+        &["-O2", "-g0"],
+    );
+}
+
+#[test]
 fn native_layout_validation_scales_with_repeated_types() {
     for tier in [true, false] {
         let mut runner = runner(tier).with_task_limits(TaskLimits {
