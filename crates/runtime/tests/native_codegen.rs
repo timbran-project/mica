@@ -1518,6 +1518,23 @@ return true
             ),
             Value::bool(true)
         );
+        let module = eval(
+            &mut runner,
+            "return native/emit_module(native/scalar_example(), \"scalar\", 1)",
+        );
+        check_native_module_fixture(
+            &module,
+            r#"
+#include <assert.h>
+int main(void) {
+    assert(mica_sum(100) == 4950);
+    assert(mica_add(UINT64_MAX, 1) == 0);
+    assert(mica_tag(UINT64_C(0xab00000000000000)) == 0xab);
+    return 0;
+}
+"#,
+            &["-O0", "-g0"],
+        );
     }
 }
 
@@ -4108,12 +4125,12 @@ fn generate_native_source(
     generate_native_source_example(interpreter_only, &example, method_ids, &[])
 }
 
-fn generate_native_source_example(
+fn prepare_native_source_example(
     interpreter_only: bool,
     example: &str,
     method_ids: &str,
     identities: &[(&str, u64)],
-) -> (String, String, String) {
+) -> (SourceRunner, Value) {
     let generation_started = Instant::now();
     let mut runner = runner(interpreter_only).with_task_limits(TaskLimits {
         // The conformance module includes lifted closure bodies and continuations.
@@ -4149,28 +4166,53 @@ fn generate_native_source_example(
         "native source: interpreter_only={interpreter_only}, module construction={:?}",
         generation_started.elapsed()
     );
-    let emission_started = Instant::now();
     let state = module
         .map_get(&Value::symbol(Symbol::intern("state")))
         .unwrap();
+    (runner, state)
+}
+
+fn generate_native_source_example(
+    interpreter_only: bool,
+    example: &str,
+    method_ids: &str,
+    identities: &[(&str, u64)],
+) -> (String, String, String) {
+    let (runner, state) =
+        prepare_native_source_example(interpreter_only, example, method_ids, identities);
+    let (generated, memory, tasks) = emit_native_source_artifacts(
+        runner,
+        "native/emit_c",
+        vec![(Symbol::intern("state"), state)],
+        20_000_000_000,
+    );
+    (generated.with_str(str::to_owned).unwrap(), memory, tasks)
+}
+
+fn emit_native_source_artifacts(
+    runner: SourceRunner,
+    emitter: &str,
+    roles: Vec<(Symbol, Value)>,
+    emission_budget: usize,
+) -> (Value, String, String) {
+    let emission_started = Instant::now();
+    let mut runner = runner.with_task_limits(TaskLimits {
+        instruction_budget: emission_budget,
+        max_call_depth: 256,
+        ..TaskLimits::default()
+    });
     let mut request = SourceRunner::root_source_request("");
     request.input = TaskInput::Invocation {
-        selector: Symbol::intern("native/emit_c"),
-        roles: vec![(Symbol::intern("state"), state)],
+        selector: Symbol::intern(emitter),
+        roles,
     };
     let submitted = runner.submit_invocation(request).unwrap();
     let TaskOutcome::Complete { value, .. } = submitted.outcome else {
         panic!("C emission: {:?}", submitted.outcome);
     };
-    let generated = value.with_str(str::to_owned).unwrap();
     eprintln!(
-        "native source: interpreter_only={interpreter_only}, C emission={:?}",
+        "native source: {emitter} emission={:?}",
         emission_started.elapsed()
-    );
-    eprintln!(
-        "native source: interpreter_only={interpreter_only}, generation={:?}, C bytes={}",
-        generation_started.elapsed(),
-        generated.len()
     );
     let memory = eval(&mut runner, "return native_memory/platform()")
         .with_str(str::to_owned)
@@ -4178,7 +4220,7 @@ fn generate_native_source_example(
     let tasks = eval(&mut runner, "return native_tasks/platform()")
         .with_str(str::to_owned)
         .unwrap();
-    (generated, memory, tasks)
+    (value, memory, tasks)
 }
 
 #[test]
@@ -5795,19 +5837,95 @@ fn check_native_source_fixture(fixture: &str) {
     check_native_source_fixture_with_flags(fixture, &["-O2", "-g"]);
 }
 
-fn check_native_source_fixture_with_flags(fixture: &str, compilation_flags: &[&str]) {
+fn check_native_module_fixture(module: &Value, fixture: &str, compilation_flags: &[&str]) {
     let scratch = Scratch::new();
-    let source = scratch.0.join("source.c");
+    let field = |name| {
+        module
+            .map_get(&Value::symbol(Symbol::intern(name)))
+            .unwrap()
+    };
+    let header_name = field("header_name").with_str(str::to_owned).unwrap();
+    fs::write(
+        scratch.0.join(&header_name),
+        field("header").with_str(str::to_owned).unwrap(),
+    )
+    .unwrap();
+    let mut sources = Vec::new();
+    for unit in field("sources").with_list(|units| units.to_vec()).unwrap() {
+        let pair = unit.with_list(|pair| pair.to_vec()).unwrap();
+        let path = scratch.0.join(pair[0].with_str(str::to_owned).unwrap());
+        fs::write(&path, pair[1].with_str(str::to_owned).unwrap()).unwrap();
+        sources.push(path);
+    }
+    let driver = scratch.0.join("fixture.c");
+    fs::write(&driver, format!("#include \"{header_name}\"\n{fixture}")).unwrap();
+    sources.push(driver);
+    let started = Instant::now();
+    eprintln!(
+        "native source: compiling {} translation units",
+        sources.len()
+    );
+    // Bound compiler concurrency: sanitizer IR for large generated functions
+    // can use several gigabytes even when each file holds few functions.
+    thread::scope(|scope| {
+        for lane in 0..2 {
+            let sources = &sources;
+            scope.spawn(move || {
+                for path in sources.iter().skip(lane).step_by(2) {
+                    let started = Instant::now();
+                    let compiled = native_source_compiler(compilation_flags)
+                        .arg("-c")
+                        .arg(path)
+                        .arg("-o")
+                        .arg(path.with_extension("o"))
+                        .output()
+                        .unwrap();
+                    assert!(
+                        compiled.status.success(),
+                        "{}: {}",
+                        path.display(),
+                        String::from_utf8_lossy(&compiled.stderr)
+                    );
+                    eprintln!(
+                        "native source: {} compiled in {:?}",
+                        path.display(),
+                        started.elapsed()
+                    );
+                }
+            });
+        }
+    });
     let binary = scratch.0.join("source");
-    fs::write(&source, fixture).unwrap();
-    let sanitizer = if std::env::var_os("MICA_NATIVE_THREAD_SANITIZER").is_some() {
+    let linked = Command::new("clang")
+        .args(["-pthread", native_source_sanitizer()])
+        .args(sources.iter().map(|path| path.with_extension("o")))
+        .args(["-lm", "-ldl", "-o"])
+        .arg(&binary)
+        .output()
+        .unwrap();
+    assert!(
+        linked.status.success(),
+        "{}",
+        String::from_utf8_lossy(&linked.stderr)
+    );
+    eprintln!(
+        "native source: module compilation and link={:?}",
+        started.elapsed()
+    );
+    execute_native_source_fixture(&scratch, &binary);
+}
+
+fn native_source_sanitizer() -> &'static str {
+    if std::env::var_os("MICA_NATIVE_THREAD_SANITIZER").is_some() {
         "-fsanitize=thread"
     } else {
         "-fsanitize=address,undefined,float-cast-overflow"
-    };
-    let compilation_started = Instant::now();
-    eprintln!("native source: compiling {} C bytes", fixture.len());
-    let compiled = Command::new("clang")
+    }
+}
+
+fn native_source_compiler(compilation_flags: &[&str]) -> Command {
+    let mut command = Command::new("clang");
+    command
         .args([
             "-std=c11",
             "-pthread",
@@ -5820,11 +5938,30 @@ fn check_native_source_fixture_with_flags(fixture: &str, compilation_flags: &[&s
             // Large sanitizer fixtures can exceed AArch64's branch range.
             // Separate sections leave cross-function range extension to the linker.
             "-ffunction-sections",
-            sanitizer,
+            // GlobalISel's localizer scales poorly with large initialization
+            // blocks on AArch64. Use LLVM's SelectionDAG instruction selector.
+            "-fno-global-isel",
+            native_source_sanitizer(),
             "-fno-sanitize-recover=all",
             "-fno-omit-frame-pointer",
         ])
-        .args(compilation_flags)
+        .args(compilation_flags);
+    if std::env::var_os("MICA_NATIVE_THREAD_SANITIZER").is_none() {
+        // Large generated frames make LLVM's StackLifetime analysis expensive.
+        // Keep ASan checks; disable the analysis that elides proven-safe accesses.
+        command.args(["-mllvm", "-asan-use-stack-safety=false"]);
+    }
+    command
+}
+
+fn check_native_source_fixture_with_flags(fixture: &str, compilation_flags: &[&str]) {
+    let scratch = Scratch::new();
+    let source = scratch.0.join("source.c");
+    let binary = scratch.0.join("source");
+    fs::write(&source, fixture).unwrap();
+    let compilation_started = Instant::now();
+    eprintln!("native source: compiling {} C bytes", fixture.len());
+    let compiled = native_source_compiler(compilation_flags)
         .arg(&source)
         .args(["-lm", "-ldl", "-o"])
         .arg(&binary)
@@ -5839,6 +5976,10 @@ fn check_native_source_fixture_with_flags(fixture: &str, compilation_flags: &[&s
         "native source: C compilation={:?}",
         compilation_started.elapsed()
     );
+    execute_native_source_fixture(&scratch, &binary);
+}
+
+fn execute_native_source_fixture(scratch: &Scratch, binary: &std::path::Path) {
     let execution_started = Instant::now();
     let executed = Command::new(binary)
         .current_dir(&scratch.0)
