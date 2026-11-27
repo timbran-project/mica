@@ -1,0 +1,253 @@
+// Copyright (C) 2026 Ryan Daum <ryan.daum@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+verb native_source/mask_bit(position: int) -> int
+  native/ensure(position >= 0 && position <= 62, "native relation column exceeds integer masks")
+  let bit: int = 1
+  let current: int = 0
+  while current < position
+    bit = bit * 2
+    current = current + 1
+  end
+  return bit
+end
+
+verb native_source/submission_cursor() -> list
+  let expected: int = -1
+  let next: int = 1
+  let generations: int = 0
+  for row in compiler/Generation(:native/source, ?current)
+    expected = row[:current]
+    generations = generations + 1
+  end
+  native/ensure(generations <= 1, "duplicate native source cursor")
+  if expected >= 0
+    return [expected, expected]
+  end
+  for row in RelationName(?relation, ?name)
+    let id: int = native_source/resident_small_number(row[:relation]) + 1
+    if id > next
+      next = id
+    end
+  end
+  for row in MethodSelector(?method_id, ?selector)
+    let id: int = native_source/resident_small_number(row[:method_id]) + 1
+    if id > next
+      next = id
+    end
+  end
+  for row in MethodProgram(?method_id, ?program)
+    let method_id: int = native_source/resident_small_number(row[:method_id]) + 1
+    let artifact: int = native_source/resident_small_number(row[:program]) + 1
+    if method_id > next
+      next = method_id
+    end
+    if artifact > next
+      next = artifact
+    end
+  end
+  return [expected, next]
+end
+
+verb native_source/plan_relations(declarations: list, initial: int, existing_relations: map, existing_widths: map, existing_functional: map) -> map
+  let relations: map = existing_relations
+  let widths: map = existing_widths
+  let functional: map = existing_functional
+  let next: int = initial
+  for name, id in relations
+    native/ensure(map_contains_key(widths, id), "native relation is missing its arity")
+  end
+  let planned: list = []
+  let prospective_relations: map = {}
+  let binary: list = []
+  let prospective_functional: list = []
+  let seen: map = {}
+  for declaration in declarations
+    native/ensure(is_kind(declaration, :list) && len(declaration) == 4, "native relation declaration requires name, arity, policy, and keys")
+    let [name, arity, policy, keys] = declaration
+    native/ensure(is_kind(name, :symbol), "native relation name must be a symbol")
+    native/ensure(!map_contains_key(seen, name), "duplicate native relation declaration")
+    seen[name] = true
+    native/ensure(is_kind(arity, :int) && arity >= 0 && arity <= 64, "native relation arity is invalid")
+    native/ensure(is_kind(policy, :int) && (policy == 0 || policy == 1), "native relation policy is invalid")
+    native/ensure(is_kind(keys, :int) && keys >= 0, "native relation key mask is invalid")
+    native/ensure((policy == 0 && keys == 0) || (policy == 1 && keys > 0), "native relation policy and keys disagree")
+    if policy == 1
+      native/ensure(arity > 0 && arity < 63 && keys < native_source/mask_bit(arity), "native relation key mask exceeds its arity")
+    end
+    let existing: bool = map_contains_key(relations, name)
+    let id: int = next
+    if existing
+      id = relations[name]
+    else
+      next = next + 1
+    end
+    if existing
+      native/ensure(widths[id] == arity && index_or(functional, id, 0) == keys, "native relation declaration conflicts with existing metadata")
+      native/ensure((policy == 1) == (keys != 0), "native relation declaration conflicts with existing policy")
+    else
+      relations[name] = id
+      widths[id] = arity
+      functional[id] = keys
+      planned = [@planned, [id, name, arity, policy, keys, 0]]
+    end
+    let resident = native_source/resident_identity(id)
+    prospective_relations[name] = resident
+    if arity == 2
+      binary = [@binary, resident]
+    end
+    if policy == 1
+      let slot: int = 0
+      let position: int = 0
+      while position < arity
+        if keys % 2 == 1
+          prospective_functional = [@prospective_functional, [resident, slot, position]]
+          slot = slot + 1
+        end
+        keys = (keys - (keys % 2)) / 2
+        position = position + 1
+      end
+    end
+  end
+  return {:relations -> relations, :declarations -> planned, :prospective -> {:relations -> prospective_relations,
+    :binary -> binary, :functional -> prospective_functional}, :next -> next}
+end
+
+verb native_source/submission_relations(declarations: list, initial: int) -> map
+  let relations: map = {}
+  let widths: map = {}
+  let functional: map = {}
+  for row in RelationName(?relation, ?name)
+    let id: int = native_source/resident_small_number(row[:relation])
+    if id >= 0
+      relations[row[:name]] = id
+    end
+  end
+  for row in Arity(?relation, ?arity)
+    let id: int = native_source/resident_small_number(row[:relation])
+    if id >= 0
+      native/ensure(row[:arity] >= 0, "negative native relation arity")
+      widths[id] = row[:arity]
+    end
+  end
+  for row in FunctionalKey(?relation, ?slot, ?position)
+    let id: int = native_source/resident_small_number(row[:relation])
+    if id >= 0
+      functional[id] = index_or(functional, id, 0) + native_source/mask_bit(row[:position])
+    end
+  end
+  let result: map = native_source/plan_relations(declarations, initial, relations, widths, functional)
+  return result
+end
+
+verb native_source/submission_methods(unit: symbol, definitions: list, initial: int) -> map
+  let methods: map = {}
+  let owners: map = {}
+  let signatures: map = {}
+  for row in MethodSelector(?method_id, ?selector)
+    let id: int = native_source/resident_small_number(row[:method_id])
+    if id >= 0
+      native/ensure(!map_contains_key(methods, id), "duplicate native method selector")
+      methods[id] = {:selector -> row[:selector], :parameters -> [], :programs -> []}
+    end
+  end
+  for row in Param(?method_id, ?role, ?restriction, ?position, ?mode, ?default)
+    let id: int = native_source/resident_small_number(row[:method_id])
+    if id >= 0
+      native/ensure(map_contains_key(methods, id), "native parameter has no method selector")
+      let item: map = methods[id]
+      item[:parameters] = [@item[:parameters], row]
+      methods[id] = item
+    end
+  end
+  for row in MethodProgram(?method_id, ?program)
+    let id: int = native_source/resident_small_number(row[:method_id])
+    if id >= 0
+      native/ensure(map_contains_key(methods, id), "native program has no method selector")
+      let item: map = methods[id]
+      item[:programs] = [@item[:programs], row]
+      methods[id] = item
+    end
+  end
+  for row in compiler/Method(?owner, ?method_id)
+    let id: int = native_source/resident_small_number(row[:method_id])
+    if id >= 0
+      native/ensure(!map_contains_key(owners, id), "duplicate native method ownership")
+      owners[id] = row[:owner]
+    end
+  end
+  for id, item in methods
+    let ordered: list = sort([[parameter[:position], parameter[:role], parameter[:restriction], parameter[:mode]] for parameter in item[:parameters]])
+    let parameters: list = [[parameter[1], parameter[2], parameter[3]] for parameter in ordered]
+    let signature: list = [item[:selector], parameters]
+    signatures[signature] = [@index_or(signatures, signature, []), id]
+    item[:signature] = signature
+    methods[id] = item
+  end
+  let next: int = initial
+  let writes: list = []
+  let remove_programs: list = []
+  for id, owner in owners
+    if owner == unit
+      native/ensure(map_contains_key(methods, id), "owned native method has no selector")
+      let item: map = methods[id]
+      let target = native_source/resident_identity(id)
+      writes = [@writes, [702, false, [target, item[:selector]]]]
+      for parameter in item[:parameters]
+        writes = [@writes, [703, false, [target, parameter[:role], parameter[:restriction], parameter[:position], parameter[:mode], parameter[:default]]]]
+      end
+      for program in item[:programs]
+        writes = [@writes, [704, false, [target, program[:program]]]]
+        let artifact: int = native_source/resident_number(program[:program])
+        if !native/contains(remove_programs, artifact)
+          remove_programs = [@remove_programs, artifact]
+        end
+      end
+      writes = [@writes, [711, false, [unit, target]]]
+    end
+  end
+  let method_ids: list = []
+  let retained: map = {}
+  for definition in definitions
+    let parameters: list = [[parameter[:role], parameter[:restriction], parameter[:mode]] for parameter in definition[:parameters]]
+    let signature: list = [definition[:selector], parameters]
+    let candidates: list = index_or(signatures, signature, [])
+    native/ensure(len(candidates) <= 1, "ambiguous native method signature")
+    let id: int = next
+    let program: int = next + 1
+    if len(candidates) == 1
+      id = candidates[0]
+      native/ensure(map_contains_key(owners, id) && owners[id] == unit, "native method signature belongs to another unit")
+      program = next
+    end
+    next = program + 1
+    native/ensure(!map_contains_key(retained, id), "duplicate native source method")
+    retained[id] = true
+    method_ids = [@method_ids, [id, program]]
+    writes = [@writes, [711, true, [unit, native_source/resident_identity(id)]]]
+  end
+  return {:method_ids -> method_ids, :writes -> writes, :remove_programs -> remove_programs,
+    :next -> next, :retained -> retained}
+end
+
+verb native_source/plan_submission(interface: map, unit: symbol, source: string, declarations: list) -> map
+  let parsed: map = parse_rows(source)
+  native/ensure(parsed[:errors] == [], to_literal(parsed[:errors]))
+  let cursor: list = native_source/submission_cursor()
+  let relations: map = native_source/submission_relations(declarations, cursor[1])
+  let emitted: map = emit_program_with_catalogue(parsed[:rows], parsed[:root], relations[:prospective])
+  native/ensure(emitted[:errors] == [], to_literal(emitted[:errors]))
+  let methods: map = native_source/submission_methods(unit, emitted[:methods], relations[:next])
+  let prefix: string = string_concat("application_", to_literal(cursor[1]))
+  let module: map = native_source/compile_emitted(interface, prefix, emitted, relations[:relations], :resident, methods[:method_ids])
+  return {:prefix -> prefix, :state -> module[:state], :relations -> relations[:relations],
+    :declarations -> relations[:declarations], :writes -> methods[:writes], :remove_programs -> methods[:remove_programs],
+    :method_ids -> methods[:method_ids], :guard -> cursor[0], :next -> methods[:next], :unit -> unit}
+end
+
+verb native_source/submit(interface: map, unit: symbol, source: string, declarations: list) -> map
+  let plan: map = native_source/plan_submission(interface, unit, source, declarations)
+  plan[:artifacts] = native/emit_module(plan[:state], plan[:prefix])
+  plan[:state] = none
+  return plan
+end

@@ -1,0 +1,4 @@
+verb native_acceptance_probe()
+  return native_acceptance_answer()
+end
+return native_acceptance_probe()

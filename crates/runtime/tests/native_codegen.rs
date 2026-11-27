@@ -2915,9 +2915,15 @@ const SOURCE_COMPILER_SOURCES: &[&str] = &[
     include_str!("../../../apps/native/compiler/install.mica"),
     include_str!("../../../apps/native/compiler/lower.mica"),
     include_str!("../../../apps/native/compiler/program.mica"),
+    include_str!("../../../apps/native/compiler/submission.mica"),
 ];
 
 fn load_native_source_compiler(runner: &mut SourceRunner) {
+    runner
+        .run_filein(include_str!("../../../apps/compiler/install.mica"))
+        .unwrap_or_else(|error| {
+            panic!("{}", runner.render_source_task_error(&error));
+        });
     for source in SOURCE_COMPILER_SOURCES {
         runner.run_filein(source).unwrap_or_else(|error| {
             panic!("{}", runner.render_source_task_error(&error));
@@ -4236,13 +4242,18 @@ fn native_source_composite_literals_preserve_ownership() {
         assert_eq!(
             eval(
                 &mut runner,
-                r#"
+                r##"
 let prototype = make_identity(:literal_prototype)
 let bindings = {prototype -> 17001}
 native/ensure(native_source/literal_description(prototype, bindings) == {:kind -> :Identity, :value -> 17001}, "identity uses its explicit native binding")
 let nested = native_source/literal_description([prototype, {prototype -> prototype}], bindings)
 native/ensure(nested[:children][0][:value] == 17001 && nested[:children][1][:children][0][:value] == 17001 && nested[:children][1][:children][1][:value] == 17001, "identity bindings apply to nested values and keys")
-for invalid in [{}, {prototype -> -1}, {prototype -> "wrong"}]
+let resident_prototype = from_literal(string_concat("#", "17002"))[0][:value]
+let resident_number = native_source/resident_number(resident_prototype)
+native/ensure(resident_number == 17002 && native_source/resident_identity(resident_number) == resident_prototype, "resident identities round trip through their numeric value")
+let resident = native_source/literal_description([resident_prototype, {resident_prototype -> resident_prototype}], :resident)
+native/ensure(resident[:children][0][:value] == resident_number && resident[:children][1][:children][0][:value] == resident_number && resident[:children][1][:children][1][:value] == resident_number, "resident identities preserve nested values and keys")
+for invalid in [{}, {prototype -> -1}, {prototype -> "wrong"}, 42, :unknown]
   let rejected = false
   try
     native_source/literal_description(prototype, invalid)
@@ -4267,7 +4278,7 @@ let [value, ready] = native_literal/emit(builder, literal, native_gen/ref(builde
 module = native_gen/finish(module, native_roots/return_value(ready, value))
 native/check(module[:state])
 return true
-"#,
+"##,
             ),
             Value::bool(true)
         );
@@ -4446,6 +4457,109 @@ int main(void) {
 }
 "#;
 
+#[test]
+fn native_source_plans_atomic_relation_and_method_submission() {
+    let application = r#"
+verb native_submission_answer(value)
+  assert NativeSubmission(7, value)
+  return value
+end
+return native_submission_answer(42)
+"#;
+    let fixtures = [
+        include_str!("../../../apps/native/runner/acceptance.mica"),
+        include_str!("../../../apps/native/runner/probe.mica"),
+        include_str!("../../../apps/native/runner/replacement.mica"),
+    ];
+    let rejected = include_str!("../../../apps/native/runner/rejected.mica");
+    for tier in [true, false] {
+        let mut runner = runner(tier).with_task_limits(TaskLimits {
+            instruction_budget: 20_000_000_000,
+            max_call_depth: 256,
+            ..TaskLimits::default()
+        });
+        load_native_kernel(&mut runner, true);
+        load_native_source_compiler(&mut runner);
+        assert_eq!(
+            eval(
+                &mut runner,
+                &format!(
+                    r#"
+let fixture_relation = native_source/resident_identity(705)
+let fixture_catalogue = {{:relations -> {{:Acceptance -> fixture_relation}}, :binary -> [fixture_relation], :functional -> []}}
+for fixture in {fixtures:?}
+  let parsed = parse_rows(fixture)
+  native/ensure(parsed[:errors] == [], to_literal(parsed[:errors]))
+  let emitted = emit_program_with_catalogue(parsed[:rows], parsed[:root], fixture_catalogue)
+  native/ensure(emitted[:errors] == [], to_literal(emitted[:errors]))
+end
+native/ensure(parse_rows({rejected:?})[:errors] != [], "the rejected fixture must contain a parse error")
+let catalogue = native_source/plan_relations([[:Existing, 2, 0, 0], [:NativeSubmissionExtra, 3, 0, 0]], 1000000, {{:Existing -> 705}}, {{705 -> 2}}, {{705 -> 0}})
+native/ensure(catalogue[:relations][:Existing] == 705 && catalogue[:declarations] == [[1000000, :NativeSubmissionExtra, 3, 0, 0, 0]], "existing relations are reused and new relations receive world-owned IDs")
+native/ensure(catalogue[:next] == 1000001, "relation allocation advances the cursor")
+native/ensure(catalogue[:prospective][:relations][:NativeSubmissionExtra] == native_source/resident_identity(1000000), "prospective emission uses the allocated relation")
+let plan = native_source/plan_submission(native_tasks/definitions(), :native_submission, {application:?}, [[:NativeSubmission, 2, 1, 1]])
+native/ensure(plan[:guard] == -1 && len(plan[:declarations]) == 1 && len(plan[:method_ids]) == 1, "submission allocates its relation and method generation")
+native/ensure(plan[:method_ids][0][1] > plan[:method_ids][0][0], "method generation receives fresh ids")
+native/ensure(len(RelationName(?relation, :NativeSubmission)) == 0, "planning does not declare relations")
+native/ensure(len(MethodSelector(?method_id, :native_submission_answer)) == 0, "planning does not publish methods")
+native/ensure(len(compiler/Generation(:native/source, ?cursor)) == 0, "planning does not advance the world cursor")
+return true
+"#
+                ),
+            ),
+            Value::bool(true)
+        );
+        assert_eq!(
+            eval(
+                &mut runner,
+                r#"
+let old = native_source/resident_identity(600)
+let obsolete = native_source/resident_identity(601)
+assert MethodSelector(old, :alpha)
+assert Param(old, :value, :dispatch/unrestricted, 0, :required, none)
+assert MethodProgram(old, native_source/resident_identity(8000))
+assert compiler/Method(:unit, old)
+assert MethodSelector(obsolete, :obsolete)
+assert MethodProgram(obsolete, native_source/resident_identity(8001))
+assert compiler/Method(:unit, obsolete)
+let definitions = [
+  {:selector -> :alpha, :parameters -> [{:role -> :value, :restriction -> :dispatch/unrestricted, :mode -> :required, :default -> 5}]},
+  {:selector -> :beta, :parameters -> []}
+]
+let methods = native_source/submission_methods(:unit, definitions, 10000)
+native/ensure(methods[:method_ids] == [[600, 10000], [10001, 10002]], "same-signature methods retain IDs and every generation receives fresh program IDs")
+native/ensure(methods[:next] == 10003, "method allocation advances by fresh artifact IDs")
+native/ensure(methods[:remove_programs] == [8000, 8001], "replacement and removal retire old compiled programs")
+native/ensure(native/contains(methods[:writes], [703, false, [old, :value, :dispatch/unrestricted, 0, :required, none]]), "replacement retracts old parameter rows")
+native/ensure(native/contains(methods[:writes], [702, false, [obsolete, :obsolete]]), "removed methods lose their selectors")
+native/ensure(native/contains(methods[:writes], [711, false, [:unit, obsolete]]), "removed methods lose ownership")
+assert compiler/Generation(:native/source, 12345)
+native/ensure(native_source/submission_cursor() == [12345, 12345], "the persistent cursor guards subsequent plans")
+let conflict = false
+try
+  native_source/submission_methods(:intruder, [definitions[0]], 20000)
+catch error
+  conflict = true
+end
+native/ensure(conflict, "another unit cannot claim an existing signature")
+let failed = false
+try
+  native_source/plan_submission({}, :broken, "verb broken(\n", [[:NativeRejected, 2, 0, 0]])
+catch error
+  failed = true
+end
+native/ensure(failed, "invalid source fails planning")
+native/ensure(native_source/submission_cursor() == [12345, 12345], "failed planning leaves the cursor unchanged")
+native/ensure(len(RelationName(?relation, :NativeRejected)) == 0, "failed planning leaves relations unchanged")
+return true
+"#,
+            ),
+            Value::bool(true)
+        );
+    }
+}
+
 fn generate_native_source(
     interpreter_only: bool,
     conformance_source: &str,
@@ -4492,7 +4606,7 @@ fn prepare_native_source_example(
     let module = eval(
         &mut runner,
         &format!(
-            "return native_source/compile(native_tasks/definitions(), \"source_roundtrip\", {example:?}, {{:NativeResult -> 705, :NativeQuery -> 706, :RelationName -> 707, :Arity -> 708, :FunctionalKey -> 709}}, {identity_bindings}, {method_ids})"
+            "return native_source/compile(native_tasks/definitions(), \"source_roundtrip\", {example:?}, {{:NativeResult -> 705, :NativeQuery -> 706, :MethodSelector -> 702, :Param -> 703, :MethodProgram -> 704, :RelationName -> 707, :Arity -> 708, :FunctionalKey -> 709, :compiler/Generation -> 710, :compiler/Method -> 711}}, {identity_bindings}, {method_ids})"
         ),
     );
     eprintln!(
@@ -5892,11 +6006,14 @@ end
 #[ignore = "large native compiler bootstrap; run explicitly"]
 fn native_source_runs_standalone_compiled_tasks() {
     let entry = r#"
-verb native_compile_fixture(interface: map, source: string, identities: map) -> map
-  let relations = {:Acceptance -> 705, :RelationName -> 707, :Arity -> 708, :FunctionalKey -> 709}
-  let method_ids = [[601, 8001], [602, 8002], [603, 8003]]
-  let module = native_source/compile(interface, "compiled", source, relations, identities, method_ids)
-  return native/emit_module(module[:state], "application")
+verb native_compile_fixture(interface: map, unit: symbol, source: string) -> map
+  let declarations = {
+    :acceptance -> [[:Acceptance, 2, 0, 0]],
+    :probe -> [],
+    :rejected -> [[:NativeRejected, 2, 0, 0]]
+  }
+  let plan: map = native_source/submit(interface, unit, source, declarations[unit])
+  return plan
 end
 "#;
     let mut library = native_backend_library();
@@ -5974,14 +6091,31 @@ end
         &["-O0", "-g0"],
         &["-Wl,--export-dynamic"],
     );
-    let source = cache.join("acceptance.mica");
-    fs::write(
-        &source,
-        include_str!("../../../apps/native/runner/acceptance.mica"),
-    )
-    .unwrap();
+    for (name, contents) in [
+        (
+            "acceptance.mica",
+            include_str!("../../../apps/native/runner/acceptance.mica"),
+        ),
+        (
+            "probe.mica",
+            include_str!("../../../apps/native/runner/probe.mica"),
+        ),
+        (
+            "replacement.mica",
+            include_str!("../../../apps/native/runner/replacement.mica"),
+        ),
+        (
+            "rejected.mica",
+            include_str!("../../../apps/native/runner/rejected.mica"),
+        ),
+    ] {
+        fs::write(cache.join(name), contents).unwrap();
+    }
     let executed = Command::new(cache.join("source"))
-        .arg(source)
+        .arg(cache.join("acceptance.mica"))
+        .arg(cache.join("probe.mica"))
+        .arg(cache.join("replacement.mica"))
+        .arg(cache.join("rejected.mica"))
         .current_dir(&cache)
         .env("ASAN_OPTIONS", "detect_leaks=1:halt_on_error=1")
         .env("TSAN_OPTIONS", "halt_on_error=1")
@@ -6083,7 +6217,7 @@ end
 native/ensure(missing == [], to_literal(missing))
 let catalogues = sort([row[:name] for row in RelationName(?id, ?name) if map_contains_key(relations, row[:id])])
 for catalogue in catalogues
-  native/ensure(native/contains([:RelationName, :Arity, :FunctionalKey], catalogue), to_literal(catalogue))
+  native/ensure(native/contains([:RelationName, :Arity, :FunctionalKey, :MethodSelector, :Param, :MethodProgram, :compiler/Generation, :compiler/Method], catalogue), to_literal(catalogue))
 end
 native/ensure(len(catalogues) == len(relations), "unresolved catalogue dependency")
 return {{:programs -> position, :builtins -> builtins, :catalogues -> catalogues, :dependencies -> dependencies}}

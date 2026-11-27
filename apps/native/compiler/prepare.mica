@@ -263,10 +263,40 @@ verb native_source/program_literals(analysis: map, initial: map) -> map
   end
   return pool
 end
-verb native_source/literal_description(value, identities: map) -> map
+verb native_source/resident_number(value) -> int
+  native/ensure(is_kind(value, :identity), "native resident value must be an identity")
+  let spelling: string = to_literal(value)
+  let number: int = parse_int(string_slice(spelling, 1, len(spelling)))
+  native/ensure(number >= 0, "native resident identity must be nonnegative")
+  return number
+end
+
+verb native_source/resident_small_number(value) -> int
+  try
+    let number: int = native_source/resident_number(value)
+    return number
+  catch error
+    return -1
+  end
+end
+
+verb native_source/resident_identity(number: int)
+  native/ensure(number >= 0, "native resident identity must be nonnegative")
+  let parsed: relation = from_literal(string_concat("#", to_literal(number)))
+  native/ensure(len(parsed) == 1 && parsed[0][:case] == :ok, "invalid native resident identity")
+  return parsed[0][:value]
+end
+
+verb native_source/literal_description(value, identities) -> map
   if is_kind(value, :identity)
-    native/ensure(map_contains_key(identities, value), string_concat("unlinked native identity: ", to_literal(value)))
-    let target = identities[value]
+    let target = none
+    if identities == :resident
+      target = native_source/resident_number(value)
+    else
+      native/ensure(is_kind(identities, :map), "native identity bindings must be a map or :resident")
+      native/ensure(map_contains_key(identities, value), string_concat("unlinked native identity: ", to_literal(value)))
+      target = identities[value]
+    end
     native/ensure(is_kind(target, :int) && target >= 0, "native identity binding must be a nonnegative integer")
     return {:kind -> :Identity, :value -> target}
   end
@@ -323,6 +353,9 @@ verb native_source/link_relations(description: map, relations: map) -> map
   for row in RelationName(?relation, ?name)
     names[row[:relation]] = row[:name]
   end
+  for name, target in relations
+    names[native_source/resident_identity(target)] = name
+  end
   let code: list = []
   for instruction in description[:code]
     if native/contains([:ScanDynamic, :AssertDynamic, :RetractDynamic, :ReplaceFunctional], instruction[0])
@@ -378,7 +411,7 @@ verb native_source/check_method_ids(method_ids: list, count: int)
 end
 
 // Resolve the frontend output, collect literals, and plan continuation regions.
-verb native_source/prepare_module(input: map, prefix: string, emitted: map, relations: map, identities: map, method_ids: list) -> map
+verb native_source/prepare_module(input: map, prefix: string, emitted: map, relations: map, identities, method_ids: list) -> map
   native_source/check_method_ids(method_ids, len(emitted[:methods]))
   let descriptions: list = [[emitted[:entry], 0, string_concat(prefix, "_entry")]]
   let pool: map = native_source/literal_pool([E_TYPE, E_RANGE, [] {[]}, :dispatch/unrestricted, :required, @[spec[0] for spec in native_value/kinds()]])

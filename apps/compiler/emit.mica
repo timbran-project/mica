@@ -23,6 +23,11 @@ verb emit_state(relations, node_kinds, field_relations)
 end
 
 verb emit_program(raw_rows, root) -> map
+  let result: map = emit_program_with_catalogue(raw_rows, root, {})
+  return result
+end
+
+verb emit_program_with_catalogue(raw_rows, root, prospective: map) -> map
   let rows = sort_ast_rows(raw_rows)
   let node_kinds = {}
   let needs_fields = false
@@ -36,17 +41,28 @@ verb emit_program(raw_rows, root) -> map
   for entry in RelationName(?relation, ?name)
     relations[entry[:name]] = entry[:relation]
   end
+  for name, relation in index_or(prospective, :relations, {})
+    relations[name] = relation
+  end
   let field_relations = {}
   if needs_fields
     let binary = {}
     for entry in Arity(?relation, 2)
       binary[entry[:relation]] = true
     end
+    for target in index_or(prospective, :binary, [])
+      binary[target] = true
+    end
     let keys = {}
     for entry in FunctionalKey(?relation, ?slot, ?position)
       let target = entry[:relation]
       let info = index_or(keys, target, [0, true])
       keys[target] = [info[0] + 1, info[1] && entry[:slot] == 0 && entry[:position] == 0]
+    end
+    for entry in index_or(prospective, :functional, [])
+      let target = entry[0]
+      let info = index_or(keys, target, [0, true])
+      keys[target] = [info[0] + 1, info[1] && entry[1] == 0 && entry[2] == 0]
     end
     for target, info in keys
       if info == [1, true] && index_or(binary, target, false)

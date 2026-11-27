@@ -1,0 +1,18 @@
+verb native_acceptance_answer()
+  return 43
+end
+
+verb native_acceptance_failure()
+  assert Acceptance(9, 99)
+  emit(#0, 99)
+  raise E_INVARG, "discard spawned writes and effects"
+end
+
+verb native_acceptance_parent()
+  let answer = native_acceptance_answer()
+  assert Acceptance(8, 84)
+  emit(#0, answer)
+  return answer
+end
+
+return 0

@@ -1,16 +1,18 @@
 # Native Mica: current state and remaining gaps
 
 Assessment date: 14 October 2026. Validation date: 26 November 2026.
-Reviewed commit: `4c2da75`, with the local changes described below.
+Reviewed commit: `8e47998`, with the local changes described below.
 
 The validation results below come from focused and ignored integration runs on this worktree. They do not represent a complete workspace test run.
 
 ## Where we are
 
 We have substantial Mica-written generators for a native runtime, plus native execution of the existing Mica-written compiler and generator in integration fixtures.
-A constrained native executable now compiles and executes one Mica source file without Rust runtime services after process start.
-This one-shot fixture is not a general self-hosted system.
-General catalogue ownership, source replacement, persistence, and successive self-hosting remain unfinished.
+A constrained native executable now compiles and executes successive Mica source submissions without Rust runtime services after process start.
+The fixture allocates native identifiers, submits additional units, and replaces methods transactionally.
+It preserves suspended code and leaves the visible world unchanged after rejected compilation.
+This constrained fixture is not a general self-hosted system.
+General world initialization, durable storage, and successive self-hosting remain unfinished.
 Language coverage, resource accounting, and performance qualification also remain incomplete.
 
 The endpoint is a Mica-written system that compiles and executes Mica, manages its live world, and supports transactional tasks across native threads.
@@ -33,14 +35,14 @@ These entries describe implementation, not a claim that every associated test cu
 | Authority and dispatch | Snapshot-derived authority, selector-specific invocation checks, epoch expiry, prototype dispatch, catalogue checks, and target-specific emission rights. | Complete tenant workflows need integration coverage across compilation, installation, execution, and host services. |
 | Tasks | Retry, commit boundaries, continuations, suspension, native worker scheduling, mailboxes, child tasks, subscriptions, and staged effects. | Complete language-level accounting and production host integration remain unfinished. External delivery is not crash-durable. |
 | Source compilation | Existing lexer, parser, and register-description emitter feed native analysis and lowering. Closures, calls, control flow, handlers, relation operations, and task boundaries have implementations. | Supported constructs and builtins are not the complete language/runtime surface. General catalogue setup and source management still depend on harness orchestration. |
-| Code installation | Generated installers stage method facts and compiled bodies together. Code references retain constants, dependencies, and versions across snapshots and suspended tasks. | General source submission, replacement, and retirement workflows are still missing. The standalone fixture loads one application with fixed bindings. |
+| Code installation | Generated installers stage method facts and compiled bodies together. Native Mica plans source submission, replacement, and artifact retirement. Code references retain constants, dependencies, and versions across snapshots and suspended tasks. | The standalone host uses a fixed tenant and test-specific declaration maps. General production workflows remain unfinished. |
 
 Implementation entry points:
 
 - [Native generation](../apps/native/README.md), [memory](../apps/native/memory/), and [values](../apps/native/value/).
 - [Kernel](../apps/native/kernel/), [queries](../apps/native/query/), and [rules](../apps/native/rules/).
 - [Tasks and code ownership](../apps/native/tasks/README.md).
-- [Existing compiler](../apps/compiler/), [native compiler entry](../apps/native/compiler/program.mica), and [generated installer](../apps/native/compiler/install.mica).
+- [Existing compiler](../apps/compiler/), [native compiler entry](../apps/native/compiler/program.mica), [submission planner](../apps/native/compiler/submission.mica), and [generated installer](../apps/native/compiler/install.mica).
 - [Standalone native process](../apps/native/runner/acceptance.c) and its [acceptance source](../apps/native/runner/acceptance.mica).
 
 The register descriptions are compiler input to native lowering. The generated process does not interpret them as bytecode.
@@ -69,14 +71,14 @@ A separate runtime-generation diagnostic completed before `4c2da75`:
 
 These are measurements from one diagnostic, not normal startup costs or a Rust-versus-native performance result.
 They exclude the preceding host generation and C build costs.
-The complete native runtime rebuild gate passed in 724.40 seconds before the standalone runner was added.
-The run reused 49 generated bootstrap artifacts, rebuilt eight empty objects, and linked 258 translation units.
-It compared ordinary and forced-collection outputs with the Rust oracle, then linked and executed sample applications with sanitizers.
-The standalone-runner additions did not alter the runtime generator, and the gate was not rerun after those additions.
+The complete native runtime rebuild gate passed in 2233.73 seconds with a fresh cache.
+It generated and compared 48 modules across both bootstrap tiers.
+It executed the rebuilt runtime with ordinary and forced collection, then linked and executed sample applications with sanitizers.
 
-The standalone acceptance test passed in 178.41 seconds with a populated compiler cache.
-The native executable read the source, ran the Mica compiler, built and loaded the application, and executed transactional tasks.
-The fixture checked suspension and resumption, method dispatch, one committed effect, spawned rollback, final facts, and clean teardown.
+The cold standalone acceptance test passed in 2161.54 seconds.
+The native executable completed three source submissions and rejected one invalid source.
+The fixture checked relation and method allocation, stable method IDs, fresh program IDs, and failed-compilation rollback.
+It also checked old-code retention during suspension and reclamation after task completion.
 
 There is still no demonstrated successive rebuild of the complete compiler and runtime with Rust unavailable after the initial bootstrap.
 
@@ -97,20 +99,27 @@ Its C host owns process initialization, file access, Clang invocation, dynamic l
 Generated Mica code owns compilation, scheduling, dispatch, transactions, continuations, spawning, effects, rollback, and code ownership.
 Rust supplies the initial compiler artifact and fixed ABI. It provides no runtime service after the native executable starts.
 
-The fixture accepts one source file with fixed tenant, relation, identity, and method bindings.
-It does not provide general catalogue allocation or live source replacement.
+The fixture accepts four source paths to exercise initial submission, additional-unit dispatch, replacement, and rejected compilation.
+Application relation, method, and program IDs come from the native planner rather than fixture constants.
+Native Mica allocates these IDs from visible metadata and a persisted cursor.
+The host registers generated code before atomically publishing each plan.
+The tenant and declaration maps remain test-specific.
 A production native entry point still needs general world initialization and source management.
 This constrained result completes the integration milestone, not the full project endpoint.
 
 ### 2. Live compilation and catalogue ownership
 
-The compiler currently accepts explicit relation bindings, identity mappings, and method IDs from its caller.
-A running world must supply these through coherent APIs instead of test-specific setup.
-That includes identity allocation, name resolution, declaration handling, source units, replacement, and ownership of installed definitions.
+The standalone fixture now exercises coherent source submission in native Mica.
+The planner allocates IDs and emits artifacts without changing the world.
+The host checks the persisted cursor before publishing each plan in one transaction.
+Failed compiler tasks return no plan, so the host performs no publication.
 
-Code publication primitives already exist. Build the source-level workflow around them rather than replacing them.
-Failed compilation or installation must leave the world unchanged.
-Replacement must preserve code used by older snapshots and suspended tasks, then retire it when those references disappear.
+Replacement preserves matching method IDs and allocates fresh program IDs.
+Exact retractions remove replaced dispatch metadata and obsolete ownership rows.
+Retired artifacts remain available to snapshots and suspended tasks until their references disappear.
+The acceptance fixture demonstrates this retention and later reclamation.
+
+Production source management still needs general identity allocation, name resolution, and declaration handling.
 Compiler work must obey tenant authority and resource limits without holding the publication lock.
 
 ### 3. Language and service coverage
@@ -119,7 +128,7 @@ Concrete known gaps include:
 
 - Destructuring catch patterns, as recorded in the [task integration limitations](../apps/native/tasks/README.md#remaining-integration).
 - Native identity creation and named identity resolution for literal input.
-- Language-level method installation and complete filein/unit replacement behaviour.
+- Complete language-level filein and unit replacement beyond the standalone workflow.
 - Transactional buffers and relation removal.
 - General host/service integration and durable world storage.
 
@@ -167,15 +176,15 @@ The focused native checks and the two ignored integration milestones described a
 - The compiler and subscription C fixtures request collection through explicit pressure.
   Their focused suites passed before the complete runtime rebuild gate passed.
 - `apps/native/kernel/tests.c` contains the repaired heap-admission and preparation-cancellation fixtures.
-- `apps/native/runner/` contains the standalone host and acceptance source. The cached standalone acceptance test passes.
+- `apps/native/runner/` contains the standalone host and acceptance sources. The cold standalone acceptance test passes.
 - `sketches/NATIVE_TASKS_AND_MEMORY_DESIGN.md` contains a separate large draft. This assessment leaves it untouched.
 
 No build or test process remains running. The complete workspace suite has not run.
 
 ## Recommended order of work
 
-1. Extend the constrained standalone runner with general source submission and catalogue ownership.
-   Preserve native ownership of language and transaction semantics.
+1. Integrate the validated source-submission workflow into general native world initialization.
+   Replace test-specific declaration maps with production catalogue APIs.
 2. Expand the agreed corpus and complete missing capabilities in coherent, reviewable commits.
    Keep unresolved semantic choices explicit and separate from implementation defects.
 3. Demonstrate a reproducible self-hosting rebuild, then review application performance and remaining gaps with the maintainer.

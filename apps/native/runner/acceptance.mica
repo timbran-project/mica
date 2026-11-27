@@ -1,4 +1,6 @@
 verb native_acceptance_answer()
+  commit()
+  suspend(0.001)
   return 42
 end
 
@@ -11,10 +13,10 @@ end
 verb native_acceptance_parent()
   assert Acceptance(7, 42)
   commit()
-  suspend(0.001)
+  let answer = native_acceptance_answer()
   assert Acceptance(8, 84)
-  emit(#0, native_acceptance_answer())
-  return native_acceptance_answer()
+  emit(#0, answer)
+  return answer
 end
 
 let child = spawn :native_acceptance_failure()

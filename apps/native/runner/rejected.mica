@@ -1,0 +1,6 @@
+verb native_rejected_answer()
+  assert NativeRejected(1, 2)
+  return 2
+end
+
+verb native_rejected_broken(
