@@ -36,8 +36,7 @@ static void command_control_checks(struct mica_MemoryWorker *worker,
     struct mica_TaskAttempt attempt = {.f_remaining = 1000000};
     struct mica_MemoryRoot *roots = worker->f_roots;
     struct mica_MemoryControl *control = worker->f_control;
-    uint64_t collection_limit = worker->f_heap->f_collection_limit;
-    worker->f_heap->f_collection_limit = 0;
+    worker->f_heap->f_pressure = true;
     uint64_t collections = worker->f_heap->f_collections;
     struct mica_source_roundtrip_CommandTextResult parsed = operation(worker,
         &attempt, &tx, mica_value_root_get(&text));
@@ -86,7 +85,6 @@ static void command_control_checks(struct mica_MemoryWorker *worker,
     command_set_text(worker, &text, "");
     parsed = operation(worker, &attempt, &tx, mica_value_root_get(&text));
     assert(parsed.f_status == 11 && !parsed.f_value);
-    worker->f_heap->f_collection_limit = collection_limit;
     assert(mica_kernel_end(&tx));
     assert(mica_memory_root_pop(worker, &text));
 }

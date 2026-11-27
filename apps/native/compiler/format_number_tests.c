@@ -53,15 +53,13 @@ static void source_body_checks(struct mica_MemoryWorker *worker, struct mica_Ker
         assert(!formatted.f_status && !formatted.f_shape);
         number_text_is(formatted.f_value, expected);
     }
-    uint64_t collection_limit = worker->f_heap->f_collection_limit;
     uint64_t collections = worker->f_heap->f_collections;
-    worker->f_heap->f_collection_limit = 0;
+    worker->f_heap->f_pressure = true;
     struct mica_TaskAttempt attempt = {.f_remaining = 1000000};
     struct mica_source_roundtrip_LiteralTextResult formatted = mica_source_roundtrip_format_number(
         worker, &attempt, &tx, mica_value_float_from_bits(1).f_value);
     assert(!formatted.f_status && !formatted.f_shape && worker->f_heap->f_collections > collections);
     number_text_is(formatted.f_value, "1e-45");
-    worker->f_heap->f_collection_limit = collection_limit;
     formatted = mica_source_roundtrip_format_number(worker, &attempt, &tx, mica_value_bool(true));
     assert(!formatted.f_status && formatted.f_shape == 1 && !formatted.f_value);
     attempt.f_remaining = 1;

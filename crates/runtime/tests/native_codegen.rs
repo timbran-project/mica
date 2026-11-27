@@ -5,8 +5,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 #[cfg(unix)]
 use std::os::unix::process::ExitStatusExt;
+use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
@@ -4741,29 +4743,8 @@ return [native/emit_module(runtime[:state], "runtime"), native/emit_module(first
              {}\n}}\n",
             source_value_check(&expected, "mica_value_root_get(&output)")
         );
-        let fixture = include_str!("../../../apps/native/compiler/frontend_tests.c")
-            .replace("source_roundtrip", "module_entry")
-            .replace("/* FRONTEND_CONFORMANCE_CASES */", &checks)
-            .replace(
-                "mica_type_Value kinds[16];",
-                "struct mica_MemoryRoot support_code = {0};\n\
-                 assert(mica_memory_root_push(&worker, &support_code));\n\
-                 void *support_library = dlopen(NULL, RTLD_NOW);\n\
-                 assert(support_library && mica_task_code_register(&registry, &worker, support_library, &support_code) == 0);\n\
-                 assert(mica_task_module_support_constants(&worker, &symbols, &registry, (void *)support_code.f_pointer) == 0);\n\
-                 mica_type_Value kinds[16];",
-            )
-            .replace(
-                "assert(mica_kernel_commit(&install) == 0 && mica_kernel_end(&install));",
-                "assert(mica_task_module_support_install(&install, &dispatch, (void *)support_code.f_pointer, source_integer(7)) == 0);\n\
-                 assert(mica_kernel_commit(&install) == 0 && mica_kernel_end(&install));",
-            )
-            .replace(
-                "assert(mica_memory_root_pop(&worker, &prototypes)",
-                "assert(mica_memory_root_pop(&worker, &support_code));\n\
-                 assert(mica_memory_root_pop(&worker, &prototypes)",
-            )
-            .replace("reaped.f_released == 1", "reaped.f_released == 2");
+        let fixture =
+            native_bootstrap_fixture(&["module_entry".into(), "module_support".into()], &checks);
         let text = |index| {
             artifacts
                 .list_get(index)
@@ -5329,6 +5310,403 @@ return input
     );
 }
 
+fn native_bootstrap_units(source: &str) -> Vec<String> {
+    let mut starts = vec![0];
+    starts.extend(
+        source
+            .match_indices("\nverb ")
+            .map(|(offset, _)| offset + 1),
+    );
+    let mut units = Vec::new();
+    let mut unit = String::new();
+    for (index, start) in starts.iter().copied().enumerate() {
+        let end = starts.get(index + 1).copied().unwrap_or(source.len());
+        let definition = &source[start..end];
+        if !unit.is_empty() && unit.len() + definition.len() > 32768 {
+            units.push(std::mem::take(&mut unit));
+        }
+        unit.push_str(definition);
+    }
+    if !unit.is_empty() {
+        units.push(unit);
+    }
+    units
+}
+
+fn native_bootstrap_cache(directory: &std::path::Path, sources: &[&str], units: &[String]) {
+    fs::create_dir_all(directory).unwrap();
+    // This is a local build cache, not an artifact trust or signing boundary.
+    // Include the bootstrap executable so host compiler/runtime edits invalidate it.
+    let mut host = fs::File::open(std::env::current_exe().unwrap()).unwrap();
+    let mut hash = std::hash::DefaultHasher::new();
+    let mut buffer = [0; 65536];
+    loop {
+        let read = std::io::Read::read(&mut host, &mut buffer).unwrap();
+        if read == 0 {
+            break;
+        }
+        std::hash::Hasher::write(&mut hash, &buffer[..read]);
+    }
+    let mut manifest = std::hash::Hasher::finish(&hash).to_le_bytes().to_vec();
+    for source in sources
+        .iter()
+        .copied()
+        .chain(units.iter().map(String::as_str))
+    {
+        manifest.extend_from_slice(&(source.len() as u64).to_le_bytes());
+        manifest.extend_from_slice(source.as_bytes());
+    }
+    let path = directory.join("inputs.bin");
+    if path.exists() {
+        assert!(
+            fs::read(path).unwrap() == manifest,
+            "bootstrap cache inputs changed; use a fresh MICA_NATIVE_BOOTSTRAP_DIR"
+        );
+        return;
+    }
+    fs::write(path, manifest).unwrap();
+}
+
+fn cached_native_bootstrap<F>(directory: &std::path::Path, name: &str, generate: F) -> Value
+where
+    F: Fn(bool) -> Value + Sync,
+{
+    let path = directory.join(format!("{name}.bin"));
+    if path.exists() {
+        eprintln!("native bootstrap: reusing {name}");
+        return decode_value_exact(&fs::read(path).unwrap()).unwrap();
+    }
+    let started = Instant::now();
+    let result = thread::scope(|scope| {
+        let builds = [true, false].map(|tier| {
+            let generate = &generate;
+            scope.spawn(move || generate(tier))
+        });
+        let [first, second] = builds.map(|build| build.join().unwrap());
+        assert!(first == second, "bootstrap {name} differs between tiers");
+        first
+    });
+    let mut bytes = Vec::new();
+    encode_value(&result, &mut bytes).unwrap();
+    let pending = path.with_extension("pending");
+    fs::write(&pending, bytes).unwrap();
+    fs::rename(pending, path).unwrap();
+    eprintln!(
+        "native bootstrap: {name} generated and compared in {:?}",
+        started.elapsed()
+    );
+    result
+}
+
+#[test]
+fn native_bootstrap_cache_reuses_matching_artifacts() {
+    let scratch = Scratch::new();
+    let units = vec!["verb sample(input)\n  return input\nend\n".to_owned()];
+    native_bootstrap_cache(&scratch.0, &["base source"], &units);
+    native_bootstrap_cache(&scratch.0, &["base source"], &units);
+    let calls = AtomicUsize::new(0);
+    let generate = |_tier| {
+        calls.fetch_add(1, Ordering::Relaxed);
+        Value::string("cached artifact")
+    };
+    let first = cached_native_bootstrap(&scratch.0, "sample", &generate);
+    assert_eq!(first, Value::string("cached artifact"));
+    assert_eq!(calls.load(Ordering::Relaxed), 2);
+    assert!(scratch.0.join("sample.bin").exists());
+    assert!(!scratch.0.join("sample.pending").exists());
+    let second = cached_native_bootstrap(&scratch.0, "sample", &generate);
+    assert_eq!(second, first);
+    assert_eq!(calls.load(Ordering::Relaxed), 2);
+}
+
+#[test]
+#[should_panic(expected = "bootstrap cache inputs changed")]
+fn native_bootstrap_cache_rejects_changed_inputs() {
+    let scratch = Scratch::new();
+    native_bootstrap_cache(&scratch.0, &["first source"], &[]);
+    native_bootstrap_cache(&scratch.0, &["changed source"], &[]);
+}
+
+fn native_bootstrap_runner(tier: bool) -> SourceRunner {
+    let mut runner = runner(tier).with_task_limits(TaskLimits {
+        instruction_budget: 2_000_000_000,
+        max_call_depth: 256,
+        ..TaskLimits::default()
+    });
+    load_native_kernel(&mut runner, true);
+    load_native_source_compiler(&mut runner);
+    runner
+}
+
+fn native_bootstrap_module(
+    tier: bool,
+    interface: Value,
+    prefix: &str,
+    source: &str,
+    first: usize,
+) -> Value {
+    let mut runner = native_bootstrap_runner(tier);
+    let count = source
+        .lines()
+        .filter(|line| line.starts_with("verb "))
+        .count();
+    let ids = format!(
+        "[{}]",
+        (first..first + count)
+            .map(|index| format!("[{}, {}]", 10000 + index, 20000 + index))
+            .collect::<Vec<_>>()
+            .join(",")
+    );
+    let mut request = SourceRunner::root_source_request("");
+    request.input = TaskInput::Invocation {
+        selector: Symbol::intern("native_source/compile"),
+        roles: vec![
+            (Symbol::intern("input"), interface),
+            (Symbol::intern("prefix"), Value::string(prefix)),
+            (Symbol::intern("source"), Value::string(source)),
+            (Symbol::intern("relations"), Value::map([])),
+            (Symbol::intern("identities"), Value::map([])),
+            (
+                Symbol::intern("method_ids"),
+                eval(&mut runner, &format!("return {ids}")),
+            ),
+        ],
+    };
+    let started = Instant::now();
+    let result = runner.submit_invocation(request).unwrap();
+    let TaskOutcome::Complete { value, .. } = result.outcome else {
+        panic!("bootstrap {prefix}: {:?}", result.outcome);
+    };
+    let state = value
+        .map_get(&Value::symbol(Symbol::intern("state")))
+        .unwrap();
+    drop(value);
+    runner.forget_all_terminal_tasks();
+    eprintln!(
+        "native bootstrap: {prefix}, tier={tier}, lowering={:?}",
+        started.elapsed()
+    );
+    emit_native_source_artifacts(
+        runner,
+        "native/emit_module",
+        vec![
+            (Symbol::intern("state"), state),
+            (Symbol::intern("spelling"), Value::string(prefix)),
+        ],
+        2_000_000_000,
+    )
+    .0
+}
+
+fn native_bootstrap_fixture(prefixes: &[String], checks: &str) -> String {
+    let count = prefixes.len();
+    let mut declarations = String::new();
+    let mut constants = String::new();
+    let mut installs = String::new();
+    for (index, prefix) in prefixes.iter().enumerate().skip(1) {
+        declarations.push_str(&format!(
+            "uint64_t mica_task_{prefix}_constants(struct mica_MemoryWorker *, struct mica_SymbolTable *, struct mica_TaskCodeRegistry *, struct mica_TaskCodeRef *);\n\
+             uint64_t mica_task_{prefix}_install(struct mica_KernelTransaction *, struct mica_TaskDispatchContext *, struct mica_TaskCodeRef *, mica_type_Value);\n"
+        ));
+        constants.push_str(&format!(
+            "assert(mica_memory_root_push(&worker, &modules[{index}]));\n\
+             assert(mica_task_code_register(&registry, &worker, dlopen(NULL, RTLD_NOW), &modules[{index}]) == 0);\n\
+             assert(mica_task_{prefix}_constants(&worker, &symbols, &registry, (void *)modules[{index}].f_pointer) == 0);\n"
+        ));
+        installs.push_str(&format!(
+            "assert(mica_task_{prefix}_install(&install, &dispatch, (void *)modules[{index}].f_pointer, source_integer(7)) == 0);\n"
+        ));
+    }
+    let fixture = include_str!("../../../apps/native/compiler/frontend_tests.c")
+        .replace("source_roundtrip", &prefixes[0])
+        .replace("/* FRONTEND_CONFORMANCE_CASES */", checks)
+        .replace("mica_type_Value kinds[16];", &format!("struct mica_MemoryRoot modules[{count}] = {{0}};\n{constants}\nmica_type_Value kinds[16];"))
+        .replace("assert(mica_kernel_commit(&install) == 0 && mica_kernel_end(&install));", &format!("{installs}\nassert(mica_kernel_commit(&install) == 0 && mica_kernel_end(&install));"))
+        .replace("assert(mica_memory_root_pop(&worker, &prototypes)", &format!("for (unsigned index = {count}; index-- > 1;) assert(mica_memory_root_pop(&worker, &modules[index]));\nassert(mica_memory_root_pop(&worker, &prototypes)"))
+        .replace("reaped.f_released == 1", &format!("reaped.f_released == {count}"));
+    format!("{declarations}\n{fixture}")
+}
+
+#[test]
+#[ignore = "large native compiler bootstrap; run explicitly"]
+fn native_source_rebuilds_the_task_runtime() {
+    eprintln!("native runtime rebuild: checking generator dependency closure");
+    let entry = r#"
+verb native_runtime_fixture(input)
+  let runtime = native_tasks/definitions()
+  return [native/module_interface(runtime), native/emit_module(runtime[:state], "runtime")]
+end
+"#;
+    let mut library = native_backend_library();
+    library.push(entry);
+    let inventory = native_source_dependency_inventory(&library, &["emit_source"]);
+    let dependencies = native_source_dependency_closure_from_inventory(
+        &library,
+        "native_runtime_fixture",
+        &inventory,
+    );
+    let source = format!("{entry}\n{}", dependencies.replace(entry.trim(), ""));
+    let units = native_bootstrap_units(source.trim_start());
+    eprintln!(
+        "native runtime generator: {} modules, {} source bytes",
+        units.len(),
+        source.len()
+    );
+    let scratch = Scratch::new();
+    let cache = std::env::var_os("MICA_NATIVE_BOOTSTRAP_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| scratch.0.clone());
+    native_bootstrap_cache(&cache, &library, &units);
+    let runtime = cached_native_bootstrap(&cache, "runtime", |tier| {
+        let mut runner = native_bootstrap_runner(tier);
+        eval(
+            &mut runner,
+            "let runtime = native_tasks/definitions()\nreturn [native/module_interface(runtime), native/emit_module(runtime[:state], \"runtime\"), native_memory/platform(), native_tasks/platform()]",
+        )
+    });
+    let interface = runtime.list_get(0).unwrap();
+    let mut artifacts = vec![runtime.list_get(1).unwrap()];
+    let memory = runtime
+        .list_get(2)
+        .unwrap()
+        .with_str(str::to_owned)
+        .unwrap();
+    let tasks = runtime
+        .list_get(3)
+        .unwrap()
+        .with_str(str::to_owned)
+        .unwrap();
+    let mut first = 0;
+    let jobs = units
+        .iter()
+        .map(|unit| {
+            let count = unit
+                .lines()
+                .filter(|line| line.starts_with("verb "))
+                .count();
+            let job = (first, count, unit);
+            first += count;
+            job
+        })
+        .collect::<Vec<_>>();
+    let next = AtomicUsize::new(0);
+    let mut generated = thread::scope(|scope| {
+        // Each module runs on both bootstrap tiers. Bound the number of live
+        // IR graphs while allowing independent modules to use separate cores.
+        let mut builders = Vec::new();
+        for _ in 0..4 {
+            builders.push(scope.spawn(|| {
+                let mut completed = Vec::new();
+                loop {
+                    let index = next.fetch_add(1, Ordering::Relaxed);
+                    let Some(&(first, count, unit)) = jobs.get(index) else {
+                        return completed;
+                    };
+                    let prefix = format!("generator_{index}");
+                    eprintln!(
+                        "native bootstrap: module {}/{}: {count} methods, {} source bytes",
+                        index + 1,
+                        jobs.len(),
+                        unit.len()
+                    );
+                    let artifact = catch_unwind(AssertUnwindSafe(|| {
+                        cached_native_bootstrap(&cache, &prefix, |tier| {
+                            native_bootstrap_module(tier, interface.clone(), &prefix, unit, first)
+                        })
+                    }))
+                    .unwrap_or_else(|panic| {
+                        next.store(jobs.len(), Ordering::Relaxed);
+                        resume_unwind(panic)
+                    });
+                    completed.push((index, artifact));
+                }
+            }));
+        }
+        builders
+            .into_iter()
+            .flat_map(|builder| builder.join().unwrap())
+            .collect::<Vec<_>>()
+    });
+    generated.sort_by_key(|(index, _)| *index);
+    artifacts.extend(generated.into_iter().map(|(_, artifact)| artifact));
+    // The fixture includes the entry module's header; all other modules use
+    // the same runtime ABI and expose only their setup functions to the host.
+    let first_module = artifacts.remove(1);
+    artifacts.push(first_module);
+    let checks = r#"
+    mica_value_root_set(&input, source_integer(0));
+    for (unsigned collect = 0; collect < 2; ++collect) {
+        // The complete runtime rebuild consumes about 2.5 billion charged steps.
+        run_frontend(worker, kernel, code, runtime, &input, &output, 3000000000, collect != 0);
+        struct mica_ValueResult wire = mica_value_encode(worker, symbols,
+            mica_value_root_get(&output), (struct mica_ValueCodecOptions){0});
+        assert(wire.f_ok);
+        const struct mica_HeapBytes *bytes = mica_value_as_bytes(wire.f_value).f_header;
+        char path[64];
+        assert(snprintf(path, sizeof(path), "runtime_%u.bin", collect) > 0);
+        FILE *file = fopen(path, "wb"); assert(file);
+        assert(fwrite(bytes->f_data, 1, bytes->f_length, file) == bytes->f_length);
+        assert(fclose(file) == 0);
+    }
+"#;
+    let prefixes = (0..units.len())
+        .map(|index| format!("generator_{index}"))
+        .collect::<Vec<_>>();
+    let fixture = native_bootstrap_fixture(&prefixes, checks);
+    compile_native_modules_in(
+        &cache,
+        &artifacts,
+        &format!(
+            "{memory}\n{tasks}\n{}\n{}\n#include <stdio.h>\n{fixture}",
+            include_str!("../../../native/platform/allocation.c"),
+            include_str!("../../../native/platform/mutex.c"),
+        ),
+        &["-O2", "-g0"],
+    );
+    drop(artifacts);
+    eprintln!("native runtime rebuild: executing generator with ordinary and forced collection");
+    let executed = Command::new(cache.join("source"))
+        .current_dir(&cache)
+        .env("ASAN_OPTIONS", "detect_leaks=1:halt_on_error=1")
+        .output()
+        .unwrap();
+    assert!(executed.status.success(), "{executed:?}");
+    assert!(executed.stderr.is_empty(), "{executed:?}");
+    let mut oracle = native_bootstrap_runner(true);
+    oracle.run_filein(entry).unwrap();
+    let expected = eval(&mut oracle, "return native_runtime_fixture(none)");
+    for collect in 0..2 {
+        let bytes = fs::read(cache.join(format!("runtime_{collect}.bin"))).unwrap();
+        let rebuilt = decode_value_exact(&bytes).unwrap();
+        assert!(
+            rebuilt == expected,
+            "native runtime rebuild differs with collection={collect}"
+        );
+    }
+    let bytes = fs::read(cache.join("runtime_0.bin")).unwrap();
+    let rebuilt = decode_value_exact(&bytes).unwrap();
+    // Transport the actual native output unchanged. The bootstrap host only
+    // prepares applications that exercise the rebuilt runtime's public ABI.
+    for (case, (source, ids)) in native_compilation_cases().into_iter().enumerate() {
+        let application = eval(
+            &mut oracle,
+            &format!(
+                "let module = native_source/compile(native/module_interface(native_tasks/definitions()), \"compiled\", {source:?}, {{}}, {{}}, {ids})\nreturn native/emit_module(module[:state], \"application\")"
+            ),
+        );
+        check_native_modules_fixture(
+            &[rebuilt.list_get(1).unwrap(), application],
+            &format!(
+                "{memory}\n{tasks}\n{}\n{}\n{}",
+                include_str!("../../../native/platform/allocation.c"),
+                include_str!("../../../native/platform/mutex.c"),
+                compiled_application_fixture(case),
+            ),
+            &["-O0", "-g0"],
+        );
+    }
+}
+
 #[test]
 #[ignore = "large native compiler bootstrap; run explicitly"]
 fn native_source_executes_the_compilation_pipeline() {
@@ -5510,6 +5888,108 @@ end
     }
 }
 
+#[test]
+#[ignore = "large native compiler bootstrap; run explicitly"]
+fn native_source_runs_standalone_compiled_tasks() {
+    let entry = r#"
+verb native_compile_fixture(interface: map, source: string, identities: map) -> map
+  let relations = {:Acceptance -> 705, :RelationName -> 707, :Arity -> 708, :FunctionalKey -> 709}
+  let method_ids = [[601, 8001], [602, 8002], [603, 8003]]
+  let module = native_source/compile(interface, "compiled", source, relations, identities, method_ids)
+  return native/emit_module(module[:state], "application")
+end
+"#;
+    let mut library = native_backend_library();
+    library.push(entry);
+    let inventory = native_source_dependency_inventory(&library, &["emit_source"]);
+    let dependencies = native_source_dependency_closure_from_inventory(
+        &library,
+        "native_compile_fixture",
+        &inventory,
+    );
+    let source = format!("{entry}\n{}", dependencies.replace(entry.trim(), ""));
+    let method_ids = format!(
+        "[{}]",
+        source
+            .lines()
+            .filter(|line| line.starts_with("verb "))
+            .enumerate()
+            .map(|(index, _)| format!("[{}, {}]", 10000 + index, 20000 + index))
+            .collect::<Vec<_>>()
+            .join(",")
+    );
+    let scratch = Scratch::new();
+    let cache = std::env::var_os("MICA_NATIVE_BOOTSTRAP_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| scratch.0.clone());
+    native_bootstrap_cache(
+        &cache,
+        &library,
+        &native_bootstrap_units(source.trim_start()),
+    );
+    let artifacts = cached_native_bootstrap(&cache, "standalone-compiler", |tier| {
+        let (runner, state) = prepare_native_source_example(tier, &source, &method_ids, &[]);
+        let (generated, memory, tasks) = emit_native_source_artifacts(
+            runner,
+            "native/emit_module",
+            vec![
+                (Symbol::intern("state"), state),
+                (Symbol::intern("spelling"), Value::string("compiler")),
+            ],
+            60_000_000_000,
+        );
+        Value::list(vec![generated, Value::string(memory), Value::string(tasks)])
+    });
+    let generated = artifacts.list_get(0).unwrap();
+    let memory = artifacts
+        .list_get(1)
+        .unwrap()
+        .with_str(str::to_owned)
+        .unwrap();
+    let tasks = artifacts
+        .list_get(2)
+        .unwrap()
+        .with_str(str::to_owned)
+        .unwrap();
+    let mut oracle = native_bootstrap_runner(true);
+    let interface = eval(
+        &mut oracle,
+        "let runtime = native_tasks/definitions()\nreturn native/module_interface(runtime)",
+    );
+    let encoded = source_encoded_value(&interface, "interface");
+    let interface = format!(
+        "static mica_type_Value process_interface(struct mica_MemoryWorker *worker, struct mica_SymbolTable *symbols) {{ {encoded} return interface.f_value; }}\n"
+    );
+    let fixture = format!(
+        "{memory}\n{tasks}\n{}\n{}\n#define MICA_NATIVE_PROCESS_SANITIZER \"{}\"\n#include <assert.h>\n{interface}{}",
+        include_str!("../../../native/platform/allocation.c"),
+        include_str!("../../../native/platform/mutex.c"),
+        native_source_sanitizer(),
+        include_str!("../../../apps/native/runner/acceptance.c")
+    );
+    compile_native_modules_with_link_flags_in(
+        &cache,
+        &[generated],
+        &fixture,
+        &["-O0", "-g0"],
+        &["-Wl,--export-dynamic"],
+    );
+    let source = cache.join("acceptance.mica");
+    fs::write(
+        &source,
+        include_str!("../../../apps/native/runner/acceptance.mica"),
+    )
+    .unwrap();
+    let executed = Command::new(cache.join("source"))
+        .arg(source)
+        .current_dir(&cache)
+        .env("ASAN_OPTIONS", "detect_leaks=1:halt_on_error=1")
+        .env("TSAN_OPTIONS", "halt_on_error=1")
+        .output()
+        .unwrap();
+    assert!(executed.status.success(), "{executed:?}");
+    assert!(executed.stderr.is_empty(), "{executed:?}");
+}
 fn native_source_dependency_inventory(sources: &[&str], excluded: &[&str]) -> Value {
     let mut runner = runner(true).with_task_limits(TaskLimits {
         // The backend inventory includes the value, kernel, task, and compiler
@@ -6719,12 +7199,90 @@ fn check_native_modules_fixture(modules: &[Value], fixture: &str, compilation_fl
     execute_native_source_fixture(&scratch, &scratch.0.join("source"));
 }
 
+#[test]
+fn native_module_build_cache_tracks_headers_and_sources() {
+    let mut runner = runner(true);
+    let modules = eval(
+        &mut runner,
+        r#"
+let first = native/emit_module(native/scalar_example(), "cache")
+first[:header] = string_concat(first[:header], "\n#define EXPECTED 9\n")
+let second = native/emit_module(native/scalar_example(), "cache")
+second[:header] = string_concat(second[:header], "\n#define EXPECTED 10\n")
+return [first, second]
+"#,
+    );
+    let scratch = Scratch::new();
+    let first = modules.list_get(0).unwrap();
+    let second = modules.list_get(1).unwrap();
+    let fixture = "int main(void) { return mica_add(4, 5) == EXPECTED ? 0 : 1; }\n";
+    let execute = || {
+        Command::new(scratch.0.join("source"))
+            .status()
+            .unwrap()
+            .success()
+    };
+    compile_native_modules_in(&scratch.0, std::slice::from_ref(&first), fixture, &["-O0"]);
+    assert!(execute());
+    let object = scratch.0.join("cache_0.o");
+    let written = fs::metadata(&object).unwrap().modified().unwrap();
+    compile_native_modules_in(&scratch.0, std::slice::from_ref(&first), fixture, &["-O0"]);
+    assert_eq!(fs::metadata(&object).unwrap().modified().unwrap(), written);
+    assert!(execute());
+    fs::write(&object, "").unwrap();
+    compile_native_modules_in(&scratch.0, std::slice::from_ref(&first), fixture, &["-O0"]);
+    assert!(fs::metadata(&object).unwrap().len() > 0);
+    assert!(execute(), "an empty cached object must be rebuilt");
+    compile_native_modules_in(&scratch.0, std::slice::from_ref(&second), fixture, &["-O0"]);
+    assert!(!execute(), "a changed header must rebuild the driver");
+    compile_native_modules_in(
+        &scratch.0,
+        &[second],
+        "int main(void) { return mica_add(4, 5) == EXPECTED - 1 ? 0 : 1; }\n",
+        &["-O0"],
+    );
+    assert!(execute(), "a changed driver must replace its cached object");
+}
+
 fn compile_native_modules_fixture(
     modules: &[Value],
     fixture: &str,
     compilation_flags: &[&str],
 ) -> Scratch {
     let scratch = Scratch::new();
+    compile_native_modules_in(&scratch.0, modules, fixture, compilation_flags);
+    scratch
+}
+
+fn write_native_build_source(path: &std::path::Path, contents: &str) {
+    if fs::read(path).ok().as_deref() == Some(contents.as_bytes()) {
+        return;
+    }
+    let object = path.with_extension("o");
+    if object.exists() {
+        fs::remove_file(object).unwrap();
+    }
+    fs::write(path, contents).unwrap();
+}
+
+fn compile_native_modules_in(
+    directory: &std::path::Path,
+    modules: &[Value],
+    fixture: &str,
+    compilation_flags: &[&str],
+) {
+    compile_native_modules_with_link_flags_in(directory, modules, fixture, compilation_flags, &[]);
+}
+
+fn compile_native_modules_with_link_flags_in(
+    directory: &std::path::Path,
+    modules: &[Value],
+    fixture: &str,
+    compilation_flags: &[&str],
+    link_flags: &[&str],
+) {
+    fs::create_dir_all(directory).unwrap();
+    let mut names = BTreeSet::new();
     let mut sources = Vec::new();
     let mut header_name = String::new();
     for module in modules {
@@ -6734,20 +7292,55 @@ fn compile_native_modules_fixture(
                 .unwrap()
         };
         header_name = field("header_name").with_str(str::to_owned).unwrap();
-        let header = scratch.0.join(&header_name);
-        assert!(!header.exists(), "duplicate module header");
-        fs::write(header, field("header").with_str(str::to_owned).unwrap()).unwrap();
-        for unit in field("sources").with_list(|units| units.to_vec()).unwrap() {
+        let header = directory.join(&header_name);
+        assert!(names.insert(header.clone()), "duplicate module header");
+        let header_text = field("header").with_str(str::to_owned).unwrap();
+        let header_changed = fs::read(&header).ok().as_deref() != Some(header_text.as_bytes());
+        let units = field("sources").with_list(|units| units.to_vec()).unwrap();
+        // Invalidate dependants before replacing the header, including when a
+        // previous build was interrupted between writing and compiling files.
+        if header_changed {
+            let driver_object = directory.join("fixture.o");
+            if driver_object.exists() {
+                fs::remove_file(driver_object).unwrap();
+            }
+            for unit in &units {
+                let name = unit.list_get(0).unwrap().with_str(str::to_owned).unwrap();
+                let object = directory.join(name).with_extension("o");
+                if object.exists() {
+                    fs::remove_file(object).unwrap();
+                }
+            }
+            fs::write(&header, header_text).unwrap();
+        }
+        for unit in units {
             let pair = unit.with_list(|pair| pair.to_vec()).unwrap();
-            let path = scratch.0.join(pair[0].with_str(str::to_owned).unwrap());
-            assert!(!path.exists(), "duplicate module source");
-            fs::write(&path, pair[1].with_str(str::to_owned).unwrap()).unwrap();
+            let path = directory.join(pair[0].with_str(str::to_owned).unwrap());
+            assert!(names.insert(path.clone()), "duplicate module source");
+            write_native_build_source(&path, &pair[1].with_str(str::to_owned).unwrap());
             sources.push(path);
         }
     }
-    let driver = scratch.0.join("fixture.c");
-    fs::write(&driver, format!("#include \"{header_name}\"\n{fixture}")).unwrap();
+    let driver = directory.join("fixture.c");
+    write_native_build_source(&driver, &format!("#include \"{header_name}\"\n{fixture}"));
     sources.push(driver);
+    let compiler = Command::new("clang").arg("--version").output().unwrap();
+    assert!(compiler.status.success());
+    let configuration = format!(
+        "{:?}\n{}",
+        native_source_compiler(compilation_flags),
+        String::from_utf8_lossy(&compiler.stdout)
+    );
+    let configuration_path = directory.join("compiler.txt");
+    if fs::read(&configuration_path).ok().as_deref() != Some(configuration.as_bytes()) {
+        for path in &sources {
+            let object = path.with_extension("o");
+            if object.exists() {
+                fs::remove_file(object).unwrap();
+            }
+        }
+        fs::write(configuration_path, configuration).unwrap();
+    }
     let started = Instant::now();
     eprintln!(
         "native source: compiling {} translation units",
@@ -6755,25 +7348,49 @@ fn compile_native_modules_fixture(
     );
     // Bound compiler concurrency: sanitizer IR for large generated functions
     // can use several gigabytes even when each file holds few functions.
+    let workers = std::env::var("MICA_NATIVE_COMPILE_JOBS")
+        .map(|value| {
+            value
+                .parse::<usize>()
+                .expect("MICA_NATIVE_COMPILE_JOBS must be a positive integer")
+        })
+        .unwrap_or(2);
+    assert!(workers > 0, "MICA_NATIVE_COMPILE_JOBS must be positive");
+    let workers = workers.min(sources.len().max(1));
+    // Start larger units first so one late expensive compilation does not
+    // leave the other workers idle. Preserve the original order for linking.
+    let mut compilation_order = sources.iter().collect::<Vec<_>>();
+    compilation_order
+        .sort_by_cached_key(|path| std::cmp::Reverse(fs::metadata(path).unwrap().len()));
+    let next = AtomicUsize::new(0);
     thread::scope(|scope| {
-        for lane in 0..2 {
-            let sources = &sources;
+        for _ in 0..workers {
+            let sources = &compilation_order;
+            let next = &next;
             scope.spawn(move || {
-                for path in sources.iter().skip(lane).step_by(2) {
+                while let Some(path) = sources.get(next.fetch_add(1, Ordering::Relaxed)) {
+                    let object = path.with_extension("o");
+                    if fs::metadata(&object).is_ok_and(|metadata| metadata.len() > 0) {
+                        continue;
+                    }
+                    let pending = path.with_extension("o.pending");
                     let started = Instant::now();
                     let compiled = native_source_compiler(compilation_flags)
                         .arg("-c")
                         .arg(path)
                         .arg("-o")
-                        .arg(path.with_extension("o"))
+                        .arg(&pending)
                         .output()
                         .unwrap();
-                    assert!(
-                        compiled.status.success(),
-                        "{}: {}",
-                        path.display(),
-                        String::from_utf8_lossy(&compiled.stderr)
-                    );
+                    if !compiled.status.success() {
+                        next.store(sources.len(), Ordering::Relaxed);
+                        panic!(
+                            "{}: {}",
+                            path.display(),
+                            String::from_utf8_lossy(&compiled.stderr)
+                        );
+                    }
+                    fs::rename(pending, object).unwrap();
                     eprintln!(
                         "native source: {} compiled in {:?}",
                         path.display(),
@@ -6783,9 +7400,10 @@ fn compile_native_modules_fixture(
             });
         }
     });
-    let binary = scratch.0.join("source");
+    let binary = directory.join("source");
     let linked = Command::new("clang")
         .args(["-pthread", native_source_sanitizer()])
+        .args(link_flags)
         .args(sources.iter().map(|path| path.with_extension("o")))
         .args(["-lm", "-ldl", "-o"])
         .arg(&binary)
@@ -6800,7 +7418,6 @@ fn compile_native_modules_fixture(
         "native source: module compilation and link={:?}",
         started.elapsed()
     );
-    scratch
 }
 
 fn native_source_sanitizer() -> &'static str {

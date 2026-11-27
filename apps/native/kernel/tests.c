@@ -2727,6 +2727,21 @@ static void preparation_collection(void) {
     destroy(&f);
 }
 
+struct preparation_cancellation_control {
+    struct mica_KernelTransaction *transaction;
+    unsigned remaining;
+    bool cancelled;
+};
+static bool cancel_preparation_progress(uint8_t *context, uint64_t bytes, uint64_t steps) {
+    struct preparation_cancellation_control *state = (void *)context;
+    (void)bytes;
+    (void)steps;
+    if (!state->cancelled && !--state->remaining) {
+        assert(mica_kernel_cancel(state->transaction));
+        state->cancelled = true;
+    }
+    return true;
+}
 static void preparation_cancellation(void) {
 #ifdef MICA_MEMORY_TEST_ALLOCATOR
     struct fixture f;
@@ -2735,16 +2750,16 @@ static void preparation_cancellation(void) {
     struct mica_KernelTransaction tx;
     begin(&f, &tx);
     for (int64_t i = 0; i < 2048; ++i) assert(write_pair(&tx, 1, i, i % 8, true) == OK);
-    // Complete any pending promotion before arming the allocation trigger.
+    // Complete any pending promotion before arming the cancellation control.
     assert(mica_memory_safepoint(&f.worker, true));
     struct mica_KernelBudget budget = operation_budget(&tx);
     struct mica_MemoryRoot *parent = f.worker.f_roots;
-    atomic_store(&allocation_transaction, &tx);
-    atomic_store(&cancellation_allocation, 3);
+    struct preparation_cancellation_control state = {.transaction = &tx, .remaining = 3};
+    struct mica_MemoryControl control = {.f_context = (void *)&state, .f_check = cancel_preparation_progress};
+    mica_memory_control_push(&f.worker, &control);
     assert(mica_kernel_prepare(&tx, &budget) == CANCELLED);
-    assert(atomic_load(&cancellation_allocation) == 0);
-    atomic_store(&allocation_transaction, NULL);
-    atomic_store(&cancellation_allocation, -1);
+    assert(state.cancelled && f.worker.f_control == &control);
+    mica_memory_control_pop(&f.worker);
     assert(f.worker.f_roots == parent);
     assert(mica_kernel_work(&tx)->f_status == CANCELLED);
     assert(!mica_kernel_work(&tx)->f_candidate && !mica_kernel_work(&tx)->f_deltas);
@@ -2971,34 +2986,48 @@ static void snapshot_admission(void) {
     destroy(&f);
 }
 
+// Keep a large nursery object live so a collection cannot satisfy admission
+// merely by discarding scratch data. Its promotion needs another size class.
+static void retain_nursery_capacity(struct fixture *f, struct mica_MemoryRoot *root) {
+    uint64_t remaining = f->worker.f_capacity - f->worker.f_used;
+    root->f_pointer = mica_memory_allocate(&f->worker, remaining - sizeof(struct mica_MemoryObject), 0);
+    assert(root->f_pointer && f->worker.f_used == f->worker.f_capacity);
+}
+
 static void heap_admission(void) {
     struct fixture f;
     init(&f);
     uint64_t capacity = f.heap.f_allocated + f.heap.f_nursery_bytes;
     assert(mica_memory_set_capacity(&f.heap, capacity));
-    uint64_t remaining = f.worker.f_capacity - f.worker.f_used;
-    assert(mica_memory_allocate(&f.worker, remaining - sizeof(struct mica_MemoryObject), 0));
-    assert(f.worker.f_used == f.worker.f_capacity);
+    struct mica_MemoryRoot retained = {0};
+    assert(mica_memory_root_push(&f.worker, &retained));
+    retain_nursery_capacity(&f, &retained);
     struct mica_KernelTransaction tx = {0};
     assert(mica_kernel_begin(&f.kernel, &f.worker, &tx, integer(7)) == LIMIT);
     assert(!f.kernel.f_retained_transactions && !tx.f_worker && !f.worker.f_control);
     assert(f.heap.f_allocated + f.heap.f_nursery_bytes == capacity);
+    assert(mica_memory_root_pop(&f.worker, &retained));
     assert(mica_memory_safepoint(&f.worker, true));
-    begin(&f, &tx); // Collection reclaimed the unrooted nursery payload.
+    begin(&f, &tx); // Collection reclaimed the released nursery payload.
     assert(mica_kernel_end(&tx));
     destroy(&f);
 
     init(&f);
     capacity = f.heap.f_allocated + f.heap.f_nursery_bytes;
     assert(mica_memory_set_capacity(&f.heap, capacity));
+    retained = (struct mica_MemoryRoot){0};
+    assert(mica_memory_root_push(&f.worker, &retained));
     begin(&f, &tx);
     assert(mica_kernel_declare(&tx, 1, 1, 2, SET, 0, 0) == OK);
     assert(write_pair(&tx, 1, 1, 2, true) == OK);
+    retain_nursery_capacity(&f, &retained);
+    f.heap.f_pressure = true;
     assert(mica_kernel_commit(&tx) == LIMIT);
     assert(mica_kernel_work(&tx)->f_status == LIMIT && !mica_kernel_work(&tx)->f_done);
     assert(!mica_kernel_work(&tx)->f_candidate && !mica_kernel_work(&tx)->f_deltas);
     assert(f.kernel.f_retained_transactions == 1 && !f.worker.f_control);
     assert(mica_kernel_end(&tx));
+    assert(mica_memory_root_pop(&f.worker, &retained));
     begin(&f, &tx);
     assert(!mica_kernel_view(&tx, 1));
     assert(mica_kernel_end(&tx));
@@ -3007,12 +3036,16 @@ static void heap_admission(void) {
     init(&f);
     capacity = f.heap.f_allocated + f.heap.f_nursery_bytes;
     assert(mica_memory_set_capacity(&f.heap, capacity));
+    retained = (struct mica_MemoryRoot){0};
+    assert(mica_memory_root_push(&f.worker, &retained));
     begin(&f, &tx);
+    retain_nursery_capacity(&f, &retained);
     assert(!mica_memory_allocate(&f.worker, 90000, 0));
     assert(f.heap.f_pressure);
     assert(mica_kernel_rule(&tx, 9).f_status == LIMIT); // Collection failed before catalogue access.
     assert(f.heap.f_collection_limited && f.worker.f_roots == &tx.f_root && !f.worker.f_control);
     assert(mica_kernel_end(&tx));
+    assert(mica_memory_root_pop(&f.worker, &retained));
     begin(&f, &tx); // Released roots no longer require promotion.
     assert(mica_kernel_end(&tx));
     destroy(&f);
@@ -3562,7 +3595,7 @@ static bool collect_source_allocations(uint8_t *context, uint64_t bytes, uint64_
     (void)steps;
     // This fixture has one worker. Request collection after each allocation;
     // the next generated poll must preserve partially constructed definitions.
-    if (bytes) heap->f_collection_limit = 0;
+    if (bytes) heap->f_pressure = true;
     return true;
 }
 static void source_rules(void) {
@@ -3591,7 +3624,6 @@ static void source_rules(void) {
     begin(&f, &tx);
     assert(rule_count(&tx) == 0 && count(&tx, 40) == 0);
     // Force collections while source terms and chains are being constructed.
-    uint64_t collection_limit = f.heap.f_collection_limit;
     struct mica_MemoryControl collection = {.f_context = (void *)&f.heap, .f_check = collect_source_allocations};
     mica_memory_control_push(&f.worker, &collection);
     uint64_t epoch = f.heap.f_epoch;
@@ -3601,7 +3633,6 @@ static void source_rules(void) {
     assert(mica_kernel_source_3(&tx, &symbols, 103, false, true) == OK);
     assert(f.heap.f_epoch > epoch + 4 && f.worker.f_control == &collection);
     mica_memory_control_pop(&f.worker);
-    f.heap.f_collection_limit = collection_limit;
     assert(write_pair(&tx, 40, 1, 2, true) == OK);
     assert(write_pair(&tx, 40, 2, 3, true) == OK);
     assert(write_pair(&tx, 42, 1, 3, true) == OK);

@@ -35,11 +35,10 @@ static void run_lexer(struct mica_MemoryWorker *worker, struct mica_Kernel *kern
     struct mica_TaskServices services = {0};
     assert(mica_task_init(&task, worker, kernel, &image, 1000000, 3, 16, &runtime) == 0);
     uint64_t collections = worker->f_heap->f_collections;
-    uint64_t collection_limit = worker->f_heap->f_collection_limit;
     bool nonempty = mica_value_string_length(mica_value_root_get(input)).f_number != 0;
     if (collect) {
         assert(mica_memory_safepoint(worker, true));
-        worker->f_heap->f_collection_limit = 0;
+        worker->f_heap->f_pressure = true;
     }
     uint64_t before_execution = worker->f_heap->f_collections;
     assert(mica_task_execute(&task, worker) == 0);
@@ -55,7 +54,6 @@ static void run_lexer(struct mica_MemoryWorker *worker, struct mica_Kernel *kern
         assert(mica_memory_safepoint(worker, true));
         assert(worker->f_heap->f_collections > collections);
     }
-    worker->f_heap->f_collection_limit = collection_limit;
 }
 
 static void source_body_checks(struct mica_MemoryWorker *worker, struct mica_Kernel *kernel,

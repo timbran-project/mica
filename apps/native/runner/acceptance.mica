@@ -1,0 +1,21 @@
+verb native_acceptance_answer()
+  return 42
+end
+
+verb native_acceptance_failure()
+  assert Acceptance(9, 99)
+  emit(#0, 99)
+  raise E_INVARG, "discard spawned writes and effects"
+end
+
+verb native_acceptance_parent()
+  assert Acceptance(7, 42)
+  commit()
+  suspend(0.001)
+  assert Acceptance(8, 84)
+  emit(#0, native_acceptance_answer())
+  return native_acceptance_answer()
+end
+
+let child = spawn :native_acceptance_failure()
+return [native_acceptance_parent(), child]

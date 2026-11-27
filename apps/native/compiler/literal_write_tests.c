@@ -47,9 +47,8 @@ static void source_body_checks(struct mica_MemoryWorker *worker, struct mica_Ker
         assert(list.f_ok);
         mica_value_root_set(&value, list.f_value);
     }
-    uint64_t collection_limit = worker->f_heap->f_collection_limit;
     uint64_t collections = worker->f_heap->f_collections;
-    worker->f_heap->f_collection_limit = 0;
+    worker->f_heap->f_pressure = true;
     struct mica_source_roundtrip_LiteralTextResult written = write_literal(worker, &tx, symbols, &attempt, mica_value_root_get(&value));
     assert(!written.f_status && !written.f_shape && worker->f_heap->f_collections > collections);
     mica_value_root_set(&text, written.f_value);
@@ -58,7 +57,6 @@ static void source_body_checks(struct mica_MemoryWorker *worker, struct mica_Ker
     assert(!parsed.f_status && !parsed.f_shape);
     struct mica_BoolResult equal = mica_value_equal(mica_value_root_get(&value), parsed.f_value);
     assert(equal.f_ok && equal.f_value);
-    worker->f_heap->f_collection_limit = collection_limit;
 
     const char *nested = "[{:a -> [1, \"café\"], :b -> [:value] {[[3]]}}, error(E_FAIL, \"bad\", [4]), #72057594037927935<[true]>, b\"AAH-_w==\", 1..(2..3)]";
     struct mica_ValueResult input = mica_value_string(worker, (const uint8_t *)nested, strlen(nested));
@@ -67,7 +65,7 @@ static void source_body_checks(struct mica_MemoryWorker *worker, struct mica_Ker
     parsed = mica_source_roundtrip_literal_parse(worker, &attempt, &tx, (void *)code->f_pointer, symbols, mica_value_root_get(&text));
     assert(!parsed.f_status && !parsed.f_shape);
     mica_value_root_set(&value, parsed.f_value);
-    worker->f_heap->f_collection_limit = 0;
+    worker->f_heap->f_pressure = true;
     written = write_literal(worker, &tx, symbols, &attempt, mica_value_root_get(&value));
     assert(!written.f_status && !written.f_shape);
     mica_value_root_set(&text, written.f_value);
@@ -75,7 +73,6 @@ static void source_body_checks(struct mica_MemoryWorker *worker, struct mica_Ker
     assert(!parsed.f_status && !parsed.f_shape);
     equal = mica_value_equal(mica_value_root_get(&value), parsed.f_value);
     assert(equal.f_ok && equal.f_value);
-    worker->f_heap->f_collection_limit = collection_limit;
 
     // Unsupported children must fail the whole serialization.
     mica_type_Value capability = mica_value_capability(1).f_value;

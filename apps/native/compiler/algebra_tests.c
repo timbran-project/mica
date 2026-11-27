@@ -72,13 +72,12 @@ static void source_body_checks(struct mica_MemoryWorker *worker, struct mica_Ker
     value = mica_value_list(worker, args, 2);
     assert(value.f_ok);
     mica_value_root_set(&arguments, value.f_value);
-    uint64_t collection_limit = worker->f_heap->f_collection_limit;
     const uint64_t lengths[] = {ROWS + SHIFT, SHIFT, ROWS - SHIFT, ROWS};
     for (unsigned operation = 0; operation < 4; ++operation) {
         struct mica_KernelTransaction tx = {0};
         assert(mica_kernel_begin(kernel, worker, &tx, source_integer(7)) == 0);
         struct mica_TaskAttempt attempt = {.f_remaining = 1000000};
-        worker->f_heap->f_collection_limit = 0;
+        worker->f_heap->f_pressure = true;
         uint64_t collections = worker->f_heap->f_collections;
         struct mica_MemoryRoot *roots = worker->f_roots;
         // Fail immediately on a repeated stack-root registration, rather than
@@ -110,7 +109,6 @@ static void source_body_checks(struct mica_MemoryWorker *worker, struct mica_Ker
         mica_memory_control_pop(worker);
         assert(mica_kernel_end(&tx));
     }
-    worker->f_heap->f_collection_limit = collection_limit;
     struct mica_KernelTransaction tx = {0};
     assert(mica_kernel_begin(kernel, worker, &tx, source_integer(7)) == 0);
     struct mica_TaskAttempt attempt = {.f_remaining = 1000000};

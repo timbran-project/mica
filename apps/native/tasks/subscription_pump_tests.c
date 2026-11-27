@@ -242,7 +242,7 @@ static void subscription_catalogue_authority(void) {
     struct mica_TaskMailboxCaps caps = mica_task_mailbox_create(&mailboxes, &worker, 16);
     assert(caps.f_status == OK);
     assert(mica_task_subscription_hub_init(&hub, &worker, &kernel, &mailboxes, &vocabulary, 8) == OK);
-    heap.f_collection_limit = 0;
+    heap.f_pressure = true;
     for (uint64_t source = 1; source <= 3; ++source) {
         struct mica_TaskControl task = {0};
         struct mica_TaskAttempt attempt = {0};

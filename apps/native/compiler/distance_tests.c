@@ -56,8 +56,7 @@ static void source_body_checks(struct mica_MemoryWorker *worker, struct mica_Ker
         mica_value_root_get(&left), mica_value_root_get(&right), &output) == 10);
     assert(mica_value_root_get(&output) == source_integer(99));
     attempt.f_remaining = 1000000;
-    uint64_t collection_limit = worker->f_heap->f_collection_limit;
-    worker->f_heap->f_collection_limit = 0;
+    worker->f_heap->f_pressure = true;
     uint64_t collections = worker->f_heap->f_collections;
     assert(mica_source_roundtrip_text_edit_distance(worker, &attempt, &tx,
         mica_value_root_get(&left), mica_value_root_get(&right), &output) == 0);
@@ -68,7 +67,7 @@ static void source_body_checks(struct mica_MemoryWorker *worker, struct mica_Ker
         source_integer(1), mica_value_root_get(&right), &output) == 7);
     mica_value_root_set(&output, source_integer(99));
     attempt.f_remaining = 1000000;
-    worker->f_heap->f_collection_limit = 0;
+    worker->f_heap->f_pressure = true;
     // Cancel after the first scratch array is rooted, while reserving the second.
     struct DistanceCancellation state = {.transaction = &tx};
     struct mica_MemoryControl control = {.f_context = (void *)&state, .f_check = distance_cancel};
@@ -88,7 +87,6 @@ static void source_body_checks(struct mica_MemoryWorker *worker, struct mica_Ker
     assert(mica_source_roundtrip_text_edit_distance(worker, &attempt, &tx,
         text.f_value, mica_value_root_get(&right), &output) == 11);
     assert(mica_value_root_get(&output) == source_integer(99));
-    worker->f_heap->f_collection_limit = collection_limit;
     assert(mica_kernel_end(&tx));
     assert(mica_memory_root_pop(worker, &output) && mica_memory_root_pop(worker, &short_text));
     assert(mica_memory_root_pop(worker, &right) && mica_memory_root_pop(worker, &left));

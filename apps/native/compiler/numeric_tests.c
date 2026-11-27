@@ -116,7 +116,7 @@ static void source_body_checks(struct mica_MemoryWorker *worker, struct mica_Ker
         worker, &attempt, &tx, mica_value_root_get(&text));
     assert(parsed.f_status == 10 && !parsed.f_value && !parsed.f_shape);
     uint64_t collections = worker->f_heap->f_collections;
-    worker->f_heap->f_collection_limit = 0;
+    worker->f_heap->f_pressure = true;
     attempt.f_remaining = 1000000;
     parsed = mica_source_roundtrip_parse_int(worker, &attempt, &tx, mica_value_root_get(&text));
     assert(parsed.f_status == 0 && parsed.f_shape == 0 && parsed.f_value == source_integer(42));
@@ -135,7 +135,7 @@ static void source_body_checks(struct mica_MemoryWorker *worker, struct mica_Ker
     parsed = mica_source_roundtrip_decimal_parse(worker, &attempt, &tx, mica_value_root_get(&text));
     assert(parsed.f_status == 10 && !parsed.f_value && !parsed.f_shape);
     collections = worker->f_heap->f_collections;
-    worker->f_heap->f_collection_limit = 0;
+    worker->f_heap->f_pressure = true;
     attempt.f_remaining = 1000000;
     parsed = mica_source_roundtrip_decimal_parse(worker, &attempt, &tx, mica_value_root_get(&text));
     assert(parsed.f_status == 0 && parsed.f_shape == 0 && parsed.f_value == mica_value_float(42.0f).f_value);

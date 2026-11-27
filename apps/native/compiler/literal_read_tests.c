@@ -50,14 +50,12 @@ static void source_body_checks(struct mica_MemoryWorker *worker, struct mica_Ker
     parsed = read_literal(worker, &tx, code, symbols, &attempt, nested);
     assert(!parsed.f_status && !parsed.f_shape);
     mica_value_root_set(&expected, parsed.f_value);
-    uint64_t collection_limit = worker->f_heap->f_collection_limit;
     uint64_t collections = worker->f_heap->f_collections;
-    worker->f_heap->f_collection_limit = 0;
+    worker->f_heap->f_pressure = true;
     parsed = read_literal(worker, &tx, code, symbols, &attempt, nested);
     assert(!parsed.f_status && !parsed.f_shape);
     struct mica_BoolResult equal = mica_value_equal(mica_value_root_get(&expected), parsed.f_value);
     assert(equal.f_ok && equal.f_value && worker->f_heap->f_collections > collections);
-    worker->f_heap->f_collection_limit = collection_limit;
     assert(mica_memory_root_pop(worker, &expected));
 
     // Depth is bounded independently of the amount of input or remaining work.

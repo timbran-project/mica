@@ -34,7 +34,7 @@ static void source_body_checks(struct mica_MemoryWorker *worker, struct mica_Ker
     // A contended table must not keep this worker from collecting or stopping.
     mica_foreign_mutex_lock(symbols->f_mutex);
     attempt.f_remaining = 10;
-    worker->f_heap->f_collection_limit = 0;
+    worker->f_heap->f_pressure = true;
     uint64_t collections = worker->f_heap->f_collections;
     assert(mica_source_roundtrip_to_symbol(worker, &attempt, &tx, symbols, mica_value_root_get(&input), &output) == 10);
     mica_foreign_mutex_unlock(symbols->f_mutex);

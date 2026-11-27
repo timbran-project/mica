@@ -35,14 +35,14 @@ static void source_body_checks(struct mica_MemoryWorker *worker, struct mica_Ker
     assert(mica_source_roundtrip_text_url_encode(worker, &attempt, &tx, mica_value_root_get(&input), &output) == 10);
     assert(mica_value_root_get(&output) == source_integer(99));
     uint64_t collections = worker->f_heap->f_collections;
-    worker->f_heap->f_collection_limit = 0;
+    worker->f_heap->f_pressure = true;
     attempt.f_remaining = 1000000;
     assert(mica_source_roundtrip_text_url_encode(worker, &attempt, &tx, mica_value_root_get(&input), &encoded) == 0);
     assert(worker->f_heap->f_collections > collections && attempt.f_remaining < 1000000);
     attempt.f_remaining = 10;
     assert(mica_source_roundtrip_text_url_decode(worker, &attempt, &tx, mica_value_root_get(&encoded), &output) == 10);
     assert(mica_value_root_get(&output) == source_integer(99));
-    worker->f_heap->f_collection_limit = 0;
+    worker->f_heap->f_pressure = true;
     collections = worker->f_heap->f_collections;
     attempt.f_remaining = 1000000;
     assert(mica_source_roundtrip_text_url_decode(worker, &attempt, &tx, mica_value_root_get(&encoded), &output) == 0);

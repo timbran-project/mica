@@ -52,9 +52,8 @@ static void source_body_checks(struct mica_MemoryWorker *worker, struct mica_Ker
         worker, &tx, code, symbols, &attempt, mica_value_root_get(&text));
     assert(!result.f_status && !result.f_shape);
     mica_value_root_set(&value, result.f_value);
-    uint64_t collection_limit = worker->f_heap->f_collection_limit;
     uint64_t collections = worker->f_heap->f_collections;
-    worker->f_heap->f_collection_limit = 0;
+    worker->f_heap->f_pressure = true;
     result = convert_json(read, worker, &tx, code, symbols, &attempt, mica_value_root_get(&text));
     assert(!result.f_status && !result.f_shape);
     assert(mica_value_equal(result.f_value, mica_value_root_get(&value)).f_value);
@@ -65,7 +64,6 @@ static void source_body_checks(struct mica_MemoryWorker *worker, struct mica_Ker
     assert(!result.f_status && !result.f_shape);
     assert(mica_value_equal(result.f_value, mica_value_root_get(&value)).f_value);
     assert(worker->f_heap->f_collections > collections);
-    worker->f_heap->f_collection_limit = collection_limit;
 
     // Unsorted objects exercise merge passes and relocation during map copying.
     char object[32768] = "{";
@@ -78,7 +76,7 @@ static void source_body_checks(struct mica_MemoryWorker *worker, struct mica_Ker
     }
     strcpy(object + used, "\"k000\":[999,\"last\"]}");
     json_text(worker, &output, object);
-    worker->f_heap->f_collection_limit = 0;
+    worker->f_heap->f_pressure = true;
     result = convert_json(read, worker, &tx, code, symbols, &attempt, mica_value_root_get(&output));
     assert(!result.f_status && !result.f_shape && mica_value_map_length(result.f_value).f_number == 320);
     mica_value_root_set(&output, result.f_value);
@@ -109,7 +107,6 @@ static void source_body_checks(struct mica_MemoryWorker *worker, struct mica_Ker
     struct mica_MemoryRoot *roots = worker->f_roots;
     result = mica_source_roundtrip_json_map(worker, &tx, mica_value_root_get(&output), &budget);
     assert(result.f_status == 10 && !result.f_value && worker->f_roots == roots);
-    worker->f_heap->f_collection_limit = collection_limit;
 
     const char *open[] = {"[", "{\"x\":"};
     const char *close[] = {"]", "}"};

@@ -104,12 +104,10 @@ static void source_body_checks(struct mica_MemoryWorker *worker, struct mica_Ker
         memcpy(bytes + length, encoded.f_bytes.elements, (size_t)encoded.f_width);
         length += (size_t)encoded.f_width;
     }
-    uint64_t collection_limit = worker->f_heap->f_collection_limit;
-    worker->f_heap->f_collection_limit = 0;
+    worker->f_heap->f_pressure = true;
     uint64_t collections = worker->f_heap->f_collections;
     quote_roundtrip(worker, &tx, bytes, length, NULL);
     assert(worker->f_heap->f_collections > collections);
-    worker->f_heap->f_collection_limit = collection_limit;
 
     struct mica_MemoryRoot input = {0};
     assert(mica_memory_root_push(worker, &input));

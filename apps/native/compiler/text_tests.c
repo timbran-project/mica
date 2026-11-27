@@ -80,7 +80,7 @@ static void source_body_checks(struct mica_MemoryWorker *worker, struct mica_Ker
     assert(mica_value_root_get(&output) == source_integer(99));
     // Request a collection at the helper's first poll and verify rooted inputs survive it.
     uint64_t collections = worker->f_heap->f_collections;
-    worker->f_heap->f_collection_limit = 0;
+    worker->f_heap->f_pressure = true;
     attempt.f_remaining = 1000000;
     assert(mica_source_roundtrip_text_contains(worker, &attempt, &tx, mica_value_root_get(&text),
         mica_value_root_get(&text), &output) == 0);

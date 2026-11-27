@@ -115,8 +115,7 @@ static void source_body_checks(struct mica_MemoryWorker *worker, struct mica_Ker
     assert(!hub.f_count);
     mica_type_Value identity = mica_value_identity(705).f_value;
     mica_type_Value name = subscription_symbol(symbols, "NativeResult");
-    uint64_t collection_limit = worker->f_heap->f_collection_limit;
-    worker->f_heap->f_collection_limit = 0;
+    worker->f_heap->f_pressure = true;
     uint64_t collections = worker->f_heap->f_collections;
     for (unsigned named = 0; named < 2; ++named) {
         mica_type_Value target = named ? name : identity;
@@ -150,7 +149,6 @@ static void source_body_checks(struct mica_MemoryWorker *worker, struct mica_Ker
     assert(request->f_subject == 3 && !request->f_relation && !mica_kernel_width(request->f_pattern));
     subscription_run(worker, kernel, code, &runtime, &hub, "cancel", cap, identity, 0, true);
     assert(!hub.f_count && worker->f_heap->f_collections > collections);
-    worker->f_heap->f_collection_limit = collection_limit;
     assert(mica_task_subscription_hub_close(&hub, worker) == 0);
     assert(mica_task_subscription_hub_release(&hub, worker) == 0);
     assert(mica_task_mailbox_hub_shutdown(&mailboxes, worker) == 0);

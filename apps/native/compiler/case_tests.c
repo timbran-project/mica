@@ -20,7 +20,7 @@ static void source_body_checks(struct mica_MemoryWorker *worker, struct mica_Ker
     assert(mica_value_root_get(&output) == source_integer(99));
     attempt.f_remaining = 1000000;
     uint64_t collections = worker->f_heap->f_collections;
-    worker->f_heap->f_collection_limit = 0;
+    worker->f_heap->f_pressure = true;
     assert(mica_source_roundtrip_text_lower(worker, &attempt, &tx, mica_value_root_get(&input), &output) == 0);
     assert(worker->f_heap->f_collections > collections && attempt.f_remaining < 1000000);
     struct mica_HeapStringResult lowered = mica_value_as_string(mica_value_root_get(&output));
